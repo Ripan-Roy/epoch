@@ -8,6 +8,7 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+epoch-storage = { path = "../epoch-storage" }
 prost.workspace = true
 raft.workspace = true
 sha2.workspace = true

@@ -39,7 +39,7 @@ Implementing a custom consensus algorithm is out of scope. Replacing the
 provisional library with another vetted Rust library remains possible behind the
 adapter if the spike fails.
 
-## Stage 1 implementation status
+## Stage 1 and local persistence status
 
 The first workspace slice implements a fixed-three-voter, memory-only adapter
 behind Epoch-owned types. It exercises election, majority commit, partition and
@@ -49,11 +49,20 @@ fault delivery through `epoch-testkit`. Snapshots and membership entries are
 rejected rather than partially supported. See the evidence and non-claims in
 [Consensus Feasibility Spike](../CONSENSUS_SPIKE.md).
 
-This work does not accept the ADR. `MemStorage` is test-only, no runnable node
-uses the adapter, and no API returns a quorum acknowledgement. Persistent
-storage, process-crash recovery, checkpoint installation, membership and
-catalog-authorized epoch transitions, read barriers, authenticated transport,
-group density, performance, formal-model, and chaos evidence remain open.
+A follow-on local persistence sub-slice adds `PersistentRaftAdapter` and EPRS
+v1 over the checksummed, fsync-backed `FileWal`. Each generation stores explicit
+`HardState`, normal-entry, and applied/publishable digest-checkpoint fields rather
+than raw library protobuf. Reopen validates immutable identity, reconstructs
+logical suffix replacement and applied history, and rejects detected corruption
+or invariant regression. The byte and recovery contract is documented in
+[EPRS v1 consensus stable journal](../../spec/formats/consensus-stable-store-v1.md).
+
+This work does not accept the ADR. No runnable node uses the persistent adapter,
+and no API returns a durable-majority acknowledgement. An exhaustive
+process-crash and I/O-fault matrix, snapshots and checkpoint installation,
+membership and catalog-authorized epoch transitions, read barriers,
+authenticated transport, group density, performance, formal-model, and chaos
+evidence remain open.
 
 The released `raft-rs` 0.7 dependency graph was rejected because its
 `protobuf` 2.28 dependency is affected by `RUSTSEC-2024-0437`. The spike pins

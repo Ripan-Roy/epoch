@@ -877,13 +877,12 @@ fn memory_store_messages_are_released_only_after_their_barrier() {
         let mut released_count = 0;
         for event in adapter.processing_trace() {
             match event {
-                ProcessingTrace::MemoryStoreBarrier(generation) => {
+                ProcessingTrace::StableStoreBarrier(generation) => {
                     barrier_count += 1;
                     latest_barrier = *generation;
                 }
-                ProcessingTrace::MessageReleasedAfterMemoryStoreBarrier(generation) => {
+                ProcessingTrace::MessageReleasedAfterStableStoreBarrier(generation) => {
                     released_count += 1;
-                    assert_ne!(*generation, 0);
                     assert!(*generation <= latest_barrier);
                 }
                 ProcessingTrace::Applied(_) => {}

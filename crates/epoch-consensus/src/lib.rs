@@ -1,16 +1,19 @@
 //! Epoch-owned consensus types and an isolated `raft-rs` feasibility adapter.
 //!
-//! [`InMemoryRaftAdapter`] deliberately uses `raft::storage::MemStorage`. Its
-//! memory-store barriers model the ordering required of a future durable
-//! implementation, but they are not durable writes and must not be presented as
-//! an acknowledgement boundary. Snapshots remain disabled until Epoch has a
-//! state-machine checkpoint format that can be installed atomically with Raft
-//! metadata.
+//! [`InMemoryRaftAdapter`] provides deterministic memory-only histories.
+//! [`PersistentRaftAdapter`] journals each stable Raft transition and its
+//! publishable application checkpoint through Epoch's checksummed WAL before it
+//! releases persisted messages or commit receipts. The persistent adapter is
+//! still a fixed-voter feasibility slice: snapshots, compaction, membership
+//! changes, production transport, and node/API integration remain disabled.
+
+mod stable;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt::{self, Display, Formatter},
+    path::Path,
 };
 
 use prost::Message as ProstMessage;
@@ -21,6 +24,7 @@ use raft::{
 };
 use sha2::{Digest, Sha256};
 use slog::{Logger, o};
+use stable::{DiskStableStore, StableCheckpoint, StableIdentity};
 
 const COMMAND_MAGIC: [u8; 4] = *b"EPCM";
 const COMMAND_VERSION: u16 = 1;
@@ -32,6 +36,8 @@ const STATE_DIGEST_MAGIC: [u8; 4] = *b"EPDG";
 const STATE_DIGEST_VERSION: u16 = 1;
 const HEARTBEAT_TICK: usize = 2;
 const ELECTION_TICK: usize = 10;
+const MAX_UNCOMMITTED_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_COMMITTED_BYTES_PER_READY: u64 = 8 * 1024 * 1024;
 
 /// Maximum accepted size of a complete canonical Epoch peer-message frame.
 pub const MAX_PEER_MESSAGE_WIRE_BYTES: usize = 1024 * 1024;
@@ -447,7 +453,7 @@ pub struct MemoryStableState {
     applied_index: LogIndex,
     applied: Vec<CommittedProposal>,
     state_digest: StateDigest,
-    memory_store_generation: u64,
+    stable_generation: u64,
 }
 
 impl fmt::Debug for MemoryStableState {
@@ -461,7 +467,7 @@ impl fmt::Debug for MemoryStableState {
             .field("applied_index", &self.applied_index)
             .field("applied_count", &self.applied.len())
             .field("state_digest", &DigestDebug(&self.state_digest))
-            .field("memory_store_generation", &self.memory_store_generation)
+            .field("stable_generation", &self.stable_generation)
             .finish_non_exhaustive()
     }
 }
@@ -469,8 +475,8 @@ impl fmt::Debug for MemoryStableState {
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProcessingTrace {
-    MemoryStoreBarrier(u64),
-    MessageReleasedAfterMemoryStoreBarrier(u64),
+    StableStoreBarrier(u64),
+    MessageReleasedAfterStableStoreBarrier(u64),
     Applied(LogIndex),
 }
 
@@ -498,7 +504,8 @@ pub struct InMemoryRaftAdapter {
     applied: Vec<CommittedProposal>,
     state_digest: StateDigest,
     proposals: BTreeMap<ProposalId, TrackedProposal>,
-    memory_store_generation: u64,
+    stable_generation: u64,
+    disk_store: Option<DiskStableStore>,
     poisoned: Option<String>,
     #[cfg(test)]
     processing_trace: Vec<ProcessingTrace>,
@@ -512,8 +519,47 @@ impl fmt::Debug for InMemoryRaftAdapter {
             .field("applied_count", &self.applied.len())
             .field("state_digest", &DigestDebug(&self.state_digest))
             .field("proposals", &self.proposals)
-            .field("memory_store_generation", &self.memory_store_generation)
+            .field("stable_generation", &self.stable_generation)
+            .field("disk_backed", &self.disk_store.is_some())
             .field("poisoned", &self.poisoned)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Facts observed while reopening a disk-backed consensus journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PersistentRecovery {
+    pub stable_generation: u64,
+    pub applied_index: LogIndex,
+    pub repaired_partial_tail: bool,
+}
+
+/// A fixed-three-voter adapter whose Raft stable state and publishable
+/// application checkpoint are written to a checksummed local journal.
+///
+/// This establishes local crash recovery for the consensus boundary. It is not
+/// yet wired into the Epoch node and does not, by itself, provide a public
+/// quorum-durability mode.
+pub struct PersistentRaftAdapter {
+    inner: InMemoryRaftAdapter,
+    recovery: PersistentRecovery,
+}
+
+/// A reopened adapter and any work that became publishable while recovery
+/// caught its application checkpoint up to the durable Raft commit index.
+#[derive(Debug)]
+#[must_use = "recovery output can contain committed receipts or peer messages"]
+pub struct PersistentOpenResult {
+    pub adapter: PersistentRaftAdapter,
+    pub output: ConsensusOutput,
+}
+
+impl fmt::Debug for PersistentRaftAdapter {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PersistentRaftAdapter")
+            .field("inner", &self.inner)
+            .field("recovery", &self.recovery)
             .finish_non_exhaustive()
     }
 }
@@ -539,13 +585,20 @@ impl InMemoryRaftAdapter {
             applied_index: LogIndex::ZERO,
             applied: Vec::new(),
             state_digest: compute_state_digest(group_id, group_epoch, &[])?,
-            memory_store_generation: 0,
+            stable_generation: 0,
         })
     }
 
     /// Reconstructs all proposal state from the full in-memory log and rejects
     /// any restart image whose Raft and Epoch state disagree.
     pub fn restart(stable: MemoryStableState) -> ConsensusResult<Self> {
+        Self::restart_with_disk_store(stable, None)
+    }
+
+    fn restart_with_disk_store(
+        stable: MemoryStableState,
+        disk_store: Option<DiskStableStore>,
+    ) -> ConsensusResult<Self> {
         let proposals = validate_persisted_state(PersistedStateView {
             node_id: stable.node_id,
             group_id: stable.group_id,
@@ -570,21 +623,24 @@ impl InMemoryRaftAdapter {
             applied: stable.applied,
             state_digest: stable.state_digest,
             proposals,
-            memory_store_generation: stable.memory_store_generation,
+            stable_generation: stable.stable_generation,
+            disk_store,
             poisoned: None,
             #[cfg(test)]
-            processing_trace: (stable.memory_store_generation != 0)
-                .then_some(ProcessingTrace::MemoryStoreBarrier(
-                    stable.memory_store_generation,
-                ))
-                .into_iter()
-                .collect(),
+            processing_trace: vec![ProcessingTrace::StableStoreBarrier(
+                stable.stable_generation,
+            )],
         })
     }
 
     /// Extracts and validates an in-memory restart image.
     pub fn into_stable_state(self) -> ConsensusResult<MemoryStableState> {
         self.ensure_healthy()?;
+        if self.disk_store.is_some() {
+            return Err(ConsensusError::InvalidState(
+                "disk-backed adapters must be reopened from their stable journal".into(),
+            ));
+        }
         if self.raw_node.has_ready() {
             return Err(ConsensusError::InvalidState(
                 "cannot extract memory state while RawNode still has Ready work".into(),
@@ -599,7 +655,7 @@ impl InMemoryRaftAdapter {
             applied_index: self.applied_index,
             applied: self.applied,
             state_digest: self.state_digest,
-            memory_store_generation: self.memory_store_generation,
+            stable_generation: self.stable_generation,
         };
         validate_persisted_state(PersistedStateView {
             node_id: stable.node_id,
@@ -675,40 +731,36 @@ impl InMemoryRaftAdapter {
 
             let mut ready = self.raw_node.ready();
             reject_snapshot(ready.snapshot(), "Ready")?;
-            let ready_requires_barrier = ready.must_sync();
             let immediate_messages = self.wrap_messages(ready.take_messages(), None)?;
             let persisted_messages_raw = ready.take_persisted_messages();
             let ready_committed = ready.take_committed_entries();
             let ready_plan = self.prevalidate_committed_batch(&ready_committed)?;
-            let ready_barrier = self.persist_ready(&ready)?;
-            if !persisted_messages_raw.is_empty()
-                && ready_requires_barrier
-                && ready_barrier.is_none()
-            {
+            let ready_checkpoint = self.project_checkpoint(&ready_plan)?;
+            let ready_barrier = self.persist_ready(&ready, ready_checkpoint)?;
+            if !persisted_messages_raw.is_empty() && ready_barrier.is_none() {
                 return Err(ConsensusError::InvalidState(
-                    "Ready requiring stable storage released messages without a memory-store barrier"
-                        .into(),
+                    "Ready released persisted messages without a stable-store barrier".into(),
                 ));
             }
             let persisted_messages = self.wrap_messages(persisted_messages_raw, ready_barrier)?;
 
             outbound.extend(immediate_messages);
             outbound.extend(persisted_messages);
-            self.apply_prevalidated_batch(ready_plan, &mut commits)?;
+            self.apply_prevalidated_batch(ready_plan, ready_checkpoint, &mut commits);
 
             let mut light_ready = self.raw_node.advance(ready);
             let light_messages_raw = light_ready.take_messages();
             let light_committed = light_ready.take_committed_entries();
             let light_plan = self.prevalidate_committed_batch(&light_committed)?;
-            let light_barrier = if let Some(commit_index) = light_ready.commit_index() {
-                self.raw_node.mut_store().wl().mut_hard_state().commit = commit_index;
-                Some(self.record_memory_store_barrier()?)
-            } else {
-                ready_barrier.or_else(|| self.current_memory_store_barrier())
-            };
+            let light_checkpoint = self.project_checkpoint(&light_plan)?;
+            let light_barrier = self.persist_light_ready(
+                light_ready.commit_index(),
+                light_checkpoint,
+                ready_barrier,
+            )?;
             let light_messages = self.wrap_messages(light_messages_raw, light_barrier)?;
             outbound.extend(light_messages);
-            self.apply_prevalidated_batch(light_plan, &mut commits)?;
+            self.apply_prevalidated_batch(light_plan, light_checkpoint, &mut commits);
             self.raw_node.advance_apply();
         }
 
@@ -730,14 +782,28 @@ impl InMemoryRaftAdapter {
         })
     }
 
-    fn persist_ready(&mut self, ready: &raft::Ready) -> ConsensusResult<Option<u64>> {
+    fn persist_ready(
+        &mut self,
+        ready: &raft::Ready,
+        checkpoint: StableCheckpoint,
+    ) -> ConsensusResult<Option<u64>> {
         reject_snapshot(ready.snapshot(), "Ready")?;
         let entries = ready.entries().clone();
-        let hard_state = ready.hs().cloned();
-        let changed = !entries.is_empty() || hard_state.is_some();
-        let next_generation = changed
-            .then(|| self.next_memory_store_generation())
-            .transpose()?;
+        let current_hard_state = self
+            .raw_node
+            .store()
+            .initial_state()
+            .map_err(|error| ConsensusError::Storage(error.to_string()))?
+            .hard_state;
+        let hard_state = ready.hs().cloned().unwrap_or(current_hard_state.clone());
+        let changed = !entries.is_empty()
+            || hard_state != current_hard_state
+            || checkpoint != self.current_checkpoint();
+        let barrier = if changed {
+            Some(self.persist_stable_transition(&hard_state, &entries, checkpoint)?)
+        } else {
+            Some(self.current_stable_store_barrier())
+        };
         {
             let mut storage = self.raw_node.mut_store().wl();
             if !entries.is_empty() {
@@ -745,17 +811,9 @@ impl InMemoryRaftAdapter {
                     .append(&entries)
                     .map_err(|error| ConsensusError::Storage(error.to_string()))?;
             }
-            if let Some(hard_state) = hard_state {
+            if hard_state != current_hard_state {
                 storage.set_hardstate(hard_state);
             }
-        }
-        if let Some(generation) = next_generation {
-            self.memory_store_generation = generation;
-        }
-        #[cfg(test)]
-        if let Some(generation) = next_generation {
-            self.processing_trace
-                .push(ProcessingTrace::MemoryStoreBarrier(generation));
         }
         self.proposals = build_proposal_tracking(
             self.group_id,
@@ -765,32 +823,107 @@ impl InMemoryRaftAdapter {
             &self.applied,
             self.voters,
         )?;
-        Ok(next_generation.or_else(|| self.current_memory_store_barrier()))
+        Ok(barrier)
     }
 
-    fn next_memory_store_generation(&self) -> ConsensusResult<u64> {
-        self.memory_store_generation.checked_add(1).ok_or_else(|| {
-            ConsensusError::InvalidState("memory-store barrier generation overflow".into())
+    fn next_stable_generation(&self) -> ConsensusResult<u64> {
+        self.stable_generation.checked_add(1).ok_or_else(|| {
+            ConsensusError::InvalidState("stable-store barrier generation overflow".into())
         })
     }
 
-    fn record_memory_store_barrier(&mut self) -> ConsensusResult<u64> {
-        let generation = self.next_memory_store_generation()?;
-        self.memory_store_generation = generation;
+    fn persist_stable_transition(
+        &mut self,
+        hard_state: &HardState,
+        entries: &[Entry],
+        checkpoint: StableCheckpoint,
+    ) -> ConsensusResult<u64> {
+        if checkpoint.applied_index.get() > hard_state.commit {
+            return Err(ConsensusError::InvalidState(format!(
+                "stable checkpoint applied index {} exceeds durable commit {}",
+                checkpoint.applied_index, hard_state.commit
+            )));
+        }
+        let generation = self.next_stable_generation()?;
+        if let Some(store) = self.disk_store.as_mut() {
+            let observed = store.persist(generation, hard_state, entries, checkpoint)?;
+            if observed != generation {
+                return Err(ConsensusError::InvalidState(format!(
+                    "stable store returned generation {observed}; expected {generation}"
+                )));
+            }
+        }
+        self.stable_generation = generation;
         #[cfg(test)]
         self.processing_trace
-            .push(ProcessingTrace::MemoryStoreBarrier(generation));
+            .push(ProcessingTrace::StableStoreBarrier(generation));
         Ok(generation)
     }
 
-    fn current_memory_store_barrier(&self) -> Option<u64> {
-        (self.memory_store_generation != 0).then_some(self.memory_store_generation)
+    fn persist_light_ready(
+        &mut self,
+        commit_index: Option<u64>,
+        checkpoint: StableCheckpoint,
+        fallback_barrier: Option<u64>,
+    ) -> ConsensusResult<Option<u64>> {
+        let current_hard_state = self
+            .raw_node
+            .store()
+            .initial_state()
+            .map_err(|error| ConsensusError::Storage(error.to_string()))?
+            .hard_state;
+        let mut next_hard_state = current_hard_state.clone();
+        if let Some(commit_index) = commit_index {
+            next_hard_state.commit = commit_index;
+        }
+        let changed =
+            next_hard_state != current_hard_state || checkpoint != self.current_checkpoint();
+        if !changed {
+            return Ok(fallback_barrier.or(Some(self.current_stable_store_barrier())));
+        }
+        let generation = self.persist_stable_transition(&next_hard_state, &[], checkpoint)?;
+        if next_hard_state != current_hard_state {
+            self.raw_node
+                .mut_store()
+                .wl()
+                .set_hardstate(next_hard_state);
+        }
+        Ok(Some(generation))
+    }
+
+    fn current_checkpoint(&self) -> StableCheckpoint {
+        StableCheckpoint {
+            applied_index: self.applied_index,
+            publishable_index: self.applied_index,
+            state_digest: self.state_digest,
+        }
+    }
+
+    fn project_checkpoint(&self, planned: &[PlannedEntry]) -> ConsensusResult<StableCheckpoint> {
+        let applied_index = planned
+            .last()
+            .map_or(self.applied_index, |entry| entry.log_index);
+        let mut projected_applied = self.applied.clone();
+        projected_applied.extend(planned.iter().filter_map(|entry| entry.committed.clone()));
+        Ok(StableCheckpoint {
+            applied_index,
+            publishable_index: applied_index,
+            state_digest: compute_state_digest(
+                self.group_id,
+                self.group_epoch,
+                &projected_applied,
+            )?,
+        })
+    }
+
+    const fn current_stable_store_barrier(&self) -> u64 {
+        self.stable_generation
     }
 
     fn wrap_messages(
         &mut self,
         messages: Vec<RaftMessage>,
-        memory_store_barrier: Option<u64>,
+        stable_store_barrier: Option<u64>,
     ) -> ConsensusResult<Vec<PeerMessage>> {
         let wrapped = messages
             .into_iter()
@@ -822,15 +955,15 @@ impl InMemoryRaftAdapter {
             .collect::<ConsensusResult<Vec<_>>>()?;
 
         #[cfg(test)]
-        if let Some(generation) = memory_store_barrier {
+        if let Some(generation) = stable_store_barrier {
             self.processing_trace.extend(
                 wrapped
                     .iter()
-                    .map(|_| ProcessingTrace::MessageReleasedAfterMemoryStoreBarrier(generation)),
+                    .map(|_| ProcessingTrace::MessageReleasedAfterStableStoreBarrier(generation)),
             );
         }
         #[cfg(not(test))]
-        let _ = memory_store_barrier;
+        let _ = stable_store_barrier;
         Ok(wrapped)
     }
 
@@ -901,13 +1034,19 @@ impl InMemoryRaftAdapter {
     fn apply_prevalidated_batch(
         &mut self,
         planned: Vec<PlannedEntry>,
+        checkpoint: StableCheckpoint,
         new_commits: &mut Vec<CommittedProposal>,
-    ) -> ConsensusResult<()> {
-        let mut projected_applied = self.applied.clone();
-        projected_applied.extend(planned.iter().filter_map(|entry| entry.committed.clone()));
-        let projected_digest =
-            compute_state_digest(self.group_id, self.group_epoch, &projected_applied)?;
-
+    ) {
+        debug_assert_eq!(
+            checkpoint.applied_index,
+            planned
+                .last()
+                .map_or(self.applied_index, |entry| entry.log_index)
+        );
+        debug_assert_eq!(checkpoint.publishable_index, checkpoint.applied_index);
+        debug_assert!(self.disk_store.as_ref().is_none_or(|store| {
+            store.stable_generation() == self.stable_generation && store.checkpoint() == checkpoint
+        }));
         for planned_entry in planned {
             if let Some(committed) = planned_entry.committed {
                 self.proposals.insert(
@@ -922,8 +1061,7 @@ impl InMemoryRaftAdapter {
             self.processing_trace
                 .push(ProcessingTrace::Applied(planned_entry.log_index));
         }
-        self.state_digest = projected_digest;
-        Ok(())
+        self.state_digest = checkpoint.state_digest;
     }
 
     fn validate_proposal(&self, proposal: &Proposal) -> ConsensusResult<()> {
@@ -1063,6 +1201,90 @@ impl ConsensusAdapter for InMemoryRaftAdapter {
     }
 }
 
+impl PersistentRaftAdapter {
+    /// Opens or creates a per-node, per-group stable-state journal.
+    ///
+    /// The parent directory must already exist. A live adapter owns an
+    /// exclusive writer lock, so a second open of the same path fails closed.
+    pub fn open(
+        path: impl AsRef<Path>,
+        node_id: NodeId,
+        group_id: GroupId,
+        group_epoch: GroupEpoch,
+        voters: [NodeId; 3],
+    ) -> ConsensusResult<PersistentOpenResult> {
+        let identity = StableIdentity {
+            node_id,
+            group_id,
+            group_epoch,
+            voters,
+        };
+        let recovered = DiskStableStore::open(path.as_ref(), identity)?;
+        let recovery = PersistentRecovery {
+            stable_generation: recovered.stable_generation,
+            applied_index: recovered.checkpoint.applied_index,
+            repaired_partial_tail: recovered.repaired_partial_tail,
+        };
+        let stable = MemoryStableState {
+            node_id,
+            group_id,
+            group_epoch,
+            voters,
+            storage: recovered.storage,
+            applied_index: recovered.checkpoint.applied_index,
+            applied: recovered.applied,
+            state_digest: recovered.checkpoint.state_digest,
+            stable_generation: recovered.stable_generation,
+        };
+        let inner = InMemoryRaftAdapter::restart_with_disk_store(stable, Some(recovered.store))?;
+        let mut adapter = Self { inner, recovery };
+        let output = adapter.inner.process_ready()?;
+        Ok(PersistentOpenResult { adapter, output })
+    }
+
+    pub const fn recovery(&self) -> PersistentRecovery {
+        self.recovery
+    }
+
+    pub const fn state_digest(&self) -> StateDigest {
+        self.inner.state_digest()
+    }
+
+    pub fn applied_proposals(&self) -> &[CommittedProposal] {
+        self.inner.applied_proposals()
+    }
+
+    pub fn lookup_proposal(&self, proposal_id: ProposalId) -> ProposalLookup {
+        self.inner.lookup_proposal(proposal_id)
+    }
+}
+
+impl ConsensusAdapter for PersistentRaftAdapter {
+    fn status(&self) -> ConsensusStatus {
+        self.inner.status()
+    }
+
+    fn campaign(&mut self) -> ConsensusResult<ConsensusOutput> {
+        self.inner.campaign()
+    }
+
+    fn tick(&mut self) -> ConsensusResult<ConsensusOutput> {
+        self.inner.tick()
+    }
+
+    fn propose(&mut self, proposal: Proposal) -> ConsensusResult<ConsensusOutput> {
+        self.inner.propose(proposal)
+    }
+
+    fn receive(&mut self, message: PeerMessage) -> ConsensusResult<ConsensusOutput> {
+        self.inner.receive(message)
+    }
+
+    fn transfer_leadership(&mut self, target: NodeId) -> ConsensusResult<ConsensusOutput> {
+        self.inner.transfer_leadership(target)
+    }
+}
+
 fn raft_config(node_id: NodeId, applied_index: LogIndex) -> ConsensusResult<Config> {
     let config = Config {
         id: node_id.get(),
@@ -1071,6 +1293,10 @@ fn raft_config(node_id: NodeId, applied_index: LogIndex) -> ConsensusResult<Conf
         applied: applied_index.get(),
         check_quorum: true,
         pre_vote: true,
+        max_size_per_msg: 0,
+        max_uncommitted_size: MAX_UNCOMMITTED_BYTES,
+        max_committed_size_per_ready: MAX_COMMITTED_BYTES_PER_READY,
+        disable_proposal_forwarding: true,
         ..Config::default()
     };
     config
@@ -1608,5 +1834,7 @@ impl fmt::Debug for DigestDebug<'_> {
     }
 }
 
+#[cfg(test)]
+mod persistent_tests;
 #[cfg(test)]
 mod tests;

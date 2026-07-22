@@ -1,8 +1,9 @@
-# Versioned format fixtures
+# Versioned formats and fixtures
 
-This directory contains reviewed golden vectors for provisional Epoch persisted
-formats. A fixture protects byte-level compatibility within its format version;
-it does not make the pre-alpha format a permanent public contract.
+This directory contains reviewed specifications and golden vectors for
+provisional Epoch persisted formats. A fixture protects byte-level
+compatibility within its format version; it does not make the pre-alpha format
+a permanent public contract.
 
 ## Engine journal version 1
 
@@ -120,9 +121,8 @@ until a versioned executable scenario bundle is defined.
 
 ## Consensus feasibility formats version 1
 
-The memory-only consensus spike uses two big-endian Epoch frames. They are
-internal feasibility formats, not a production transport or tablet-log
-compatibility promise.
+The consensus spike uses big-endian Epoch frames. They are internal feasibility
+formats, not a production transport or tablet-log compatibility promise.
 
 An Epoch command stored inside a normal Raft entry is EPCM v1:
 
@@ -159,3 +159,11 @@ then contributes log index, Raft term, proposal ID, payload length, and payload.
 SHA-256 covers the complete canonical sequence. The digest compares deterministic
 state histories; it does not replace full histories or authenticate an
 adversarial writer.
+
+The disk stable-store sub-slice stores EPRS v1 records inside the checksummed
+`FileWal` frame. Sequence zero fixes the node, group, epoch, and three voters;
+each later generation atomically records explicit `HardState` fields, a
+publishable EPDG checkpoint, and normal-entry index/term/data fields. It does
+not persist raw `raft-rs` protobuf. The exact byte layout, replay invariants,
+recovery boundary, and limitations are specified in
+[EPRS v1 consensus stable journal](consensus-stable-store-v1.md).

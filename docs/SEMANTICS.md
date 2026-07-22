@@ -377,9 +377,9 @@ durability, regional catalog/placement, distributed fencing, persisted profile
 snapshots, consumer-group coordination, bounded transactions, object tier, geo
 replication, native Protobuf services, compatibility gateways, durable webhook
 delivery, connector execution, or the security controls in
-[SECURITY.md](SECURITY.md). An isolated fixed-voter, memory-only consensus
-feasibility adapter exists for deterministic tests; it does not change any
-runtime acknowledgement or recovery guarantee.
+[SECURITY.md](SECURITY.md). Isolated fixed-voter consensus feasibility adapters
+exist for deterministic memory histories and EPRS-backed local reopen tests;
+they do not change any runtime acknowledgement or recovery guarantee.
 
 Current JSON-shaped payloads, standalone epochs, HTTP endpoints, and local WAL
 frames are provisional scaffold interfaces. They are not frozen compatibility

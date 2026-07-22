@@ -99,16 +99,20 @@ the reusable kernel sub-slice. Consensus, storage, process lifecycle, and
 profile history runners must integrate it before the M1 simulation or emulator
 exit evidence is met.
 
-The Stage 1 consensus spike now uses that kernel for a fixed three-voter,
-memory-only `raft-rs` adapter. Its tests cover majority-only commit, isolated
-leader replacement and catch-up, directed partitions, delayed/reordered and
-duplicate delivery, proposal reconstruction/deduplication, leader transfer,
-bounded peer frames, and corrupt restart-image rejection. The adapter is not
-linked into the node and `MemStorage` is not durability evidence. Persistent
-Raft storage, process crash points, snapshots, membership and authoritative
-epoch transitions, read barriers, authenticated transport, model/chaos reports,
-and profile integration remain required for the metadata/replication work
-package and G3. See [Consensus Feasibility Spike](CONSENSUS_SPIKE.md).
+The Stage 1 consensus spike uses that kernel for a fixed three-voter `raft-rs`
+adapter. Its tests cover majority-only commit, isolated leader replacement and
+catch-up, directed partitions, delayed/reordered and duplicate delivery,
+proposal reconstruction/deduplication, leader transfer, bounded peer frames,
+and corrupt restart-image rejection. A local follow-on adds
+`PersistentRaftAdapter` and the EPRS v1 checksummed `FileWal` journal, including
+immutable identity, explicit `HardState`/entry/checkpoint fields, local reopen,
+uncommitted-suffix replacement, partial-tail repair, and corruption rejection.
+The adapter is not linked into the node, and local persistence is not a
+durable-majority acknowledgement. Exhaustive process crash points, snapshots,
+membership and authoritative epoch transitions, read barriers, authenticated
+transport, model/chaos reports, and profile integration remain required for the
+metadata/replication work package and G3. See
+[Consensus Feasibility Spike](CONSENSUS_SPIKE.md).
 
 The segmented-WAL work package is implemented as the single-node storage
 sub-slice at `$EPOCH_DATA_DIR/engine-wal/segment-*.wal`. The implementation has

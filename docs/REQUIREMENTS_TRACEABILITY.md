@@ -61,15 +61,23 @@ persisted continuation, and overflow. Durable timer indexes, uncertainty
 handling, leader ownership, and restart/failover integration remain open G2/G3
 work.
 
-The Stage 1 consensus slice supplies partial adapter evidence only: a fixed
-three-voter `raft-rs` group uses Epoch-owned types, bounded versioned peer
-frames, restart-reconstructed proposal lookup, exact-duplicate suppression,
-conflicting-payload fail-stop, SHA-256 applied-history digests, and seeded
-`epoch-testkit` partition/delay/duplicate histories. It is memory-only and not
-linked into the node. G3 remains open for persistent storage and crash recovery,
-snapshots, membership and authoritative epoch transitions, read barriers,
-authenticated transport, placement/repair, model and chaos reports, density,
-and performance. See [Consensus Feasibility Spike](CONSENSUS_SPIKE.md).
+The Stage 1 consensus slice supplies partial adapter and local stable-store
+evidence: a fixed three-voter `raft-rs` group uses Epoch-owned types, bounded
+versioned peer frames, restart-reconstructed proposal lookup, exact-duplicate
+suppression, conflicting-payload fail-stop, SHA-256 applied-history digests,
+and seeded `epoch-testkit` partition/delay/duplicate histories. EPRS v1 adds a
+checksummed, fsync-backed `FileWal` journal for immutable identity, complete
+`HardState`, normal entries, and applied/publishable checkpoints; unit tests
+cover local reopen, suffix replacement, partial-tail repair, corruption, and
+writer exclusion. Adapter tests reopen three voters with identical committed
+history/digests, verify stable-barrier ordering, recover a post-append unknown
+outcome, and publish commit-ahead-of-checkpoint recovery once. It is not linked
+into the node. G3 remains open for a
+durable-majority acknowledgement and exhaustive crash matrix, snapshots,
+membership and authoritative epoch transitions, read barriers, authenticated
+transport,
+placement/repair, model and chaos reports, density, and performance. See
+[Consensus Feasibility Spike](CONSENSUS_SPIKE.md).
 
 ## Cache and State
 

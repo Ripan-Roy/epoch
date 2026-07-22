@@ -366,6 +366,7 @@ dependencies = [
 name = "epoch-consensus"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "epoch-storage",
  "epoch-testkit",
  "prost",
  "raft",

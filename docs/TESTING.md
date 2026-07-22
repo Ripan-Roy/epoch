@@ -115,10 +115,19 @@ conflicting payload reuse, and corrupt restart images. The bounded peer-frame
 suite covers destination, membership, canonical encoding, corruption, local
 message classes, snapshots, and maximum size.
 
-Those tests use `MemStorage` and graceful in-process restart images. They are
-not disk, fsync, process-crash, snapshot, membership-transition, authoritative
-epoch-fencing, or product acknowledgement evidence. Those scenarios remain
-required before G3 or the emulator is complete; see
+The distributed fault histories still use `MemStorage` and graceful in-process
+restart images. A separate EPRS v1 suite exercises the local fsync-backed
+stable journal's exact identity bytes, create/reopen, immutable identity,
+writer exclusion, `HardState`/entry replay, uncommitted-suffix replacement,
+partial-tail repair, corruption rejection, and safety regressions. This is not
+yet an exhaustive injected-I/O or real-process-crash matrix. Persistent adapter
+tests additionally reopen a three-voter committed history, preserve an isolated
+pending proposal, verify stable-barrier message ordering, recover after an
+injected post-append error, and publish a commit-ahead-of-checkpoint receipt
+exactly once. This is still not snapshot,
+membership-transition, authoritative epoch-fencing, durable-majority, or
+product acknowledgement evidence. Those scenarios remain required before G3
+or the emulator is complete; see
 [Consensus Feasibility Spike](CONSENSUS_SPIKE.md).
 
 ### 3. Integration tests
