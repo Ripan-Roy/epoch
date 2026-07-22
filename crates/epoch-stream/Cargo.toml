@@ -1,0 +1,17 @@
+[package]
+name = "epoch-stream"
+description = "Partitioned append-only Stream Log profile engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+epoch-core = { path = "../epoch-core" }
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

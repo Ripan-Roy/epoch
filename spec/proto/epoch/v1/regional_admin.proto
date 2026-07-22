@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+package epoch.v1;
+
+import "epoch/v1/common.proto";
+
+option go_package = "epoch.local/epoch/gen/go/epoch/v1;epochv1";
+
+// RegionalAdmin is the versioned boundary between managed Go reconciliation
+// and a regional Rust control surface. It carries desired metadata only.
+service RegionalAdminService {
+  // ApplyResource idempotently creates or updates desired resource state.
+  rpc ApplyResource(ApplyResourceRequest) returns (ApplyResourceResponse);
+  // GetResource returns one resource by fully qualified name.
+  rpc GetResource(GetResourceRequest) returns (GetResourceResponse);
+  // ListResources returns a stable page of resources.
+  rpc ListResources(ListResourcesRequest) returns (ListResourcesResponse);
+  // DeleteResource removes desired resource state idempotently.
+  rpc DeleteResource(DeleteResourceRequest) returns (DeleteResourceResponse);
+}
+
+message ApplyResourceRequest {
+  string request_token = 1;
+  ResourceName name = 2;
+  ResourceSpec spec = 3;
+  optional uint64 expected_generation = 4;
+}
+
+message ApplyResourceResponse {
+  Resource resource = 1;
+  bool created = 2;
+  bool changed = 3;
+  bool replayed = 4;
+}
+
+message GetResourceRequest {
+  ResourceName name = 1;
+}
+
+message GetResourceResponse {
+  Resource resource = 1;
+}
+
+message ListResourcesRequest {
+  string organization = 1;
+  string project = 2;
+  string environment = 3;
+  string namespace = 4;
+  ResourceKind kind = 5;
+  int32 page_size = 6;
+  string page_token = 7;
+}
+
+message ListResourcesResponse {
+  repeated Resource resources = 1;
+  string next_page_token = 2;
+}
+
+message DeleteResourceRequest {
+  string request_token = 1;
+  ResourceName name = 2;
+  optional uint64 expected_generation = 3;
+}
+
+message DeleteResourceResponse {
+  ResourceName name = 1;
+  uint64 generation = 2;
+  bool deleted = 3;
+  bool replayed = 4;
+}

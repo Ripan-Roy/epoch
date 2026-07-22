@@ -1,0 +1,69 @@
+# macOS and editors
+.DS_Store
+.idea/
+.fleet/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*.swo
+*~
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# Rust
+/target/
+**/*.rs.bk
+
+# Go
+/bin/
+*.test
+*.prof
+coverage.out
+
+# Node.js and frontend
+node_modules/
+**/node_modules/
+.pnpm-store/
+dist/
+**/dist/
+.next/
+coverage/
+*.tsbuildinfo
+
+# Java, Python, and .NET SDK workspaces
+.gradle/
+**/build/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+**/obj/
+
+# Generated local artifacts
+/artifacts/
+/tmp/
+/.cache/
+*.log
+*.pid
+
+# Epoch runtime data
+/.epoch/
+/data/
+
+# Test and benchmark output
+/test-results/
+/benchmark-results/
+/corpus/
+/crashes/
+
+# Local infrastructure state
+.terraform/
+*.tfstate
+*.tfstate.*

@@ -1,0 +1,20 @@
+[package]
+name = "epoch-storage"
+description = "Checksummed append-only storage primitives for Epoch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+crc32fast.workspace = true
+epoch-core = { path = "../epoch-core" }
+parking_lot.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
+

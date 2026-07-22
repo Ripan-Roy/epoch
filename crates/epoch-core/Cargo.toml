@@ -1,0 +1,17 @@
+[package]
+name = "epoch-core"
+description = "Shared, I/O-free domain types and guarantee model for Epoch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true
+

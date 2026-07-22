@@ -1,0 +1,22 @@
+[package]
+name = "epoch-cli"
+description = "Command-line client for Epoch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "epoch"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+epoch-core = { path = "../epoch-core" }
+reqwest.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
+

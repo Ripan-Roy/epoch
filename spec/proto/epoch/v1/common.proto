@@ -1,0 +1,177 @@
+syntax = "proto3";
+
+package epoch.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "epoch.local/epoch/gen/go/epoch/v1;epochv1";
+
+// WorkloadProfile identifies the behavior family selected by a resource.
+enum WorkloadProfile {
+  WORKLOAD_PROFILE_UNSPECIFIED = 0;
+  WORKLOAD_PROFILE_CACHE = 1;
+  WORKLOAD_PROFILE_STATE_TABLE = 2;
+  WORKLOAD_PROFILE_STREAM_LOG = 3;
+  WORKLOAD_PROFILE_WORK_QUEUE = 4;
+  WORKLOAD_PROFILE_EVENT_BUS = 5;
+}
+
+// ResourceKind identifies every first-class control-plane resource kind.
+enum ResourceKind {
+  RESOURCE_KIND_UNSPECIFIED = 0;
+  RESOURCE_KIND_CACHE = 1;
+  RESOURCE_KIND_TABLE = 2;
+  RESOURCE_KIND_STREAM = 3;
+  RESOURCE_KIND_QUEUE = 4;
+  RESOURCE_KIND_EVENT_BUS = 5;
+  RESOURCE_KIND_SUBSCRIPTION = 6;
+  RESOURCE_KIND_SCHEMA = 7;
+  RESOURCE_KIND_PIPE = 8;
+  RESOURCE_KIND_CONNECTOR = 9;
+  RESOURCE_KIND_POLICY = 10;
+}
+
+// DurabilityProfile states the acknowledgement point promised to a caller.
+enum DurabilityProfile {
+  DURABILITY_PROFILE_UNSPECIFIED = 0;
+  DURABILITY_PROFILE_VOLATILE = 1;
+  DURABILITY_PROFILE_REPLICATED_MEMORY = 2;
+  DURABILITY_PROFILE_LOCAL_DURABLE = 3;
+  DURABILITY_PROFILE_QUORUM_DURABLE = 4;
+  DURABILITY_PROFILE_GEO_ASYNC = 5;
+  DURABILITY_PROFILE_GEO_SYNC = 6;
+}
+
+// DeliverySemantics scopes duplicate and loss behavior.
+enum DeliverySemantics {
+  DELIVERY_SEMANTICS_UNSPECIFIED = 0;
+  DELIVERY_SEMANTICS_AT_MOST_ONCE = 1;
+  DELIVERY_SEMANTICS_AT_LEAST_ONCE = 2;
+  DELIVERY_SEMANTICS_EFFECTIVELY_ONCE = 3;
+  DELIVERY_SEMANTICS_TRANSACTIONAL_EXACTLY_ONCE = 4;
+}
+
+// OrderingScope names the boundary inside which order is meaningful.
+enum OrderingScope {
+  ORDERING_SCOPE_UNSPECIFIED = 0;
+  ORDERING_SCOPE_NONE = 1;
+  ORDERING_SCOPE_KEY = 2;
+  ORDERING_SCOPE_SESSION = 3;
+  ORDERING_SCOPE_PARTITION = 4;
+  ORDERING_SCOPE_RESOURCE = 5;
+}
+
+// DeploymentMode prevents health and status APIs from implying guarantees the
+// current runtime topology cannot provide.
+enum DeploymentMode {
+  DEPLOYMENT_MODE_UNSPECIFIED = 0;
+  DEPLOYMENT_MODE_EMBEDDED = 1;
+  DEPLOYMENT_MODE_STANDALONE = 2;
+  DEPLOYMENT_MODE_CLUSTER = 3;
+  DEPLOYMENT_MODE_MANAGED = 4;
+}
+
+// ResourcePhase is control-plane reconciliation state, not data-plane health.
+enum ResourcePhase {
+  RESOURCE_PHASE_UNSPECIFIED = 0;
+  RESOURCE_PHASE_PENDING = 1;
+  RESOURCE_PHASE_READY = 2;
+  RESOURCE_PHASE_DEGRADED = 3;
+  RESOURCE_PHASE_FAILED = 4;
+  RESOURCE_PHASE_DELETING = 5;
+}
+
+// ConditionState uses a three-valued status so an unobserved condition is not
+// accidentally interpreted as false.
+enum ConditionState {
+  CONDITION_STATE_UNSPECIFIED = 0;
+  CONDITION_STATE_TRUE = 1;
+  CONDITION_STATE_FALSE = 2;
+  CONDITION_STATE_UNKNOWN = 3;
+}
+
+// Envelope is the common native record accepted across workload profiles.
+message Envelope {
+  string id = 1;
+  string source = 2;
+  string type = 3;
+  string subject = 4;
+  google.protobuf.Timestamp time = 5;
+  string key = 6;
+  map<string, string> headers = 7;
+  string content_type = 8;
+  string schema_ref = 9;
+  string traceparent = 10;
+  bytes payload = 11;
+  google.protobuf.Timestamp deliver_at = 12;
+  google.protobuf.Duration ttl = 13;
+  int32 priority = 14;
+  string dedupe_id = 15;
+  string transaction_id = 16;
+  map<string, bytes> extensions = 17;
+}
+
+// WriteReceipt makes the achieved acknowledgement boundary auditable.
+message WriteReceipt {
+  DurabilityProfile achieved_durability = 1;
+  uint64 resource_epoch = 2;
+  uint64 commit_position = 3;
+  uint32 replica_acks = 4;
+  bool duplicate = 5;
+  string request_id = 6;
+}
+
+// ResourceName is the fully qualified control-plane identity.
+message ResourceName {
+  string organization = 1;
+  string project = 2;
+  string environment = 3;
+  string namespace = 4;
+  ResourceKind kind = 5;
+  string name = 6;
+}
+
+// ResourceSpec contains shared guarantees and a typed-by-kind configuration
+// object. Profile-specific messages may replace configuration as contracts
+// stabilize without changing ResourceName or ResourceStatus.
+message ResourceSpec {
+  WorkloadProfile workload_profile = 1;
+  DurabilityProfile durability = 2;
+  DeliverySemantics delivery = 3;
+  OrderingScope ordering = 4;
+  uint32 replicas = 5;
+  map<string, string> labels = 6;
+  google.protobuf.Struct configuration = 7;
+}
+
+// Condition is an observable reconciliation or guarantee condition.
+message Condition {
+  string type = 1;
+  ConditionState state = 2;
+  string reason = 3;
+  string message = 4;
+  uint64 observed_generation = 5;
+  google.protobuf.Timestamp last_transition_time = 6;
+}
+
+// ResourceStatus reports achieved state separately from desired state.
+message ResourceStatus {
+  ResourcePhase phase = 1;
+  uint64 observed_generation = 2;
+  DeploymentMode deployment_mode = 3;
+  DurabilityProfile achieved_durability = 4;
+  uint64 resource_epoch = 5;
+  repeated Condition conditions = 6;
+}
+
+// Resource combines desired state, monotonic generation, and observed state.
+message Resource {
+  ResourceName name = 1;
+  uint64 generation = 2;
+  ResourceSpec spec = 3;
+  ResourceStatus status = 4;
+  google.protobuf.Timestamp create_time = 5;
+  google.protobuf.Timestamp update_time = 6;
+}

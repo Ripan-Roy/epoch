@@ -1,0 +1,43 @@
+# syntax=docker/dockerfile:1.7
+
+ARG RUST_VERSION=1.97.1
+
+FROM rust:${RUST_VERSION}-bookworm AS builder
+WORKDIR /workspace
+
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates ./crates
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/workspace/target \
+    cargo build --locked --release -p epoch-node && \
+    cp /workspace/target/release/epoch-node /tmp/epoch-node
+
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && \
+    apt-get install --yes --no-install-recommends ca-certificates curl tini && \
+    rm -rf /var/lib/apt/lists/* && \
+    groupadd --system --gid 10001 epoch && \
+    useradd --system --uid 10001 --gid epoch --home-dir /var/lib/epoch epoch && \
+    mkdir -p /var/lib/epoch && \
+    chown epoch:epoch /var/lib/epoch
+
+COPY --from=builder --chown=root:root /tmp/epoch-node /usr/local/bin/epoch-node
+
+USER epoch:epoch
+WORKDIR /var/lib/epoch
+
+ENV EPOCH_DEPLOYMENT_MODE=standalone \
+    EPOCH_DATA_DIR=/var/lib/epoch \
+    EPOCH_GRPC_ADDR=0.0.0.0:7600 \
+    EPOCH_HTTP_LISTEN=0.0.0.0:7601 \
+    EPOCH_METRICS_ADDR=0.0.0.0:9464 \
+    EPOCH_LOG=info
+
+EXPOSE 7600 7601 9464
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=6 \
+  CMD ["curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:7601/healthz"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/epoch-node"]

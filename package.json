@@ -1,0 +1,19 @@
+{
+  "name": "epoch-workspace",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "description": "One runtime for cache, stream, queue, and event-bus workloads",
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=24 <25",
+    "pnpm": ">=10.28 <11"
+  },
+  "scripts": {
+    "build": "pnpm -r --if-present build",
+    "format": "pnpm -r --if-present format",
+    "format:check": "pnpm -r --if-present format:check",
+    "lint": "pnpm -r --if-present lint",
+    "test": "pnpm -r --if-present test",
+    "typecheck": "pnpm -r --if-present typecheck"
+  }
+}
