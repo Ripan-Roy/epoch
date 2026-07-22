@@ -32,12 +32,12 @@ raft = { git = "https://github.com/tikv/raft-rs.git", rev = "ad13f3d90780f53aea2
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sha2 = "=0.10.9"
+sha2 = "=0.11.0"
 slog = "=2.8.2"
 tempfile = "3.23"
 thiserror = "2.0"
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
-tower-http = { version = "0.6", features = ["cors", "request-id", "trace"] }
+tower-http = { version = "0.7", features = ["cors", "request-id", "trace"] }
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }

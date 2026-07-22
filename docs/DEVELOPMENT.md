@@ -134,6 +134,23 @@ accidental publication under an uncleared organization name. Replace it in one
 reviewed migration after the company, repository, domain, and package namespace
 are selected; do not publish it as a stable import path.
 
+## Dependency update policy
+
+Dependabot staggers the six package ecosystems across the week and opens at
+most one grouped routine version-update pull request per ecosystem after a
+seven-day cooldown. Routine Go, Java, Python, npm, and GitHub Actions updates
+are limited to SemVer minor and patch releases. Routine Cargo updates are
+patch-only because a `0.x` minor change can be API-breaking and the consensus
+dependency graph is deliberately pinned. Security updates use a separate group
+and are never filtered or delayed by the routine-version policy.
+
+Major migrations, Cargo `0.x` minor migrations, runtime-floor changes, and
+coupled toolchain upgrades are maintained on explicit branches. They require a
+compatibility note and the same language, integration, container, and
+documentation gates as product code. Dependabot pull requests are not
+auto-merged; a green check on one dependency does not prove that a collection
+of independently generated updates is compatible.
+
 ## Common commands
 
 ```shell
