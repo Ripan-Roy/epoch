@@ -85,6 +85,7 @@ impl FileWal {
         let path = path.as_ref().to_path_buf();
         let mut file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&path)
@@ -255,6 +256,7 @@ fn checksum(header_without_magic_or_crc: &[u8], payload: &[u8]) -> u32 {
     hasher.finalize()
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn storage_error(error: std::io::Error) -> EpochError {
     EpochError::Storage(error.to_string())
 }

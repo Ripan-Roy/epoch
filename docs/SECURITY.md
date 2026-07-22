@@ -424,9 +424,10 @@ current local WAL checksum detects accidental corruption; it is not encryption,
 tamper-proofing, replication, or a compliance control.
 
 The development node listens on loopback by default, while the development
-container binds its HTTP port on all interfaces. Because that endpoint has no
-TLS or authentication yet, it must not be exposed to an untrusted network or
-used for untrusted/multi-tenant data.
+container binds its HTTP port on all interfaces. The current HTTP router also
+uses permissive CORS. Because that endpoint has no TLS or authentication yet,
+it must not be exposed to an untrusted network or used for
+untrusted/multi-tenant data.
 
 No deployment is secure for untrusted or multi-tenant production traffic until
 the applicable rows in [REQUIREMENTS_TRACEABILITY.md](REQUIREMENTS_TRACEABILITY.md)

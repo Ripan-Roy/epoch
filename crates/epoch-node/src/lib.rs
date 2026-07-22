@@ -378,9 +378,9 @@ async fn queue_settle(
     match request {
         SettleRequest::Ack { token } => {
             let acknowledgement: AckMetadata = queue.acknowledge(&token, now)?;
-            Ok(Json(
-                serde_json::to_value(acknowledgement).map_err(internal_json_error)?,
-            ))
+            Ok(Json(serde_json::to_value(acknowledgement).map_err(
+                |error| EpochError::Internal(error.to_string()),
+            )?))
         }
         SettleRequest::Release {
             token,
@@ -518,8 +518,4 @@ impl IntoResponse for ApiError {
         };
         (status, Json(json!({"error": self.0}))).into_response()
     }
-}
-
-fn internal_json_error(error: serde_json::Error) -> ApiError {
-    EpochError::Internal(error.to_string()).into()
 }

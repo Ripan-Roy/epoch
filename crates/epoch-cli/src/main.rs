@@ -344,7 +344,7 @@ async fn run_queue(
                 Some(json!({
                     "durability": "local_durable",
                     "visibility_timeout_ms": visibility_timeout_ms,
-                    "max_messages": 100000,
+                    "max_messages": 100_000,
                     "retry": {
                         "strategy": "exponential",
                         "initial_delay_ms": 1000,

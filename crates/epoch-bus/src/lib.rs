@@ -178,14 +178,6 @@ impl EventBus {
         self.commit_position = self.commit_position.saturating_add(1);
         let position = self.commit_position;
         let route_plan_version = self.route_plan_version;
-        if self.config.archive {
-            self.archive.push(ArchivedEvent {
-                position,
-                received_at_ms: now_ms,
-                route_plan_version,
-                envelope: event.clone(),
-            });
-        }
         let mut subscriptions: Vec<&Subscription> = self.subscriptions.values().collect();
         subscriptions.sort_by(|left, right| left.name.cmp(&right.name));
         let deliveries = subscriptions
@@ -198,6 +190,14 @@ impl EventBus {
                 route_plan_version,
             })
             .collect();
+        if self.config.archive {
+            self.archive.push(ArchivedEvent {
+                position,
+                received_at_ms: now_ms,
+                route_plan_version,
+                envelope: event,
+            });
+        }
         Ok(PublishResult {
             acknowledgement: AckMetadata::standalone(position, self.config.durability),
             deliveries,

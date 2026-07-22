@@ -380,14 +380,19 @@ explicitly.
 ## 12. What is implemented now
 
 The current scaffold exposes provisional Rust domain structs, in-memory profile
-methods, standalone receipt metadata, `/healthz` and `/readyz` HTTP routes, and
-a small local WAL. Those health routes currently report the same in-process
-engine state. It does not yet contain the Protobuf packages or gRPC services
-described here; port 7600 is only reserved for the native gRPC API.
+methods, standalone receipt metadata, JSON/HTTP profile routes, a CLI,
+`/healthz` and `/readyz`, and a small local WAL. The two health routes currently
+report the same in-process engine state.
 
-TLS/authentication metadata, typed `google.rpc.Status` details, request lookup,
-streaming credit, regional administration, long-running operations, metrics on
-the reserved port, protocol gateways, generated SDKs, and compatibility
-negotiation remain unimplemented.
-Current JSON payload structs and error enums are internal scaffolding and may be
-migrated to these contracts before any public compatibility promise.
+Initial `epoch.v1` Protobuf source defines common resource/envelope types and a
+small `RegionalAdminService`; Buf generation is configured for Go. It is an
+early boundary scaffold, not the complete package split or native data API in
+this document. No gRPC server is running, and port 7600 is only reserved.
+
+TLS/authentication metadata, typed `google.rpc.Status` details, mutation-status
+lookup, streaming credit, a Rust regional administration implementation,
+long-running operations, metrics on the reserved port, protocol gateways,
+supported SDKs, and compatibility negotiation remain unimplemented. The Go
+control HTTP registry, browser console, current JSON payload structs, and Rust
+error enum are provisional scaffolding and may be migrated before any public
+compatibility promise.

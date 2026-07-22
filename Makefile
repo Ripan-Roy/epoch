@@ -1,6 +1,11 @@
 SHELL := /bin/sh
 .DEFAULT_GOAL := help
 
+# Prefer the repository's pinned keg-only Node LTS on Homebrew systems without
+# changing the user's globally linked Node version. On other systems the
+# nonexistent prefix is harmless and the normal PATH remains effective.
+export PATH := /opt/homebrew/opt/node@24/bin:$(PATH)
+
 .PHONY: help bootstrap-check generate generate-check format format-check lint test test-unit build check ci compose-config compose-up compose-down clean
 
 help: ## Show available commands.
