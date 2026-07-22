@@ -1,5 +1,7 @@
 //! Native HTTP surface for the standalone Epoch node.
 
+pub mod consensus;
+
 use std::{sync::Arc, time::Duration};
 
 use axum::{

@@ -409,7 +409,10 @@ The implemented Rust dependency gate pins `cargo-audit` 0.22.2 and denies audit
 warnings. Its only temporary exception is `RUSTSEC-2025-0057`, the unmaintained
 `fxhash` dependency inherited through `raft`. This exception does not accept the
 consensus dependency or change ADR-0003 from Proposed; removal or replacement
-must be resolved through that decision. The Linux `protoc` 35.1 installer pins
+must be resolved through that decision. CI caches only the exact binary produced
+by the pinned locked-source build under an OS, architecture, toolchain, and
+version-specific immutable key; the advisory database is not cached and the
+audit still runs on every job. The Linux `protoc` 35.1 installer pins
 separate SHA-256 values for x86_64 and aarch64, requires an explicit destination
 that does not already exist, verifies the extracted compiler version, and fails
 closed.
@@ -440,6 +443,16 @@ on ports 5173 and 4173 are allowed by default; wildcard, opaque, credentialed,
 path-bearing, and malformed origins are rejected during startup. The GitHub
 Pages artifact is documentation-only and does not contain the live console
 client.
+
+The opt-in consensus probe uses a distinct listener with no CORS, TLS, or peer
+authentication. Its internal frame and diagnostic routes are development-only.
+The supplied Compose topology publishes them only on host loopback; operators
+must not expose port 7701 or the experimental routes to an untrusted network.
+Outbound peer requests ignore ambient proxy settings and reject redirects so a
+configured authority cannot reroute frames through the host environment or a
+3xx response. This does not authenticate the configured peer. The explicit
+plaintext/unauthenticated weakness is one reason the probe cannot support a
+product quorum claim.
 
 CORS is only a browser boundary, not authentication. Requests without an
 `Origin` header remain available to native SDKs, CLI tools, and any network

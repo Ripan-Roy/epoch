@@ -273,6 +273,18 @@ Stop it while retaining the named data volume:
 make compose-down
 ```
 
+Validate or run the opt-in fixed-three-voter consensus probe:
+
+```shell
+make compose-probe-config
+make compose-probe-up
+make compose-probe-down
+```
+
+Its three public profile endpoints are still standalone. The separate local
+diagnostic listeners replicate opaque probe bytes only; see
+[Experimental Consensus Probe](CONSENSUS_PROBE.md) before using them.
+
 To discard local data, explicitly add `--volumes` to the Compose down command.
 That is destructive and is intentionally not part of the Make target.
 

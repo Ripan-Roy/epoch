@@ -39,7 +39,7 @@ Implementing a custom consensus algorithm is out of scope. Replacing the
 provisional library with another vetted Rust library remains possible behind the
 adapter if the spike fails.
 
-## Stage 1 and local persistence status
+## Stage 1, local persistence, and probe status
 
 The first workspace slice implements a fixed-three-voter, memory-only adapter
 behind Epoch-owned types. It exercises election, majority commit, partition and
@@ -57,12 +57,19 @@ logical suffix replacement and applied history, and rejects detected corruption
 or invariant regression. The byte and recovery contract is documented in
 [EPRS v1 consensus stable journal](../../spec/formats/consensus-stable-store-v1.md).
 
-This work does not accept the ADR. No runnable node uses the persistent adapter,
-and no API returns a durable-majority acknowledgement. An exhaustive
-process-crash and I/O-fault matrix, snapshots and checkpoint installation,
-membership and catalog-authorized epoch transitions, read barriers,
-authenticated transport, group density, performance, formal-model, and chaos
-evidence remain open.
+The evidence now also includes a three-child-process partition and
+`SIGKILL`/same-path-reopen smoke, plus an opt-in `epoch-node` probe with a
+dedicated actor, bounded ordered HTTP transport, local diagnostic lookup, and a
+static three-container topology. The runtime commits only opaque probe bytes;
+it does not drive a product state machine. See
+[Experimental Consensus Probe](../CONSENSUS_PROBE.md).
+
+This work does not accept the ADR. A runnable node can use the adapter only for
+the explicitly experimental opaque probe, and no product API returns a
+durable-majority acknowledgement. An exhaustive process-crash and I/O-fault
+matrix, snapshots and checkpoint installation, membership and
+catalog-authorized epoch transitions, read barriers, authenticated transport,
+group density, performance, formal-model, and chaos evidence remain open.
 
 The released `raft-rs` 0.7 dependency graph was rejected because its
 `protobuf` 2.28 dependency is affected by `RUSTSEC-2024-0437`. The spike pins

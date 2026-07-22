@@ -71,8 +71,12 @@ checksummed, fsync-backed `FileWal` journal for immutable identity, complete
 cover local reopen, suffix replacement, partial-tail repair, corruption, and
 writer exclusion. Adapter tests reopen three voters with identical committed
 history/digests, verify stable-barrier ordering, recover a post-append unknown
-outcome, and publish commit-ahead-of-checkpoint recovery once. It is not linked
-into the node. G3 remains open for a
+outcome, and publish commit-ahead-of-checkpoint recovery once. A separate
+three-process smoke proves minority non-commit, partition healing, identical
+receipts/digests, and one-voter plus all-voter `SIGKILL`/same-path reopen without
+duplicate receipt publication. An opt-in node runtime adds bounded real HTTP
+transport and opaque diagnostic status/propose/lookup endpoints, with a static
+three-container topology. Product profiles remain standalone. G3 remains open for a
 durable-majority acknowledgement and exhaustive crash matrix, snapshots,
 membership and authoritative epoch transitions, read barriers, authenticated
 transport,
@@ -214,8 +218,8 @@ placement/repair, model and chaos reports, density, and performance. See
 |---|---:|---|---|---|---|---|
 | DX-001 | P0 | Official Go, Java, and Python SDKs | M1 one SDK → M2 | Slice | G0, G1, G4, G10 | Go/Java/Python HTTP unit + independent exact-source crash/restart quickstarts, including selectable local Stream/Queue durability, and Go generated bindings; pending: native streaming contract/version matrix for all three |
 | DX-002 | P0 | Generated guarantee-aware API docs | M1 → M2 | Slice | G0, G1, G10 | Hand-authored guarantee/error guidance and exact executable Go/Java/Python examples are built as a docs-only Pages artifact; pending: generated API reference and full doc lint |
-| DX-003 | P0 | Deterministic single-binary emulator | M1 → M2 | Slice | G1, G2, G4, G10 | Seeded scheduler, virtual wall/monotonic clock, occurrence fault plan, directed partitionable peer transport, golden EPTR v1 serialization/digest, pinned transport history, and fixed-voter consensus harness integration; pending: executable replay bundle, persistent storage/profile/process integration, and runnable emulator controls |
-| DX-004 | P0 | Test containers and ephemeral namespaces | M1 → M2 | Slice | G1, G5, G10 | Pending: parallel lifecycle/isolation CI |
+| DX-003 | P0 | Deterministic single-binary emulator | M1 → M2 | Slice | G1, G2, G4, G10 | Seeded scheduler, virtual wall/monotonic clock, occurrence fault plan, directed partitionable peer transport, golden EPTR v1 serialization/digest, pinned transport history, fixed-voter consensus integration, a real-process EPRS/SIGKILL harness, and an opt-in node probe; pending: executable replay bundle, profile integration, and runnable emulator controls |
+| DX-004 | P0 | Test containers and ephemeral namespaces | M1 → M2 | Slice | G1, G5, G10 | Unique three-node Compose project, independent ephemeral volumes, dynamically allocated loopback ports, failover/catch-up CI, and scoped cleanup; pending: broader parallel profile lifecycle/isolation matrix |
 | DX-005 | P1 | Audited/redacted console message browser | M3 → M4 | Planned | G5, G7, G8 | Pending: access/redaction/action audit matrix |
 | DX-006 | P0 | Explain live guarantees and cost drivers | M1 basic → M2 | Slice | G0, G3, G5 | Pending: live-state reconciliation suite |
 | DX-007 | P1 | Compatibility usage scanner | M3 | Planned | G0, G6 | Pending: unsupported-feature fixture corpus |
@@ -240,7 +244,7 @@ placement/repair, model and chaos reports, density, and performance. See
 | PKG-001 | P0 | Selective four-profile Rust node | M1 scaffold → M4 complete | Slice | G1, G4, G10 | Pending: feature/config startup matrix |
 | PKG-002 | P0 | Shared engine/format standalone and cluster | M1 → M2 | Slice | G1, G2, G3, G10 | Checksummed v1 segmented standalone format, durable identity/manifest, fresh-layout activation, and no-migration legacy fallback verified; pending: cluster format equivalence |
 | PKG-003 | P0 | Standalone without hosted Go services | M1 | Slice | G1, G2, G10 | Rust node restart/recovery test; pending: extended disconnected lifecycle suite |
-| PKG-004 | P0 | Three-node quorum/failover/placement | M1 prototype → M2 | Slice | G2, G3, G10 | Fixed-three-voter in-process feasibility histories only; pending: runnable nodes, durable quorum, placement, process faults, and published three-node report |
+| PKG-004 | P0 | Three-node quorum/failover/placement | M1 prototype → M2 | Slice | G2, G3, G10 | Fixed-three-voter deterministic histories, real child-process EPRS partition/SIGKILL/reopen smoke, and three-node HTTP/Compose opaque probe; pending: profile durable quorum, placement, exhaustive process faults, and published three-node report |
 | PKG-005 | P0 | OCI, Kubernetes dev, signed binaries | M1 dev → M2 | Slice | G1, G5, G10 | Pending: clean-install/signature/SBOM CI |
 | PKG-006 | P1 | Rust embedded engine with guarantee ceiling | M2 experimental → M3 | Planned | G0, G1, G2, G10 | Pending: lifecycle/persistence contract suite |
 | PKG-007 | P1 | Supervised sidecar/child for other languages | M2 → M3 | Planned | G1, G5, G10 | Pending: crash/isolation/upgrade matrix |

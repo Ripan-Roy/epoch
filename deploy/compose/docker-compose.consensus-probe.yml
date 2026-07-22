@@ -1,0 +1,72 @@
+name: epoch-consensus-probe
+
+x-epoch-probe: &epoch-probe
+  image: ${EPOCH_PROBE_IMAGE:-epoch/node:consensus-probe}
+  pull_policy: never
+  environment: &epoch-probe-environment
+    EPOCH_HTTP_LISTEN: 0.0.0.0:7601
+    EPOCH_CONSENSUS_PROBE_ENABLED: "true"
+    EPOCH_CONSENSUS_GROUP_ID: "1"
+    EPOCH_CONSENSUS_GROUP_EPOCH: "1"
+    EPOCH_CONSENSUS_LISTEN: 0.0.0.0:7701
+    EPOCH_CONSENSUS_PEERS: 1=http://epoch-probe-1:7701,2=http://epoch-probe-2:7701,3=http://epoch-probe-3:7701
+    EPOCH_CONSENSUS_TICK_MS: "100"
+    EPOCH_LOG: ${EPOCH_LOG:-epoch=info,tower_http=info}
+  restart: unless-stopped
+  stop_grace_period: 30s
+  healthcheck:
+    test:
+      - CMD
+      - curl
+      - --fail
+      - --silent
+      - --show-error
+      - http://127.0.0.1:7601/healthz
+    interval: 5s
+    timeout: 3s
+    start_period: 10s
+    retries: 12
+
+services:
+  epoch-probe-1:
+    <<: *epoch-probe
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.node
+      args:
+        RUST_VERSION: 1.97.1
+    environment:
+      <<: *epoch-probe-environment
+      EPOCH_CONSENSUS_NODE_ID: "1"
+    ports:
+      - "127.0.0.1:${EPOCH_PROBE_HTTP_PORT_1:-17661}:7601"
+      - "127.0.0.1:${EPOCH_PROBE_PEER_PORT_1:-17701}:7701"
+    volumes:
+      - epoch-probe-1-data:/var/lib/epoch
+
+  epoch-probe-2:
+    <<: *epoch-probe
+    environment:
+      <<: *epoch-probe-environment
+      EPOCH_CONSENSUS_NODE_ID: "2"
+    ports:
+      - "127.0.0.1:${EPOCH_PROBE_HTTP_PORT_2:-17662}:7601"
+      - "127.0.0.1:${EPOCH_PROBE_PEER_PORT_2:-17702}:7701"
+    volumes:
+      - epoch-probe-2-data:/var/lib/epoch
+
+  epoch-probe-3:
+    <<: *epoch-probe
+    environment:
+      <<: *epoch-probe-environment
+      EPOCH_CONSENSUS_NODE_ID: "3"
+    ports:
+      - "127.0.0.1:${EPOCH_PROBE_HTTP_PORT_3:-17663}:7601"
+      - "127.0.0.1:${EPOCH_PROBE_PEER_PORT_3:-17703}:7701"
+    volumes:
+      - epoch-probe-3-data:/var/lib/epoch
+
+volumes:
+  epoch-probe-1-data:
+  epoch-probe-2-data:
+  epoch-probe-3-data:

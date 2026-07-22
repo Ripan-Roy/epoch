@@ -410,6 +410,23 @@ Fresh segmented activation replaces an invalid-to-old-readers staging marker
 only after the new layout is durable. Mixed histories without that marker are
 rejected; legacy migration is not yet automatic.
 
+When explicitly enabled, a separate internal listener exposes the experimental
+fixed-voter consensus probe:
+
+- `POST /internal/v1/consensus/messages` accepts only bounded Epoch peer frames
+  with `application/octet-stream`;
+- `GET /experimental/v1/consensus/status` reports the local role, leader, term,
+  commit/applied indexes, cumulative per-peer queue/delivery/drop evidence, and
+  explicit non-production capability fields;
+- `POST /experimental/v1/consensus/proposals` proposes opaque diagnostic bytes
+  with a caller-supplied proposal ID and expected term; and
+- `GET /experimental/v1/consensus/proposals/{proposal_id}` distinguishes a
+  local `unknown`, `pending`, or `committed` observation.
+
+These routes have no CORS layer, TLS, authentication, SDK commitment, or
+product-profile semantics. They do not change the standalone API's receipt or
+durability contract. See [Experimental Consensus Probe](CONSENSUS_PROBE.md).
+
 This is still a single-node journal slice, not the final tablet consensus log.
 It has no snapshot/compaction path, quorum, replica acknowledgement, segment
 retention/deletion, or protection from loss of the host and its storage.

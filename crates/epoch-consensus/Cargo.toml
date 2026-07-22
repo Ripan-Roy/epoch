@@ -16,6 +16,9 @@ slog.workspace = true
 
 [dev-dependencies]
 epoch-testkit = { path = "../epoch-testkit" }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

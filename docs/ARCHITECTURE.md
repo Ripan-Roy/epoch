@@ -218,13 +218,17 @@ stable journal over `FileWal` exposed through `PersistentRaftAdapter`. EPRS
 records immutable voter identity, complete `HardState`, normal-entry
 index/term/data, and an applied/publishable digest checkpoint without persisting
 raw library protobuf. It supports checksummed
-local reopen and logical uncommitted-suffix replacement, but the adapter is not
-connected to a tablet or node and no durable-majority acknowledgement is
-exposed. Snapshots, compaction, membership changes, authoritative catalog
+local reopen and logical uncommitted-suffix replacement. An opt-in node probe
+wraps it in a dedicated actor, bounded ordered HTTP peer queues, local
+status/proposal lookup, and a static three-container topology. The probe carries
+opaque diagnostics only: the adapter is not connected to a tablet/profile state
+machine and no product durable-majority acknowledgement is exposed. Snapshots,
+compaction, membership changes, authoritative catalog
 fencing, and read barriers remain disabled. The byte contract is documented in
 [EPRS v1 consensus stable journal](../spec/formats/consensus-stable-store-v1.md);
 the complete scope and non-claims are recorded in
-[Consensus Feasibility Spike](CONSENSUS_SPIKE.md).
+[Consensus Feasibility Spike](CONSENSUS_SPIKE.md) and the runnable boundary in
+[Experimental Consensus Probe](CONSENSUS_PROBE.md).
 
 Rust peer replication uses batched, framed, mutually authenticated connections
 with separate priorities for control, append, snapshot, and repair traffic.

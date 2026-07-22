@@ -124,7 +124,30 @@ yet an exhaustive injected-I/O or real-process-crash matrix. Persistent adapter
 tests additionally reopen a three-voter committed history, preserve an isolated
 pending proposal, verify stable-barrier message ordering, recover after an
 injected post-append error, and publish a commit-ahead-of-checkpoint receipt
-exactly once. This is still not snapshot,
+exactly once.
+
+The explicit `test-consensus-process` gate extends that evidence across real
+process boundaries. A parent harness starts three child test executables, each
+with its own EPRS journal and loopback control socket, and routes their bounded
+peer frames through the deterministic `PeerTransport`. It isolates a leader,
+proves that a minority proposal remains pending without a receipt, heals the
+partition, compares the committed receipt, payload, and state digest at all
+three voters, sends `SIGKILL` to one child and then all children, and reopens the
+same journal paths without republishing duplicate receipts. Failure retains the
+seed, EPTR trace, child logs, and data directories; CI uploads those artifacts.
+This is process-crash evidence for the isolated adapter, not node-to-node HTTP
+transport, product profile replication, or a complete crash-point matrix.
+The complementary `three_probe_runtimes_elect_and_commit_over_real_http` test
+starts three persistent probe runtimes with ephemeral loopback listeners,
+elects through the runtime probe HTTP transport, commits opaque bytes, and
+compares proposal lookup at every voter. It covers runtime transport but not
+separate process loss; the two test layers intentionally prove different
+boundaries. `sustained_minority_outage_drops_only_that_peers_frames_and_majority_commits`
+uses a one-frame outbound queue, keeps the lower-ID destination unavailable
+until drops and exhausted retries are observed, and proves eight subsequent
+proposals still commit on the healthy majority.
+
+This is still not snapshot,
 membership-transition, authoritative epoch-fencing, durable-majority, or
 product acknowledgement evidence. Those scenarios remain required before G3
 or the emulator is complete; see
@@ -161,6 +184,26 @@ pre-create the data root outside the storage boundary. A separate downgrade
 test verifies that an existing valid `engine.wal` remains the only journal,
 receives new appends through the legacy writer, and does not create
 `engine-wal/`.
+
+Run the persistent consensus process smoke directly with:
+
+```shell
+make test-consensus-process
+make test-consensus-probe
+```
+
+`test-consensus-process` is ignored by Cargo's default suite so it cannot run
+accidentally as a unit test, while the Make target, extended local integration
+gate, and GitHub Actions Rust job select it explicitly.
+
+`test-consensus-probe` builds a single node image, starts three containers with
+independent EPRS volumes and dynamically allocated loopback ports, verifies the
+truthful experimental status contract, commits an opaque proposal, stops the
+leader, observes a higher-term election and majority commit, restarts the old
+leader, and waits for identical local lookup at all voters. The script uses a
+unique Compose project and deletes only its ephemeral containers, network, and
+volumes. On CI failure it retains container logs, state, and port assignments as
+an uploaded artifact.
 
 `tests/integration/docs-quickstarts.sh` separately executes the exact Go, Java,
 and Python source imported into the documentation page. Each language gets a

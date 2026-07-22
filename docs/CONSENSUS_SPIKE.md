@@ -1,12 +1,14 @@
 # Consensus Feasibility Spike
 
-**Status:** Stage 1 adapter plus local stable-store slice; not a product replication mode
+**Status:** Stage 1 adapter, local stable store, and bounded process-crash harness; not a product replication mode
 
 **Decision:** [ADR-0003](adr/0003-consensus-adapter.md) remains Proposed
 
 This document records exactly what the first Epoch consensus slice proves and,
-more importantly, what it does not prove. The runnable node is still
-standalone-only and rejects replicated-memory, quorum, and geo durability.
+more importantly, what it does not prove. The runnable node's product profiles
+remain standalone-only and reject replicated-memory, quorum, and geo
+durability. An opt-in diagnostic probe runs beside them without changing that
+guarantee ceiling.
 
 ## Implemented boundary
 
@@ -43,6 +45,19 @@ any receipts or peer messages that become publishable while catching an older
 checkpoint up to the durable commit index, so callers cannot silently discard
 recovery output. The exact format and limitations are in
 [EPRS v1 consensus stable journal](../spec/formats/consensus-stable-store-v1.md).
+
+`epoch-node` can opt into a dedicated-listener `ConsensusProbeRuntime`. A
+blocking actor thread owns the persistent adapter, periodic ticks drive Raft,
+and bounded per-peer workers preserve HTTP delivery order. Actor dispatch uses
+nonblocking per-destination reservations, so saturation or failure of one peer
+cannot block ticks or traffic to another; local cumulative queue, delivery,
+drop, and exhausted-retry evidence is exposed in probe status. Raw internal
+frames have a strict body limit and no CORS surface. Experimental status,
+propose, and lookup endpoints replicate opaque bytes only and always disclose
+local observation, no peer authentication, `profile_replication: false`, and a
+`local_durable` product-profile ceiling. A static three-container Compose model
+gives every voter its own data volume. See
+[Experimental Consensus Probe](CONSENSUS_PROBE.md).
 
 ## Processing contract
 
@@ -84,9 +99,22 @@ digests, preserve a minority-only pending proposal, order persisted messages
 after stable barriers, recover a proposal after an injected post-append error,
 and publish a commit-ahead-of-checkpoint receipt exactly once during recovery.
 
-This is deterministic in-process evidence plus local file reopen evidence. It
-is not an exhaustive injected-I/O, real-process-crash, zone, model-check,
-linearizability, or soak report.
+An explicitly selected multiprocess smoke starts three child test executables,
+each owning a `PersistentRaftAdapter` and separate EPRS path. The parent uses
+the seeded `epoch-testkit::PeerTransport` to isolate the leader, proves that the
+minority proposal stays pending without a commit receipt, heals the partition,
+and compares committed receipts, payloads, and state digests. It then sends
+`SIGKILL` to one voter and later all three voters, reopens the same bytes in new
+processes, and verifies lookup/digest survival without duplicate receipt
+publication. The loopback sockets are bounded test-control channels; this is
+not itself the node HTTP peer transport or a profile replication path. A
+separate node test starts three complete probe runtimes on ephemeral loopback
+listeners, elects a leader over real HTTP, commits an opaque proposal, and
+compares local committed lookup at all voters.
+
+This is deterministic in-process evidence, local file reopen evidence, and one
+bounded real-process `SIGKILL`/reopen history. It is not an exhaustive
+crash-point, injected-I/O, zone, model-check, linearizability, or soak report.
 
 ## Dependency decision under test
 
@@ -107,8 +135,8 @@ and replacement path still require the ADR's dependency and security review.
 
 This slice does not provide:
 
-- a node-integrated or public quorum-durable acknowledgement, durable-majority
-  proof, or replica-acknowledgement count;
+- a profile-integrated or public quorum-durable acknowledgement,
+  durable-majority proof, or replica-acknowledgement count;
 - an exhaustive process-crash, fsync-failure, disk-full, or partial-write
   matrix beyond the bounded incomplete-tail and corruption tests;
 - snapshots, compaction, log purge, or state-machine checkpoint installation;
@@ -116,7 +144,8 @@ This slice does not provide:
 - an authoritative catalog epoch transition that can fence an old voter set;
 - a linearizable read barrier;
 - mutually authenticated, encrypted, batched production transport;
-- node, engine, profile, API, CLI, SDK, health, or deployment integration;
+- product engine/profile, CLI, SDK, or public health integration; the only node
+  and deployment integration is the explicitly experimental opaque probe;
 - bounded proposal-history memory or a configured idempotency-retention window;
 - segment rotation, a committed-length manifest, arbitrary post-sync
   truncation detection, authenticated anti-rollback evidence, backup generation
@@ -129,8 +158,8 @@ This slice does not provide:
 1. Add deterministic crash points around EPRS write, sync, commit, apply,
    `advance`, and receipt publication, then exercise them through a persistent
    three-voter harness.
-2. Reopen EPRS bytes in a new process and prove that an acknowledged commit and
-   its proposal lookup survive every supported crash boundary.
+2. Expand the new-process EPRS reopen harness across every supported crash
+   boundary and unknown-outcome publication point.
 3. Add a versioned state-machine checkpoint and atomic snapshot installation.
 4. Add joint-consensus membership, catalog-authorized epoch transitions, and
    old-configuration fencing tests.
@@ -145,6 +174,9 @@ This slice does not provide:
 
 ```shell
 cargo test --locked -p epoch-consensus --all-features
+cargo test --locked -p epoch-consensus --test multiprocess persistent_three_node_partition_and_sigkill_reopen -- --ignored --nocapture --test-threads=1
+cargo test --locked -p epoch-node --all-targets
+docker compose -f deploy/compose/docker-compose.consensus-probe.yml config --quiet
 cargo clippy --locked -p epoch-consensus --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked -p epoch-consensus --all-features --no-deps
 cargo audit --deny warnings --ignore RUSTSEC-2025-0057

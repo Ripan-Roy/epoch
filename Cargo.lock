@@ -370,8 +370,11 @@ dependencies = [
  "epoch-testkit",
  "prost",
  "raft",
+ "serde",
+ "serde_json",
  "sha2",
  "slog",
+ "tempfile",
 ]
 
 [[package]]
@@ -407,6 +410,7 @@ dependencies = [
  "clap",
  "epoch-bus",
  "epoch-cache",
+ "epoch-consensus",
  "epoch-core",
  "epoch-engine",
  "epoch-queue",
@@ -414,9 +418,11 @@ dependencies = [
  "epoch-stream",
  "http",
  "http-body-util",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.19",
  "tokio",
  "tower",
  "tower-http",

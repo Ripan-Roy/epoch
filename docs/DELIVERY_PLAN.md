@@ -107,8 +107,13 @@ and corrupt restart-image rejection. A local follow-on adds
 `PersistentRaftAdapter` and the EPRS v1 checksummed `FileWal` journal, including
 immutable identity, explicit `HardState`/entry/checkpoint fields, local reopen,
 uncommitted-suffix replacement, partial-tail repair, and corruption rejection.
-The adapter is not linked into the node, and local persistence is not a
-durable-majority acknowledgement. Exhaustive process crash points, snapshots,
+An explicit three-child-process extension isolates the leader, proves no
+minority commit, heals and compares all receipts/digests, then sends `SIGKILL`
+to one and all voters before reopening the same EPRS paths without duplicate
+receipt publication. An opt-in node runtime and three-container topology add a
+dedicated bounded HTTP transport plus opaque diagnostic proposals while keeping
+all product profiles standalone. Neither integration is a product
+durable-majority acknowledgement. Exhaustive crash points, snapshots,
 membership and authoritative epoch transitions, read barriers, authenticated
 transport, model/chaos reports, and profile integration remain required for the
 metadata/replication work package and G3. See

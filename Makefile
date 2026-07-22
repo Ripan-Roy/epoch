@@ -8,7 +8,7 @@ NODE_LTS := $(if $(wildcard /opt/homebrew/opt/node@24/bin/node),/opt/homebrew/op
 PNPM_ENV := PATH="/opt/homebrew/opt/node@24/bin:$$PATH"
 JAVA_MVN := ./sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress
 
-.PHONY: help bootstrap-check generate generate-check format format-check lint audit test test-unit test-integration build check ci compose-config compose-up compose-down clean
+.PHONY: help bootstrap-check generate generate-check format format-check lint audit test test-unit test-consensus-process test-consensus-probe test-integration build check ci compose-config compose-up compose-down compose-probe-config compose-probe-up compose-probe-down clean
 
 help: ## Show available commands.
 	@awk 'BEGIN {FS = ":.*## "; printf "Epoch development commands:\n\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -96,7 +96,13 @@ test-unit: ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) test; fi
 	@$(PNPM_ENV) pnpm run test
 
-test-integration: ## Exercise real processes through the CLI and Go/Java/Python SDKs.
+test-consensus-process: ## Prove persistent three-voter behavior across real SIGKILL/reopen cycles.
+	cargo test --locked -p epoch-consensus --test multiprocess persistent_three_node_partition_and_sigkill_reopen -- --ignored --nocapture --test-threads=1
+
+test-consensus-probe: ## Run the three-container HTTP election, failover, and catch-up smoke.
+	@bash tests/integration/consensus-probe.sh
+
+test-integration: test-consensus-process test-consensus-probe ## Exercise real processes through consensus, the CLI, and Go/Java/Python SDKs.
 	@bash tests/integration/smoke.sh
 	@bash tests/integration/docs-quickstarts.sh
 
@@ -109,7 +115,7 @@ build: ## Build all available workspace components.
 
 check: generate-check format-check lint test-unit audit ## Run the local pre-commit gate.
 
-ci: bootstrap-check check build test-integration compose-config ## Run the deterministic CI gate available locally.
+ci: bootstrap-check check build test-integration compose-config compose-probe-config ## Run the deterministic CI gate available locally.
 
 compose-config: ## Validate the development Compose model.
 	docker compose -f deploy/compose/docker-compose.yml config --quiet
@@ -119,6 +125,15 @@ compose-up: ## Build and start the standalone development node.
 
 compose-down: ## Stop the standalone development node without deleting its volume.
 	docker compose -f deploy/compose/docker-compose.yml down
+
+compose-probe-config: ## Validate the experimental three-node consensus probe model.
+	docker compose -f deploy/compose/docker-compose.consensus-probe.yml config --quiet
+
+compose-probe-up: ## Build and start the experimental fixed-voter consensus probe.
+	docker compose -f deploy/compose/docker-compose.consensus-probe.yml up --build --detach
+
+compose-probe-down: ## Stop the consensus probe without deleting its three volumes.
+	docker compose -f deploy/compose/docker-compose.consensus-probe.yml down
 
 clean: ## Remove language build output (runtime data is retained).
 	@if [ -f Cargo.toml ]; then cargo clean; fi
