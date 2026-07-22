@@ -1419,13 +1419,11 @@ mod tests {
         let temporary = TempDir::new().unwrap();
         let paths = tablet_paths(temporary.path());
         let cluster = RunningTabletCluster::start(&paths).await;
-        let (leader, term) = cluster.leader().await;
-        let follower = (leader + 1) % 3;
         let client = reqwest::Client::new();
 
         assert_json_rejection_uses_the_typed_error_contract(&cluster, &client).await;
-        assert_follower_rejects_write(&cluster, follower, term, &client).await;
-        append_retry_conflict_and_second_record(&cluster, leader, term, &client).await;
+        assert_follower_rejects_write(&cluster, &client).await;
+        append_retry_conflict_and_second_record(&cluster, &client).await;
         assert_all_records(&cluster, &client).await;
         cluster.shutdown().await;
 
@@ -1436,22 +1434,42 @@ mod tests {
 
     async fn assert_follower_rejects_write(
         cluster: &RunningTabletCluster,
-        follower: usize,
-        term: u64,
         client: &reqwest::Client,
     ) {
-        let mut body = append_body(1);
-        body["expected_term"] = json!(term);
-        let follower_response = client
-            .post(append_url_for(&cluster.nodes[follower]))
-            .json(&body)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(follower_response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let follower_error: Value = follower_response.json().await.unwrap();
-        assert_eq!(follower_error["error"]["code"], "not_leader");
-        assert_eq!(follower_error["error"]["outcome_certainty"], "unknown");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let (leader, term) = cluster.leader().await;
+                let follower = (leader + 1) % cluster.nodes.len();
+                let mut body = append_body(1);
+                body["expected_term"] = json!(term);
+                let follower_response = client
+                    .post(append_url_for(&cluster.nodes[follower]))
+                    .json(&body)
+                    .send()
+                    .await
+                    .unwrap();
+                let status = follower_response.status();
+                let document: Value = follower_response.json().await.unwrap();
+
+                if status == StatusCode::SERVICE_UNAVAILABLE
+                    && document["error"]["code"] == "not_leader"
+                {
+                    assert_eq!(document["error"]["outcome_certainty"], "unknown");
+                    return;
+                }
+
+                // A follower that becomes leader must do so in a newer term, so
+                // term fencing can reject this attempt without mutating state.
+                if is_stale_term_response(status, &document) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    continue;
+                }
+
+                panic!("unexpected response while targeting a follower: {status} {document}");
+            }
+        })
+        .await
+        .expect("a stable follower should reject the write");
     }
 
     async fn assert_json_rejection_uses_the_typed_error_contract(
@@ -1488,21 +1506,11 @@ mod tests {
 
     async fn append_retry_conflict_and_second_record(
         cluster: &RunningTabletCluster,
-        leader: usize,
-        term: u64,
         client: &reqwest::Client,
     ) {
-        let mut body = append_body(1);
-        body["expected_term"] = json!(term);
-        let append_url = append_url_for(&cluster.nodes[leader]);
-        let response = client
-            .post(append_url.clone())
-            .json(&body)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::CREATED);
-        let committed: Value = response.json().await.unwrap();
+        let body = append_body(1);
+        let (status, committed) = post_to_current_leader(cluster, client, &body).await;
+        assert!(matches!(status, StatusCode::CREATED | StatusCode::OK));
         assert_eq!(committed["state"], "committed");
         assert_eq!(committed["receipt"]["offset"], "0");
         assert_eq!(committed["receipt"]["durable_voter_acks"], 2);
@@ -1515,42 +1523,92 @@ mod tests {
             committed["proposal_id"],
             committed["receipt"]["proposal_id"]
         );
-        assert_eq!(committed["receipt"]["disposition"], "new");
+        assert_eq!(
+            committed["receipt"]["disposition"],
+            if status == StatusCode::CREATED {
+                "new"
+            } else {
+                "replayed"
+            }
+        );
 
-        let retry = client
-            .post(append_url.clone())
-            .json(&body)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(retry.status(), StatusCode::OK);
-        let replayed: Value = retry.json().await.unwrap();
+        let (retry_status, replayed) = post_to_current_leader(cluster, client, &body).await;
+        assert_eq!(retry_status, StatusCode::OK);
         assert_eq!(replayed["receipt"]["offset"], "0");
         assert_eq!(replayed["receipt"]["disposition"], "replayed");
 
         let mut conflicting = body.clone();
         conflicting["envelope"]["payload"] = json!({"id": 2});
-        let conflict = client
-            .post(append_url)
-            .json(&conflicting)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let (conflict_status, conflict) =
+            post_to_current_leader(cluster, client, &conflicting).await;
+        assert_eq!(conflict_status, StatusCode::CONFLICT);
+        assert_eq!(conflict["error"]["code"], "idempotency_conflict");
 
         let mut second = append_body(2);
         second["idempotency_key"] = json!("request-2");
-        second["expected_term"] = json!(term);
         second["envelope"]["id"] = json!("order-2");
-        let second_response = client
-            .post(append_url_for(&cluster.nodes[leader]))
-            .json(&second)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(second_response.status(), StatusCode::CREATED);
-        let second_committed: Value = second_response.json().await.unwrap();
+        let (second_status, second_committed) =
+            post_to_current_leader(cluster, client, &second).await;
+        assert!(matches!(
+            second_status,
+            StatusCode::CREATED | StatusCode::OK
+        ));
+        assert_eq!(second_committed["state"], "committed");
         assert_eq!(second_committed["receipt"]["offset"], "1");
+        assert_eq!(
+            second_committed["receipt"]["disposition"],
+            if second_status == StatusCode::CREATED {
+                "new"
+            } else {
+                "replayed"
+            }
+        );
+    }
+
+    async fn post_to_current_leader(
+        cluster: &RunningTabletCluster,
+        client: &reqwest::Client,
+        request: &Value,
+    ) -> (StatusCode, Value) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let (leader, term) = cluster.leader().await;
+                let mut attempt = request.clone();
+                attempt["expected_term"] = json!(term);
+                let response = client
+                    .post(append_url_for(&cluster.nodes[leader]))
+                    .json(&attempt)
+                    .send()
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let document: Value = response.json().await.unwrap();
+
+                if is_retryable_leadership_response(status, &document) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    continue;
+                }
+                return (status, document);
+            }
+        })
+        .await
+        .expect("an exact idempotent request should resolve under stable leadership")
+    }
+
+    fn is_retryable_leadership_response(status: StatusCode, document: &Value) -> bool {
+        (status == StatusCode::SERVICE_UNAVAILABLE
+            && document["error"]["code"] == "not_leader"
+            && document["error"]["outcome_certainty"] == "unknown")
+            || is_stale_term_response(status, document)
+            || (status == StatusCode::ACCEPTED
+                && document["outcome_certainty"] == "unknown"
+                && matches!(document["state"].as_str(), Some("unknown" | "pending")))
+    }
+
+    fn is_stale_term_response(status: StatusCode, document: &Value) -> bool {
+        status == StatusCode::CONFLICT
+            && document["error"]["code"] == "stale_term"
+            && document["error"]["outcome_certainty"] == "unknown"
     }
 
     async fn assert_all_records(cluster: &RunningTabletCluster, client: &reqwest::Client) {
