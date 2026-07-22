@@ -1,7 +1,7 @@
 # Engineering Standards
 
 **Status:** Required for all production-bound changes
-**Applies to:** Rust, Go, Python, TypeScript, Protobuf, deployment code, and documentation
+**Applies to:** Rust, Go, Java, Python, TypeScript, Protobuf, deployment code, and documentation
 
 Epoch is correctness-sensitive infrastructure. A change is not complete because
 it compiles or demonstrates a happy path; it is complete when its behavior,

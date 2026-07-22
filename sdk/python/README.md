@@ -20,5 +20,5 @@ All profiles accept `volatile`; Stream creation may explicitly request
 `durability="local_durable"` for single-node fsync and restart recovery. Event
 Bus filters, transforms, and targets use typed models; the transport is
 injectable for fast contract tests. This package is pre-alpha, is not published,
-and does not yet provide native gRPC streaming, automatic retries, or the full
-Go/Java/Python DX-001 contract matrix.
+and does not yet provide native gRPC streaming, automatic retries, or the stable
+Go/Java/Python DX-001 compatibility matrix.

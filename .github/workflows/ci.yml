@@ -35,7 +35,7 @@ jobs:
       - run: cargo build --locked --workspace --all-targets
 
   go-contracts:
-    name: Go and Protobuf contracts
+    name: Go SDK and Protobuf contracts
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

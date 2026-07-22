@@ -89,7 +89,7 @@ test-unit: ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) test; fi
 	@$(PNPM_ENV) pnpm run test
 
-test-integration: ## Exercise real processes through the CLI, Java SDK, and Python SDK.
+test-integration: ## Exercise real processes through the CLI and Go/Java/Python SDKs.
 	@bash tests/integration/smoke.sh
 
 build: ## Build all available workspace components.

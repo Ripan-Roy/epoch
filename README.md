@@ -60,9 +60,9 @@ docs/            Product, architecture, semantics, testing, and operations docs
 Not every target directory exists yet. New components should be introduced only
 with a defined responsibility, dependency boundary, and acceptance test.
 
-Go, Java, and Python are the P0 SDK ecosystems. Typed Java and Python HTTP
-clients are under `sdk/java` and `sdk/python`; generated/native streaming parity
-across all three remains tracked by DX-001.
+Go, Java, and Python are the P0 SDK ecosystems. Typed HTTP clients are under
+`sdk/go`, `sdk/java`, and `sdk/python`; generated native streaming parity across
+all three remains tracked by DX-001.
 
 ## Quick start
 

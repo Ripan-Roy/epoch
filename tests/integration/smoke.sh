@@ -203,6 +203,9 @@ PYTHON
     -Dtest=StandaloneSmokeTest test
 )
 
+EPOCH_GO_INTEGRATION_URL="http://${epoch_node_addr}" \
+  go test -count=1 -run '^TestStandaloneSmoke$' ./sdk/go/epoch
+
 stop_node
 start_node
 

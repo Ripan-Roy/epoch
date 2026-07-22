@@ -404,9 +404,9 @@ TLS/authentication metadata, typed `google.rpc.Status` details, mutation-status
 lookup, streaming credit, a Rust regional administration implementation,
 long-running operations, metrics on the reserved port, protocol gateways, full
 Go/Java/Python generated SDK parity and compatibility negotiation remain
-unimplemented. Typed Java and Python clients cover the provisional HTTP routes,
-including explicit local Stream durability. Both use injectable transport
-boundaries and run against the real standalone node; Python also drives its
-restart proof. The Go control HTTP registry, browser console, current JSON
-payload structs, and Rust error enum are provisional scaffolding and may be
-migrated before any public compatibility promise.
+unimplemented. Typed Go, Java, and Python clients cover the provisional HTTP
+routes, including explicit local Stream durability. All three use injectable
+transport boundaries and run against the real standalone node; Python also
+drives its restart proof. The Go control HTTP registry, browser console,
+current JSON payload structs, and Rust error enum are provisional scaffolding
+and may be migrated before any public compatibility promise.

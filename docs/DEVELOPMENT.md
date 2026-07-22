@@ -92,7 +92,8 @@ compilation and unit tests do not require the daemon.
 Epoch deliberately keeps the native build systems:
 
 - Cargo owns the Rust workspace and committed `Cargo.lock`.
-- One Go module initially owns `control`, `operator`, and `sdk/go`.
+- One Go module initially owns `control`, `operator`, generated bindings, and
+  the typed native HTTP client under `sdk/go`.
 - The checksum-pinned Maven wrapper owns the Java 25 client under `sdk/java`.
 - Python packaging metadata owns the typed client under `sdk/python`.
 - pnpm owns `console`, `sdk/typescript`, and browser tooling.
@@ -113,7 +114,7 @@ make format-check     # verify formatting without writes
 make generate         # regenerate Go Protobuf bindings
 make lint             # Rust, Go, Java, Python, TypeScript, and Protobuf checks
 make test             # local unit tests
-make test-integration # real Rust/Go processes through CLI, Java, and Python SDKs
+make test-integration # real processes through CLI and Go/Java/Python SDKs
 make build            # compile all current components
 make check            # normal pre-commit gate
 make ci               # local deterministic CI gate
