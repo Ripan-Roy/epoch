@@ -10,6 +10,9 @@ tooling while retaining the distinct semantics that make each workload useful.
 Epoch is currently an early engineering scaffold. Interfaces, storage formats,
 and compatibility claims are not stable, and no production guarantee is
 implied yet. The source of truth for product scope is [the PRD](docs/PRD.md).
+The runnable node currently accepts only volatile profile resources; its local
+WAL proof is not yet wired into profile recovery, so stronger durability is
+rejected rather than implied.
 
 ## Design boundaries
 
@@ -56,6 +59,9 @@ docs/            Product, architecture, semantics, testing, and operations docs
 Not every target directory exists yet. New components should be introduced only
 with a defined responsibility, dependency boundary, and acceptance test.
 
+Go, Java, and Python are the P0 SDK ecosystems. The first Python HTTP client is
+under `sdk/python`; generated/native streaming parity remains tracked by DX-001.
+
 ## Quick start
 
 The supported local baseline is macOS on Apple Silicon with:
@@ -64,6 +70,7 @@ The supported local baseline is macOS on Apple Silicon with:
 - Rust 1.97.1, including `rustfmt` and Clippy
 - Protobuf compiler 35.1
 - Buf 1.72.0
+- Python 3.11 or newer, Ruff 0.15.19, actionlint 1.7.12, and ShellCheck 0.11.0
 - Node.js 24 LTS and pnpm 10.28.0
 - Docker Desktop with Compose v2 for container tests
 
@@ -94,6 +101,9 @@ make compose-up
 
 See [Development](docs/DEVELOPMENT.md) for toolchain setup and
 [Testing](docs/TESTING.md) for the test layers and required gates.
+All changes follow the repository's [engineering standards](docs/ENGINEERING_STANDARDS.md),
+including test-driven development, SOLID dependency boundaries, and clean-code
+definition-of-done checks.
 
 ## Planning and traceability
 

@@ -1,9 +1,4 @@
-import type {
-  CreateResourceInput,
-  EngineHealth,
-  ResourceCreated,
-  ResourceSummary,
-} from "./types";
+import type { CreateResourceInput, EngineHealth, ResourceCreated, ResourceSummary } from "./types";
 
 const configuredBaseUrl = import.meta.env.VITE_EPOCH_API_BASE_URL?.trim();
 

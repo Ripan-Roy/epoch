@@ -1,21 +1,9 @@
 export type DeploymentMode = "embedded" | "standalone" | "cluster" | "managed";
 
 export type DurabilityProfile =
-  | "volatile"
-  | "replicated_memory"
-  | "local_durable"
-  | "quorum_durable"
-  | "geo_async"
-  | "geo_sync";
+  "volatile" | "replicated_memory" | "local_durable" | "quorum_durable" | "geo_async" | "geo_sync";
 
-export type ResourceKind =
-  | "cache"
-  | "stream"
-  | "queue"
-  | "event_bus"
-  | "subscription"
-  | "schema"
-  | "pipe";
+export type ResourceKind = "cache" | "stream" | "queue" | "event_bus" | "subscription" | "schema" | "pipe";
 
 export type CreateProfile = "cache" | "stream" | "queue" | "event_bus";
 
@@ -43,6 +31,7 @@ export interface ResourceCreated {
 export interface CacheConfig {
   max_entries: number;
   default_ttl_ms: number | null;
+  durability: "volatile";
   eviction:
     | "no_eviction"
     | "all_keys_lru"
@@ -56,12 +45,12 @@ export interface CacheConfig {
 
 export interface StreamConfig {
   partitions: number;
-  durability: "local_durable";
+  durability: "volatile";
   max_records_per_partition: number | null;
 }
 
 export interface QueueConfig {
-  durability: "local_durable";
+  durability: "volatile";
   visibility_timeout_ms: number;
   max_messages: number;
   retry: {
@@ -76,7 +65,7 @@ export interface QueueConfig {
 }
 
 export interface BusConfig {
-  durability: "local_durable";
+  durability: "volatile";
   archive: boolean;
 }
 

@@ -176,7 +176,7 @@ Dependency gates are:
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
-| DX-001 | P0 | Official Go and Java SDKs | M1 one SDK → M2 | Slice | G0, G1, G4, G10 | Pending: SDK contract/version matrix |
+| DX-001 | P0 | Official Go, Java, and Python SDKs | M1 one SDK → M2 | Slice | G0, G1, G4, G10 | Python HTTP unit/standalone-smoke slice present; pending: generated native contract/version matrix for all three |
 | DX-002 | P0 | Generated guarantee-aware API docs | M1 → M2 | Slice | G0, G1, G10 | Pending: doc lint and executable examples |
 | DX-003 | P0 | Deterministic single-binary emulator | M1 → M2 | Slice | G1, G2, G4, G10 | Pending: seeded replay/fault suite |
 | DX-004 | P0 | Test containers and ephemeral namespaces | M1 → M2 | Slice | G1, G5, G10 | Pending: parallel lifecycle/isolation CI |
@@ -184,7 +184,7 @@ Dependency gates are:
 | DX-006 | P0 | Explain live guarantees and cost drivers | M1 basic → M2 | Slice | G0, G3, G5 | Pending: live-state reconciliation suite |
 | DX-007 | P1 | Compatibility usage scanner | M3 | Planned | G0, G6 | Pending: unsupported-feature fixture corpus |
 | DX-008 | P1 | End-to-end event trace | M4 | Planned | G1, G4, G5, G7 | Pending: trace/history reconciliation |
-| DX-009 | P1 | Python, TS, Rust, .NET SDKs | M3 | Planned | G0, G1, G6, G10 | Pending: multi-language client matrix |
+| DX-009 | P1 | TypeScript, Rust, .NET SDKs | M3 | Planned | G0, G1, G6, G10 | Pending: multi-language client matrix |
 
 ## Lifecycle and Governance
 

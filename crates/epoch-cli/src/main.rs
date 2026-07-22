@@ -292,7 +292,7 @@ async fn run_stream(
                 &format!("{base}/v1/streams/{name}"),
                 Some(json!({
                     "partitions": partitions,
-                    "durability": "local_durable",
+                    "durability": "volatile",
                     "max_records_per_partition": null
                 })),
             )
@@ -342,7 +342,7 @@ async fn run_queue(
                 Method::POST,
                 &format!("{base}/v1/queues/{name}"),
                 Some(json!({
-                    "durability": "local_durable",
+                    "durability": "volatile",
                     "visibility_timeout_ms": visibility_timeout_ms,
                     "max_messages": 100_000,
                     "retry": {
@@ -428,7 +428,7 @@ async fn run_bus(
                 client,
                 Method::POST,
                 &format!("{base}/v1/buses/{name}"),
-                Some(json!({"durability": "local_durable", "archive": true})),
+                Some(json!({"durability": "volatile", "archive": true})),
             )
             .await
         }

@@ -341,6 +341,12 @@ distributed contract described above:
 - a checksummed, versioned local WAL with partial-tail recovery;
 - basic in-process routing between Bus, Queue, and Stream resources.
 
+All currently runnable profile resources and write receipts are **volatile**.
+The WAL proof is not yet connected to profile state or recovery, so the node
+rejects replicated-memory, local-durable, quorum, and geo durability requests
+instead of returning a false acknowledgement. Wiring profile mutations,
+snapshots, and deterministic recovery to that storage primitive is an M1 gate.
+
 It does **not** yet implement tablet consensus, replicated quorum durability,
 regional catalog/placement, distributed fencing, persisted profile snapshots,
 consumer-group coordination, bounded transactions, object tier, geo

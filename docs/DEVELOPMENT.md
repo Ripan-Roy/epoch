@@ -4,6 +4,9 @@ This guide describes the reproducible local environment and the commands used
 to build Epoch. The product is in its initial scaffold, so some commands skip a
 language area until that area contains source files.
 
+Behavioral work follows the mandatory TDD, SOLID, and clean-code policy in
+[ENGINEERING_STANDARDS.md](ENGINEERING_STANDARDS.md).
+
 ## Supported local baseline
 
 The first development environment is macOS 26 on Apple Silicon. Linux is the
@@ -18,6 +21,10 @@ primary CI and container target. The current repository pins or validates:
 | Clippy | 0.1.97 | Required by `make lint` |
 | protoc | 35.1 | Required for contract tooling and language generators |
 | Buf | 1.72.0 | Lints and generates Protobuf contracts |
+| Python | 3.11 or newer | Runs the official Python SDK and integration client |
+| Ruff | 0.15.19 | Formats and lints `sdk/python` |
+| actionlint | 1.7.12 | Validates GitHub Actions workflows and embedded shell |
+| ShellCheck | 0.11.0 | Lints repository integration scripts |
 | Node.js | 24 LTS | `.node-version` pins 24.18.0 |
 | pnpm | 10.28.0 | Pinned by the root `package.json` |
 | Docker | 29 or newer | Docker Desktop and Compose v2 |
@@ -44,7 +51,8 @@ brew upgrade node@24
 Homebrew is the lowest-risk path for the current workstation:
 
 ```shell
-brew install go rust protobuf buf pkgconf node@24 pnpm
+brew install go rust protobuf buf pkgconf node@24 pnpm actionlint shellcheck
+python3 -m pip install ruff==0.15.19
 ```
 
 Xcode and its command-line tools supply Clang and the linker:
@@ -72,9 +80,10 @@ From the repository root:
 make bootstrap-check
 ```
 
-The check is deliberately strict for Go, Rust, protoc, and Buf. It also rejects
-a non-LTS Node major. Docker Desktop must be running for Compose and integration
-tests, although compilation and unit tests do not require the daemon.
+The check is deliberately strict for Go, Rust, Ruff, protoc, and Buf. It also
+requires Python 3.11 or newer and rejects a non-LTS Node major. Docker Desktop
+must be running for Compose and integration tests, although compilation and
+unit tests do not require the daemon.
 
 ## Repository-level package managers
 
@@ -82,6 +91,7 @@ Epoch deliberately keeps the native build systems:
 
 - Cargo owns the Rust workspace and committed `Cargo.lock`.
 - One Go module initially owns `control`, `operator`, and `sdk/go`.
+- Python packaging metadata owns the typed client under `sdk/python`.
 - pnpm owns `console`, `sdk/typescript`, and browser tooling.
 - Buf owns Protobuf linting, breaking-change policy, and generation.
 - Make provides memorable root commands without hiding the native commands.
@@ -98,8 +108,9 @@ make help             # list commands
 make format           # update source formatting
 make format-check     # verify formatting without writes
 make generate         # regenerate Go Protobuf bindings
-make lint             # Rust, Go, TypeScript, and Protobuf static checks
+make lint             # Rust, Go, Python, TypeScript, and Protobuf checks
 make test             # local unit tests
+make test-integration # real Rust/Go processes through CLI and Python SDK
 make build            # compile all current components
 make check            # normal pre-commit gate
 make ci               # local deterministic CI gate

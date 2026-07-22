@@ -110,7 +110,7 @@ Primary scope:
 - Complete P0 native cache, stream, and queue behavior: CACHE-001–CACHE-007; STREAM-001–STREAM-006; QUEUE-001–QUEUE-006 and QUEUE-011.
 - Complete basic route topology BUS-001 while keeping the broader Event Bus target matrix for M4.
 - Complete multi-zone placement/failover, safe topology operations, admission, and observability: MGD-002, MGD-004, MGD-012, MGD-014; CTRL-001–CTRL-005.
-- Deliver Go and Java SDKs, guarantee-aware docs, emulator, integration containers, and explain: DX-001–DX-004 and DX-006.
+- Deliver Go, Java, and Python SDKs, guarantee-aware docs, emulator, integration containers, and explain: DX-001–DX-004 and DX-006.
 - Establish audit/tag governance and standalone/cluster/embedded lifecycle foundations: MGD-011 basics, GOV-005, GOV-006 basics, PKG-002–PKG-009.
 
 Exit gate:

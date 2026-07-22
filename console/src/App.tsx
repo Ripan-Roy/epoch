@@ -8,7 +8,8 @@ import type {
   ResourceKind,
   ResourceSummary,
 } from "./api/types";
-import { ProfileCreateCard, profileDefinitions } from "./components/ProfileCreateCard";
+import { ProfileCreateCard } from "./components/ProfileCreateCard";
+import { profileDefinitions } from "./profileDefinitions";
 
 const refreshIntervalMs = 15_000;
 
@@ -64,7 +65,9 @@ function App() {
       throw new Error("The node must report healthy before the console can create a resource.");
     }
     const created = await createResource(input);
-    setNotice(`${profileLabel(input.profile)} “${created.name}” created at resource epoch ${created.resource_epoch}.`);
+    setNotice(
+      `${profileLabel(input.profile)} “${created.name}” created at resource epoch ${created.resource_epoch}.`,
+    );
     await loadOverview(true);
   }
 
@@ -97,8 +100,9 @@ function App() {
           <aside className="alpha-banner" aria-label="Alpha limitations">
             <strong>Evidence before promises.</strong>
             <span>
-              This console reflects one local Rust node. “Local durable” means single-node persistence—not
-              replication, quorum, multi-zone availability, or protection from total machine loss.
+              This console reflects one in-memory local Rust node. Current write receipts are volatile: a
+              process restart can lose resources and data. Local durability, replication, and quorum are not
+              wired yet.
             </span>
           </aside>
 
@@ -107,8 +111,8 @@ function App() {
               <p className="eyebrow">NODE OVERVIEW</p>
               <h1 id="overview-title">One runtime, four explicit behaviors.</h1>
               <p className="hero__lede">
-                Inspect what this node can actually guarantee, then create the workload profile whose semantics
-                fit the job.
+                Inspect what this node can actually guarantee, then create the workload profile whose
+                semantics fit the job.
               </p>
             </div>
             <div className="hero__actions">
@@ -146,13 +150,20 @@ function App() {
 
           <section className="status-grid" aria-label="Node status" aria-busy={loading}>
             <StatusCard label="Connection" value={connectionLabel} tone={connectionTone}>
-              {lastChecked ? `Checked ${formatCheckTime(lastChecked)}` : "Waiting for the first health response"}
+              {lastChecked
+                ? `Checked ${formatCheckTime(lastChecked)}`
+                : "Waiting for the first health response"}
             </StatusCard>
             <StatusCard label="Deployment" value={health ? formatEnum(health.deployment_mode) : "Unknown"}>
               {health ? deploymentDescription(health) : "No deployment mode has been observed"}
             </StatusCard>
-            <StatusCard label="Guarantee ceiling" value={health ? formatEnum(health.guarantee_ceiling) : "Unknown"}>
-              {health ? guaranteeDescription(health.guarantee_ceiling) : "The console will not infer a guarantee"}
+            <StatusCard
+              label="Reported ceiling"
+              value={health ? formatEnum(health.guarantee_ceiling) : "Unknown"}
+            >
+              {health
+                ? guaranteeDescription(health.guarantee_ceiling)
+                : "The console will not infer a guarantee"}
             </StatusCard>
             <StatusCard label="Live resources" value={health ? String(health.resource_count) : "—"}>
               {health && health.profiles.length > 0
@@ -187,7 +198,10 @@ function App() {
                 <p className="eyebrow">INVENTORY</p>
                 <h2 id="resources-title">Resources reported by this process</h2>
               </div>
-              <p>Configured durability is shown separately from the node’s maximum credible guarantee.</p>
+              <p>
+                Configured durability and the reported node ceiling are separate; neither is independent
+                evidence.
+              </p>
             </div>
 
             {connected && resources.length === 0 ? (
@@ -283,10 +297,10 @@ function assessDurability(
     return { label: "Exceeds node ceiling", tone: "bad" };
   }
   if (resource.durability === "volatile") {
-    return { label: "Loss accepted", tone: "warn" };
+    return { label: "Configured volatile", tone: "warn" };
   }
   if (health.deployment_mode === "standalone" || health.deployment_mode === "embedded") {
-    return { label: "Single-node scope", tone: "warn" };
+    return { label: "Within ceiling · unverified", tone: "warn" };
   }
   return { label: "Within reported ceiling", tone: "good" };
 }
@@ -313,7 +327,7 @@ function guaranteeDescription(profile: DurabilityProfile): string {
     case "replicated_memory":
       return "Memory replicas only; simultaneous power loss remains exposed";
     case "local_durable":
-      return "Local disk only; total machine loss is not covered";
+      return "Node-reported class; verify commit and recovery evidence";
     case "quorum_durable":
       return "Maximum reported class; achieved placement still matters";
     case "geo_async":

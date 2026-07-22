@@ -94,6 +94,7 @@ impl EpochEngine {
 
     pub fn create_cache(&self, name: &str, config: CacheConfig) -> EpochResult<CacheHandle> {
         validate_resource_name(name)?;
+        self.validate_durability(config.durability)?;
         let cache = Arc::new(Mutex::new(Cache::new(config)?));
         insert_unique(&self.caches, name, cache.clone())?;
         Ok(cache)
@@ -101,6 +102,7 @@ impl EpochEngine {
 
     pub fn create_stream(&self, name: &str, config: StreamConfig) -> EpochResult<StreamHandle> {
         validate_resource_name(name)?;
+        self.validate_durability(config.durability)?;
         let stream = Arc::new(Mutex::new(Stream::new(config)?));
         insert_unique(&self.streams, name, stream.clone())?;
         Ok(stream)
@@ -108,6 +110,7 @@ impl EpochEngine {
 
     pub fn create_queue(&self, name: &str, config: QueueConfig) -> EpochResult<QueueHandle> {
         validate_resource_name(name)?;
+        self.validate_durability(config.durability)?;
         let queue = Arc::new(Mutex::new(Queue::new(config)?));
         insert_unique(&self.queues, name, queue.clone())?;
         Ok(queue)
@@ -115,6 +118,7 @@ impl EpochEngine {
 
     pub fn create_bus(&self, name: &str, config: BusConfig) -> EpochResult<BusHandle> {
         validate_resource_name(name)?;
+        self.validate_durability(config.durability)?;
         let bus = Arc::new(Mutex::new(EventBus::new(config)));
         insert_unique(&self.buses, name, bus.clone())?;
         Ok(bus)
@@ -284,14 +288,7 @@ impl EpochEngine {
             deployment_mode: self.deployment_mode,
             profiles,
             resource_count: resources.len(),
-            guarantee_ceiling: match self.deployment_mode {
-                DeploymentMode::Embedded | DeploymentMode::Standalone => {
-                    DurabilityProfile::LocalDurable
-                }
-                DeploymentMode::Cluster | DeploymentMode::Managed => {
-                    DurabilityProfile::QuorumDurable
-                }
-            },
+            guarantee_ceiling: DurabilityProfile::Volatile,
             hosted_control_plane_required: self.deployment_mode == DeploymentMode::Managed,
         }
     }
@@ -303,6 +300,17 @@ impl EpochEngine {
         }
         for queue in self.queues.read().values() {
             queue.lock().maintain(now_ms);
+        }
+    }
+
+    fn validate_durability(&self, durability: DurabilityProfile) -> EpochResult<()> {
+        if durability == DurabilityProfile::Volatile {
+            Ok(())
+        } else {
+            Err(EpochError::InvalidArgument(format!(
+                "durability {durability:?} is unavailable in the current {:?} data-plane slice; only Volatile is implemented",
+                self.deployment_mode
+            )))
         }
     }
 }
@@ -396,7 +404,7 @@ mod tests {
         let engine = EpochEngine::default();
         let health = engine.health();
         assert_eq!(health.deployment_mode, DeploymentMode::Standalone);
-        assert_eq!(health.guarantee_ceiling, DurabilityProfile::LocalDurable);
+        assert_eq!(health.guarantee_ceiling, DurabilityProfile::Volatile);
         assert!(!health.hosted_control_plane_required);
     }
 }

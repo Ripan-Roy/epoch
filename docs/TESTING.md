@@ -4,6 +4,10 @@ Epoch's guarantees are product behavior, so tests must prove semantics under
 failure, not merely exercise successful API calls. This document defines the
 test layers and the evidence required as the implementation grows.
 
+Test construction and definition-of-done rules are mandatory and documented in
+[ENGINEERING_STANDARDS.md](ENGINEERING_STANDARDS.md). Bug fixes begin with a
+reproducing failing test; new behavior follows red → green → refactor.
+
 ## Local gate
 
 Run before sending a change for review:
@@ -153,9 +157,9 @@ policy-cache expiry, key rotation, audit integrity, payload redaction, webhook
 SSRF, connector egress allowlists, decompression/schema bombs, credential
 replay, resource exhaustion, and object-tier tampering.
 
-Dependency and release gates include Cargo advisory/license policy, Go
-vulnerability scanning, JavaScript dependency scanning, secret scanning, SBOM
-generation, artifact signing, and provenance verification.
+Dependency and release gates include Cargo advisory/license policy, Go and
+Python vulnerability scanning, JavaScript dependency scanning, secret scanning,
+SBOM generation, artifact signing, and provenance verification.
 
 ## Test organization
 

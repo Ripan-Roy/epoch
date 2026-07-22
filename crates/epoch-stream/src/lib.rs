@@ -16,7 +16,7 @@ impl Default for StreamConfig {
     fn default() -> Self {
         Self {
             partitions: 1,
-            durability: DurabilityProfile::LocalDurable,
+            durability: DurabilityProfile::Volatile,
             max_records_per_partition: None,
         }
     }

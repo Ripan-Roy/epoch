@@ -71,7 +71,7 @@ layouts or unversioned internal structs.
 ### Console, SDKs, and contracts
 
 Use a Vite React console backed by the Go BFF; do not add a second Node control
-plane. Go and Java are the first native SDKs, followed by Python, TypeScript,
+plane. Go, Java, and Python are the first native SDKs, followed by TypeScript,
 .NET, and Rust. Generated transport bindings are wrapped by hand-written,
 guarantee-aware clients and are never edited manually.
 
@@ -91,6 +91,10 @@ generated output once contracts exist.
 | pnpm | `10.28.0` through the root `packageManager` field |
 | protoc | `35.1`, validated by `make bootstrap-check` |
 | Buf | `1.72.0`, validated by `make bootstrap-check` |
+| Python | `3.11` minimum for the P0 Python SDK |
+| Ruff | `0.15.19`, validated by `make bootstrap-check` |
+| actionlint | `1.7.12`, validates GitHub Actions workflow syntax and shell |
+| ShellCheck | `0.11.0`, validates integration scripts |
 | Java | `25` LTS when Java SDK work begins; not required by the server scaffold |
 
 Developer-specific absolute paths do not enter build files. Bootstrap and
@@ -105,7 +109,7 @@ Accept this ADR after a clean machine and CI can reproducibly:
 2. build, format, lint, and test the Rust workspace and root Go module;
 3. generate the first Protobuf contract without a diff;
 4. pass a cross-language gRPC health call;
-5. build the console and one generated API client;
+5. build the console and package/test at least one official API client;
 6. run without developer-specific paths or mutable global generated state.
 
 ## Consequences

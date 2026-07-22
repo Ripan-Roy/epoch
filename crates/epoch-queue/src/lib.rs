@@ -52,7 +52,7 @@ pub struct QueueConfig {
 impl Default for QueueConfig {
     fn default() -> Self {
         Self {
-            durability: DurabilityProfile::LocalDurable,
+            durability: DurabilityProfile::Volatile,
             visibility_timeout_ms: 30_000,
             max_messages: 100_000,
             retry: RetryPolicy::default(),

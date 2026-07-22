@@ -384,6 +384,11 @@ methods, standalone receipt metadata, JSON/HTTP profile routes, a CLI,
 `/healthz` and `/readyz`, and a small local WAL. The two health routes currently
 report the same in-process engine state.
 
+The runnable node currently reports a `volatile` guarantee ceiling and rejects
+every stronger durability request. The WAL is a separately tested storage
+primitive, not yet the source of truth for profile recovery; no HTTP receipt
+claims local durability until that integration passes crash/restart tests.
+
 Initial `epoch.v1` Protobuf source defines common resource/envelope types and a
 small `RegionalAdminService`; Buf generation is configured for Go. It is an
 early boundary scaffold, not the complete package split or native data API in
@@ -391,8 +396,9 @@ this document. No gRPC server is running, and port 7600 is only reserved.
 
 TLS/authentication metadata, typed `google.rpc.Status` details, mutation-status
 lookup, streaming credit, a Rust regional administration implementation,
-long-running operations, metrics on the reserved port, protocol gateways,
-supported SDKs, and compatibility negotiation remain unimplemented. The Go
-control HTTP registry, browser console, current JSON payload structs, and Rust
-error enum are provisional scaffolding and may be migrated before any public
-compatibility promise.
+long-running operations, metrics on the reserved port, protocol gateways, full
+Go/Java/Python generated SDK parity, and compatibility negotiation remain
+unimplemented. A typed Python client covers the provisional HTTP routes and is
+exercised in the standalone smoke test. The Go control HTTP registry, browser
+console, current JSON payload structs, and Rust error enum are provisional
+scaffolding and may be migrated before any public compatibility promise.
