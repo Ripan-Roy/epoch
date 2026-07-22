@@ -196,6 +196,13 @@ assert replayed["replayed"] is True
 assert replayed["resource"]["generation"] == 1
 PYTHON
 
+(
+  cd "$epoch_repo_root/sdk/java"
+  EPOCH_JAVA_INTEGRATION_URL="http://${epoch_node_addr}" \
+    ./mvnw --batch-mode --no-transfer-progress \
+    -Dtest=StandaloneSmokeTest test
+)
+
 stop_node
 start_node
 

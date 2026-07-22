@@ -60,8 +60,9 @@ docs/            Product, architecture, semantics, testing, and operations docs
 Not every target directory exists yet. New components should be introduced only
 with a defined responsibility, dependency boundary, and acceptance test.
 
-Go, Java, and Python are the P0 SDK ecosystems. The first Python HTTP client is
-under `sdk/python`; generated/native streaming parity remains tracked by DX-001.
+Go, Java, and Python are the P0 SDK ecosystems. Typed Java and Python HTTP
+clients are under `sdk/java` and `sdk/python`; generated/native streaming parity
+across all three remains tracked by DX-001.
 
 ## Quick start
 
@@ -72,6 +73,7 @@ The supported local baseline is macOS on Apple Silicon with:
 - Protobuf compiler 35.1
 - Buf 1.72.0
 - Python 3.11 or newer, Ruff 0.15.19, actionlint 1.7.12, and ShellCheck 0.11.0
+- Java 25 LTS or newer; the checked-in wrapper pins Maven 3.9.16
 - Node.js 24 LTS and pnpm 10.28.0
 - Docker Desktop with Compose v2 for container tests
 

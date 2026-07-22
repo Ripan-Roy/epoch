@@ -16,6 +16,10 @@ updates:
     directory: /sdk/python
     schedule:
       interval: weekly
+  - package-ecosystem: maven
+    directory: /sdk/java
+    schedule:
+      interval: weekly
   - package-ecosystem: github-actions
     directory: /
     schedule:

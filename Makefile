@@ -6,6 +6,7 @@ SHELL := /bin/sh
 # nonexistent prefix is harmless and the normal PATH remains effective.
 NODE_LTS := $(if $(wildcard /opt/homebrew/opt/node@24/bin/node),/opt/homebrew/opt/node@24/bin/node,node)
 PNPM_ENV := PATH="/opt/homebrew/opt/node@24/bin:$$PATH"
+JAVA_MVN := ./sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress
 
 .PHONY: help bootstrap-check generate generate-check format format-check lint test test-unit test-integration build check ci compose-config compose-up compose-down clean
 
@@ -24,6 +25,11 @@ bootstrap-check: ## Print and validate the required local toolchain.
 	@cargo clippy --version
 	@python3 --version
 	@python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else "expected Python 3.11 or newer")'
+	@command -v java >/dev/null || { echo "missing Java 25 or newer" >&2; exit 1; }
+	@java -version
+	@javac -version
+	@java -version 2>&1 | awk -F'[ ."]' 'NR == 1 {major = ($$2 == "1" ? $$3 : $$2); exit !(major >= 25)}' || { echo "expected Java 25 or newer" >&2; exit 1; }
+	@$(JAVA_MVN) --version | grep -q '^Apache Maven 3\.9\.16 ' || { echo "expected Maven wrapper 3.9.16" >&2; exit 1; }
 	@ruff --version
 	@ruff --version | grep -q '^ruff 0\.15\.19$$' || { echo "expected Ruff 0.15.19" >&2; exit 1; }
 	@actionlint --version
@@ -49,22 +55,25 @@ generate-check: ## Fail when generated bindings are stale.
 	$(MAKE) generate; \
 	diff -ru "$$epoch_generate_snapshot/generated" sdk/go/gen
 
-format: ## Format Rust, Go, Python, and JavaScript/TypeScript sources.
+format: ## Format Rust, Go, Java, Python, and JavaScript/TypeScript sources.
 	@if [ -f Cargo.toml ]; then cargo fmt --all; fi
 	@files="$$(find control operator sdk/go -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then gofmt -w $$files; fi
 	@if [ -d sdk/python ]; then ruff format sdk/python; fi
+	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) spotless:apply; fi
 	@$(PNPM_ENV) pnpm run format
 
 format-check: ## Check formatting without changing files.
 	@if [ -f Cargo.toml ]; then cargo fmt --all --check; fi
 	@files="$$(find control operator sdk/go -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then unformatted="$$(gofmt -l $$files)"; test -z "$$unformatted" || { printf '%s\n' "$$unformatted"; exit 1; }; fi
 	@if [ -d sdk/python ]; then ruff format --check sdk/python; fi
+	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) spotless:check; fi
 	@$(PNPM_ENV) pnpm run format:check
 
 lint: ## Run static checks for every language and contract.
 	@if [ -f Cargo.toml ]; then cargo clippy --workspace --all-targets --all-features -- -D warnings; fi
 	@if find control operator sdk/go -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then go vet ./...; fi
 	@if [ -d sdk/python ]; then ruff check sdk/python; fi
+	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) -DskipTests verify; fi
 	@if [ -d .github/workflows ]; then actionlint; fi
 	@if [ -f tests/integration/smoke.sh ]; then shellcheck tests/integration/smoke.sh; fi
 	@$(PNPM_ENV) pnpm run lint
@@ -73,19 +82,21 @@ lint: ## Run static checks for every language and contract.
 
 test: test-unit ## Run the default local test suite.
 
-test-unit: ## Run unit tests for Rust, Go, Python, and workspace packages.
+test-unit: ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
 	@if [ -f Cargo.toml ]; then cargo test --workspace --all-targets; fi
 	@if find control operator sdk/go -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then go test -race ./...; fi
 	@if [ -d sdk/python ]; then PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests -v; fi
+	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) test; fi
 	@$(PNPM_ENV) pnpm run test
 
-test-integration: ## Exercise both processes and all profile APIs through the Python SDK.
+test-integration: ## Exercise real processes through the CLI, Java SDK, and Python SDK.
 	@bash tests/integration/smoke.sh
 
 build: ## Build all available workspace components.
 	@if [ -f Cargo.toml ]; then cargo build --workspace --all-targets; fi
 	@if find control operator sdk/go -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then go build ./...; fi
 	@if [ -d sdk/python ]; then python3 -m compileall -q sdk/python/src sdk/python/tests; fi
+	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) -DskipTests package; fi
 	@$(PNPM_ENV) pnpm run build
 
 check: generate-check format-check lint test-unit ## Run the local pre-commit gate.
@@ -103,4 +114,5 @@ compose-down: ## Stop the standalone development node without deleting its volum
 
 clean: ## Remove language build output (runtime data is retained).
 	@if [ -f Cargo.toml ]; then cargo clean; fi
+	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) clean; fi
 	@$(PNPM_ENV) pnpm -r --if-present clean

@@ -403,9 +403,10 @@ this document. No gRPC server is running, and port 7600 is only reserved.
 TLS/authentication metadata, typed `google.rpc.Status` details, mutation-status
 lookup, streaming credit, a Rust regional administration implementation,
 long-running operations, metrics on the reserved port, protocol gateways, full
-Go/Java/Python generated SDK parity, and compatibility negotiation remain
-unimplemented. A typed Python client covers the provisional HTTP routes,
-including explicit local Stream durability, and is exercised across restart in
-the standalone smoke test. The Go control HTTP registry, browser
-console, current JSON payload structs, and Rust error enum are provisional
-scaffolding and may be migrated before any public compatibility promise.
+Go/Java/Python generated SDK parity and compatibility negotiation remain
+unimplemented. Typed Java and Python clients cover the provisional HTTP routes,
+including explicit local Stream durability. Both use injectable transport
+boundaries and run against the real standalone node; Python also drives its
+restart proof. The Go control HTTP registry, browser console, current JSON
+payload structs, and Rust error enum are provisional scaffolding and may be
+migrated before any public compatibility promise.

@@ -84,6 +84,20 @@ jobs:
       - name: Build an installable SDK wheel
         run: python -m pip wheel --no-deps --wheel-dir /tmp/epoch-python-wheel sdk/python
 
+  java:
+    name: Java format, lint, test, package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: actions/setup-java@v5.2.0
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+          cache-dependency-path: sdk/java/pom.xml
+      - run: sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress verify
+
   web:
     name: Console format, lint, typecheck, build
     runs-on: ubuntu-latest
@@ -108,7 +122,7 @@ jobs:
     name: Cross-language standalone smoke
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    needs: [rust, go-contracts, python]
+    needs: [rust, go-contracts, python, java]
     steps:
       - uses: actions/checkout@v6.0.2
       - name: Install pinned Rust toolchain
@@ -120,6 +134,12 @@ jobs:
       - uses: actions/setup-python@v7.0.0
         with:
           python-version: '3.11'
+      - uses: actions/setup-java@v5.2.0
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+          cache-dependency-path: sdk/java/pom.xml
       - run: bash tests/integration/smoke.sh
 
   container:

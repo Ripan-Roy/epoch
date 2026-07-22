@@ -87,11 +87,12 @@ Tests must always capture node configuration, logs, seed, process exit status,
 and relevant data manifests on failure. Payloads and credentials are redacted.
 
 The current fast integration smoke starts real Rust and Go processes, exercises
-all four profile APIs through the Python SDK, restarts the Rust node, proves the
-local-durable Stream survived, and proves volatile resources did not. The node
-HTTP suite separately injects an incomplete WAL tail and verifies record and
-consumer-offset recovery. Container CI mounts the data directory into a named
-volume and repeats the recovery check after replacing the running container.
+all four profile APIs through the Python SDK, validates the Java SDK against the
+same node, restarts the Rust process, proves the local-durable Stream survived,
+and proves volatile resources did not. The node HTTP suite separately injects
+an incomplete WAL tail and verifies record and consumer-offset recovery.
+Container CI mounts the data directory into a named volume and repeats the
+recovery check after replacing the running container.
 
 ### 4. History and consistency checking
 

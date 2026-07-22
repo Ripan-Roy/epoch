@@ -95,7 +95,7 @@ generated output once contracts exist.
 | Ruff | `0.15.19`, validated by `make bootstrap-check` |
 | actionlint | `1.7.12`, validates GitHub Actions workflow syntax and shell |
 | ShellCheck | `0.11.0`, validates integration scripts |
-| Java | `25` LTS when Java SDK work begins; not required by the server scaffold |
+| Java | `25` LTS for the Java SDK; compiled and tested through its Maven wrapper |
 
 Developer-specific absolute paths do not enter build files. Bootstrap and
 verification commands live in `docs/DEVELOPMENT.md`. Nightly Rust is isolated

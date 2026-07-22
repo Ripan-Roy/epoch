@@ -22,6 +22,8 @@ primary CI and container target. The current repository pins or validates:
 | protoc | 35.1 | Required for contract tooling and language generators |
 | Buf | 1.72.0 | Lints and generates Protobuf contracts |
 | Python | 3.11 or newer | Runs the official Python SDK and integration client |
+| Java | 25 LTS or newer | Compiles Java 25 bytecode for the official Java SDK |
+| Maven | 3.9.16 | Downloaded and checksum-pinned by `sdk/java/mvnw` |
 | Ruff | 0.15.19 | Formats and lints `sdk/python` |
 | actionlint | 1.7.12 | Validates GitHub Actions workflows and embedded shell |
 | ShellCheck | 0.11.0 | Lints repository integration scripts |
@@ -51,7 +53,7 @@ brew upgrade node@24
 Homebrew is the lowest-risk path for the current workstation:
 
 ```shell
-brew install go rust protobuf buf pkgconf node@24 pnpm actionlint shellcheck
+brew install go rust protobuf buf pkgconf openjdk@25 node@24 pnpm actionlint shellcheck
 python3 -m pip install ruff==0.15.19
 ```
 
@@ -80,10 +82,10 @@ From the repository root:
 make bootstrap-check
 ```
 
-The check is deliberately strict for Go, Rust, Ruff, protoc, and Buf. It also
-requires Python 3.11 or newer and rejects a non-LTS Node major. Docker Desktop
-must be running for Compose and integration tests, although compilation and
-unit tests do not require the daemon.
+The check is deliberately strict for Go, Rust, Maven, Ruff, protoc, and Buf. It
+also requires Java 25 and Python 3.11 or newer and rejects a non-LTS Node major.
+Docker Desktop must be running for Compose and integration tests, although
+compilation and unit tests do not require the daemon.
 
 ## Repository-level package managers
 
@@ -91,6 +93,7 @@ Epoch deliberately keeps the native build systems:
 
 - Cargo owns the Rust workspace and committed `Cargo.lock`.
 - One Go module initially owns `control`, `operator`, and `sdk/go`.
+- The checksum-pinned Maven wrapper owns the Java 25 client under `sdk/java`.
 - Python packaging metadata owns the typed client under `sdk/python`.
 - pnpm owns `console`, `sdk/typescript`, and browser tooling.
 - Buf owns Protobuf linting, breaking-change policy, and generation.
@@ -108,9 +111,9 @@ make help             # list commands
 make format           # update source formatting
 make format-check     # verify formatting without writes
 make generate         # regenerate Go Protobuf bindings
-make lint             # Rust, Go, Python, TypeScript, and Protobuf checks
+make lint             # Rust, Go, Java, Python, TypeScript, and Protobuf checks
 make test             # local unit tests
-make test-integration # real Rust/Go processes through CLI and Python SDK
+make test-integration # real Rust/Go processes through CLI, Java, and Python SDKs
 make build            # compile all current components
 make check            # normal pre-commit gate
 make ci               # local deterministic CI gate
