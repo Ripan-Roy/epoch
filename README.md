@@ -167,8 +167,10 @@ The workflow executes every displayed Go, Java, and Python seed → forced crash
 → restart → verification example before deployment. Pull requests build and
 verify the same artifact but never publish it; deployment is permitted only
 from `main` (including a manual dispatch that targets `main`). The public site
-is live with enforced HTTPS. The SDKs remain repository-local pre-alpha packages
-and are not presented as registry releases.
+is live with enforced HTTPS. The next development version is
+`0.1.0-alpha.2` (`0.1.0a2` for Python). CI builds and clean-install-tests its
+package shapes without registry credentials or uploads; every SDK remains
+repository-local until the documented licensing and namespace blockers clear.
 
 Run the local verification suite:
 
@@ -194,6 +196,8 @@ definition-of-done checks.
 - [Product requirements](docs/PRD.md)
 - [Requirements traceability](docs/REQUIREMENTS_TRACEABILITY.md)
 - [Delivery plan](docs/DELIVERY_PLAN.md)
+- [Package publication](docs/PACKAGE_PUBLICATION.md)
+- [Release readiness](docs/RELEASE_READINESS.md)
 
 The traceability matrix is the contract for “all features”: every PRD
 requirement must have an owner, phase, design reference, implementation status,

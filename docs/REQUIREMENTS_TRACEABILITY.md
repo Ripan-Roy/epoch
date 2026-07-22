@@ -225,6 +225,7 @@ placement/repair, model and chaos reports, density, and performance. See
 | DX-007 | P1 | Compatibility usage scanner | M3 | Planned | G0, G6 | Pending: unsupported-feature fixture corpus |
 | DX-008 | P1 | End-to-end event trace | M4 | Planned | G1, G4, G5, G7 | Pending: trace/history reconciliation |
 | DX-009 | P1 | TypeScript, Rust, .NET SDKs | M3 | Planned | G0, G1, G6, G10 | Pending: multi-language client matrix |
+| DX-010 | P0 | Immutable, install-tested registry packages with explicit private boundaries | M1 shape → M2 publish | Slice | G1, G5, G10 | Machine-readable alpha.2 policy, Rust privacy checks, Java/Python artifact-shape and clean-consumer tests, provisional Go/TypeScript guards, and nonpublishing CI; pending: license/namespace ownership, signing, SBOM/provenance, protected publishers, and first registry release |
 
 ## Lifecycle and Governance
 
@@ -257,10 +258,10 @@ placement/repair, model and chaos reports, density, and performance. See
 
 | Priority | Count |
 |---|---:|
-| P0 | 51 |
+| P0 | 52 |
 | P1 | 54 |
 | P2 | 14 |
 | Explicitly deferred catalog item | 1 |
-| **Total** | **120** |
+| **Total** | **121** |
 
 The catalog count excludes the three transaction classes separately deferred in PRD §8.5: arbitrary global transactions, transactions against unknown external APIs, and unbounded cross-profile transactions. Those are tracked as delivery constraints in [DELIVERY_PLAN.md](./DELIVERY_PLAN.md).

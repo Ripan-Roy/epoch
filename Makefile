@@ -8,7 +8,7 @@ NODE_LTS := $(if $(wildcard /opt/homebrew/opt/node@24/bin/node),/opt/homebrew/op
 PNPM_ENV := PATH="/opt/homebrew/opt/node@24/bin:$$PATH"
 JAVA_MVN := ./sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress
 
-.PHONY: help bootstrap-check generate generate-check format format-check lint audit test test-unit test-consensus-process test-consensus-probe test-integration build check ci compose-config compose-up compose-down compose-probe-config compose-probe-up compose-probe-down clean
+.PHONY: help bootstrap-check generate generate-check format format-check lint audit test test-unit test-consensus-process test-consensus-probe test-integration build package-shape check ci compose-config compose-up compose-down compose-probe-config compose-probe-up compose-probe-down clean
 
 help: ## Show available commands.
 	@awk 'BEGIN {FS = ":.*## "; printf "Epoch development commands:\n\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -58,14 +58,14 @@ generate-check: ## Fail when generated bindings are stale.
 format: ## Format Rust, Go, Java, Python, and JavaScript/TypeScript sources.
 	@if [ -f Cargo.toml ]; then cargo fmt --all; fi
 	@files="$$(find control operator sdk/go -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then gofmt -w $$files; fi
-	@if [ -d sdk/python ]; then ruff format sdk/python; fi
+	@if [ -d sdk/python ]; then ruff format sdk/python scripts/release tests/release; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) spotless:apply; fi
 	@$(PNPM_ENV) pnpm run format
 
 format-check: ## Check formatting without changing files.
 	@if [ -f Cargo.toml ]; then cargo fmt --all --check; fi
 	@files="$$(find control operator sdk/go -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then unformatted="$$(gofmt -l $$files)"; test -z "$$unformatted" || { printf '%s\n' "$$unformatted"; exit 1; }; fi
-	@if [ -d sdk/python ]; then ruff format --check sdk/python; fi
+	@if [ -d sdk/python ]; then ruff format --check sdk/python scripts/release tests/release; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) spotless:check; fi
 	@$(PNPM_ENV) pnpm run format:check
 
@@ -73,10 +73,10 @@ lint: ## Run static checks for every language and contract.
 	@if [ -f Cargo.toml ]; then cargo clippy --locked --workspace --all-targets --all-features -- -D warnings; fi
 	@if [ -f Cargo.toml ]; then RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --all-features --no-deps; fi
 	@if find control operator sdk/go -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then go vet ./...; fi
-	@if [ -d sdk/python ]; then ruff check sdk/python; fi
+	@if [ -d sdk/python ]; then ruff check sdk/python scripts/release tests/release; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) -DskipTests verify; fi
 	@if [ -d .github/workflows ]; then actionlint; fi
-	@if [ -d tests/integration ]; then shellcheck scripts/*.sh tests/integration/*.sh; fi
+	@if [ -d tests/integration ]; then shellcheck scripts/*.sh scripts/release/*.sh tests/integration/*.sh; fi
 	@$(PNPM_ENV) pnpm run lint
 	@$(PNPM_ENV) pnpm run typecheck
 	@if find spec/proto -type f -name '*.proto' -print -quit 2>/dev/null | grep -q .; then buf lint; else echo "no Protobuf contracts found; skipping Buf lint"; fi
@@ -113,7 +113,16 @@ build: ## Build all available workspace components.
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) -DskipTests package; fi
 	@$(PNPM_ENV) pnpm run build
 
-check: generate-check format-check lint test-unit audit ## Run the local pre-commit gate.
+package-shape: ## Validate package boundaries and local consumer shapes without publishing.
+	@python3 -m unittest discover -s tests/release -v
+	@python3 scripts/release/check-package-policy.py --scope versions
+	@scripts/release/check-rust.sh
+	@scripts/release/check-go.sh
+	@scripts/release/check-java.sh
+	@scripts/release/check-python.sh
+	@scripts/release/check-typescript.sh
+
+check: generate-check format-check lint test-unit audit package-shape ## Run the local pre-commit gate.
 
 ci: bootstrap-check check build test-integration compose-config compose-probe-config ## Run the deterministic CI gate available locally.
 

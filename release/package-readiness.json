@@ -1,0 +1,134 @@
+{
+  "schemaVersion": 1,
+  "release": {
+    "version": "0.1.0-alpha.2",
+    "channel": "source-only",
+    "goTag": "v0.1.0-alpha.2"
+  },
+  "blockers": [
+    {
+      "id": "distribution-license",
+      "label": "Distribution license",
+      "summary": "No distribution license has been selected."
+    },
+    {
+      "id": "rust-public-api",
+      "label": "Rust public API",
+      "summary": "The supported public Rust crate and API boundary has not been selected."
+    },
+    {
+      "id": "rust-crate-ownership",
+      "label": "Rust crate ownership",
+      "summary": "Public crate names and registry ownership have not been cleared."
+    },
+    {
+      "id": "go-module-path",
+      "label": "Go module path",
+      "summary": "The permanent public Go module path has not been selected."
+    },
+    {
+      "id": "go-module-layout",
+      "label": "Go module layout",
+      "summary": "The root-module versus nested-SDK release layout has not been selected."
+    },
+    {
+      "id": "maven-namespace",
+      "label": "Maven namespace",
+      "summary": "A permanent Maven Central namespace has not been verified."
+    },
+    {
+      "id": "maven-signing",
+      "label": "Maven signing identity",
+      "summary": "A durable signing identity and key-custody process have not been configured."
+    },
+    {
+      "id": "pypi-project",
+      "label": "PyPI project ownership",
+      "summary": "The PyPI project name and trusted publisher have not been configured."
+    },
+    {
+      "id": "npm-scope",
+      "label": "npm scope ownership",
+      "summary": "A permanent npm package scope has not been selected and verified."
+    }
+  ],
+  "packages": {
+    "rust": {
+      "label": "Rust crates",
+      "version": "0.1.0-alpha.2",
+      "publicationStatus": "blocked",
+      "stage": "repository-only",
+      "coordinate": null,
+      "provisionalCoordinate": null,
+      "blockerIds": [
+        "distribution-license",
+        "rust-public-api",
+        "rust-crate-ownership"
+      ],
+      "publicCrates": [],
+      "privateCrates": [
+        "epoch-bus",
+        "epoch-cache",
+        "epoch-cli",
+        "epoch-consensus",
+        "epoch-core",
+        "epoch-engine",
+        "epoch-node",
+        "epoch-queue",
+        "epoch-storage",
+        "epoch-stream",
+        "epoch-testkit"
+      ]
+    },
+    "go": {
+      "label": "Go SDK",
+      "version": "0.1.0-alpha.2",
+      "publicationStatus": "blocked",
+      "stage": "repository-only",
+      "coordinate": null,
+      "provisionalCoordinate": "epoch.local/epoch",
+      "blockerIds": [
+        "distribution-license",
+        "go-module-path",
+        "go-module-layout"
+      ]
+    },
+    "java": {
+      "label": "Java SDK",
+      "version": "0.1.0-alpha.2",
+      "publicationStatus": "blocked",
+      "stage": "repository-only",
+      "coordinate": null,
+      "provisionalCoordinate": "io.epoch:epoch-sdk",
+      "blockerIds": [
+        "distribution-license",
+        "maven-namespace",
+        "maven-signing"
+      ]
+    },
+    "python": {
+      "label": "Python SDK",
+      "version": "0.1.0a2",
+      "publicationStatus": "blocked",
+      "stage": "repository-only",
+      "coordinate": null,
+      "provisionalCoordinate": "epoch-sdk",
+      "blockerIds": [
+        "distribution-license",
+        "pypi-project"
+      ]
+    },
+    "typescript": {
+      "label": "TypeScript SDK",
+      "version": "0.1.0-alpha.2",
+      "publicationStatus": "planned",
+      "stage": "planned",
+      "coordinate": null,
+      "provisionalCoordinate": null,
+      "blockerIds": [
+        "distribution-license",
+        "npm-scope"
+      ]
+    }
+  }
+}

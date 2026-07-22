@@ -1,0 +1,4 @@
+// This path is intentionally local until package ownership is decided.
+module epoch.local/epoch
+
+go 1.26.0

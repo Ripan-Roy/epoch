@@ -740,6 +740,7 @@ The following catalog is the product contract for scope planning.
 | DX-007 | Compatibility scanner for Redis/Kafka/RabbitMQ usage and unsupported features | P1 |
 | DX-008 | End-to-end trace view from publish through route, attempt, acknowledgement, and dead letter | P1 |
 | DX-009 | Official JavaScript/TypeScript, Rust, and .NET native SDKs | P1 |
+| DX-010 | Official SDK and CLI packages use immutable cross-ecosystem version mapping, clean-consumer install tests, owned registry coordinates, signatures/provenance where supported, and explicit private boundaries before publication | P0 |
 
 ### 11.4 Lifecycle and governance
 

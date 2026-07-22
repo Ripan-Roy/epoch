@@ -409,6 +409,11 @@ h3 {
   box-shadow: 0 0 0 4px rgb(105 214 172 / 0.12);
 }
 
+.status-dot[data-tone="warn"] {
+  background: var(--amber);
+  box-shadow: 0 0 0 4px rgb(242 185 103 / 0.12);
+}
+
 .status-dot[data-tone="bad"] {
   background: var(--red);
   box-shadow: 0 0 0 4px rgb(255 132 124 / 0.12);
@@ -1488,6 +1493,155 @@ footer {
   line-height: 1.55;
 }
 
+.package-boundary {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.8rem;
+  border: 1px solid #5e4228;
+  border-radius: var(--radius-md);
+  padding: 1rem 1.1rem;
+  color: #c8b7a4;
+  background: rgb(75 50 29 / 0.32);
+}
+
+.package-boundary .status-dot {
+  flex: none;
+  margin-top: 0.35rem;
+}
+
+.package-boundary strong {
+  display: block;
+  margin-bottom: 0.3rem;
+  color: #ffd2a0;
+}
+
+.package-boundary p {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.55;
+}
+
+.package-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+  margin-top: 1rem;
+}
+
+.package-status-grid article {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 1.1rem;
+  background: var(--surface);
+}
+
+.package-status-card__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 1.35rem;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.61rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.package-status-card__heading > span {
+  color: var(--mint);
+}
+
+.package-status-card__heading em {
+  border: 1px solid #5e4228;
+  border-radius: 999px;
+  padding: 0.25rem 0.45rem;
+  color: #ffd2a0;
+  background: rgb(75 50 29 / 0.25);
+  font-style: normal;
+}
+
+.package-status-grid article[data-status="planned"] .package-status-card__heading em {
+  border-color: #3b5268;
+  color: #b9d7ff;
+  background: rgb(42 70 97 / 0.25);
+}
+
+.package-status-grid article > strong {
+  display: block;
+  margin-bottom: 0.9rem;
+  font-size: 0.95rem;
+}
+
+.package-status-grid dl {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0 0 1rem;
+}
+
+.package-status-grid dl > div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 0.65rem;
+}
+
+.package-status-grid dt,
+.package-status-grid article > p {
+  color: var(--muted);
+  font-size: 0.67rem;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.package-status-grid dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+.package-status-grid dd code {
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.package-status-grid article > p {
+  margin-bottom: 0.35rem;
+}
+
+.package-status-grid ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.55;
+}
+
+.package-policy-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  margin-top: 1rem;
+}
+
+.package-policy-links a {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.55rem 0.75rem;
+  color: var(--muted-strong);
+  background: var(--surface);
+  font-size: 0.72rem;
+  font-weight: 720;
+  text-decoration: none;
+}
+
+.package-policy-links a:hover {
+  border-color: #56615f;
+  color: var(--ink);
+}
+
 .guarantee-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1642,7 +1796,8 @@ footer {
 
   .verification-grid,
   .reference-grid,
-  .sdk-notes {
+  .sdk-notes,
+  .package-status-grid {
     grid-template-columns: 1fr;
   }
 

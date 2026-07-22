@@ -4,11 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "epoch-sdk"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "Official Python client for Epoch"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "License not yet selected; do not publish" }
 authors = [{ name = "Epoch Contributors" }]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",

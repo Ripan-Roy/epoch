@@ -1,0 +1,3 @@
+module example.com/unreviewed/epoch
+
+go 1.26.0
