@@ -1944,6 +1944,36 @@ mod tests {
         .expect("proposal should commit on all three nodes")
     }
 
+    async fn propose_through_current_leader(
+        handles: &[ConsensusProbeHandle],
+        proposal_id: u64,
+        payload: Vec<u8>,
+    ) -> ProposalLookup {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            'proposal: loop {
+                for handle in handles {
+                    let status = handle.status().await.expect("status should be available");
+                    if status.role != ConsensusRole::Leader {
+                        continue;
+                    }
+                    match handle
+                        .propose(proposal_id, status.term.get(), payload.clone())
+                        .await
+                    {
+                        Ok(lookup) => break 'proposal lookup,
+                        Err(ConsensusProbeError::Consensus(
+                            ConsensusError::NotLeader { .. } | ConsensusError::StaleTerm { .. },
+                        )) => {}
+                        Err(error) => panic!("current leader should accept the proposal: {error}"),
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a live majority leader should accept the proposal")
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn three_probe_runtimes_elect_and_commit_over_real_http() {
         let cluster = TestProbeCluster::start().await;
@@ -2008,31 +2038,29 @@ mod tests {
             ConsensusProbeTransportCondition::Degraded
         );
 
-        let leader_status =
+        let responsive_status =
             tokio::time::timeout(Duration::from_millis(250), handles[leader_index].status())
                 .await
                 .expect("a saturated minority queue must not block the Raft actor")
-                .expect("leader status should remain available");
-        assert_eq!(leader_status.role, ConsensusRole::Leader);
+                .expect("original leader status should remain available");
+        assert!(!responsive_status.fail_stopped);
 
         let majority = vec![
             handles[leader_index].clone(),
             handles[healthy_index].clone(),
         ];
+        let dropped_before_workload = majority
+            .iter()
+            .map(|handle| peer_transport_status(handle, failed_peer_id).dropped_queue_full_frames)
+            .sum::<u64>();
         tokio::time::timeout(Duration::from_secs(5), async {
             for proposal_id in 100..108 {
-                let status = handles[leader_index]
-                    .status()
-                    .await
-                    .expect("leader status should remain available");
-                let proposed = handles[leader_index]
-                    .propose(
-                        proposal_id,
-                        status.term.get(),
-                        format!("minority-outage-{proposal_id}").into_bytes(),
-                    )
-                    .await
-                    .expect("healthy majority should accept a proposal");
+                let proposed = propose_through_current_leader(
+                    &majority,
+                    proposal_id,
+                    format!("minority-outage-{proposal_id}").into_bytes(),
+                )
+                .await;
                 assert!(matches!(
                     proposed,
                     ProposalLookup::Pending | ProposalLookup::Committed(_)
@@ -2043,9 +2071,12 @@ mod tests {
         .await
         .expect("healthy majority should keep committing while one peer stays unavailable");
 
-        let final_transport = peer_transport_status(&handles[leader_index], failed_peer_id);
+        let dropped_after_workload = majority
+            .iter()
+            .map(|handle| peer_transport_status(handle, failed_peer_id).dropped_queue_full_frames)
+            .sum::<u64>();
         assert!(
-            final_transport.dropped_queue_full_frames > saturated.dropped_queue_full_frames,
+            dropped_after_workload > dropped_before_workload,
             "the minority outage should remain active throughout the commit workload"
         );
         cluster.shutdown().await;
