@@ -372,16 +372,25 @@ survive loss of the machine/storage. Cache and Event Bus still reject local
 durability, and every profile rejects replicated-memory, quorum, and geo
 durability instead of returning a false acknowledgement.
 
-It does **not** yet expose or integrate tablet consensus, replicated quorum
-durability, regional catalog/placement, distributed fencing, persisted profile
-snapshots, consumer-group coordination, bounded transactions, object tier, geo
-replication, native Protobuf services, compatibility gateways, durable webhook
-delivery, connector execution, or the security controls in
-[SECURITY.md](SECURITY.md). Isolated fixed-voter consensus feasibility adapters
-exist for deterministic memory histories and EPRS-backed local reopen tests. An
-opt-in node probe can replicate opaque diagnostic bytes over a dedicated HTTP
-listener, but it is not connected to any profile state machine and does not
-change a product acknowledgement or recovery guarantee.
+An opt-in experimental listener now integrates one configured,
+single-partition Stream tablet with the fixed three-voter persistent consensus
+runtime. It encodes typed commands canonically, returns success only after a
+durable fixed-voter majority commit plus local profile application, rebuilds
+the profile from committed EPRS history before readiness, and resolves exact
+retries to the original offset. Waiters revalidate committed semantic input,
+and actor/profile divergence fails the process instead of applying from an HTTP
+task. The receipt names this as bounded fixed-voter evidence, not the PRD's
+zone-aware quorum profile. It remains intentionally separate from the public
+standalone API, which continues to reject quorum durability.
+
+Epoch does **not** yet provide a public clustered durability contract, regional
+catalog/placement, distributed membership fencing, persisted profile snapshots,
+consumer-group coordination, bounded transactions, object tier, geo replication,
+native Protobuf services, compatibility gateways, durable webhook delivery,
+connector execution, or the security controls in [SECURITY.md](SECURITY.md).
+The experimental tablet also lacks a read barrier, authenticated transport,
+multiple partitions/tablets, and bounded idempotency retention. See
+[STREAM_TABLET.md](STREAM_TABLET.md).
 
 Current JSON-shaped payloads, standalone epochs, HTTP endpoints, and local WAL
 frames are provisional scaffold interfaces. They are not frozen compatibility

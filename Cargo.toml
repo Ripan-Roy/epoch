@@ -5,6 +5,7 @@ members = [
   "crates/epoch-consensus",
   "crates/epoch-cache",
   "crates/epoch-stream",
+  "crates/epoch-tablet",
   "crates/epoch-queue",
   "crates/epoch-bus",
   "crates/epoch-engine",

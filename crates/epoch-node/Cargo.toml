@@ -17,6 +17,7 @@ epoch-engine = { path = "../epoch-engine" }
 epoch-queue = { path = "../epoch-queue" }
 epoch-storage = { path = "../epoch-storage" }
 epoch-stream = { path = "../epoch-stream" }
+epoch-tablet = { path = "../epoch-tablet" }
 http.workspace = true
 reqwest.workspace = true
 serde.workspace = true

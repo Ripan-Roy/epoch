@@ -230,7 +230,9 @@ fn isolated_leader_pending_proposal_survives_disk_reopen() {
 
     assert_eq!(
         cluster.nodes[&node(1)].lookup_proposal(proposal(7)),
-        ProposalLookup::Pending
+        ProposalLookup::Pending {
+            payload: b"minority-only".to_vec()
+        }
     );
     assert!(
         cluster
@@ -243,7 +245,9 @@ fn isolated_leader_pending_proposal_survives_disk_reopen() {
 
     assert_eq!(
         cluster.nodes[&node(1)].lookup_proposal(proposal(7)),
-        ProposalLookup::Pending
+        ProposalLookup::Pending {
+            payload: b"minority-only".to_vec()
+        }
     );
     assert!(cluster.nodes[&node(1)].applied_proposals().is_empty());
 }
@@ -389,7 +393,9 @@ fn fsynced_proposal_is_recovered_after_injected_post_append_failure() {
 
     assert_eq!(
         cluster.nodes[&node(1)].lookup_proposal(proposal(31)),
-        ProposalLookup::Pending
+        ProposalLookup::Pending {
+            payload: b"fsynced-before-failure".to_vec()
+        }
     );
     assert!(!cluster.nodes[&node(1)].status().fail_stopped);
 }

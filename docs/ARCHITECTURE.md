@@ -211,24 +211,33 @@ consensus library behind an Epoch adapter. The library choice remains subject to
 the spike in [ADR-0003](adr/0003-consensus-adapter.md); Epoch will not implement
 a new consensus algorithm during Phase 0.
 
-The current workspace contains Stage 1 of that spike plus a local stable-store
-sub-slice: an Epoch-owned, fixed-three-voter adapter over an exact upstream
+The current workspace contains Stage 2 of that spike: an Epoch-owned,
+fixed-three-voter adapter over an exact upstream
 `raft-rs` revision, deterministic `epoch-testkit` transport, and the EPRS v1
 stable journal over `FileWal` exposed through `PersistentRaftAdapter`. EPRS
 records immutable voter identity, complete `HardState`, normal-entry
 index/term/data, and an applied/publishable digest checkpoint without persisting
 raw library protobuf. It supports checksummed
-local reopen and logical uncommitted-suffix replacement. An opt-in node probe
-wraps it in a dedicated actor, bounded ordered HTTP peer queues, local
-status/proposal lookup, and a static three-container topology. The probe carries
-opaque diagnostics only: the adapter is not connected to a tablet/profile state
-machine and no product durable-majority acknowledgement is exposed. Snapshots,
-compaction, membership changes, authoritative catalog
-fencing, and read barriers remain disabled. The byte contract is documented in
+local reopen and logical uncommitted-suffix replacement. An opt-in node runtime
+wraps it in a dedicated actor, bounded ordered HTTP peer queues, and a static
+three-container topology. Its default probe mode carries opaque diagnostics.
+An alternative experimental mode attaches one single-partition Stream tablet:
+strict typed commands are applied on the actor after consensus commit, startup
+rebuilds the profile from the complete committed history before readiness, and
+the clustered path never writes the standalone engine journal. Success reports
+the fixed-voter majority evidence and the logical Stream offset only through
+the dedicated experimental API; it does not claim zone placement. A profile
+application error on the actor drains both listeners and exits the process. If
+an HTTP lookup ever observes a commit without the exact actor-applied receipt,
+the typed service fails closed and does not apply state from the request task.
+The public API guarantee remains unchanged.
+Snapshots, compaction, membership changes, authoritative catalog fencing,
+placement, and read barriers remain disabled. The byte contract is documented in
 [EPRS v1 consensus stable journal](../spec/formats/consensus-stable-store-v1.md);
 the complete scope and non-claims are recorded in
-[Consensus Feasibility Spike](CONSENSUS_SPIKE.md) and the runnable boundary in
-[Experimental Consensus Probe](CONSENSUS_PROBE.md).
+[Consensus Feasibility Spike](CONSENSUS_SPIKE.md), the opaque boundary in
+[Experimental Consensus Probe](CONSENSUS_PROBE.md), and the typed milestone in
+[Experimental Stream Tablet](STREAM_TABLET.md).
 
 Rust peer replication uses batched, framed, mutually authenticated connections
 with separate priorities for control, append, snapshot, and repair traffic.

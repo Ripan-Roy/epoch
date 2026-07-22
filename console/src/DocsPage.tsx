@@ -237,6 +237,9 @@ export function DocsPage({ section }: DocsPageProps) {
               <a href="#/docs/guarantees" onClick={() => navigateToSection("guarantees")}>
                 Guarantees &amp; errors
               </a>
+              <a href="#/docs/cluster-milestone" onClick={() => navigateToSection("cluster-milestone")}>
+                Cluster milestone
+              </a>
               <a href="#/docs/sdk-reference" onClick={() => navigateToSection("sdk-reference")}>
                 SDK reference
               </a>
@@ -429,19 +432,61 @@ export function DocsPage({ section }: DocsPageProps) {
             </section>
 
             <section
+              id="cluster-milestone"
+              className="docs-section"
+              aria-labelledby="cluster-milestone-title"
+              tabIndex={-1}
+            >
+              <div className="docs-section__heading">
+                <span>04</span>
+                <div>
+                  <p className="eyebrow">EXPERIMENTAL CLUSTER CORE</p>
+                  <h2 id="cluster-milestone-title">One typed Stream tablet now crosses real consensus.</h2>
+                  <p>
+                    This opt-in engineering milestone runs on a separate, unauthenticated listener. The public
+                    SDK quickstart above remains standalone and <code>local_durable</code>; no SDK or public
+                    quorum contract is implied. Its two durable voters are fixed-topology evidence, not
+                    multi-zone placement proof.
+                  </p>
+                </div>
+              </div>
+              <div className="verification-grid">
+                <article>
+                  <span>MAJORITY</span>
+                  <strong>Two of three voters persist before typed success.</strong>
+                  <p>The receipt separates the Raft commit index from the logical Stream offset.</p>
+                </article>
+                <article>
+                  <span>FAILOVER</span>
+                  <strong>A replacement leader appends the next offset.</strong>
+                  <p>The stopped voter rejoins, catches up, and applies each command once.</p>
+                </article>
+                <article>
+                  <span>RECOVERY</span>
+                  <strong>All three voters rebuild the same digest.</strong>
+                  <p>
+                    A full <code>SIGKILL</code> cycle replays the consensus history without a second WAL.
+                  </p>
+                </article>
+              </div>
+              <CodeBlock label="Disposable three-container proof" value="make test-stream-tablet" />
+            </section>
+
+            <section
               id="sdk-reference"
               className="docs-section"
               aria-labelledby="sdk-reference-title"
               tabIndex={-1}
             >
               <div className="docs-section__heading">
-                <span>04</span>
+                <span>05</span>
                 <div>
-                  <p className="eyebrow">COMPLETE ALPHA SURFACE</p>
+                  <p className="eyebrow">STANDALONE ALPHA SURFACE</p>
                   <h2 id="sdk-reference-title">The same operation, native to each ecosystem.</h2>
                   <p>
-                    All implemented HTTP operations have Go, Java, and Python entry points. Responses are
-                    still dynamic documents in this alpha; mutation calls never perform hidden retries.
+                    All implemented standalone profile operations have Go, Java, and Python entry points. The
+                    experimental tablet routes above intentionally have no SDK contract. Responses are still
+                    dynamic documents in this alpha; mutation calls never perform hidden retries.
                   </p>
                 </div>
               </div>
@@ -507,7 +552,7 @@ export function DocsPage({ section }: DocsPageProps) {
 
             <section id="reference" className="docs-section" aria-labelledby="reference-title" tabIndex={-1}>
               <div className="docs-section__heading">
-                <span>05</span>
+                <span>06</span>
                 <div>
                   <p className="eyebrow">SOURCE OF TRUTH</p>
                   <h2 id="reference-title">Go deeper without losing the boundary.</h2>
@@ -532,6 +577,12 @@ export function DocsPage({ section }: DocsPageProps) {
                   title="Testing strategy"
                   description="Restart, corruption, history, integration, and release evidence expectations."
                   href={`${repositoryDocsUrl}/TESTING.md`}
+                />
+                <ReferenceCard
+                  eyebrow="CLUSTER CORE"
+                  title="Experimental Stream tablet"
+                  description="Typed command, fixed-voter majority, failover, idempotency, and all-voter recovery boundary."
+                  href={`${repositoryDocsUrl}/STREAM_TABLET.md`}
                 />
               </div>
             </section>

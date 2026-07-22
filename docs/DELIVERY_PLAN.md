@@ -111,13 +111,17 @@ An explicit three-child-process extension isolates the leader, proves no
 minority commit, heals and compares all receipts/digests, then sends `SIGKILL`
 to one and all voters before reopening the same EPRS paths without duplicate
 receipt publication. An opt-in node runtime and three-container topology add a
-dedicated bounded HTTP transport plus opaque diagnostic proposals while keeping
-all product profiles standalone. Neither integration is a product
-durable-majority acknowledgement. Exhaustive crash points, snapshots,
-membership and authoritative epoch transitions, read barriers, authenticated
-transport, model/chaos reports, and profile integration remain required for the
-metadata/replication work package and G3. See
-[Consensus Feasibility Spike](CONSENSUS_SPIKE.md).
+dedicated bounded HTTP transport. Its default mode carries opaque diagnostic
+proposals; a mutually exclusive experimental mode applies canonical commands to
+one single-partition Stream after fixed-voter majority commit and rebuilds it
+from EPRS history. That typed receipt is bounded fixed-topology evidence, not a
+public or placement-aware quorum-durable acknowledgement, and all public profile
+APIs remain standalone. Exhaustive crash points, snapshots, membership and
+authoritative epoch transitions, read barriers, authenticated transport,
+placement, broader profile/tablet integration, and model/chaos reports remain
+required for the metadata/replication work package and G3. See
+[Consensus Feasibility Spike](CONSENSUS_SPIKE.md) and
+[Experimental Stream Tablet](STREAM_TABLET.md).
 
 The segmented-WAL work package is implemented as the single-node storage
 sub-slice at `$EPOCH_DATA_DIR/engine-wal/segment-*.wal`. The implementation has

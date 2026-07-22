@@ -413,6 +413,7 @@ dependencies = [
  "epoch-queue",
  "epoch-storage",
  "epoch-stream",
+ "epoch-tablet",
  "http",
  "http-body-util",
  "reqwest",
@@ -458,6 +459,18 @@ dependencies = [
  "epoch-core",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "epoch-tablet"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "epoch-core",
+ "epoch-stream",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

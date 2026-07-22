@@ -11,6 +11,8 @@ x-epoch-probe: &epoch-probe
     EPOCH_CONSENSUS_LISTEN: 0.0.0.0:7701
     EPOCH_CONSENSUS_PEERS: 1=http://epoch-probe-1:7701,2=http://epoch-probe-2:7701,3=http://epoch-probe-3:7701
     EPOCH_CONSENSUS_TICK_MS: "100"
+    EPOCH_EXPERIMENTAL_STREAM_TABLET_ENABLED: "${EPOCH_EXPERIMENTAL_STREAM_TABLET_ENABLED:-false}"
+    EPOCH_EXPERIMENTAL_STREAM_TABLET_NAME: "${EPOCH_EXPERIMENTAL_STREAM_TABLET_NAME:-experimental-stream}"
     EPOCH_LOG: ${EPOCH_LOG:-epoch=info,tower_http=info}
   restart: unless-stopped
   stop_grace_period: 30s

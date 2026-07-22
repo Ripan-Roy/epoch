@@ -147,10 +147,11 @@ uses a one-frame outbound queue, keeps the lower-ID destination unavailable
 until drops and exhausted retries are observed, and proves eight subsequent
 proposals still commit on the healthy majority.
 
-This is still not snapshot,
-membership-transition, authoritative epoch-fencing, durable-majority, or
-product acknowledgement evidence. Those scenarios remain required before G3
-or the emulator is complete; see
+The typed Stream-tablet layer adds bounded durable fixed-voter-majority and
+deterministic profile-application evidence for one fixed group and partition. It
+does not add snapshot, membership-transition, authoritative epoch-fencing,
+public product acknowledgement, or complete G3 evidence. Those scenarios remain
+required before G3 or the emulator is complete; see
 [Consensus Feasibility Spike](CONSENSUS_SPIKE.md).
 
 ### 3. Integration tests
@@ -190,6 +191,7 @@ Run the persistent consensus process smoke directly with:
 ```shell
 make test-consensus-process
 make test-consensus-probe
+make test-stream-tablet
 ```
 
 `test-consensus-process` is ignored by Cargo's default suite so it cannot run
@@ -204,6 +206,25 @@ leader, and waits for identical local lookup at all voters. The script uses a
 unique Compose project and deletes only its ephemeral containers, network, and
 volumes. On CI failure it retains container logs, state, and port assignments as
 an uploaded artifact.
+
+`test-stream-tablet` selects the mutually exclusive typed mode on the same
+three-voter runtime. It verifies a follower error, success only after majority
+commit and local application, `fixed_voter_majority_persisted` with two durable
+voters, ordered Stream offsets, exact retry, and changed-input conflict
+behavior. It isolates an old leader and proves no committed response, then
+commits different input under the same deterministic ID on a higher-term
+majority and proves the original input conflicts rather than receiving that
+receipt. It verifies old-voter catch-up, sends `SIGKILL` to all three
+containers, reopens the same EPRS volumes, compares every record and profile
+digest with the pre-crash state across every voter, and proves a retry still
+resolves to the original offset. On failure, CI retains the scoped logs, port
+map, and state volumes as an artifact. The process still starts its empty
+standalone engine for the separate public API,
+but typed commands are never appended to that engine journal. Unit/runtime
+tests additionally prove strict command/request decoding, browser-safe 64-bit
+identity/position/time encoding,
+actor-only application, and process supervision after an injected live profile
+apply failure.
 
 `tests/integration/docs-quickstarts.sh` separately executes the exact Go, Java,
 and Python source imported into the documentation page. Each language gets a

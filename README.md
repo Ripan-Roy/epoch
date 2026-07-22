@@ -72,18 +72,21 @@ occurrences, partitionable peer transport, and versioned trace serialization
 and comparison. It is test infrastructure and does not raise the standalone
 node's guarantee ceiling.
 
-`crates/epoch-consensus` contains isolated, fixed-three-voter memory and
-EPRS-backed `raft-rs` feasibility adapters. The persistent path journals local
-`HardState`, normal entries, and publishable checkpoints through the checksummed
-`FileWal`. An explicit three-process smoke now proves minority non-commit,
-partition healing, identical committed state, and EPRS recovery after one-node
-and all-node `SIGKILL` cycles. `epoch-node` also has an opt-in, separate-listener
-runtime and three-container topology for opaque probe proposals; it explicitly
-does not replicate product profiles or raise their guarantee ceiling. An
-exhaustive crash matrix, snapshots, membership/epoch transitions, read barriers,
-authenticated transport, and profile integration remain open; see the
-[probe guide](docs/CONSENSUS_PROBE.md), [spike report](docs/CONSENSUS_SPIKE.md),
-and proposed [ADR-0003](docs/adr/0003-consensus-adapter.md).
+`crates/epoch-consensus` contains fixed-three-voter memory and EPRS-backed
+`raft-rs` feasibility adapters. `crates/epoch-tablet` adds the first typed
+profile application boundary: one opt-in, single-partition Stream tablet whose
+canonical commands commit through the real three-node runtime and rebuild from
+the consensus log. Unit, real-runtime, and three-container gates prove typed
+leader errors, minority non-commit, majority-before-success, bounded
+two-durable-voter evidence, semantic retry/rebinding, ordered offsets, leader
+replacement, catch-up, and all-node `SIGKILL` replay.
+It remains on the unauthenticated experimental listener; the public standalone
+API and SDKs still reject quorum durability. An exhaustive crash matrix,
+snapshots, membership/epoch transitions, read barriers, authenticated transport,
+placement, and multi-tablet routing remain open; see the
+[Stream tablet guide](docs/STREAM_TABLET.md), [probe guide](docs/CONSENSUS_PROBE.md),
+[spike report](docs/CONSENSUS_SPIKE.md), and proposed
+[ADR-0003](docs/adr/0003-consensus-adapter.md).
 
 ## Quick start
 
