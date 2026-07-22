@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.1
       - name: Install pinned Rust toolchain
         run: >-
           rustup toolchain install 1.97.1
@@ -82,7 +82,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.1
       - uses: actions/setup-go@v6.4.0
         with:
           go-version: 1.26.5
@@ -117,7 +117,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.1
       - uses: actions/setup-python@v7.0.0
         with:
           python-version: '3.11'
@@ -138,7 +138,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.1
       - uses: actions/setup-java@v5.2.0
         with:
           distribution: temurin
@@ -161,7 +161,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.1
       - uses: actions/setup-node@v7.0.0
         with:
           node-version-file: .node-version
@@ -182,7 +182,7 @@ jobs:
     timeout-minutes: 35
     needs: [rust, go-contracts, python, java]
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.1
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
       - uses: actions/setup-go@v6.4.0
@@ -207,7 +207,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v7.0.1
       - run: docker compose -f deploy/compose/docker-compose.yml config --quiet
       - run: docker compose -f deploy/compose/docker-compose.consensus-probe.yml config --quiet
       - run: docker build --file deploy/docker/Dockerfile.node --tag epoch/node:ci .
