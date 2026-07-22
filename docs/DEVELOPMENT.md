@@ -298,9 +298,13 @@ make compose-probe-up
 make compose-probe-down
 ```
 
-Its three public profile endpoints are still standalone. The separate local
-diagnostic listeners replicate opaque probe bytes only; see
-[Experimental Consensus Probe](CONSENSUS_PROBE.md) before using them.
+Its three public profile endpoints are still standalone. By default, the
+separate local diagnostic listeners replicate opaque probe bytes; see
+[Experimental Consensus Probe](CONSENSUS_PROBE.md). Setting
+`EPOCH_EXPERIMENTAL_STREAM_TABLET_ENABLED=true` replaces those opaque proposal
+routes with the bounded typed Stream milestone described in
+[Experimental Stream Tablet](STREAM_TABLET.md). The two experimental modes are
+mutually exclusive, and neither changes the public API or SDK guarantee ceiling.
 
 To discard local data, explicitly add `--volumes` to the Compose down command.
 That is destructive and is intentionally not part of the Make target.

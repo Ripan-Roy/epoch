@@ -1,14 +1,15 @@
 # Consensus Feasibility Spike
 
-**Status:** Stage 1 adapter, local stable store, and bounded process-crash harness; not a product replication mode
+**Status:** Stage 2 typed single-Stream-tablet integration; still not a public product replication mode
 
 **Decision:** [ADR-0003](adr/0003-consensus-adapter.md) remains Proposed
 
-This document records exactly what the first Epoch consensus slice proves and,
-more importantly, what it does not prove. The runnable node's product profiles
-remain standalone-only and reject replicated-memory, quorum, and geo
-durability. An opt-in diagnostic probe runs beside them without changing that
-guarantee ceiling.
+This document records exactly what the current Epoch consensus slices prove
+and, more importantly, what they do not prove. The public node profiles remain
+standalone-only and reject replicated-memory, quorum, and geo durability. An
+opt-in diagnostic probe and a mutually exclusive typed Stream-tablet mode run
+on the dedicated experimental listener without changing that public guarantee
+ceiling.
 
 ## Implemented boundary
 
@@ -58,6 +59,17 @@ local observation, no peer authentication, `profile_replication: false`, and a
 `local_durable` product-profile ceiling. A static three-container Compose model
 gives every voter its own data volume. See
 [Experimental Consensus Probe](CONSENSUS_PROBE.md).
+
+The typed bounded slice attaches `crates/epoch-tablet` to the same runtime for
+one configured, single-partition Stream. Canonical typed commands enter the
+persistent Raft log, become visible only after fixed-voter majority commit and
+local profile application, and rebuild the tablet from the complete committed
+history before its status route becomes ready. Exact idempotent retries retain
+the original command bytes and Stream offset. A three-container gate proves
+leader rejection, ordered failover, lagging-voter catch-up, and identical
+profile recovery after all voters receive `SIGKILL`. This mode is documented in
+[Experimental Stream Tablet](STREAM_TABLET.md); it remains separate from the
+public API and SDKs.
 
 ## Processing contract
 
@@ -135,8 +147,8 @@ and replacement path still require the ADR's dependency and security review.
 
 This slice does not provide:
 
-- a profile-integrated or public quorum-durable acknowledgement,
-  durable-majority proof, or replica-acknowledgement count;
+- a public or zone-aware quorum-durable acknowledgement; the experimental
+  tablet reports only `fixed_voter_majority_persisted` with two durable voters;
 - an exhaustive process-crash, fsync-failure, disk-full, or partial-write
   matrix beyond the bounded incomplete-tail and corruption tests;
 - snapshots, compaction, log purge, or state-machine checkpoint installation;
@@ -144,8 +156,8 @@ This slice does not provide:
 - an authoritative catalog epoch transition that can fence an old voter set;
 - a linearizable read barrier;
 - mutually authenticated, encrypted, batched production transport;
-- product engine/profile, CLI, SDK, or public health integration; the only node
-  and deployment integration is the explicitly experimental opaque probe;
+- public engine routing, CLI, SDK, or public health integration; the typed
+  Stream milestone is confined to the explicitly experimental listener;
 - bounded proposal-history memory or a configured idempotency-retention window;
 - segment rotation, a committed-length manifest, arbitrary post-sync
   truncation detection, authenticated anti-rollback evidence, backup generation
@@ -165,8 +177,9 @@ This slice does not provide:
    old-configuration fencing tests.
 5. Add a read barrier, authenticated peer identity, replica progress, and
    bounded admission/flow control.
-6. Integrate one profile mutation through a real three-node runtime without
-   raising the public guarantee until the durable majority rule is proven.
+6. Expand the typed milestone beyond one partition/resource, add a full
+   acknowledgement/failure matrix, and then design public routing without
+   raising the guarantee before every required gate is proven.
 7. Complete density, benchmark, model, dependency, license, unsafe-code, and
    security gates before accepting ADR-0003.
 
@@ -177,6 +190,7 @@ cargo test --locked -p epoch-consensus --all-features
 cargo test --locked -p epoch-consensus --test multiprocess persistent_three_node_partition_and_sigkill_reopen -- --ignored --nocapture --test-threads=1
 cargo test --locked -p epoch-node --all-targets
 docker compose -f deploy/compose/docker-compose.consensus-probe.yml config --quiet
+make test-stream-tablet
 cargo clippy --locked -p epoch-consensus --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked -p epoch-consensus --all-features --no-deps
 cargo audit --deny warnings --ignore RUSTSEC-2025-0057

@@ -168,7 +168,7 @@ impl From<ProposalLookup> for Lookup {
     fn from(lookup: ProposalLookup) -> Self {
         match lookup {
             ProposalLookup::Unknown => Self::Unknown,
-            ProposalLookup::Pending => Self::Pending,
+            ProposalLookup::Pending { .. } => Self::Pending,
             ProposalLookup::Committed(committed) => Self::Committed(committed.into()),
         }
     }

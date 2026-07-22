@@ -9,6 +9,11 @@ This surface exists to exercise process lifecycle, real HTTP peer delivery,
 EPRS recovery, election, and proposal lookup without claiming that product
 profile replication is complete.
 
+Setting `EPOCH_EXPERIMENTAL_STREAM_TABLET_ENABLED=true` replaces the opaque
+proposal routes with the first typed profile milestone on the same group. The
+two modes are intentionally mutually exclusive; see
+[Experimental Stream Tablet](STREAM_TABLET.md).
+
 ## Start three local containers
 
 ```shell

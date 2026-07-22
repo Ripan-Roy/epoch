@@ -176,7 +176,7 @@ pub struct CommittedProposal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProposalLookup {
     Unknown,
-    Pending,
+    Pending { payload: Vec<u8> },
     Committed(CommittedProposal),
 }
 
@@ -537,8 +537,9 @@ pub struct PersistentRecovery {
 /// A fixed-three-voter adapter whose Raft stable state and publishable
 /// application checkpoint are written to a checksummed local journal.
 ///
-/// This establishes local crash recovery for the consensus boundary. It is not
-/// yet wired into the Epoch node and does not, by itself, provide a public
+/// This establishes local crash recovery for the consensus boundary. The
+/// experimental node runtime can attach an opaque probe or typed profile
+/// applier, but the adapter does not, by itself, provide a public
 /// quorum-durability mode.
 pub struct PersistentRaftAdapter {
     inner: InMemoryRaftAdapter,
@@ -681,7 +682,9 @@ impl InMemoryRaftAdapter {
     pub fn lookup_proposal(&self, proposal_id: ProposalId) -> ProposalLookup {
         match self.proposals.get(&proposal_id) {
             None => ProposalLookup::Unknown,
-            Some(TrackedProposal::Pending { .. }) => ProposalLookup::Pending,
+            Some(TrackedProposal::Pending { payload }) => ProposalLookup::Pending {
+                payload: payload.clone(),
+            },
             Some(TrackedProposal::Committed(committed)) => {
                 ProposalLookup::Committed(committed.clone())
             }

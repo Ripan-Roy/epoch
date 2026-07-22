@@ -217,6 +217,12 @@ jobs:
           EPOCH_PROBE_IMAGE: epoch/node:ci
           EPOCH_PROBE_USE_EXISTING_IMAGE: "1"
         run: bash tests/integration/consensus-probe.sh
+      - name: Prove typed Stream fixed-voter majority, failover, and SIGKILL replay
+        env:
+          EPOCH_TABLET_ARTIFACT_DIR: ${{ runner.temp }}/epoch-stream-tablet
+          EPOCH_PROBE_IMAGE: epoch/node:ci
+          EPOCH_TABLET_USE_EXISTING_IMAGE: "1"
+        run: bash tests/integration/stream-tablet.sh
       - name: Prove mounted local durability across container replacement
         run: |
           wait_for_health() {
@@ -297,6 +303,8 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: consensus-probe-failure-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/epoch-consensus-probe
+          path: |
+            ${{ runner.temp }}/epoch-consensus-probe
+            ${{ runner.temp }}/epoch-stream-tablet
           if-no-files-found: ignore
           retention-days: 7

@@ -1,13 +1,20 @@
-use std::{error::Error, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    error::Error, future::Future, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration,
+};
 
 use clap::Parser;
-use epoch_core::DeploymentMode;
+use epoch_core::{DeploymentMode, SystemClock};
 use epoch_engine::EpochEngine;
 use epoch_node::{
-    consensus::{ConsensusProbeConfig, ConsensusProbeError, ConsensusProbeRuntime},
-    router, spawn_maintenance, validate_allowed_origins,
+    consensus::{
+        CommittedProposalApplier, ConsensusProbeConfig, ConsensusProbeError, ConsensusProbeRuntime,
+    },
+    router, spawn_maintenance,
+    stream_tablet::{self, DEFAULT_COMMIT_WAIT, StreamTabletService},
+    validate_allowed_origins,
 };
 use epoch_storage::{DEFAULT_WAL_SEGMENT_BYTES, MIN_WAL_SEGMENT_BYTES, StandaloneWal};
+use epoch_tablet::StreamTabletScope;
 use tokio::{net::TcpListener, sync::watch};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -45,6 +52,14 @@ struct Args {
     json_logs: bool,
     #[arg(long, env = "EPOCH_CONSENSUS_PROBE_ENABLED")]
     consensus_probe_enabled: bool,
+    #[arg(long, env = "EPOCH_EXPERIMENTAL_STREAM_TABLET_ENABLED")]
+    experimental_stream_tablet_enabled: bool,
+    #[arg(
+        long,
+        env = "EPOCH_EXPERIMENTAL_STREAM_TABLET_NAME",
+        default_value = "experimental-stream"
+    )]
+    experimental_stream_tablet_name: String,
     #[arg(long, env = "EPOCH_CONSENSUS_NODE_ID")]
     consensus_node_id: Option<u64>,
     #[arg(long, env = "EPOCH_CONSENSUS_GROUP_ID", default_value_t = 1)]
@@ -72,6 +87,7 @@ struct ConsensusProbeLaunch {
     config: ConsensusProbeConfig,
     listen: SocketAddr,
     stable_path: PathBuf,
+    stream_tablet_scope: Option<StreamTabletScope>,
 }
 
 #[tokio::main]
@@ -106,9 +122,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "discarded an incomplete WAL tail during recovery"
         );
     }
+    let clock = Arc::new(SystemClock::default());
     let engine = Arc::new(EpochEngine::with_commit_log(
         DeploymentMode::Standalone,
-        Arc::new(epoch_core::SystemClock::default()),
+        clock.clone(),
         Box::new(wal),
     )?);
     let app = router(engine.clone(), &args.allowed_origins)?;
@@ -126,44 +143,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let serving_result = if let Some(launch) = consensus_probe {
-        let stable_parent = launch.stable_path.parent().ok_or_else(|| {
-            ConsensusProbeError::InvalidConfiguration(format!(
-                "consensus stable path has no parent: {}",
-                launch.stable_path.display()
-            ))
-        })?;
-        std::fs::create_dir_all(stable_parent)?;
-        let consensus_listener = TcpListener::bind(launch.listen).await?;
-        let node_id = launch.config.node_id();
-        let group_id = launch.config.group_id();
-        let group_epoch = launch.config.group_epoch();
-        let tick_interval = launch.config.tick_interval();
-        let runtime = ConsensusProbeRuntime::start(launch.config, &launch.stable_path).await?;
-        let recovery = runtime.recovery();
-        let consensus_app = runtime
-            .internal_router()
-            .merge(runtime.experimental_router());
-        info!(
-            address = %launch.listen,
-            %node_id,
-            %group_id,
-            %group_epoch,
-            tick_ms = tick_interval.as_millis(),
-            stable_path = %launch.stable_path.display(),
-            stable_generation = recovery.stable_generation,
-            applied_index = %recovery.applied_index,
-            repaired_partial_tail = recovery.repaired_partial_tail,
-            profile_replication = false,
-            profile_guarantee_ceiling = "local_durable",
-            peer_authentication = "none",
-            "experimental fixed-voter consensus probe is listening"
-        );
-        let server_result =
-            serve_with_consensus_probe(listener, app, consensus_listener, consensus_app)
-                .await
-                .map_err(boxed_error);
-        let runtime_result = runtime.shutdown().await.map_err(boxed_error);
-        server_result.and(runtime_result)
+        serve_consensus_mode(launch, listener, app, clock).await
     } else {
         axum::serve(listener, app)
             .with_graceful_shutdown(shutdown_signal())
@@ -175,6 +155,89 @@ async fn main() -> Result<(), Box<dyn Error>> {
     serving_result
 }
 
+async fn serve_consensus_mode(
+    launch: ConsensusProbeLaunch,
+    public_listener: TcpListener,
+    public_app: axum::Router,
+    clock: Arc<SystemClock>,
+) -> Result<(), Box<dyn Error>> {
+    let stable_parent = launch.stable_path.parent().ok_or_else(|| {
+        ConsensusProbeError::InvalidConfiguration(format!(
+            "consensus stable path has no parent: {}",
+            launch.stable_path.display()
+        ))
+    })?;
+    std::fs::create_dir_all(stable_parent)?;
+    let consensus_listener = TcpListener::bind(launch.listen).await?;
+    let node_id = launch.config.node_id();
+    let group_id = launch.config.group_id();
+    let group_epoch = launch.config.group_epoch();
+    let tick_interval = launch.config.tick_interval();
+    let (runtime, consensus_app, profile_replication) =
+        start_consensus_mode(&launch, clock).await?;
+    let recovery = runtime.recovery();
+    info!(
+        address = %launch.listen,
+        %node_id,
+        %group_id,
+        %group_epoch,
+        tick_ms = tick_interval.as_millis(),
+        stable_path = %launch.stable_path.display(),
+        stable_generation = recovery.stable_generation,
+        applied_index = %recovery.applied_index,
+        repaired_partial_tail = recovery.repaired_partial_tail,
+        profile_replication,
+        profile_guarantee_ceiling = if profile_replication {
+            "experimental_fixed_voter_majority"
+        } else {
+            "local_durable"
+        },
+        peer_authentication = "none",
+        "experimental fixed-voter consensus probe is listening"
+    );
+    let server_result = serve_with_consensus_probe(
+        public_listener,
+        public_app,
+        consensus_listener,
+        consensus_app,
+        runtime.wait_for_actor_failure(),
+    )
+    .await
+    .map_err(boxed_error);
+    let runtime_result = runtime.shutdown().await.map_err(boxed_error);
+    server_result.and(runtime_result)
+}
+
+async fn start_consensus_mode(
+    launch: &ConsensusProbeLaunch,
+    clock: Arc<SystemClock>,
+) -> Result<(ConsensusProbeRuntime, axum::Router, bool), Box<dyn Error>> {
+    if let Some(scope) = launch.stream_tablet_scope.clone() {
+        let tablet = StreamTabletService::new(scope)?;
+        let applier: Arc<dyn CommittedProposalApplier> = tablet.clone();
+        let runtime = ConsensusProbeRuntime::start_with_profile_applier(
+            launch.config.clone(),
+            &launch.stable_path,
+            applier,
+        )
+        .await?;
+        let app = runtime.internal_router().merge(stream_tablet::router(
+            tablet,
+            runtime.handle(),
+            clock,
+            DEFAULT_COMMIT_WAIT,
+        ));
+        Ok((runtime, app, true))
+    } else {
+        let runtime =
+            ConsensusProbeRuntime::start(launch.config.clone(), &launch.stable_path).await?;
+        let app = runtime
+            .internal_router()
+            .merge(runtime.experimental_router());
+        Ok((runtime, app, false))
+    }
+}
+
 fn boxed_error(error: impl Error + 'static) -> Box<dyn Error> {
     Box::new(error)
 }
@@ -182,6 +245,12 @@ fn boxed_error(error: impl Error + 'static) -> Box<dyn Error> {
 fn consensus_probe_launch(
     args: &Args,
 ) -> Result<Option<ConsensusProbeLaunch>, ConsensusProbeError> {
+    if args.experimental_stream_tablet_enabled && !args.consensus_probe_enabled {
+        return Err(ConsensusProbeError::InvalidConfiguration(
+            "EPOCH_EXPERIMENTAL_STREAM_TABLET_ENABLED requires EPOCH_CONSENSUS_PROBE_ENABLED"
+                .into(),
+        ));
+    }
     if !args.consensus_probe_enabled {
         return Ok(None);
     }
@@ -207,10 +276,22 @@ fn consensus_probe_launch(
         .join("consensus")
         .join(format!("group-{}", config.group_id().get()))
         .join(format!("node-{}.wal", config.node_id().get()));
+    let stream_tablet_scope = args
+        .experimental_stream_tablet_enabled
+        .then(|| {
+            StreamTabletScope::new(
+                config.group_id().get(),
+                config.group_epoch().get(),
+                &args.experimental_stream_tablet_name,
+            )
+            .map_err(|error| ConsensusProbeError::InvalidConfiguration(error.to_string()))
+        })
+        .transpose()?;
     Ok(Some(ConsensusProbeLaunch {
         config,
         listen: args.consensus_listen,
         stable_path,
+        stream_tablet_scope,
     }))
 }
 
@@ -219,8 +300,28 @@ async fn serve_with_consensus_probe(
     public_app: axum::Router,
     consensus_listener: TcpListener,
     consensus_app: axum::Router,
+    actor_failure: impl Future<Output = ConsensusProbeError>,
 ) -> std::io::Result<()> {
-    let (shutdown, public_shutdown) = watch::channel(false);
+    serve_with_consensus_probe_until(
+        public_listener,
+        public_app,
+        consensus_listener,
+        consensus_app,
+        shutdown_signal(),
+        actor_failure,
+    )
+    .await
+}
+
+async fn serve_with_consensus_probe_until(
+    public_listener: TcpListener,
+    public_app: axum::Router,
+    consensus_listener: TcpListener,
+    consensus_app: axum::Router,
+    shutdown: impl Future<Output = ()>,
+    actor_failure: impl Future<Output = ConsensusProbeError>,
+) -> std::io::Result<()> {
+    let (drain_tx, public_shutdown) = watch::channel(false);
     let consensus_shutdown = public_shutdown.clone();
     let public_server = async move {
         axum::serve(public_listener, public_app)
@@ -234,13 +335,21 @@ async fn serve_with_consensus_probe(
     };
     tokio::pin!(public_server);
     tokio::pin!(consensus_server);
+    tokio::pin!(shutdown);
+    tokio::pin!(actor_failure);
 
     let (public_finished, consensus_finished, first_result) = tokio::select! {
-        () = shutdown_signal() => (false, false, Ok(())),
+        biased;
+        error = &mut actor_failure => (
+            false,
+            false,
+            Err(std::io::Error::other(error)),
+        ),
+        () = &mut shutdown => (false, false, Ok(())),
         result = &mut public_server => (true, false, result),
         result = &mut consensus_server => (false, true, result),
     };
-    let _ = shutdown.send(true);
+    let _ = drain_tx.send(true);
     let drain_servers = async {
         let public_drain = async {
             if public_finished {
@@ -308,7 +417,109 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axum::{Router, extract::State, http::StatusCode, routing::get};
+    use tokio::sync::{Notify, oneshot};
+
     use super::*;
+
+    #[derive(Clone)]
+    struct DrainState {
+        started: Arc<AtomicUsize>,
+        release: Arc<Notify>,
+    }
+
+    async fn held_request(State(state): State<DrainState>) -> StatusCode {
+        state.started.fetch_add(1, Ordering::SeqCst);
+        state.release.notified().await;
+        StatusCode::NO_CONTENT
+    }
+
+    #[tokio::test]
+    async fn actor_failure_drains_both_http_servers_and_returns_the_cause() {
+        let public_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let public_address = public_listener.local_addr().unwrap();
+        let consensus_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let consensus_address = consensus_listener.local_addr().unwrap();
+        let state = DrainState {
+            started: Arc::new(AtomicUsize::new(0)),
+            release: Arc::new(Notify::new()),
+        };
+        let app = || {
+            Router::new()
+                .route("/held", get(held_request))
+                .with_state(state.clone())
+        };
+        let (failure_tx, failure_rx) = oneshot::channel();
+        let mut serving = tokio::spawn(serve_with_consensus_probe_until(
+            public_listener,
+            app(),
+            consensus_listener,
+            app(),
+            std::future::pending(),
+            async move {
+                failure_rx
+                    .await
+                    .expect("test actor failure should be delivered")
+            },
+        ));
+        let public_request = tokio::spawn(reqwest::get(format!("http://{public_address}/held")));
+        let consensus_request =
+            tokio::spawn(reqwest::get(format!("http://{consensus_address}/held")));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.started.load(Ordering::SeqCst) != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both requests should enter their handlers");
+
+        failure_tx
+            .send(ConsensusProbeError::ProfileApplication(
+                "injected supervision failure".into(),
+            ))
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut serving)
+                .await
+                .is_err(),
+            "server supervision should drain in-flight requests"
+        );
+        state.release.notify_waiters();
+
+        assert_eq!(
+            public_request.await.unwrap().unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            consensus_request.await.unwrap().unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+        let error = serving
+            .await
+            .expect("server supervisor should not panic")
+            .expect_err("actor failure must fail the server supervisor");
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(error.to_string().contains("injected supervision failure"));
+    }
+
+    #[tokio::test]
+    async fn operator_shutdown_remains_successful_while_the_actor_is_healthy() {
+        let public_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let consensus_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+        serve_with_consensus_probe_until(
+            public_listener,
+            Router::new(),
+            consensus_listener,
+            Router::new(),
+            std::future::ready(()),
+            std::future::pending::<ConsensusProbeError>(),
+        )
+        .await
+        .expect("operator shutdown should drain both healthy servers successfully");
+    }
 
     #[test]
     fn wal_segment_target_rejects_values_smaller_than_a_frame_header() {
@@ -400,6 +611,18 @@ mod tests {
     }
 
     #[test]
+    fn experimental_stream_tablet_requires_the_consensus_runtime() {
+        let args =
+            Args::try_parse_from(["epoch-node", "--experimental-stream-tablet-enabled"]).unwrap();
+        assert!(
+            consensus_probe_launch(&args)
+                .unwrap_err()
+                .to_string()
+                .contains("EPOCH_CONSENSUS_PROBE_ENABLED")
+        );
+    }
+
+    #[test]
     fn consensus_probe_uses_identity_scoped_stable_path() {
         let args = Args::try_parse_from([
             "epoch-node",
@@ -429,6 +652,32 @@ mod tests {
         assert_eq!(
             launch.stable_path,
             PathBuf::from("/tmp/epoch-probe-test/consensus/group-7/node-2.wal")
+        );
+        assert!(launch.stream_tablet_scope.is_none());
+    }
+
+    #[test]
+    fn experimental_stream_tablet_uses_the_consensus_group_scope() {
+        let args = Args::try_parse_from([
+            "epoch-node",
+            "--consensus-probe-enabled",
+            "--experimental-stream-tablet-enabled",
+            "--experimental-stream-tablet-name",
+            "orders",
+            "--consensus-node-id",
+            "2",
+            "--consensus-group-id",
+            "7",
+            "--consensus-group-epoch",
+            "3",
+            "--consensus-peers",
+            "1=http://127.0.0.1:7701,2=http://127.0.0.1:7702,3=http://127.0.0.1:7703",
+        ])
+        .unwrap();
+        let launch = consensus_probe_launch(&args).unwrap().unwrap();
+        assert_eq!(
+            launch.stream_tablet_scope,
+            Some(StreamTabletScope::new(7, 3, "orders").unwrap())
         );
     }
 }

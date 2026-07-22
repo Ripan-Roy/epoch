@@ -75,13 +75,17 @@ outcome, and publish commit-ahead-of-checkpoint recovery once. A separate
 three-process smoke proves minority non-commit, partition healing, identical
 receipts/digests, and one-voter plus all-voter `SIGKILL`/same-path reopen without
 duplicate receipt publication. An opt-in node runtime adds bounded real HTTP
-transport and opaque diagnostic status/propose/lookup endpoints, with a static
-three-container topology. Product profiles remain standalone. G3 remains open for a
-durable-majority acknowledgement and exhaustive crash matrix, snapshots,
-membership and authoritative epoch transitions, read barriers, authenticated
-transport,
-placement/repair, model and chaos reports, density, and performance. See
-[Consensus Feasibility Spike](CONSENSUS_SPIKE.md).
+transport and opaque diagnostic status/propose/lookup endpoints. A mutually
+exclusive experimental mode now applies one typed, single-partition Stream
+tablet after commit, rebuilds it from the complete proposal history before
+readiness, returns two-durable-voter evidence, and passes minority non-commit,
+leader-rebinding, catch-up, exact-retry, and all-container `SIGKILL`/reopen
+gates. Public product
+profiles remain standalone. G3 remains open for the exhaustive crash matrix,
+snapshots, membership and authoritative epoch transitions, read barriers,
+authenticated transport, placement/repair, model and chaos reports, density,
+and performance. See [Consensus Feasibility Spike](CONSENSUS_SPIKE.md) and
+[Experimental Stream Tablet](STREAM_TABLET.md).
 
 ## Cache and State
 
@@ -107,11 +111,11 @@ placement/repair, model and chaos reports, density, and performance. See
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
-| STREAM-001 | P0 | Partitioned append log and key routing | M1 prototype → M2 | Slice | G0, G1, G2, G4 | Segmented-WAL rotation/restart, global-sequence, single-writer, manifest-bounded active-suffix, missing/topology/content-corruption, activation, and legacy-fallback suites; pending: replicated partition recovery |
+| STREAM-001 | P0 | Partitioned append log and key routing | M1 prototype → M2 | Slice | G0, G1, G2, G4 | Standalone segmented-WAL suites plus typed partition-0 Raft command, identical three-voter apply history/digest, catch-up, and all-voter EPRS replay; pending: multi-partition tablet routing/recovery |
 | STREAM-002 | P0 | Time/size/combined retention | M1 basic → M2 | Slice | G0, G2, G4 | Physical byte-threshold rotation verified; this is not retention; pending: time/size/combined deletion semantics |
 | STREAM-003 | P0 | Consumer groups, offsets, lag, reset/replay | M2 | Slice | G0, G2, G3, G4, G5 | Local offset restart/lag suite; pending: coordinated group history |
-| STREAM-004 | P0 | Partition order and acknowledgement policy | M1 prototype → M2 | Slice | G0, G2, G3, G4 | fsync-before-apply failure + local restart; isolated in-memory consensus leader emits no commit before majority; pending: durable replicated ack matrix and profile integration |
-| STREAM-005 | P0 | Zone replication, election, ISR visibility | M1 prototype → M2 | Slice | G2, G3, G5 | Fixed-voter in-memory election, partition, replacement, heal, and tail catch-up history; pending: real replica/ISR visibility and node/zone chaos report |
+| STREAM-004 | P0 | Partition order and acknowledgement policy | M1 prototype → M2 | Slice | G0, G2, G3, G4 | Local fsync-before-apply plus experimental fixed-voter majority-before-local-profile-apply receipts (`durable_voter_acks=2`), minority non-commit, ordered offsets, semantic retry/rebinding, and conflict tests; pending: placement-aware public/multi-policy durable ack matrix |
+| STREAM-005 | P0 | Zone replication, election, ISR visibility | M1 prototype → M2 | Slice | G2, G3, G5 | Fixed-voter deterministic histories plus typed real-runtime/container leader replacement, old-voter catch-up, and all-voter `SIGKILL` replay; pending: placement domains and authenticated replica/ISR visibility |
 | STREAM-006 | P0 | Batching and required compression paths | M2 | Planned | G2, G4, G6 | Pending: round-trip corpus and compression benchmark |
 | STREAM-007 | P1 | Idempotent producer sequencing | M5 | Planned | G2, G3, G7 | Pending: duplicate/recovery history |
 | STREAM-008 | P1 | Transactions, atomic offsets, read-committed | M5 | Planned | G0, G2, G3, G7 | Pending: transaction model/history report |
@@ -170,7 +174,7 @@ placement/repair, model and chaos reports, density, and performance. See
 | MGD-001 | P1 | Serverless and dedicated choices | M4 | Planned | G4, G5, G8, G10 | Pending: topology/semantic/isolation matrix |
 | MGD-002 | P0 | Automatic placement and online rebalance | M1 prototype → M2 | Slice | G2, G3, G5 | Pending: constraint/rebalance chaos report |
 | MGD-003 | P1 | Policy-bound multidimensional autoscaling | M4 | Planned | G5, G8 | Pending: hysteresis/headroom load report |
-| MGD-004 | P0 | Multi-zone replicas and failover | M1 prototype → M2 | Slice | G2, G3, G5 | Deterministic fixed-voter in-memory leader replacement/catch-up; pending: placement, durable replicas, process/zone loss, and failover SLO report |
+| MGD-004 | P0 | Multi-zone replicas and failover | M1 prototype → M2 | Slice | G2, G3, G5 | Bounded fixed-voter evidence now includes EPRS persistence, real-runtime/container leader replacement, catch-up, minority non-commit, and all-voter `SIGKILL` replay; pending: placement domains, public durability policy, broader process/zone fault matrix, and failover SLO report |
 | MGD-005 | P1 | Geo DR, switch, promotion, failback | M4 → M5 | Planned | G3, G8, G9 | Pending: RPO/RTO and split-brain drill |
 | MGD-006 | P1 | Backup, validation, semantic PITR | M3 | Planned | G2, G5, G7, G8 | Pending: scheduled restore evidence |
 | MGD-007 | P1 | Guarded rolling upgrades | M5 | Planned | G3, G5, G6, G8, G10 | Pending: mixed-version stop/rollback drill |
@@ -218,7 +222,7 @@ placement/repair, model and chaos reports, density, and performance. See
 |---|---:|---|---|---|---|---|
 | DX-001 | P0 | Official Go, Java, and Python SDKs | M1 one SDK → M2 | Slice | G0, G1, G4, G10 | Go/Java/Python HTTP unit + independent exact-source crash/restart quickstarts, including selectable local Stream/Queue durability, and Go generated bindings; pending: native streaming contract/version matrix for all three |
 | DX-002 | P0 | Generated guarantee-aware API docs | M1 → M2 | Slice | G0, G1, G10 | Hand-authored guarantee/error guidance and exact executable Go/Java/Python examples are built as a docs-only Pages artifact; pending: generated API reference and full doc lint |
-| DX-003 | P0 | Deterministic single-binary emulator | M1 → M2 | Slice | G1, G2, G4, G10 | Seeded scheduler, virtual wall/monotonic clock, occurrence fault plan, directed partitionable peer transport, golden EPTR v1 serialization/digest, pinned transport history, fixed-voter consensus integration, a real-process EPRS/SIGKILL harness, and an opt-in node probe; pending: executable replay bundle, profile integration, and runnable emulator controls |
+| DX-003 | P0 | Deterministic single-binary emulator | M1 → M2 | Slice | G1, G2, G4, G10 | Seeded scheduler, virtual clocks/fault plan/transport, golden EPTR history, fixed-voter consensus, real-process EPRS/SIGKILL, opaque probe, and one typed Stream tablet; pending: executable replay bundle, remaining profiles, and runnable emulator controls |
 | DX-004 | P0 | Test containers and ephemeral namespaces | M1 → M2 | Slice | G1, G5, G10 | Unique three-node Compose project, independent ephemeral volumes, dynamically allocated loopback ports, failover/catch-up CI, and scoped cleanup; pending: broader parallel profile lifecycle/isolation matrix |
 | DX-005 | P1 | Audited/redacted console message browser | M3 → M4 | Planned | G5, G7, G8 | Pending: access/redaction/action audit matrix |
 | DX-006 | P0 | Explain live guarantees and cost drivers | M1 basic → M2 | Slice | G0, G3, G5 | Pending: live-state reconciliation suite |
@@ -242,9 +246,9 @@ placement/repair, model and chaos reports, density, and performance. See
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
 | PKG-001 | P0 | Selective four-profile Rust node | M1 scaffold → M4 complete | Slice | G1, G4, G10 | Pending: feature/config startup matrix |
-| PKG-002 | P0 | Shared engine/format standalone and cluster | M1 → M2 | Slice | G1, G2, G3, G10 | Checksummed v1 segmented standalone format, durable identity/manifest, fresh-layout activation, and no-migration legacy fallback verified; pending: cluster format equivalence |
+| PKG-002 | P0 | Shared engine/format standalone and cluster | M1 → M2 | Slice | G1, G2, G3, G10 | Checksummed segmented standalone format plus canonical typed Stream command applied from EPRS without a second clustered WAL; pending: supported standalone-to-cluster format/migration equivalence |
 | PKG-003 | P0 | Standalone without hosted Go services | M1 | Slice | G1, G2, G10 | Rust node restart/recovery test; pending: extended disconnected lifecycle suite |
-| PKG-004 | P0 | Three-node quorum/failover/placement | M1 prototype → M2 | Slice | G2, G3, G10 | Fixed-three-voter deterministic histories, real child-process EPRS partition/SIGKILL/reopen smoke, and three-node HTTP/Compose opaque probe; pending: profile durable quorum, placement, exhaustive process faults, and published three-node report |
+| PKG-004 | P0 | Three-node quorum/failover/placement | M1 prototype → M2 | Slice | G2, G3, G10 | Deterministic and real-process EPRS histories, opaque HTTP probe, plus typed Stream majority commit, failover, catch-up, and three-container `SIGKILL` replay; pending: public multi-tablet quorum, placement, exhaustive faults, and published report |
 | PKG-005 | P0 | OCI, Kubernetes dev, signed binaries | M1 dev → M2 | Slice | G1, G5, G10 | Pending: clean-install/signature/SBOM CI |
 | PKG-006 | P1 | Rust embedded engine with guarantee ceiling | M2 experimental → M3 | Planned | G0, G1, G2, G10 | Pending: lifecycle/persistence contract suite |
 | PKG-007 | P1 | Supervised sidecar/child for other languages | M2 → M3 | Planned | G1, G5, G10 | Pending: crash/isolation/upgrade matrix |

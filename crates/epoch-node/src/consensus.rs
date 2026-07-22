@@ -1,9 +1,10 @@
 //! Experimental fixed-three-voter consensus probe runtime.
 //!
-//! This module deliberately does not replicate Epoch profile data. It gives the
-//! persistent consensus adapter a bounded, private transport and a small
-//! diagnostic API so that process-level Raft behavior can be exercised without
-//! raising the standalone engine's durability guarantee.
+//! The default probe deliberately does not replicate Epoch profile data. An
+//! opt-in typed profile applier can consume committed commands on the actor
+//! thread, while the persistent adapter remains the authoritative replay log.
+//! Both modes keep the transport private and do not raise the standalone
+//! engine's durability guarantee.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -63,7 +64,7 @@ type OutboundSenders = BTreeMap<NodeId, OutboundPeer>;
 type OutboundHealthRegistry = Arc<BTreeMap<NodeId, Arc<OutboundPeerHealth>>>;
 type OutboundWorkers = Vec<(NodeId, JoinHandle<()>)>;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum ConsensusProbeError {
     #[error("invalid consensus probe configuration: {0}")]
     InvalidConfiguration(String),
@@ -83,6 +84,20 @@ pub enum ConsensusProbeError {
     RuntimeShutdown(String),
     #[error("peer request must use content-type application/octet-stream")]
     UnsupportedPeerContentType,
+    #[error("committed profile command could not be applied: {0}")]
+    ProfileApplication(String),
+}
+
+/// Applies consensus-decoded commands to a profile state machine.
+///
+/// Implementations must be deterministic and idempotent. Recovery replays the
+/// complete committed history before the runtime reports ready, while live
+/// application runs on the consensus actor thread before a commit notification
+/// or successful lookup can be observed by the typed profile boundary.
+pub trait CommittedProposalApplier: fmt::Debug + Send + Sync + 'static {
+    fn replay(&self, committed: &[CommittedProposal]) -> Result<(), String>;
+
+    fn apply(&self, committed: &CommittedProposal) -> Result<(), String>;
 }
 
 /// Validated configuration for one fixed-three-voter probe group.
@@ -417,6 +432,11 @@ enum ActorCommand {
     AppliedProposals {
         reply: ActorReply<Vec<CommittedProposal>>,
     },
+    #[cfg(test)]
+    InjectFailure {
+        error: ConsensusProbeError,
+        reply: ActorReply<()>,
+    },
     Shutdown {
         reply: oneshot::Sender<()>,
     },
@@ -526,6 +546,12 @@ impl ConsensusProbeHandle {
             .map_err(|_| ConsensusProbeError::ActorUnavailable)
     }
 
+    #[cfg(test)]
+    async fn inject_failure(&self, error: ConsensusProbeError) -> ConsensusProbeResult<()> {
+        self.request(|reply| ActorCommand::InjectFailure { error, reply })
+            .await
+    }
+
     fn try_shutdown_actor(&self) {
         let (reply, _response) = oneshot::channel();
         let _ = self.commands.try_send(ActorCommand::Shutdown { reply });
@@ -606,6 +632,7 @@ pub fn spawn_periodic_ticks(
 pub struct ConsensusProbeRuntime {
     handle: ConsensusProbeHandle,
     recovery: PersistentRecovery,
+    actor_failure: watch::Receiver<Option<ConsensusProbeError>>,
     tick_task: Option<PeriodicTickHandle>,
     actor_thread: Option<thread::JoinHandle<()>>,
     outbound_workers: OutboundWorkers,
@@ -627,26 +654,57 @@ impl ConsensusProbeRuntime {
         config: ConsensusProbeConfig,
         stable_path: impl AsRef<Path>,
     ) -> ConsensusProbeResult<Self> {
+        Self::start_with_applier(config, stable_path, None).await
+    }
+
+    pub async fn start_with_profile_applier(
+        config: ConsensusProbeConfig,
+        stable_path: impl AsRef<Path>,
+        applier: Arc<dyn CommittedProposalApplier>,
+    ) -> ConsensusProbeResult<Self> {
+        Self::start_with_applier(config, stable_path, Some(applier)).await
+    }
+
+    async fn start_with_applier(
+        config: ConsensusProbeConfig,
+        stable_path: impl AsRef<Path>,
+        applier: Option<Arc<dyn CommittedProposalApplier>>,
+    ) -> ConsensusProbeResult<Self> {
         let stable_path = stable_path.as_ref().to_path_buf();
         let client = build_outbound_client()?;
         let (outbound, outbound_health, mut outbound_workers) =
             spawn_outbound_workers(&config, &client)?;
         let (commands, command_receiver) = mpsc::channel(config.command_queue_capacity);
         let (commits, _) = broadcast::channel(COMMIT_NOTIFICATION_CAPACITY);
+        let (actor_failure, actor_failure_receiver) = watch::channel(None);
         let (initialized, initialization) = oneshot::channel();
         let actor_commits = commits.clone();
         let actor_config = config.clone();
+        let actor_applier = applier.clone();
         let actor_thread = match thread::Builder::new()
             .name(format!("epoch-consensus-{}", config.node_id))
             .spawn(move || {
-                run_persistent_actor(
-                    stable_path,
-                    &actor_config,
-                    &outbound,
-                    &actor_commits,
-                    command_receiver,
-                    initialized,
-                );
+                let actor_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_persistent_actor(
+                        stable_path,
+                        &actor_config,
+                        &outbound,
+                        &actor_commits,
+                        actor_applier.as_deref(),
+                        command_receiver,
+                        initialized,
+                    )
+                }));
+                match actor_result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        actor_failure.send_replace(Some(error));
+                    }
+                    Err(payload) => {
+                        actor_failure.send_replace(Some(ConsensusProbeError::ActorPanicked));
+                        std::panic::resume_unwind(payload);
+                    }
+                }
             }) {
             Ok(actor_thread) => actor_thread,
             Err(error) => {
@@ -680,6 +738,7 @@ impl ConsensusProbeRuntime {
         Ok(Self {
             handle,
             recovery,
+            actor_failure: actor_failure_receiver,
             tick_task: Some(tick_task),
             actor_thread: Some(actor_thread),
             outbound_workers,
@@ -700,6 +759,23 @@ impl ConsensusProbeRuntime {
 
     pub fn experimental_router(&self) -> Router {
         experimental_consensus_router(self.handle())
+    }
+
+    /// Waits until the actor terminates abnormally and returns its root cause.
+    ///
+    /// Ordered shutdown does not publish a failure, so callers can race this
+    /// future against their normal process-shutdown signal without turning an
+    /// operator-requested stop into an error.
+    pub async fn wait_for_actor_failure(&self) -> ConsensusProbeError {
+        let mut actor_failure = self.actor_failure.clone();
+        loop {
+            if let Some(error) = actor_failure.borrow().clone() {
+                return error;
+            }
+            if actor_failure.changed().await.is_err() {
+                return ConsensusProbeError::ActorUnavailable;
+            }
+        }
     }
 
     pub async fn shutdown(mut self) -> ConsensusProbeResult<()> {
@@ -769,9 +845,10 @@ fn run_persistent_actor(
     config: &ConsensusProbeConfig,
     outbound: &OutboundSenders,
     commits: &broadcast::Sender<CommittedProposal>,
+    applier: Option<&dyn CommittedProposalApplier>,
     mut commands: mpsc::Receiver<ActorCommand>,
     initialized: oneshot::Sender<ConsensusProbeResult<PersistentRecovery>>,
-) {
+) -> ConsensusProbeResult<()> {
     let PersistentOpenResult {
         mut adapter,
         output,
@@ -784,72 +861,121 @@ fn run_persistent_actor(
     ) {
         Ok(opened) => opened,
         Err(error) => {
-            let _ = initialized.send(Err(error.into()));
-            return;
+            let error = ConsensusProbeError::from(error);
+            let _ = initialized.send(Err(error.clone()));
+            return Err(error);
         }
     };
     let recovery = adapter.recovery();
-    if let Err(error) = publish_output(output, outbound, commits) {
-        let _ = initialized.send(Err(error));
-        return;
+    if let Some(applier) = applier
+        && let Err(error) = applier.replay(adapter.applied_proposals())
+    {
+        let error = ConsensusProbeError::ProfileApplication(error);
+        let _ = initialized.send(Err(error.clone()));
+        return Err(error);
+    }
+    // `PersistentRaftAdapter::open` has already included recovery commits in
+    // `applied_proposals`, so replay above is authoritative. Publish only its
+    // peer work/notifications here to avoid treating recovery output as a new
+    // profile transition.
+    if let Err(error) = publish_output(output, outbound, commits, None) {
+        let _ = initialized.send(Err(error.clone()));
+        return Err(error);
     }
     if initialized.send(Ok(recovery)).is_err() {
-        return;
+        return Ok(());
     }
 
     while let Some(command) = commands.blocking_recv() {
-        match command {
-            ActorCommand::Status { reply } => {
-                let _ = reply.send(Ok(adapter.status()));
-            }
-            ActorCommand::Campaign { reply } => {
-                let result = adapter
-                    .campaign()
-                    .map_err(Into::into)
-                    .and_then(|output| publish_output(output, outbound, commits));
-                let _ = reply.send(result);
-            }
-            ActorCommand::Tick { reply } => {
-                let result = adapter
-                    .tick()
-                    .map_err(Into::into)
-                    .and_then(|output| publish_output(output, outbound, commits));
-                let _ = reply.send(result);
-            }
-            ActorCommand::Propose { proposal, reply } => {
-                let proposal_id = proposal.proposal_id;
-                let result = adapter
-                    .propose(proposal)
-                    .map_err(Into::into)
-                    .and_then(|output| publish_output(output, outbound, commits))
-                    .map(|_| adapter.lookup_proposal(proposal_id));
-                let _ = reply.send(result);
-            }
-            ActorCommand::Receive { message, reply } => {
-                let result = adapter
-                    .receive(message)
-                    .map_err(Into::into)
-                    .and_then(|output| publish_output(output, outbound, commits));
-                let _ = reply.send(result);
-            }
-            ActorCommand::Lookup { proposal_id, reply } => {
-                let _ = reply.send(Ok(adapter.lookup_proposal(proposal_id)));
-            }
-            ActorCommand::AppliedProposals { reply } => {
-                let _ = reply.send(Ok(adapter.applied_proposals().to_vec()));
-            }
-            ActorCommand::Shutdown { reply } => {
-                let _ = reply.send(());
-                break;
-            }
+        if handle_actor_command(&mut adapter, outbound, commits, applier, command)?
+            == ActorDirective::Shutdown
+        {
+            return Ok(());
         }
     }
+    Err(ConsensusProbeError::ActorUnavailable)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActorDirective {
+    Continue,
+    Shutdown,
+}
+
+fn handle_actor_command(
+    adapter: &mut PersistentRaftAdapter,
+    outbound: &OutboundSenders,
+    commits: &broadcast::Sender<CommittedProposal>,
+    applier: Option<&dyn CommittedProposalApplier>,
+    command: ActorCommand,
+) -> ConsensusProbeResult<ActorDirective> {
+    match command {
+        ActorCommand::Status { reply } => {
+            let _ = reply.send(Ok(adapter.status()));
+        }
+        ActorCommand::Campaign { reply } => {
+            let result = adapter
+                .campaign()
+                .map_err(Into::into)
+                .and_then(|output| publish_output(output, outbound, commits, applier));
+            deliver_actor_result(adapter, reply, result)?;
+        }
+        ActorCommand::Tick { reply } => {
+            let result = adapter
+                .tick()
+                .map_err(Into::into)
+                .and_then(|output| publish_output(output, outbound, commits, applier));
+            deliver_actor_result(adapter, reply, result)?;
+        }
+        ActorCommand::Propose { proposal, reply } => {
+            let proposal_id = proposal.proposal_id;
+            let result = adapter
+                .propose(proposal)
+                .map_err(Into::into)
+                .and_then(|output| publish_output(output, outbound, commits, applier))
+                .map(|_| adapter.lookup_proposal(proposal_id));
+            deliver_actor_result(adapter, reply, result)?;
+        }
+        ActorCommand::Receive { message, reply } => {
+            let result = adapter
+                .receive(message)
+                .map_err(Into::into)
+                .and_then(|output| publish_output(output, outbound, commits, applier));
+            deliver_actor_result(adapter, reply, result)?;
+        }
+        ActorCommand::Lookup { proposal_id, reply } => {
+            let _ = reply.send(Ok(adapter.lookup_proposal(proposal_id)));
+        }
+        ActorCommand::AppliedProposals { reply } => {
+            let _ = reply.send(Ok(adapter.applied_proposals().to_vec()));
+        }
+        #[cfg(test)]
+        ActorCommand::InjectFailure { error, reply } => {
+            deliver_actor_result(adapter, reply, Err(error))?;
+        }
+        ActorCommand::Shutdown { reply } => {
+            let _ = reply.send(());
+            return Ok(ActorDirective::Shutdown);
+        }
+    }
+    Ok(ActorDirective::Continue)
+}
+
+fn deliver_actor_result<T>(
+    adapter: &PersistentRaftAdapter,
+    reply: ActorReply<T>,
+    result: ConsensusProbeResult<T>,
+) -> ConsensusProbeResult<()> {
+    let failure = fatal_actor_failure(adapter, &result);
+    let _ = reply.send(result);
+    failure.map_or(Ok(()), Err)
 }
 
 fn publish_output(
     output: ConsensusOutput,
     outbound: &OutboundSenders,
     commits: &broadcast::Sender<CommittedProposal>,
+    applier: Option<&dyn CommittedProposalApplier>,
 ) -> ConsensusProbeResult<ConsensusStatus> {
     for message in output.messages {
         let destination = message.to();
@@ -887,12 +1013,36 @@ fn publish_output(
         }
     }
     for commit in output.commits {
+        if let Some(applier) = applier {
+            applier
+                .apply(&commit)
+                .map_err(ConsensusProbeError::ProfileApplication)?;
+        }
         // The adapter remains the authoritative replayable record. Broadcast is
         // only a low-latency notification; late consumers can call
         // `applied_proposals` or `lookup`.
         let _ = commits.send(commit);
     }
     Ok(output.status)
+}
+
+fn fatal_actor_failure<T>(
+    adapter: &PersistentRaftAdapter,
+    result: &ConsensusProbeResult<T>,
+) -> Option<ConsensusProbeError> {
+    let error = result.as_ref().err()?;
+    let fatal = adapter.status().fail_stopped
+        || matches!(
+            error,
+            ConsensusProbeError::ProfileApplication(_)
+                | ConsensusProbeError::OutboundUnavailable(_)
+                | ConsensusProbeError::Consensus(
+                    ConsensusError::Poisoned(_)
+                        | ConsensusError::Storage(_)
+                        | ConsensusError::InvalidState(_)
+                )
+        );
+    fatal.then(|| error.clone())
 }
 
 fn spawn_outbound_workers(
@@ -1260,7 +1410,7 @@ impl ConsensusProbeProposalResponse {
     fn from_lookup(proposal_id: u64, lookup: ProposalLookup) -> Self {
         let (state, commit) = match lookup {
             ProposalLookup::Unknown => (ConsensusProbeProposalState::Unknown, None),
-            ProposalLookup::Pending => (ConsensusProbeProposalState::Pending, None),
+            ProposalLookup::Pending { .. } => (ConsensusProbeProposalState::Pending, None),
             ProposalLookup::Committed(committed) => (
                 ConsensusProbeProposalState::Committed,
                 Some(ConsensusProbeCommit::new(
@@ -1329,6 +1479,7 @@ impl IntoResponse for ConsensusProbeApiError {
             ) => (StatusCode::CONFLICT, "proposal_conflict", None),
             ConsensusProbeError::ActorUnavailable
             | ConsensusProbeError::OutboundUnavailable(_)
+            | ConsensusProbeError::ProfileApplication(_)
             | ConsensusProbeError::Consensus(
                 ConsensusError::Poisoned(_) | ConsensusError::Storage(_),
             ) => (
@@ -1464,7 +1615,7 @@ mod tests {
         ]);
         let (commits, _) = broadcast::channel(1);
 
-        let status = publish_output(output, &outbound, &commits)
+        let status = publish_output(output, &outbound, &commits, None)
             .expect("initial output should be dispatched before initialization");
 
         assert_eq!(status.node_id, voters[0]);
@@ -1499,6 +1650,72 @@ mod tests {
             .await
             .expect("runtime should start");
         (directory, runtime)
+    }
+
+    #[tokio::test]
+    async fn expected_request_errors_do_not_stop_the_actor() {
+        let (_directory, runtime) = runtime().await;
+        let handle = runtime.handle();
+        let proposal_id = ProposalId::new(41).unwrap();
+        let expected = [
+            ConsensusProbeError::Consensus(ConsensusError::NotLeader {
+                leader_hint: Some(NodeId::new(2).unwrap()),
+            }),
+            ConsensusProbeError::Consensus(ConsensusError::StaleTerm {
+                current: Term::new(2),
+                observed: Term::new(1),
+            }),
+            ConsensusProbeError::Consensus(ConsensusError::DuplicateProposal(proposal_id)),
+            ConsensusProbeError::Consensus(ConsensusError::ConflictingProposal(proposal_id)),
+            ConsensusProbeError::Consensus(ConsensusError::Unsupported(
+                "unsupported peer capability".into(),
+            )),
+        ];
+
+        for error in expected {
+            let expected_message = error.to_string();
+            let returned = handle.inject_failure(error).await.unwrap_err();
+            assert_eq!(returned.to_string(), expected_message);
+            handle
+                .status()
+                .await
+                .expect("an expected request error must leave the actor available");
+        }
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fatal_storage_error_is_published_and_stops_the_actor() {
+        let (_directory, runtime) = runtime().await;
+        let handle = runtime.handle();
+        let injected_message = "injected stable-store failure";
+
+        let result = handle
+            .inject_failure(ConsensusProbeError::Consensus(ConsensusError::Storage(
+                injected_message.into(),
+            )))
+            .await;
+        assert!(matches!(
+            result,
+            Err(ConsensusProbeError::Consensus(ConsensusError::Storage(ref message)))
+                if message == injected_message
+        ));
+
+        let failure =
+            tokio::time::timeout(Duration::from_secs(2), runtime.wait_for_actor_failure())
+                .await
+                .expect("fatal actor failure should be supervised");
+        assert!(matches!(
+            failure,
+            ConsensusProbeError::Consensus(ConsensusError::Storage(ref message))
+                if message == injected_message
+        ));
+        assert!(matches!(
+            handle.status().await,
+            Err(ConsensusProbeError::ActorUnavailable)
+        ));
+
+        let _ = runtime.shutdown().await;
     }
 
     #[tokio::test]
@@ -1788,12 +2005,33 @@ mod tests {
         servers: Vec<Option<JoinHandle<()>>>,
     }
 
+    #[derive(Debug)]
+    struct RejectingProfileApplier;
+
+    impl CommittedProposalApplier for RejectingProfileApplier {
+        fn replay(&self, _committed: &[CommittedProposal]) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn apply(&self, _committed: &CommittedProposal) -> Result<(), String> {
+            Err("injected profile apply failure".into())
+        }
+    }
+
     impl TestProbeCluster {
         async fn start() -> Self {
             Self::start_with_outbound_queue_capacity(DEFAULT_OUTBOUND_QUEUE_CAPACITY).await
         }
 
         async fn start_with_outbound_queue_capacity(outbound_queue_capacity: usize) -> Self {
+            Self::start_with_appliers(outbound_queue_capacity, vec![None, None, None]).await
+        }
+
+        async fn start_with_appliers(
+            outbound_queue_capacity: usize,
+            appliers: Vec<Option<Arc<dyn CommittedProposalApplier>>>,
+        ) -> Self {
+            assert_eq!(appliers.len(), 3, "one applier slot is required per voter");
             let listeners = bind_three_listeners().await;
             let peers = listeners
                 .iter()
@@ -1827,11 +2065,13 @@ mod tests {
                 .expect("cluster config should be valid")
                 .with_queue_capacities(DEFAULT_COMMAND_QUEUE_CAPACITY, outbound_queue_capacity)
                 .expect("cluster queue capacities should be valid");
-                let runtime = ConsensusProbeRuntime::start(
-                    config,
-                    directories[index].path().join("raft.wal"),
-                )
-                .await
+                let stable_path = directories[index].path().join("raft.wal");
+                let runtime = if let Some(applier) = appliers[index].clone() {
+                    ConsensusProbeRuntime::start_with_profile_applier(config, stable_path, applier)
+                        .await
+                } else {
+                    ConsensusProbeRuntime::start(config, stable_path).await
+                }
                 .expect("probe runtime should start");
                 let router = runtime.internal_router();
                 servers.push(Some(tokio::spawn(async move {
@@ -1880,6 +2120,16 @@ mod tests {
             for server in self.servers.into_iter().flatten() {
                 server.abort();
                 let _ = server.await;
+            }
+        }
+
+        async fn shutdown_after_actor_failure(self) {
+            for server in self.servers.into_iter().flatten() {
+                server.abort();
+                let _ = server.await;
+            }
+            for runtime in self.runtimes {
+                let _ = runtime.shutdown().await;
             }
         }
     }
@@ -1944,6 +2194,36 @@ mod tests {
         .expect("proposal should commit on all three nodes")
     }
 
+    async fn propose_through_current_leader(
+        handles: &[ConsensusProbeHandle],
+        proposal_id: u64,
+        payload: Vec<u8>,
+    ) -> ProposalLookup {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            'proposal: loop {
+                for handle in handles {
+                    let status = handle.status().await.expect("status should be available");
+                    if status.role != ConsensusRole::Leader {
+                        continue;
+                    }
+                    match handle
+                        .propose(proposal_id, status.term.get(), payload.clone())
+                        .await
+                    {
+                        Ok(lookup) => break 'proposal lookup,
+                        Err(ConsensusProbeError::Consensus(
+                            ConsensusError::NotLeader { .. } | ConsensusError::StaleTerm { .. },
+                        )) => {}
+                        Err(error) => panic!("current leader should accept the proposal: {error}"),
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a live majority leader should accept the proposal")
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn three_probe_runtimes_elect_and_commit_over_real_http() {
         let cluster = TestProbeCluster::start().await;
@@ -1958,7 +2238,7 @@ mod tests {
             .expect("leader should accept the probe proposal");
         assert!(matches!(
             proposed,
-            ProposalLookup::Pending | ProposalLookup::Committed(_)
+            ProposalLookup::Pending { .. } | ProposalLookup::Committed(_)
         ));
 
         let committed = wait_for_commit(&handles, proposal_id).await;
@@ -1969,6 +2249,51 @@ mod tests {
             assert_eq!(committed.payload, payload);
         }
         cluster.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn live_profile_apply_failure_is_observable_by_the_runtime() {
+        let appliers = (0..3)
+            .map(|_| Some(Arc::new(RejectingProfileApplier) as Arc<dyn CommittedProposalApplier>))
+            .collect();
+        let cluster =
+            TestProbeCluster::start_with_appliers(DEFAULT_OUTBOUND_QUEUE_CAPACITY, appliers).await;
+        let handles = cluster.handles();
+        let (leader_index, leader_status) = wait_for_leader(&handles).await;
+
+        let proposed = handles[leader_index]
+            .propose(
+                51,
+                leader_status.term.get(),
+                b"rejected-profile-command".to_vec(),
+            )
+            .await;
+        assert!(
+            matches!(
+                proposed,
+                Ok(ProposalLookup::Pending { .. } | ProposalLookup::Committed(_))
+                    | Err(ConsensusProbeError::ProfileApplication(_))
+            ),
+            "the proposal should reach profile application: {proposed:?}"
+        );
+
+        let failure = tokio::time::timeout(
+            Duration::from_secs(5),
+            cluster.runtimes[leader_index].wait_for_actor_failure(),
+        )
+        .await
+        .expect("actor failure should be published");
+        assert!(matches!(
+            failure,
+            ConsensusProbeError::ProfileApplication(ref message)
+                if message == "injected profile apply failure"
+        ));
+        assert!(matches!(
+            handles[leader_index].status().await,
+            Err(ConsensusProbeError::ActorUnavailable)
+        ));
+
+        cluster.shutdown_after_actor_failure().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2008,34 +2333,32 @@ mod tests {
             ConsensusProbeTransportCondition::Degraded
         );
 
-        let leader_status =
+        let responsive_status =
             tokio::time::timeout(Duration::from_millis(250), handles[leader_index].status())
                 .await
                 .expect("a saturated minority queue must not block the Raft actor")
-                .expect("leader status should remain available");
-        assert_eq!(leader_status.role, ConsensusRole::Leader);
+                .expect("original leader status should remain available");
+        assert!(!responsive_status.fail_stopped);
 
         let majority = vec![
             handles[leader_index].clone(),
             handles[healthy_index].clone(),
         ];
+        let dropped_before_workload = majority
+            .iter()
+            .map(|handle| peer_transport_status(handle, failed_peer_id).dropped_queue_full_frames)
+            .sum::<u64>();
         tokio::time::timeout(Duration::from_secs(5), async {
             for proposal_id in 100..108 {
-                let status = handles[leader_index]
-                    .status()
-                    .await
-                    .expect("leader status should remain available");
-                let proposed = handles[leader_index]
-                    .propose(
-                        proposal_id,
-                        status.term.get(),
-                        format!("minority-outage-{proposal_id}").into_bytes(),
-                    )
-                    .await
-                    .expect("healthy majority should accept a proposal");
+                let proposed = propose_through_current_leader(
+                    &majority,
+                    proposal_id,
+                    format!("minority-outage-{proposal_id}").into_bytes(),
+                )
+                .await;
                 assert!(matches!(
                     proposed,
-                    ProposalLookup::Pending | ProposalLookup::Committed(_)
+                    ProposalLookup::Pending { .. } | ProposalLookup::Committed(_)
                 ));
                 let _ = wait_for_commit(&majority, proposal_id).await;
             }
@@ -2043,9 +2366,12 @@ mod tests {
         .await
         .expect("healthy majority should keep committing while one peer stays unavailable");
 
-        let final_transport = peer_transport_status(&handles[leader_index], failed_peer_id);
+        let dropped_after_workload = majority
+            .iter()
+            .map(|handle| peer_transport_status(handle, failed_peer_id).dropped_queue_full_frames)
+            .sum::<u64>();
         assert!(
-            final_transport.dropped_queue_full_frames > saturated.dropped_queue_full_frames,
+            dropped_after_workload > dropped_before_workload,
             "the minority outage should remain active throughout the commit workload"
         );
         cluster.shutdown().await;

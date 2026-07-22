@@ -339,7 +339,9 @@ fn proposal_is_reported_only_after_a_majority_commit() {
     assert_eq!(cluster.observed_commit_ids(node(1)), Vec::new());
     assert_eq!(
         cluster.nodes[&node(1)].lookup_proposal(proposal(1)),
-        ProposalLookup::Pending
+        ProposalLookup::Pending {
+            payload: b"needs-majority".to_vec()
+        }
     );
 
     cluster.heal_all();
@@ -390,7 +392,9 @@ fn pending_proposal_survives_a_graceful_memory_state_restart() {
     cluster.propose(node(1), 10, b"pending-across-restart");
     assert_eq!(
         cluster.nodes[&node(1)].lookup_proposal(proposal(10)),
-        ProposalLookup::Pending
+        ProposalLookup::Pending {
+            payload: b"pending-across-restart".to_vec()
+        }
     );
 
     cluster.stop(node(1));
@@ -398,7 +402,9 @@ fn pending_proposal_survives_a_graceful_memory_state_restart() {
 
     assert_eq!(
         cluster.nodes[&node(1)].lookup_proposal(proposal(10)),
-        ProposalLookup::Pending
+        ProposalLookup::Pending {
+            payload: b"pending-across-restart".to_vec()
+        }
     );
     assert_eq!(cluster.observed_commit_ids(node(1)), Vec::new());
 }

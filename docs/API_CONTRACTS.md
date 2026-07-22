@@ -427,21 +427,64 @@ These routes have no CORS layer, TLS, authentication, SDK commitment, or
 product-profile semantics. They do not change the standalone API's receipt or
 durability contract. See [Experimental Consensus Probe](CONSENSUS_PROBE.md).
 
-This is still a single-node journal slice, not the final tablet consensus log.
-It has no snapshot/compaction path, quorum, replica acknowledgement, segment
-retention/deletion, or protection from loss of the host and its storage.
+When `EPOCH_EXPERIMENTAL_STREAM_TABLET_ENABLED=true`, opaque proposal routes are
+not mounted on that group. The listener instead exposes:
+
+- `GET /experimental/v1/tablets/stream/status` for local Raft positions and the
+  last unique typed mutation index applied to the profile;
+- `POST /experimental/v1/tablets/stream/records` for a typed partition-0 append
+  with `idempotency_key` and `expected_term`; unknown top-level or nested
+  envelope fields are rejected;
+- `GET /experimental/v1/tablets/stream/records` for explicitly stale-capable
+  local committed reads; and
+- `GET /experimental/v1/tablets/stream/mutations/{proposal_id}` for unknown,
+  pending, or committed outcome resolution.
+
+JSON syntax, media-type, body-limit, and schema extraction failures use the
+same structured `invalid_request` error envelope and are definitely not
+committed. Status samples the profile before requesting the actor's consensus
+snapshot and rejects an inconsistent result, so `last_profile_mutation_index`
+never exceeds `consensus_applied_index` in one document.
+
+The typed receipt separates Raft commit index from Stream offset and reports
+`write_evidence: fixed_voter_majority_persisted` with
+`durable_voter_acks: 2` only after a fixed three-voter majority is durably
+committed and the local tablet has applied the command. This is bounded
+trusted-topology evidence, not a claim against spoofed peers and not the PRD's
+placement-aware `quorum_durable` profile.
+All 64-bit identities, positions, and envelope timestamps are exact decimal
+strings in typed JSON. The append endpoint accepts decimal strings for
+`expected_term`, `time_ms`, `deliver_at_ms`, and `ttl_ms`. Proposal IDs use the
+same representation in the mutation-status URL.
+A bounded unresolved wait returns `202`, preserving local `unknown` versus
+`pending` state while keeping outcome certainty unknown. Exact retries return
+the original offset; changed input under the same key is a conflict, and every
+notification/lookup is checked against that semantic input before a receipt is
+returned. `not_leader`, `stale_term`, and idempotency-conflict errors have
+unknown global outcome certainty. Startup replays the full committed proposal
+history before the typed status route becomes ready. A live deterministic apply
+failure drains both listeners and exits the process. See
+[Experimental Stream Tablet](STREAM_TABLET.md).
+
+Neither experimental mode is the final tablet service. Snapshots/compaction,
+retention deletion, dynamic membership, placement, read barriers, authenticated
+transport, public routing, and SDK support remain absent. The standalone engine
+journal remains a separate single-node source of truth and is never used by the
+experimental replicated tablet.
 
 Initial `epoch.v1` Protobuf source defines common resource/envelope types and a
 small `RegionalAdminService`; Buf generation is configured for Go. It is an
 early boundary scaffold, not the complete package split or native data API in
 this document. No gRPC server is running, and port 7600 is only reserved.
 
-TLS/authentication metadata, typed `google.rpc.Status` details, mutation-status
-lookup, streaming credit, a Rust regional administration implementation,
-long-running operations, metrics on the reserved port, protocol gateways, full
-Go/Java/Python generated SDK parity and compatibility negotiation remain
-unimplemented. Typed Go, Java, and Python clients cover the provisional HTTP
-routes, including explicit local Stream and Queue durability. All three use
+TLS/authentication metadata, typed `google.rpc.Status` details, public native
+mutation-status lookup, streaming credit, a Rust regional administration
+implementation, long-running operations, metrics on the reserved port, protocol
+gateways, full Go/Java/Python generated SDK parity and compatibility negotiation
+remain unimplemented. The experimental tablet has only the local mutation lookup
+described above. Typed Go, Java, and Python clients cover the provisional
+standalone profile HTTP routes, including explicit local Stream and Queue
+durability; they do not cover the experimental tablet listener. All three use
 injectable transport boundaries and run against the real standalone node;
 the exact quickstarts displayed by the documentation each drive an independent
 seed, forced process crash, restart, and recovery proof in CI. Browser calls are
