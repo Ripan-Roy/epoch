@@ -49,6 +49,19 @@ class EpochClientTests(unittest.TestCase):
         _, _, body, _ = self.transport.requests[-1]
         self.assertEqual(body["durability"], "local_durable")
 
+    def test_queue_create_can_request_local_durability(self) -> None:
+        self.client.create_queue("jobs", durability="local_durable")
+
+        method, path, body, _ = self.transport.requests[-1]
+        self.assertEqual((method, path), ("POST", "/v1/queues/jobs"))
+        self.assertEqual(body["durability"], "local_durable")
+
+    def test_queue_create_defaults_to_volatile(self) -> None:
+        self.client.create_queue("jobs")
+
+        _, _, body, _ = self.transport.requests[-1]
+        self.assertEqual(body["durability"], "volatile")
+
     def test_event_envelope_maps_python_name_to_wire_type(self) -> None:
         event = EventEnvelope(
             id="order-1",

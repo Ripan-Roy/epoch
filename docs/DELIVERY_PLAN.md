@@ -84,7 +84,7 @@ The traceability register marks the following as **Slice**. A Slice entry can be
 | Cache slice | Rust | One memory shard, core types, TTL, eviction, atomic batch, pipeline, snapshot | Linearizability, expiry, eviction, restore tests |
 | Route slice | Rust | Envelope-normalized direct/fan-out delivery into a queue or stream | Route truth table and backpressure test |
 | Standalone and cluster lifecycle | Rust | One selectable node binary, local admin API, truthful mode/guarantee health | Disconnected standalone and three-node smoke suites |
-| CLI, SDK, emulator | Rust plus one SDK language | Create, append/publish, consume/ack, inspect, deterministic local testing | Executable quickstarts in CI |
+| CLI, SDK, emulator | Rust, Go, Java, Python | Create, append/publish, consume/ack, inspect, deterministic local testing | Cross-language executable quickstarts in CI |
 | Control-plane contract scaffold | Go | Reconciler skeleton that uses only gRPC contracts; no record-path ownership | Boundary test and dependency audit |
 | Trust and diagnostics baseline | Rust | mTLS-ready identity boundary, audit event skeleton, golden metrics/traces, explain output | Required-event/metric fault assertions |
 | Packaging | Release tooling | Development OCI image, Kubernetes dev manifest, signed development binary/SBOM path | Clean-room install and signature CI |

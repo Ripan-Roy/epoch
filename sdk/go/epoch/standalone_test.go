@@ -26,6 +26,13 @@ func TestStandaloneSmoke(t *testing.T) {
 	if health["status"] != "ok" {
 		t.Fatalf("node is not healthy: %#v", health)
 	}
+	queueConfig := DefaultQueueConfig()
+	queueConfig.Durability = LocalDurable
+	queueConfig.MaxMessages = 100
+	_, err = client.CreateQueue(ctx, "go-sdk-durable", queueConfig)
+	if err != nil {
+		t.Fatalf("CreateQueue returned an error: %v", err)
+	}
 	_, err = client.CreateStream(ctx, "go-sdk-smoke", DefaultStreamConfig())
 	if err != nil {
 		t.Fatalf("CreateStream returned an error: %v", err)

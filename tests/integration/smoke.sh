@@ -124,7 +124,7 @@ durable_receipt = client.append_stream(
 )
 assert durable_receipt["acknowledgement"]["durability"] == "local_durable"
 
-client.create_queue("jobs", max_messages=100)
+client.create_queue("jobs", durability="local_durable", max_messages=100)
 client.send(
     "jobs",
     EventEnvelope(
@@ -219,12 +219,21 @@ from epoch_sdk import EpochClient
 
 client = EpochClient(os.environ["EPOCH_SMOKE_NODE_URL"])
 resources = client.resources()
-assert [(resource["kind"], resource["name"]) for resource in resources] == [
-    ("stream", "audit")
-]
+assert {(resource["kind"], resource["name"]) for resource in resources} == {
+    ("queue", "go-sdk-durable"),
+    ("queue", "java-sdk-durable"),
+    ("queue", "jobs"),
+    ("stream", "audit"),
+}
 records = client.fetch_stream("audit")
 assert records[0]["envelope"]["id"] == "audit-1"
 assert records[0]["envelope"]["payload"] == {"subject": "one"}
+counts = client.queue_counts("jobs")
+assert counts["acknowledged"] == 1
+assert counts["ready"] == 1
+delivery = client.receive("jobs", consumer="worker-after-restart")[0]
+assert delivery["message"]["id"] == "order-2"
+client.acknowledge("jobs", delivery["lease_token"])
 PYTHON
 
 printf 'Epoch standalone cross-language smoke passed.\n'

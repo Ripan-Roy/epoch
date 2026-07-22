@@ -46,6 +46,26 @@ func TestCreateStreamUsesTypedDurability(t *testing.T) {
 	}
 }
 
+func TestCreateQueueUsesTypedDurability(t *testing.T) {
+	transport := &recordingTransport{response: Document{"generation": float64(1)}}
+	client := testClient(t, transport)
+	config := DefaultQueueConfig()
+	config.Durability = LocalDurable
+
+	_, err := client.CreateQueue(context.Background(), "jobs", config)
+	if err != nil {
+		t.Fatalf("CreateQueue returned an error: %v", err)
+	}
+
+	request := lastRequest(t, transport)
+	if request.Method != "POST" || request.Path != "/v1/queues/jobs" {
+		t.Fatalf("unexpected route: %s %s", request.Method, request.Path)
+	}
+	if body := requestBody(t, request); body["durability"] != "local_durable" {
+		t.Fatalf("unexpected Queue durability: %#v", body)
+	}
+}
+
 func TestEventEnvelopeAndSegmentsUseWireContract(t *testing.T) {
 	transport := &recordingTransport{response: Document{"offset": float64(0)}}
 	client := testClient(t, transport)
@@ -261,6 +281,9 @@ func TestRemainingNativeRoutes(t *testing.T) {
 	}
 	if requestBody(t, transport.requests[3])["max_messages"] != float64(100_000) {
 		t.Fatal("queue defaults were not encoded")
+	}
+	if requestBody(t, transport.requests[3])["durability"] != "volatile" {
+		t.Fatal("queue did not declare volatile durability")
 	}
 	if transport.requests[6].Query.Get("limit") != "100" {
 		t.Fatalf("fetch options were not encoded: %v", transport.requests[6].Query)

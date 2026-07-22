@@ -17,6 +17,8 @@ final class StandaloneSmokeTest {
             URI.create(System.getenv("EPOCH_JAVA_INTEGRATION_URL")), Duration.ofSeconds(5));
 
     assertEquals("local_durable", client.health().get("guarantee_ceiling").textValue());
+    client.createQueue(
+        "java-sdk-durable", new QueueConfig(DurabilityProfile.LOCAL_DURABLE, 30_000, 100, 8));
     client.createStream("java-sdk-smoke", StreamConfig.defaults());
     client.appendStream(
         "java-sdk-smoke",

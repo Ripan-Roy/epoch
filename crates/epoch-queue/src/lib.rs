@@ -116,14 +116,14 @@ pub struct DeadLetter {
     pub last_error: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct DedupeEntry {
     message_id: String,
     expires_at_ms: u64,
     receipt: AckMetadata,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Queue {
     config: QueueConfig,
     messages: HashMap<String, QueueMessage>,
@@ -369,6 +369,7 @@ impl Queue {
         message.state = QueueState::Ready;
         self.commit_position = self.commit_position.saturating_add(1);
         message.commit_position = self.commit_position;
+        self.order.retain(|candidate| candidate != message_id);
         self.order.push_back(message_id.to_owned());
         let _ = now_ms;
         Ok(())
@@ -645,6 +646,20 @@ mod tests {
         assert_eq!(dead.reason, "failed again");
         queue.redrive("poison", 3).unwrap();
         assert_eq!(queue.counts().ready, 1);
+    }
+
+    #[test]
+    fn redrive_cannot_lease_one_message_twice_in_a_batch() {
+        let mut queue = Queue::new(QueueConfig::default()).unwrap();
+        queue.enqueue(event("poison"), 0).unwrap();
+        let delivery = queue.acquire("worker", 1, None, 0).unwrap().remove(0);
+        queue.reject(&delivery.lease_token, "poison", 1).unwrap();
+        queue.redrive("poison", 2).unwrap();
+
+        let deliveries = queue.acquire("worker", 2, None, 2).unwrap();
+
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].message.id, "poison");
     }
 
     #[test]

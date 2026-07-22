@@ -72,6 +72,7 @@ class EpochClient:
         self,
         name: str,
         *,
+        durability: DurabilityProfile = "volatile",
         visibility_timeout_ms: int = 30_000,
         max_messages: int = 100_000,
         max_attempts: int = 8,
@@ -80,7 +81,7 @@ class EpochClient:
             "queues",
             name,
             {
-                "durability": "volatile",
+                "durability": durability,
                 "visibility_timeout_ms": visibility_timeout_ms,
                 "max_messages": max_messages,
                 "retry": {

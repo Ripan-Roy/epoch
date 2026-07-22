@@ -31,8 +31,8 @@ export const profileDefinitions: ProfileDefinition[] = [
     eyebrow: "WORK QUEUE",
     title: "Reliable work",
     description: "Lease-based delivery with retry, scheduling, acknowledgements, and dead letters.",
-    guarantee: "Configured: volatile",
-    caveat: "Lease and acknowledgement state is process-local; duplicate delivery remains possible.",
+    guarantee: "Selectable: local durable or volatile",
+    caveat: "Local durability survives process restart on one machine; duplicate delivery remains possible.",
   },
   {
     profile: "event_bus",

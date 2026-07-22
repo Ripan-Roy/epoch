@@ -20,15 +20,23 @@ Version 1 mutation kinds are:
 
 - `create_stream`: resource name plus complete `StreamConfig`;
 - `append_stream`: resource name, envelope, selected partition, and apply time;
-- `set_stream_offset`: resource/group identity, partition, next offset, and reset flag.
+- `set_stream_offset`: resource/group identity, partition, next offset, and reset flag;
+- `create_queue`: resource name plus complete `QueueConfig`;
+- `enqueue_queue`: resource name, envelope, and apply time;
+- `acquire_queue`: resource/consumer identity, batch/visibility options, and apply time;
+- `settle_queue`: Ack, Release, Reject, or Extend command plus apply time;
+- `redrive_queue`: resource/message identity plus apply time;
+- `maintain_queue`: deterministic schedule, TTL, lease-expiry, retry, and dedupe maintenance time.
 
 Recovery rejects an unknown engine format, malformed JSON, mutation ordering
 that cannot be applied, and checksum corruption. It truncates only an incomplete
 outer tail. The writer fsyncs each local-durable mutation before applying it to
-live Stream memory, so a persistence failure cannot produce a successful or
-visible mutation.
+live Stream or Queue memory, so a persistence failure cannot produce a
+successful or visible mutation. Queue replay re-executes deterministic commands
+at their recorded apply times, preserving lease generations and tokens.
 
-`engine-journal-v1-create-stream.json` is compiled into the engine test suite.
-Any intentional change requires a new version or an explicit compatible-fixture
-review. This node-level journal is replaced by the tablet log/snapshot format in
-the replicated architecture; it has no snapshot or compaction contract.
+The `create_stream` and `create_queue` vectors are compiled into the engine test
+suite. Any intentional change requires a new version or an explicit
+compatible-fixture review. This node-level journal is replaced by the tablet
+log/snapshot format in the replicated architecture; it has no snapshot or
+compaction contract.

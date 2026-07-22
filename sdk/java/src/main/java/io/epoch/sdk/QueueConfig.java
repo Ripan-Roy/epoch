@@ -1,9 +1,13 @@
 package io.epoch.sdk;
 
-/** Work Queue creation options for the currently implemented volatile profile. */
-public record QueueConfig(long visibilityTimeoutMs, int maxMessages, int maxAttempts) {
+import java.util.Objects;
+
+/** Work Queue creation options with an explicit acknowledgement boundary. */
+public record QueueConfig(
+    DurabilityProfile durability, long visibilityTimeoutMs, int maxMessages, int maxAttempts) {
 
   public QueueConfig {
+    Objects.requireNonNull(durability, "durability");
     if (visibilityTimeoutMs <= 0) {
       throw new IllegalArgumentException("visibilityTimeoutMs must be greater than zero");
     }
@@ -16,6 +20,6 @@ public record QueueConfig(long visibilityTimeoutMs, int maxMessages, int maxAtte
   }
 
   public static QueueConfig defaults() {
-    return new QueueConfig(30_000, 100_000, 8);
+    return new QueueConfig(DurabilityProfile.VOLATILE, 30_000, 100_000, 8);
   }
 }

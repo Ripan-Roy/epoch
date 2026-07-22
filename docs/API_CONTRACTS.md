@@ -385,11 +385,13 @@ methods, standalone receipt metadata, JSON/HTTP profile routes, a CLI,
 report the same in-process engine state.
 
 The runnable node opens one exclusively owned WAL under `EPOCH_DATA_DIR` and
-reports a `local_durable` guarantee ceiling. Streams may select `volatile` or
-`local_durable`; durable Stream creation, append, and consumer-offset mutations
-are fsynced before success and replayed on restart. Partial tail frames are
-discarded, while checksum corruption fails startup. Cache, Queue, and Event Bus
-still accept only `volatile`, and every replication or geo mode is rejected.
+reports a `local_durable` guarantee ceiling. Streams and Queues may select
+`volatile` or `local_durable`. Durable Stream creation, append, and offset
+mutations and durable Queue creation, enqueue, lease, settlement, redrive, and
+maintenance commands are fsynced before becoming visible and replayed on
+restart. Partial tail frames are discarded, while checksum corruption fails
+startup. Cache and Event Bus still accept only `volatile`, and every replication
+or geo mode is rejected.
 
 This is a single-node journal slice, not the final segmented tablet format. It
 has no snapshot/compaction path, quorum, replica acknowledgement, or protection
@@ -405,8 +407,8 @@ lookup, streaming credit, a Rust regional administration implementation,
 long-running operations, metrics on the reserved port, protocol gateways, full
 Go/Java/Python generated SDK parity and compatibility negotiation remain
 unimplemented. Typed Go, Java, and Python clients cover the provisional HTTP
-routes, including explicit local Stream durability. All three use injectable
-transport boundaries and run against the real standalone node; Python also
-drives its restart proof. The Go control HTTP registry, browser console,
+routes, including explicit local Stream and Queue durability. All three use
+injectable transport boundaries and run against the real standalone node;
+Python also drives the Stream and Queue restart proof. The Go control HTTP registry, browser console,
 current JSON payload structs, and Rust error enum are provisional scaffolding
 and may be migrated before any public compatibility promise.

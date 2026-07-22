@@ -177,6 +177,14 @@ jobs:
             --header 'content-type: application/json' \
             --data '{"envelope":{"id":"container-1","source":"ci","type":"audit.created","time_ms":1,"payload":{"ok":true}}}' \
             http://127.0.0.1:17661/v1/streams/audit/records
+          curl --fail --silent --show-error --output /dev/null \
+            --header 'content-type: application/json' \
+            --data '{"durability":"local_durable","visibility_timeout_ms":30000,"max_messages":100,"retry":{"strategy":"fixed","initial_delay_ms":1000,"max_delay_ms":1000,"jitter_percent":0,"max_attempts":3,"max_age_ms":null},"dedupe_window_ms":null}' \
+            http://127.0.0.1:17661/v1/queues/jobs
+          curl --fail --silent --show-error --output /dev/null \
+            --header 'content-type: application/json' \
+            --data '{"id":"container-job-1","source":"ci","type":"job.created","time_ms":1,"payload":{"ok":true}}' \
+            http://127.0.0.1:17661/v1/queues/jobs/messages
           docker stop --timeout 10 epoch-node-ci-smoke
 
           docker run --detach --rm --name epoch-node-ci-smoke \
@@ -187,6 +195,9 @@ jobs:
           records="$(curl --fail --silent --show-error \
             'http://127.0.0.1:17661/v1/streams/audit/records?partition=0&offset=0&limit=10')"
           grep -q '"id":"container-1"' <<<"$records"
+          queue_counts="$(curl --fail --silent --show-error \
+            'http://127.0.0.1:17661/v1/queues/jobs/counts')"
+          grep -q '"ready":1' <<<"$queue_counts"
       - name: Stop smoke container
         if: always()
         run: |

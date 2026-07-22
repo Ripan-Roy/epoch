@@ -25,12 +25,18 @@ func main() {
 	if _, err := client.CreateStream(context.Background(), "orders", config); err != nil {
 		log.Fatal(err)
 	}
+	queueConfig := epoch.DefaultQueueConfig()
+	queueConfig.Durability = epoch.LocalDurable
+	if _, err := client.CreateQueue(context.Background(), "jobs", queueConfig); err != nil {
+		log.Fatal(err)
+	}
 }
 ```
 
 `LocalDurable` currently means fsync and recovery on one node; it does not
-provide replication or protection from losing that host and its storage. Other
-profiles remain volatile in the runnable slice.
+provide replication or protection from losing that host and its storage. Queue
+messages and transitions use the same boundary; Cache and Event Bus remain
+volatile in the runnable slice.
 
 The client uses an injectable `Transport`, preserves structured and non-JSON
 HTTP error bodies through `APIError`, bounds response bodies, does not follow

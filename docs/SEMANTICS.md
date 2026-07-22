@@ -341,16 +341,18 @@ distributed contract described above:
 - a checksummed, versioned local WAL with partial-tail recovery;
 - basic in-process routing between Bus, Queue, and Stream resources.
 
-All four runnable profiles support **volatile** resources. Stream additionally
-supports an explicit **local durable** mode: resource creation, record append,
-and consumer-offset mutation are recorded in a versioned, checksummed WAL and
-fsynced before success. Recovery replays only complete checksum-valid entries;
-an incomplete crash tail is truncated. A failed journal append does not mutate
-the in-memory Stream state.
+All four runnable profiles support **volatile** resources. Stream and Queue also
+support an explicit **local durable** mode. Stream creation, record append, and
+consumer-offset mutation are recorded alongside Queue creation, enqueue,
+acquire, settlement, redrive, and time-driven maintenance in a versioned,
+checksummed WAL and fsynced before success. Recovery replays only complete
+checksum-valid entries at their original apply times; an incomplete crash tail
+is truncated. A failed journal append does not mutate live Stream or Queue
+state.
 
 That mode is single-node only. It has no snapshot/compaction path and does not
-survive loss of the machine/storage. Cache, Queue, and Event Bus still reject
-local durability, and every profile rejects replicated-memory, quorum, and geo
+survive loss of the machine/storage. Cache and Event Bus still reject local
+durability, and every profile rejects replicated-memory, quorum, and geo
 durability instead of returning a false acknowledgement.
 
 It does **not** yet implement tablet consensus, replicated quorum durability,

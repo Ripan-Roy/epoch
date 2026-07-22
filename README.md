@@ -11,9 +11,10 @@ Epoch is currently an early engineering scaffold. Interfaces, storage formats,
 and compatibility claims are not stable, and no production guarantee is
 implied yet. The source of truth for product scope is [the PRD](docs/PRD.md).
 The runnable node supports volatile resources for all four profiles and an
-explicit `local_durable` mode for Streams. Local-durable Stream creation,
-append, and consumer offsets are fsynced to one node and replayed on restart;
-replication, snapshots, and protection from total machine loss are not implied.
+explicit `local_durable` mode for Streams and Work Queues. Durable Stream
+records/offsets and Queue messages/leases/settlements are fsynced to one node
+and replayed on restart; replication, snapshots, and protection from total
+machine loss are not implied.
 
 ## Design boundaries
 
@@ -89,15 +90,16 @@ Install JavaScript workspace dependencies when a frontend package is present:
 pnpm install
 ```
 
-Start a standalone node and create a restart-safe local Stream:
+Start a standalone node and create restart-safe local Stream and Queue resources:
 
 ```shell
 cargo run -p epoch-node -- --data-dir .epoch
 cargo run -p epoch-cli -- stream create audit --durability local-durable
+cargo run -p epoch-cli -- queue create jobs --durability local-durable
 ```
 
-Use a separate terminal for the CLI command. Omitting `--durability` creates a
-volatile Stream; Cache, Queue, and Event Bus are currently volatile-only.
+Use a separate terminal for the CLI commands. Omitting `--durability` creates a
+volatile Stream or Queue; Cache and Event Bus are currently volatile-only.
 
 Run the local verification suite:
 

@@ -248,11 +248,13 @@ capture to Parquet, JSON, or another open interchange format is a separate
 export, not the replication source of truth.
 
 The current standalone vertical slice is intentionally narrower: one
-exclusively locked node WAL stores versioned Stream creation, append, and
-consumer-offset mutations. Local-durable mutations fsync before application;
-startup replays complete checksum-valid frames and repairs only a partial tail.
-Volatile mutations bypass it. Its golden payload fixtures live in
-`spec/formats`; it is not the final tablet consensus log or snapshot format.
+exclusively locked node WAL stores versioned Stream and Queue commands. Stream
+creation, append, and offsets are recorded alongside Queue creation, enqueue,
+lease, settlement, redrive, and time-driven maintenance. Local-durable
+mutations fsync before application; startup replays complete checksum-valid
+frames at their recorded apply times and repairs only a partial tail. Volatile
+mutations bypass it. Its golden payload fixtures live in `spec/formats`; it is
+not the final tablet consensus log or snapshot format.
 
 ## 8. Profile engines
 
@@ -279,6 +281,12 @@ Acquire is a committed transition that chooses eligible records and creates
 fenced lease tokens. Ack, Nack, Release, Reject, and Extend validate the tablet,
 leader, consumer/session, message, and lease generations before committing.
 Expired or superseded tokens cannot mutate state.
+
+In the standalone slice, a local-durable Queue uses deterministic command
+replay. The engine clones the current state, validates and applies a proposed
+transition, fsyncs its command, and only then publishes that state in memory.
+Consequently a failed enqueue or settlement cannot become visible, while a
+restart reconstructs lease generations and opaque tokens exactly.
 
 The alpha implementation can use memory-resident indexes plus checksummed
 snapshots and tail replay. A bounded-memory, disk-backed derived-index design and

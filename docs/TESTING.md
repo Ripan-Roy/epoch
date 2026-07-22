@@ -88,11 +88,14 @@ and relevant data manifests on failure. Payloads and credentials are redacted.
 
 The current fast integration smoke starts real Rust and Go processes, exercises
 all four profile APIs through the Python SDK, validates the Go and Java SDKs
-against the same node, restarts the Rust process, proves the local-durable
-Stream survived, and proves volatile resources did not. The node HTTP suite
-separately injects an incomplete WAL tail and verifies record and
-consumer-offset recovery. Container CI mounts the data directory into a named
-volume and repeats the recovery check after replacing the running container.
+against the same node, restarts the Rust process, proves local-durable Stream
+and Queue state survived, and proves volatile resources did not. The node HTTP
+suite separately injects an incomplete WAL tail and verifies Stream recovery;
+its Queue lifecycle test restarts across enqueue, acquire, extend, Ack, Reject,
+redrive, and scheduled eligibility. Injected journal failures prove proposed
+Queue enqueues and settlements never leak into live memory. Container CI mounts
+the data directory into a named volume and repeats Stream and Queue recovery
+after replacing the running container.
 
 ### 4. History and consistency checking
 

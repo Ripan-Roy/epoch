@@ -50,7 +50,7 @@ export interface StreamConfig {
 }
 
 export interface QueueConfig {
-  durability: "volatile";
+  durability: "volatile" | "local_durable";
   visibility_timeout_ms: number;
   max_messages: number;
   retry: {

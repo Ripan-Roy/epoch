@@ -173,8 +173,10 @@ will use `/metrics` when the exporter lands.
 The standalone node stores its engine journal at
 `$EPOCH_DATA_DIR/engine.wal` (`.epoch/engine.wal` by default and
 `/var/lib/epoch/engine.wal` in the development image). The process takes an
-exclusive lock. Only Streams configured as `local_durable` use this journal;
-all volatile resources are intentionally absent after restart.
+exclusive lock. Streams and Queues configured as `local_durable` use this
+journal; all volatile resources are intentionally absent after restart. Queue
+commands include enqueue, acquire, settlement, redrive, and time-driven
+maintenance so recovered lease tokens and retry state remain deterministic.
 
 ## Containers
 

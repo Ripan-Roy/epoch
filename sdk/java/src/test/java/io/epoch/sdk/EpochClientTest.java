@@ -37,6 +37,17 @@ final class EpochClientTest {
   }
 
   @Test
+  void createsQueuesWithTruthfulDurability() throws Exception {
+    client.createQueue(
+        "jobs", new QueueConfig(DurabilityProfile.LOCAL_DURABLE, 30_000, 100_000, 8));
+
+    Request request = transport.requests.getFirst();
+    assertEquals("POST", request.method());
+    assertEquals("/v1/queues/jobs", request.path());
+    assertEquals("local_durable", request.body().get("durability").textValue());
+  }
+
+  @Test
   void serializesTheCommonEnvelopeAndEscapesPathSegments() throws Exception {
     EventEnvelope event =
         EventEnvelope.builder("checkout", "order.created", Map.of("id", "1"))
@@ -90,6 +101,7 @@ final class EpochClientTest {
     assertEquals("/healthz", transport.requests.get(0).path());
     assertEquals("/v1/resources", transport.requests.get(1).path());
     assertEquals("volatile", transport.requests.get(2).body().get("durability").textValue());
+    assertEquals("volatile", transport.requests.get(3).body().get("durability").textValue());
     assertEquals(8, transport.requests.get(3).body().get("retry").get("max_attempts").intValue());
     assertTrue(transport.requests.get(4).body().get("archive").booleanValue());
     assertEquals(

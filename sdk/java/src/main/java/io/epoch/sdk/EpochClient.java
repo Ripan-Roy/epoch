@@ -84,7 +84,7 @@ public final class EpochClient {
     retry.put("max_attempts", config.maxAttempts());
     retry.putNull("max_age_ms");
     ObjectNode body = MAPPER.createObjectNode();
-    body.put("durability", DurabilityProfile.VOLATILE.wireName());
+    body.put("durability", config.durability().wireName());
     body.put("visibility_timeout_ms", config.visibilityTimeoutMs());
     body.put("max_messages", config.maxMessages());
     body.set("retry", retry);

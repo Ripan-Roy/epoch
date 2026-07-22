@@ -375,3 +375,213 @@ async fn local_durable_stream_recovers_records_offsets_and_partial_tail() {
     assert!(!recovered_partial_tail);
     verify_recovered_offset_reset(&app).await;
 }
+
+async fn create_durable_queue(app: &Router) {
+    let (status, _) = call(
+        app,
+        Method::POST,
+        "/v1/queues/jobs",
+        Some(json!({
+            "durability": "local_durable",
+            "visibility_timeout_ms": 100,
+            "max_messages": 100,
+            "retry": {
+                "strategy": "fixed",
+                "initial_delay_ms": 25,
+                "max_delay_ms": 25,
+                "jitter_percent": 0,
+                "max_attempts": 3,
+                "max_age_ms": null
+            },
+            "dedupe_window_ms": 60_000
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+}
+
+async fn enqueue_durable_queue_messages(app: &Router) {
+    for (id, deliver_at_ms) in [
+        ("job-ack", None),
+        ("job-scheduled", Some(1_500)),
+        ("job-leased", None),
+        ("job-released", None),
+        ("job-redriven", None),
+    ] {
+        let (status, receipt) = call(
+            app,
+            Method::POST,
+            "/v1/queues/jobs/messages",
+            Some(json!({
+                "id": id,
+                "source": "tests",
+                "type": "job.requested",
+                "time_ms": 1_000,
+                "deliver_at_ms": deliver_at_ms,
+                "payload": {"id": id}
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(receipt["acknowledgement"]["durability"], "local_durable");
+    }
+}
+
+fn lease_token(deliveries: &Value, message_id: &str) -> String {
+    deliveries
+        .as_array()
+        .expect("delivery array")
+        .iter()
+        .find(|delivery| delivery["message"]["id"] == message_id)
+        .and_then(|delivery| delivery["lease_token"].as_str())
+        .expect("message has a lease token")
+        .to_owned()
+}
+
+async fn acknowledge_queue_delivery(app: &Router, token: &str) {
+    let (status, _) = call(
+        app,
+        Method::POST,
+        "/v1/queues/jobs/settle",
+        Some(json!({"action": "ack", "token": token})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+async fn seed_durable_queue_lifecycle(app: &Router) -> String {
+    create_durable_queue(app).await;
+    enqueue_durable_queue_messages(app).await;
+    let (_, deliveries) = call(
+        app,
+        Method::POST,
+        "/v1/queues/jobs/acquire",
+        Some(json!({"consumer": "worker-a", "max_messages": 4})),
+    )
+    .await;
+    assert_eq!(deliveries.as_array().expect("delivery array").len(), 4);
+    acknowledge_queue_delivery(app, &lease_token(&deliveries, "job-ack")).await;
+
+    let recovered_lease_token = lease_token(&deliveries, "job-leased");
+    let (status, extended) = call(
+        app,
+        Method::POST,
+        "/v1/queues/jobs/settle",
+        Some(json!({
+            "action": "extend",
+            "token": recovered_lease_token,
+            "extension_ms": 400
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(extended["lease_deadline_ms"], 1_400);
+
+    let (status, _) = call(
+        app,
+        Method::POST,
+        "/v1/queues/jobs/settle",
+        Some(json!({
+            "action": "release",
+            "token": lease_token(&deliveries, "job-released"),
+            "delay_ms": 300,
+            "reason": "retry"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = call(
+        app,
+        Method::POST,
+        "/v1/queues/jobs/settle",
+        Some(json!({
+            "action": "reject",
+            "token": lease_token(&deliveries, "job-redriven"),
+            "reason": "poison"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = call(
+        app,
+        Method::POST,
+        "/v1/queues/jobs/dead-letters/job-redriven/redrive",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    recovered_lease_token
+}
+
+async fn verify_first_queue_recovery(app: &Router, recovered_lease_token: &str) {
+    let (status, counts) = call(app, Method::GET, "/v1/queues/jobs/counts", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(counts["acknowledged"], 1);
+    assert_eq!(counts["scheduled"], 2);
+    assert_eq!(counts["in_flight"], 1);
+    assert_eq!(counts["ready"], 1);
+
+    acknowledge_queue_delivery(app, recovered_lease_token).await;
+    let (_, redriven) = call(
+        app,
+        Method::POST,
+        "/v1/queues/jobs/acquire",
+        Some(json!({"consumer": "worker-b", "max_messages": 1})),
+    )
+    .await;
+    assert_eq!(redriven[0]["message"]["id"], "job-redriven");
+    acknowledge_queue_delivery(app, &lease_token(&redriven, "job-redriven")).await;
+}
+
+async fn settle_recovered_scheduled_message(app: &Router) {
+    let (_, scheduled) = call(
+        app,
+        Method::POST,
+        "/v1/queues/jobs/acquire",
+        Some(json!({"consumer": "worker-c", "max_messages": 2})),
+    )
+    .await;
+    let ids: std::collections::BTreeSet<&str> = scheduled
+        .as_array()
+        .expect("delivery array")
+        .iter()
+        .filter_map(|delivery| delivery["message"]["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        std::collections::BTreeSet::from(["job-released", "job-scheduled"])
+    );
+    for id in ids {
+        acknowledge_queue_delivery(app, &lease_token(&scheduled, id)).await;
+    }
+}
+
+async fn verify_final_queue_counts(app: &Router) {
+    let (_, counts) = call(app, Method::GET, "/v1/queues/jobs/counts", None).await;
+    assert_eq!(counts["acknowledged"], 5);
+    assert_eq!(counts["ready"], 0);
+    assert_eq!(counts["scheduled"], 0);
+    assert_eq!(counts["in_flight"], 0);
+    assert_eq!(counts["dead_lettered"], 0);
+}
+
+#[tokio::test]
+async fn local_durable_queue_recovers_every_lifecycle_transition() {
+    let temporary = tempfile::tempdir().expect("temporary data directory is created");
+    let wal_path = temporary.path().join("engine.wal");
+    let (app, _) = durable_test_app(&wal_path, 1_000);
+    let recovered_lease_token = seed_durable_queue_lifecycle(&app).await;
+    drop(app);
+
+    let (app, _) = durable_test_app(&wal_path, 1_200);
+    verify_first_queue_recovery(&app, &recovered_lease_token).await;
+    drop(app);
+
+    let (app, _) = durable_test_app(&wal_path, 1_600);
+    settle_recovered_scheduled_message(&app).await;
+    drop(app);
+
+    let (app, _) = durable_test_app(&wal_path, 1_700);
+    verify_final_queue_counts(&app).await;
+}

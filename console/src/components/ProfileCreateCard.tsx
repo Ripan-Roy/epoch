@@ -180,6 +180,14 @@ function profileFields(profile: CreateProfile, prefix: string): ReactNode {
             defaultValue={100_000}
             min={1}
           />
+          <label className="field" htmlFor={`${prefix}-durability`}>
+            <span>Durability</span>
+            <select id={`${prefix}-durability`} name="durability" defaultValue="local_durable">
+              <option value="local_durable">Local durable · WAL + fsync</option>
+              <option value="volatile">Volatile · memory only</option>
+            </select>
+            <small>Queue messages, leases, settlements, retries, and redrives survive restart.</small>
+          </label>
         </>
       );
     case "event_bus":
@@ -285,7 +293,7 @@ function buildConfig(profile: CreateProfile, formData: FormData): ResourceConfig
       } satisfies StreamConfig;
     case "queue":
       return {
-        durability: "volatile",
+        durability: readString(formData, "durability") as QueueConfig["durability"],
         visibility_timeout_ms: readPositiveInteger(formData, "visibility_timeout_ms"),
         max_messages: readPositiveInteger(formData, "max_messages"),
         retry: {

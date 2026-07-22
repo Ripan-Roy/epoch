@@ -96,13 +96,19 @@ func (client *Client) CreateStream(ctx context.Context, name string, config Stre
 	return execute[Document](ctx, client, Request{Method: "POST", Path: path, Body: body})
 }
 
-// CreateQueue creates a volatile Work Queue with typed retry defaults.
+// CreateQueue creates a Work Queue with an explicit durability profile.
 func (client *Client) CreateQueue(ctx context.Context, name string, config QueueConfig) (Document, error) {
 	path, err := resourcePath("queues", name)
 	if err != nil {
 		return nil, err
 	}
 	defaults := DefaultQueueConfig()
+	if config.Durability == "" {
+		config.Durability = defaults.Durability
+	}
+	if err := config.Durability.validate(); err != nil {
+		return nil, err
+	}
 	if config.VisibilityTimeoutMS == 0 {
 		config.VisibilityTimeoutMS = defaults.VisibilityTimeoutMS
 	}
@@ -119,7 +125,7 @@ func (client *Client) CreateQueue(ctx context.Context, name string, config Queue
 		Retry               queueRetryConfig  `json:"retry"`
 		DedupeWindowMS      *uint64           `json:"dedupe_window_ms"`
 	}{
-		Durability:          Volatile,
+		Durability:          config.Durability,
 		VisibilityTimeoutMS: config.VisibilityTimeoutMS,
 		MaxMessages:         config.MaxMessages,
 		Retry: queueRetryConfig{

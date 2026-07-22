@@ -49,6 +49,7 @@ func DefaultStreamConfig() StreamConfig {
 
 // QueueConfig configures a standalone Work Queue profile.
 type QueueConfig struct {
+	Durability          DurabilityProfile
 	VisibilityTimeoutMS uint64
 	MaxMessages         uint64
 	MaxAttempts         uint32
@@ -57,6 +58,7 @@ type QueueConfig struct {
 // DefaultQueueConfig returns the standalone Work Queue defaults.
 func DefaultQueueConfig() QueueConfig {
 	return QueueConfig{
+		Durability:          Volatile,
 		VisibilityTimeoutMS: 30_000,
 		MaxMessages:         100_000,
 		MaxAttempts:         8,

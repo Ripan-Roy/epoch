@@ -118,6 +118,8 @@ struct QueueArgs {
 enum QueueCommand {
     Create {
         name: String,
+        #[arg(long, value_enum, default_value = "volatile")]
+        durability: DurabilityArg,
         #[arg(long, default_value_t = 30_000)]
         visibility_timeout_ms: u64,
     },
@@ -356,6 +358,7 @@ async fn run_queue(
     match command {
         QueueCommand::Create {
             name,
+            durability,
             visibility_timeout_ms,
         } => {
             request(
@@ -363,7 +366,7 @@ async fn run_queue(
                 Method::POST,
                 &format!("{base}/v1/queues/{name}"),
                 Some(json!({
-                    "durability": "volatile",
+                    "durability": durability.wire_name(),
                     "visibility_timeout_ms": visibility_timeout_ms,
                     "max_messages": 100_000,
                     "retry": {
@@ -548,5 +551,40 @@ mod tests {
             panic!("Stream create command was expected");
         };
         assert_eq!(durability.wire_name(), "local_durable");
+    }
+
+    #[test]
+    fn queue_create_parses_local_durability() {
+        let cli = Cli::try_parse_from([
+            "epoch",
+            "queue",
+            "create",
+            "jobs",
+            "--durability",
+            "local-durable",
+        ])
+        .expect("valid Queue durability parses");
+
+        let Command::Queue(QueueArgs {
+            command: QueueCommand::Create { durability, .. },
+        }) = cli.command
+        else {
+            panic!("Queue create command was expected");
+        };
+        assert_eq!(durability.wire_name(), "local_durable");
+    }
+
+    #[test]
+    fn queue_create_defaults_to_volatile() {
+        let cli = Cli::try_parse_from(["epoch", "queue", "create", "jobs"])
+            .expect("Queue defaults parse");
+
+        let Command::Queue(QueueArgs {
+            command: QueueCommand::Create { durability, .. },
+        }) = cli.command
+        else {
+            panic!("Queue create command was expected");
+        };
+        assert_eq!(durability.wire_name(), "volatile");
     }
 }
