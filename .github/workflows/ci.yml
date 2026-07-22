@@ -49,10 +49,10 @@ jobs:
       - name: Lint workflows and shell scripts
         run: |
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color
-          shellcheck tests/integration/smoke.sh
+          shellcheck tests/integration/*.sh
       - name: Check Go formatting
         run: |
-          mapfile -t go_files < <(find control operator sdk/go -type f -name '*.go' 2>/dev/null)
+          mapfile -t go_files < <(find control operator sdk/go console/src/quickstarts -type f -name '*.go' 2>/dev/null)
           if (( ${#go_files[@]} > 0 )); then
             unformatted="$(gofmt -l "${go_files[@]}")"
             test -z "$unformatted" || { printf '%s\n' "$unformatted"; exit 1; }
@@ -66,6 +66,8 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
       - run: go build ./...
+      - name: Compile displayed Go quickstart
+        run: go build -trimpath -o /tmp/epoch-go-quickstart ./console/src/quickstarts/quickstart.go
 
   python:
     name: Python format, lint, test, package
@@ -76,9 +78,13 @@ jobs:
       - uses: actions/setup-python@v7.0.0
         with:
           python-version: '3.11'
-      - run: python -m pip install ruff==0.15.19
-      - run: ruff format --check sdk/python
-      - run: ruff check sdk/python
+      - run: python -m pip install mypy==2.1.0 ruff==0.15.19
+      - run: ruff format --check sdk/python console/src/quickstarts/quickstart.py
+      - run: ruff check sdk/python console/src/quickstarts/quickstart.py
+      - name: Compile and type-check displayed Python quickstart
+        run: |
+          python -m py_compile console/src/quickstarts/quickstart.py
+          PYTHONPATH=sdk/python/src mypy --strict console/src/quickstarts/quickstart.py
       - name: Run Python SDK tests
         run: PYTHONPATH=sdk/python/src python -m unittest discover -s sdk/python/tests -v
       - name: Build an installable SDK wheel
@@ -97,6 +103,15 @@ jobs:
           cache: maven
           cache-dependency-path: sdk/java/pom.xml
       - run: sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress verify
+      - name: Compile displayed Java quickstart
+        run: |
+          sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress \
+            dependency:build-classpath -Dmdep.outputFile=target/runtime-classpath.txt
+          mkdir -p sdk/java/target/docs-quickstart
+          javac --release 25 -Xlint:all -Werror \
+            -cp "sdk/java/target/classes:$(cat sdk/java/target/runtime-classpath.txt)" \
+            -d sdk/java/target/docs-quickstart \
+            console/src/quickstarts/Quickstart.java
 
   web:
     name: Console format, lint, typecheck, build
@@ -119,9 +134,9 @@ jobs:
       - run: pnpm run build
 
   integration:
-    name: Cross-language standalone smoke
+    name: Cross-language standalone and docs smoke
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     needs: [rust, go-contracts, python, java]
     steps:
       - uses: actions/checkout@v6.0.2
@@ -141,6 +156,8 @@ jobs:
           cache: maven
           cache-dependency-path: sdk/java/pom.xml
       - run: bash tests/integration/smoke.sh
+      - name: Execute the exact displayed SDK quickstarts
+        run: bash tests/integration/docs-quickstarts.sh
 
   container:
     name: Container and Compose
@@ -163,10 +180,28 @@ jobs:
             return 1
           }
 
+          wal_segment_count() {
+            docker exec epoch-node-ci-smoke sh -c \
+              'set -- /var/lib/epoch/engine-wal/segment-*.wal; if [ ! -e "$1" ]; then echo 0; else echo "$#"; fi'
+          }
+
+          assert_wal_rotated() {
+            minimum_count="$1"
+            segment_count="$(wal_segment_count)"
+            if [ "$segment_count" -lt "$minimum_count" ]; then
+              echo "expected at least $minimum_count WAL segments, found $segment_count" >&2
+              docker exec epoch-node-ci-smoke \
+                find /var/lib/epoch/engine-wal -maxdepth 1 -type f -print >&2 || true
+              return 1
+            fi
+            echo "$segment_count"
+          }
+
           docker volume create epoch-node-ci-data >/dev/null
           docker run --detach --rm --name epoch-node-ci-smoke \
             --publish 127.0.0.1:17661:7601 \
             --volume epoch-node-ci-data:/var/lib/epoch \
+            --env EPOCH_WAL_SEGMENT_BYTES=512 \
             epoch/node:ci
           wait_for_health
           curl --fail --silent --show-error --output /dev/null \
@@ -185,11 +220,13 @@ jobs:
             --header 'content-type: application/json' \
             --data '{"id":"container-job-1","source":"ci","type":"job.created","time_ms":1,"payload":{"ok":true}}' \
             http://127.0.0.1:17661/v1/queues/jobs/messages
+          segments_before_restart="$(assert_wal_rotated 2)"
           docker stop --timeout 10 epoch-node-ci-smoke
 
           docker run --detach --rm --name epoch-node-ci-smoke \
             --publish 127.0.0.1:17661:7601 \
             --volume epoch-node-ci-data:/var/lib/epoch \
+            --env EPOCH_WAL_SEGMENT_BYTES=512 \
             epoch/node:ci
           wait_for_health
           records="$(curl --fail --silent --show-error \
@@ -198,6 +235,8 @@ jobs:
           queue_counts="$(curl --fail --silent --show-error \
             'http://127.0.0.1:17661/v1/queues/jobs/counts')"
           grep -q '"ready":1' <<<"$queue_counts"
+          segments_after_restart="$(assert_wal_rotated 2)"
+          test "$segments_after_restart" -ge "$segments_before_restart"
       - name: Stop smoke container
         if: always()
         run: |

@@ -384,18 +384,35 @@ methods, standalone receipt metadata, JSON/HTTP profile routes, a CLI,
 `/healthz` and `/readyz`, and a small local WAL. The two health routes currently
 report the same in-process engine state.
 
-The runnable node opens one exclusively owned WAL under `EPOCH_DATA_DIR` and
-reports a `local_durable` guarantee ceiling. Streams and Queues may select
-`volatile` or `local_durable`. Durable Stream creation, append, and offset
-mutations and durable Queue creation, enqueue, lease, settlement, redrive, and
-maintenance commands are fsynced before becoming visible and replayed on
-restart. Partial tail frames are discarded, while checksum corruption fails
-startup. Cache and Event Bus still accept only `volatile`, and every replication
-or geo mode is rejected.
+On a fresh data directory, the runnable node opens one exclusively owned
+segmented WAL at `$EPOCH_DATA_DIR/engine-wal/segment-*.wal`; `engine.wal` is its
+activation marker and cross-version lock. The node reports a `local_durable`
+guarantee ceiling. Streams and Queues may select `volatile` or `local_durable`.
+Durable Stream creation, append, and offset mutations and durable Queue
+creation, enqueue, lease, settlement, redrive, and maintenance commands are
+fsynced before becoming visible and replayed on restart. Cache and Event Bus
+still accept only `volatile`, and every replication or geo mode is rejected.
 
-This is a single-node journal slice, not the final segmented tablet format. It
-has no snapshot/compaction path, quorum, replica acknowledgement, or protection
-from loss of the host and its storage.
+The v1 frames retain their checksum and global sequence across segment
+boundaries. Segment rotation targets `--wal-segment-bytes` /
+`EPOCH_WAL_SEGMENT_BYTES` (64 MiB by default), but rotation is not retention or
+compaction. A frame is never split, so one frame larger than the target may
+occupy an otherwise empty segment. A versioned, checksummed manifest records the
+exact committed topology, lengths, sequences, and file checksums. Recovery may
+discard only an uncommitted suffix of the active segment. Missing or truncated
+committed data, an unexpected or changed segment, metadata mismatch, checksum
+failure, or sequence discontinuity fails startup.
+
+A pre-existing valid legacy `$EPOCH_DATA_DIR/engine.wal` remains the active
+single-file WAL. The current binary replays and continues appending to it and
+does not create `engine-wal/`, preserving safe offline downgrade behavior.
+Fresh segmented activation replaces an invalid-to-old-readers staging marker
+only after the new layout is durable. Mixed histories without that marker are
+rejected; legacy migration is not yet automatic.
+
+This is still a single-node journal slice, not the final tablet consensus log.
+It has no snapshot/compaction path, quorum, replica acknowledgement, segment
+retention/deletion, or protection from loss of the host and its storage.
 
 Initial `epoch.v1` Protobuf source defines common resource/envelope types and a
 small `RegionalAdminService`; Buf generation is configured for Go. It is an
@@ -409,6 +426,10 @@ Go/Java/Python generated SDK parity and compatibility negotiation remain
 unimplemented. Typed Go, Java, and Python clients cover the provisional HTTP
 routes, including explicit local Stream and Queue durability. All three use
 injectable transport boundaries and run against the real standalone node;
-Python also drives the Stream and Queue restart proof. The Go control HTTP registry, browser console,
-current JSON payload structs, and Rust error enum are provisional scaffolding
-and may be migrated before any public compatibility promise.
+the exact quickstarts displayed by the documentation each drive an independent
+seed, forced process crash, restart, and recovery proof in CI. Browser calls are
+accepted only from the exact HTTP(S) origins configured by
+`EPOCH_ALLOWED_ORIGINS`; requests without an `Origin` header remain available
+to native clients. The Go control HTTP registry, browser console, current JSON
+payload structs, and Rust error enum are provisional scaffolding and may be
+migrated before any public compatibility promise.

@@ -93,11 +93,15 @@ enum JournalMutation {
     CreateQueue {
         name: String,
         config: QueueConfig,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_state_checksum: Option<u32>,
     },
     EnqueueQueue {
         name: String,
         envelope: Box<EventEnvelope>,
         applied_at_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_state_checksum: Option<u32>,
     },
     AcquireQueue {
         name: String,
@@ -105,21 +109,67 @@ enum JournalMutation {
         max_messages: u32,
         visibility_timeout_ms: Option<u64>,
         applied_at_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_state_checksum: Option<u32>,
     },
     SettleQueue {
         name: String,
         settlement: JournalQueueSettlement,
         applied_at_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_state_checksum: Option<u32>,
     },
     RedriveQueue {
         name: String,
         message_id: String,
         applied_at_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_state_checksum: Option<u32>,
     },
     MaintainQueue {
         name: String,
         applied_at_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_state_checksum: Option<u32>,
     },
+}
+
+impl JournalMutation {
+    fn with_expected_queue_state_checksum(mut self, checksum: u32) -> Self {
+        let expected_state_checksum = match &mut self {
+            Self::CreateQueue {
+                expected_state_checksum,
+                ..
+            }
+            | Self::EnqueueQueue {
+                expected_state_checksum,
+                ..
+            }
+            | Self::AcquireQueue {
+                expected_state_checksum,
+                ..
+            }
+            | Self::SettleQueue {
+                expected_state_checksum,
+                ..
+            }
+            | Self::RedriveQueue {
+                expected_state_checksum,
+                ..
+            }
+            | Self::MaintainQueue {
+                expected_state_checksum,
+                ..
+            } => expected_state_checksum,
+            Self::CreateStream { .. }
+            | Self::AppendStream { .. }
+            | Self::SetStreamOffset { .. } => {
+                unreachable!("queue state checksums apply only to queue journal mutations")
+            }
+        };
+        *expected_state_checksum = Some(checksum);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -236,7 +286,10 @@ impl EpochEngine {
     pub fn create_queue(&self, name: &str, config: QueueConfig) -> EpochResult<QueueHandle> {
         validate_resource_name(name)?;
         self.validate_durability(ResourceKind::Queue, config.durability)?;
-        let queue = Arc::new(Mutex::new(Queue::new(config.clone())?));
+        let queue = Queue::new(config.clone())?;
+        let expected_state_checksum = (config.durability != DurabilityProfile::Volatile)
+            .then(|| queue.recovery_state_checksum());
+        let queue = Arc::new(Mutex::new(queue));
         let mut queues = self.queues.write();
         if queues.contains_key(name) {
             return Err(EpochError::AlreadyExists(name.to_owned()));
@@ -246,6 +299,7 @@ impl EpochEngine {
             JournalMutation::CreateQueue {
                 name: name.to_owned(),
                 config,
+                expected_state_checksum,
             },
             self.now_ms(),
         )?;
@@ -333,6 +387,7 @@ impl EpochEngine {
                 max_messages,
                 visibility_timeout_ms,
                 applied_at_ms,
+                expected_state_checksum: None,
             },
             applied_at_ms,
             |proposed| {
@@ -357,6 +412,7 @@ impl EpochEngine {
                     token: token.to_owned(),
                 },
                 applied_at_ms,
+                expected_state_checksum: None,
             },
             applied_at_ms,
             |proposed| proposed.acknowledge(token, applied_at_ms),
@@ -382,6 +438,7 @@ impl EpochEngine {
                     reason: reason.clone(),
                 },
                 applied_at_ms,
+                expected_state_checksum: None,
             },
             applied_at_ms,
             |proposed| proposed.release(token, delay_ms, reason, applied_at_ms),
@@ -400,6 +457,7 @@ impl EpochEngine {
                     reason: reason.clone(),
                 },
                 applied_at_ms,
+                expected_state_checksum: None,
             },
             applied_at_ms,
             |proposed| proposed.reject(token, reason, applied_at_ms),
@@ -423,6 +481,7 @@ impl EpochEngine {
                     extension_ms,
                 },
                 applied_at_ms,
+                expected_state_checksum: None,
             },
             applied_at_ms,
             |proposed| proposed.extend_lease(token, extension_ms, applied_at_ms),
@@ -437,6 +496,7 @@ impl EpochEngine {
                 name: queue.to_owned(),
                 message_id: message_id.to_owned(),
                 applied_at_ms,
+                expected_state_checksum: None,
             },
             applied_at_ms,
             |proposed| proposed.redrive(message_id, applied_at_ms),
@@ -554,15 +614,14 @@ impl EpochEngine {
         let mut proposed = current.clone();
         let receipt = proposed.enqueue(envelope.clone(), applied_at_ms)?;
         if proposed != *current {
-            self.persist_if_required(
-                durability,
-                JournalMutation::EnqueueQueue {
-                    name: queue_name.to_owned(),
-                    envelope: Box::new(envelope),
-                    applied_at_ms,
-                },
+            let mutation = JournalMutation::EnqueueQueue {
+                name: queue_name.to_owned(),
+                envelope: Box::new(envelope),
                 applied_at_ms,
-            )?;
+                expected_state_checksum: None,
+            }
+            .with_expected_queue_state_checksum(proposed.recovery_state_checksum());
+            self.persist_if_required(durability, mutation, applied_at_ms)?;
             *current = proposed;
         }
         Ok(receipt)
@@ -584,6 +643,8 @@ impl EpochEngine {
         let mut proposed = current.clone();
         let result = operation(&mut proposed)?;
         if proposed != *current {
+            let mutation =
+                mutation.with_expected_queue_state_checksum(proposed.recovery_state_checksum());
             self.persist_if_required(durability, mutation, applied_at_ms)?;
             *current = proposed;
         }
@@ -596,6 +657,7 @@ impl EpochEngine {
             JournalMutation::MaintainQueue {
                 name: queue_name.to_owned(),
                 applied_at_ms,
+                expected_state_checksum: None,
             },
             applied_at_ms,
             |proposed| {
@@ -719,18 +781,25 @@ impl EpochEngine {
                     stream.commit_offset(group, partition, next_offset)
                 }
             }
-            JournalMutation::CreateQueue { name, config } => {
+            JournalMutation::CreateQueue {
+                name,
+                config,
+                expected_state_checksum,
+            } => {
                 validate_resource_name(&name)?;
                 self.validate_durability(ResourceKind::Queue, config.durability)?;
                 ensure_local_durable(config.durability, ResourceKind::Queue)?;
-                let queue = Arc::new(Mutex::new(Queue::new(config)?));
+                let queue = Queue::new(config)?;
+                verify_queue_recovery_state(&name, &queue, expected_state_checksum)?;
+                let queue = Arc::new(Mutex::new(queue));
                 insert_unique(&self.queues, &name, queue)
             }
             JournalMutation::EnqueueQueue {
                 name,
                 envelope,
                 applied_at_ms,
-            } => self.with_recovered_queue(&name, |queue| {
+                expected_state_checksum,
+            } => self.with_recovered_queue(&name, expected_state_checksum, |queue| {
                 queue.enqueue(*envelope, applied_at_ms).map(|_| ())
             }),
             JournalMutation::AcquireQueue {
@@ -739,7 +808,8 @@ impl EpochEngine {
                 max_messages,
                 visibility_timeout_ms,
                 applied_at_ms,
-            } => self.with_recovered_queue(&name, |queue| {
+                expected_state_checksum,
+            } => self.with_recovered_queue(&name, expected_state_checksum, |queue| {
                 queue.acquire(
                     &consumer,
                     max_messages as usize,
@@ -752,20 +822,23 @@ impl EpochEngine {
                 name,
                 settlement,
                 applied_at_ms,
-            } => self.with_recovered_queue(&name, |queue| {
+                expected_state_checksum,
+            } => self.with_recovered_queue(&name, expected_state_checksum, |queue| {
                 replay_queue_settlement(queue, settlement, applied_at_ms)
             }),
             JournalMutation::RedriveQueue {
                 name,
                 message_id,
                 applied_at_ms,
-            } => {
-                self.with_recovered_queue(&name, |queue| queue.redrive(&message_id, applied_at_ms))
-            }
+                expected_state_checksum,
+            } => self.with_recovered_queue(&name, expected_state_checksum, |queue| {
+                queue.redrive(&message_id, applied_at_ms)
+            }),
             JournalMutation::MaintainQueue {
                 name,
                 applied_at_ms,
-            } => self.with_recovered_queue(&name, |queue| {
+                expected_state_checksum,
+            } => self.with_recovered_queue(&name, expected_state_checksum, |queue| {
                 queue.maintain(applied_at_ms);
                 Ok(())
             }),
@@ -775,12 +848,15 @@ impl EpochEngine {
     fn with_recovered_queue<T>(
         &self,
         queue_name: &str,
+        expected_state_checksum: Option<u32>,
         operation: impl FnOnce(&mut Queue) -> EpochResult<T>,
     ) -> EpochResult<T> {
         let queue = self.queue(queue_name)?;
         let mut queue = queue.lock();
         ensure_local_durable(queue.config().durability, ResourceKind::Queue)?;
-        operation(&mut queue)
+        let result = operation(&mut queue)?;
+        verify_queue_recovery_state(queue_name, &queue, expected_state_checksum)?;
+        Ok(result)
     }
 
     pub fn resources(&self) -> Vec<ResourceSummary> {
@@ -925,6 +1001,24 @@ fn ensure_local_durable(
     }
 }
 
+fn verify_queue_recovery_state(
+    queue_name: &str,
+    queue: &Queue,
+    expected_state_checksum: Option<u32>,
+) -> EpochResult<()> {
+    let Some(expected) = expected_state_checksum else {
+        return Ok(());
+    };
+    let actual = queue.recovery_state_checksum();
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(EpochError::Storage(format!(
+            "queue {queue_name} recovery state checksum mismatch: expected {expected:08x}, actual {actual:08x}"
+        )))
+    }
+}
+
 fn replay_queue_settlement(
     queue: &mut Queue,
     settlement: JournalQueueSettlement,
@@ -1023,6 +1117,55 @@ mod tests {
 
         fn last_sequence(&self) -> Option<u64> {
             self.inner.lock().last_sequence()
+        }
+    }
+
+    fn rewrite_journal(
+        log: &SharedMemoryLog,
+        mut rewrite: impl FnMut(&mut JournalMutation),
+    ) -> MemoryLog {
+        let records = log.inner.lock().records_from(0, usize::MAX);
+        let mut rewritten = MemoryLog::default();
+        for record in records {
+            let mut entry: JournalEntry = serde_json::from_slice(&record.payload).unwrap();
+            rewrite(&mut entry.mutation);
+            let payload = serde_json::to_vec(&entry).unwrap();
+            rewritten
+                .append(record.timestamp_ms, &payload, true)
+                .unwrap();
+        }
+        rewritten
+    }
+
+    fn queue_mutation_checksum(mutation: &JournalMutation) -> Option<u32> {
+        match mutation {
+            JournalMutation::CreateQueue {
+                expected_state_checksum,
+                ..
+            }
+            | JournalMutation::EnqueueQueue {
+                expected_state_checksum,
+                ..
+            }
+            | JournalMutation::AcquireQueue {
+                expected_state_checksum,
+                ..
+            }
+            | JournalMutation::SettleQueue {
+                expected_state_checksum,
+                ..
+            }
+            | JournalMutation::RedriveQueue {
+                expected_state_checksum,
+                ..
+            }
+            | JournalMutation::MaintainQueue {
+                expected_state_checksum,
+                ..
+            } => *expected_state_checksum,
+            JournalMutation::CreateStream { .. }
+            | JournalMutation::AppendStream { .. }
+            | JournalMutation::SetStreamOffset { .. } => None,
         }
     }
 
@@ -1239,6 +1382,203 @@ mod tests {
     }
 
     #[test]
+    fn durable_queue_lifecycle_persists_and_verifies_post_state_checksums() {
+        let log = SharedMemoryLog::default();
+        let clock = Arc::new(ManualClock::new(100));
+        let engine = EpochEngine::with_commit_log(
+            DeploymentMode::Standalone,
+            clock.clone(),
+            Box::new(log.clone()),
+        )
+        .unwrap();
+        engine
+            .create_queue(
+                "jobs",
+                QueueConfig {
+                    durability: DurabilityProfile::LocalDurable,
+                    visibility_timeout_ms: 10,
+                    retry: epoch_queue::RetryPolicy {
+                        initial_delay_ms: 0,
+                        max_delay_ms: 0,
+                        jitter_percent: 0,
+                        max_attempts: 4,
+                        ..epoch_queue::RetryPolicy::default()
+                    },
+                    dedupe_window_ms: Some(1_000),
+                    ..QueueConfig::default()
+                },
+            )
+            .unwrap();
+
+        let mut event =
+            EventEnvelope::new("tests", "job.requested", json!({"id": 1}), clock.now_ms());
+        event.id = "job-1".into();
+        event.dedupe_id = Some("request-1".into());
+        engine.enqueue("jobs", event).unwrap();
+
+        let first = engine
+            .acquire_queue("jobs", "worker-a", 1, None)
+            .unwrap()
+            .remove(0);
+        engine
+            .extend_queue_lease("jobs", &first.lease_token, 20)
+            .unwrap();
+        engine
+            .release_queue("jobs", &first.lease_token, 0, Some("retry".into()))
+            .unwrap();
+
+        let second = engine
+            .acquire_queue("jobs", "worker-b", 1, None)
+            .unwrap()
+            .remove(0);
+        engine
+            .reject_queue("jobs", &second.lease_token, "invalid".into())
+            .unwrap();
+        engine.redrive_queue("jobs", "job-1").unwrap();
+
+        engine.acquire_queue("jobs", "worker-c", 1, None).unwrap();
+        clock.set(110);
+        engine.maintain(1_000).unwrap();
+        let final_delivery = engine
+            .acquire_queue("jobs", "worker-d", 1, None)
+            .unwrap()
+            .remove(0);
+        engine
+            .acknowledge_queue("jobs", &final_delivery.lease_token)
+            .unwrap();
+
+        let expected_checksum = engine
+            .queue("jobs")
+            .unwrap()
+            .lock()
+            .recovery_state_checksum();
+        let records = log.inner.lock().records_from(0, usize::MAX);
+        assert!(!records.is_empty());
+        for record in records {
+            let entry: JournalEntry = serde_json::from_slice(&record.payload).unwrap();
+            assert!(
+                queue_mutation_checksum(&entry.mutation).is_some(),
+                "queue mutation at sequence {} omitted its state checksum",
+                record.sequence
+            );
+        }
+        drop(engine);
+
+        let recovered = EpochEngine::with_commit_log(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(110)),
+            Box::new(log),
+        )
+        .unwrap();
+        let recovered_queue = recovered.queue("jobs").unwrap();
+        let recovered_queue = recovered_queue.lock();
+        assert_eq!(recovered_queue.recovery_state_checksum(), expected_checksum);
+        assert_eq!(recovered_queue.counts().acknowledged, 1);
+    }
+
+    #[test]
+    fn recovery_detects_queue_command_replay_drift() {
+        let log = SharedMemoryLog::default();
+        let engine = EpochEngine::with_commit_log(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(100)),
+            Box::new(log.clone()),
+        )
+        .unwrap();
+        engine
+            .create_queue(
+                "jobs",
+                QueueConfig {
+                    durability: DurabilityProfile::LocalDurable,
+                    ..QueueConfig::default()
+                },
+            )
+            .unwrap();
+        let mut event = EventEnvelope::new("tests", "job.requested", json!({}), 100);
+        event.id = "job-1".into();
+        engine.enqueue("jobs", event).unwrap();
+        engine.acquire_queue("jobs", "worker", 1, None).unwrap();
+        drop(engine);
+
+        let mut changed_command = false;
+        let inner = rewrite_journal(&log, |mutation| {
+            if let JournalMutation::AcquireQueue { max_messages, .. } = mutation
+                && !changed_command
+            {
+                *max_messages = 0;
+                changed_command = true;
+            }
+        });
+        assert!(changed_command);
+
+        let result = EpochEngine::with_commit_log(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(100)),
+            Box::new(FailAfterLog {
+                inner,
+                successful_appends: usize::MAX,
+            }),
+        );
+        assert!(matches!(
+            result,
+            Err(EpochError::Storage(message))
+                if message.contains("queue jobs recovery state checksum mismatch")
+        ));
+    }
+
+    #[test]
+    fn recovery_rejects_a_corrupted_queue_state_checksum() {
+        let log = SharedMemoryLog::default();
+        let engine = EpochEngine::with_commit_log(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(100)),
+            Box::new(log.clone()),
+        )
+        .unwrap();
+        engine
+            .create_queue(
+                "jobs",
+                QueueConfig {
+                    durability: DurabilityProfile::LocalDurable,
+                    ..QueueConfig::default()
+                },
+            )
+            .unwrap();
+        let mut event = EventEnvelope::new("tests", "job.requested", json!({}), 100);
+        event.id = "job-1".into();
+        engine.enqueue("jobs", event).unwrap();
+        drop(engine);
+
+        let mut corrupted = false;
+        let inner = rewrite_journal(&log, |mutation| {
+            if let JournalMutation::EnqueueQueue {
+                expected_state_checksum: Some(checksum),
+                ..
+            } = mutation
+                && !corrupted
+            {
+                *checksum ^= u32::MAX;
+                corrupted = true;
+            }
+        });
+        assert!(corrupted);
+
+        let result = EpochEngine::with_commit_log(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(100)),
+            Box::new(FailAfterLog {
+                inner,
+                successful_appends: usize::MAX,
+            }),
+        );
+        assert!(matches!(
+            result,
+            Err(EpochError::Storage(message))
+                if message.contains("queue jobs recovery state checksum mismatch")
+        ));
+    }
+
+    #[test]
     fn journal_create_stream_encoding_matches_golden_vector() {
         let encoded = serde_json::to_string(&JournalEntry {
             format_version: JOURNAL_FORMAT_VERSION,
@@ -1268,6 +1608,7 @@ mod tests {
                     durability: DurabilityProfile::LocalDurable,
                     ..QueueConfig::default()
                 },
+                expected_state_checksum: None,
             },
         })
         .unwrap();
@@ -1276,6 +1617,58 @@ mod tests {
             format!("{encoded}\n"),
             include_str!("../../../spec/formats/engine-journal-v1-create-queue.json")
         );
+    }
+
+    #[test]
+    fn journal_checksummed_queue_encoding_matches_golden_vector() {
+        let config = QueueConfig {
+            durability: DurabilityProfile::LocalDurable,
+            ..QueueConfig::default()
+        };
+        let expected_state_checksum = Queue::new(config.clone())
+            .unwrap()
+            .recovery_state_checksum();
+        let encoded = serde_json::to_string(&JournalEntry {
+            format_version: JOURNAL_FORMAT_VERSION,
+            mutation: JournalMutation::CreateQueue {
+                name: "jobs".into(),
+                config,
+                expected_state_checksum: Some(expected_state_checksum),
+            },
+        })
+        .unwrap();
+
+        assert_eq!(
+            format!("{encoded}\n"),
+            include_str!("../../../spec/formats/engine-journal-v1-create-queue-checksummed.json")
+        );
+    }
+
+    #[test]
+    fn recovery_accepts_v1_queue_entries_without_a_state_checksum() {
+        let payload = include_bytes!("../../../spec/formats/engine-journal-v1-create-queue.json");
+        let entry: JournalEntry = serde_json::from_slice(payload).unwrap();
+        assert!(matches!(
+            entry.mutation,
+            JournalMutation::CreateQueue {
+                expected_state_checksum: None,
+                ..
+            }
+        ));
+
+        let mut inner = MemoryLog::default();
+        inner.append(100, payload, true).unwrap();
+        let engine = EpochEngine::with_commit_log(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(100)),
+            Box::new(FailAfterLog {
+                inner,
+                successful_appends: usize::MAX,
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(engine.queue("jobs").unwrap().lock().counts().ready, 0);
     }
 
     #[test]

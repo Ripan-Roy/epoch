@@ -64,7 +64,8 @@ One package demonstrates that the same Rust engines and format contracts work in
 
 The traceability register marks the following as **Slice**. A Slice entry can be partial where its final milestone is later; the evidence must say exactly which sub-capability passed.
 
-- Cache: CACHE-001–CACHE-005, CACHE-007, and snapshot prototype CACHE-008.
+- Cache: CACHE-001–CACHE-005 and CACHE-007. CACHE-008 snapshots remain M3;
+  the M1 segmented WAL is only a prerequisite and is not Cache restore evidence.
 - Stream: STREAM-001, STREAM-002 basic retention, STREAM-004, and STREAM-005.
 - Queue: QUEUE-001–QUEUE-006 and native credit flow for QUEUE-011.
 - Bus: basic direct/fan-out routing for BUS-001 and the native/CloudEvents-shaped envelope foundation for BUS-005.
@@ -77,17 +78,33 @@ The traceability register marks the following as **Slice**. A Slice entry can be
 |---|---|---|---|
 | Repository and contracts | Rust, Go, Protobuf | Workspace boundaries, generated interfaces, envelope, error/health/config contracts | Cross-language build and compatibility test |
 | Deterministic runtime | Rust | Injectable monotonic/wall clocks, seeded scheduling, crash points, fault transport | Same seed reproduces the same history |
-| Segmented log | Rust | Checksummed append/read, group commit, recovery, snapshots, bounded index rebuild | Partial-write/corruption/restart property suite |
+| Segmented WAL | Rust | Configured rotation, checksummed v1 frames, durable identity/manifest, global sequence, exclusive writer, bounded active-suffix repair, safe legacy fallback | Rotation/restart/metadata/corruption/lock/activation/legacy unit and real-process suites |
 | Metadata and replication prototype | Rust | Three-node metadata/log group, epochs, quorum commit, fencing, leader transfer | Model check plus node/network/disk chaos report |
 | Stream slice | Rust | Key routing, committed offsets, fetch, retention baseline, visible ack policy | Ordered recovery and no-early-ack history |
 | Queue slice | Rust | Ready/scheduled/leased/acked/DLQ state, renewal, retry, redrive | Crash-at-every-transition history check |
-| Cache slice | Rust | One memory shard, core types, TTL, eviction, atomic batch, pipeline, snapshot | Linearizability, expiry, eviction, restore tests |
+| Cache slice | Rust | One volatile memory shard, core types, TTL, eviction, atomic batch, pipeline | Linearizability, expiry, and eviction tests; snapshot/restore remains M3 |
 | Route slice | Rust | Envelope-normalized direct/fan-out delivery into a queue or stream | Route truth table and backpressure test |
 | Standalone and cluster lifecycle | Rust | One selectable node binary, local admin API, truthful mode/guarantee health | Disconnected standalone and three-node smoke suites |
 | CLI, SDK, emulator | Rust, Go, Java, Python | Create, append/publish, consume/ack, inspect, deterministic local testing | Cross-language executable quickstarts in CI |
 | Control-plane contract scaffold | Go | Reconciler skeleton that uses only gRPC contracts; no record-path ownership | Boundary test and dependency audit |
 | Trust and diagnostics baseline | Rust | mTLS-ready identity boundary, audit event skeleton, golden metrics/traces, explain output | Required-event/metric fault assertions |
 | Packaging | Release tooling | Development OCI image, Kubernetes dev manifest, signed development binary/SBOM path | Clean-room install and signature CI |
+
+The segmented-WAL work package is implemented as the single-node storage
+sub-slice at `$EPOCH_DATA_DIR/engine-wal/segment-*.wal`. The implementation has
+a 64 MiB default and a configurable rotation threshold; tests exercise small
+thresholds, continuous sequence validation, checksummed restart replay,
+exclusive ownership, and recovery that discards only an active-segment suffix
+beyond its manifest-committed length. Fresh data directories receive an
+invalid-to-old-readers staging/active marker at
+`engine.wal`; `engine-wal/identity.v1` and `manifest.v1` bind a WAL UUID to the
+ordered topology, committed lengths, last sequences, content CRC32 values, and
+pending rotation. Missing, truncated, foreign, untracked, or changed committed
+state fails closed. A pre-existing valid `engine.wal` instead remains on the
+legacy single-file writer, including new appends; no segmented directory or
+automatic migration is created, preserving offline downgrade. This does not
+close the broader storage or replication gates: no snapshots, compaction,
+retention deletion, consensus, replicas, or repair exist yet.
 
 ### M1 exit criteria
 

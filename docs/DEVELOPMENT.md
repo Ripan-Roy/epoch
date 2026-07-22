@@ -114,7 +114,7 @@ make format-check     # verify formatting without writes
 make generate         # regenerate Go Protobuf bindings
 make lint             # Rust, Go, Java, Python, TypeScript, and Protobuf checks
 make test             # local unit tests
-make test-integration # real processes through CLI and Go/Java/Python SDKs
+make test-integration # real processes plus exact published SDK quickstarts
 make build            # compile all current components
 make check            # normal pre-commit gate
 make ci               # local deterministic CI gate
@@ -164,19 +164,62 @@ The initial standalone development contract is:
 | Native/admin HTTP address | `0.0.0.0:7601` |
 | Metrics address | `0.0.0.0:9464` |
 | Data directory in the image | `/var/lib/epoch` |
+| Browser origins | local Vite dev/preview on `127.0.0.1` and `localhost` |
 
 The first node exposes its implemented native and administrative HTTP routes on
 7601. Port 7600 is reserved for the native gRPC service as contracts land.
 Health endpoints are `/healthz` and `/readyz`; metrics are reserved on 9464 and
 will use `/metrics` when the exporter lands.
 
-The standalone node stores its engine journal at
-`$EPOCH_DATA_DIR/engine.wal` (`.epoch/engine.wal` by default and
-`/var/lib/epoch/engine.wal` in the development image). The process takes an
-exclusive lock. Streams and Queues configured as `local_durable` use this
-journal; all volatile resources are intentionally absent after restart. Queue
-commands include enqueue, acquire, settlement, redrive, and time-driven
-maintenance so recovered lease tokens and retry state remain deterministic.
+Browser access is restricted to a comma-delimited exact-origin allowlist. Set
+`--allowed-origins` or `EPOCH_ALLOWED_ORIGINS` when serving the local console
+from another HTTP(S) origin; paths, query strings, credentials, opaque origins,
+and wildcards are invalid. Origins are canonicalized before matching. This
+setting does not authenticate native clients and must not be used as a network
+security boundary.
+
+For a fresh data directory, the standalone node stores its active engine
+journal in `$EPOCH_DATA_DIR/engine-wal/`. Files are named `segment-*.wal`; the
+default development paths therefore begin at `.epoch/engine-wal/` locally and
+`/var/lib/epoch/engine-wal/` in the development image. `engine.wal` is a
+versioned activation marker and the cross-version writer lock. The segmented
+directory also contains a writer lock, a durable WAL identity, and the manifest
+that defines committed segment topology.
+
+The active segment rotates before ordinary growth crosses the configured
+threshold. The default is 64 MiB and can be changed with
+`--wal-segment-bytes` or `EPOCH_WAL_SEGMENT_BYTES`; this is a rotation setting,
+not retention, compaction, or a disk quota. Frames are never split, so one frame
+larger than the threshold may occupy an otherwise empty segment. All segments
+use checksummed v1 WAL frames and one global, contiguous sequence. The
+checksummed `manifest.v1` records each segment's exact committed length, ending
+sequence, and whole-file checksum. Startup rejects missing or unexpected files,
+gaps, reordered segments, truncated committed data, invalid frames, foreign
+metadata, and checksum corruption. It may discard only an uncommitted suffix
+beyond the active segment's manifested length; extra bytes in a sealed segment
+fail startup.
+
+Streams and Queues configured as `local_durable` use this journal; volatile
+resources are intentionally absent after restart. Queue commands include
+enqueue, acquire, settlement, redrive, and time-driven maintenance so recovered
+lease tokens and retry state remain deterministic.
+
+`$EPOCH_DATA_DIR/engine.wal` was also the earlier single-file WAL location. A
+pre-existing valid legacy WAL stays in that layout: the current node locks,
+replays, repairs only an incomplete crash tail, and continues appending to the
+same file. It does not create segmented history, so an offline downgrade remains
+safe. Automatic conversion is intentionally deferred until Epoch has an
+explicit migration and rollback protocol.
+
+On a fresh installation, Epoch first writes a staging marker that an older
+single-file-only binary cannot parse, creates and syncs the segmented journal,
+then atomically installs the active marker. Do not modify either marker or mix a
+legacy file with `engine-wal/`; ambiguous histories fail startup instead of
+guessing. A second old or new process is rejected by the shared lock.
+
+This milestone has no snapshots, compaction, retention deletion, object tier,
+replication, or replica repair. Losing the host and its storage can still lose
+all locally durable data.
 
 ## Containers
 

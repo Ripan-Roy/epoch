@@ -8,6 +8,7 @@ epoch_node_addr="${EPOCH_SMOKE_NODE_ADDR:-127.0.0.1:17651}"
 epoch_control_addr="${EPOCH_SMOKE_CONTROL_ADDR:-127.0.0.1:18081}"
 epoch_target_dir="${EPOCH_SMOKE_TARGET_DIR:-${epoch_repo_root}/target}"
 epoch_node_data="$epoch_smoke_tmp/node-data"
+epoch_wal_segment_bytes="${EPOCH_SMOKE_WAL_SEGMENT_BYTES:-512}"
 epoch_node_pid=""
 epoch_control_pid=""
 
@@ -50,6 +51,7 @@ start_node() {
   "$epoch_target_dir/debug/epoch-node" \
     --http-listen "$epoch_node_addr" \
     --data-dir "$epoch_node_data" \
+    --wal-segment-bytes "$epoch_wal_segment_bytes" \
     --log warn >"$epoch_smoke_tmp/node.log" 2>&1 &
   epoch_node_pid=$!
   wait_for_health "Epoch node" "http://${epoch_node_addr}/healthz"
@@ -61,11 +63,64 @@ stop_node() {
   epoch_node_pid=""
 }
 
+crash_node() {
+  kill -KILL "$epoch_node_pid"
+  wait "$epoch_node_pid" 2>/dev/null || true
+  epoch_node_pid=""
+}
+
+assert_second_node_rejected() {
+  local second_pid
+  "$epoch_target_dir/debug/epoch-node" \
+    --http-listen 127.0.0.1:0 \
+    --data-dir "$epoch_node_data" \
+    --wal-segment-bytes "$epoch_wal_segment_bytes" \
+    --log warn >"$epoch_smoke_tmp/second-node.log" 2>&1 &
+  second_pid=$!
+  for _ in {1..100}; do
+    if ! kill -0 "$second_pid" 2>/dev/null; then
+      if wait "$second_pid" 2>/dev/null; then
+        printf 'second Epoch node unexpectedly exited successfully\n' >&2
+        return 1
+      fi
+      grep -q 'already owned by another process' "$epoch_smoke_tmp/second-node.log"
+      return 0
+    fi
+    sleep 0.02
+  done
+  kill -KILL "$second_pid" 2>/dev/null || true
+  wait "$second_pid" 2>/dev/null || true
+  printf 'second Epoch node remained running against an already-owned WAL\n' >&2
+  return 1
+}
+
+wal_segment_count() {
+  (
+    shopt -s nullglob
+    epoch_segments=("$epoch_node_data"/engine-wal/segment-*.wal)
+    printf '%s\n' "${#epoch_segments[@]}"
+  )
+}
+
+assert_wal_rotated() {
+  local minimum_count=$1
+  local segment_count
+  segment_count="$(wal_segment_count)"
+  if (( segment_count < minimum_count )); then
+    printf 'expected at least %s WAL segments, found %s\n' \
+      "$minimum_count" "$segment_count" >&2
+    find "$epoch_node_data" -type f -print >&2 2>/dev/null || true
+    return 1
+  fi
+  printf '%s\n' "$segment_count"
+}
+
 cd "$epoch_repo_root"
 CARGO_TARGET_DIR="$epoch_target_dir" cargo build --locked -p epoch-node -p epoch-cli
 go build -o "$epoch_smoke_tmp/epoch-control" ./control/cmd/epoch-control
 
 start_node
+assert_second_node_rejected
 
 EPOCH_CONTROL_ADDR="$epoch_control_addr" \
   "$epoch_smoke_tmp/epoch-control" >"$epoch_smoke_tmp/control.log" 2>&1 &
@@ -206,7 +261,8 @@ PYTHON
 EPOCH_GO_INTEGRATION_URL="http://${epoch_node_addr}" \
   go test -count=1 -run '^TestStandaloneSmoke$' ./sdk/go/epoch
 
-stop_node
+crash_node
+epoch_segments_before_restart="$(assert_wal_rotated 2)"
 start_node
 
 EPOCH_SMOKE_NODE_URL="http://${epoch_node_addr}" \
@@ -235,5 +291,12 @@ delivery = client.receive("jobs", consumer="worker-after-restart")[0]
 assert delivery["message"]["id"] == "order-2"
 client.acknowledge("jobs", delivery["lease_token"])
 PYTHON
+
+epoch_segments_after_restart="$(assert_wal_rotated 2)"
+if (( epoch_segments_after_restart < epoch_segments_before_restart )); then
+  printf 'WAL segment count regressed across restart: %s -> %s\n' \
+    "$epoch_segments_before_restart" "$epoch_segments_after_restart" >&2
+  exit 1
+fi
 
 printf 'Epoch standalone cross-language smoke passed.\n'

@@ -43,6 +43,14 @@ Dependency gates are:
 | G9 Geo | Replication checkpoints, promotion, failback, loop prevention, residency, RPO, and RTO are proven in drills. |
 | G10 Release | Signed artifacts, SBOM, packaging, migration, documentation, and support matrices are release-ready. |
 
+The segmented standalone WAL supplies partial G2 evidence: configured physical
+rotation, checksummed v1 frames, single-writer ownership, global sequence
+validation, manifest-bounded active-suffix repair, restart replay, durable
+identity/topology checks, and crash-safe fresh-layout activation. Existing valid
+single-file journals remain on the legacy writer and are not migrated. G2
+remains open because snapshots, durable index rebuild, compaction, retention,
+and replicated recovery are not implemented.
+
 ## Cache and State
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
@@ -54,7 +62,7 @@ Dependency gates are:
 | CACHE-005 | P0 | Pipeline, multiplex, batch, pool guidance | M1 → M2 | Slice | G1, G4 | Pending: ordering and throughput suite |
 | CACHE-006 | P0 | CAS, optimistic transaction, increment, fenced lock | M2 | Planned | G0, G3, G4 | Pending: concurrency history and stale-token test |
 | CACHE-007 | P0 | Volatile, replicated-memory, quorum modes | M1 prototype → M2 | Slice | G0, G2, G3, G4 | Pending: durability fault matrix |
-| CACHE-008 | P1 | Snapshot, WAL restore, backup, PITR | M1 snapshot prototype → M3 | Slice | G2, G5, G7 | Pending: checksummed restore/PITR drill |
+| CACHE-008 | P1 | Snapshot, WAL restore, backup, PITR | M3 | Planned | G2, G5, G7 | Segmented WAL is not a Cache snapshot; pending: snapshot/backup/PITR implementation and restore drill |
 | CACHE-009 | P1 | Explicitly lossy Pub/Sub and patterns | M3 | Planned | G0, G4, G6 | Pending: route and disconnect semantics suite |
 | CACHE-010 | P1 | Durable mutation change stream | M3 | Planned | G2, G4, G7 | Pending: mutation-to-offset reconciliation |
 | CACHE-011 | P2 | Bitmap, cardinality, probabilistic, geo types | M6 | Planned | G2, G4 | Pending: accuracy and persistence corpus |
@@ -67,8 +75,8 @@ Dependency gates are:
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
-| STREAM-001 | P0 | Partitioned append log and key routing | M1 prototype → M2 | Slice | G0, G1, G2, G4 | Local WAL restart + partial-tail HTTP suite; pending: segmented/replicated recovery |
-| STREAM-002 | P0 | Time/size/combined retention | M1 basic → M2 | Slice | G0, G2, G4 | Pending: segment-boundary retention suite |
+| STREAM-001 | P0 | Partitioned append log and key routing | M1 prototype → M2 | Slice | G0, G1, G2, G4 | Segmented-WAL rotation/restart, global-sequence, single-writer, manifest-bounded active-suffix, missing/topology/content-corruption, activation, and legacy-fallback suites; pending: replicated partition recovery |
+| STREAM-002 | P0 | Time/size/combined retention | M1 basic → M2 | Slice | G0, G2, G4 | Physical byte-threshold rotation verified; this is not retention; pending: time/size/combined deletion semantics |
 | STREAM-003 | P0 | Consumer groups, offsets, lag, reset/replay | M2 | Slice | G0, G2, G3, G4, G5 | Local offset restart/lag suite; pending: coordinated group history |
 | STREAM-004 | P0 | Partition order and acknowledgement policy | M1 prototype → M2 | Slice | G0, G2, G3, G4 | fsync-before-apply failure test + local restart; pending: replicated ack matrix |
 | STREAM-005 | P0 | Zone replication, election, ISR visibility | M1 prototype → M2 | Slice | G2, G3, G5 | Pending: node/zone chaos report |
@@ -87,7 +95,7 @@ Dependency gates are:
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
-| QUEUE-001 | P0 | Competing consumers and delivery transitions | M1 prototype → M2 | Slice | G0, G2, G4 | Local WAL lifecycle restart + failed-settlement isolation; pending: replicated concurrent history check |
+| QUEUE-001 | P0 | Competing consumers and delivery transitions | M1 prototype → M2 | Slice | G0, G2, G4 | Multi-segment lifecycle restart + failed-settlement isolation; pending: replicated concurrent history check |
 | QUEUE-002 | P0 | Renewable visibility/acquisition lease | M1 prototype → M2 | Slice | G0, G2, G3, G4 | Restart preserves extended lease/token + stale-token unit; pending: monotonic/leader fault suite |
 | QUEUE-003 | P0 | Durability-aware publisher confirmation | M1 prototype → M2 | Slice | G0, G2, G3 | Local-durable receipt + injected fsync enqueue/settlement tests; pending: quorum acknowledgement matrix |
 | QUEUE-004 | P0 | Delayed and scheduled messages | M1 prototype → M2 | Slice | G0, G2, G4 | Scheduled state restart/promotion test; pending: schedule precision load report |
@@ -176,8 +184,8 @@ Dependency gates are:
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
-| DX-001 | P0 | Official Go, Java, and Python SDKs | M1 one SDK → M2 | Slice | G0, G1, G4, G10 | Go/Java/Python HTTP unit + real-node smoke, including selectable local Stream/Queue durability, and Go generated bindings; pending: native streaming contract/version matrix for all three |
-| DX-002 | P0 | Generated guarantee-aware API docs | M1 → M2 | Slice | G0, G1, G10 | Pending: doc lint and executable examples |
+| DX-001 | P0 | Official Go, Java, and Python SDKs | M1 one SDK → M2 | Slice | G0, G1, G4, G10 | Go/Java/Python HTTP unit + independent exact-source crash/restart quickstarts, including selectable local Stream/Queue durability, and Go generated bindings; pending: native streaming contract/version matrix for all three |
+| DX-002 | P0 | Generated guarantee-aware API docs | M1 → M2 | Slice | G0, G1, G10 | Hand-authored guarantee/error guidance and exact executable Go/Java/Python examples are built as a docs-only Pages artifact; pending: generated API reference and full doc lint |
 | DX-003 | P0 | Deterministic single-binary emulator | M1 → M2 | Slice | G1, G2, G4, G10 | Pending: seeded replay/fault suite |
 | DX-004 | P0 | Test containers and ephemeral namespaces | M1 → M2 | Slice | G1, G5, G10 | Pending: parallel lifecycle/isolation CI |
 | DX-005 | P1 | Audited/redacted console message browser | M3 → M4 | Planned | G5, G7, G8 | Pending: access/redaction/action audit matrix |
@@ -202,7 +210,7 @@ Dependency gates are:
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
 | PKG-001 | P0 | Selective four-profile Rust node | M1 scaffold → M4 complete | Slice | G1, G4, G10 | Pending: feature/config startup matrix |
-| PKG-002 | P0 | Shared engine/format standalone and cluster | M1 → M2 | Slice | G1, G2, G3, G10 | Pending: format and semantic equivalence suite |
+| PKG-002 | P0 | Shared engine/format standalone and cluster | M1 → M2 | Slice | G1, G2, G3, G10 | Checksummed v1 segmented standalone format, durable identity/manifest, fresh-layout activation, and no-migration legacy fallback verified; pending: cluster format equivalence |
 | PKG-003 | P0 | Standalone without hosted Go services | M1 | Slice | G1, G2, G10 | Rust node restart/recovery test; pending: extended disconnected lifecycle suite |
 | PKG-004 | P0 | Three-node quorum/failover/placement | M1 prototype → M2 | Slice | G2, G3, G10 | Pending: three-node fault report |
 | PKG-005 | P0 | OCI, Kubernetes dev, signed binaries | M1 dev → M2 | Slice | G1, G5, G10 | Pending: clean-install/signature/SBOM CI |

@@ -424,9 +424,18 @@ current local WAL checksum detects accidental corruption; it is not encryption,
 tamper-proofing, replication, or a compliance control.
 
 The development node listens on loopback by default, while the development
-container binds its HTTP port on all interfaces. The current HTTP router also
-uses permissive CORS. Because that endpoint has no TLS or authentication yet,
-it must not be exposed to an untrusted network or used for
+container binds its HTTP port on all interfaces. Browser CORS is fail-closed:
+the node returns access-control headers only for the exact, canonical HTTP(S)
+origins in `EPOCH_ALLOWED_ORIGINS`. Local Vite development and preview origins
+on ports 5173 and 4173 are allowed by default; wildcard, opaque, credentialed,
+path-bearing, and malformed origins are rejected during startup. The GitHub
+Pages artifact is documentation-only and does not contain the live console
+client.
+
+CORS is only a browser boundary, not authentication. Requests without an
+`Origin` header remain available to native SDKs, CLI tools, and any network
+peer that can reach the endpoint. Because the HTTP API still has no TLS or
+authentication, it must not be exposed to an untrusted network or used for
 untrusted/multi-tenant data.
 
 No deployment is secure for untrusted or multi-tenant production traffic until

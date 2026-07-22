@@ -26,4 +26,16 @@ class EpochAPIError(Exception):
         retrying writes whose outcome is unknown.
         """
 
-        return self.status in {408, 425, 429, 502, 503, 504}
+        return (
+            self.status == 0
+            or self.status in {408, 425, 429}
+            or self.status >= 500
+            or self.code
+            in {
+                "deadline_exceeded",
+                "overloaded",
+                "rate_limited",
+                "transport_error",
+                "unavailable",
+            }
+        )

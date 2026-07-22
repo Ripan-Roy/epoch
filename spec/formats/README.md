@@ -28,15 +28,69 @@ Version 1 mutation kinds are:
 - `redrive_queue`: resource/message identity plus apply time;
 - `maintain_queue`: deterministic schedule, TTL, lease-expiry, retry, and dedupe maintenance time.
 
-Recovery rejects an unknown engine format, malformed JSON, mutation ordering
-that cannot be applied, and checksum corruption. It truncates only an incomplete
-outer tail. The writer fsyncs each local-durable mutation before applying it to
-live Stream or Queue memory, so a persistence failure cannot produce a
-successful or visible mutation. Queue replay re-executes deterministic commands
-at their recorded apply times, preserving lease generations and tokens.
+Those snake-case strings are the persisted mutation discriminants. Queue
+settlement discriminants are `ack`, `release`, `reject`, and `extend`. The
+compact writer emits `format_version` before `mutation`; a mutation emits
+`kind` first and then its fields in the Rust declaration order. Queue variants
+emit `expected_state_checksum` last when present. JSON readers do not rely on
+object-member order, but the reviewed fixtures pin writer output because the
+outer WAL frame checksum covers these exact payload bytes.
 
-The `create_stream` and `create_queue` vectors are compiled into the engine test
-suite. Any intentional change requires a new version or an explicit
-compatible-fixture review. This node-level journal is replaced by the tablet
-log/snapshot format in the replicated architecture; it has no snapshot or
-compaction contract.
+Every Queue mutation written by current binaries also carries an optional
+`expected_state_checksum`: the CRC32 of the complete Queue state immediately
+after that command was applied. The canonical checksum input starts with the
+`epoch.queue.recovery-state` domain and encoding version, uses fixed
+little-endian integers plus length-prefixed UTF-8 and collections, sorts
+message and dedupe maps by their UTF-8 keys, recursively sorts JSON object
+keys, and preserves Queue and dead-letter order. It covers the full config,
+messages, queue order, dead-letter contents, dedupe receipts/expiry,
+commit position, and lease generation. Recovery recomputes the value after
+each command and fails closed on a mismatch, detecting replay-algorithm drift
+such as different selected messages or lease tokens.
+
+The field is omitted when absent, so earlier v1 entries and the reviewed
+`create_queue` fixture remain byte-compatible and continue to replay without a
+comparison. Once a checksummed entry appears, it checkpoints all state produced
+by earlier entries too. CRC32 is used only as a deterministic replay-drift
+guard; it is not cryptographic authentication or protection from a malicious
+writer.
+
+Recovery rejects an unknown engine format, unsupported outer flags, malformed
+JSON, mutation ordering that cannot be applied, and checksum corruption. The
+writer fsyncs each local-durable mutation before applying it to live Stream or
+Queue memory, so a persistence failure cannot produce a successful or visible
+mutation. Queue replay re-executes commands at their recorded apply times and
+verifies each available post-state checksum, preserving lease generations and
+tokens or failing startup when behavior diverges.
+
+### Standalone physical layouts
+
+A fresh or empty data directory uses the segmented layout. Startup writes a
+staging value to `engine.wal`, initializes `engine-wal/`, and atomically replaces
+the staging value with an active marker. Both values are intentionally invalid
+v1 frames, so an older single-file reader fails instead of creating a second
+history. `engine-wal/identity.v1` and `engine-wal/manifest.v1` are themselves
+versioned and checksummed. They share a WAL UUID; the manifest records the
+ordered segment topology and, for each segment, its committed byte length, last
+sequence, and CRC32 over all committed bytes. It also records an optional
+pending segment during rotation.
+
+On segmented recovery, only bytes after the manifest's committed length in the
+active segment may be discarded. Recovery fails closed for a missing or
+truncated committed segment; missing identity or manifest; a foreign identity;
+an extra/untracked segment; sequence or topology drift; a committed-content
+checksum mismatch; or bytes beyond the committed length of a sealed segment. A
+pending rotation is completed only when its expected target is absent or empty;
+nonempty or unrelated untracked files are rejected.
+
+A pre-existing valid `engine.wal` selects the legacy layout instead. The node
+continues appending v1 frames to that same file and does not create
+`engine-wal/`; there is no automatic migration or logical legacy prefix. This
+preserves compatibility with an offline downgrade. The legacy path retains its
+original single-file incomplete-tail recovery behavior.
+
+The `create_stream`, checksum-less `create_queue`, and checksummed
+`create_queue` vectors are compiled into the engine test suite. Any intentional
+change requires a new version or an explicit compatible-fixture review. This
+node-level journal is replaced by the tablet log/snapshot format in the
+replicated architecture; it has no snapshot or compaction contract.

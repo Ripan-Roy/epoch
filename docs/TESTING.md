@@ -90,12 +90,71 @@ The current fast integration smoke starts real Rust and Go processes, exercises
 all four profile APIs through the Python SDK, validates the Go and Java SDKs
 against the same node, restarts the Rust process, proves local-durable Stream
 and Queue state survived, and proves volatile resources did not. The node HTTP
-suite separately injects an incomplete WAL tail and verifies Stream recovery;
-its Queue lifecycle test restarts across enqueue, acquire, extend, Ack, Reject,
+suite forces a small segment threshold, verifies physical rotation, restarts,
+and checks Stream and Queue state across multiple files. Storage tests verify
+one global sequence across segment boundaries and exclusive writer ownership.
+Fresh directories activate through a staging and then active marker at
+`engine.wal`; direct tests cover rejection by the older single-file reader and
+recovery from a torn staging marker. Relative-root and nested-directory tests
+cover durable parent selection and component-wise creation; the node does not
+pre-create the data root outside the storage boundary. A separate downgrade
+test verifies that an existing valid `engine.wal` remains the only journal,
+receives new appends through the legacy writer, and does not create
+`engine-wal/`.
+
+`tests/integration/docs-quickstarts.sh` separately executes the exact Go, Java,
+and Python source imported into the documentation page. Each language gets a
+fresh data directory, creates a local-durable Stream and Queue, acknowledges
+only `job-1001`, kills the node with `SIGKILL`, restarts from the same bytes,
+and proves that the Stream record, acknowledgement count, and only `job-1002`
+survived. The GitHub Pages deploy job depends on this lifecycle test as well as
+the documentation-only frontend build.
+
+Manifest recovery tests distinguish a safe uncommitted suffix from committed
+data damage. Only bytes beyond the manifest's committed length in the active
+segment are discarded. Missing or truncated committed segments, bytes appended
+to a sealed segment, a content-checksum mismatch, a sequence/topology mismatch,
+an untracked segment, missing identity or manifest metadata, and a foreign WAL
+identity fail closed. Pending-rotation recovery can create a missing expected
+target or adopt it only when empty; the direct unit test covers the missing-file
+branch.
+
+Current direct unit evidence includes:
+
+- `segmented_wal_rotates_and_recovers_global_sequences` and
+  `segmented_wal_rejects_a_second_writer`;
+- `segmented_wal_cannot_rotate_past_a_poisoned_active_segment`, which forces an
+  append and rollback failure and proves no later rotation or manifest change
+  can bypass the terminal fault;
+- `segmented_wal_repairs_only_the_active_tail`,
+  `segmented_wal_discards_bytes_not_committed_by_the_manifest`, and
+  `segmented_wal_rejects_a_partial_sealed_segment`;
+- `segmented_wal_rejects_a_missing_committed_final_segment`,
+  `segmented_wal_rejects_all_committed_segments_missing`,
+  `segmented_wal_rejects_a_truncated_committed_active_segment`,
+  `segmented_wal_rejects_a_missing_manifest_after_activation`, and
+  `segmented_wal_rejects_a_missing_identity`;
+- `segmented_wal_rejects_sequence_gaps_between_files`,
+  `segmented_wal_rejects_a_foreign_manifest_identity`,
+  `segmented_wal_rejects_valid_frames_that_do_not_match_the_manifest`, and
+  `segmented_wal_rejects_checksum_corruption`;
+- `segmented_wal_completes_a_manifested_pending_rotation`; and
+- `standalone_wal_activation_blocks_single_file_writers`,
+  `standalone_wal_resumes_a_torn_staging_marker`,
+  `standalone_wal_rejects_a_missing_activated_segment_directory`,
+  `standalone_wal_keeps_existing_legacy_history_downgrade_safe`, and
+  `standalone_wal_rejects_ambiguous_legacy_and_segmented_histories`.
+
+The Queue lifecycle test restarts across enqueue, acquire, extend, Ack, Reject,
 redrive, and scheduled eligibility. Injected journal failures prove proposed
 Queue enqueues and settlements never leak into live memory. Container CI mounts
-the data directory into a named volume and repeats Stream and Queue recovery
-after replacing the running container.
+the data directory into a named volume, asserts that a small configured rotation
+threshold creates multiple files under `engine-wal/`, and repeats Stream and
+Queue recovery after replacing the running container.
+
+These tests are segmented-journal evidence only. Snapshot restore, compaction,
+retention deletion, replica recovery, and quorum acknowledgement remain future
+test gates.
 
 ### 4. History and consistency checking
 

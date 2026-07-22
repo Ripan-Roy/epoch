@@ -339,12 +339,14 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
 name = "epoch-queue"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "crc32fast",
  "epoch-core",
  "serde",
  "serde_json",
@@ -358,7 +360,9 @@ dependencies = [
  "epoch-core",
  "parking_lot",
  "serde",
+ "serde_json",
  "tempfile",
+ "uuid",
 ]
 
 [[package]]

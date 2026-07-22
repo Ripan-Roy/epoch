@@ -247,14 +247,36 @@ The primary remote representation is an open Epoch segment format. Analytics
 capture to Parquet, JSON, or another open interchange format is a separate
 export, not the replication source of truth.
 
-The current standalone vertical slice is intentionally narrower: one
-exclusively locked node WAL stores versioned Stream and Queue commands. Stream
-creation, append, and offsets are recorded alongside Queue creation, enqueue,
-lease, settlement, redrive, and time-driven maintenance. Local-durable
-mutations fsync before application; startup replays complete checksum-valid
-frames at their recorded apply times and repairs only a partial tail. Volatile
-mutations bypass it. Its golden payload fixtures live in `spec/formats`; it is
-not the final tablet consensus log or snapshot format.
+The current standalone vertical slice is intentionally narrower. Fresh data
+directories use one exclusively locked segmented node WAL under
+`$EPOCH_DATA_DIR/engine-wal/segment-*.wal`; `engine.wal` is its crash-safe
+activation marker and cross-version lock. Stream creation, append, and offsets
+are recorded alongside Queue creation, enqueue, lease, settlement, redrive, and
+time-driven maintenance. Local-durable mutations fsync before application;
+volatile mutations bypass the journal.
+
+Segments rotate at a configured byte threshold and retain the checksummed v1
+frame format. Record sequence is global across files, not reset per segment. A
+versioned identity and checksummed manifest bind the WAL UUID, ordered segment
+set, committed lengths, ending sequences, and whole-file checksums. Startup
+rejects missing, unexpected, reordered, truncated, foreign, or checksum-invalid
+committed history. Recovery may discard only bytes beyond the active segment's
+manifested length; sealed segments are immutable. A pending manifest transition
+makes an interrupted rotation deterministic. The directory is append-only at
+this milestone: rotation does not implement retention, compaction, snapshots,
+or tiering.
+
+A valid legacy `$EPOCH_DATA_DIR/engine.wal` remains on the single-file writer;
+the current binary replays and continues appending to it without creating a
+segmented history. Fresh activation installs a marker that old binaries cannot
+interpret as a WAL, preventing a split history. Ambiguous mixed layouts fail
+closed. Safe automatic migration is deferred. These compatibility rules and
+fixtures are not the final tablet consensus log or snapshot format.
+
+The local manifest detects missing or independently changed committed files,
+not rollback of an entire self-consistent storage volume. Backup/restore must
+treat the activation marker and `engine-wal/` as one atomic unit; authenticated
+anti-rollback evidence belongs to the later backup and consensus design.
 
 ## 8. Profile engines
 
@@ -586,3 +608,4 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0005: Injectable Time and Fencing](adr/0005-time-and-fencing.md)
 - [ADR-0006: Delivery Sequence and Initial Wedge](adr/0006-delivery-sequence.md)
 - [ADR-0007: Provisional Repository and Toolchains](adr/0007-repository-and-toolchains.md)
+- [ADR-0008: Segmented Standalone WAL](adr/0008-segmented-standalone-wal.md)

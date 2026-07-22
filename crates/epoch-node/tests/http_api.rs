@@ -3,7 +3,14 @@ use std::{fs::OpenOptions, io::Write as _, path::Path, sync::Arc};
 use axum::{
     Router,
     body::Body,
-    http::{Method, Request, StatusCode},
+    http::{
+        Method, Request, StatusCode,
+        header::{
+            ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
+            ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_REQUEST_HEADERS,
+            ACCESS_CONTROL_REQUEST_METHOD, ORIGIN,
+        },
+    },
 };
 use epoch_core::{DeploymentMode, ManualClock};
 use epoch_engine::EpochEngine;
@@ -14,10 +21,14 @@ use serde_json::{Value, json};
 use tower::ServiceExt as _;
 
 fn test_app() -> Router {
-    router(Arc::new(EpochEngine::new(
-        DeploymentMode::Standalone,
-        Arc::new(ManualClock::new(1_000)),
-    )))
+    router(
+        Arc::new(EpochEngine::new(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(1_000)),
+        )),
+        &[],
+    )
+    .expect("test CORS configuration is valid")
 }
 
 fn durable_test_app(wal_path: &Path, now_ms: u64) -> (Router, bool) {
@@ -29,7 +40,24 @@ fn durable_test_app(wal_path: &Path, now_ms: u64) -> (Router, bool) {
         Box::new(wal),
     )
     .expect("journal recovers");
-    (router(Arc::new(engine)), recovered_partial_tail)
+    (
+        router(Arc::new(engine), &[]).expect("test CORS configuration is valid"),
+        recovered_partial_tail,
+    )
+}
+
+fn app_with_origins(origins: &[&str]) -> Result<Router, epoch_core::EpochError> {
+    let origins = origins
+        .iter()
+        .map(|origin| (*origin).to_owned())
+        .collect::<Vec<_>>();
+    router(
+        Arc::new(EpochEngine::new(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(1_000)),
+        )),
+        &origins,
+    )
 }
 
 async fn call(app: &Router, method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -58,6 +86,139 @@ async fn call(app: &Router, method: Method, uri: &str, body: Option<Value>) -> (
         serde_json::from_slice(&bytes).expect("API returns JSON")
     };
     (status, value)
+}
+
+#[tokio::test]
+async fn cors_allows_only_an_explicit_browser_origin() {
+    let app = app_with_origins(&["https://console.example"]).expect("origin is valid");
+    let allowed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/v1/queues/jobs/messages")
+                .header(ORIGIN, "https://console.example")
+                .header(ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .header(ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
+                .body(Body::empty())
+                .expect("preflight request builds"),
+        )
+        .await
+        .expect("router returns a response");
+    assert_eq!(allowed.status(), StatusCode::OK);
+    assert_eq!(
+        allowed.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN),
+        Some(&"https://console.example".parse().expect("valid header"))
+    );
+    assert!(
+        allowed
+            .headers()
+            .get(ACCESS_CONTROL_ALLOW_METHODS)
+            .expect("allowed methods are returned")
+            .to_str()
+            .expect("methods are text")
+            .contains("POST")
+    );
+    assert!(
+        allowed
+            .headers()
+            .get(ACCESS_CONTROL_ALLOW_HEADERS)
+            .expect("allowed headers are returned")
+            .to_str()
+            .expect("headers are text")
+            .eq_ignore_ascii_case("content-type")
+    );
+
+    let denied = app
+        .oneshot(
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/v1/queues/jobs/messages")
+                .header(ORIGIN, "https://attacker.example")
+                .header(ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .body(Body::empty())
+                .expect("preflight request builds"),
+        )
+        .await
+        .expect("router returns a response");
+    assert_eq!(denied.status(), StatusCode::OK);
+    assert!(denied.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
+}
+
+#[tokio::test]
+async fn cors_blocks_headers_outside_the_json_contract() {
+    let app = app_with_origins(&["https://console.example"]).expect("origin is valid");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/v1/queues/jobs/messages")
+                .header(ORIGIN, "https://console.example")
+                .header(ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .header(ACCESS_CONTROL_REQUEST_HEADERS, "x-epoch-secret")
+                .body(Body::empty())
+                .expect("preflight request builds"),
+        )
+        .await
+        .expect("router returns a response");
+    assert!(
+        !response
+            .headers()
+            .get(ACCESS_CONTROL_ALLOW_HEADERS)
+            .expect("configured headers are returned")
+            .to_str()
+            .expect("headers are text")
+            .contains("x-epoch-secret")
+    );
+}
+
+#[test]
+fn cors_rejects_wildcards_paths_credentials_and_non_http_schemes() {
+    for origin in [
+        "*",
+        "null",
+        "file://localhost",
+        "https://console.example/path",
+        "https://user@console.example",
+        "http://:5173",
+        "http://host:abc",
+        "http://host:99999",
+    ] {
+        let error = app_with_origins(&[origin]).expect_err("unsafe origin must fail closed");
+        assert!(
+            matches!(error, epoch_core::EpochError::InvalidArgument(_)),
+            "origin was {origin}: {error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cors_canonicalizes_safe_origin_spelling() {
+    let app = app_with_origins(&["HTTPS://CONSOLE.EXAMPLE:443/"]).expect("origin is valid");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/healthz")
+                .header(ORIGIN, "https://console.example")
+                .header(ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                .body(Body::empty())
+                .expect("preflight request builds"),
+        )
+        .await
+        .expect("router returns a response");
+    assert_eq!(
+        response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN),
+        Some(&"https://console.example".parse().expect("valid header"))
+    );
+}
+
+#[tokio::test]
+async fn requests_without_an_origin_remain_available_to_native_sdks() {
+    let app = app_with_origins(&[]).expect("empty browser allowlist is valid");
+    let (status, body) = call(&app, Method::GET, "/healthz", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "ok");
 }
 
 #[tokio::test]

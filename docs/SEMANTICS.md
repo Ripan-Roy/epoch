@@ -338,19 +338,35 @@ distributed contract described above:
 - in-memory Cache, Stream, Queue, and Bus state machines with a subset of core
   operations;
 - standalone commit positions and acknowledgement metadata;
-- a checksummed, versioned local WAL with partial-tail recovery;
+- a checksummed, versioned, manifest-committed rotating local WAL;
 - basic in-process routing between Bus, Queue, and Stream resources.
 
 All four runnable profiles support **volatile** resources. Stream and Queue also
 support an explicit **local durable** mode. Stream creation, record append, and
 consumer-offset mutation are recorded alongside Queue creation, enqueue,
 acquire, settlement, redrive, and time-driven maintenance in a versioned,
-checksummed WAL and fsynced before success. Recovery replays only complete
-checksum-valid entries at their original apply times; an incomplete crash tail
-is truncated. A failed journal append does not mutate live Stream or Queue
-state.
+checksummed WAL and fsynced before success. Fresh data directories store it as
+`$EPOCH_DATA_DIR/engine-wal/segment-*.wal`; it rotates at a configured byte
+threshold and maintains one global contiguous record sequence across files.
+The WAL identity and manifest are versioned and checksummed. The manifest is the
+commit authority for the exact segment set, committed byte lengths, ending
+sequences, and whole-file checksums. Recovery replays only manifested,
+checksum-valid entries at their original apply times. It may discard only an
+uncommitted suffix beyond the active segment's manifested length. Missing or
+truncated committed data, extra sealed bytes, metadata mismatch, checksum
+failure, or a sequence gap fails recovery. A failed journal append does not
+mutate live Stream or Queue state.
 
-That mode is single-node only. It has no snapshot/compaction path and does not
+The node uses `engine.wal` as the segmented layout activation marker and a
+cross-version single-writer lock. A fresh activation becomes visible only after
+the segmented identity, manifest, and first segment are durable; old binaries
+cannot parse either staging or active markers as a valid v1 WAL. A pre-existing
+valid legacy `engine.wal` instead stays on its single-file writer: the current
+binary replays and appends to it without creating a second history, preserving
+safe offline downgrade. Ambiguous mixed layouts fail closed.
+
+That mode is single-node only. Segment rotation is not retention: this slice
+has no snapshot, compaction, segment deletion, or replication path and does not
 survive loss of the machine/storage. Cache and Event Bus still reject local
 durability, and every profile rejects replicated-memory, quorum, and geo
 durability instead of returning a false acknowledgement.

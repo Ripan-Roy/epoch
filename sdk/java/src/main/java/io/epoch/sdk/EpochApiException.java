@@ -7,7 +7,9 @@ import java.util.Set;
 /** Typed HTTP or transport failure returned by the Epoch Java SDK. */
 public final class EpochApiException extends IOException {
   private static final long serialVersionUID = 1L;
-  private static final Set<Integer> RETRYABLE_STATUSES = Set.of(408, 425, 429, 502, 503, 504);
+  private static final Set<Integer> RETRYABLE_STATUSES = Set.of(408, 425, 429);
+  private static final Set<String> RETRYABLE_CODES =
+      Set.of("deadline_exceeded", "overloaded", "rate_limited", "transport_error", "unavailable");
 
   private final int status;
   private final String code;
@@ -48,6 +50,9 @@ public final class EpochApiException extends IOException {
 
   /** Whether a generic transport retry may be considered for an idempotent operation. */
   public boolean retryable() {
-    return RETRYABLE_STATUSES.contains(status);
+    return status == 0
+        || status >= 500
+        || RETRYABLE_STATUSES.contains(status)
+        || RETRYABLE_CODES.contains(code);
   }
 }

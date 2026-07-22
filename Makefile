@@ -75,7 +75,7 @@ lint: ## Run static checks for every language and contract.
 	@if [ -d sdk/python ]; then ruff check sdk/python; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) -DskipTests verify; fi
 	@if [ -d .github/workflows ]; then actionlint; fi
-	@if [ -f tests/integration/smoke.sh ]; then shellcheck tests/integration/smoke.sh; fi
+	@if [ -d tests/integration ]; then shellcheck tests/integration/*.sh; fi
 	@$(PNPM_ENV) pnpm run lint
 	@$(PNPM_ENV) pnpm run typecheck
 	@if find spec/proto -type f -name '*.proto' -print -quit 2>/dev/null | grep -q .; then buf lint; else echo "no Protobuf contracts found; skipping Buf lint"; fi
@@ -91,6 +91,7 @@ test-unit: ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
 
 test-integration: ## Exercise real processes through the CLI and Go/Java/Python SDKs.
 	@bash tests/integration/smoke.sh
+	@bash tests/integration/docs-quickstarts.sh
 
 build: ## Build all available workspace components.
 	@if [ -f Cargo.toml ]; then cargo build --workspace --all-targets; fi

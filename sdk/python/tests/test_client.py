@@ -4,6 +4,7 @@ import unittest
 from typing import Any
 
 from epoch_sdk import (
+    EpochAPIError,
     EpochClient,
     EventEnvelope,
     EventFilter,
@@ -113,6 +114,15 @@ class EpochClientTests(unittest.TestCase):
             delete_request,
             ("DELETE", "/v1/caches/sessions/keys/user-42", None, None),
         )
+
+    def test_retry_classification_covers_transport_and_server_failures(self) -> None:
+        retryable = [
+            EpochAPIError(0, "transport_error", "reset"),
+            EpochAPIError(500, "internal", "failed"),
+            EpochAPIError(400, "unavailable", "transient"),
+        ]
+        self.assertTrue(all(error.retryable for error in retryable))
+        self.assertFalse(EpochAPIError(400, "invalid_argument", "invalid").retryable)
 
     def test_stream_group_operations_map_to_native_routes(self) -> None:
         self.client.commit_stream_offset("orders", "billing", partition=2, next_offset=7)

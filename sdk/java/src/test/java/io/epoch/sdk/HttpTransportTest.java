@@ -1,6 +1,7 @@
 package io.epoch.sdk;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -88,6 +89,16 @@ final class HttpTransportTest {
     assertEquals(502, error.status());
     assertEquals("http_error", error.code());
     assertTrue(error.retryable());
+  }
+
+  @Test
+  void retryClassificationCoversTransportFailuresAndAllServerErrors() {
+    JsonNode body = JsonNodeFactory.instance.nullNode();
+
+    assertTrue(new EpochApiException(0, "transport_error", "reset", body).retryable());
+    assertTrue(new EpochApiException(500, "internal", "failed", body).retryable());
+    assertTrue(new EpochApiException(400, "unavailable", "transient", body).retryable());
+    assertFalse(new EpochApiException(400, "invalid_argument", "invalid", body).retryable());
   }
 
   private void handleSuccess(HttpExchange exchange) throws IOException {

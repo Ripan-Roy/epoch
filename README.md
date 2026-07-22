@@ -12,9 +12,10 @@ and compatibility claims are not stable, and no production guarantee is
 implied yet. The source of truth for product scope is [the PRD](docs/PRD.md).
 The runnable node supports volatile resources for all four profiles and an
 explicit `local_durable` mode for Streams and Work Queues. Durable Stream
-records/offsets and Queue messages/leases/settlements are fsynced to one node
-and replayed on restart; replication, snapshots, and protection from total
-machine loss are not implied.
+records/offsets and Queue messages/leases/settlements are fsynced into a
+checksummed, rotating, single-node journal and replayed on restart. This is not
+replication, a snapshot/compaction system, or protection from total machine
+loss.
 
 ## Design boundaries
 
@@ -100,6 +101,52 @@ cargo run -p epoch-cli -- queue create jobs --durability local-durable
 
 Use a separate terminal for the CLI commands. Omitting `--durability` creates a
 volatile Stream or Queue; Cache and Event Bus are currently volatile-only.
+
+Fresh installations store the standalone journal under
+`$EPOCH_DATA_DIR/engine-wal/` as `segment-*.wal`; `engine.wal` becomes a
+crash-safe activation marker and cross-version lock. New segments rotate at a
+configured byte threshold: 64 MiB by default, set with `--wal-segment-bytes` or
+`EPOCH_WAL_SEGMENT_BYTES`. Rotation does not delete, compact, or snapshot older
+segments. Frames are never split, so one frame larger than the target may
+occupy an otherwise empty segment.
+
+A versioned identity and checksummed manifest bind the ordered segment set,
+committed lengths, sequence range, and file checksums. Recovery may discard only
+an uncommitted suffix beyond the active segment's manifested length; missing,
+truncated, unexpected, reordered, or corrupted committed history fails startup.
+A pre-existing valid legacy `engine.wal` remains the active single-file WAL and
+the current binary continues appending to it, preserving safe offline downgrade.
+Automatic legacy migration is deliberately deferred, and ambiguous mixed
+histories fail closed.
+
+The Vite application includes both the live node console and a public SDK
+quickstart. Run it locally, then use the top navigation or hash routes:
+
+```shell
+pnpm --filter @epoch/console dev
+# http://127.0.0.1:5173/#/console
+# http://127.0.0.1:5173/#/docs
+```
+
+The node allows the local Vite development and preview origins by default.
+Set the comma-delimited `EPOCH_ALLOWED_ORIGINS` only when the live console is
+served from another trusted HTTP(S) origin. CORS is not authentication; keep
+the unauthenticated alpha node on a trusted network.
+
+Static builds are base-path aware for GitHub Pages and other subdirectory
+hosts. For this repository's Pages path, build with:
+
+```shell
+VITE_BASE_PATH=/epoch/ VITE_DEFAULT_PAGE=docs VITE_DOCS_ONLY=true \
+  pnpm --filter @epoch/console build
+```
+
+The Pages artifact contains documentation only—no localhost console client.
+Its deployment target is
+[`https://ripan-roy.github.io/epoch/`](https://ripan-roy.github.io/epoch/).
+The workflow executes every displayed Go, Java, and Python seed → forced crash
+→ restart → verification example before deployment. The SDKs remain
+repository-local pre-alpha packages and are not presented as registry releases.
 
 Run the local verification suite:
 

@@ -6,8 +6,12 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use crc32fast::Hasher;
 use epoch_core::{AckMetadata, DurabilityProfile, EpochError, EpochResult, EventEnvelope};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+const RECOVERY_STATE_CHECKSUM_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -169,6 +173,17 @@ impl Queue {
 
     pub fn config(&self) -> &QueueConfig {
         &self.config
+    }
+
+    /// Returns the deterministic checksum persisted after durable queue commands.
+    ///
+    /// The checksum is a replay-drift guard, not a cryptographic integrity or
+    /// authentication primitive. Its canonical encoding is part of the engine
+    /// journal compatibility contract.
+    pub fn recovery_state_checksum(&self) -> u32 {
+        let mut encoder = CanonicalRecoveryState::new();
+        encoder.queue(self);
+        encoder.finish()
     }
 
     pub fn enqueue(&mut self, envelope: EventEnvelope, now_ms: u64) -> EpochResult<EnqueueReceipt> {
@@ -552,6 +567,277 @@ impl Queue {
     }
 }
 
+struct CanonicalRecoveryState {
+    hasher: Hasher,
+}
+
+impl std::fmt::Debug for CanonicalRecoveryState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CanonicalRecoveryState")
+            .finish_non_exhaustive()
+    }
+}
+
+impl CanonicalRecoveryState {
+    fn new() -> Self {
+        let mut encoder = Self {
+            hasher: Hasher::new(),
+        };
+        encoder.string("epoch.queue.recovery-state");
+        encoder.u16(RECOVERY_STATE_CHECKSUM_VERSION);
+        encoder
+    }
+
+    fn finish(self) -> u32 {
+        self.hasher.finalize()
+    }
+
+    fn byte(&mut self, value: u8) {
+        self.hasher.update(&[value]);
+    }
+
+    fn boolean(&mut self, value: bool) {
+        self.byte(u8::from(value));
+    }
+
+    fn u16(&mut self, value: u16) {
+        self.hasher.update(&value.to_le_bytes());
+    }
+
+    fn u32(&mut self, value: u32) {
+        self.hasher.update(&value.to_le_bytes());
+    }
+
+    fn u64(&mut self, value: u64) {
+        self.hasher.update(&value.to_le_bytes());
+    }
+
+    fn usize(&mut self, value: usize) {
+        let value = u64::try_from(value).expect("supported queue sizes fit in u64");
+        self.u64(value);
+    }
+
+    fn string(&mut self, value: &str) {
+        self.usize(value.len());
+        self.hasher.update(value.as_bytes());
+    }
+
+    fn optional_string(&mut self, value: Option<&str>) {
+        match value {
+            Some(value) => {
+                self.byte(1);
+                self.string(value);
+            }
+            None => self.byte(0),
+        }
+    }
+
+    fn optional_u64(&mut self, value: Option<u64>) {
+        match value {
+            Some(value) => {
+                self.byte(1);
+                self.u64(value);
+            }
+            None => self.byte(0),
+        }
+    }
+
+    fn durability(&mut self, durability: DurabilityProfile) {
+        self.byte(match durability {
+            DurabilityProfile::Volatile => 0,
+            DurabilityProfile::ReplicatedMemory => 1,
+            DurabilityProfile::LocalDurable => 2,
+            DurabilityProfile::QuorumDurable => 3,
+            DurabilityProfile::GeoAsync => 4,
+            DurabilityProfile::GeoSync => 5,
+        });
+    }
+
+    fn retry_strategy(&mut self, strategy: BackoffStrategy) {
+        self.byte(match strategy {
+            BackoffStrategy::Exponential => 0,
+            BackoffStrategy::Fixed => 1,
+        });
+    }
+
+    fn config(&mut self, config: &QueueConfig) {
+        self.durability(config.durability);
+        self.u64(config.visibility_timeout_ms);
+        self.usize(config.max_messages);
+        self.retry_strategy(config.retry.strategy);
+        self.u64(config.retry.initial_delay_ms);
+        self.u64(config.retry.max_delay_ms);
+        self.byte(config.retry.jitter_percent);
+        self.u32(config.retry.max_attempts);
+        self.optional_u64(config.retry.max_age_ms);
+        self.optional_u64(config.dedupe_window_ms);
+    }
+
+    fn queue(&mut self, queue: &Queue) {
+        self.config(&queue.config);
+
+        let mut messages: Vec<_> = queue.messages.iter().collect();
+        messages.sort_unstable_by(|(left, _), (right, _)| left.as_bytes().cmp(right.as_bytes()));
+        self.usize(messages.len());
+        for (key, message) in messages {
+            self.string(key);
+            self.message(message);
+        }
+
+        self.usize(queue.order.len());
+        for message_id in &queue.order {
+            self.string(message_id);
+        }
+
+        self.usize(queue.dead_letters.len());
+        for dead_letter in &queue.dead_letters {
+            self.dead_letter(dead_letter);
+        }
+
+        let mut dedupe: Vec<_> = queue.dedupe.iter().collect();
+        dedupe.sort_unstable_by(|(left, _), (right, _)| left.as_bytes().cmp(right.as_bytes()));
+        self.usize(dedupe.len());
+        for (key, entry) in dedupe {
+            self.string(key);
+            self.dedupe_entry(entry);
+        }
+
+        self.u64(queue.commit_position);
+        self.u64(queue.lease_generation);
+    }
+
+    fn message(&mut self, message: &QueueMessage) {
+        self.string(&message.id);
+        self.envelope(&message.envelope);
+        self.queue_state(&message.state);
+        self.u64(message.enqueued_at_ms);
+        self.u32(message.attempt);
+        self.optional_string(message.last_error.as_deref());
+        self.u64(message.commit_position);
+    }
+
+    fn queue_state(&mut self, state: &QueueState) {
+        match state {
+            QueueState::Ready => self.byte(0),
+            QueueState::Scheduled { eligible_at_ms } => {
+                self.byte(1);
+                self.u64(*eligible_at_ms);
+            }
+            QueueState::Leased {
+                consumer,
+                token,
+                deadline_ms,
+                generation,
+            } => {
+                self.byte(2);
+                self.string(consumer);
+                self.string(token);
+                self.u64(*deadline_ms);
+                self.u64(*generation);
+            }
+            QueueState::Acknowledged => self.byte(3),
+            QueueState::Expired => self.byte(4),
+            QueueState::DeadLettered { reason } => {
+                self.byte(5);
+                self.string(reason);
+            }
+        }
+    }
+
+    fn envelope(&mut self, envelope: &EventEnvelope) {
+        self.string(&envelope.id);
+        self.string(&envelope.source);
+        self.string(&envelope.event_type);
+        self.optional_string(envelope.subject.as_deref());
+        self.u64(envelope.time_ms);
+        self.optional_string(envelope.key.as_deref());
+
+        self.usize(envelope.headers.len());
+        for (key, value) in &envelope.headers {
+            self.string(key);
+            self.string(value);
+        }
+
+        self.string(&envelope.content_type);
+        self.optional_string(envelope.schema_ref.as_deref());
+        self.optional_string(envelope.traceparent.as_deref());
+        self.json(&envelope.payload);
+        self.optional_u64(envelope.deliver_at_ms);
+        self.optional_u64(envelope.ttl_ms);
+        self.byte(envelope.priority);
+        self.optional_string(envelope.dedupe_id.as_deref());
+        self.optional_string(envelope.transaction_id.as_deref());
+
+        self.usize(envelope.extensions.len());
+        for (key, value) in &envelope.extensions {
+            self.string(key);
+            self.json(value);
+        }
+    }
+
+    fn json(&mut self, value: &Value) {
+        match value {
+            Value::Null => self.byte(0),
+            Value::Bool(value) => {
+                self.byte(1);
+                self.boolean(*value);
+            }
+            Value::Number(value) => {
+                self.byte(2);
+                self.string(&value.to_string());
+            }
+            Value::String(value) => {
+                self.byte(3);
+                self.string(value);
+            }
+            Value::Array(values) => {
+                self.byte(4);
+                self.usize(values.len());
+                for value in values {
+                    self.json(value);
+                }
+            }
+            Value::Object(values) => {
+                self.byte(5);
+                let mut entries: Vec<_> = values.iter().collect();
+                entries.sort_unstable_by(|(left, _), (right, _)| {
+                    left.as_bytes().cmp(right.as_bytes())
+                });
+                self.usize(entries.len());
+                for (key, value) in entries {
+                    self.string(key);
+                    self.json(value);
+                }
+            }
+        }
+    }
+
+    fn dead_letter(&mut self, dead_letter: &DeadLetter) {
+        self.string(&dead_letter.message_id);
+        self.envelope(&dead_letter.envelope);
+        self.string(&dead_letter.reason);
+        self.u64(dead_letter.original_enqueued_at_ms);
+        self.u64(dead_letter.dead_lettered_at_ms);
+        self.u32(dead_letter.attempts);
+        self.optional_string(dead_letter.last_error.as_deref());
+    }
+
+    fn dedupe_entry(&mut self, entry: &DedupeEntry) {
+        self.string(&entry.message_id);
+        self.u64(entry.expires_at_ms);
+        self.acknowledgement(&entry.receipt);
+    }
+
+    fn acknowledgement(&mut self, acknowledgement: &AckMetadata) {
+        self.durability(acknowledgement.durability);
+        self.u64(acknowledgement.resource_epoch);
+        self.u64(acknowledgement.commit_position);
+        self.u16(acknowledgement.replica_acks);
+        self.boolean(acknowledgement.duplicate);
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueCounts {
     pub ready: usize,
@@ -579,6 +865,54 @@ mod tests {
         let mut event = EventEnvelope::new("tests", "work.requested", json!({"id": id}), 0);
         event.id = id.into();
         event
+    }
+
+    fn checksum_fixture_queue() -> Queue {
+        let mut queue = Queue::new(QueueConfig {
+            durability: DurabilityProfile::LocalDurable,
+            visibility_timeout_ms: 50,
+            max_messages: 20,
+            retry: RetryPolicy {
+                strategy: BackoffStrategy::Fixed,
+                initial_delay_ms: 7,
+                max_delay_ms: 70,
+                jitter_percent: 3,
+                max_attempts: 4,
+                max_age_ms: Some(5_000),
+            },
+            dedupe_window_ms: Some(1_000),
+        })
+        .unwrap();
+
+        let mut first = event("one");
+        first.subject = Some("tenant-a".into());
+        first.key = Some("account-7".into());
+        first.headers.insert("z-last".into(), "z".into());
+        first.headers.insert("a-first".into(), "a".into());
+        first.schema_ref = Some("schema:work:1".into());
+        first.traceparent = Some("00-trace-parent-01".into());
+        first.payload = json!({"z": [true, null, 1.5], "a": {"value": 7}});
+        first.ttl_ms = Some(10_000);
+        first.priority = 9;
+        first.dedupe_id = Some("request-one".into());
+        first.transaction_id = Some("tx-one".into());
+        first.extensions.insert("x-z".into(), json!({"n": 2}));
+        first.extensions.insert("x-a".into(), json!([1, 2, 3]));
+        queue.enqueue(first, 10).unwrap();
+
+        let mut second = event("two");
+        second.dedupe_id = Some("request-two".into());
+        queue.enqueue(second, 11).unwrap();
+
+        let rejected = queue
+            .acquire("worker-a", 1, Some(40), 12)
+            .unwrap()
+            .remove(0);
+        queue
+            .reject(&rejected.lease_token, "invalid payload", 13)
+            .unwrap();
+        queue.acquire("worker-b", 1, None, 14).unwrap();
+        queue
     }
 
     #[test]
@@ -691,5 +1025,63 @@ mod tests {
         let second = queue.enqueue(value, 1).unwrap();
         assert_eq!(first.message_id, second.message_id);
         assert!(second.acknowledgement.duplicate);
+    }
+
+    #[test]
+    fn recovery_state_checksum_is_independent_of_hash_map_iteration_order() {
+        let mut queue = checksum_fixture_queue();
+        let expected = queue.recovery_state_checksum();
+
+        let mut messages: Vec<_> = queue.messages.drain().collect();
+        messages.sort_unstable_by(|(left, _), (right, _)| right.cmp(left));
+        queue.messages.extend(messages);
+
+        let mut dedupe: Vec<_> = queue.dedupe.drain().collect();
+        dedupe.sort_unstable_by(|(left, _), (right, _)| right.cmp(left));
+        queue.dedupe.extend(dedupe);
+
+        assert_eq!(queue.recovery_state_checksum(), expected);
+    }
+
+    #[test]
+    fn recovery_state_checksum_covers_every_queue_state_component() {
+        let queue = checksum_fixture_queue();
+        let expected = queue.recovery_state_checksum();
+
+        let mut changed = queue.clone();
+        changed.config.max_messages += 1;
+        assert_ne!(changed.recovery_state_checksum(), expected);
+
+        let mut changed = queue.clone();
+        changed.messages.get_mut("two").unwrap().attempt += 1;
+        assert_ne!(changed.recovery_state_checksum(), expected);
+
+        let mut changed = queue.clone();
+        changed.order.swap(0, 1);
+        assert_ne!(changed.recovery_state_checksum(), expected);
+
+        let mut changed = queue.clone();
+        changed.dead_letters[0].reason.push_str(" changed");
+        assert_ne!(changed.recovery_state_checksum(), expected);
+
+        let mut changed = queue.clone();
+        changed.dedupe.get_mut("request-one").unwrap().expires_at_ms += 1;
+        assert_ne!(changed.recovery_state_checksum(), expected);
+
+        let mut changed = queue.clone();
+        changed.commit_position += 1;
+        assert_ne!(changed.recovery_state_checksum(), expected);
+
+        let mut changed = queue;
+        changed.lease_generation += 1;
+        assert_ne!(changed.recovery_state_checksum(), expected);
+    }
+
+    #[test]
+    fn recovery_state_checksum_matches_the_v1_golden_value() {
+        assert_eq!(
+            checksum_fixture_queue().recovery_state_checksum(),
+            3_359_853_911
+        );
     }
 }
