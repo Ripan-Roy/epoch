@@ -67,10 +67,10 @@ Dependency gates are:
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
-| STREAM-001 | P0 | Partitioned append log and key routing | M1 prototype → M2 | Slice | G0, G1, G2, G4 | Pending: offset/order recovery suite |
+| STREAM-001 | P0 | Partitioned append log and key routing | M1 prototype → M2 | Slice | G0, G1, G2, G4 | Local WAL restart + partial-tail HTTP suite; pending: segmented/replicated recovery |
 | STREAM-002 | P0 | Time/size/combined retention | M1 basic → M2 | Slice | G0, G2, G4 | Pending: segment-boundary retention suite |
-| STREAM-003 | P0 | Consumer groups, offsets, lag, reset/replay | M2 | Planned | G0, G2, G3, G4, G5 | Pending: group history and lag reconciliation |
-| STREAM-004 | P0 | Partition order and acknowledgement policy | M1 prototype → M2 | Slice | G0, G2, G3, G4 | Pending: matched ack/fault matrix |
+| STREAM-003 | P0 | Consumer groups, offsets, lag, reset/replay | M2 | Slice | G0, G2, G3, G4, G5 | Local offset restart/lag suite; pending: coordinated group history |
+| STREAM-004 | P0 | Partition order and acknowledgement policy | M1 prototype → M2 | Slice | G0, G2, G3, G4 | fsync-before-apply failure test + local restart; pending: replicated ack matrix |
 | STREAM-005 | P0 | Zone replication, election, ISR visibility | M1 prototype → M2 | Slice | G2, G3, G5 | Pending: node/zone chaos report |
 | STREAM-006 | P0 | Batching and required compression paths | M2 | Planned | G2, G4, G6 | Pending: round-trip corpus and compression benchmark |
 | STREAM-007 | P1 | Idempotent producer sequencing | M5 | Planned | G2, G3, G7 | Pending: duplicate/recovery history |
@@ -176,7 +176,7 @@ Dependency gates are:
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
-| DX-001 | P0 | Official Go, Java, and Python SDKs | M1 one SDK → M2 | Slice | G0, G1, G4, G10 | Python HTTP unit/standalone-smoke slice present; pending: generated native contract/version matrix for all three |
+| DX-001 | P0 | Official Go, Java, and Python SDKs | M1 one SDK → M2 | Slice | G0, G1, G4, G10 | Python HTTP unit/restart-smoke slice present; pending: generated native contract/version matrix for all three |
 | DX-002 | P0 | Generated guarantee-aware API docs | M1 → M2 | Slice | G0, G1, G10 | Pending: doc lint and executable examples |
 | DX-003 | P0 | Deterministic single-binary emulator | M1 → M2 | Slice | G1, G2, G4, G10 | Pending: seeded replay/fault suite |
 | DX-004 | P0 | Test containers and ephemeral namespaces | M1 → M2 | Slice | G1, G5, G10 | Pending: parallel lifecycle/isolation CI |
@@ -203,7 +203,7 @@ Dependency gates are:
 |---|---:|---|---|---|---|---|
 | PKG-001 | P0 | Selective four-profile Rust node | M1 scaffold → M4 complete | Slice | G1, G4, G10 | Pending: feature/config startup matrix |
 | PKG-002 | P0 | Shared engine/format standalone and cluster | M1 → M2 | Slice | G1, G2, G3, G10 | Pending: format and semantic equivalence suite |
-| PKG-003 | P0 | Standalone without hosted Go services | M1 | Slice | G1, G2, G10 | Pending: disconnected lifecycle test |
+| PKG-003 | P0 | Standalone without hosted Go services | M1 | Slice | G1, G2, G10 | Rust node restart/recovery test; pending: extended disconnected lifecycle suite |
 | PKG-004 | P0 | Three-node quorum/failover/placement | M1 prototype → M2 | Slice | G2, G3, G10 | Pending: three-node fault report |
 | PKG-005 | P0 | OCI, Kubernetes dev, signed binaries | M1 dev → M2 | Slice | G1, G5, G10 | Pending: clean-install/signature/SBOM CI |
 | PKG-006 | P1 | Rust embedded engine with guarantee ceiling | M2 experimental → M3 | Planned | G0, G1, G2, G10 | Pending: lifecycle/persistence contract suite |

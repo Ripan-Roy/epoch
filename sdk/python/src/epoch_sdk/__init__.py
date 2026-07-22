@@ -2,10 +2,18 @@
 
 from .client import EpochClient
 from .errors import EpochAPIError
-from .models import EventEnvelope, EventFilter, EventTransform, Subscription, SubscriptionTarget
+from .models import (
+    DurabilityProfile,
+    EventEnvelope,
+    EventFilter,
+    EventTransform,
+    Subscription,
+    SubscriptionTarget,
+)
 from .transport import Transport, UrllibTransport
 
 __all__ = [
+    "DurabilityProfile",
     "EpochAPIError",
     "EpochClient",
     "EventEnvelope",

@@ -23,8 +23,8 @@ export const profileDefinitions: ProfileDefinition[] = [
     eyebrow: "STREAM LOG",
     title: "Replayable events",
     description: "Partitioned, ordered records with offsets, retention, and consumer progress.",
-    guarantee: "Configured: volatile",
-    caveat: "Records are replayable only while this process remains alive; WAL recovery is not wired yet.",
+    guarantee: "Selectable: local durable or volatile",
+    caveat: "Local durability fsyncs one node; it does not provide replication or machine-loss protection.",
   },
   {
     profile: "queue",

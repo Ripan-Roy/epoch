@@ -100,9 +100,9 @@ function App() {
           <aside className="alpha-banner" aria-label="Alpha limitations">
             <strong>Evidence before promises.</strong>
             <span>
-              This console reflects one in-memory local Rust node. Current write receipts are volatile: a
-              process restart can lose resources and data. Local durability, replication, and quorum are not
-              wired yet.
+              This console reflects one local Rust node. Streams can opt into WAL-backed local durability;
+              Cache, Queue, Event Bus, and volatile Streams remain process-local. Replication and quorum are
+              not wired yet.
             </span>
           </aside>
 

@@ -341,11 +341,17 @@ distributed contract described above:
 - a checksummed, versioned local WAL with partial-tail recovery;
 - basic in-process routing between Bus, Queue, and Stream resources.
 
-All currently runnable profile resources and write receipts are **volatile**.
-The WAL proof is not yet connected to profile state or recovery, so the node
-rejects replicated-memory, local-durable, quorum, and geo durability requests
-instead of returning a false acknowledgement. Wiring profile mutations,
-snapshots, and deterministic recovery to that storage primitive is an M1 gate.
+All four runnable profiles support **volatile** resources. Stream additionally
+supports an explicit **local durable** mode: resource creation, record append,
+and consumer-offset mutation are recorded in a versioned, checksummed WAL and
+fsynced before success. Recovery replays only complete checksum-valid entries;
+an incomplete crash tail is truncated. A failed journal append does not mutate
+the in-memory Stream state.
+
+That mode is single-node only. It has no snapshot/compaction path and does not
+survive loss of the machine/storage. Cache, Queue, and Event Bus still reject
+local durability, and every profile rejects replicated-memory, quorum, and geo
+durability instead of returning a false acknowledgement.
 
 It does **not** yet implement tablet consensus, replicated quorum durability,
 regional catalog/placement, distributed fencing, persisted profile snapshots,

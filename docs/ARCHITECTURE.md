@@ -247,6 +247,13 @@ The primary remote representation is an open Epoch segment format. Analytics
 capture to Parquet, JSON, or another open interchange format is a separate
 export, not the replication source of truth.
 
+The current standalone vertical slice is intentionally narrower: one
+exclusively locked node WAL stores versioned Stream creation, append, and
+consumer-offset mutations. Local-durable mutations fsync before application;
+startup replays complete checksum-valid frames and repairs only a partial tail.
+Volatile mutations bypass it. Its golden payload fixtures live in
+`spec/formats`; it is not the final tablet consensus log or snapshot format.
+
 ## 8. Profile engines
 
 ### 8.1 Stream Log

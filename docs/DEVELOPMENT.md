@@ -166,6 +166,12 @@ The first node exposes its implemented native and administrative HTTP routes on
 Health endpoints are `/healthz` and `/readyz`; metrics are reserved on 9464 and
 will use `/metrics` when the exporter lands.
 
+The standalone node stores its engine journal at
+`$EPOCH_DATA_DIR/engine.wal` (`.epoch/engine.wal` by default and
+`/var/lib/epoch/engine.wal` in the development image). The process takes an
+exclusive lock. Only Streams configured as `local_durable` use this journal;
+all volatile resources are intentionally absent after restart.
+
 ## Containers
 
 Validate Compose without starting a daemon workload:

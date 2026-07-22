@@ -45,7 +45,7 @@ export interface CacheConfig {
 
 export interface StreamConfig {
   partitions: number;
-  durability: "volatile";
+  durability: "volatile" | "local_durable";
   max_records_per_partition: number | null;
 }
 

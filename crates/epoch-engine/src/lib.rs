@@ -9,6 +9,7 @@ use epoch_core::{
     SystemClock, validate_resource_name,
 };
 use epoch_queue::{EnqueueReceipt, Queue, QueueConfig};
+use epoch_storage::{CommitLog, LogRecord};
 use epoch_stream::{AppendReceipt, Stream, StreamConfig};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -60,10 +61,43 @@ pub struct EngineHealth {
     pub hosted_control_plane_required: bool,
 }
 
+const JOURNAL_FORMAT_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JournalEntry {
+    format_version: u16,
+    mutation: JournalMutation,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum JournalMutation {
+    CreateStream {
+        name: String,
+        config: StreamConfig,
+    },
+    AppendStream {
+        name: String,
+        envelope: Box<EventEnvelope>,
+        partition: u32,
+        applied_at_ms: u64,
+    },
+    SetStreamOffset {
+        name: String,
+        group: String,
+        partition: u32,
+        next_offset: u64,
+        reset: bool,
+    },
+}
+
 #[derive(Debug)]
 pub struct EpochEngine {
     deployment_mode: DeploymentMode,
     clock: Arc<dyn Clock>,
+    journal: Option<Mutex<Box<dyn CommitLog>>>,
+    guarantee_ceiling: DurabilityProfile,
     caches: RwLock<HashMap<String, CacheHandle>>,
     streams: RwLock<HashMap<String, StreamHandle>>,
     queues: RwLock<HashMap<String, QueueHandle>>,
@@ -78,9 +112,37 @@ impl Default for EpochEngine {
 
 impl EpochEngine {
     pub fn new(deployment_mode: DeploymentMode, clock: Arc<dyn Clock>) -> Self {
+        Self::empty(deployment_mode, clock, None, DurabilityProfile::Volatile)
+    }
+
+    pub fn with_commit_log(
+        deployment_mode: DeploymentMode,
+        clock: Arc<dyn Clock>,
+        log: Box<dyn CommitLog>,
+    ) -> EpochResult<Self> {
+        let guarantee_ceiling = log.durability();
+        let records = log.records_from(0, usize::MAX);
+        let engine = Self::empty(
+            deployment_mode,
+            clock,
+            Some(Mutex::new(log)),
+            guarantee_ceiling,
+        );
+        engine.recover(records)?;
+        Ok(engine)
+    }
+
+    fn empty(
+        deployment_mode: DeploymentMode,
+        clock: Arc<dyn Clock>,
+        journal: Option<Mutex<Box<dyn CommitLog>>>,
+        guarantee_ceiling: DurabilityProfile,
+    ) -> Self {
         Self {
             deployment_mode,
             clock,
+            journal,
+            guarantee_ceiling,
             caches: RwLock::new(HashMap::new()),
             streams: RwLock::new(HashMap::new()),
             queues: RwLock::new(HashMap::new()),
@@ -94,7 +156,7 @@ impl EpochEngine {
 
     pub fn create_cache(&self, name: &str, config: CacheConfig) -> EpochResult<CacheHandle> {
         validate_resource_name(name)?;
-        self.validate_durability(config.durability)?;
+        self.validate_durability(ResourceKind::Cache, config.durability)?;
         let cache = Arc::new(Mutex::new(Cache::new(config)?));
         insert_unique(&self.caches, name, cache.clone())?;
         Ok(cache)
@@ -102,15 +164,27 @@ impl EpochEngine {
 
     pub fn create_stream(&self, name: &str, config: StreamConfig) -> EpochResult<StreamHandle> {
         validate_resource_name(name)?;
-        self.validate_durability(config.durability)?;
-        let stream = Arc::new(Mutex::new(Stream::new(config)?));
-        insert_unique(&self.streams, name, stream.clone())?;
+        self.validate_durability(ResourceKind::Stream, config.durability)?;
+        let stream = Arc::new(Mutex::new(Stream::new(config.clone())?));
+        let mut streams = self.streams.write();
+        if streams.contains_key(name) {
+            return Err(EpochError::AlreadyExists(name.to_owned()));
+        }
+        self.persist_if_required(
+            config.durability,
+            JournalMutation::CreateStream {
+                name: name.to_owned(),
+                config,
+            },
+            self.now_ms(),
+        )?;
+        streams.insert(name.to_owned(), stream.clone());
         Ok(stream)
     }
 
     pub fn create_queue(&self, name: &str, config: QueueConfig) -> EpochResult<QueueHandle> {
         validate_resource_name(name)?;
-        self.validate_durability(config.durability)?;
+        self.validate_durability(ResourceKind::Queue, config.durability)?;
         let queue = Arc::new(Mutex::new(Queue::new(config)?));
         insert_unique(&self.queues, name, queue.clone())?;
         Ok(queue)
@@ -118,7 +192,7 @@ impl EpochEngine {
 
     pub fn create_bus(&self, name: &str, config: BusConfig) -> EpochResult<BusHandle> {
         validate_resource_name(name)?;
-        self.validate_durability(config.durability)?;
+        self.validate_durability(ResourceKind::EventBus, config.durability)?;
         let bus = Arc::new(Mutex::new(EventBus::new(config)));
         insert_unique(&self.buses, name, bus.clone())?;
         Ok(bus)
@@ -150,9 +224,27 @@ impl EpochEngine {
         envelope: EventEnvelope,
         partition: Option<u32>,
     ) -> EpochResult<AppendReceipt> {
-        self.stream(stream)?
-            .lock()
-            .append(envelope, partition, self.now_ms())
+        self.append_stream_at(stream, envelope, partition, self.now_ms())
+    }
+
+    pub fn commit_stream_offset(
+        &self,
+        stream: &str,
+        group: &str,
+        partition: u32,
+        next_offset: u64,
+    ) -> EpochResult<()> {
+        self.set_stream_offset(stream, group, partition, next_offset, false)
+    }
+
+    pub fn reset_stream_offset(
+        &self,
+        stream: &str,
+        group: &str,
+        partition: u32,
+        next_offset: u64,
+    ) -> EpochResult<()> {
+        self.set_stream_offset(stream, group, partition, next_offset, true)
     }
 
     pub fn enqueue(&self, queue: &str, envelope: EventEnvelope) -> EpochResult<EnqueueReceipt> {
@@ -187,28 +279,25 @@ impl EpochEngine {
                     },
                     Err(_) => missing_route(&delivery.subscription, "queue", resource),
                 },
-                SubscriptionTarget::Stream { resource } => match self.stream(resource) {
-                    Ok(stream) => {
-                        match stream
-                            .lock()
-                            .append(delivery.envelope.clone(), None, now_ms)
-                        {
-                            Ok(_) => RouteExecution {
-                                subscription: delivery.subscription.clone(),
-                                target: format!("stream:{resource}"),
-                                status: RouteExecutionStatus::Delivered,
-                                detail: None,
-                            },
-                            Err(error) => RouteExecution {
-                                subscription: delivery.subscription.clone(),
-                                target: format!("stream:{resource}"),
-                                status: RouteExecutionStatus::TargetRejected,
-                                detail: Some(error.to_string()),
-                            },
+                SubscriptionTarget::Stream { resource } => {
+                    match self.append_stream_at(resource, delivery.envelope.clone(), None, now_ms) {
+                        Ok(_) => RouteExecution {
+                            subscription: delivery.subscription.clone(),
+                            target: format!("stream:{resource}"),
+                            status: RouteExecutionStatus::Delivered,
+                            detail: None,
+                        },
+                        Err(EpochError::NotFound(_)) => {
+                            missing_route(&delivery.subscription, "stream", resource)
                         }
+                        Err(error) => RouteExecution {
+                            subscription: delivery.subscription.clone(),
+                            target: format!("stream:{resource}"),
+                            status: RouteExecutionStatus::TargetRejected,
+                            detail: Some(error.to_string()),
+                        },
                     }
-                    Err(_) => missing_route(&delivery.subscription, "stream", resource),
-                },
+                }
                 SubscriptionTarget::Pull => RouteExecution {
                     subscription: delivery.subscription.clone(),
                     target: "pull".into(),
@@ -228,6 +317,155 @@ impl EpochEngine {
             })
             .collect();
         Ok(BusPublishOutcome { publish, routes })
+    }
+
+    fn append_stream_at(
+        &self,
+        stream_name: &str,
+        envelope: EventEnvelope,
+        requested_partition: Option<u32>,
+        applied_at_ms: u64,
+    ) -> EpochResult<AppendReceipt> {
+        let stream = self.stream(stream_name)?;
+        let mut current = stream.lock();
+        let durability = current.config().durability;
+        let mut proposed = current.clone();
+        let receipt = proposed.append(envelope.clone(), requested_partition, applied_at_ms)?;
+        if !receipt.acknowledgement.duplicate {
+            self.persist_if_required(
+                durability,
+                JournalMutation::AppendStream {
+                    name: stream_name.to_owned(),
+                    envelope: Box::new(envelope),
+                    partition: receipt.partition,
+                    applied_at_ms,
+                },
+                applied_at_ms,
+            )?;
+            *current = proposed;
+        }
+        Ok(receipt)
+    }
+
+    fn set_stream_offset(
+        &self,
+        stream_name: &str,
+        group: &str,
+        partition: u32,
+        next_offset: u64,
+        reset: bool,
+    ) -> EpochResult<()> {
+        let stream = self.stream(stream_name)?;
+        let mut current = stream.lock();
+        let durability = current.config().durability;
+        let mut proposed = current.clone();
+        if reset {
+            proposed.reset_offset(group, partition, next_offset)?;
+        } else {
+            proposed.commit_offset(group, partition, next_offset)?;
+        }
+        self.persist_if_required(
+            durability,
+            JournalMutation::SetStreamOffset {
+                name: stream_name.to_owned(),
+                group: group.to_owned(),
+                partition,
+                next_offset,
+                reset,
+            },
+            self.now_ms(),
+        )?;
+        *current = proposed;
+        Ok(())
+    }
+
+    fn persist_if_required(
+        &self,
+        durability: DurabilityProfile,
+        mutation: JournalMutation,
+        timestamp_ms: u64,
+    ) -> EpochResult<()> {
+        if durability == DurabilityProfile::Volatile {
+            return Ok(());
+        }
+        let journal = self.journal.as_ref().ok_or_else(|| {
+            EpochError::Unavailable("no commit log is configured for durable mutations".into())
+        })?;
+        let payload = serde_json::to_vec(&JournalEntry {
+            format_version: JOURNAL_FORMAT_VERSION,
+            mutation,
+        })
+        .map_err(|error| EpochError::Internal(format!("journal encoding failed: {error}")))?;
+        journal.lock().append(timestamp_ms, &payload, true)?;
+        Ok(())
+    }
+
+    fn recover(&self, records: Vec<LogRecord>) -> EpochResult<()> {
+        for record in records {
+            let entry: JournalEntry = serde_json::from_slice(&record.payload).map_err(|error| {
+                EpochError::Storage(format!(
+                    "journal sequence {} could not be decoded: {error}",
+                    record.sequence
+                ))
+            })?;
+            if entry.format_version != JOURNAL_FORMAT_VERSION {
+                return Err(EpochError::Storage(format!(
+                    "journal sequence {} uses unsupported engine format {}",
+                    record.sequence, entry.format_version
+                )));
+            }
+            self.replay_mutation(entry.mutation).map_err(|error| {
+                EpochError::Storage(format!(
+                    "journal sequence {} could not be applied: {error}",
+                    record.sequence
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
+    fn replay_mutation(&self, mutation: JournalMutation) -> EpochResult<()> {
+        match mutation {
+            JournalMutation::CreateStream { name, config } => {
+                validate_resource_name(&name)?;
+                self.validate_durability(ResourceKind::Stream, config.durability)?;
+                if config.durability != DurabilityProfile::LocalDurable {
+                    return Err(EpochError::InvalidArgument(
+                        "only local-durable Stream mutations belong in the journal".into(),
+                    ));
+                }
+                let stream = Arc::new(Mutex::new(Stream::new(config)?));
+                insert_unique(&self.streams, &name, stream)
+            }
+            JournalMutation::AppendStream {
+                name,
+                envelope,
+                partition,
+                applied_at_ms,
+            } => {
+                let stream = self.stream(&name)?;
+                let mut stream = stream.lock();
+                ensure_local_durable(stream.config().durability)?;
+                stream.append(*envelope, Some(partition), applied_at_ms)?;
+                Ok(())
+            }
+            JournalMutation::SetStreamOffset {
+                name,
+                group,
+                partition,
+                next_offset,
+                reset,
+            } => {
+                let stream = self.stream(&name)?;
+                let mut stream = stream.lock();
+                ensure_local_durable(stream.config().durability)?;
+                if reset {
+                    stream.reset_offset(group, partition, next_offset)
+                } else {
+                    stream.commit_offset(group, partition, next_offset)
+                }
+            }
+        }
     }
 
     pub fn resources(&self) -> Vec<ResourceSummary> {
@@ -288,7 +526,7 @@ impl EpochEngine {
             deployment_mode: self.deployment_mode,
             profiles,
             resource_count: resources.len(),
-            guarantee_ceiling: DurabilityProfile::Volatile,
+            guarantee_ceiling: self.guarantee_ceiling,
             hosted_control_plane_required: self.deployment_mode == DeploymentMode::Managed,
         }
     }
@@ -303,14 +541,22 @@ impl EpochEngine {
         }
     }
 
-    fn validate_durability(&self, durability: DurabilityProfile) -> EpochResult<()> {
-        if durability == DurabilityProfile::Volatile {
-            Ok(())
-        } else {
-            Err(EpochError::InvalidArgument(format!(
-                "durability {durability:?} is unavailable in the current {:?} data-plane slice; only Volatile is implemented",
+    fn validate_durability(
+        &self,
+        kind: ResourceKind,
+        durability: DurabilityProfile,
+    ) -> EpochResult<()> {
+        match (kind, durability, self.guarantee_ceiling) {
+            (_, DurabilityProfile::Volatile, _)
+            | (
+                ResourceKind::Stream,
+                DurabilityProfile::LocalDurable,
+                DurabilityProfile::LocalDurable,
+            ) => Ok(()),
+            _ => Err(EpochError::InvalidArgument(format!(
+                "durability {durability:?} is unavailable for {kind:?} in the current {:?} data-plane slice",
                 self.deployment_mode
-            )))
+            ))),
         }
     }
 }
@@ -349,15 +595,62 @@ fn missing_route(subscription: &str, kind: &str, resource: &str) -> RouteExecuti
     }
 }
 
+fn ensure_local_durable(durability: DurabilityProfile) -> EpochResult<()> {
+    if durability == DurabilityProfile::LocalDurable {
+        Ok(())
+    } else {
+        Err(EpochError::InvalidArgument(
+            "journal mutation targets a non-durable Stream".into(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
     use epoch_bus::{EventFilter, EventTransform};
     use epoch_core::ManualClock;
+    use epoch_storage::MemoryLog;
     use serde_json::json;
 
     use super::*;
+
+    #[derive(Debug)]
+    struct FailAfterLog {
+        inner: MemoryLog,
+        successful_appends: usize,
+    }
+
+    impl CommitLog for FailAfterLog {
+        fn durability(&self) -> DurabilityProfile {
+            DurabilityProfile::LocalDurable
+        }
+
+        fn append(
+            &mut self,
+            timestamp_ms: u64,
+            payload: &[u8],
+            durable: bool,
+        ) -> EpochResult<LogRecord> {
+            let appended = self
+                .inner
+                .last_sequence()
+                .map_or(0, |sequence| sequence.saturating_add(1));
+            if usize::try_from(appended).unwrap_or(usize::MAX) >= self.successful_appends {
+                return Err(EpochError::Storage("injected fsync failure".into()));
+            }
+            self.inner.append(timestamp_ms, payload, durable)
+        }
+
+        fn records_from(&self, sequence: u64, limit: usize) -> Vec<LogRecord> {
+            self.inner.records_from(sequence, limit)
+        }
+
+        fn last_sequence(&self) -> Option<u64> {
+            self.inner.last_sequence()
+        }
+    }
 
     #[test]
     fn bus_routes_to_queue_without_semantic_aliasing() {
@@ -406,5 +699,96 @@ mod tests {
         assert_eq!(health.deployment_mode, DeploymentMode::Standalone);
         assert_eq!(health.guarantee_ceiling, DurabilityProfile::Volatile);
         assert!(!health.hosted_control_plane_required);
+    }
+
+    #[test]
+    fn failed_durable_append_does_not_mutate_stream_memory() {
+        let engine = EpochEngine::with_commit_log(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(100)),
+            Box::new(FailAfterLog {
+                inner: MemoryLog::default(),
+                successful_appends: 1,
+            }),
+        )
+        .unwrap();
+        engine
+            .create_stream(
+                "audit",
+                StreamConfig {
+                    durability: DurabilityProfile::LocalDurable,
+                    ..StreamConfig::default()
+                },
+            )
+            .unwrap();
+
+        let result = engine.append_stream(
+            "audit",
+            EventEnvelope::new("tests", "audit.created", json!({"id": 1}), 100),
+            None,
+        );
+
+        assert!(matches!(result, Err(EpochError::Storage(_))));
+        assert!(
+            engine
+                .stream("audit")
+                .unwrap()
+                .lock()
+                .fetch(0, 0, 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn journal_create_stream_encoding_matches_golden_vector() {
+        let encoded = serde_json::to_string(&JournalEntry {
+            format_version: JOURNAL_FORMAT_VERSION,
+            mutation: JournalMutation::CreateStream {
+                name: "audit".into(),
+                config: StreamConfig {
+                    durability: DurabilityProfile::LocalDurable,
+                    ..StreamConfig::default()
+                },
+            },
+        })
+        .unwrap();
+
+        assert_eq!(
+            format!("{encoded}\n"),
+            include_str!("../../../spec/formats/engine-journal-v1-create-stream.json")
+        );
+    }
+
+    #[test]
+    fn recovery_rejects_an_unknown_engine_journal_version() {
+        let payload = serde_json::to_vec(&JournalEntry {
+            format_version: JOURNAL_FORMAT_VERSION + 1,
+            mutation: JournalMutation::CreateStream {
+                name: "audit".into(),
+                config: StreamConfig {
+                    durability: DurabilityProfile::LocalDurable,
+                    ..StreamConfig::default()
+                },
+            },
+        })
+        .unwrap();
+        let mut inner = MemoryLog::default();
+        inner.append(100, &payload, true).unwrap();
+
+        let result = EpochEngine::with_commit_log(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(100)),
+            Box::new(FailAfterLog {
+                inner,
+                successful_appends: usize::MAX,
+            }),
+        );
+
+        assert!(matches!(
+            result,
+            Err(EpochError::Storage(message))
+                if message.contains("unsupported engine format 2")
+        ));
     }
 }

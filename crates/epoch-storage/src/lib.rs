@@ -11,11 +11,12 @@ use std::{
 };
 
 use crc32fast::Hasher;
-use epoch_core::{EpochError, EpochResult};
+use epoch_core::{DurabilityProfile, EpochError, EpochResult};
 
 const MAGIC: [u8; 4] = *b"EPCH";
 const FORMAT_VERSION: u16 = 1;
 const HEADER_LEN: usize = 32;
+const MAX_PAYLOAD_LEN: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogRecord {
@@ -25,6 +26,9 @@ pub struct LogRecord {
 }
 
 pub trait CommitLog: std::fmt::Debug + Send {
+    /// Strongest acknowledgement this implementation can truthfully provide.
+    fn durability(&self) -> DurabilityProfile;
+
     fn append(
         &mut self,
         timestamp_ms: u64,
@@ -41,6 +45,10 @@ pub struct MemoryLog {
 }
 
 impl CommitLog for MemoryLog {
+    fn durability(&self) -> DurabilityProfile {
+        DurabilityProfile::Volatile
+    }
+
     fn append(
         &mut self,
         timestamp_ms: u64,
@@ -83,6 +91,7 @@ pub struct FileWal {
 impl FileWal {
     pub fn open(path: impl AsRef<Path>) -> EpochResult<Self> {
         let path = path.as_ref().to_path_buf();
+        let existed = path.exists();
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -90,9 +99,20 @@ impl FileWal {
             .write(true)
             .open(&path)
             .map_err(storage_error)?;
+        file.try_lock().map_err(|error| {
+            EpochError::Storage(format!(
+                "WAL {} is already owned by another process: {error}",
+                path.display()
+            ))
+        })?;
+        if !existed {
+            file.sync_all().map_err(storage_error)?;
+            sync_parent_directory(&path)?;
+        }
         let (records, valid_len, recovered_partial_tail) = recover(&mut file)?;
         if recovered_partial_tail {
             file.set_len(valid_len).map_err(storage_error)?;
+            file.sync_data().map_err(storage_error)?;
         }
         file.seek(SeekFrom::End(0)).map_err(storage_error)?;
         Ok(Self {
@@ -116,13 +136,40 @@ impl FileWal {
     }
 }
 
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> EpochResult<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(storage_error)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> EpochResult<()> {
+    Ok(())
+}
+
 impl CommitLog for FileWal {
+    fn durability(&self) -> DurabilityProfile {
+        DurabilityProfile::LocalDurable
+    }
+
     fn append(
         &mut self,
         timestamp_ms: u64,
         payload: &[u8],
         durable: bool,
     ) -> EpochResult<LogRecord> {
+        if payload.len() > MAX_PAYLOAD_LEN {
+            return Err(EpochError::Capacity(format!(
+                "WAL record payload exceeds {MAX_PAYLOAD_LEN} bytes"
+            )));
+        }
         let sequence = self
             .records
             .last()
@@ -204,6 +251,11 @@ fn recover(file: &mut File) -> EpochResult<(Vec<LogRecord>, u64, bool)> {
         let timestamp_ms = u64::from_le_bytes(header[16..24].try_into().expect("fixed header"));
         let payload_len =
             u32::from_le_bytes(header[24..28].try_into().expect("fixed header")) as usize;
+        if payload_len > MAX_PAYLOAD_LEN {
+            return Err(EpochError::Capacity(format!(
+                "WAL record payload at sequence {sequence} exceeds {MAX_PAYLOAD_LEN} bytes"
+            )));
+        }
         let expected_checksum =
             u32::from_le_bytes(header[28..32].try_into().expect("fixed header"));
         let mut payload = vec![0_u8; payload_len];
@@ -324,6 +376,37 @@ mod tests {
         assert!(matches!(
             FileWal::open(temp.path()),
             Err(EpochError::Storage(_))
+        ));
+    }
+
+    #[test]
+    fn file_wal_rejects_a_second_writer() {
+        let temp = NamedTempFile::new().unwrap();
+        let first = FileWal::open(temp.path()).unwrap();
+
+        assert!(matches!(
+            FileWal::open(temp.path()),
+            Err(EpochError::Storage(_))
+        ));
+        drop(first);
+        FileWal::open(temp.path()).expect("lock is released when the owner closes");
+    }
+
+    #[test]
+    fn recovery_rejects_an_oversized_declared_payload() {
+        let temp = NamedTempFile::new().unwrap();
+        let mut header = [0_u8; HEADER_LEN];
+        header[0..4].copy_from_slice(&MAGIC);
+        header[4..6].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+        let declared_len = u32::try_from(MAX_PAYLOAD_LEN + 1).unwrap();
+        header[24..28].copy_from_slice(&declared_len.to_le_bytes());
+        temp.as_file()
+            .write_all(&header)
+            .expect("synthetic header is written");
+
+        assert!(matches!(
+            FileWal::open(temp.path()),
+            Err(EpochError::Capacity(_))
         ));
     }
 }

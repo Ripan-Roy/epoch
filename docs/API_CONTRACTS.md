@@ -384,10 +384,16 @@ methods, standalone receipt metadata, JSON/HTTP profile routes, a CLI,
 `/healthz` and `/readyz`, and a small local WAL. The two health routes currently
 report the same in-process engine state.
 
-The runnable node currently reports a `volatile` guarantee ceiling and rejects
-every stronger durability request. The WAL is a separately tested storage
-primitive, not yet the source of truth for profile recovery; no HTTP receipt
-claims local durability until that integration passes crash/restart tests.
+The runnable node opens one exclusively owned WAL under `EPOCH_DATA_DIR` and
+reports a `local_durable` guarantee ceiling. Streams may select `volatile` or
+`local_durable`; durable Stream creation, append, and consumer-offset mutations
+are fsynced before success and replayed on restart. Partial tail frames are
+discarded, while checksum corruption fails startup. Cache, Queue, and Event Bus
+still accept only `volatile`, and every replication or geo mode is rejected.
+
+This is a single-node journal slice, not the final segmented tablet format. It
+has no snapshot/compaction path, quorum, replica acknowledgement, or protection
+from loss of the host and its storage.
 
 Initial `epoch.v1` Protobuf source defines common resource/envelope types and a
 small `RegionalAdminService`; Buf generation is configured for Go. It is an
@@ -398,7 +404,8 @@ TLS/authentication metadata, typed `google.rpc.Status` details, mutation-status
 lookup, streaming credit, a Rust regional administration implementation,
 long-running operations, metrics on the reserved port, protocol gateways, full
 Go/Java/Python generated SDK parity, and compatibility negotiation remain
-unimplemented. A typed Python client covers the provisional HTTP routes and is
-exercised in the standalone smoke test. The Go control HTTP registry, browser
+unimplemented. A typed Python client covers the provisional HTTP routes,
+including explicit local Stream durability, and is exercised across restart in
+the standalone smoke test. The Go control HTTP registry, browser
 console, current JSON payload structs, and Rust error enum are provisional
 scaffolding and may be migrated before any public compatibility promise.

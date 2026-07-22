@@ -130,18 +130,45 @@ jobs:
       - uses: actions/checkout@v6.0.2
       - run: docker compose -f deploy/compose/docker-compose.yml config --quiet
       - run: docker build --file deploy/docker/Dockerfile.node --tag epoch/node:ci .
-      - name: Start and health-check the image
+      - name: Prove mounted local durability across container replacement
         run: |
+          wait_for_health() {
+            for _ in {1..100}; do
+              if curl --fail --silent --show-error http://127.0.0.1:17661/healthz >/dev/null; then
+                return 0
+              fi
+              sleep 0.1
+            done
+            docker logs epoch-node-ci-smoke
+            return 1
+          }
+
+          docker volume create epoch-node-ci-data >/dev/null
           docker run --detach --rm --name epoch-node-ci-smoke \
-            --publish 127.0.0.1:17661:7601 epoch/node:ci
-          for _ in {1..100}; do
-            if curl --fail --silent --show-error http://127.0.0.1:17661/healthz; then
-              exit 0
-            fi
-            sleep 0.1
-          done
-          docker logs epoch-node-ci-smoke
-          exit 1
+            --publish 127.0.0.1:17661:7601 \
+            --volume epoch-node-ci-data:/var/lib/epoch \
+            epoch/node:ci
+          wait_for_health
+          curl --fail --silent --show-error --output /dev/null \
+            --header 'content-type: application/json' \
+            --data '{"partitions":1,"durability":"local_durable","max_records_per_partition":null}' \
+            http://127.0.0.1:17661/v1/streams/audit
+          curl --fail --silent --show-error --output /dev/null \
+            --header 'content-type: application/json' \
+            --data '{"envelope":{"id":"container-1","source":"ci","type":"audit.created","time_ms":1,"payload":{"ok":true}}}' \
+            http://127.0.0.1:17661/v1/streams/audit/records
+          docker stop --timeout 10 epoch-node-ci-smoke
+
+          docker run --detach --rm --name epoch-node-ci-smoke \
+            --publish 127.0.0.1:17661:7601 \
+            --volume epoch-node-ci-data:/var/lib/epoch \
+            epoch/node:ci
+          wait_for_health
+          records="$(curl --fail --silent --show-error \
+            'http://127.0.0.1:17661/v1/streams/audit/records?partition=0&offset=0&limit=10')"
+          grep -q '"id":"container-1"' <<<"$records"
       - name: Stop smoke container
         if: always()
-        run: docker stop --timeout 10 epoch-node-ci-smoke || true
+        run: |
+          docker stop --timeout 10 epoch-node-ci-smoke || true
+          docker volume rm epoch-node-ci-data || true

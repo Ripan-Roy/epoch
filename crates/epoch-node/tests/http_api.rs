@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fs::OpenOptions, io::Write as _, path::Path, sync::Arc};
 
 use axum::{
     Router,
@@ -8,6 +8,7 @@ use axum::{
 use epoch_core::{DeploymentMode, ManualClock};
 use epoch_engine::EpochEngine;
 use epoch_node::router;
+use epoch_storage::FileWal;
 use http_body_util::BodyExt as _;
 use serde_json::{Value, json};
 use tower::ServiceExt as _;
@@ -17,6 +18,18 @@ fn test_app() -> Router {
         DeploymentMode::Standalone,
         Arc::new(ManualClock::new(1_000)),
     )))
+}
+
+fn durable_test_app(wal_path: &Path, now_ms: u64) -> (Router, bool) {
+    let wal = FileWal::open(wal_path).expect("WAL opens");
+    let recovered_partial_tail = wal.recovered_partial_tail();
+    let engine = EpochEngine::with_commit_log(
+        DeploymentMode::Standalone,
+        Arc::new(ManualClock::new(now_ms)),
+        Box::new(wal),
+    )
+    .expect("journal recovers");
+    (router(Arc::new(engine)), recovered_partial_tail)
 }
 
 async fn call(app: &Router, method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -228,4 +241,137 @@ async fn native_http_api_exercises_all_four_profiles() {
     let (_, health) = call(&app, Method::GET, "/healthz", None).await;
     assert_eq!(health["resource_count"], 4);
     assert_eq!(health["guarantee_ceiling"], "volatile");
+}
+
+async fn create_durable_stream_with_state(app: &Router) {
+    let (status, _) = call(
+        app,
+        Method::POST,
+        "/v1/streams/audit",
+        Some(json!({
+            "partitions": 1,
+            "durability": "local_durable",
+            "max_records_per_partition": null
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, receipt) = call(
+        app,
+        Method::POST,
+        "/v1/streams/audit/records",
+        Some(json!({
+            "envelope": {
+                "id": "audit-1",
+                "source": "tests",
+                "type": "audit.created",
+                "time_ms": 1_000,
+                "dedupe_id": "audit-request-1",
+                "payload": {"subject": "one"}
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(receipt["acknowledgement"]["durability"], "local_durable");
+    let (status, _) = call(
+        app,
+        Method::PUT,
+        "/v1/streams/audit/groups/exporter/offsets",
+        Some(json!({"partition": 0, "next_offset": 1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+async fn verify_recovered_stream_and_reset_offset(app: &Router) {
+    let (status, records) = call(
+        app,
+        Method::GET,
+        "/v1/streams/audit/records?partition=0&offset=0&limit=10",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(records[0]["envelope"]["id"], "audit-1");
+    let (status, duplicate) = call(
+        app,
+        Method::POST,
+        "/v1/streams/audit/records",
+        Some(json!({
+            "envelope": {
+                "id": "audit-retry",
+                "source": "tests",
+                "type": "audit.created",
+                "time_ms": 2_000,
+                "dedupe_id": "audit-request-1",
+                "payload": {"subject": "retry"}
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(duplicate["offset"], 0);
+    assert_eq!(duplicate["acknowledgement"]["duplicate"], true);
+    let (status, lag) = call(
+        app,
+        Method::GET,
+        "/v1/streams/audit/groups/exporter/lag?partition=0",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(lag["committed_offset"], 1);
+    assert_eq!(lag["lag"], 0);
+    let (_, health) = call(app, Method::GET, "/healthz", None).await;
+    assert_eq!(health["guarantee_ceiling"], "local_durable");
+
+    let (status, _) = call(
+        app,
+        Method::PUT,
+        "/v1/streams/audit/groups/exporter/offsets",
+        Some(json!({"partition": 0, "next_offset": 0, "reset": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+async fn verify_recovered_offset_reset(app: &Router) {
+    let (status, lag) = call(
+        app,
+        Method::GET,
+        "/v1/streams/audit/groups/exporter/lag?partition=0",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(lag["committed_offset"], 0);
+    assert_eq!(lag["lag"], 1);
+}
+
+#[tokio::test]
+async fn local_durable_stream_recovers_records_offsets_and_partial_tail() {
+    let temporary = tempfile::tempdir().expect("temporary data directory is created");
+    let wal_path = temporary.path().join("engine.wal");
+    {
+        let (app, recovered_partial_tail) = durable_test_app(&wal_path, 1_000);
+        assert!(!recovered_partial_tail);
+        create_durable_stream_with_state(&app).await;
+    }
+
+    OpenOptions::new()
+        .append(true)
+        .open(&wal_path)
+        .expect("WAL is appendable after shutdown")
+        .write_all(b"EPCHpartial-crash-tail")
+        .expect("partial tail is injected");
+
+    let (app, recovered_partial_tail) = durable_test_app(&wal_path, 2_000);
+    assert!(recovered_partial_tail);
+    verify_recovered_stream_and_reset_offset(&app).await;
+    drop(app);
+
+    let (app, recovered_partial_tail) = durable_test_app(&wal_path, 3_000);
+    assert!(!recovered_partial_tail);
+    verify_recovered_offset_reset(&app).await;
 }

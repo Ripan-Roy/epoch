@@ -7,6 +7,15 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+DurabilityProfile = Literal[
+    "volatile",
+    "replicated_memory",
+    "local_durable",
+    "quorum_durable",
+    "geo_async",
+    "geo_sync",
+]
+
 
 @dataclass(slots=True)
 class EventEnvelope:

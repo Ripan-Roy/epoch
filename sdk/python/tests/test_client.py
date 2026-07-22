@@ -43,6 +43,12 @@ class EpochClientTests(unittest.TestCase):
         self.assertEqual(body["partitions"], 4)
         self.assertEqual(body["durability"], "volatile")
 
+    def test_stream_create_can_request_local_durability(self) -> None:
+        self.client.create_stream("audit", durability="local_durable")
+
+        _, _, body, _ = self.transport.requests[-1]
+        self.assertEqual(body["durability"], "local_durable")
+
     def test_event_envelope_maps_python_name_to_wire_type(self) -> None:
         event = EventEnvelope(
             id="order-1",

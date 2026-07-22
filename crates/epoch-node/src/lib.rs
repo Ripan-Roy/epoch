@@ -278,12 +278,14 @@ async fn stream_commit(
     Path((name, group)): Path<(String, String)>,
     Json(request): Json<OffsetRequest>,
 ) -> ApiResult<StatusCode> {
-    let stream = state.engine.stream(&name)?;
-    let mut stream = stream.lock();
     if request.reset {
-        stream.reset_offset(group, request.partition, request.next_offset)?;
+        state
+            .engine
+            .reset_stream_offset(&name, &group, request.partition, request.next_offset)?;
     } else {
-        stream.commit_offset(group, request.partition, request.next_offset)?;
+        state
+            .engine
+            .commit_stream_offset(&name, &group, request.partition, request.next_offset)?;
     }
     Ok(StatusCode::NO_CONTENT)
 }

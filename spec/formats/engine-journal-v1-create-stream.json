@@ -1,0 +1,1 @@
+{"format_version":1,"mutation":{"kind":"create_stream","name":"audit","config":{"partitions":1,"durability":"local_durable","max_records_per_partition":null}}}

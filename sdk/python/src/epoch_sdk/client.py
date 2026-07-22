@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import quote
 
-from .models import EventEnvelope, Subscription
+from .models import DurabilityProfile, EventEnvelope, Subscription
 from .transport import Transport, UrllibTransport
 
 
@@ -55,6 +55,7 @@ class EpochClient:
         name: str,
         *,
         partitions: int = 1,
+        durability: DurabilityProfile = "volatile",
         max_records_per_partition: int | None = None,
     ) -> dict[str, Any]:
         return self._create(
@@ -62,7 +63,7 @@ class EpochClient:
             name,
             {
                 "partitions": partitions,
-                "durability": "volatile",
+                "durability": durability,
                 "max_records_per_partition": max_records_per_partition,
             },
         )

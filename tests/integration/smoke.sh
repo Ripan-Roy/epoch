@@ -7,6 +7,7 @@ epoch_smoke_tmp="$(mktemp -d "${TMPDIR:-/tmp}/epoch-smoke.XXXXXX")"
 epoch_node_addr="${EPOCH_SMOKE_NODE_ADDR:-127.0.0.1:17651}"
 epoch_control_addr="${EPOCH_SMOKE_CONTROL_ADDR:-127.0.0.1:18081}"
 epoch_target_dir="${EPOCH_SMOKE_TARGET_DIR:-${epoch_repo_root}/target}"
+epoch_node_data="$epoch_smoke_tmp/node-data"
 epoch_node_pid=""
 epoch_control_pid=""
 
@@ -45,20 +46,31 @@ wait_for_health() {
   return 1
 }
 
+start_node() {
+  "$epoch_target_dir/debug/epoch-node" \
+    --http-listen "$epoch_node_addr" \
+    --data-dir "$epoch_node_data" \
+    --log warn >"$epoch_smoke_tmp/node.log" 2>&1 &
+  epoch_node_pid=$!
+  wait_for_health "Epoch node" "http://${epoch_node_addr}/healthz"
+}
+
+stop_node() {
+  kill "$epoch_node_pid"
+  wait "$epoch_node_pid" 2>/dev/null || true
+  epoch_node_pid=""
+}
+
 cd "$epoch_repo_root"
 CARGO_TARGET_DIR="$epoch_target_dir" cargo build --locked -p epoch-node -p epoch-cli
 go build -o "$epoch_smoke_tmp/epoch-control" ./control/cmd/epoch-control
 
-"$epoch_target_dir/debug/epoch-node" \
-  --http-listen "$epoch_node_addr" \
-  --log warn >"$epoch_smoke_tmp/node.log" 2>&1 &
-epoch_node_pid=$!
+start_node
 
 EPOCH_CONTROL_ADDR="$epoch_control_addr" \
   "$epoch_smoke_tmp/epoch-control" >"$epoch_smoke_tmp/control.log" 2>&1 &
 epoch_control_pid=$!
 
-wait_for_health "Epoch node" "http://${epoch_node_addr}/healthz"
 wait_for_health "Epoch control plane" "http://${epoch_control_addr}/healthz"
 
 "$epoch_target_dir/debug/epoch" \
@@ -78,7 +90,7 @@ from epoch_sdk import EpochClient, EventEnvelope, EventFilter, Subscription, Sub
 client = EpochClient(os.environ["EPOCH_SMOKE_NODE_URL"])
 health = client.health()
 assert health["status"] == "ok"
-assert health["guarantee_ceiling"] == "volatile"
+assert health["guarantee_ceiling"] == "local_durable"
 
 client.create_cache("sessions", max_entries=100)
 client.cache_set("sessions", "user-42", "active", only_if_absent=True)
@@ -99,6 +111,18 @@ assert stream_receipt["acknowledgement"]["durability"] == "volatile"
 assert client.fetch_stream("orders")[0]["envelope"]["id"] == "order-1"
 client.commit_stream_offset("orders", "billing", partition=0, next_offset=1)
 assert client.stream_lag("orders", "billing")["lag"] == 0
+
+client.create_stream("audit", durability="local_durable")
+durable_receipt = client.append_stream(
+    "audit",
+    EventEnvelope(
+        id="audit-1",
+        source="api",
+        event_type="audit.created",
+        payload={"subject": "one"},
+    ),
+)
+assert durable_receipt["acknowledgement"]["durability"] == "local_durable"
 
 client.create_queue("jobs", max_messages=100)
 client.send(
@@ -134,7 +158,7 @@ publish = client.publish(
 )
 assert publish["routes"][0]["status"] == "delivered"
 assert client.replay_bus("events", event_type="order.*")[0]["envelope"]["id"] == "order-2"
-assert len(client.resources()) == 4
+assert len(client.resources()) == 5
 
 control_url = os.environ["EPOCH_SMOKE_CONTROL_URL"] + "/v1/resources"
 body = json.dumps(
@@ -170,6 +194,27 @@ status, replayed = apply_control_resource()
 assert status == 200
 assert replayed["replayed"] is True
 assert replayed["resource"]["generation"] == 1
+PYTHON
+
+stop_node
+start_node
+
+EPOCH_SMOKE_NODE_URL="http://${epoch_node_addr}" \
+PYTHONPATH="$epoch_repo_root/sdk/python/src" \
+python3 <<'PYTHON'
+import os
+
+from epoch_sdk import EpochClient
+
+
+client = EpochClient(os.environ["EPOCH_SMOKE_NODE_URL"])
+resources = client.resources()
+assert [(resource["kind"], resource["name"]) for resource in resources] == [
+    ("stream", "audit")
+]
+records = client.fetch_stream("audit")
+assert records[0]["envelope"]["id"] == "audit-1"
+assert records[0]["envelope"]["payload"] == {"subject": "one"}
 PYTHON
 
 printf 'Epoch standalone cross-language smoke passed.\n'

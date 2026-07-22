@@ -125,24 +125,34 @@ function profileFields(profile: CreateProfile, prefix: string): ReactNode {
       );
     case "stream":
       return (
-        <div className="field-row">
-          <NumberField
-            id={`${prefix}-partitions`}
-            label="Partitions"
-            name="partitions"
-            defaultValue={1}
-            min={1}
-            max={1_024}
-          />
-          <NumberField
-            id={`${prefix}-record-limit`}
-            label="Records / partition"
-            name="max_records_per_partition"
-            placeholder="Unbounded"
-            min={1}
-            optional
-          />
-        </div>
+        <>
+          <div className="field-row">
+            <NumberField
+              id={`${prefix}-partitions`}
+              label="Partitions"
+              name="partitions"
+              defaultValue={1}
+              min={1}
+              max={1_024}
+            />
+            <NumberField
+              id={`${prefix}-record-limit`}
+              label="Records / partition"
+              name="max_records_per_partition"
+              placeholder="Unbounded"
+              min={1}
+              optional
+            />
+          </div>
+          <label className="field" htmlFor={`${prefix}-durability`}>
+            <span>Durability</span>
+            <select id={`${prefix}-durability`} name="durability" defaultValue="local_durable">
+              <option value="local_durable">Local durable · WAL + fsync</option>
+              <option value="volatile">Volatile · memory only</option>
+            </select>
+            <small>Local durable survives process restart on this machine; it is not replicated.</small>
+          </label>
+        </>
       );
     case "queue":
       return (
@@ -270,7 +280,7 @@ function buildConfig(profile: CreateProfile, formData: FormData): ResourceConfig
     case "stream":
       return {
         partitions: readPositiveInteger(formData, "partitions"),
-        durability: "volatile",
+        durability: readString(formData, "durability") as StreamConfig["durability"],
         max_records_per_partition: readOptionalPositiveInteger(formData, "max_records_per_partition"),
       } satisfies StreamConfig;
     case "queue":
