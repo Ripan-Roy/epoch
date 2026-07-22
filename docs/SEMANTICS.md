@@ -372,12 +372,14 @@ survive loss of the machine/storage. Cache and Event Bus still reject local
 durability, and every profile rejects replicated-memory, quorum, and geo
 durability instead of returning a false acknowledgement.
 
-It does **not** yet implement tablet consensus, replicated quorum durability,
-regional catalog/placement, distributed fencing, persisted profile snapshots,
-consumer-group coordination, bounded transactions, object tier, geo
+It does **not** yet expose or integrate tablet consensus, replicated quorum
+durability, regional catalog/placement, distributed fencing, persisted profile
+snapshots, consumer-group coordination, bounded transactions, object tier, geo
 replication, native Protobuf services, compatibility gateways, durable webhook
 delivery, connector execution, or the security controls in
-[SECURITY.md](SECURITY.md).
+[SECURITY.md](SECURITY.md). An isolated fixed-voter, memory-only consensus
+feasibility adapter exists for deterministic tests; it does not change any
+runtime acknowledgement or recovery guarantee.
 
 Current JSON-shaped payloads, standalone epochs, HTTP endpoints, and local WAL
 frames are provisional scaffold interfaces. They are not frozen compatibility

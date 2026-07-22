@@ -16,9 +16,10 @@ Run before sending a change for review:
 make check
 ```
 
-It performs generated-code freshness, formatting, static analysis, and unit
-tests for every language area currently present. The extended deterministic
-local gate is:
+It performs generated-code freshness, formatting, static analysis, Rust
+documentation checks, unit tests for every language area currently present,
+and the Rust dependency advisory gate. The extended deterministic local gate
+is:
 
 ```shell
 make ci
@@ -28,6 +29,28 @@ make ci
 validates the Compose model. Long-running compatibility, fuzz, simulation,
 chaos, soak, and performance suites remain separate so the fast gate stays
 useful.
+
+### Rust dependency gate
+
+Both pull-request CI and `make audit` install or require `cargo-audit` 0.22.2
+and run:
+
+```shell
+cargo audit --deny warnings --ignore RUSTSEC-2025-0057
+```
+
+All reported Rust advisories and audit warnings fail the gate except
+`RUSTSEC-2025-0057`. That single temporary exception is the unmaintained
+`fxhash` dependency inherited through `raft`; it is not a vulnerability waiver
+or an acceptance of the adapter. ADR-0003 remains Proposed until the dependency
+decision and replacement path are reviewed. No additional advisory may be
+ignored without a documented review and a bounded removal condition.
+
+The Rust CI job also tests and builds the complete workspace with
+`--all-features`, and builds workspace documentation with
+`RUSTDOCFLAGS="-D warnings"`. It installs `protoc` 35.1 through the repository's
+Linux installer before any Rust compilation and verifies the exact
+`libprotoc 35.1` output.
 
 ## Test layers
 
@@ -77,10 +100,26 @@ bidirectional peer partitions, and a strictly decoded EPTR v1 trace with a
 stable history digest. Golden tests pin the random sequence, generic trace
 framing, and one complete seeded transport history. A failing run must retain
 its seed and fault plan alongside the trace: EPTR does not yet encode an
-executable replay bundle. This is the simulation kernel only; consensus,
-storage, process lifecycle, and profile state machines must still adopt it and
+executable replay bundle. This is the simulation kernel only; persistent
+consensus storage, process lifecycle, and profile state machines must still
 publish invariant histories before the simulator or emulator requirement is
 complete.
+
+The Stage 1 `epoch-consensus` harness now adopts the peer-transport portion of
+that kernel. A fixed seed and canonical trace cover three fixed voters under
+directed partitions, delayed/reordered delivery, duplicate delivery, election,
+majority-only commit, old-leader replacement, catch-up, and leader transfer.
+Full applied histories and SHA-256 state digests are compared; proposal tests
+cover restart reconstruction, overwrite, exact duplicate application,
+conflicting payload reuse, and corrupt restart images. The bounded peer-frame
+suite covers destination, membership, canonical encoding, corruption, local
+message classes, snapshots, and maximum size.
+
+Those tests use `MemStorage` and graceful in-process restart images. They are
+not disk, fsync, process-crash, snapshot, membership-transition, authoritative
+epoch-fencing, or product acknowledgement evidence. Those scenarios remain
+required before G3 or the emulator is complete; see
+[Consensus Feasibility Spike](CONSENSUS_SPIKE.md).
 
 ### 3. Integration tests
 
@@ -269,7 +308,7 @@ committed and documented.
 | Integration | Every pull request once available | Standalone and three-node process tests |
 | Simulation | Pull request seed sample; larger nightly matrix | Deterministic failure exploration |
 | Compatibility | Nightly and release | Pinned Redis/Kafka/RabbitMQ client matrix |
-| Security | Pull request and scheduled | Dependencies, secrets, fuzz smoke, authorization |
+| Security | Pull request and scheduled | Rust advisory gate; secrets, fuzz smoke, authorization as implemented |
 | Performance | Nightly or scheduled dedicated runner | Baselines, saturation, regression analysis |
 | Chaos/soak | Scheduled environments | Fault, upgrade, repair, restore, and long-duration evidence |
 | Platform | Weekly and release | Linux amd64/arm64 and macOS arm64 smoke/release matrix |

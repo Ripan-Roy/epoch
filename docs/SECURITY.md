@@ -405,6 +405,15 @@ scanning, fuzzing, SBOM generation, signed artifacts, provenance, reproducible
 build goals, and verification of downloaded tools and generated code. Unsafe
 Rust is denied by the workspace unless a reviewed ADR grants a narrow exception.
 
+The implemented Rust dependency gate pins `cargo-audit` 0.22.2 and denies audit
+warnings. Its only temporary exception is `RUSTSEC-2025-0057`, the unmaintained
+`fxhash` dependency inherited through `raft`. This exception does not accept the
+consensus dependency or change ADR-0003 from Proposed; removal or replacement
+must be resolved through that decision. The Linux `protoc` 35.1 installer pins
+separate SHA-256 values for x86_64 and aarch64, requires an explicit destination
+that does not already exist, verifies the extracted compiler version, and fails
+closed.
+
 Protocol parsers, storage formats, cryptography integrations, authorization,
 webhook egress, connector sandboxing, and tenant boundaries receive dedicated
 threat models and security tests before public exposure.

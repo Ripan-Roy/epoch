@@ -211,6 +211,15 @@ consensus library behind an Epoch adapter. The library choice remains subject to
 the spike in [ADR-0003](adr/0003-consensus-adapter.md); Epoch will not implement
 a new consensus algorithm during Phase 0.
 
+The current workspace contains only Stage 1 of that spike: an Epoch-owned,
+fixed-three-voter adapter over an exact upstream `raft-rs` revision, using
+in-memory test storage and deterministic `epoch-testkit` transport. It validates
+the adapter/Ready/idempotency/wire boundary but is not connected to a tablet or
+node. It deliberately rejects snapshots and membership changes and does not
+provide durable acknowledgement, catalog-authorized fencing, or a read barrier.
+The complete scope and non-claims are recorded in
+[Consensus Feasibility Spike](CONSENSUS_SPIKE.md).
+
 Rust peer replication uses batched, framed, mutually authenticated connections
 with separate priorities for control, append, snapshot, and repair traffic.
 Administrative and Rust/Go calls use gRPC. Bulk replication is not required to

@@ -8,7 +8,7 @@ NODE_LTS := $(if $(wildcard /opt/homebrew/opt/node@24/bin/node),/opt/homebrew/op
 PNPM_ENV := PATH="/opt/homebrew/opt/node@24/bin:$$PATH"
 JAVA_MVN := ./sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress
 
-.PHONY: help bootstrap-check generate generate-check format format-check lint test test-unit test-integration build check ci compose-config compose-up compose-down clean
+.PHONY: help bootstrap-check generate generate-check format format-check lint audit test test-unit test-integration build check ci compose-config compose-up compose-down clean
 
 help: ## Show available commands.
 	@awk 'BEGIN {FS = ":.*## "; printf "Epoch development commands:\n\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -70,20 +70,27 @@ format-check: ## Check formatting without changing files.
 	@$(PNPM_ENV) pnpm run format:check
 
 lint: ## Run static checks for every language and contract.
-	@if [ -f Cargo.toml ]; then cargo clippy --workspace --all-targets --all-features -- -D warnings; fi
+	@if [ -f Cargo.toml ]; then cargo clippy --locked --workspace --all-targets --all-features -- -D warnings; fi
+	@if [ -f Cargo.toml ]; then RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --all-features --no-deps; fi
 	@if find control operator sdk/go -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then go vet ./...; fi
 	@if [ -d sdk/python ]; then ruff check sdk/python; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) -DskipTests verify; fi
 	@if [ -d .github/workflows ]; then actionlint; fi
-	@if [ -d tests/integration ]; then shellcheck tests/integration/*.sh; fi
+	@if [ -d tests/integration ]; then shellcheck scripts/*.sh tests/integration/*.sh; fi
 	@$(PNPM_ENV) pnpm run lint
 	@$(PNPM_ENV) pnpm run typecheck
 	@if find spec/proto -type f -name '*.proto' -print -quit 2>/dev/null | grep -q .; then buf lint; else echo "no Protobuf contracts found; skipping Buf lint"; fi
 
+audit: ## Reject Rust dependency advisories except the documented Raft exception.
+	@cargo audit --version 2>/dev/null | grep -Eq '^cargo-audit(-audit)? 0\.22\.2$$' || { echo "missing cargo-audit 0.22.2; see docs/DEVELOPMENT.md" >&2; exit 1; }
+	# The only temporary exception is Raft's unmaintained fxhash dependency;
+	# ADR-0003 stays Proposed until the dependency decision is accepted.
+	cargo audit --deny warnings --ignore RUSTSEC-2025-0057
+
 test: test-unit ## Run the default local test suite.
 
 test-unit: ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
-	@if [ -f Cargo.toml ]; then cargo test --workspace --all-targets; fi
+	@if [ -f Cargo.toml ]; then cargo test --locked --workspace --all-targets --all-features; fi
 	@if find control operator sdk/go -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then go test -race ./...; fi
 	@if [ -d sdk/python ]; then PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests -v; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) test; fi
@@ -94,13 +101,13 @@ test-integration: ## Exercise real processes through the CLI and Go/Java/Python 
 	@bash tests/integration/docs-quickstarts.sh
 
 build: ## Build all available workspace components.
-	@if [ -f Cargo.toml ]; then cargo build --workspace --all-targets; fi
+	@if [ -f Cargo.toml ]; then cargo build --locked --workspace --all-targets --all-features; fi
 	@if find control operator sdk/go -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then go build ./...; fi
 	@if [ -d sdk/python ]; then python3 -m compileall -q sdk/python/src sdk/python/tests; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) -DskipTests package; fi
 	@$(PNPM_ENV) pnpm run build
 
-check: generate-check format-check lint test-unit ## Run the local pre-commit gate.
+check: generate-check format-check lint test-unit audit ## Run the local pre-commit gate.
 
 ci: bootstrap-check check build test-integration compose-config ## Run the deterministic CI gate available locally.
 

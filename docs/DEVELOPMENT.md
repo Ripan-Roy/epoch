@@ -19,6 +19,7 @@ primary CI and container target. The current repository pins or validates:
 | Cargo | 1.97.1 | Installed with Rust |
 | rustfmt | 1.9.0 | Required by `make format-check` |
 | Clippy | 0.1.97 | Required by `make lint` |
+| cargo-audit | 0.22.2 | Required by `make audit` and `make check` |
 | protoc | 35.1 | Required for contract tooling and language generators |
 | Buf | 1.72.0 | Lints and generates Protobuf contracts |
 | Python | 3.11 or newer | Runs the official Python SDK and integration client |
@@ -74,6 +75,34 @@ Avoid unintentionally mixing Homebrew Rust and rustup proxies: if rustup is
 installed, ensure the intended toolchain appears first on `PATH`, confirm it
 with `command -v rustc`, and keep the version at 1.97.1 for normal builds.
 
+Install the dependency auditor at the repository-pinned version:
+
+```shell
+cargo install cargo-audit --version 0.22.2 --locked
+cargo audit --version
+```
+
+Make never installs this tool implicitly. `make audit` and `make check` fail
+with an installation hint when the executable is missing or has another
+version.
+
+Linux CI obtains `protoc` from the upstream v35.1 release with a pinned SHA-256
+for each supported runner architecture. The installer requires a new, absolute
+destination and supports Linux x86_64 and aarch64 only:
+
+```shell
+protoc_destination="${TMPDIR:-/tmp}/epoch-protoc-35.1"
+test ! -e "$protoc_destination"
+./scripts/install-protoc.sh "$protoc_destination"
+export PATH="$protoc_destination/bin:$PATH"
+test "$(protoc --version)" = "libprotoc 35.1"
+```
+
+It rejects an existing destination, unsupported platform, missing extraction
+tools, checksum mismatch, unexpected archive layout, or unexpected compiler
+version. It never falls back to an ambient `protoc`. macOS developers continue
+to use the Homebrew package validated by `make bootstrap-check`.
+
 ## Verify the environment
 
 From the repository root:
@@ -113,6 +142,7 @@ make format           # update source formatting
 make format-check     # verify formatting without writes
 make generate         # regenerate Go Protobuf bindings
 make lint             # Rust, Go, Java, Python, TypeScript, and Protobuf checks
+make audit            # pinned Rust dependency advisory gate
 make test             # local unit tests
 make test-integration # real processes plus exact published SDK quickstarts
 make build            # compile all current components
@@ -120,9 +150,10 @@ make check            # normal pre-commit gate
 make ci               # local deterministic CI gate
 ```
 
-The Make targets remain thin wrappers. When debugging a failure, rerun the
-native command printed by Make rather than adding behavior that exists only in
-the wrapper.
+`make check` includes `make audit`; it therefore requires the pinned
+`cargo-audit` installation above. The Make targets remain thin wrappers. When
+debugging a failure, rerun the native command printed by Make rather than adding
+behavior that exists only in the wrapper.
 
 ## Protobuf contracts
 

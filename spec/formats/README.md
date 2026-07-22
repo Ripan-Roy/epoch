@@ -1,4 +1,4 @@
-# Persisted format fixtures
+# Versioned format fixtures
 
 This directory contains reviewed golden vectors for provisional Epoch persisted
 formats. A fixture protects byte-level compatibility within its format version;
@@ -117,3 +117,45 @@ authenticated. Compatibility tests pin both full golden bytes and digest
 changing only the implementation while retaining v1 must preserve these bytes.
 EPTR stores observations only; a seed and fault plan must be captured separately
 until a versioned executable scenario bundle is defined.
+
+## Consensus feasibility formats version 1
+
+The memory-only consensus spike uses two big-endian Epoch frames. They are
+internal feasibility formats, not a production transport or tablet-log
+compatibility promise.
+
+An Epoch command stored inside a normal Raft entry is EPCM v1:
+
+```text
+"EPCM" | u16 version=1 | u64 group_id | u64 group_epoch
+       | u64 proposal_id | u32 payload_len | payload bytes
+```
+
+Zero identifiers, unsupported versions, truncated or trailing bytes, and
+group/epoch mismatches are rejected. The same proposal ID and payload is
+applied once. The public proposal path rejects conflicting ID reuse before
+Raft; if conflicting bytes instead reach committed-entry processing, the
+adapter fail-stops.
+
+An in-process peer transport frame is EPPM v1:
+
+```text
+"EPPM" | u16 version=1 | u64 group_id | u64 group_epoch
+       | u64 from | u64 to | u64 raft_term | u32 opaque_len
+       | canonical opaque raft-rs protobuf bytes
+```
+
+The complete frame is capped at 1 MiB before allocation. Decoding checks the
+expected destination, rejects a self route, requires the envelope to match the
+opaque message, and re-encodes the opaque payload to enforce canonical bytes.
+The adapter additionally requires both endpoints to be in its fixed voter set
+and rejects local-only, snapshot, and membership-changing message classes.
+Production peer transport still requires authenticated identity, encryption,
+flow control, batching, version negotiation, and compatibility fixtures.
+
+The applied-history digest input starts with `EPDG`, big-endian version 1,
+group ID, group epoch, and applied command count. Every unique applied command
+then contributes log index, Raft term, proposal ID, payload length, and payload.
+SHA-256 covers the complete canonical sequence. The digest compares deterministic
+state histories; it does not replace full histories or authenticate an
+adversarial writer.

@@ -72,6 +72,14 @@ occurrences, partitionable peer transport, and versioned trace serialization
 and comparison. It is test infrastructure and does not raise the standalone
 node's guarantee ceiling.
 
+`crates/epoch-consensus` is an isolated, fixed-three-voter, memory-only
+`raft-rs` feasibility adapter. It is now covered by the workspace fault and
+dependency gates, but it is not linked into the node and provides no product
+quorum mode. Durable storage, snapshots, membership/epoch transitions, read
+barriers, authenticated transport, and runtime integration remain open; see
+[the spike report](docs/CONSENSUS_SPIKE.md) and proposed
+[ADR-0003](docs/adr/0003-consensus-adapter.md).
+
 ## Quick start
 
 The supported local baseline is macOS on Apple Silicon with:

@@ -41,7 +41,8 @@ pub const MIN_WAL_SEGMENT_BYTES: u64 = 32;
 /// Default maximum encoded bytes targeted for each standalone WAL segment.
 ///
 /// A single record larger than this target is accepted in an otherwise empty
-/// segment, up to [`MAX_PAYLOAD_LEN`], so records are never split across files.
+/// segment, up to the internal `MAX_PAYLOAD_LEN`, so records are never split
+/// across files.
 pub const DEFAULT_WAL_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -591,7 +592,7 @@ impl SegmentedWal {
 /// Crash-safe standalone layout selector used by the runnable node.
 ///
 /// New or empty data directories receive an invalid-to-old-readers activation
-/// marker and use [`SegmentedWal`]. A pre-existing valid `engine.wal` remains
+/// marker and use the internal segmented WAL. A pre-existing valid `engine.wal` remains
 /// on the legacy single-file writer until an explicit migration exists, which
 /// keeps both concurrent old/new startup and an offline downgrade fail-safe.
 #[derive(Debug)]

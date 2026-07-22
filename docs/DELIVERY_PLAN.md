@@ -99,6 +99,17 @@ the reusable kernel sub-slice. Consensus, storage, process lifecycle, and
 profile history runners must integrate it before the M1 simulation or emulator
 exit evidence is met.
 
+The Stage 1 consensus spike now uses that kernel for a fixed three-voter,
+memory-only `raft-rs` adapter. Its tests cover majority-only commit, isolated
+leader replacement and catch-up, directed partitions, delayed/reordered and
+duplicate delivery, proposal reconstruction/deduplication, leader transfer,
+bounded peer frames, and corrupt restart-image rejection. The adapter is not
+linked into the node and `MemStorage` is not durability evidence. Persistent
+Raft storage, process crash points, snapshots, membership and authoritative
+epoch transitions, read barriers, authenticated transport, model/chaos reports,
+and profile integration remain required for the metadata/replication work
+package and G3. See [Consensus Feasibility Spike](CONSENSUS_SPIKE.md).
+
 The segmented-WAL work package is implemented as the single-node storage
 sub-slice at `$EPOCH_DATA_DIR/engine-wal/segment-*.wal`. The implementation has
 a 64 MiB default and a configurable rotation threshold; tests exercise small
@@ -113,7 +124,8 @@ state fails closed. A pre-existing valid `engine.wal` instead remains on the
 legacy single-file writer, including new appends; no segmented directory or
 automatic migration is created, preserving offline downgrade. This does not
 close the broader storage or replication gates: no snapshots, compaction,
-retention deletion, consensus, replicas, or repair exist yet.
+retention deletion, product-integrated consensus, replicas, or repair exist
+yet.
 
 ### M1 exit criteria
 
