@@ -64,7 +64,8 @@ One package demonstrates that the same Rust engines and format contracts work in
 
 The traceability register marks the following as **Slice**. A Slice entry can be partial where its final milestone is later; the evidence must say exactly which sub-capability passed.
 
-- Cache: CACHE-001–CACHE-005, CACHE-007, and snapshot prototype CACHE-008.
+- Cache: CACHE-001–CACHE-005 and CACHE-007. CACHE-008 snapshots remain M3;
+  the M1 segmented WAL is only a prerequisite and is not Cache restore evidence.
 - Stream: STREAM-001, STREAM-002 basic retention, STREAM-004, and STREAM-005.
 - Queue: QUEUE-001–QUEUE-006 and native credit flow for QUEUE-011.
 - Bus: basic direct/fan-out routing for BUS-001 and the native/CloudEvents-shaped envelope foundation for BUS-005.
@@ -77,17 +78,63 @@ The traceability register marks the following as **Slice**. A Slice entry can be
 |---|---|---|---|
 | Repository and contracts | Rust, Go, Protobuf | Workspace boundaries, generated interfaces, envelope, error/health/config contracts | Cross-language build and compatibility test |
 | Deterministic runtime | Rust | Injectable monotonic/wall clocks, seeded scheduling, crash points, fault transport | Same seed reproduces the same history |
-| Segmented log | Rust | Checksummed append/read, group commit, recovery, snapshots, bounded index rebuild | Partial-write/corruption/restart property suite |
+| Segmented WAL | Rust | Configured rotation, checksummed v1 frames, durable identity/manifest, global sequence, exclusive writer, bounded active-suffix repair, safe legacy fallback | Rotation/restart/metadata/corruption/lock/activation/legacy unit and real-process suites |
 | Metadata and replication prototype | Rust | Three-node metadata/log group, epochs, quorum commit, fencing, leader transfer | Model check plus node/network/disk chaos report |
 | Stream slice | Rust | Key routing, committed offsets, fetch, retention baseline, visible ack policy | Ordered recovery and no-early-ack history |
 | Queue slice | Rust | Ready/scheduled/leased/acked/DLQ state, renewal, retry, redrive | Crash-at-every-transition history check |
-| Cache slice | Rust | One memory shard, core types, TTL, eviction, atomic batch, pipeline, snapshot | Linearizability, expiry, eviction, restore tests |
+| Cache slice | Rust | One volatile memory shard, core types, TTL, eviction, atomic batch, pipeline | Linearizability, expiry, and eviction tests; snapshot/restore remains M3 |
 | Route slice | Rust | Envelope-normalized direct/fan-out delivery into a queue or stream | Route truth table and backpressure test |
 | Standalone and cluster lifecycle | Rust | One selectable node binary, local admin API, truthful mode/guarantee health | Disconnected standalone and three-node smoke suites |
-| CLI, SDK, emulator | Rust plus one SDK language | Create, append/publish, consume/ack, inspect, deterministic local testing | Executable quickstarts in CI |
+| CLI, SDK, emulator | Rust, Go, Java, Python | Create, append/publish, consume/ack, inspect, deterministic local testing | Cross-language executable quickstarts in CI |
 | Control-plane contract scaffold | Go | Reconciler skeleton that uses only gRPC contracts; no record-path ownership | Boundary test and dependency audit |
 | Trust and diagnostics baseline | Rust | mTLS-ready identity boundary, audit event skeleton, golden metrics/traces, explain output | Required-event/metric fault assertions |
 | Packaging | Release tooling | Development OCI image, Kubernetes dev manifest, signed development binary/SBOM path | Clean-room install and signature CI |
+
+The deterministic-runtime kernel is implemented in `epoch-testkit`: stable
+seeded scheduling, independent virtual wall/monotonic time, occurrence-indexed
+faults, directed partitions, duplicate/delay/reorder delivery, and canonical
+EPTR v1 traces with golden history digests. EPTR is not yet an executable replay
+bundle, so the seed and fault plan remain separate evidence. This closes only
+the reusable kernel sub-slice. Consensus, storage, process lifecycle, and
+profile history runners must integrate it before the M1 simulation or emulator
+exit evidence is met.
+
+The Stage 1 consensus spike uses that kernel for a fixed three-voter `raft-rs`
+adapter. Its tests cover majority-only commit, isolated leader replacement and
+catch-up, directed partitions, delayed/reordered and duplicate delivery,
+proposal reconstruction/deduplication, leader transfer, bounded peer frames,
+and corrupt restart-image rejection. A local follow-on adds
+`PersistentRaftAdapter` and the EPRS v1 checksummed `FileWal` journal, including
+immutable identity, explicit `HardState`/entry/checkpoint fields, local reopen,
+uncommitted-suffix replacement, partial-tail repair, and corruption rejection.
+An explicit three-child-process extension isolates the leader, proves no
+minority commit, heals and compares all receipts/digests, then sends `SIGKILL`
+to one and all voters before reopening the same EPRS paths without duplicate
+receipt publication. An opt-in node runtime and three-container topology add a
+dedicated bounded HTTP transport plus opaque diagnostic proposals while keeping
+all product profiles standalone. Neither integration is a product
+durable-majority acknowledgement. Exhaustive crash points, snapshots,
+membership and authoritative epoch transitions, read barriers, authenticated
+transport, model/chaos reports, and profile integration remain required for the
+metadata/replication work package and G3. See
+[Consensus Feasibility Spike](CONSENSUS_SPIKE.md).
+
+The segmented-WAL work package is implemented as the single-node storage
+sub-slice at `$EPOCH_DATA_DIR/engine-wal/segment-*.wal`. The implementation has
+a 64 MiB default and a configurable rotation threshold; tests exercise small
+thresholds, continuous sequence validation, checksummed restart replay,
+exclusive ownership, and recovery that discards only an active-segment suffix
+beyond its manifest-committed length. Fresh data directories receive an
+invalid-to-old-readers staging/active marker at
+`engine.wal`; `engine-wal/identity.v1` and `manifest.v1` bind a WAL UUID to the
+ordered topology, committed lengths, last sequences, content CRC32 values, and
+pending rotation. Missing, truncated, foreign, untracked, or changed committed
+state fails closed. A pre-existing valid `engine.wal` instead remains on the
+legacy single-file writer, including new appends; no segmented directory or
+automatic migration is created, preserving offline downgrade. This does not
+close the broader storage or replication gates: no snapshots, compaction,
+retention deletion, product-integrated consensus, replicas, or repair exist
+yet.
 
 ### M1 exit criteria
 
@@ -110,7 +157,7 @@ Primary scope:
 - Complete P0 native cache, stream, and queue behavior: CACHE-001–CACHE-007; STREAM-001–STREAM-006; QUEUE-001–QUEUE-006 and QUEUE-011.
 - Complete basic route topology BUS-001 while keeping the broader Event Bus target matrix for M4.
 - Complete multi-zone placement/failover, safe topology operations, admission, and observability: MGD-002, MGD-004, MGD-012, MGD-014; CTRL-001–CTRL-005.
-- Deliver Go and Java SDKs, guarantee-aware docs, emulator, integration containers, and explain: DX-001–DX-004 and DX-006.
+- Deliver Go, Java, and Python SDKs, guarantee-aware docs, emulator, integration containers, and explain: DX-001–DX-004 and DX-006.
 - Establish audit/tag governance and standalone/cluster/embedded lifecycle foundations: MGD-011 basics, GOV-005, GOV-006 basics, PKG-002–PKG-009.
 
 Exit gate:

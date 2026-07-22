@@ -334,19 +334,54 @@ distributed contract described above:
 
 - shared envelope, durability, delivery, ordering, deployment, receipt, and
   error types;
-- an injectable `Clock` trait and deterministic test clock;
+- an injectable `Clock` trait with separate wall and monotonic observations, a
+  deterministic test clock, and a serializable hybrid-logical timestamp;
 - in-memory Cache, Stream, Queue, and Bus state machines with a subset of core
   operations;
 - standalone commit positions and acknowledgement metadata;
-- a checksummed, versioned local WAL with partial-tail recovery;
+- a checksummed, versioned, manifest-committed rotating local WAL;
 - basic in-process routing between Bus, Queue, and Stream resources.
 
-It does **not** yet implement tablet consensus, replicated quorum durability,
-regional catalog/placement, distributed fencing, persisted profile snapshots,
-consumer-group coordination, bounded transactions, object tier, geo
+All four runnable profiles support **volatile** resources. Stream and Queue also
+support an explicit **local durable** mode. Stream creation, record append, and
+consumer-offset mutation are recorded alongside Queue creation, enqueue,
+acquire, settlement, redrive, and time-driven maintenance in a versioned,
+checksummed WAL and fsynced before success. Fresh data directories store it as
+`$EPOCH_DATA_DIR/engine-wal/segment-*.wal`; it rotates at a configured byte
+threshold and maintains one global contiguous record sequence across files.
+The WAL identity and manifest are versioned and checksummed. The manifest is the
+commit authority for the exact segment set, committed byte lengths, ending
+sequences, and whole-file checksums. Recovery replays only manifested,
+checksum-valid entries at their original apply times. It may discard only an
+uncommitted suffix beyond the active segment's manifested length. Missing or
+truncated committed data, extra sealed bytes, metadata mismatch, checksum
+failure, or a sequence gap fails recovery. A failed journal append does not
+mutate live Stream or Queue state.
+
+The node uses `engine.wal` as the segmented layout activation marker and a
+cross-version single-writer lock. A fresh activation becomes visible only after
+the segmented identity, manifest, and first segment are durable; old binaries
+cannot parse either staging or active markers as a valid v1 WAL. A pre-existing
+valid legacy `engine.wal` instead stays on its single-file writer: the current
+binary replays and appends to it without creating a second history, preserving
+safe offline downgrade. Ambiguous mixed layouts fail closed.
+
+That mode is single-node only. Segment rotation is not retention: this slice
+has no snapshot, compaction, segment deletion, or replication path and does not
+survive loss of the machine/storage. Cache and Event Bus still reject local
+durability, and every profile rejects replicated-memory, quorum, and geo
+durability instead of returning a false acknowledgement.
+
+It does **not** yet expose or integrate tablet consensus, replicated quorum
+durability, regional catalog/placement, distributed fencing, persisted profile
+snapshots, consumer-group coordination, bounded transactions, object tier, geo
 replication, native Protobuf services, compatibility gateways, durable webhook
 delivery, connector execution, or the security controls in
-[SECURITY.md](SECURITY.md).
+[SECURITY.md](SECURITY.md). Isolated fixed-voter consensus feasibility adapters
+exist for deterministic memory histories and EPRS-backed local reopen tests. An
+opt-in node probe can replicate opaque diagnostic bytes over a dedicated HTTP
+listener, but it is not connected to any profile state machine and does not
+change a product acknowledgement or recovery guarantee.
 
 Current JSON-shaped payloads, standalone epochs, HTTP endpoints, and local WAL
 frames are provisional scaffold interfaces. They are not frozen compatibility

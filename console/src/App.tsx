@@ -8,9 +8,12 @@ import type {
   ResourceKind,
   ResourceSummary,
 } from "./api/types";
-import { ProfileCreateCard, profileDefinitions } from "./components/ProfileCreateCard";
+import { ProfileCreateCard } from "./components/ProfileCreateCard";
+import { DocsPage } from "./DocsPage";
+import { profileDefinitions } from "./profileDefinitions";
 
 const refreshIntervalMs = 15_000;
+const docsOnly = import.meta.env.VITE_DOCS_ONLY === "true";
 
 const durabilityRank: Record<DurabilityProfile, number> = {
   volatile: 0,
@@ -21,7 +24,81 @@ const durabilityRank: Record<DurabilityProfile, number> = {
   geo_sync: 5,
 };
 
+interface AppRoute {
+  page: "console" | "docs";
+  section: string | null;
+}
+
 function App() {
+  return docsOnly ? <DocumentationApp /> : <EpochApp />;
+}
+
+function DocumentationApp() {
+  const [section, setSection] = useState<string | null>(readDocsSection);
+
+  useEffect(() => {
+    const updateRoute = () => setSection(readDocsSection());
+    window.addEventListener("hashchange", updateRoute);
+    return () => window.removeEventListener("hashchange", updateRoute);
+  }, []);
+
+  useEffect(() => {
+    document.title = "Epoch Docs · Alpha";
+  }, []);
+
+  return (
+    <>
+      <a
+        className="skip-link"
+        href="#/docs/main-content"
+        onClick={() => {
+          if (section === "main-content") {
+            focusMainContent();
+          }
+        }}
+      >
+        Skip to main content
+      </a>
+
+      <header className="topbar">
+        <div className="shell topbar__inner">
+          <a className="brand" href="#/docs" aria-label="Epoch documentation home">
+            <span className="brand__mark" aria-hidden="true">
+              E
+            </span>
+            <span>
+              <strong>Epoch</strong>
+              <small>developer docs</small>
+            </span>
+          </a>
+          <div className="topbar__right">
+            <nav className="topnav" aria-label="Primary navigation">
+              <a href="#/docs" aria-current="page">
+                Docs
+              </a>
+              <a href="https://github.com/Ripan-Roy/epoch" target="_blank" rel="noreferrer">
+                GitHub <span aria-hidden="true">↗</span>
+              </a>
+            </nav>
+            <span className="alpha-pill">FOUNDATION ALPHA</span>
+          </div>
+        </div>
+      </header>
+
+      <DocsPage section={section} />
+
+      <footer>
+        <div className="shell footer__inner">
+          <span>Epoch Docs · 0.1 alpha</span>
+          <span>Reported state only. No silent guarantee upgrades.</span>
+        </div>
+      </footer>
+    </>
+  );
+}
+
+function EpochApp() {
+  const [route, setRoute] = useState<AppRoute>(readRoute);
   const [health, setHealth] = useState<EngineHealth | null>(null);
   const [resources, setResources] = useState<ResourceSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -52,10 +129,33 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const updateRoute = () => setRoute(readRoute());
+    window.addEventListener("hashchange", updateRoute);
+    return () => window.removeEventListener("hashchange", updateRoute);
+  }, []);
+
+  useEffect(() => {
+    document.title = route.page === "docs" ? "Epoch Docs · Alpha" : "Epoch Console · Alpha";
+  }, [route.page]);
+
+  useEffect(() => {
+    if (route.page !== "console") {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      window.scrollTo({ top: 0 });
+      document.getElementById("main-content")?.focus({ preventScroll: true });
+    });
+  }, [route.page]);
+
+  useEffect(() => {
+    if (route.page !== "console") {
+      return;
+    }
     void loadOverview();
     const interval = window.setInterval(() => void loadOverview(true), refreshIntervalMs);
     return () => window.clearInterval(interval);
-  }, [loadOverview]);
+  }, [loadOverview, route.page]);
 
   const connected = health?.status === "ok";
 
@@ -64,7 +164,9 @@ function App() {
       throw new Error("The node must report healthy before the console can create a resource.");
     }
     const created = await createResource(input);
-    setNotice(`${profileLabel(input.profile)} “${created.name}” created at resource epoch ${created.resource_epoch}.`);
+    setNotice(
+      `${profileLabel(input.profile)} “${created.name}” created at resource epoch ${created.resource_epoch}.`,
+    );
     await loadOverview(true);
   }
 
@@ -73,180 +175,246 @@ function App() {
 
   return (
     <>
-      <a className="skip-link" href="#main-content">
+      <a
+        className="skip-link"
+        href={route.page === "docs" ? "#/docs/main-content" : "#main-content"}
+        onClick={() => {
+          if (route.page === "docs" && route.section === "main-content") {
+            focusMainContent();
+          }
+        }}
+      >
         Skip to main content
       </a>
 
       <header className="topbar">
         <div className="shell topbar__inner">
-          <a className="brand" href="#top" aria-label="Epoch console home">
+          <a
+            className="brand"
+            href={route.page === "docs" ? "#/docs" : "#/console"}
+            aria-label={route.page === "docs" ? "Epoch documentation home" : "Epoch runtime console home"}
+          >
             <span className="brand__mark" aria-hidden="true">
               E
             </span>
             <span>
               <strong>Epoch</strong>
-              <small>runtime console</small>
+              <small>{route.page === "docs" ? "developer docs" : "runtime console"}</small>
             </span>
           </a>
-          <span className="alpha-pill">FOUNDATION ALPHA</span>
+          <div className="topbar__right">
+            <nav className="topnav" aria-label="Primary navigation">
+              <a href="#/console" aria-current={route.page === "console" ? "page" : undefined}>
+                Console
+              </a>
+              <a href="#/docs" aria-current={route.page === "docs" ? "page" : undefined}>
+                Docs
+              </a>
+              <a href="https://github.com/Ripan-Roy/epoch" target="_blank" rel="noreferrer">
+                GitHub <span aria-hidden="true">↗</span>
+              </a>
+            </nav>
+            <span className="alpha-pill">FOUNDATION ALPHA</span>
+          </div>
         </div>
       </header>
 
-      <main id="main-content">
-        <div className="shell" id="top">
-          <aside className="alpha-banner" aria-label="Alpha limitations">
-            <strong>Evidence before promises.</strong>
-            <span>
-              This console reflects one local Rust node. “Local durable” means single-node persistence—not
-              replication, quorum, multi-zone availability, or protection from total machine loss.
-            </span>
-          </aside>
-
-          <section className="hero" aria-labelledby="overview-title">
-            <div>
-              <p className="eyebrow">NODE OVERVIEW</p>
-              <h1 id="overview-title">One runtime, four explicit behaviors.</h1>
-              <p className="hero__lede">
-                Inspect what this node can actually guarantee, then create the workload profile whose semantics
-                fit the job.
-              </p>
-            </div>
-            <div className="hero__actions">
-              <code>{apiBaseUrl}</code>
-              <button
-                className="button button--secondary"
-                type="button"
-                onClick={() => void loadOverview()}
-                disabled={loading}
-              >
-                {loading ? "Checking…" : "Refresh node"}
-              </button>
-            </div>
-          </section>
-
-          {loadError ? (
-            <div className="callout callout--error" role="alert">
-              <strong>Node unavailable</strong>
-              <span>{loadError}</span>
+      {route.page === "docs" ? (
+        <DocsPage section={route.section} />
+      ) : (
+        <main id="main-content" tabIndex={-1}>
+          <div className="shell" id="top">
+            <aside className="alpha-banner" aria-label="Alpha limitations">
+              <strong>Evidence before promises.</strong>
               <span>
-                Start <code>epoch-node</code> on port 7601, then refresh.
+                This console reflects one local Rust node. Streams and Queues can opt into WAL-backed local
+                durability; Cache, Event Bus, and volatile resources remain process-local. Replication and
+                quorum are not wired yet.
               </span>
-            </div>
-          ) : null}
+            </aside>
 
-          {notice ? (
-            <div className="callout callout--success" role="status" aria-live="polite">
-              <strong>Resource accepted</strong>
-              <span>{notice}</span>
-              <button type="button" className="text-button" onClick={() => setNotice(null)}>
-                Dismiss
-              </button>
-            </div>
-          ) : null}
-
-          <section className="status-grid" aria-label="Node status" aria-busy={loading}>
-            <StatusCard label="Connection" value={connectionLabel} tone={connectionTone}>
-              {lastChecked ? `Checked ${formatCheckTime(lastChecked)}` : "Waiting for the first health response"}
-            </StatusCard>
-            <StatusCard label="Deployment" value={health ? formatEnum(health.deployment_mode) : "Unknown"}>
-              {health ? deploymentDescription(health) : "No deployment mode has been observed"}
-            </StatusCard>
-            <StatusCard label="Guarantee ceiling" value={health ? formatEnum(health.guarantee_ceiling) : "Unknown"}>
-              {health ? guaranteeDescription(health.guarantee_ceiling) : "The console will not infer a guarantee"}
-            </StatusCard>
-            <StatusCard label="Live resources" value={health ? String(health.resource_count) : "—"}>
-              {health && health.profiles.length > 0
-                ? `Active: ${health.profiles.map(profileLabel).join(", ")}`
-                : "No active resource profiles reported"}
-            </StatusCard>
-          </section>
-
-          <section className="section" aria-labelledby="create-title">
-            <div className="section-heading">
+            <section className="hero" aria-labelledby="overview-title">
               <div>
-                <p className="eyebrow">CREATE</p>
-                <h2 id="create-title">Choose behavior, not a vendor analogy.</h2>
+                <p className="eyebrow">NODE OVERVIEW</p>
+                <h1 id="overview-title">One runtime, four explicit behaviors.</h1>
+                <p className="hero__lede">
+                  Inspect what this node can actually guarantee, then create the workload profile whose
+                  semantics fit the job.
+                </p>
               </div>
-              <p>Alpha forms intentionally expose only the local guarantees implemented by this node.</p>
-            </div>
-            <div className="profile-grid">
-              {profileDefinitions.map((definition) => (
-                <ProfileCreateCard
-                  key={definition.profile}
-                  definition={definition}
-                  connected={connected}
-                  onCreate={handleCreate}
-                />
-              ))}
-            </div>
-          </section>
-
-          <section className="section resources-section" aria-labelledby="resources-title">
-            <div className="section-heading">
-              <div>
-                <p className="eyebrow">INVENTORY</p>
-                <h2 id="resources-title">Resources reported by this process</h2>
+              <div className="hero__actions">
+                <code>{apiBaseUrl}</code>
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  onClick={() => void loadOverview()}
+                  disabled={loading}
+                >
+                  {loading ? "Checking…" : "Refresh node"}
+                </button>
               </div>
-              <p>Configured durability is shown separately from the node’s maximum credible guarantee.</p>
-            </div>
+            </section>
 
-            {connected && resources.length === 0 ? (
-              <div className="empty-state">
-                <strong>No resources yet.</strong>
-                <span>Create one above; the inventory refreshes after the node accepts it.</span>
+            {loadError ? (
+              <div className="callout callout--error" role="alert">
+                <strong>Node unavailable</strong>
+                <span>{loadError}</span>
+                <span>
+                  Start <code>epoch-node</code> on port 7601, then refresh.
+                </span>
               </div>
             ) : null}
 
-            {resources.length > 0 ? (
-              <div className="table-wrap">
-                <table>
-                  <caption className="sr-only">Epoch resources and configured guarantees</caption>
-                  <thead>
-                    <tr>
-                      <th scope="col">Resource</th>
-                      <th scope="col">Profile</th>
-                      <th scope="col">Configured durability</th>
-                      <th scope="col">Epoch</th>
-                      <th scope="col">Console check</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {resources.map((resource) => {
-                      const assessment = assessDurability(resource, health);
-                      return (
-                        <tr key={`${resource.kind}:${resource.name}`}>
-                          <th scope="row">{resource.name}</th>
-                          <td>
-                            <span className="profile-token" data-kind={resource.kind}>
-                              {profileLabel(resource.kind)}
-                            </span>
-                          </td>
-                          <td>{formatEnum(resource.durability)}</td>
-                          <td>{resource.epoch}</td>
-                          <td>
-                            <span className="assessment" data-tone={assessment.tone}>
-                              {assessment.label}
-                            </span>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+            {notice ? (
+              <div className="callout callout--success" role="status" aria-live="polite">
+                <strong>Resource accepted</strong>
+                <span>{notice}</span>
+                <button type="button" className="text-button" onClick={() => setNotice(null)}>
+                  Dismiss
+                </button>
               </div>
             ) : null}
-          </section>
-        </div>
-      </main>
+
+            <section className="status-grid" aria-label="Node status" aria-busy={loading}>
+              <StatusCard label="Connection" value={connectionLabel} tone={connectionTone}>
+                {lastChecked
+                  ? `Checked ${formatCheckTime(lastChecked)}`
+                  : "Waiting for the first health response"}
+              </StatusCard>
+              <StatusCard label="Deployment" value={health ? formatEnum(health.deployment_mode) : "Unknown"}>
+                {health ? deploymentDescription(health) : "No deployment mode has been observed"}
+              </StatusCard>
+              <StatusCard
+                label="Reported ceiling"
+                value={health ? formatEnum(health.guarantee_ceiling) : "Unknown"}
+              >
+                {health
+                  ? guaranteeDescription(health.guarantee_ceiling)
+                  : "The console will not infer a guarantee"}
+              </StatusCard>
+              <StatusCard label="Live resources" value={health ? String(health.resource_count) : "—"}>
+                {health && health.profiles.length > 0
+                  ? `Active: ${health.profiles.map(profileLabel).join(", ")}`
+                  : "No active resource profiles reported"}
+              </StatusCard>
+            </section>
+
+            <section className="section" aria-labelledby="create-title">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">CREATE</p>
+                  <h2 id="create-title">Choose behavior, not a vendor analogy.</h2>
+                </div>
+                <p>Alpha forms intentionally expose only the local guarantees implemented by this node.</p>
+              </div>
+              <div className="profile-grid">
+                {profileDefinitions.map((definition) => (
+                  <ProfileCreateCard
+                    key={definition.profile}
+                    definition={definition}
+                    connected={connected}
+                    onCreate={handleCreate}
+                  />
+                ))}
+              </div>
+            </section>
+
+            <section className="section resources-section" aria-labelledby="resources-title">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">INVENTORY</p>
+                  <h2 id="resources-title">Resources reported by this process</h2>
+                </div>
+                <p>
+                  Configured durability and the reported node ceiling are separate; neither is independent
+                  evidence.
+                </p>
+              </div>
+
+              {connected && resources.length === 0 ? (
+                <div className="empty-state">
+                  <strong>No resources yet.</strong>
+                  <span>Create one above; the inventory refreshes after the node accepts it.</span>
+                </div>
+              ) : null}
+
+              {resources.length > 0 ? (
+                <div className="table-wrap">
+                  <table>
+                    <caption className="sr-only">Epoch resources and configured guarantees</caption>
+                    <thead>
+                      <tr>
+                        <th scope="col">Resource</th>
+                        <th scope="col">Profile</th>
+                        <th scope="col">Configured durability</th>
+                        <th scope="col">Epoch</th>
+                        <th scope="col">Console check</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {resources.map((resource) => {
+                        const assessment = assessDurability(resource, health);
+                        return (
+                          <tr key={`${resource.kind}:${resource.name}`}>
+                            <th scope="row">{resource.name}</th>
+                            <td>
+                              <span className="profile-token" data-kind={resource.kind}>
+                                {profileLabel(resource.kind)}
+                              </span>
+                            </td>
+                            <td>{formatEnum(resource.durability)}</td>
+                            <td>{resource.epoch}</td>
+                            <td>
+                              <span className="assessment" data-tone={assessment.tone}>
+                                {assessment.label}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
+            </section>
+          </div>
+        </main>
+      )}
 
       <footer>
         <div className="shell footer__inner">
-          <span>Epoch Console · 0.1 alpha</span>
+          <span>Epoch {route.page === "docs" ? "Docs" : "Console"} · 0.1 alpha</span>
           <span>Reported state only. No silent guarantee upgrades.</span>
         </div>
       </footer>
     </>
   );
+}
+
+function readRoute(): AppRoute {
+  if (!window.location.hash || window.location.hash === "#") {
+    return import.meta.env.VITE_DEFAULT_PAGE === "docs"
+      ? { page: "docs", section: null }
+      : { page: "console", section: null };
+  }
+  const [page, section] = window.location.hash.replace(/^#\/?/, "").split("/");
+  if (page === "docs") {
+    return { page: "docs", section: section || null };
+  }
+  return { page: "console", section: null };
+}
+
+function readDocsSection(): string | null {
+  const [page, section] = window.location.hash.replace(/^#\/?/, "").split("/");
+  return page === "docs" && section ? section : null;
+}
+
+function focusMainContent() {
+  window.requestAnimationFrame(() => {
+    const main = document.getElementById("main-content");
+    main?.scrollIntoView();
+    main?.focus({ preventScroll: true });
+  });
 }
 
 function StatusCard({
@@ -283,10 +451,10 @@ function assessDurability(
     return { label: "Exceeds node ceiling", tone: "bad" };
   }
   if (resource.durability === "volatile") {
-    return { label: "Loss accepted", tone: "warn" };
+    return { label: "Configured volatile", tone: "warn" };
   }
   if (health.deployment_mode === "standalone" || health.deployment_mode === "embedded") {
-    return { label: "Single-node scope", tone: "warn" };
+    return { label: "Within ceiling · unverified", tone: "warn" };
   }
   return { label: "Within reported ceiling", tone: "good" };
 }
@@ -313,7 +481,7 @@ function guaranteeDescription(profile: DurabilityProfile): string {
     case "replicated_memory":
       return "Memory replicas only; simultaneous power loss remains exposed";
     case "local_durable":
-      return "Local disk only; total machine loss is not covered";
+      return "Node-reported class; verify commit and recovery evidence";
     case "quorum_durable":
       return "Maximum reported class; achieved placement still matters";
     case "geo_async":

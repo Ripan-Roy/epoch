@@ -5,10 +5,11 @@ use std::{collections::HashMap, sync::Arc};
 use epoch_bus::{BusConfig, EventBus, PublishResult, Subscription, SubscriptionTarget};
 use epoch_cache::{Cache, CacheConfig};
 use epoch_core::{
-    Clock, DeploymentMode, DurabilityProfile, EpochError, EpochResult, EventEnvelope, ResourceKind,
-    SystemClock, validate_resource_name,
+    AckMetadata, Clock, DeploymentMode, DurabilityProfile, EpochError, EpochResult, EventEnvelope,
+    ResourceKind, SystemClock, validate_resource_name,
 };
-use epoch_queue::{EnqueueReceipt, Queue, QueueConfig};
+use epoch_queue::{Delivery, EnqueueReceipt, Queue, QueueConfig};
+use epoch_storage::{CommitLog, LogRecord};
 use epoch_stream::{AppendReceipt, Stream, StreamConfig};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -60,10 +61,144 @@ pub struct EngineHealth {
     pub hosted_control_plane_required: bool,
 }
 
+const JOURNAL_FORMAT_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JournalEntry {
+    format_version: u16,
+    mutation: JournalMutation,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum JournalMutation {
+    CreateStream {
+        name: String,
+        config: StreamConfig,
+    },
+    AppendStream {
+        name: String,
+        envelope: Box<EventEnvelope>,
+        partition: u32,
+        applied_at_ms: u64,
+    },
+    SetStreamOffset {
+        name: String,
+        group: String,
+        partition: u32,
+        next_offset: u64,
+        reset: bool,
+    },
+    CreateQueue {
+        name: String,
+        config: QueueConfig,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_state_checksum: Option<u32>,
+    },
+    EnqueueQueue {
+        name: String,
+        envelope: Box<EventEnvelope>,
+        applied_at_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_state_checksum: Option<u32>,
+    },
+    AcquireQueue {
+        name: String,
+        consumer: String,
+        max_messages: u32,
+        visibility_timeout_ms: Option<u64>,
+        applied_at_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_state_checksum: Option<u32>,
+    },
+    SettleQueue {
+        name: String,
+        settlement: JournalQueueSettlement,
+        applied_at_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_state_checksum: Option<u32>,
+    },
+    RedriveQueue {
+        name: String,
+        message_id: String,
+        applied_at_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_state_checksum: Option<u32>,
+    },
+    MaintainQueue {
+        name: String,
+        applied_at_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_state_checksum: Option<u32>,
+    },
+}
+
+impl JournalMutation {
+    fn with_expected_queue_state_checksum(mut self, checksum: u32) -> Self {
+        let expected_state_checksum = match &mut self {
+            Self::CreateQueue {
+                expected_state_checksum,
+                ..
+            }
+            | Self::EnqueueQueue {
+                expected_state_checksum,
+                ..
+            }
+            | Self::AcquireQueue {
+                expected_state_checksum,
+                ..
+            }
+            | Self::SettleQueue {
+                expected_state_checksum,
+                ..
+            }
+            | Self::RedriveQueue {
+                expected_state_checksum,
+                ..
+            }
+            | Self::MaintainQueue {
+                expected_state_checksum,
+                ..
+            } => expected_state_checksum,
+            Self::CreateStream { .. }
+            | Self::AppendStream { .. }
+            | Self::SetStreamOffset { .. } => {
+                unreachable!("queue state checksums apply only to queue journal mutations")
+            }
+        };
+        *expected_state_checksum = Some(checksum);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+enum JournalQueueSettlement {
+    Ack {
+        token: String,
+    },
+    Release {
+        token: String,
+        delay_ms: u64,
+        reason: Option<String>,
+    },
+    Reject {
+        token: String,
+        reason: String,
+    },
+    Extend {
+        token: String,
+        extension_ms: u64,
+    },
+}
+
 #[derive(Debug)]
 pub struct EpochEngine {
     deployment_mode: DeploymentMode,
     clock: Arc<dyn Clock>,
+    journal: Option<Mutex<Box<dyn CommitLog>>>,
+    guarantee_ceiling: DurabilityProfile,
     caches: RwLock<HashMap<String, CacheHandle>>,
     streams: RwLock<HashMap<String, StreamHandle>>,
     queues: RwLock<HashMap<String, QueueHandle>>,
@@ -72,15 +207,43 @@ pub struct EpochEngine {
 
 impl Default for EpochEngine {
     fn default() -> Self {
-        Self::new(DeploymentMode::Standalone, Arc::new(SystemClock))
+        Self::new(DeploymentMode::Standalone, Arc::new(SystemClock::default()))
     }
 }
 
 impl EpochEngine {
     pub fn new(deployment_mode: DeploymentMode, clock: Arc<dyn Clock>) -> Self {
+        Self::empty(deployment_mode, clock, None, DurabilityProfile::Volatile)
+    }
+
+    pub fn with_commit_log(
+        deployment_mode: DeploymentMode,
+        clock: Arc<dyn Clock>,
+        log: Box<dyn CommitLog>,
+    ) -> EpochResult<Self> {
+        let guarantee_ceiling = log.durability();
+        let records = log.records_from(0, usize::MAX);
+        let engine = Self::empty(
+            deployment_mode,
+            clock,
+            Some(Mutex::new(log)),
+            guarantee_ceiling,
+        );
+        engine.recover(records)?;
+        Ok(engine)
+    }
+
+    fn empty(
+        deployment_mode: DeploymentMode,
+        clock: Arc<dyn Clock>,
+        journal: Option<Mutex<Box<dyn CommitLog>>>,
+        guarantee_ceiling: DurabilityProfile,
+    ) -> Self {
         Self {
             deployment_mode,
             clock,
+            journal,
+            guarantee_ceiling,
             caches: RwLock::new(HashMap::new()),
             streams: RwLock::new(HashMap::new()),
             queues: RwLock::new(HashMap::new()),
@@ -89,11 +252,20 @@ impl EpochEngine {
     }
 
     pub fn now_ms(&self) -> u64 {
-        self.clock.now_ms()
+        self.wall_time_ms()
+    }
+
+    pub fn wall_time_ms(&self) -> u64 {
+        self.clock.wall_time_ms()
+    }
+
+    pub fn monotonic_time_ms(&self) -> u64 {
+        self.clock.monotonic_time_ms()
     }
 
     pub fn create_cache(&self, name: &str, config: CacheConfig) -> EpochResult<CacheHandle> {
         validate_resource_name(name)?;
+        self.validate_durability(ResourceKind::Cache, config.durability)?;
         let cache = Arc::new(Mutex::new(Cache::new(config)?));
         insert_unique(&self.caches, name, cache.clone())?;
         Ok(cache)
@@ -101,20 +273,51 @@ impl EpochEngine {
 
     pub fn create_stream(&self, name: &str, config: StreamConfig) -> EpochResult<StreamHandle> {
         validate_resource_name(name)?;
-        let stream = Arc::new(Mutex::new(Stream::new(config)?));
-        insert_unique(&self.streams, name, stream.clone())?;
+        self.validate_durability(ResourceKind::Stream, config.durability)?;
+        let stream = Arc::new(Mutex::new(Stream::new(config.clone())?));
+        let mut streams = self.streams.write();
+        if streams.contains_key(name) {
+            return Err(EpochError::AlreadyExists(name.to_owned()));
+        }
+        self.persist_if_required(
+            config.durability,
+            JournalMutation::CreateStream {
+                name: name.to_owned(),
+                config,
+            },
+            self.now_ms(),
+        )?;
+        streams.insert(name.to_owned(), stream.clone());
         Ok(stream)
     }
 
     pub fn create_queue(&self, name: &str, config: QueueConfig) -> EpochResult<QueueHandle> {
         validate_resource_name(name)?;
-        let queue = Arc::new(Mutex::new(Queue::new(config)?));
-        insert_unique(&self.queues, name, queue.clone())?;
+        self.validate_durability(ResourceKind::Queue, config.durability)?;
+        let queue = Queue::new(config.clone())?;
+        let expected_state_checksum = (config.durability != DurabilityProfile::Volatile)
+            .then(|| queue.recovery_state_checksum());
+        let queue = Arc::new(Mutex::new(queue));
+        let mut queues = self.queues.write();
+        if queues.contains_key(name) {
+            return Err(EpochError::AlreadyExists(name.to_owned()));
+        }
+        self.persist_if_required(
+            config.durability,
+            JournalMutation::CreateQueue {
+                name: name.to_owned(),
+                config,
+                expected_state_checksum,
+            },
+            self.now_ms(),
+        )?;
+        queues.insert(name.to_owned(), queue.clone());
         Ok(queue)
     }
 
     pub fn create_bus(&self, name: &str, config: BusConfig) -> EpochResult<BusHandle> {
         validate_resource_name(name)?;
+        self.validate_durability(ResourceKind::EventBus, config.durability)?;
         let bus = Arc::new(Mutex::new(EventBus::new(config)));
         insert_unique(&self.buses, name, bus.clone())?;
         Ok(bus)
@@ -146,13 +349,166 @@ impl EpochEngine {
         envelope: EventEnvelope,
         partition: Option<u32>,
     ) -> EpochResult<AppendReceipt> {
-        self.stream(stream)?
-            .lock()
-            .append(envelope, partition, self.now_ms())
+        self.append_stream_at(stream, envelope, partition, self.now_ms())
+    }
+
+    pub fn commit_stream_offset(
+        &self,
+        stream: &str,
+        group: &str,
+        partition: u32,
+        next_offset: u64,
+    ) -> EpochResult<()> {
+        self.set_stream_offset(stream, group, partition, next_offset, false)
+    }
+
+    pub fn reset_stream_offset(
+        &self,
+        stream: &str,
+        group: &str,
+        partition: u32,
+        next_offset: u64,
+    ) -> EpochResult<()> {
+        self.set_stream_offset(stream, group, partition, next_offset, true)
     }
 
     pub fn enqueue(&self, queue: &str, envelope: EventEnvelope) -> EpochResult<EnqueueReceipt> {
-        self.queue(queue)?.lock().enqueue(envelope, self.now_ms())
+        self.enqueue_at(queue, envelope, self.now_ms())
+    }
+
+    pub fn acquire_queue(
+        &self,
+        queue: &str,
+        consumer: &str,
+        max_messages: usize,
+        visibility_timeout_ms: Option<u64>,
+    ) -> EpochResult<Vec<Delivery>> {
+        let max_messages = u32::try_from(max_messages).map_err(|_| {
+            EpochError::InvalidArgument("max_messages exceeds the supported range".into())
+        })?;
+        let applied_at_ms = self.now_ms();
+        self.mutate_queue(
+            queue,
+            JournalMutation::AcquireQueue {
+                name: queue.to_owned(),
+                consumer: consumer.to_owned(),
+                max_messages,
+                visibility_timeout_ms,
+                applied_at_ms,
+                expected_state_checksum: None,
+            },
+            applied_at_ms,
+            |proposed| {
+                proposed.acquire(
+                    consumer,
+                    max_messages as usize,
+                    visibility_timeout_ms,
+                    applied_at_ms,
+                )
+            },
+        )
+    }
+
+    pub fn acknowledge_queue(&self, queue: &str, token: &str) -> EpochResult<AckMetadata> {
+        let applied_at_ms = self.now_ms();
+        self.maintain_queue_at(queue, applied_at_ms)?;
+        self.mutate_queue(
+            queue,
+            JournalMutation::SettleQueue {
+                name: queue.to_owned(),
+                settlement: JournalQueueSettlement::Ack {
+                    token: token.to_owned(),
+                },
+                applied_at_ms,
+                expected_state_checksum: None,
+            },
+            applied_at_ms,
+            |proposed| proposed.acknowledge(token, applied_at_ms),
+        )
+    }
+
+    pub fn release_queue(
+        &self,
+        queue: &str,
+        token: &str,
+        delay_ms: u64,
+        reason: Option<String>,
+    ) -> EpochResult<()> {
+        let applied_at_ms = self.now_ms();
+        self.maintain_queue_at(queue, applied_at_ms)?;
+        self.mutate_queue(
+            queue,
+            JournalMutation::SettleQueue {
+                name: queue.to_owned(),
+                settlement: JournalQueueSettlement::Release {
+                    token: token.to_owned(),
+                    delay_ms,
+                    reason: reason.clone(),
+                },
+                applied_at_ms,
+                expected_state_checksum: None,
+            },
+            applied_at_ms,
+            |proposed| proposed.release(token, delay_ms, reason, applied_at_ms),
+        )
+    }
+
+    pub fn reject_queue(&self, queue: &str, token: &str, reason: String) -> EpochResult<()> {
+        let applied_at_ms = self.now_ms();
+        self.maintain_queue_at(queue, applied_at_ms)?;
+        self.mutate_queue(
+            queue,
+            JournalMutation::SettleQueue {
+                name: queue.to_owned(),
+                settlement: JournalQueueSettlement::Reject {
+                    token: token.to_owned(),
+                    reason: reason.clone(),
+                },
+                applied_at_ms,
+                expected_state_checksum: None,
+            },
+            applied_at_ms,
+            |proposed| proposed.reject(token, reason, applied_at_ms),
+        )
+    }
+
+    pub fn extend_queue_lease(
+        &self,
+        queue: &str,
+        token: &str,
+        extension_ms: u64,
+    ) -> EpochResult<u64> {
+        let applied_at_ms = self.now_ms();
+        self.maintain_queue_at(queue, applied_at_ms)?;
+        self.mutate_queue(
+            queue,
+            JournalMutation::SettleQueue {
+                name: queue.to_owned(),
+                settlement: JournalQueueSettlement::Extend {
+                    token: token.to_owned(),
+                    extension_ms,
+                },
+                applied_at_ms,
+                expected_state_checksum: None,
+            },
+            applied_at_ms,
+            |proposed| proposed.extend_lease(token, extension_ms, applied_at_ms),
+        )
+    }
+
+    pub fn redrive_queue(&self, queue: &str, message_id: &str) -> EpochResult<()> {
+        let applied_at_ms = self.now_ms();
+        self.mutate_queue(
+            queue,
+            JournalMutation::RedriveQueue {
+                name: queue.to_owned(),
+                message_id: message_id.to_owned(),
+                applied_at_ms,
+                expected_state_checksum: None,
+            },
+            applied_at_ms,
+            |proposed| proposed.redrive(message_id, applied_at_ms),
+        )
     }
 
     pub fn publish_bus(
@@ -167,7 +523,7 @@ impl EpochEngine {
             .iter()
             .map(|delivery| match &delivery.target {
                 SubscriptionTarget::Queue { resource } => match self.queue(resource) {
-                    Ok(queue) => match queue.lock().enqueue(delivery.envelope.clone(), now_ms) {
+                    Ok(_) => match self.enqueue_at(resource, delivery.envelope.clone(), now_ms) {
                         Ok(_) => RouteExecution {
                             subscription: delivery.subscription.clone(),
                             target: format!("queue:{resource}"),
@@ -183,28 +539,25 @@ impl EpochEngine {
                     },
                     Err(_) => missing_route(&delivery.subscription, "queue", resource),
                 },
-                SubscriptionTarget::Stream { resource } => match self.stream(resource) {
-                    Ok(stream) => {
-                        match stream
-                            .lock()
-                            .append(delivery.envelope.clone(), None, now_ms)
-                        {
-                            Ok(_) => RouteExecution {
-                                subscription: delivery.subscription.clone(),
-                                target: format!("stream:{resource}"),
-                                status: RouteExecutionStatus::Delivered,
-                                detail: None,
-                            },
-                            Err(error) => RouteExecution {
-                                subscription: delivery.subscription.clone(),
-                                target: format!("stream:{resource}"),
-                                status: RouteExecutionStatus::TargetRejected,
-                                detail: Some(error.to_string()),
-                            },
+                SubscriptionTarget::Stream { resource } => {
+                    match self.append_stream_at(resource, delivery.envelope.clone(), None, now_ms) {
+                        Ok(_) => RouteExecution {
+                            subscription: delivery.subscription.clone(),
+                            target: format!("stream:{resource}"),
+                            status: RouteExecutionStatus::Delivered,
+                            detail: None,
+                        },
+                        Err(EpochError::NotFound(_)) => {
+                            missing_route(&delivery.subscription, "stream", resource)
                         }
+                        Err(error) => RouteExecution {
+                            subscription: delivery.subscription.clone(),
+                            target: format!("stream:{resource}"),
+                            status: RouteExecutionStatus::TargetRejected,
+                            detail: Some(error.to_string()),
+                        },
                     }
-                    Err(_) => missing_route(&delivery.subscription, "stream", resource),
-                },
+                }
                 SubscriptionTarget::Pull => RouteExecution {
                     subscription: delivery.subscription.clone(),
                     target: "pull".into(),
@@ -224,6 +577,294 @@ impl EpochEngine {
             })
             .collect();
         Ok(BusPublishOutcome { publish, routes })
+    }
+
+    fn append_stream_at(
+        &self,
+        stream_name: &str,
+        envelope: EventEnvelope,
+        requested_partition: Option<u32>,
+        applied_at_ms: u64,
+    ) -> EpochResult<AppendReceipt> {
+        let stream = self.stream(stream_name)?;
+        let mut current = stream.lock();
+        let durability = current.config().durability;
+        let mut proposed = current.clone();
+        let receipt = proposed.append(envelope.clone(), requested_partition, applied_at_ms)?;
+        if !receipt.acknowledgement.duplicate {
+            self.persist_if_required(
+                durability,
+                JournalMutation::AppendStream {
+                    name: stream_name.to_owned(),
+                    envelope: Box::new(envelope),
+                    partition: receipt.partition,
+                    applied_at_ms,
+                },
+                applied_at_ms,
+            )?;
+            *current = proposed;
+        }
+        Ok(receipt)
+    }
+
+    fn enqueue_at(
+        &self,
+        queue_name: &str,
+        envelope: EventEnvelope,
+        applied_at_ms: u64,
+    ) -> EpochResult<EnqueueReceipt> {
+        let queue = self.queue(queue_name)?;
+        let mut current = queue.lock();
+        let durability = current.config().durability;
+        if durability == DurabilityProfile::Volatile {
+            return current.enqueue(envelope, applied_at_ms);
+        }
+        let mut proposed = current.clone();
+        let receipt = proposed.enqueue(envelope.clone(), applied_at_ms)?;
+        if proposed != *current {
+            let mutation = JournalMutation::EnqueueQueue {
+                name: queue_name.to_owned(),
+                envelope: Box::new(envelope),
+                applied_at_ms,
+                expected_state_checksum: None,
+            }
+            .with_expected_queue_state_checksum(proposed.recovery_state_checksum());
+            self.persist_if_required(durability, mutation, applied_at_ms)?;
+            *current = proposed;
+        }
+        Ok(receipt)
+    }
+
+    fn mutate_queue<T>(
+        &self,
+        queue_name: &str,
+        mutation: JournalMutation,
+        applied_at_ms: u64,
+        operation: impl FnOnce(&mut Queue) -> EpochResult<T>,
+    ) -> EpochResult<T> {
+        let queue = self.queue(queue_name)?;
+        let mut current = queue.lock();
+        let durability = current.config().durability;
+        if durability == DurabilityProfile::Volatile {
+            return operation(&mut current);
+        }
+        let mut proposed = current.clone();
+        let result = operation(&mut proposed)?;
+        if proposed != *current {
+            let mutation =
+                mutation.with_expected_queue_state_checksum(proposed.recovery_state_checksum());
+            self.persist_if_required(durability, mutation, applied_at_ms)?;
+            *current = proposed;
+        }
+        Ok(result)
+    }
+
+    fn maintain_queue_at(&self, queue_name: &str, applied_at_ms: u64) -> EpochResult<()> {
+        self.mutate_queue(
+            queue_name,
+            JournalMutation::MaintainQueue {
+                name: queue_name.to_owned(),
+                applied_at_ms,
+                expected_state_checksum: None,
+            },
+            applied_at_ms,
+            |proposed| {
+                proposed.maintain(applied_at_ms);
+                Ok(())
+            },
+        )
+    }
+
+    fn set_stream_offset(
+        &self,
+        stream_name: &str,
+        group: &str,
+        partition: u32,
+        next_offset: u64,
+        reset: bool,
+    ) -> EpochResult<()> {
+        let stream = self.stream(stream_name)?;
+        let mut current = stream.lock();
+        let durability = current.config().durability;
+        let mut proposed = current.clone();
+        if reset {
+            proposed.reset_offset(group, partition, next_offset)?;
+        } else {
+            proposed.commit_offset(group, partition, next_offset)?;
+        }
+        self.persist_if_required(
+            durability,
+            JournalMutation::SetStreamOffset {
+                name: stream_name.to_owned(),
+                group: group.to_owned(),
+                partition,
+                next_offset,
+                reset,
+            },
+            self.now_ms(),
+        )?;
+        *current = proposed;
+        Ok(())
+    }
+
+    fn persist_if_required(
+        &self,
+        durability: DurabilityProfile,
+        mutation: JournalMutation,
+        timestamp_ms: u64,
+    ) -> EpochResult<()> {
+        if durability == DurabilityProfile::Volatile {
+            return Ok(());
+        }
+        let journal = self.journal.as_ref().ok_or_else(|| {
+            EpochError::Unavailable("no commit log is configured for durable mutations".into())
+        })?;
+        let payload = serde_json::to_vec(&JournalEntry {
+            format_version: JOURNAL_FORMAT_VERSION,
+            mutation,
+        })
+        .map_err(|error| EpochError::Internal(format!("journal encoding failed: {error}")))?;
+        journal.lock().append(timestamp_ms, &payload, true)?;
+        Ok(())
+    }
+
+    fn recover(&self, records: Vec<LogRecord>) -> EpochResult<()> {
+        for record in records {
+            let entry: JournalEntry = serde_json::from_slice(&record.payload).map_err(|error| {
+                EpochError::Storage(format!(
+                    "journal sequence {} could not be decoded: {error}",
+                    record.sequence
+                ))
+            })?;
+            if entry.format_version != JOURNAL_FORMAT_VERSION {
+                return Err(EpochError::Storage(format!(
+                    "journal sequence {} uses unsupported engine format {}",
+                    record.sequence, entry.format_version
+                )));
+            }
+            self.replay_mutation(entry.mutation).map_err(|error| {
+                EpochError::Storage(format!(
+                    "journal sequence {} could not be applied: {error}",
+                    record.sequence
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
+    fn replay_mutation(&self, mutation: JournalMutation) -> EpochResult<()> {
+        match mutation {
+            JournalMutation::CreateStream { name, config } => {
+                validate_resource_name(&name)?;
+                self.validate_durability(ResourceKind::Stream, config.durability)?;
+                ensure_local_durable(config.durability, ResourceKind::Stream)?;
+                let stream = Arc::new(Mutex::new(Stream::new(config)?));
+                insert_unique(&self.streams, &name, stream)
+            }
+            JournalMutation::AppendStream {
+                name,
+                envelope,
+                partition,
+                applied_at_ms,
+            } => {
+                let stream = self.stream(&name)?;
+                let mut stream = stream.lock();
+                ensure_local_durable(stream.config().durability, ResourceKind::Stream)?;
+                stream.append(*envelope, Some(partition), applied_at_ms)?;
+                Ok(())
+            }
+            JournalMutation::SetStreamOffset {
+                name,
+                group,
+                partition,
+                next_offset,
+                reset,
+            } => {
+                let stream = self.stream(&name)?;
+                let mut stream = stream.lock();
+                ensure_local_durable(stream.config().durability, ResourceKind::Stream)?;
+                if reset {
+                    stream.reset_offset(group, partition, next_offset)
+                } else {
+                    stream.commit_offset(group, partition, next_offset)
+                }
+            }
+            JournalMutation::CreateQueue {
+                name,
+                config,
+                expected_state_checksum,
+            } => {
+                validate_resource_name(&name)?;
+                self.validate_durability(ResourceKind::Queue, config.durability)?;
+                ensure_local_durable(config.durability, ResourceKind::Queue)?;
+                let queue = Queue::new(config)?;
+                verify_queue_recovery_state(&name, &queue, expected_state_checksum)?;
+                let queue = Arc::new(Mutex::new(queue));
+                insert_unique(&self.queues, &name, queue)
+            }
+            JournalMutation::EnqueueQueue {
+                name,
+                envelope,
+                applied_at_ms,
+                expected_state_checksum,
+            } => self.with_recovered_queue(&name, expected_state_checksum, |queue| {
+                queue.enqueue(*envelope, applied_at_ms).map(|_| ())
+            }),
+            JournalMutation::AcquireQueue {
+                name,
+                consumer,
+                max_messages,
+                visibility_timeout_ms,
+                applied_at_ms,
+                expected_state_checksum,
+            } => self.with_recovered_queue(&name, expected_state_checksum, |queue| {
+                queue.acquire(
+                    &consumer,
+                    max_messages as usize,
+                    visibility_timeout_ms,
+                    applied_at_ms,
+                )?;
+                Ok(())
+            }),
+            JournalMutation::SettleQueue {
+                name,
+                settlement,
+                applied_at_ms,
+                expected_state_checksum,
+            } => self.with_recovered_queue(&name, expected_state_checksum, |queue| {
+                replay_queue_settlement(queue, settlement, applied_at_ms)
+            }),
+            JournalMutation::RedriveQueue {
+                name,
+                message_id,
+                applied_at_ms,
+                expected_state_checksum,
+            } => self.with_recovered_queue(&name, expected_state_checksum, |queue| {
+                queue.redrive(&message_id, applied_at_ms)
+            }),
+            JournalMutation::MaintainQueue {
+                name,
+                applied_at_ms,
+                expected_state_checksum,
+            } => self.with_recovered_queue(&name, expected_state_checksum, |queue| {
+                queue.maintain(applied_at_ms);
+                Ok(())
+            }),
+        }
+    }
+
+    fn with_recovered_queue<T>(
+        &self,
+        queue_name: &str,
+        expected_state_checksum: Option<u32>,
+        operation: impl FnOnce(&mut Queue) -> EpochResult<T>,
+    ) -> EpochResult<T> {
+        let queue = self.queue(queue_name)?;
+        let mut queue = queue.lock();
+        ensure_local_durable(queue.config().durability, ResourceKind::Queue)?;
+        let result = operation(&mut queue)?;
+        verify_queue_recovery_state(queue_name, &queue, expected_state_checksum)?;
+        Ok(result)
     }
 
     pub fn resources(&self) -> Vec<ResourceSummary> {
@@ -284,25 +925,39 @@ impl EpochEngine {
             deployment_mode: self.deployment_mode,
             profiles,
             resource_count: resources.len(),
-            guarantee_ceiling: match self.deployment_mode {
-                DeploymentMode::Embedded | DeploymentMode::Standalone => {
-                    DurabilityProfile::LocalDurable
-                }
-                DeploymentMode::Cluster | DeploymentMode::Managed => {
-                    DurabilityProfile::QuorumDurable
-                }
-            },
+            guarantee_ceiling: self.guarantee_ceiling,
             hosted_control_plane_required: self.deployment_mode == DeploymentMode::Managed,
         }
     }
 
-    pub fn maintain(&self, limit_per_cache: usize) {
+    pub fn maintain(&self, limit_per_cache: usize) -> EpochResult<()> {
         let now_ms = self.now_ms();
         for cache in self.caches.read().values() {
             cache.lock().purge_expired(now_ms, limit_per_cache);
         }
-        for queue in self.queues.read().values() {
-            queue.lock().maintain(now_ms);
+        let queue_names: Vec<String> = self.queues.read().keys().cloned().collect();
+        for queue_name in queue_names {
+            self.maintain_queue_at(&queue_name, now_ms)?;
+        }
+        Ok(())
+    }
+
+    fn validate_durability(
+        &self,
+        kind: ResourceKind,
+        durability: DurabilityProfile,
+    ) -> EpochResult<()> {
+        match (kind, durability, self.guarantee_ceiling) {
+            (_, DurabilityProfile::Volatile, _)
+            | (
+                ResourceKind::Stream | ResourceKind::Queue,
+                DurabilityProfile::LocalDurable,
+                DurabilityProfile::LocalDurable,
+            ) => Ok(()),
+            _ => Err(EpochError::InvalidArgument(format!(
+                "durability {durability:?} is unavailable for {kind:?} in the current {:?} data-plane slice",
+                self.deployment_mode
+            ))),
         }
     }
 }
@@ -341,15 +996,186 @@ fn missing_route(subscription: &str, kind: &str, resource: &str) -> RouteExecuti
     }
 }
 
+fn ensure_local_durable(
+    durability: DurabilityProfile,
+    resource_kind: ResourceKind,
+) -> EpochResult<()> {
+    if durability == DurabilityProfile::LocalDurable {
+        Ok(())
+    } else {
+        Err(EpochError::InvalidArgument(format!(
+            "journal mutation targets a non-durable {resource_kind:?}"
+        )))
+    }
+}
+
+fn verify_queue_recovery_state(
+    queue_name: &str,
+    queue: &Queue,
+    expected_state_checksum: Option<u32>,
+) -> EpochResult<()> {
+    let Some(expected) = expected_state_checksum else {
+        return Ok(());
+    };
+    let actual = queue.recovery_state_checksum();
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(EpochError::Storage(format!(
+            "queue {queue_name} recovery state checksum mismatch: expected {expected:08x}, actual {actual:08x}"
+        )))
+    }
+}
+
+fn replay_queue_settlement(
+    queue: &mut Queue,
+    settlement: JournalQueueSettlement,
+    applied_at_ms: u64,
+) -> EpochResult<()> {
+    match settlement {
+        JournalQueueSettlement::Ack { token } => {
+            queue.acknowledge(&token, applied_at_ms).map(|_| ())
+        }
+        JournalQueueSettlement::Release {
+            token,
+            delay_ms,
+            reason,
+        } => queue.release(&token, delay_ms, reason, applied_at_ms),
+        JournalQueueSettlement::Reject { token, reason } => {
+            queue.reject(&token, reason, applied_at_ms)
+        }
+        JournalQueueSettlement::Extend {
+            token,
+            extension_ms,
+        } => queue
+            .extend_lease(&token, extension_ms, applied_at_ms)
+            .map(|_| ()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
     use epoch_bus::{EventFilter, EventTransform};
     use epoch_core::ManualClock;
+    use epoch_storage::MemoryLog;
     use serde_json::json;
 
     use super::*;
+
+    #[derive(Debug)]
+    struct FailAfterLog {
+        inner: MemoryLog,
+        successful_appends: usize,
+    }
+
+    impl CommitLog for FailAfterLog {
+        fn durability(&self) -> DurabilityProfile {
+            DurabilityProfile::LocalDurable
+        }
+
+        fn append(
+            &mut self,
+            timestamp_ms: u64,
+            payload: &[u8],
+            durable: bool,
+        ) -> EpochResult<LogRecord> {
+            let appended = self
+                .inner
+                .last_sequence()
+                .map_or(0, |sequence| sequence.saturating_add(1));
+            if usize::try_from(appended).unwrap_or(usize::MAX) >= self.successful_appends {
+                return Err(EpochError::Storage("injected fsync failure".into()));
+            }
+            self.inner.append(timestamp_ms, payload, durable)
+        }
+
+        fn records_from(&self, sequence: u64, limit: usize) -> Vec<LogRecord> {
+            self.inner.records_from(sequence, limit)
+        }
+
+        fn last_sequence(&self) -> Option<u64> {
+            self.inner.last_sequence()
+        }
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct SharedMemoryLog {
+        inner: Arc<Mutex<MemoryLog>>,
+    }
+
+    impl CommitLog for SharedMemoryLog {
+        fn durability(&self) -> DurabilityProfile {
+            DurabilityProfile::LocalDurable
+        }
+
+        fn append(
+            &mut self,
+            timestamp_ms: u64,
+            payload: &[u8],
+            durable: bool,
+        ) -> EpochResult<LogRecord> {
+            self.inner.lock().append(timestamp_ms, payload, durable)
+        }
+
+        fn records_from(&self, sequence: u64, limit: usize) -> Vec<LogRecord> {
+            self.inner.lock().records_from(sequence, limit)
+        }
+
+        fn last_sequence(&self) -> Option<u64> {
+            self.inner.lock().last_sequence()
+        }
+    }
+
+    fn rewrite_journal(
+        log: &SharedMemoryLog,
+        mut rewrite: impl FnMut(&mut JournalMutation),
+    ) -> MemoryLog {
+        let records = log.inner.lock().records_from(0, usize::MAX);
+        let mut rewritten = MemoryLog::default();
+        for record in records {
+            let mut entry: JournalEntry = serde_json::from_slice(&record.payload).unwrap();
+            rewrite(&mut entry.mutation);
+            let payload = serde_json::to_vec(&entry).unwrap();
+            rewritten
+                .append(record.timestamp_ms, &payload, true)
+                .unwrap();
+        }
+        rewritten
+    }
+
+    fn queue_mutation_checksum(mutation: &JournalMutation) -> Option<u32> {
+        match mutation {
+            JournalMutation::CreateQueue {
+                expected_state_checksum,
+                ..
+            }
+            | JournalMutation::EnqueueQueue {
+                expected_state_checksum,
+                ..
+            }
+            | JournalMutation::AcquireQueue {
+                expected_state_checksum,
+                ..
+            }
+            | JournalMutation::SettleQueue {
+                expected_state_checksum,
+                ..
+            }
+            | JournalMutation::RedriveQueue {
+                expected_state_checksum,
+                ..
+            }
+            | JournalMutation::MaintainQueue {
+                expected_state_checksum,
+                ..
+            } => *expected_state_checksum,
+            JournalMutation::CreateStream { .. }
+            | JournalMutation::AppendStream { .. }
+            | JournalMutation::SetStreamOffset { .. } => None,
+        }
+    }
 
     #[test]
     fn bus_routes_to_queue_without_semantic_aliasing() {
@@ -396,7 +1222,504 @@ mod tests {
         let engine = EpochEngine::default();
         let health = engine.health();
         assert_eq!(health.deployment_mode, DeploymentMode::Standalone);
-        assert_eq!(health.guarantee_ceiling, DurabilityProfile::LocalDurable);
+        assert_eq!(health.guarantee_ceiling, DurabilityProfile::Volatile);
         assert!(!health.hosted_control_plane_required);
+    }
+
+    #[test]
+    fn engine_exposes_wall_and_monotonic_time_without_aliasing_clock_jumps() {
+        let clock = Arc::new(ManualClock::with_times(1_000, 50));
+        let engine = EpochEngine::new(DeploymentMode::Standalone, clock.clone());
+
+        clock.set_wall_time_ms(10);
+
+        assert_eq!(engine.wall_time_ms(), 10);
+        assert_eq!(engine.monotonic_time_ms(), 50);
+        assert_eq!(engine.now_ms(), engine.wall_time_ms());
+    }
+
+    #[test]
+    fn failed_durable_append_does_not_mutate_stream_memory() {
+        let engine = EpochEngine::with_commit_log(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(100)),
+            Box::new(FailAfterLog {
+                inner: MemoryLog::default(),
+                successful_appends: 1,
+            }),
+        )
+        .unwrap();
+        engine
+            .create_stream(
+                "audit",
+                StreamConfig {
+                    durability: DurabilityProfile::LocalDurable,
+                    ..StreamConfig::default()
+                },
+            )
+            .unwrap();
+
+        let result = engine.append_stream(
+            "audit",
+            EventEnvelope::new("tests", "audit.created", json!({"id": 1}), 100),
+            None,
+        );
+
+        assert!(matches!(result, Err(EpochError::Storage(_))));
+        assert!(
+            engine
+                .stream("audit")
+                .unwrap()
+                .lock()
+                .fetch(0, 0, 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn failed_durable_enqueue_does_not_mutate_queue_memory() {
+        let engine = EpochEngine::with_commit_log(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(100)),
+            Box::new(FailAfterLog {
+                inner: MemoryLog::default(),
+                successful_appends: 1,
+            }),
+        )
+        .unwrap();
+        engine
+            .create_queue(
+                "jobs",
+                QueueConfig {
+                    durability: DurabilityProfile::LocalDurable,
+                    ..QueueConfig::default()
+                },
+            )
+            .unwrap();
+
+        let result = engine.enqueue(
+            "jobs",
+            EventEnvelope::new("tests", "job.requested", json!({"id": 1}), 100),
+        );
+
+        assert!(matches!(result, Err(EpochError::Storage(_))));
+        assert_eq!(engine.queue("jobs").unwrap().lock().counts().ready, 0);
+    }
+
+    #[test]
+    fn failed_durable_settlement_keeps_the_live_lease() {
+        let engine = EpochEngine::with_commit_log(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(100)),
+            Box::new(FailAfterLog {
+                inner: MemoryLog::default(),
+                successful_appends: 3,
+            }),
+        )
+        .unwrap();
+        engine
+            .create_queue(
+                "jobs",
+                QueueConfig {
+                    durability: DurabilityProfile::LocalDurable,
+                    ..QueueConfig::default()
+                },
+            )
+            .unwrap();
+        engine
+            .enqueue(
+                "jobs",
+                EventEnvelope::new("tests", "job.requested", json!({"id": 1}), 100),
+            )
+            .unwrap();
+        let delivery = engine
+            .acquire_queue("jobs", "worker", 1, None)
+            .unwrap()
+            .remove(0);
+
+        let result = engine.acknowledge_queue("jobs", &delivery.lease_token);
+
+        assert!(matches!(result, Err(EpochError::Storage(_))));
+        let counts = engine.queue("jobs").unwrap().lock().counts();
+        assert_eq!(counts.in_flight, 1);
+        assert_eq!(counts.acknowledged, 0);
+    }
+
+    #[test]
+    fn durable_maintenance_replays_lease_expiry_and_fences_the_old_token() {
+        let log = SharedMemoryLog::default();
+        let clock = Arc::new(ManualClock::new(100));
+        let engine = EpochEngine::with_commit_log(
+            DeploymentMode::Standalone,
+            clock.clone(),
+            Box::new(log.clone()),
+        )
+        .unwrap();
+        engine
+            .create_queue(
+                "jobs",
+                QueueConfig {
+                    durability: DurabilityProfile::LocalDurable,
+                    visibility_timeout_ms: 10,
+                    retry: epoch_queue::RetryPolicy {
+                        initial_delay_ms: 0,
+                        max_delay_ms: 0,
+                        jitter_percent: 0,
+                        ..epoch_queue::RetryPolicy::default()
+                    },
+                    ..QueueConfig::default()
+                },
+            )
+            .unwrap();
+        engine
+            .enqueue(
+                "jobs",
+                EventEnvelope::new("tests", "job.requested", json!({"id": 1}), 100),
+            )
+            .unwrap();
+        let stale_token = engine
+            .acquire_queue("jobs", "worker-a", 1, None)
+            .unwrap()
+            .remove(0)
+            .lease_token;
+        clock.set(110);
+        engine.maintain(1_000).unwrap();
+        drop(engine);
+
+        let recovered = EpochEngine::with_commit_log(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(110)),
+            Box::new(log),
+        )
+        .unwrap();
+
+        assert_eq!(recovered.queue("jobs").unwrap().lock().counts().ready, 1);
+        assert!(matches!(
+            recovered.acknowledge_queue("jobs", &stale_token),
+            Err(EpochError::Fenced)
+        ));
+    }
+
+    #[test]
+    fn durable_queue_lifecycle_persists_and_verifies_post_state_checksums() {
+        let log = SharedMemoryLog::default();
+        let clock = Arc::new(ManualClock::new(100));
+        let engine = EpochEngine::with_commit_log(
+            DeploymentMode::Standalone,
+            clock.clone(),
+            Box::new(log.clone()),
+        )
+        .unwrap();
+        engine
+            .create_queue(
+                "jobs",
+                QueueConfig {
+                    durability: DurabilityProfile::LocalDurable,
+                    visibility_timeout_ms: 10,
+                    retry: epoch_queue::RetryPolicy {
+                        initial_delay_ms: 0,
+                        max_delay_ms: 0,
+                        jitter_percent: 0,
+                        max_attempts: 4,
+                        ..epoch_queue::RetryPolicy::default()
+                    },
+                    dedupe_window_ms: Some(1_000),
+                    ..QueueConfig::default()
+                },
+            )
+            .unwrap();
+
+        let mut event =
+            EventEnvelope::new("tests", "job.requested", json!({"id": 1}), clock.now_ms());
+        event.id = "job-1".into();
+        event.dedupe_id = Some("request-1".into());
+        engine.enqueue("jobs", event).unwrap();
+
+        let first = engine
+            .acquire_queue("jobs", "worker-a", 1, None)
+            .unwrap()
+            .remove(0);
+        engine
+            .extend_queue_lease("jobs", &first.lease_token, 20)
+            .unwrap();
+        engine
+            .release_queue("jobs", &first.lease_token, 0, Some("retry".into()))
+            .unwrap();
+
+        let second = engine
+            .acquire_queue("jobs", "worker-b", 1, None)
+            .unwrap()
+            .remove(0);
+        engine
+            .reject_queue("jobs", &second.lease_token, "invalid".into())
+            .unwrap();
+        engine.redrive_queue("jobs", "job-1").unwrap();
+
+        engine.acquire_queue("jobs", "worker-c", 1, None).unwrap();
+        clock.set(110);
+        engine.maintain(1_000).unwrap();
+        let final_delivery = engine
+            .acquire_queue("jobs", "worker-d", 1, None)
+            .unwrap()
+            .remove(0);
+        engine
+            .acknowledge_queue("jobs", &final_delivery.lease_token)
+            .unwrap();
+
+        let expected_checksum = engine
+            .queue("jobs")
+            .unwrap()
+            .lock()
+            .recovery_state_checksum();
+        let records = log.inner.lock().records_from(0, usize::MAX);
+        assert!(!records.is_empty());
+        for record in records {
+            let entry: JournalEntry = serde_json::from_slice(&record.payload).unwrap();
+            assert!(
+                queue_mutation_checksum(&entry.mutation).is_some(),
+                "queue mutation at sequence {} omitted its state checksum",
+                record.sequence
+            );
+        }
+        drop(engine);
+
+        let recovered = EpochEngine::with_commit_log(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(110)),
+            Box::new(log),
+        )
+        .unwrap();
+        let recovered_queue = recovered.queue("jobs").unwrap();
+        let recovered_queue = recovered_queue.lock();
+        assert_eq!(recovered_queue.recovery_state_checksum(), expected_checksum);
+        assert_eq!(recovered_queue.counts().acknowledged, 1);
+    }
+
+    #[test]
+    fn recovery_detects_queue_command_replay_drift() {
+        let log = SharedMemoryLog::default();
+        let engine = EpochEngine::with_commit_log(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(100)),
+            Box::new(log.clone()),
+        )
+        .unwrap();
+        engine
+            .create_queue(
+                "jobs",
+                QueueConfig {
+                    durability: DurabilityProfile::LocalDurable,
+                    ..QueueConfig::default()
+                },
+            )
+            .unwrap();
+        let mut event = EventEnvelope::new("tests", "job.requested", json!({}), 100);
+        event.id = "job-1".into();
+        engine.enqueue("jobs", event).unwrap();
+        engine.acquire_queue("jobs", "worker", 1, None).unwrap();
+        drop(engine);
+
+        let mut changed_command = false;
+        let inner = rewrite_journal(&log, |mutation| {
+            if let JournalMutation::AcquireQueue { max_messages, .. } = mutation
+                && !changed_command
+            {
+                *max_messages = 0;
+                changed_command = true;
+            }
+        });
+        assert!(changed_command);
+
+        let result = EpochEngine::with_commit_log(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(100)),
+            Box::new(FailAfterLog {
+                inner,
+                successful_appends: usize::MAX,
+            }),
+        );
+        assert!(matches!(
+            result,
+            Err(EpochError::Storage(message))
+                if message.contains("queue jobs recovery state checksum mismatch")
+        ));
+    }
+
+    #[test]
+    fn recovery_rejects_a_corrupted_queue_state_checksum() {
+        let log = SharedMemoryLog::default();
+        let engine = EpochEngine::with_commit_log(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(100)),
+            Box::new(log.clone()),
+        )
+        .unwrap();
+        engine
+            .create_queue(
+                "jobs",
+                QueueConfig {
+                    durability: DurabilityProfile::LocalDurable,
+                    ..QueueConfig::default()
+                },
+            )
+            .unwrap();
+        let mut event = EventEnvelope::new("tests", "job.requested", json!({}), 100);
+        event.id = "job-1".into();
+        engine.enqueue("jobs", event).unwrap();
+        drop(engine);
+
+        let mut corrupted = false;
+        let inner = rewrite_journal(&log, |mutation| {
+            if let JournalMutation::EnqueueQueue {
+                expected_state_checksum: Some(checksum),
+                ..
+            } = mutation
+                && !corrupted
+            {
+                *checksum ^= u32::MAX;
+                corrupted = true;
+            }
+        });
+        assert!(corrupted);
+
+        let result = EpochEngine::with_commit_log(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(100)),
+            Box::new(FailAfterLog {
+                inner,
+                successful_appends: usize::MAX,
+            }),
+        );
+        assert!(matches!(
+            result,
+            Err(EpochError::Storage(message))
+                if message.contains("queue jobs recovery state checksum mismatch")
+        ));
+    }
+
+    #[test]
+    fn journal_create_stream_encoding_matches_golden_vector() {
+        let encoded = serde_json::to_string(&JournalEntry {
+            format_version: JOURNAL_FORMAT_VERSION,
+            mutation: JournalMutation::CreateStream {
+                name: "audit".into(),
+                config: StreamConfig {
+                    durability: DurabilityProfile::LocalDurable,
+                    ..StreamConfig::default()
+                },
+            },
+        })
+        .unwrap();
+
+        assert_eq!(
+            format!("{encoded}\n"),
+            include_str!("../../../spec/formats/engine-journal-v1-create-stream.json")
+        );
+    }
+
+    #[test]
+    fn journal_create_queue_encoding_matches_golden_vector() {
+        let encoded = serde_json::to_string(&JournalEntry {
+            format_version: JOURNAL_FORMAT_VERSION,
+            mutation: JournalMutation::CreateQueue {
+                name: "jobs".into(),
+                config: QueueConfig {
+                    durability: DurabilityProfile::LocalDurable,
+                    ..QueueConfig::default()
+                },
+                expected_state_checksum: None,
+            },
+        })
+        .unwrap();
+
+        assert_eq!(
+            format!("{encoded}\n"),
+            include_str!("../../../spec/formats/engine-journal-v1-create-queue.json")
+        );
+    }
+
+    #[test]
+    fn journal_checksummed_queue_encoding_matches_golden_vector() {
+        let config = QueueConfig {
+            durability: DurabilityProfile::LocalDurable,
+            ..QueueConfig::default()
+        };
+        let expected_state_checksum = Queue::new(config.clone())
+            .unwrap()
+            .recovery_state_checksum();
+        let encoded = serde_json::to_string(&JournalEntry {
+            format_version: JOURNAL_FORMAT_VERSION,
+            mutation: JournalMutation::CreateQueue {
+                name: "jobs".into(),
+                config,
+                expected_state_checksum: Some(expected_state_checksum),
+            },
+        })
+        .unwrap();
+
+        assert_eq!(
+            format!("{encoded}\n"),
+            include_str!("../../../spec/formats/engine-journal-v1-create-queue-checksummed.json")
+        );
+    }
+
+    #[test]
+    fn recovery_accepts_v1_queue_entries_without_a_state_checksum() {
+        let payload = include_bytes!("../../../spec/formats/engine-journal-v1-create-queue.json");
+        let entry: JournalEntry = serde_json::from_slice(payload).unwrap();
+        assert!(matches!(
+            entry.mutation,
+            JournalMutation::CreateQueue {
+                expected_state_checksum: None,
+                ..
+            }
+        ));
+
+        let mut inner = MemoryLog::default();
+        inner.append(100, payload, true).unwrap();
+        let engine = EpochEngine::with_commit_log(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(100)),
+            Box::new(FailAfterLog {
+                inner,
+                successful_appends: usize::MAX,
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(engine.queue("jobs").unwrap().lock().counts().ready, 0);
+    }
+
+    #[test]
+    fn recovery_rejects_an_unknown_engine_journal_version() {
+        let payload = serde_json::to_vec(&JournalEntry {
+            format_version: JOURNAL_FORMAT_VERSION + 1,
+            mutation: JournalMutation::CreateStream {
+                name: "audit".into(),
+                config: StreamConfig {
+                    durability: DurabilityProfile::LocalDurable,
+                    ..StreamConfig::default()
+                },
+            },
+        })
+        .unwrap();
+        let mut inner = MemoryLog::default();
+        inner.append(100, &payload, true).unwrap();
+
+        let result = EpochEngine::with_commit_log(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(100)),
+            Box::new(FailAfterLog {
+                inner,
+                successful_appends: usize::MAX,
+            }),
+        );
+
+        assert!(matches!(
+            result,
+            Err(EpochError::Storage(message))
+                if message.contains("unsupported engine format 2")
+        ));
     }
 }

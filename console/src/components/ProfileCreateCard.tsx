@@ -9,50 +9,7 @@ import type {
   ResourceConfig,
   StreamConfig,
 } from "../api/types";
-
-interface ProfileDefinition {
-  profile: CreateProfile;
-  eyebrow: string;
-  title: string;
-  description: string;
-  guarantee: string;
-  caveat: string;
-}
-
-export const profileDefinitions: ProfileDefinition[] = [
-  {
-    profile: "cache",
-    eyebrow: "CACHE + STATE",
-    title: "Fast state",
-    description: "Memory-first values, expiry, eviction, counters, and shard-local atomic operations.",
-    guarantee: "Volatile memory",
-    caveat: "Acknowledged cache writes can be lost when this process exits.",
-  },
-  {
-    profile: "stream",
-    eyebrow: "STREAM LOG",
-    title: "Replayable events",
-    description: "Partitioned, ordered records with offsets, retention, and consumer progress.",
-    guarantee: "Local durable",
-    caveat: "Persisted by one node only; this is not quorum or zone durability.",
-  },
-  {
-    profile: "queue",
-    eyebrow: "WORK QUEUE",
-    title: "Reliable work",
-    description: "Lease-based delivery with retry, scheduling, acknowledgements, and dead letters.",
-    guarantee: "Local durable",
-    caveat: "Duplicates remain possible and total machine loss is not covered.",
-  },
-  {
-    profile: "event_bus",
-    eyebrow: "EVENT BUS",
-    title: "Routed events",
-    description: "Filtered fan-out into local queues and streams with an optional replay archive.",
-    guarantee: "Local durable archive",
-    caveat: "External target delivery is a pending alpha plan, not a completed delivery guarantee.",
-  },
-];
+import type { ProfileDefinition } from "../profileDefinitions";
 
 interface ProfileCreateCardProps {
   definition: ProfileDefinition;
@@ -93,7 +50,7 @@ export function ProfileCreateCard({ definition, connected, onCreate }: ProfileCr
 
       <dl className="guarantee-note">
         <div>
-          <dt>Alpha durability</dt>
+          <dt>Durability setting</dt>
           <dd>{definition.guarantee}</dd>
         </div>
         <div>
@@ -168,24 +125,34 @@ function profileFields(profile: CreateProfile, prefix: string): ReactNode {
       );
     case "stream":
       return (
-        <div className="field-row">
-          <NumberField
-            id={`${prefix}-partitions`}
-            label="Partitions"
-            name="partitions"
-            defaultValue={1}
-            min={1}
-            max={1_024}
-          />
-          <NumberField
-            id={`${prefix}-record-limit`}
-            label="Records / partition"
-            name="max_records_per_partition"
-            placeholder="Unbounded"
-            min={1}
-            optional
-          />
-        </div>
+        <>
+          <div className="field-row">
+            <NumberField
+              id={`${prefix}-partitions`}
+              label="Partitions"
+              name="partitions"
+              defaultValue={1}
+              min={1}
+              max={1_024}
+            />
+            <NumberField
+              id={`${prefix}-record-limit`}
+              label="Records / partition"
+              name="max_records_per_partition"
+              placeholder="Unbounded"
+              min={1}
+              optional
+            />
+          </div>
+          <label className="field" htmlFor={`${prefix}-durability`}>
+            <span>Durability</span>
+            <select id={`${prefix}-durability`} name="durability" defaultValue="local_durable">
+              <option value="local_durable">Local durable · WAL + fsync</option>
+              <option value="volatile">Volatile · memory only</option>
+            </select>
+            <small>Local durable survives process restart on this machine; it is not replicated.</small>
+          </label>
+        </>
       );
     case "queue":
       return (
@@ -213,6 +180,14 @@ function profileFields(profile: CreateProfile, prefix: string): ReactNode {
             defaultValue={100_000}
             min={1}
           />
+          <label className="field" htmlFor={`${prefix}-durability`}>
+            <span>Durability</span>
+            <select id={`${prefix}-durability`} name="durability" defaultValue="local_durable">
+              <option value="local_durable">Local durable · WAL + fsync</option>
+              <option value="volatile">Volatile · memory only</option>
+            </select>
+            <small>Queue messages, leases, settlements, retries, and redrives survive restart.</small>
+          </label>
         </>
       );
     case "event_bus":
@@ -307,17 +282,18 @@ function buildConfig(profile: CreateProfile, formData: FormData): ResourceConfig
       return {
         max_entries: readPositiveInteger(formData, "max_entries"),
         default_ttl_ms: readOptionalPositiveInteger(formData, "default_ttl_ms"),
+        durability: "volatile",
         eviction: readString(formData, "eviction") as CacheConfig["eviction"],
       } satisfies CacheConfig;
     case "stream":
       return {
         partitions: readPositiveInteger(formData, "partitions"),
-        durability: "local_durable",
+        durability: readString(formData, "durability") as StreamConfig["durability"],
         max_records_per_partition: readOptionalPositiveInteger(formData, "max_records_per_partition"),
       } satisfies StreamConfig;
     case "queue":
       return {
-        durability: "local_durable",
+        durability: readString(formData, "durability") as QueueConfig["durability"],
         visibility_timeout_ms: readPositiveInteger(formData, "visibility_timeout_ms"),
         max_messages: readPositiveInteger(formData, "max_messages"),
         retry: {
@@ -332,7 +308,7 @@ function buildConfig(profile: CreateProfile, formData: FormData): ResourceConfig
       } satisfies QueueConfig;
     case "event_bus":
       return {
-        durability: "local_durable",
+        durability: "volatile",
         archive: formData.get("archive") === "on",
       } satisfies BusConfig;
   }

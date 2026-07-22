@@ -39,6 +39,49 @@ Implementing a custom consensus algorithm is out of scope. Replacing the
 provisional library with another vetted Rust library remains possible behind the
 adapter if the spike fails.
 
+## Stage 1, local persistence, and probe status
+
+The first workspace slice implements a fixed-three-voter, memory-only adapter
+behind Epoch-owned types. It exercises election, majority commit, partition and
+catch-up, leader transfer, proposal lookup/deduplication, bounded versioned peer
+frames, fail-stop Ready handling, restart-image invariants, and deterministic
+fault delivery through `epoch-testkit`. Snapshots and membership entries are
+rejected rather than partially supported. See the evidence and non-claims in
+[Consensus Feasibility Spike](../CONSENSUS_SPIKE.md).
+
+A follow-on local persistence sub-slice adds `PersistentRaftAdapter` and EPRS
+v1 over the checksummed, fsync-backed `FileWal`. Each generation stores explicit
+`HardState`, normal-entry, and applied/publishable digest-checkpoint fields rather
+than raw library protobuf. Reopen validates immutable identity, reconstructs
+logical suffix replacement and applied history, and rejects detected corruption
+or invariant regression. The byte and recovery contract is documented in
+[EPRS v1 consensus stable journal](../../spec/formats/consensus-stable-store-v1.md).
+
+The evidence now also includes a three-child-process partition and
+`SIGKILL`/same-path-reopen smoke, plus an opt-in `epoch-node` probe with a
+dedicated actor, bounded ordered HTTP transport, local diagnostic lookup, and a
+static three-container topology. The runtime commits only opaque probe bytes;
+it does not drive a product state machine. See
+[Experimental Consensus Probe](../CONSENSUS_PROBE.md).
+
+This work does not accept the ADR. A runnable node can use the adapter only for
+the explicitly experimental opaque probe, and no product API returns a
+durable-majority acknowledgement. An exhaustive process-crash and I/O-fault
+matrix, snapshots and checkpoint installation, membership and
+catalog-authorized epoch transitions, read barriers, authenticated transport,
+group density, performance, formal-model, and chaos evidence remain open.
+
+The released `raft-rs` 0.7 dependency graph was rejected because its
+`protobuf` 2.28 dependency is affected by `RUSTSEC-2024-0437`. The spike pins
+official upstream revision
+`ad13f3d90780f53aea2488c6a4b76c0d334bf136` with `prost-codec`, which removes
+that dependency and includes the later unstable-entry capacity fix. The
+revision is unreleased and still brings the unmaintained `fxhash` dependency
+reported by `RUSTSEC-2025-0057`. CI has one explicit temporary exception for
+that informational advisory and denies every other Cargo advisory or warning.
+The exception, transitive unsafe/C++ inventory, and unreleased revision are
+open items under acceptance criterion 8.
+
 ## Spike acceptance gate
 
 The proposal becomes Accepted only after a reproducible spike demonstrates:
@@ -81,4 +124,3 @@ batching, fsync policy, fault schedule, and complete latency percentiles.
 A custom consensus implementation requires a separate ADR, formal model,
 independent expert review, and evidence that vetted libraries cannot satisfy the
 requirements.
-

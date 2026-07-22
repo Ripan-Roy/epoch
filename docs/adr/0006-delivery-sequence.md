@@ -23,7 +23,7 @@ Build evidence-producing vertical slices in this order:
 1. **Foundation:** contracts, invariants, deterministic testkit, format fixtures,
    and matched Redis/Kafka/RabbitMQ benchmark environments.
 2. **Standalone Stream:** crash-safe segment append/fetch, recovery, native API,
-   CLI, metrics, and Go SDK.
+   CLI, metrics, and initial Go, Java, and Python SDK slices.
 3. **Replicated foundation:** three-node catalog and tablet consensus, quorum
    acknowledgement, leader fencing, membership, snapshot, catch-up, placement,
    and injected failures.
@@ -33,8 +33,8 @@ Build evidence-producing vertical slices in this order:
    eviction, atomic same-shard mutations, and CAS; then replicated-memory and
    durable changelog/snapshot modes.
 6. **Regional productization:** declarative administration, quotas, auth, audit,
-   backup/restore, repair/rebalance, Kubernetes operator, Java SDK, and local
-   integration packages.
+   backup/restore, repair/rebalance, Kubernetes operator, production SDK parity,
+   and local integration packages.
 7. **Compatibility and P1 storage:** named Kafka, RESP3, and AMQP subsets;
    producer idempotence, consumer groups, durable Cache restore, compaction,
    schemas, tiering, capture, and migration tooling.
@@ -85,4 +85,3 @@ acknowledgement invariant.
 - Cutting quorum correctness, fencing, restore, or observability to preserve
   feature breadth.
 - Positioning an alpha as full Redis, Kafka, RabbitMQ, or cloud-service parity.
-

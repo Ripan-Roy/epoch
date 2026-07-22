@@ -1,0 +1,24 @@
+[package]
+name = "epoch-consensus"
+description = "Isolated consensus feasibility adapter for Epoch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+epoch-storage = { path = "../epoch-storage" }
+prost.workspace = true
+raft.workspace = true
+sha2.workspace = true
+slog.workspace = true
+
+[dev-dependencies]
+epoch-testkit = { path = "../epoch-testkit" }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

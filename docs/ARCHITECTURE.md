@@ -211,6 +211,25 @@ consensus library behind an Epoch adapter. The library choice remains subject to
 the spike in [ADR-0003](adr/0003-consensus-adapter.md); Epoch will not implement
 a new consensus algorithm during Phase 0.
 
+The current workspace contains Stage 1 of that spike plus a local stable-store
+sub-slice: an Epoch-owned, fixed-three-voter adapter over an exact upstream
+`raft-rs` revision, deterministic `epoch-testkit` transport, and the EPRS v1
+stable journal over `FileWal` exposed through `PersistentRaftAdapter`. EPRS
+records immutable voter identity, complete `HardState`, normal-entry
+index/term/data, and an applied/publishable digest checkpoint without persisting
+raw library protobuf. It supports checksummed
+local reopen and logical uncommitted-suffix replacement. An opt-in node probe
+wraps it in a dedicated actor, bounded ordered HTTP peer queues, local
+status/proposal lookup, and a static three-container topology. The probe carries
+opaque diagnostics only: the adapter is not connected to a tablet/profile state
+machine and no product durable-majority acknowledgement is exposed. Snapshots,
+compaction, membership changes, authoritative catalog
+fencing, and read barriers remain disabled. The byte contract is documented in
+[EPRS v1 consensus stable journal](../spec/formats/consensus-stable-store-v1.md);
+the complete scope and non-claims are recorded in
+[Consensus Feasibility Spike](CONSENSUS_SPIKE.md) and the runnable boundary in
+[Experimental Consensus Probe](CONSENSUS_PROBE.md).
+
 Rust peer replication uses batched, framed, mutually authenticated connections
 with separate priorities for control, append, snapshot, and repair traffic.
 Administrative and Rust/Go calls use gRPC. Bulk replication is not required to
@@ -247,6 +266,37 @@ The primary remote representation is an open Epoch segment format. Analytics
 capture to Parquet, JSON, or another open interchange format is a separate
 export, not the replication source of truth.
 
+The current standalone vertical slice is intentionally narrower. Fresh data
+directories use one exclusively locked segmented node WAL under
+`$EPOCH_DATA_DIR/engine-wal/segment-*.wal`; `engine.wal` is its crash-safe
+activation marker and cross-version lock. Stream creation, append, and offsets
+are recorded alongside Queue creation, enqueue, lease, settlement, redrive, and
+time-driven maintenance. Local-durable mutations fsync before application;
+volatile mutations bypass the journal.
+
+Segments rotate at a configured byte threshold and retain the checksummed v1
+frame format. Record sequence is global across files, not reset per segment. A
+versioned identity and checksummed manifest bind the WAL UUID, ordered segment
+set, committed lengths, ending sequences, and whole-file checksums. Startup
+rejects missing, unexpected, reordered, truncated, foreign, or checksum-invalid
+committed history. Recovery may discard only bytes beyond the active segment's
+manifested length; sealed segments are immutable. A pending manifest transition
+makes an interrupted rotation deterministic. The directory is append-only at
+this milestone: rotation does not implement retention, compaction, snapshots,
+or tiering.
+
+A valid legacy `$EPOCH_DATA_DIR/engine.wal` remains on the single-file writer;
+the current binary replays and continues appending to it without creating a
+segmented history. Fresh activation installs a marker that old binaries cannot
+interpret as a WAL, preventing a split history. Ambiguous mixed layouts fail
+closed. Safe automatic migration is deferred. These compatibility rules and
+fixtures are not the final tablet consensus log or snapshot format.
+
+The local manifest detects missing or independently changed committed files,
+not rollback of an entire self-consistent storage volume. Backup/restore must
+treat the activation marker and `engine-wal/` as one atomic unit; authenticated
+anti-rollback evidence belongs to the later backup and consensus design.
+
 ## 8. Profile engines
 
 ### 8.1 Stream Log
@@ -272,6 +322,12 @@ Acquire is a committed transition that chooses eligible records and creates
 fenced lease tokens. Ack, Nack, Release, Reject, and Extend validate the tablet,
 leader, consumer/session, message, and lease generations before committing.
 Expired or superseded tokens cannot mutate state.
+
+In the standalone slice, a local-durable Queue uses deterministic command
+replay. The engine clones the current state, validates and applies a proposed
+transition, fsyncs its command, and only then publishes that state in memory.
+Consequently a failed enqueue or settlement cannot become visible, while a
+restart reconstructs lease generations and opaque tokens exactly.
 
 The alpha implementation can use memory-resident indexes plus checksummed
 snapshots and tail replay. A bounded-memory, disk-backed derived-index design and
@@ -571,3 +627,4 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0005: Injectable Time and Fencing](adr/0005-time-and-fencing.md)
 - [ADR-0006: Delivery Sequence and Initial Wedge](adr/0006-delivery-sequence.md)
 - [ADR-0007: Provisional Repository and Toolchains](adr/0007-repository-and-toolchains.md)
+- [ADR-0008: Segmented Standalone WAL](adr/0008-segmented-standalone-wal.md)

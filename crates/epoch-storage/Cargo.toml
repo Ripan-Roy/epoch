@@ -11,10 +11,11 @@ crc32fast.workspace = true
 epoch-core = { path = "../epoch-core" }
 parking_lot.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 
 [lints]
 workspace = true
-

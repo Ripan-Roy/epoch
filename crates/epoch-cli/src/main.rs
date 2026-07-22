@@ -1,6 +1,6 @@
 use std::process::ExitCode;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use epoch_core::EventEnvelope;
 use reqwest::{Client, Method, StatusCode};
 use serde_json::{Value, json};
@@ -78,6 +78,8 @@ enum StreamCommand {
         name: String,
         #[arg(long, default_value_t = 1)]
         partitions: u32,
+        #[arg(long, value_enum, default_value = "volatile")]
+        durability: DurabilityArg,
     },
     Append(EventArgsWithResource),
     Fetch {
@@ -91,6 +93,21 @@ enum StreamCommand {
     },
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DurabilityArg {
+    Volatile,
+    LocalDurable,
+}
+
+impl DurabilityArg {
+    const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Volatile => "volatile",
+            Self::LocalDurable => "local_durable",
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 struct QueueArgs {
     #[command(subcommand)]
@@ -101,6 +118,8 @@ struct QueueArgs {
 enum QueueCommand {
     Create {
         name: String,
+        #[arg(long, value_enum, default_value = "volatile")]
+        durability: DurabilityArg,
         #[arg(long, default_value_t = 30_000)]
         visibility_timeout_ms: u64,
     },
@@ -285,14 +304,18 @@ async fn run_stream(
     command: StreamCommand,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     match command {
-        StreamCommand::Create { name, partitions } => {
+        StreamCommand::Create {
+            name,
+            partitions,
+            durability,
+        } => {
             request(
                 client,
                 Method::POST,
                 &format!("{base}/v1/streams/{name}"),
                 Some(json!({
                     "partitions": partitions,
-                    "durability": "local_durable",
+                    "durability": durability.wire_name(),
                     "max_records_per_partition": null
                 })),
             )
@@ -335,6 +358,7 @@ async fn run_queue(
     match command {
         QueueCommand::Create {
             name,
+            durability,
             visibility_timeout_ms,
         } => {
             request(
@@ -342,7 +366,7 @@ async fn run_queue(
                 Method::POST,
                 &format!("{base}/v1/queues/{name}"),
                 Some(json!({
-                    "durability": "local_durable",
+                    "durability": durability.wire_name(),
                     "visibility_timeout_ms": visibility_timeout_ms,
                     "max_messages": 100_000,
                     "retry": {
@@ -428,7 +452,7 @@ async fn run_bus(
                 client,
                 Method::POST,
                 &format!("{base}/v1/buses/{name}"),
-                Some(json!({"durability": "local_durable", "archive": true})),
+                Some(json!({"durability": "volatile", "archive": true})),
             )
             .await
         }
@@ -501,5 +525,66 @@ async fn request(
         Ok(value)
     } else {
         Err(format!("HTTP {status}: {value}").into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_create_parses_local_durability() {
+        let cli = Cli::try_parse_from([
+            "epoch",
+            "stream",
+            "create",
+            "audit",
+            "--durability",
+            "local-durable",
+        ])
+        .expect("valid Stream durability parses");
+
+        let Command::Stream(StreamArgs {
+            command: StreamCommand::Create { durability, .. },
+        }) = cli.command
+        else {
+            panic!("Stream create command was expected");
+        };
+        assert_eq!(durability.wire_name(), "local_durable");
+    }
+
+    #[test]
+    fn queue_create_parses_local_durability() {
+        let cli = Cli::try_parse_from([
+            "epoch",
+            "queue",
+            "create",
+            "jobs",
+            "--durability",
+            "local-durable",
+        ])
+        .expect("valid Queue durability parses");
+
+        let Command::Queue(QueueArgs {
+            command: QueueCommand::Create { durability, .. },
+        }) = cli.command
+        else {
+            panic!("Queue create command was expected");
+        };
+        assert_eq!(durability.wire_name(), "local_durable");
+    }
+
+    #[test]
+    fn queue_create_defaults_to_volatile() {
+        let cli = Cli::try_parse_from(["epoch", "queue", "create", "jobs"])
+            .expect("Queue defaults parse");
+
+        let Command::Queue(QueueArgs {
+            command: QueueCommand::Create { durability, .. },
+        }) = cli.command
+        else {
+            panic!("Queue create command was expected");
+        };
+        assert_eq!(durability.wire_name(), "volatile");
     }
 }

@@ -7,7 +7,7 @@
 use std::{
     collections::BTreeMap,
     sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -202,48 +202,184 @@ impl EventEnvelope {
     }
 }
 
+/// Supplies both user-visible wall time and process-local elapsed time.
+///
+/// Engines use the wall clock for scheduled instants and timestamps. Timeout
+/// implementations use the monotonic clock so a wall-clock adjustment cannot
+/// shorten a lease or retry delay. Implementations must never move their
+/// monotonic value backwards.
 pub trait Clock: Send + Sync + std::fmt::Debug {
-    fn now_ms(&self) -> u64;
+    fn wall_time_ms(&self) -> u64;
+
+    fn monotonic_time_ms(&self) -> u64;
+
+    /// Compatibility alias for call sites that explicitly require wall time.
+    fn now_ms(&self) -> u64 {
+        self.wall_time_ms()
+    }
 }
 
-#[derive(Debug, Default)]
-pub struct SystemClock;
+#[derive(Debug)]
+pub struct SystemClock {
+    started_at: Instant,
+}
+
+impl Default for SystemClock {
+    fn default() -> Self {
+        Self {
+            started_at: Instant::now(),
+        }
+    }
+}
 
 impl Clock for SystemClock {
-    fn now_ms(&self) -> u64 {
+    fn wall_time_ms(&self) -> u64 {
         let millis = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
         u64::try_from(millis).unwrap_or(u64::MAX)
     }
+
+    fn monotonic_time_ms(&self) -> u64 {
+        u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
 }
 
 #[derive(Debug)]
 pub struct ManualClock {
-    now_ms: AtomicU64,
+    wall_time_ms: AtomicU64,
+    monotonic_time_ms: AtomicU64,
 }
 
 impl ManualClock {
-    pub const fn new(now_ms: u64) -> Self {
+    pub const fn new(wall_time_ms: u64) -> Self {
+        Self::with_times(wall_time_ms, 0)
+    }
+
+    pub const fn with_times(wall_time_ms: u64, monotonic_time_ms: u64) -> Self {
         Self {
-            now_ms: AtomicU64::new(now_ms),
+            wall_time_ms: AtomicU64::new(wall_time_ms),
+            monotonic_time_ms: AtomicU64::new(monotonic_time_ms),
         }
     }
 
-    pub fn set(&self, now_ms: u64) {
-        self.now_ms.store(now_ms, Ordering::SeqCst);
+    /// Moves wall time to an explicit instant without changing elapsed time.
+    pub fn set_wall_time_ms(&self, wall_time_ms: u64) {
+        self.wall_time_ms.store(wall_time_ms, Ordering::SeqCst);
     }
 
+    /// Compatibility alias for existing deterministic tests.
+    pub fn set(&self, wall_time_ms: u64) {
+        self.set_wall_time_ms(wall_time_ms);
+    }
+
+    /// Advances normal elapsed time, moving wall and monotonic time together.
+    pub fn advance_elapsed(&self, delta_ms: u64) -> u64 {
+        atomic_saturating_add(&self.monotonic_time_ms, delta_ms);
+        atomic_saturating_add(&self.wall_time_ms, delta_ms)
+    }
+
+    /// Compatibility alias for existing deterministic tests.
     pub fn advance(&self, delta_ms: u64) -> u64 {
-        self.now_ms.fetch_add(delta_ms, Ordering::SeqCst) + delta_ms
+        self.advance_elapsed(delta_ms)
     }
 }
 
 impl Clock for ManualClock {
-    fn now_ms(&self) -> u64 {
-        self.now_ms.load(Ordering::SeqCst)
+    fn wall_time_ms(&self) -> u64 {
+        self.wall_time_ms.load(Ordering::SeqCst)
     }
+
+    fn monotonic_time_ms(&self) -> u64 {
+        self.monotonic_time_ms.load(Ordering::SeqCst)
+    }
+}
+
+fn atomic_saturating_add(value: &AtomicU64, delta: u64) -> u64 {
+    let mut current = value.load(Ordering::SeqCst);
+    loop {
+        let next = current.saturating_add(delta);
+        match value.compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return next,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
+/// A persisted hybrid-logical-clock observation, ordered lexicographically.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct HybridTimestamp {
+    pub physical_ms: u64,
+    pub logical: u32,
+}
+
+impl HybridTimestamp {
+    pub const fn new(physical_ms: u64, logical: u32) -> Self {
+        Self {
+            physical_ms,
+            logical,
+        }
+    }
+}
+
+/// Deterministically advances persisted logical time across clock jumps and
+/// observations received from another node.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HybridLogicalClock {
+    last: HybridTimestamp,
+}
+
+impl HybridLogicalClock {
+    pub const fn from_persisted(last: HybridTimestamp) -> Self {
+        Self { last }
+    }
+
+    pub const fn last(&self) -> HybridTimestamp {
+        self.last
+    }
+
+    pub fn tick(&mut self, wall_time_ms: u64) -> EpochResult<HybridTimestamp> {
+        let next = if wall_time_ms > self.last.physical_ms {
+            HybridTimestamp::new(wall_time_ms, 0)
+        } else {
+            increment_hybrid_logical(self.last)?
+        };
+        self.last = next;
+        Ok(next)
+    }
+
+    pub fn observe(
+        &mut self,
+        wall_time_ms: u64,
+        remote: HybridTimestamp,
+    ) -> EpochResult<HybridTimestamp> {
+        let physical_ms = wall_time_ms
+            .max(self.last.physical_ms)
+            .max(remote.physical_ms);
+        let logical =
+            if physical_ms == self.last.physical_ms && physical_ms == remote.physical_ms {
+                self.last.logical.max(remote.logical).checked_add(1)
+            } else if physical_ms == self.last.physical_ms {
+                self.last.logical.checked_add(1)
+            } else if physical_ms == remote.physical_ms {
+                remote.logical.checked_add(1)
+            } else {
+                Some(0)
+            }
+            .ok_or_else(|| EpochError::Capacity("hybrid logical clock overflow".into()))?;
+        let next = HybridTimestamp::new(physical_ms, logical);
+        self.last = next;
+        Ok(next)
+    }
+}
+
+fn increment_hybrid_logical(timestamp: HybridTimestamp) -> EpochResult<HybridTimestamp> {
+    let logical = timestamp
+        .logical
+        .checked_add(1)
+        .ok_or_else(|| EpochError::Capacity("hybrid logical clock overflow".into()))?;
+    Ok(HybridTimestamp::new(timestamp.physical_ms, logical))
 }
 
 pub fn validate_resource_name(name: &str) -> EpochResult<()> {
@@ -272,6 +408,61 @@ mod tests {
         assert_eq!(clock.advance(25), 125);
         clock.set(7);
         assert_eq!(clock.now_ms(), 7);
+    }
+
+    #[test]
+    fn wall_clock_jumps_do_not_move_manual_monotonic_time_backwards() {
+        let clock = ManualClock::with_times(1_000, 50);
+
+        clock.set_wall_time_ms(10);
+        assert_eq!(clock.wall_time_ms(), 10);
+        assert_eq!(clock.monotonic_time_ms(), 50);
+
+        assert_eq!(clock.advance_elapsed(25), 35);
+        assert_eq!(clock.wall_time_ms(), 35);
+        assert_eq!(clock.monotonic_time_ms(), 75);
+    }
+
+    #[test]
+    fn manual_elapsed_time_saturates_instead_of_wrapping() {
+        let clock = ManualClock::with_times(u64::MAX - 1, u64::MAX - 2);
+
+        assert_eq!(clock.advance_elapsed(10), u64::MAX);
+        assert_eq!(clock.wall_time_ms(), u64::MAX);
+        assert_eq!(clock.monotonic_time_ms(), u64::MAX);
+    }
+
+    #[test]
+    fn hybrid_logical_time_never_moves_back_with_wall_time() {
+        let mut clock = HybridLogicalClock::from_persisted(HybridTimestamp::new(100, 0));
+
+        let first = clock.tick(90).unwrap();
+        let second = clock.tick(80).unwrap();
+
+        assert_eq!(first, HybridTimestamp::new(100, 1));
+        assert_eq!(second, HybridTimestamp::new(100, 2));
+        assert!(second > first);
+    }
+
+    #[test]
+    fn hybrid_logical_time_orders_remote_observations() {
+        let mut clock = HybridLogicalClock::from_persisted(HybridTimestamp::new(100, 4));
+
+        let observed = clock.observe(90, HybridTimestamp::new(100, 7)).unwrap();
+        let advanced = clock.observe(110, HybridTimestamp::new(105, 9)).unwrap();
+
+        assert_eq!(observed, HybridTimestamp::new(100, 8));
+        assert_eq!(advanced, HybridTimestamp::new(110, 0));
+        assert!(advanced > observed);
+    }
+
+    #[test]
+    fn hybrid_logical_overflow_fails_without_reusing_a_timestamp() {
+        let persisted = HybridTimestamp::new(100, u32::MAX);
+        let mut clock = HybridLogicalClock::from_persisted(persisted);
+
+        assert!(matches!(clock.tick(100), Err(EpochError::Capacity(_))));
+        assert_eq!(clock.last(), persisted);
     }
 
     #[test]

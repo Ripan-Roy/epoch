@@ -15,7 +15,7 @@ pub struct BusConfig {
 impl Default for BusConfig {
     fn default() -> Self {
         Self {
-            durability: DurabilityProfile::LocalDurable,
+            durability: DurabilityProfile::Volatile,
             archive: true,
         }
     }

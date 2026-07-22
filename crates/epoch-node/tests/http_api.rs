@@ -1,0 +1,748 @@
+use std::{fs::OpenOptions, io::Write as _, path::Path, sync::Arc};
+
+use axum::{
+    Router,
+    body::Body,
+    http::{
+        Method, Request, StatusCode,
+        header::{
+            ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
+            ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_REQUEST_HEADERS,
+            ACCESS_CONTROL_REQUEST_METHOD, ORIGIN,
+        },
+    },
+};
+use epoch_core::{DeploymentMode, ManualClock};
+use epoch_engine::EpochEngine;
+use epoch_node::router;
+use epoch_storage::FileWal;
+use http_body_util::BodyExt as _;
+use serde_json::{Value, json};
+use tower::ServiceExt as _;
+
+fn test_app() -> Router {
+    router(
+        Arc::new(EpochEngine::new(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(1_000)),
+        )),
+        &[],
+    )
+    .expect("test CORS configuration is valid")
+}
+
+fn durable_test_app(wal_path: &Path, now_ms: u64) -> (Router, bool) {
+    let wal = FileWal::open(wal_path).expect("WAL opens");
+    let recovered_partial_tail = wal.recovered_partial_tail();
+    let engine = EpochEngine::with_commit_log(
+        DeploymentMode::Standalone,
+        Arc::new(ManualClock::new(now_ms)),
+        Box::new(wal),
+    )
+    .expect("journal recovers");
+    (
+        router(Arc::new(engine), &[]).expect("test CORS configuration is valid"),
+        recovered_partial_tail,
+    )
+}
+
+fn app_with_origins(origins: &[&str]) -> Result<Router, epoch_core::EpochError> {
+    let origins = origins
+        .iter()
+        .map(|origin| (*origin).to_owned())
+        .collect::<Vec<_>>();
+    router(
+        Arc::new(EpochEngine::new(
+            DeploymentMode::Standalone,
+            Arc::new(ManualClock::new(1_000)),
+        )),
+        &origins,
+    )
+}
+
+async fn call(app: &Router, method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+    let mut builder = Request::builder().method(method).uri(uri);
+    let request_body = if let Some(body) = body {
+        builder = builder.header("content-type", "application/json");
+        Body::from(serde_json::to_vec(&body).expect("test JSON serializes"))
+    } else {
+        Body::empty()
+    };
+    let response = app
+        .clone()
+        .oneshot(builder.body(request_body).expect("test request builds"))
+        .await
+        .expect("router returns a response");
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("response body is readable")
+        .to_bytes();
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).expect("API returns JSON")
+    };
+    (status, value)
+}
+
+#[tokio::test]
+async fn cors_allows_only_an_explicit_browser_origin() {
+    let app = app_with_origins(&["https://console.example"]).expect("origin is valid");
+    let allowed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/v1/queues/jobs/messages")
+                .header(ORIGIN, "https://console.example")
+                .header(ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .header(ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
+                .body(Body::empty())
+                .expect("preflight request builds"),
+        )
+        .await
+        .expect("router returns a response");
+    assert_eq!(allowed.status(), StatusCode::OK);
+    assert_eq!(
+        allowed.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN),
+        Some(&"https://console.example".parse().expect("valid header"))
+    );
+    assert!(
+        allowed
+            .headers()
+            .get(ACCESS_CONTROL_ALLOW_METHODS)
+            .expect("allowed methods are returned")
+            .to_str()
+            .expect("methods are text")
+            .contains("POST")
+    );
+    assert!(
+        allowed
+            .headers()
+            .get(ACCESS_CONTROL_ALLOW_HEADERS)
+            .expect("allowed headers are returned")
+            .to_str()
+            .expect("headers are text")
+            .eq_ignore_ascii_case("content-type")
+    );
+
+    let denied = app
+        .oneshot(
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/v1/queues/jobs/messages")
+                .header(ORIGIN, "https://attacker.example")
+                .header(ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .body(Body::empty())
+                .expect("preflight request builds"),
+        )
+        .await
+        .expect("router returns a response");
+    assert_eq!(denied.status(), StatusCode::OK);
+    assert!(denied.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
+}
+
+#[tokio::test]
+async fn cors_blocks_headers_outside_the_json_contract() {
+    let app = app_with_origins(&["https://console.example"]).expect("origin is valid");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/v1/queues/jobs/messages")
+                .header(ORIGIN, "https://console.example")
+                .header(ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .header(ACCESS_CONTROL_REQUEST_HEADERS, "x-epoch-secret")
+                .body(Body::empty())
+                .expect("preflight request builds"),
+        )
+        .await
+        .expect("router returns a response");
+    assert!(
+        !response
+            .headers()
+            .get(ACCESS_CONTROL_ALLOW_HEADERS)
+            .expect("configured headers are returned")
+            .to_str()
+            .expect("headers are text")
+            .contains("x-epoch-secret")
+    );
+}
+
+#[test]
+fn cors_rejects_wildcards_paths_credentials_and_non_http_schemes() {
+    for origin in [
+        "*",
+        "null",
+        "file://localhost",
+        "https://console.example/path",
+        "https://user@console.example",
+        "http://:5173",
+        "http://host:abc",
+        "http://host:99999",
+    ] {
+        let error = app_with_origins(&[origin]).expect_err("unsafe origin must fail closed");
+        assert!(
+            matches!(error, epoch_core::EpochError::InvalidArgument(_)),
+            "origin was {origin}: {error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cors_canonicalizes_safe_origin_spelling() {
+    let app = app_with_origins(&["HTTPS://CONSOLE.EXAMPLE:443/"]).expect("origin is valid");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/healthz")
+                .header(ORIGIN, "https://console.example")
+                .header(ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                .body(Body::empty())
+                .expect("preflight request builds"),
+        )
+        .await
+        .expect("router returns a response");
+    assert_eq!(
+        response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN),
+        Some(&"https://console.example".parse().expect("valid header"))
+    );
+}
+
+#[tokio::test]
+async fn requests_without_an_origin_remain_available_to_native_sdks() {
+    let app = app_with_origins(&[]).expect("empty browser allowlist is valid");
+    let (status, body) = call(&app, Method::GET, "/healthz", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "ok");
+}
+
+#[tokio::test]
+async fn standalone_rejects_unavailable_quorum_durability() {
+    let app = test_app();
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/v1/streams/protected",
+        Some(json!({
+            "partitions": 1,
+            "durability": "quorum_durable",
+            "max_records_per_partition": null
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "response was {body}");
+    assert_eq!(body["error"]["code"], "invalid_argument");
+}
+
+async fn create_profiles(app: &Router) {
+    let resources = [
+        (
+            "/v1/caches/sessions",
+            json!({
+                "max_entries": 100,
+                "default_ttl_ms": null,
+                "eviction": "no_eviction",
+                "durability": "volatile"
+            }),
+        ),
+        (
+            "/v1/streams/orders",
+            json!({
+                "partitions": 2,
+                "durability": "volatile",
+                "max_records_per_partition": null
+            }),
+        ),
+        (
+            "/v1/queues/jobs",
+            json!({
+                "durability": "volatile",
+                "visibility_timeout_ms": 30_000,
+                "max_messages": 100,
+                "retry": {
+                    "strategy": "exponential",
+                    "initial_delay_ms": 100,
+                    "max_delay_ms": 10_000,
+                    "jitter_percent": 0,
+                    "max_attempts": 3,
+                    "max_age_ms": null
+                },
+                "dedupe_window_ms": 60_000
+            }),
+        ),
+        (
+            "/v1/buses/events",
+            json!({"durability": "volatile", "archive": true}),
+        ),
+    ];
+    for (uri, config) in resources {
+        let (status, _) = call(app, Method::POST, uri, Some(config)).await;
+        assert_eq!(status, StatusCode::CREATED, "failed to create {uri}");
+    }
+}
+
+async fn exercise_cache(app: &Router) {
+    let (status, item) = call(
+        app,
+        Method::PUT,
+        "/v1/caches/sessions/keys/user-42",
+        Some(json!({
+            "value": {"kind": "string", "value": "active"},
+            "ttl_ms": 5_000
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(item["version"], 1);
+}
+
+async fn exercise_stream(app: &Router) {
+    let stream_event = json!({
+        "envelope": {
+            "id": "order-1",
+            "source": "checkout",
+            "type": "order.created",
+            "time_ms": 1_000,
+            "key": "customer-42",
+            "payload": {"order_id": "1"}
+        }
+    });
+    let (status, receipt) = call(
+        app,
+        Method::POST,
+        "/v1/streams/orders/records",
+        Some(stream_event),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(receipt["offset"], 0);
+}
+
+async fn exercise_queue(app: &Router) {
+    let queue_event = json!({
+        "id": "job-1",
+        "source": "api",
+        "type": "job.requested",
+        "time_ms": 1_000,
+        "payload": {"job_id": "1"}
+    });
+    let (status, _) = call(
+        app,
+        Method::POST,
+        "/v1/queues/jobs/messages",
+        Some(queue_event),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, deliveries) = call(
+        app,
+        Method::POST,
+        "/v1/queues/jobs/acquire",
+        Some(json!({"consumer": "worker-1", "max_messages": 1})),
+    )
+    .await;
+    let lease_token = deliveries[0]["lease_token"]
+        .as_str()
+        .expect("delivery has a lease token");
+    let (status, _) = call(
+        app,
+        Method::POST,
+        "/v1/queues/jobs/settle",
+        Some(json!({"action": "ack", "token": lease_token})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+async fn exercise_bus(app: &Router) {
+    let (status, _) = call(
+        app,
+        Method::PUT,
+        "/v1/buses/events/subscriptions/job-route",
+        Some(json!({
+            "name": "path-overrides-name",
+            "filter": {"event_type_patterns": ["order.*"]},
+            "target": {"kind": "queue", "resource": "jobs"}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, outcome) = call(
+        app,
+        Method::POST,
+        "/v1/buses/events/events",
+        Some(json!({
+            "id": "order-2",
+            "source": "checkout",
+            "type": "order.created",
+            "time_ms": 1_000,
+            "payload": {"order_id": "2"}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(outcome["routes"][0]["status"], "delivered");
+}
+
+#[tokio::test]
+async fn native_http_api_exercises_all_four_profiles() {
+    let app = test_app();
+    create_profiles(&app).await;
+    exercise_cache(&app).await;
+    exercise_stream(&app).await;
+    exercise_queue(&app).await;
+    exercise_bus(&app).await;
+
+    let (_, health) = call(&app, Method::GET, "/healthz", None).await;
+    assert_eq!(health["resource_count"], 4);
+    assert_eq!(health["guarantee_ceiling"], "volatile");
+}
+
+async fn create_durable_stream_with_state(app: &Router) {
+    let (status, _) = call(
+        app,
+        Method::POST,
+        "/v1/streams/audit",
+        Some(json!({
+            "partitions": 1,
+            "durability": "local_durable",
+            "max_records_per_partition": null
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, receipt) = call(
+        app,
+        Method::POST,
+        "/v1/streams/audit/records",
+        Some(json!({
+            "envelope": {
+                "id": "audit-1",
+                "source": "tests",
+                "type": "audit.created",
+                "time_ms": 1_000,
+                "dedupe_id": "audit-request-1",
+                "payload": {"subject": "one"}
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(receipt["acknowledgement"]["durability"], "local_durable");
+    let (status, _) = call(
+        app,
+        Method::PUT,
+        "/v1/streams/audit/groups/exporter/offsets",
+        Some(json!({"partition": 0, "next_offset": 1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+async fn verify_recovered_stream_and_reset_offset(app: &Router) {
+    let (status, records) = call(
+        app,
+        Method::GET,
+        "/v1/streams/audit/records?partition=0&offset=0&limit=10",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(records[0]["envelope"]["id"], "audit-1");
+    let (status, duplicate) = call(
+        app,
+        Method::POST,
+        "/v1/streams/audit/records",
+        Some(json!({
+            "envelope": {
+                "id": "audit-retry",
+                "source": "tests",
+                "type": "audit.created",
+                "time_ms": 2_000,
+                "dedupe_id": "audit-request-1",
+                "payload": {"subject": "retry"}
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(duplicate["offset"], 0);
+    assert_eq!(duplicate["acknowledgement"]["duplicate"], true);
+    let (status, lag) = call(
+        app,
+        Method::GET,
+        "/v1/streams/audit/groups/exporter/lag?partition=0",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(lag["committed_offset"], 1);
+    assert_eq!(lag["lag"], 0);
+    let (_, health) = call(app, Method::GET, "/healthz", None).await;
+    assert_eq!(health["guarantee_ceiling"], "local_durable");
+
+    let (status, _) = call(
+        app,
+        Method::PUT,
+        "/v1/streams/audit/groups/exporter/offsets",
+        Some(json!({"partition": 0, "next_offset": 0, "reset": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+async fn verify_recovered_offset_reset(app: &Router) {
+    let (status, lag) = call(
+        app,
+        Method::GET,
+        "/v1/streams/audit/groups/exporter/lag?partition=0",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(lag["committed_offset"], 0);
+    assert_eq!(lag["lag"], 1);
+}
+
+#[tokio::test]
+async fn local_durable_stream_recovers_records_offsets_and_partial_tail() {
+    let temporary = tempfile::tempdir().expect("temporary data directory is created");
+    let wal_path = temporary.path().join("engine.wal");
+    {
+        let (app, recovered_partial_tail) = durable_test_app(&wal_path, 1_000);
+        assert!(!recovered_partial_tail);
+        create_durable_stream_with_state(&app).await;
+    }
+
+    OpenOptions::new()
+        .append(true)
+        .open(&wal_path)
+        .expect("WAL is appendable after shutdown")
+        .write_all(b"EPCHpartial-crash-tail")
+        .expect("partial tail is injected");
+
+    let (app, recovered_partial_tail) = durable_test_app(&wal_path, 2_000);
+    assert!(recovered_partial_tail);
+    verify_recovered_stream_and_reset_offset(&app).await;
+    drop(app);
+
+    let (app, recovered_partial_tail) = durable_test_app(&wal_path, 3_000);
+    assert!(!recovered_partial_tail);
+    verify_recovered_offset_reset(&app).await;
+}
+
+async fn create_durable_queue(app: &Router) {
+    let (status, _) = call(
+        app,
+        Method::POST,
+        "/v1/queues/jobs",
+        Some(json!({
+            "durability": "local_durable",
+            "visibility_timeout_ms": 100,
+            "max_messages": 100,
+            "retry": {
+                "strategy": "fixed",
+                "initial_delay_ms": 25,
+                "max_delay_ms": 25,
+                "jitter_percent": 0,
+                "max_attempts": 3,
+                "max_age_ms": null
+            },
+            "dedupe_window_ms": 60_000
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+}
+
+async fn enqueue_durable_queue_messages(app: &Router) {
+    for (id, deliver_at_ms) in [
+        ("job-ack", None),
+        ("job-scheduled", Some(1_500)),
+        ("job-leased", None),
+        ("job-released", None),
+        ("job-redriven", None),
+    ] {
+        let (status, receipt) = call(
+            app,
+            Method::POST,
+            "/v1/queues/jobs/messages",
+            Some(json!({
+                "id": id,
+                "source": "tests",
+                "type": "job.requested",
+                "time_ms": 1_000,
+                "deliver_at_ms": deliver_at_ms,
+                "payload": {"id": id}
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(receipt["acknowledgement"]["durability"], "local_durable");
+    }
+}
+
+fn lease_token(deliveries: &Value, message_id: &str) -> String {
+    deliveries
+        .as_array()
+        .expect("delivery array")
+        .iter()
+        .find(|delivery| delivery["message"]["id"] == message_id)
+        .and_then(|delivery| delivery["lease_token"].as_str())
+        .expect("message has a lease token")
+        .to_owned()
+}
+
+async fn acknowledge_queue_delivery(app: &Router, token: &str) {
+    let (status, _) = call(
+        app,
+        Method::POST,
+        "/v1/queues/jobs/settle",
+        Some(json!({"action": "ack", "token": token})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+async fn seed_durable_queue_lifecycle(app: &Router) -> String {
+    create_durable_queue(app).await;
+    enqueue_durable_queue_messages(app).await;
+    let (_, deliveries) = call(
+        app,
+        Method::POST,
+        "/v1/queues/jobs/acquire",
+        Some(json!({"consumer": "worker-a", "max_messages": 4})),
+    )
+    .await;
+    assert_eq!(deliveries.as_array().expect("delivery array").len(), 4);
+    acknowledge_queue_delivery(app, &lease_token(&deliveries, "job-ack")).await;
+
+    let recovered_lease_token = lease_token(&deliveries, "job-leased");
+    let (status, extended) = call(
+        app,
+        Method::POST,
+        "/v1/queues/jobs/settle",
+        Some(json!({
+            "action": "extend",
+            "token": recovered_lease_token,
+            "extension_ms": 400
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(extended["lease_deadline_ms"], 1_400);
+
+    let (status, _) = call(
+        app,
+        Method::POST,
+        "/v1/queues/jobs/settle",
+        Some(json!({
+            "action": "release",
+            "token": lease_token(&deliveries, "job-released"),
+            "delay_ms": 300,
+            "reason": "retry"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = call(
+        app,
+        Method::POST,
+        "/v1/queues/jobs/settle",
+        Some(json!({
+            "action": "reject",
+            "token": lease_token(&deliveries, "job-redriven"),
+            "reason": "poison"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = call(
+        app,
+        Method::POST,
+        "/v1/queues/jobs/dead-letters/job-redriven/redrive",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    recovered_lease_token
+}
+
+async fn verify_first_queue_recovery(app: &Router, recovered_lease_token: &str) {
+    let (status, counts) = call(app, Method::GET, "/v1/queues/jobs/counts", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(counts["acknowledged"], 1);
+    assert_eq!(counts["scheduled"], 2);
+    assert_eq!(counts["in_flight"], 1);
+    assert_eq!(counts["ready"], 1);
+
+    acknowledge_queue_delivery(app, recovered_lease_token).await;
+    let (_, redriven) = call(
+        app,
+        Method::POST,
+        "/v1/queues/jobs/acquire",
+        Some(json!({"consumer": "worker-b", "max_messages": 1})),
+    )
+    .await;
+    assert_eq!(redriven[0]["message"]["id"], "job-redriven");
+    acknowledge_queue_delivery(app, &lease_token(&redriven, "job-redriven")).await;
+}
+
+async fn settle_recovered_scheduled_message(app: &Router) {
+    let (_, scheduled) = call(
+        app,
+        Method::POST,
+        "/v1/queues/jobs/acquire",
+        Some(json!({"consumer": "worker-c", "max_messages": 2})),
+    )
+    .await;
+    let ids: std::collections::BTreeSet<&str> = scheduled
+        .as_array()
+        .expect("delivery array")
+        .iter()
+        .filter_map(|delivery| delivery["message"]["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        std::collections::BTreeSet::from(["job-released", "job-scheduled"])
+    );
+    for id in ids {
+        acknowledge_queue_delivery(app, &lease_token(&scheduled, id)).await;
+    }
+}
+
+async fn verify_final_queue_counts(app: &Router) {
+    let (_, counts) = call(app, Method::GET, "/v1/queues/jobs/counts", None).await;
+    assert_eq!(counts["acknowledged"], 5);
+    assert_eq!(counts["ready"], 0);
+    assert_eq!(counts["scheduled"], 0);
+    assert_eq!(counts["in_flight"], 0);
+    assert_eq!(counts["dead_lettered"], 0);
+}
+
+#[tokio::test]
+async fn local_durable_queue_recovers_every_lifecycle_transition() {
+    let temporary = tempfile::tempdir().expect("temporary data directory is created");
+    let wal_path = temporary.path().join("engine.wal");
+    let (app, _) = durable_test_app(&wal_path, 1_000);
+    let recovered_lease_token = seed_durable_queue_lifecycle(&app).await;
+    drop(app);
+
+    let (app, _) = durable_test_app(&wal_path, 1_200);
+    verify_first_queue_recovery(&app, &recovered_lease_token).await;
+    drop(app);
+
+    let (app, _) = durable_test_app(&wal_path, 1_600);
+    settle_recovered_scheduled_message(&app).await;
+    drop(app);
+
+    let (app, _) = durable_test_app(&wal_path, 1_700);
+    verify_final_queue_counts(&app).await;
+}

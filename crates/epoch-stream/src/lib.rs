@@ -16,7 +16,7 @@ impl Default for StreamConfig {
     fn default() -> Self {
         Self {
             partitions: 1,
-            durability: DurabilityProfile::LocalDurable,
+            durability: DurabilityProfile::Volatile,
             max_records_per_partition: None,
         }
     }
@@ -46,14 +46,14 @@ pub struct ConsumerLag {
     pub lag: u64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct Partition {
     base_offset: u64,
     next_offset: u64,
     records: VecDeque<StreamRecord>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Stream {
     config: StreamConfig,
     partitions: Vec<Partition>,

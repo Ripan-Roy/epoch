@@ -57,7 +57,7 @@ Epoch will use a deliberately small polyglot stack:
 - **Rust is the primary product language.** Every component that stores, replicates, routes, transforms, or delivers customer data runs in Rust.
 - **Go is the managed control-plane language.** Fleet management, placement orchestration above the regional node layer, autoscaling, hosted-service APIs, billing/metering services, and the Kubernetes operator run in Go.
 - **TypeScript and React power the web console.**
-- **Client SDKs are native to their ecosystems:** Go and Java first, followed by Python, TypeScript, .NET, and Rust.
+- **Client SDKs are native to their ecosystems:** Go, Java, and Python first, followed by TypeScript, .NET, and Rust.
 
 Rust and Go communicate through versioned Protobuf/gRPC contracts. Go code must not directly read or mutate Epoch storage files, replication logs, queue acknowledgement indexes, transaction state, or cache memory. The Rust data node remains independently operable when the hosted Go management plane is temporarily unavailable.
 
@@ -731,7 +731,7 @@ The following catalog is the product contract for scope planning.
 
 | ID | Requirement | Priority |
 |---|---|---|
-| DX-001 | Official Go and Java native SDKs | P0 |
+| DX-001 | Official Go, Java, and Python native SDKs | P0 |
 | DX-002 | Generated API documentation with guarantee, error, retry, and idempotency guidance | P0 |
 | DX-003 | Local single-binary emulator with deterministic clock and fault injection | P0 |
 | DX-004 | Integration-test containers and ephemeral namespaces | P0 |
@@ -739,7 +739,7 @@ The following catalog is the product contract for scope planning.
 | DX-006 | Explain command showing placement, limits, durability, order, delivery, retention, and cost drivers | P0 |
 | DX-007 | Compatibility scanner for Redis/Kafka/RabbitMQ usage and unsupported features | P1 |
 | DX-008 | End-to-end trace view from publish through route, attempt, acknowledgement, and dead letter | P1 |
-| DX-009 | Official Python, JavaScript/TypeScript, Rust, and .NET native SDKs | P1 |
+| DX-009 | Official JavaScript/TypeScript, Rust, and .NET native SDKs | P1 |
 
 ### 11.4 Lifecycle and governance
 
@@ -1129,7 +1129,7 @@ Assumption: a focused 12–15 person initial team, including 6–8 Rust distribu
 - Native Stream and Queue resources.
 - Quorum durability, consumer offsets, leases, retries, delay/schedule, DLQ, basic routing.
 - Volatile Cache with strings, hashes, sets, sorted sets, TTL, eviction, and atomic shard-local operations.
-- Rust standalone data node, CLI, Go/Java SDKs, Go Kubernetes operator, metrics, tracing, and audit basics.
+- Rust standalone data node, CLI, Go/Java/Python SDKs, Go Kubernetes operator, metrics, tracing, and audit basics.
 - Embedded Rust crate as an experimental interface; supervised sidecar integration for other languages.
 - Single region, multi-zone dedicated topology.
 - Exit: 30-day soak, fault tests, restore test, no known acknowledged-loss violation, design-partner shadow traffic.
@@ -1141,7 +1141,7 @@ Assumption: a focused 12–15 person initial team, including 6–8 Rust distribu
 - AMQP core routing, acknowledgements, confirms, prefetch, TTL, DLX.
 - Durable Cache/State mode, snapshots and recovery.
 - Schema registry, compaction, tiered storage, object capture.
-- Console, Terraform, Python/TypeScript/.NET SDKs.
+- Console, Terraform, TypeScript/.NET SDKs.
 - Migration scanner and mirror/cutover tooling.
 - Exit: published compatibility matrix; comparative performance gates met for supported semantics; two customer cutovers with rollback drills.
 

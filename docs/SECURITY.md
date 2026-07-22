@@ -405,6 +405,18 @@ scanning, fuzzing, SBOM generation, signed artifacts, provenance, reproducible
 build goals, and verification of downloaded tools and generated code. Unsafe
 Rust is denied by the workspace unless a reviewed ADR grants a narrow exception.
 
+The implemented Rust dependency gate pins `cargo-audit` 0.22.2 and denies audit
+warnings. Its only temporary exception is `RUSTSEC-2025-0057`, the unmaintained
+`fxhash` dependency inherited through `raft`. This exception does not accept the
+consensus dependency or change ADR-0003 from Proposed; removal or replacement
+must be resolved through that decision. CI caches only the exact binary produced
+by the pinned locked-source build under an OS, architecture, toolchain, and
+version-specific immutable key; the advisory database is not cached and the
+audit still runs on every job. The Linux `protoc` 35.1 installer pins
+separate SHA-256 values for x86_64 and aarch64, requires an explicit destination
+that does not already exist, verifies the extracted compiler version, and fails
+closed.
+
 Protocol parsers, storage formats, cryptography integrations, authorization,
 webhook egress, connector sandboxing, and tenant boundaries receive dedicated
 threat models and security tests before public exposure.
@@ -424,9 +436,28 @@ current local WAL checksum detects accidental corruption; it is not encryption,
 tamper-proofing, replication, or a compliance control.
 
 The development node listens on loopback by default, while the development
-container binds its HTTP port on all interfaces. The current HTTP router also
-uses permissive CORS. Because that endpoint has no TLS or authentication yet,
-it must not be exposed to an untrusted network or used for
+container binds its HTTP port on all interfaces. Browser CORS is fail-closed:
+the node returns access-control headers only for the exact, canonical HTTP(S)
+origins in `EPOCH_ALLOWED_ORIGINS`. Local Vite development and preview origins
+on ports 5173 and 4173 are allowed by default; wildcard, opaque, credentialed,
+path-bearing, and malformed origins are rejected during startup. The GitHub
+Pages artifact is documentation-only and does not contain the live console
+client.
+
+The opt-in consensus probe uses a distinct listener with no CORS, TLS, or peer
+authentication. Its internal frame and diagnostic routes are development-only.
+The supplied Compose topology publishes them only on host loopback; operators
+must not expose port 7701 or the experimental routes to an untrusted network.
+Outbound peer requests ignore ambient proxy settings and reject redirects so a
+configured authority cannot reroute frames through the host environment or a
+3xx response. This does not authenticate the configured peer. The explicit
+plaintext/unauthenticated weakness is one reason the probe cannot support a
+product quorum claim.
+
+CORS is only a browser boundary, not authentication. Requests without an
+`Origin` header remain available to native SDKs, CLI tools, and any network
+peer that can reach the endpoint. Because the HTTP API still has no TLS or
+authentication, it must not be exposed to an untrusted network or used for
 untrusted/multi-tenant data.
 
 No deployment is secure for untrusted or multi-tenant production traffic until

@@ -1,0 +1,302 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust format, lint, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - name: Install pinned Rust toolchain
+        run: >-
+          rustup toolchain install 1.97.1
+          --profile minimal
+          --component clippy
+          --component rustfmt
+      - name: Install checksum-pinned protoc
+        run: |
+          protoc_root="${RUNNER_TEMP}/protoc-35.1"
+          ./scripts/install-protoc.sh "$protoc_root"
+          echo "${protoc_root}/bin" >> "$GITHUB_PATH"
+      - name: Verify pinned protoc
+        run: test "$(protoc --version)" = "libprotoc 35.1"
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --workspace --all-targets --all-features
+      - name: Run persistent three-process consensus crash smoke
+        env:
+          EPOCH_CONSENSUS_PROCESS_ARTIFACT_DIR: ${{ runner.temp }}/epoch-consensus-process
+        run: make test-consensus-process
+      - name: Upload consensus process failure evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: consensus-process-failure-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/epoch-consensus-process
+          if-no-files-found: ignore
+          retention-days: 7
+      - run: cargo build --locked --workspace --all-targets --all-features
+      - name: Reject Rust documentation warnings
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
+      - name: Restore locked-source cargo-audit binary
+        id: cargo-audit-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/cargo-audit-0.22.2/bin/cargo-audit
+          key: cargo-audit-source-v1-${{ runner.os }}-${{ runner.arch }}-rust-1.97.1-v0.22.2
+      - name: Build pinned cargo-audit from locked source
+        if: steps.cargo-audit-cache.outputs.cache-hit != 'true'
+        run: >-
+          cargo install cargo-audit
+          --version 0.22.2
+          --locked
+          --root "${RUNNER_TEMP}/cargo-audit-0.22.2"
+      - name: Verify pinned cargo-audit
+        run: |
+          echo "${RUNNER_TEMP}/cargo-audit-0.22.2/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/cargo-audit-0.22.2/bin/cargo-audit" --version \
+            | grep -Eq '^cargo-audit(-audit)? 0\.22\.2$'
+      - name: Audit Rust dependencies
+        # The only temporary exception is raft's unmaintained fxhash dependency;
+        # ADR-0003 stays Proposed until the dependency decision is accepted.
+        run: cargo audit --deny warnings --ignore RUSTSEC-2025-0057
+
+  go-contracts:
+    name: Go SDK and Protobuf contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: actions/setup-go@v6.4.0
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: go.sum
+      - name: Install pinned Buf CLI
+        run: go install github.com/bufbuild/buf/cmd/buf@v1.72.0
+      - name: Lint workflows and shell scripts
+        run: |
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color
+          shellcheck scripts/*.sh tests/integration/*.sh
+      - name: Check Go formatting
+        run: |
+          mapfile -t go_files < <(find control operator sdk/go console/src/quickstarts -type f -name '*.go' 2>/dev/null)
+          if (( ${#go_files[@]} > 0 )); then
+            unformatted="$(gofmt -l "${go_files[@]}")"
+            test -z "$unformatted" || { printf '%s\n' "$unformatted"; exit 1; }
+          fi
+      - run: buf lint
+      - name: Reject stale generated bindings
+        run: |
+          buf generate
+          git diff --exit-code -- sdk/go/gen
+          test -z "$(git status --porcelain --untracked-files=all -- sdk/go/gen)"
+      - run: go vet ./...
+      - run: go test -race ./...
+      - run: go build ./...
+      - name: Compile displayed Go quickstart
+        run: go build -trimpath -o /tmp/epoch-go-quickstart ./console/src/quickstarts/quickstart.go
+
+  python:
+    name: Python format, lint, test, package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.11'
+      - run: python -m pip install mypy==2.1.0 ruff==0.15.19
+      - run: ruff format --check sdk/python console/src/quickstarts/quickstart.py
+      - run: ruff check sdk/python console/src/quickstarts/quickstart.py
+      - name: Compile and type-check displayed Python quickstart
+        run: |
+          python -m py_compile console/src/quickstarts/quickstart.py
+          PYTHONPATH=sdk/python/src mypy --strict console/src/quickstarts/quickstart.py
+      - name: Run Python SDK tests
+        run: PYTHONPATH=sdk/python/src python -m unittest discover -s sdk/python/tests -v
+      - name: Build an installable SDK wheel
+        run: python -m pip wheel --no-deps --wheel-dir /tmp/epoch-python-wheel sdk/python
+
+  java:
+    name: Java format, lint, test, package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: actions/setup-java@v5.2.0
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+          cache-dependency-path: sdk/java/pom.xml
+      - run: sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress verify
+      - name: Compile displayed Java quickstart
+        run: |
+          sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress \
+            dependency:build-classpath -Dmdep.outputFile=target/runtime-classpath.txt
+          mkdir -p sdk/java/target/docs-quickstart
+          javac --release 25 -Xlint:all -Werror \
+            -cp "sdk/java/target/classes:$(cat sdk/java/target/runtime-classpath.txt)" \
+            -d sdk/java/target/docs-quickstart \
+            console/src/quickstarts/Quickstart.java
+
+  web:
+    name: Console format, lint, typecheck, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Activate pinned pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.28.0 --activate
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run format:check
+      - run: pnpm run lint
+      - run: pnpm run typecheck
+      - run: pnpm run build
+
+  integration:
+    name: Cross-language standalone and docs smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    needs: [rust, go-contracts, python, java]
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - uses: actions/setup-go@v6.4.0
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: go.sum
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-java@v5.2.0
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+          cache-dependency-path: sdk/java/pom.xml
+      - run: bash tests/integration/smoke.sh
+      - name: Execute the exact displayed SDK quickstarts
+        run: bash tests/integration/docs-quickstarts.sh
+
+  container:
+    name: Container and Compose
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - run: docker compose -f deploy/compose/docker-compose.yml config --quiet
+      - run: docker compose -f deploy/compose/docker-compose.consensus-probe.yml config --quiet
+      - run: docker build --file deploy/docker/Dockerfile.node --tag epoch/node:ci .
+      - name: Prove three-container consensus probe failover and catch-up
+        env:
+          EPOCH_PROBE_ARTIFACT_DIR: ${{ runner.temp }}/epoch-consensus-probe
+          EPOCH_PROBE_IMAGE: epoch/node:ci
+          EPOCH_PROBE_USE_EXISTING_IMAGE: "1"
+        run: bash tests/integration/consensus-probe.sh
+      - name: Prove mounted local durability across container replacement
+        run: |
+          wait_for_health() {
+            for _ in {1..100}; do
+              if curl --fail --silent --show-error http://127.0.0.1:17661/healthz >/dev/null; then
+                return 0
+              fi
+              sleep 0.1
+            done
+            docker logs epoch-node-ci-smoke
+            return 1
+          }
+
+          wal_segment_count() {
+            docker exec epoch-node-ci-smoke sh -c \
+              'set -- /var/lib/epoch/engine-wal/segment-*.wal; if [ ! -e "$1" ]; then echo 0; else echo "$#"; fi'
+          }
+
+          assert_wal_rotated() {
+            minimum_count="$1"
+            segment_count="$(wal_segment_count)"
+            if [ "$segment_count" -lt "$minimum_count" ]; then
+              echo "expected at least $minimum_count WAL segments, found $segment_count" >&2
+              docker exec epoch-node-ci-smoke \
+                find /var/lib/epoch/engine-wal -maxdepth 1 -type f -print >&2 || true
+              return 1
+            fi
+            echo "$segment_count"
+          }
+
+          docker volume create epoch-node-ci-data >/dev/null
+          docker run --detach --rm --name epoch-node-ci-smoke \
+            --publish 127.0.0.1:17661:7601 \
+            --volume epoch-node-ci-data:/var/lib/epoch \
+            --env EPOCH_WAL_SEGMENT_BYTES=512 \
+            epoch/node:ci
+          wait_for_health
+          curl --fail --silent --show-error --output /dev/null \
+            --header 'content-type: application/json' \
+            --data '{"partitions":1,"durability":"local_durable","max_records_per_partition":null}' \
+            http://127.0.0.1:17661/v1/streams/audit
+          curl --fail --silent --show-error --output /dev/null \
+            --header 'content-type: application/json' \
+            --data '{"envelope":{"id":"container-1","source":"ci","type":"audit.created","time_ms":1,"payload":{"ok":true}}}' \
+            http://127.0.0.1:17661/v1/streams/audit/records
+          curl --fail --silent --show-error --output /dev/null \
+            --header 'content-type: application/json' \
+            --data '{"durability":"local_durable","visibility_timeout_ms":30000,"max_messages":100,"retry":{"strategy":"fixed","initial_delay_ms":1000,"max_delay_ms":1000,"jitter_percent":0,"max_attempts":3,"max_age_ms":null},"dedupe_window_ms":null}' \
+            http://127.0.0.1:17661/v1/queues/jobs
+          curl --fail --silent --show-error --output /dev/null \
+            --header 'content-type: application/json' \
+            --data '{"id":"container-job-1","source":"ci","type":"job.created","time_ms":1,"payload":{"ok":true}}' \
+            http://127.0.0.1:17661/v1/queues/jobs/messages
+          segments_before_restart="$(assert_wal_rotated 2)"
+          docker stop --timeout 10 epoch-node-ci-smoke
+
+          docker run --detach --rm --name epoch-node-ci-smoke \
+            --publish 127.0.0.1:17661:7601 \
+            --volume epoch-node-ci-data:/var/lib/epoch \
+            --env EPOCH_WAL_SEGMENT_BYTES=512 \
+            epoch/node:ci
+          wait_for_health
+          records="$(curl --fail --silent --show-error \
+            'http://127.0.0.1:17661/v1/streams/audit/records?partition=0&offset=0&limit=10')"
+          grep -q '"id":"container-1"' <<<"$records"
+          queue_counts="$(curl --fail --silent --show-error \
+            'http://127.0.0.1:17661/v1/queues/jobs/counts')"
+          grep -q '"ready":1' <<<"$queue_counts"
+          segments_after_restart="$(assert_wal_rotated 2)"
+          test "$segments_after_restart" -ge "$segments_before_restart"
+      - name: Stop smoke container
+        if: always()
+        run: |
+          docker stop --timeout 10 epoch-node-ci-smoke || true
+          docker volume rm epoch-node-ci-data || true
+      - name: Upload consensus probe failure evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: consensus-probe-failure-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/epoch-consensus-probe
+          if-no-files-found: ignore
+          retention-days: 7

@@ -59,6 +59,31 @@ The following are prohibited as durable contracts:
 Exact byte layouts, compatibility windows, and feature-bit allocation live in
 `spec/formats` and require their own review before data is persisted.
 
+ADR-0008 records the narrower Phase 0 standalone step. A fresh or empty data
+directory first receives a staging marker at `$EPOCH_DATA_DIR/engine.wal`; once
+the segmented journal is durable, that marker is atomically replaced by an
+active marker. Both marker values are deliberately invalid to the old
+single-file WAL reader, preventing it from treating a segmented history as an
+empty legacy journal.
+
+The segmented journal preserves the checksummed v1 frame format and one global
+sequence under `$EPOCH_DATA_DIR/engine-wal/`. Its versioned, checksummed
+`identity.v1` and `manifest.v1` metadata bind a WAL UUID to the ordered segment
+topology, committed byte lengths, last sequences, whole-committed-file CRC32
+values, and any pending rotation. Recovery may discard only a suffix beyond the
+committed length of the active segment. Missing or truncated committed files,
+foreign identity, untracked files, and sealed-segment or committed-content
+changes fail closed; the explicit pending state permits recovery of only the
+expected empty rotation target.
+
+A pre-existing valid `engine.wal` is not incorporated as a prefix and is not
+migrated automatically. The new node continues reading and appending that file
+with the legacy single-file writer and does not create a segmented history, so
+an offline downgrade remains possible. The standalone manifest is transitional
+recovery metadata, not the final tablet manifest: this journal still has no
+snapshot, compaction, retention, consensus, or replication semantics and does
+not supersede this ADR's target format.
+
 ### Object storage
 
 Only sealed, committed segments are uploaded. A local segment is removed only
@@ -75,8 +100,9 @@ logs, or metrics.
 
 ## Consequences
 
-- The same data can move from standalone to cluster without application-level
-  re-encoding.
+- The target format is designed to move data from standalone to cluster without
+  application-level re-encoding; the Phase 0 legacy-to-segmented migration is
+  not implemented.
 - Rolling upgrade and rollback require feature negotiation and format fixtures.
 - Derived-index corruption can be repaired from a verified snapshot and log.
 - The custom storage adapter is on the correctness and performance critical
@@ -90,4 +116,3 @@ logs, or metrics.
   contract.
 - Making Parquet the active replication log.
 - Automatically rewriting the only valid stored copy in place.
-

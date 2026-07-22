@@ -12,7 +12,11 @@ Status values are:
 - **Planned** — assigned to a later milestone; implementation has not started.
 - **Deferred** — intentionally outside the committed delivery milestones.
 
-All evidence is currently pending. Replace each evidence placeholder with a durable link to a test run, model-check report, benchmark, drill record, conformance report, security review, or release artifact. A feature is not complete merely because code exists.
+Evidence remains partial unless a row explicitly names a completed artifact.
+Replace each remaining placeholder with a durable link to a test run,
+model-check report, benchmark, drill record, conformance report, security
+review, or release artifact. A feature is not complete merely because code
+exists.
 
 Milestones are:
 
@@ -43,6 +47,42 @@ Dependency gates are:
 | G9 Geo | Replication checkpoints, promotion, failback, loop prevention, residency, RPO, and RTO are proven in drills. |
 | G10 Release | Signed artifacts, SBOM, packaging, migration, documentation, and support matrices are release-ready. |
 
+The segmented standalone WAL supplies partial G2 evidence: configured physical
+rotation, checksummed v1 frames, single-writer ownership, global sequence
+validation, manifest-bounded active-suffix repair, restart replay, durable
+identity/topology checks, and crash-safe fresh-layout activation. Existing valid
+single-file journals remain on the legacy writer and are not migrated. G2
+remains open because snapshots, durable index rebuild, compaction, retention,
+and replicated recovery are not implemented.
+
+The shared clock now distinguishes wall and process-local monotonic time, and
+hybrid-logical-clock tests cover backward wall jumps, remote observations,
+persisted continuation, and overflow. Durable timer indexes, uncertainty
+handling, leader ownership, and restart/failover integration remain open G2/G3
+work.
+
+The Stage 1 consensus slice supplies partial adapter and local stable-store
+evidence: a fixed three-voter `raft-rs` group uses Epoch-owned types, bounded
+versioned peer frames, restart-reconstructed proposal lookup, exact-duplicate
+suppression, conflicting-payload fail-stop, SHA-256 applied-history digests,
+and seeded `epoch-testkit` partition/delay/duplicate histories. EPRS v1 adds a
+checksummed, fsync-backed `FileWal` journal for immutable identity, complete
+`HardState`, normal entries, and applied/publishable checkpoints; unit tests
+cover local reopen, suffix replacement, partial-tail repair, corruption, and
+writer exclusion. Adapter tests reopen three voters with identical committed
+history/digests, verify stable-barrier ordering, recover a post-append unknown
+outcome, and publish commit-ahead-of-checkpoint recovery once. A separate
+three-process smoke proves minority non-commit, partition healing, identical
+receipts/digests, and one-voter plus all-voter `SIGKILL`/same-path reopen without
+duplicate receipt publication. An opt-in node runtime adds bounded real HTTP
+transport and opaque diagnostic status/propose/lookup endpoints, with a static
+three-container topology. Product profiles remain standalone. G3 remains open for a
+durable-majority acknowledgement and exhaustive crash matrix, snapshots,
+membership and authoritative epoch transitions, read barriers, authenticated
+transport,
+placement/repair, model and chaos reports, density, and performance. See
+[Consensus Feasibility Spike](CONSENSUS_SPIKE.md).
+
 ## Cache and State
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
@@ -54,7 +94,7 @@ Dependency gates are:
 | CACHE-005 | P0 | Pipeline, multiplex, batch, pool guidance | M1 → M2 | Slice | G1, G4 | Pending: ordering and throughput suite |
 | CACHE-006 | P0 | CAS, optimistic transaction, increment, fenced lock | M2 | Planned | G0, G3, G4 | Pending: concurrency history and stale-token test |
 | CACHE-007 | P0 | Volatile, replicated-memory, quorum modes | M1 prototype → M2 | Slice | G0, G2, G3, G4 | Pending: durability fault matrix |
-| CACHE-008 | P1 | Snapshot, WAL restore, backup, PITR | M1 snapshot prototype → M3 | Slice | G2, G5, G7 | Pending: checksummed restore/PITR drill |
+| CACHE-008 | P1 | Snapshot, WAL restore, backup, PITR | M3 | Planned | G2, G5, G7 | Segmented WAL is not a Cache snapshot; pending: snapshot/backup/PITR implementation and restore drill |
 | CACHE-009 | P1 | Explicitly lossy Pub/Sub and patterns | M3 | Planned | G0, G4, G6 | Pending: route and disconnect semantics suite |
 | CACHE-010 | P1 | Durable mutation change stream | M3 | Planned | G2, G4, G7 | Pending: mutation-to-offset reconciliation |
 | CACHE-011 | P2 | Bitmap, cardinality, probabilistic, geo types | M6 | Planned | G2, G4 | Pending: accuracy and persistence corpus |
@@ -67,11 +107,11 @@ Dependency gates are:
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
-| STREAM-001 | P0 | Partitioned append log and key routing | M1 prototype → M2 | Slice | G0, G1, G2, G4 | Pending: offset/order recovery suite |
-| STREAM-002 | P0 | Time/size/combined retention | M1 basic → M2 | Slice | G0, G2, G4 | Pending: segment-boundary retention suite |
-| STREAM-003 | P0 | Consumer groups, offsets, lag, reset/replay | M2 | Planned | G0, G2, G3, G4, G5 | Pending: group history and lag reconciliation |
-| STREAM-004 | P0 | Partition order and acknowledgement policy | M1 prototype → M2 | Slice | G0, G2, G3, G4 | Pending: matched ack/fault matrix |
-| STREAM-005 | P0 | Zone replication, election, ISR visibility | M1 prototype → M2 | Slice | G2, G3, G5 | Pending: node/zone chaos report |
+| STREAM-001 | P0 | Partitioned append log and key routing | M1 prototype → M2 | Slice | G0, G1, G2, G4 | Segmented-WAL rotation/restart, global-sequence, single-writer, manifest-bounded active-suffix, missing/topology/content-corruption, activation, and legacy-fallback suites; pending: replicated partition recovery |
+| STREAM-002 | P0 | Time/size/combined retention | M1 basic → M2 | Slice | G0, G2, G4 | Physical byte-threshold rotation verified; this is not retention; pending: time/size/combined deletion semantics |
+| STREAM-003 | P0 | Consumer groups, offsets, lag, reset/replay | M2 | Slice | G0, G2, G3, G4, G5 | Local offset restart/lag suite; pending: coordinated group history |
+| STREAM-004 | P0 | Partition order and acknowledgement policy | M1 prototype → M2 | Slice | G0, G2, G3, G4 | fsync-before-apply failure + local restart; isolated in-memory consensus leader emits no commit before majority; pending: durable replicated ack matrix and profile integration |
+| STREAM-005 | P0 | Zone replication, election, ISR visibility | M1 prototype → M2 | Slice | G2, G3, G5 | Fixed-voter in-memory election, partition, replacement, heal, and tail catch-up history; pending: real replica/ISR visibility and node/zone chaos report |
 | STREAM-006 | P0 | Batching and required compression paths | M2 | Planned | G2, G4, G6 | Pending: round-trip corpus and compression benchmark |
 | STREAM-007 | P1 | Idempotent producer sequencing | M5 | Planned | G2, G3, G7 | Pending: duplicate/recovery history |
 | STREAM-008 | P1 | Transactions, atomic offsets, read-committed | M5 | Planned | G0, G2, G3, G7 | Pending: transaction model/history report |
@@ -87,12 +127,12 @@ Dependency gates are:
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
-| QUEUE-001 | P0 | Competing consumers and delivery transitions | M1 prototype → M2 | Slice | G0, G2, G4 | Pending: ack/redelivery history check |
-| QUEUE-002 | P0 | Renewable visibility/acquisition lease | M1 prototype → M2 | Slice | G0, G2, G3, G4 | Pending: monotonic timer and stale-owner suite |
-| QUEUE-003 | P0 | Durability-aware publisher confirmation | M1 prototype → M2 | Slice | G0, G2, G3 | Pending: acknowledgement-point fault matrix |
-| QUEUE-004 | P0 | Delayed and scheduled messages | M1 prototype → M2 | Slice | G0, G2, G4 | Pending: schedule precision load report |
-| QUEUE-005 | P0 | Retry/backoff/jitter/attempt-age policy | M1 prototype → M2 | Slice | G0, G2, G4 | Pending: deterministic policy corpus |
-| QUEUE-006 | P0 | Provenance-rich DLQ and redrive | M1 prototype → M2 | Slice | G2, G4, G5 | Pending: poison/redrive audit history |
+| QUEUE-001 | P0 | Competing consumers and delivery transitions | M1 prototype → M2 | Slice | G0, G2, G4 | Multi-segment lifecycle restart + failed-settlement isolation; pending: replicated concurrent history check |
+| QUEUE-002 | P0 | Renewable visibility/acquisition lease | M1 prototype → M2 | Slice | G0, G2, G3, G4 | Restart preserves extended lease/token + stale-token unit; pending: monotonic/leader fault suite |
+| QUEUE-003 | P0 | Durability-aware publisher confirmation | M1 prototype → M2 | Slice | G0, G2, G3 | Local-durable receipt + injected fsync enqueue/settlement tests; pending: quorum acknowledgement matrix |
+| QUEUE-004 | P0 | Delayed and scheduled messages | M1 prototype → M2 | Slice | G0, G2, G4 | Scheduled state restart/promotion test; pending: schedule precision load report |
+| QUEUE-005 | P0 | Retry/backoff/jitter/attempt-age policy | M1 prototype → M2 | Slice | G0, G2, G4 | Deterministic retry/dead-letter unit suite + maintenance journal replay; pending: broader policy corpus |
+| QUEUE-006 | P0 | Provenance-rich DLQ and redrive | M1 prototype → M2 | Slice | G2, G4, G5 | Reject/redrive restart + duplicate-lease regression; pending: audited provenance history |
 | QUEUE-007 | P1 | TTL, queue expiry, capacity and overflow | M3 | Planned | G0, G2, G4 | Pending: lifecycle/capacity boundary suite |
 | QUEUE-008 | P1 | FIFO sessions and renewable lock | M5 | Planned | G0, G2, G3, G4 | Pending: per-session order/fencing history |
 | QUEUE-009 | P1 | Dedupe identifier and window | M5 | Planned | G0, G2, G7 | Pending: restart/window suppression suite |
@@ -130,7 +170,7 @@ Dependency gates are:
 | MGD-001 | P1 | Serverless and dedicated choices | M4 | Planned | G4, G5, G8, G10 | Pending: topology/semantic/isolation matrix |
 | MGD-002 | P0 | Automatic placement and online rebalance | M1 prototype → M2 | Slice | G2, G3, G5 | Pending: constraint/rebalance chaos report |
 | MGD-003 | P1 | Policy-bound multidimensional autoscaling | M4 | Planned | G5, G8 | Pending: hysteresis/headroom load report |
-| MGD-004 | P0 | Multi-zone replicas and failover | M1 prototype → M2 | Slice | G2, G3, G5 | Pending: node/zone loss SLO report |
+| MGD-004 | P0 | Multi-zone replicas and failover | M1 prototype → M2 | Slice | G2, G3, G5 | Deterministic fixed-voter in-memory leader replacement/catch-up; pending: placement, durable replicas, process/zone loss, and failover SLO report |
 | MGD-005 | P1 | Geo DR, switch, promotion, failback | M4 → M5 | Planned | G3, G8, G9 | Pending: RPO/RTO and split-brain drill |
 | MGD-006 | P1 | Backup, validation, semantic PITR | M3 | Planned | G2, G5, G7, G8 | Pending: scheduled restore evidence |
 | MGD-007 | P1 | Guarded rolling upgrades | M5 | Planned | G3, G5, G6, G8, G10 | Pending: mixed-version stop/rollback drill |
@@ -152,7 +192,7 @@ Dependency gates are:
 | CTRL-001 | P0 | Idempotent declarative resource API | M1 → M2 | Slice | G0, G1, G3 | Pending: token replay/unknown-outcome suite |
 | CTRL-002 | P0 | Strong versioned metadata and OCC | M1 prototype → M2 | Slice | G0, G2, G3 | Pending: metadata linearizability report |
 | CTRL-003 | P0 | Placement/residency/tenancy constraints | M2 | Planned | G0, G3, G5 | Pending: solver/admission corpus |
-| CTRL-004 | P0 | Safe topology and repair operations | M1 prototype → M2 | Slice | G2, G3, G5 | Pending: transition chaos/history report |
+| CTRL-004 | P0 | Safe topology and repair operations | M1 prototype → M2 | Slice | G2, G3, G5 | In-memory caught-up leader-transfer history; pending: membership, split/merge, repair/rebalance, persistent transition, and chaos evidence |
 | CTRL-005 | P0 | Safe admission and limiting-resource reason | M2 | Planned | G3, G5, G8 | Pending: reserve/saturation rejection report |
 | CTRL-006 | P1 | Change plan, approval, rollback | M4 | Planned | G3, G5, G8 | Pending: preview/apply/rollback audit suite |
 | CTRL-007 | P1 | Versioned common resource templates | M3 | Planned | G0, G1, G5 | Pending: template golden manifests |
@@ -176,15 +216,15 @@ Dependency gates are:
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
-| DX-001 | P0 | Official Go and Java SDKs | M1 one SDK → M2 | Slice | G0, G1, G4, G10 | Pending: SDK contract/version matrix |
-| DX-002 | P0 | Generated guarantee-aware API docs | M1 → M2 | Slice | G0, G1, G10 | Pending: doc lint and executable examples |
-| DX-003 | P0 | Deterministic single-binary emulator | M1 → M2 | Slice | G1, G2, G4, G10 | Pending: seeded replay/fault suite |
-| DX-004 | P0 | Test containers and ephemeral namespaces | M1 → M2 | Slice | G1, G5, G10 | Pending: parallel lifecycle/isolation CI |
+| DX-001 | P0 | Official Go, Java, and Python SDKs | M1 one SDK → M2 | Slice | G0, G1, G4, G10 | Go/Java/Python HTTP unit + independent exact-source crash/restart quickstarts, including selectable local Stream/Queue durability, and Go generated bindings; pending: native streaming contract/version matrix for all three |
+| DX-002 | P0 | Generated guarantee-aware API docs | M1 → M2 | Slice | G0, G1, G10 | Hand-authored guarantee/error guidance and exact executable Go/Java/Python examples are built as a docs-only Pages artifact; pending: generated API reference and full doc lint |
+| DX-003 | P0 | Deterministic single-binary emulator | M1 → M2 | Slice | G1, G2, G4, G10 | Seeded scheduler, virtual wall/monotonic clock, occurrence fault plan, directed partitionable peer transport, golden EPTR v1 serialization/digest, pinned transport history, fixed-voter consensus integration, a real-process EPRS/SIGKILL harness, and an opt-in node probe; pending: executable replay bundle, profile integration, and runnable emulator controls |
+| DX-004 | P0 | Test containers and ephemeral namespaces | M1 → M2 | Slice | G1, G5, G10 | Unique three-node Compose project, independent ephemeral volumes, dynamically allocated loopback ports, failover/catch-up CI, and scoped cleanup; pending: broader parallel profile lifecycle/isolation matrix |
 | DX-005 | P1 | Audited/redacted console message browser | M3 → M4 | Planned | G5, G7, G8 | Pending: access/redaction/action audit matrix |
 | DX-006 | P0 | Explain live guarantees and cost drivers | M1 basic → M2 | Slice | G0, G3, G5 | Pending: live-state reconciliation suite |
 | DX-007 | P1 | Compatibility usage scanner | M3 | Planned | G0, G6 | Pending: unsupported-feature fixture corpus |
 | DX-008 | P1 | End-to-end event trace | M4 | Planned | G1, G4, G5, G7 | Pending: trace/history reconciliation |
-| DX-009 | P1 | Python, TS, Rust, .NET SDKs | M3 | Planned | G0, G1, G6, G10 | Pending: multi-language client matrix |
+| DX-009 | P1 | TypeScript, Rust, .NET SDKs | M3 | Planned | G0, G1, G6, G10 | Pending: multi-language client matrix |
 
 ## Lifecycle and Governance
 
@@ -202,9 +242,9 @@ Dependency gates are:
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
 | PKG-001 | P0 | Selective four-profile Rust node | M1 scaffold → M4 complete | Slice | G1, G4, G10 | Pending: feature/config startup matrix |
-| PKG-002 | P0 | Shared engine/format standalone and cluster | M1 → M2 | Slice | G1, G2, G3, G10 | Pending: format and semantic equivalence suite |
-| PKG-003 | P0 | Standalone without hosted Go services | M1 | Slice | G1, G2, G10 | Pending: disconnected lifecycle test |
-| PKG-004 | P0 | Three-node quorum/failover/placement | M1 prototype → M2 | Slice | G2, G3, G10 | Pending: three-node fault report |
+| PKG-002 | P0 | Shared engine/format standalone and cluster | M1 → M2 | Slice | G1, G2, G3, G10 | Checksummed v1 segmented standalone format, durable identity/manifest, fresh-layout activation, and no-migration legacy fallback verified; pending: cluster format equivalence |
+| PKG-003 | P0 | Standalone without hosted Go services | M1 | Slice | G1, G2, G10 | Rust node restart/recovery test; pending: extended disconnected lifecycle suite |
+| PKG-004 | P0 | Three-node quorum/failover/placement | M1 prototype → M2 | Slice | G2, G3, G10 | Fixed-three-voter deterministic histories, real child-process EPRS partition/SIGKILL/reopen smoke, and three-node HTTP/Compose opaque probe; pending: profile durable quorum, placement, exhaustive process faults, and published three-node report |
 | PKG-005 | P0 | OCI, Kubernetes dev, signed binaries | M1 dev → M2 | Slice | G1, G5, G10 | Pending: clean-install/signature/SBOM CI |
 | PKG-006 | P1 | Rust embedded engine with guarantee ceiling | M2 experimental → M3 | Planned | G0, G1, G2, G10 | Pending: lifecycle/persistence contract suite |
 | PKG-007 | P1 | Supervised sidecar/child for other languages | M2 → M3 | Planned | G1, G5, G10 | Pending: crash/isolation/upgrade matrix |

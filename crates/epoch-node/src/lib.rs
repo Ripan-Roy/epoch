@@ -1,33 +1,40 @@
 //! Native HTTP surface for the standalone Epoch node.
 
+pub mod consensus;
+
 use std::{sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderValue, Method, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
 use epoch_bus::{ArchivedEvent, BusConfig, EventFilter, Subscription};
 use epoch_cache::{CacheConfig, CacheItem, CacheValue, SetOptions};
-use epoch_core::{AckMetadata, EpochError, EventEnvelope};
+use epoch_core::{EpochError, EpochResult, EventEnvelope};
 use epoch_engine::{BusPublishOutcome, EngineHealth, EpochEngine, ResourceSummary};
 use epoch_queue::{Delivery, EnqueueReceipt, QueueConfig, QueueCounts};
 use epoch_stream::{AppendReceipt, ConsumerLag, StreamConfig, StreamRecord};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::{
+    cors::{AllowOrigin, CorsLayer},
+    trace::TraceLayer,
+};
+use url::Url;
 
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub engine: Arc<EpochEngine>,
 }
 
-pub fn router(engine: Arc<EpochEngine>) -> Router {
+pub fn router(engine: Arc<EpochEngine>, allowed_origins: &[String]) -> EpochResult<Router> {
+    let cors = cors_layer(allowed_origins)?;
     let state = AppState { engine };
-    Router::new()
+    Ok(Router::new()
         .route("/healthz", get(health))
         .route("/readyz", get(health))
         .route("/v1/resources", get(list_resources))
@@ -66,9 +73,54 @@ pub fn router(engine: Arc<EpochEngine>) -> Router {
             "/v1/buses/{name}/subscriptions/{subscription}",
             put(bus_upsert_subscription).delete(bus_remove_subscription),
         )
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .with_state(state))
+}
+
+fn cors_layer(allowed_origins: &[String]) -> EpochResult<CorsLayer> {
+    let origins = parse_allowed_origins(allowed_origins)?;
+
+    Ok(CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+        .allow_headers([CONTENT_TYPE]))
+}
+
+pub fn validate_allowed_origins(allowed_origins: &[String]) -> EpochResult<()> {
+    parse_allowed_origins(allowed_origins).map(|_| ())
+}
+
+fn parse_allowed_origins(allowed_origins: &[String]) -> EpochResult<Vec<HeaderValue>> {
+    allowed_origins
+        .iter()
+        .map(|origin| {
+            let origin = origin.trim();
+            let url = Url::parse(origin).map_err(|error| {
+                EpochError::InvalidArgument(format!(
+                    "allowed browser origin {origin} is invalid: {error}"
+                ))
+            })?;
+            if !matches!(url.scheme(), "http" | "https")
+                || url.host().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.path() != "/"
+                || url.query().is_some()
+                || url.fragment().is_some()
+            {
+                return Err(EpochError::InvalidArgument(format!(
+                    "allowed browser origin must contain only an http(s) scheme and authority: {origin}"
+                )));
+            }
+            let canonical = url.origin().ascii_serialization();
+            HeaderValue::from_bytes(canonical.as_bytes()).map_err(|error| {
+                EpochError::InvalidArgument(format!(
+                    "allowed browser origin {origin} is invalid: {error}"
+                ))
+            })
+        })
+        .collect()
 }
 
 pub fn spawn_maintenance(engine: Arc<EpochEngine>) -> JoinHandle<()> {
@@ -76,7 +128,9 @@ pub fn spawn_maintenance(engine: Arc<EpochEngine>) -> JoinHandle<()> {
         let mut interval = tokio::time::interval(Duration::from_millis(100));
         loop {
             interval.tick().await;
-            engine.maintain(1_000);
+            if let Err(error) = engine.maintain(1_000) {
+                tracing::error!(%error, "background maintenance could not be persisted");
+            }
         }
     })
 }
@@ -278,12 +332,14 @@ async fn stream_commit(
     Path((name, group)): Path<(String, String)>,
     Json(request): Json<OffsetRequest>,
 ) -> ApiResult<StatusCode> {
-    let stream = state.engine.stream(&name)?;
-    let mut stream = stream.lock();
     if request.reset {
-        stream.reset_offset(group, request.partition, request.next_offset)?;
+        state
+            .engine
+            .reset_stream_offset(&name, &group, request.partition, request.next_offset)?;
     } else {
-        stream.commit_offset(group, request.partition, request.next_offset)?;
+        state
+            .engine
+            .commit_stream_offset(&name, &group, request.partition, request.next_offset)?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -334,12 +390,11 @@ async fn queue_acquire(
     Path(name): Path<String>,
     Json(request): Json<AcquireRequest>,
 ) -> ApiResult<Json<Vec<Delivery>>> {
-    let now = state.engine.now_ms();
-    let messages = state.engine.queue(&name)?.lock().acquire(
+    let messages = state.engine.acquire_queue(
+        &name,
         &request.consumer,
         request.max_messages.min(1_000),
         request.visibility_timeout_ms,
-        now,
     )?;
     Ok(Json(messages))
 }
@@ -372,12 +427,9 @@ async fn queue_settle(
     Path(name): Path<String>,
     Json(request): Json<SettleRequest>,
 ) -> ApiResult<Json<Value>> {
-    let now = state.engine.now_ms();
-    let queue = state.engine.queue(&name)?;
-    let mut queue = queue.lock();
     match request {
         SettleRequest::Ack { token } => {
-            let acknowledgement: AckMetadata = queue.acknowledge(&token, now)?;
+            let acknowledgement = state.engine.acknowledge_queue(&name, &token)?;
             Ok(Json(serde_json::to_value(acknowledgement).map_err(
                 |error| EpochError::Internal(error.to_string()),
             )?))
@@ -387,18 +439,22 @@ async fn queue_settle(
             delay_ms,
             reason,
         } => {
-            queue.release(&token, delay_ms, reason, now)?;
+            state
+                .engine
+                .release_queue(&name, &token, delay_ms, reason)?;
             Ok(Json(json!({"released": true})))
         }
         SettleRequest::Reject { token, reason } => {
-            queue.reject(&token, reason, now)?;
+            state.engine.reject_queue(&name, &token, reason)?;
             Ok(Json(json!({"dead_lettered": true})))
         }
         SettleRequest::Extend {
             token,
             extension_ms,
         } => {
-            let deadline_ms = queue.extend_lease(&token, extension_ms, now)?;
+            let deadline_ms = state
+                .engine
+                .extend_queue_lease(&name, &token, extension_ms)?;
             Ok(Json(json!({"lease_deadline_ms": deadline_ms})))
         }
     }
@@ -415,12 +471,7 @@ async fn queue_redrive(
     State(state): State<AppState>,
     Path((name, message_id)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
-    let now = state.engine.now_ms();
-    state
-        .engine
-        .queue(&name)?
-        .lock()
-        .redrive(&message_id, now)?;
+    state.engine.redrive_queue(&name, &message_id)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
