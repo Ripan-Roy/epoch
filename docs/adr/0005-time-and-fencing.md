@@ -60,6 +60,22 @@ epoch.
 - Tokens and persisted transitions carry more epoch metadata.
 - Time, lease, and promotion behavior require a formal model and history tests.
 
+## Implementation status
+
+The foundation slice now exposes wall and monotonic milliseconds separately
+through the shared Rust `Clock` trait. `SystemClock` derives elapsed time from a
+process-local monotonic source, while `ManualClock` can jump wall time without
+moving elapsed time backwards and saturates instead of wrapping. A serializable
+`HybridTimestamp` and deterministic `HybridLogicalClock` implement local ticks,
+remote observation, persisted restart state, and explicit overflow failure.
+
+This is partial evidence for the decision, not the completed distributed time
+contract. Existing standalone profile commands still record wall-time apply
+instants, and no leader transfer exists yet. Clock-anomaly clamping/slewing,
+audit events, persisted HLC integration in durable commands, leader-epoch timer
+ownership, and failover uncertainty behavior remain gates for the replicated
+runtime.
+
 ## Required verification
 
 - backward and forward wall-clock steps;
@@ -75,4 +91,3 @@ epoch.
 - Trusting a client-supplied delivery or lease epoch.
 - Treating lease expiry alone as sufficient fencing.
 - Redelivering immediately after failover when old-lease expiry is uncertain.
-

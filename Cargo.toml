@@ -9,6 +9,7 @@ members = [
   "crates/epoch-engine",
   "crates/epoch-node",
   "crates/epoch-cli",
+  "crates/epoch-testkit",
 ]
 resolver = "3"
 

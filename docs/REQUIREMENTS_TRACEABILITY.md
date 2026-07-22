@@ -12,7 +12,11 @@ Status values are:
 - **Planned** — assigned to a later milestone; implementation has not started.
 - **Deferred** — intentionally outside the committed delivery milestones.
 
-All evidence is currently pending. Replace each evidence placeholder with a durable link to a test run, model-check report, benchmark, drill record, conformance report, security review, or release artifact. A feature is not complete merely because code exists.
+Evidence remains partial unless a row explicitly names a completed artifact.
+Replace each remaining placeholder with a durable link to a test run,
+model-check report, benchmark, drill record, conformance report, security
+review, or release artifact. A feature is not complete merely because code
+exists.
 
 Milestones are:
 
@@ -50,6 +54,12 @@ identity/topology checks, and crash-safe fresh-layout activation. Existing valid
 single-file journals remain on the legacy writer and are not migrated. G2
 remains open because snapshots, durable index rebuild, compaction, retention,
 and replicated recovery are not implemented.
+
+The shared clock now distinguishes wall and process-local monotonic time, and
+hybrid-logical-clock tests cover backward wall jumps, remote observations,
+persisted continuation, and overflow. Durable timer indexes, uncertainty
+handling, leader ownership, and restart/failover integration remain open G2/G3
+work.
 
 ## Cache and State
 
@@ -186,7 +196,7 @@ and replicated recovery are not implemented.
 |---|---:|---|---|---|---|---|
 | DX-001 | P0 | Official Go, Java, and Python SDKs | M1 one SDK → M2 | Slice | G0, G1, G4, G10 | Go/Java/Python HTTP unit + independent exact-source crash/restart quickstarts, including selectable local Stream/Queue durability, and Go generated bindings; pending: native streaming contract/version matrix for all three |
 | DX-002 | P0 | Generated guarantee-aware API docs | M1 → M2 | Slice | G0, G1, G10 | Hand-authored guarantee/error guidance and exact executable Go/Java/Python examples are built as a docs-only Pages artifact; pending: generated API reference and full doc lint |
-| DX-003 | P0 | Deterministic single-binary emulator | M1 → M2 | Slice | G1, G2, G4, G10 | Pending: seeded replay/fault suite |
+| DX-003 | P0 | Deterministic single-binary emulator | M1 → M2 | Slice | G1, G2, G4, G10 | Seeded scheduler, virtual wall/monotonic clock, occurrence fault plan, directed partitionable peer transport, golden EPTR v1 serialization/digest, and pinned same-seed transport history; pending: executable replay bundle, consensus/storage/profile integration, and runnable emulator controls |
 | DX-004 | P0 | Test containers and ephemeral namespaces | M1 → M2 | Slice | G1, G5, G10 | Pending: parallel lifecycle/isolation CI |
 | DX-005 | P1 | Audited/redacted console message browser | M3 → M4 | Planned | G5, G7, G8 | Pending: access/redaction/action audit matrix |
 | DX-006 | P0 | Explain live guarantees and cost drivers | M1 basic → M2 | Slice | G0, G3, G5 | Pending: live-state reconciliation suite |

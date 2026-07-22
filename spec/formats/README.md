@@ -94,3 +94,26 @@ The `create_stream`, checksum-less `create_queue`, and checksummed
 change requires a new version or an explicit compatible-fixture review. This
 node-level journal is replaced by the tablet log/snapshot format in the
 replicated architecture; it has no snapshot or compaction contract.
+
+## Deterministic test trace version 1
+
+`epoch-testkit` serializes reproducible simulation evidence as EPTR v1. This is
+a test-artifact format, not customer storage or a cryptographic audit log. Its
+canonical little-endian layout is:
+
+```text
+"EPTR" | u16 version=1 | u16 flags=0 | u64 event_count
+repeat event_count times:
+  u64 sequence | u64 monotonic_ms | u32 kind_len | kind UTF-8
+  u64 payload_len | payload bytes
+```
+
+Sequences start at zero and are contiguous. Decoding rejects unknown versions
+or flags, invalid UTF-8, truncation, noncanonical sequences, and trailing bytes.
+The history digest is the fixed 64-bit FNV-1a checksum of the complete canonical
+encoding; it detects drift between runs but is not collision-resistant or
+authenticated. Compatibility tests pin both full golden bytes and digest
+`bd94a233541b2179`. Any incompatible encoding change requires EPTR version 2;
+changing only the implementation while retaining v1 must preserve these bytes.
+EPTR stores observations only; a seed and fault plan must be captured separately
+until a versioned executable scenario bundle is defined.

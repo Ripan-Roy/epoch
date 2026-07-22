@@ -90,6 +90,15 @@ The traceability register marks the following as **Slice**. A Slice entry can be
 | Trust and diagnostics baseline | Rust | mTLS-ready identity boundary, audit event skeleton, golden metrics/traces, explain output | Required-event/metric fault assertions |
 | Packaging | Release tooling | Development OCI image, Kubernetes dev manifest, signed development binary/SBOM path | Clean-room install and signature CI |
 
+The deterministic-runtime kernel is implemented in `epoch-testkit`: stable
+seeded scheduling, independent virtual wall/monotonic time, occurrence-indexed
+faults, directed partitions, duplicate/delay/reorder delivery, and canonical
+EPTR v1 traces with golden history digests. EPTR is not yet an executable replay
+bundle, so the seed and fault plan remain separate evidence. This closes only
+the reusable kernel sub-slice. Consensus, storage, process lifecycle, and
+profile history runners must integrate it before the M1 simulation or emulator
+exit evidence is met.
+
 The segmented-WAL work package is implemented as the single-node storage
 sub-slice at `$EPOCH_DATA_DIR/engine-wal/segment-*.wal`. The implementation has
 a 64 MiB default and a configurable rotation threshold; tests exercise small

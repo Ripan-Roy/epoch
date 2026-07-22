@@ -70,6 +70,18 @@ Simulation injects:
 Do not use `sleep` to make a distributed assertion pass. Advance the injected
 clock or wait on an observable state transition with a bounded deadline.
 
+The current `epoch-testkit` foundation provides a stable SplitMix64-seeded
+scheduler, independent virtual wall/monotonic time, occurrence-indexed crash,
+I/O, partial-write, drop, delay, and duplicate actions, directed and
+bidirectional peer partitions, and a strictly decoded EPTR v1 trace with a
+stable history digest. Golden tests pin the random sequence, generic trace
+framing, and one complete seeded transport history. A failing run must retain
+its seed and fault plan alongside the trace: EPTR does not yet encode an
+executable replay bundle. This is the simulation kernel only; consensus,
+storage, process lifecycle, and profile state machines must still adopt it and
+publish invariant histories before the simulator or emulator requirement is
+complete.
+
 ### 3. Integration tests
 
 Integration tests start real Epoch processes with isolated temporary data

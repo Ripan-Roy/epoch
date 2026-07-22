@@ -334,7 +334,8 @@ distributed contract described above:
 
 - shared envelope, durability, delivery, ordering, deployment, receipt, and
   error types;
-- an injectable `Clock` trait and deterministic test clock;
+- an injectable `Clock` trait with separate wall and monotonic observations, a
+  deterministic test clock, and a serializable hybrid-logical timestamp;
 - in-memory Cache, Stream, Queue, and Bus state machines with a subset of core
   operations;
 - standalone commit positions and acknowledgement metadata;

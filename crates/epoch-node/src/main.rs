@@ -72,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let engine = Arc::new(EpochEngine::with_commit_log(
         DeploymentMode::Standalone,
-        Arc::new(epoch_core::SystemClock),
+        Arc::new(epoch_core::SystemClock::default()),
         Box::new(wal),
     )?);
     let app = router(engine.clone(), &args.allowed_origins)?;

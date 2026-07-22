@@ -66,6 +66,12 @@ Go, Java, and Python are the P0 SDK ecosystems. Typed HTTP clients are under
 `sdk/go`, `sdk/java`, and `sdk/python`; generated native streaming parity across
 all three remains tracked by DX-001.
 
+`crates/epoch-testkit` is the no-sleep correctness harness for the replicated
+foundation: seeded scheduling, independent wall/monotonic time, scripted fault
+occurrences, partitionable peer transport, and versioned trace serialization
+and comparison. It is test infrastructure and does not raise the standalone
+node's guarantee ceiling.
+
 ## Quick start
 
 The supported local baseline is macOS on Apple Silicon with:
@@ -142,11 +148,14 @@ VITE_BASE_PATH=/epoch/ VITE_DEFAULT_PAGE=docs VITE_DOCS_ONLY=true \
 ```
 
 The Pages artifact contains documentation only—no localhost console client.
-Its deployment target is
+Its configured deployment target is
 [`https://ripan-roy.github.io/epoch/`](https://ripan-roy.github.io/epoch/).
 The workflow executes every displayed Go, Java, and Python seed → forced crash
-→ restart → verification example before deployment. The SDKs remain
-repository-local pre-alpha packages and are not presented as registry releases.
+→ restart → verification example before deployment. GitHub currently refuses
+to enable Pages while this repository is private on the account's present
+plan, so the URL is not live until the plan supports private Pages or repository
+visibility is explicitly changed. The SDKs remain repository-local pre-alpha
+packages and are not presented as registry releases.
 
 Run the local verification suite:
 

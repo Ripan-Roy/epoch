@@ -207,7 +207,7 @@ pub struct EpochEngine {
 
 impl Default for EpochEngine {
     fn default() -> Self {
-        Self::new(DeploymentMode::Standalone, Arc::new(SystemClock))
+        Self::new(DeploymentMode::Standalone, Arc::new(SystemClock::default()))
     }
 }
 
@@ -252,7 +252,15 @@ impl EpochEngine {
     }
 
     pub fn now_ms(&self) -> u64 {
-        self.clock.now_ms()
+        self.wall_time_ms()
+    }
+
+    pub fn wall_time_ms(&self) -> u64 {
+        self.clock.wall_time_ms()
+    }
+
+    pub fn monotonic_time_ms(&self) -> u64 {
+        self.clock.monotonic_time_ms()
     }
 
     pub fn create_cache(&self, name: &str, config: CacheConfig) -> EpochResult<CacheHandle> {
@@ -1216,6 +1224,18 @@ mod tests {
         assert_eq!(health.deployment_mode, DeploymentMode::Standalone);
         assert_eq!(health.guarantee_ceiling, DurabilityProfile::Volatile);
         assert!(!health.hosted_control_plane_required);
+    }
+
+    #[test]
+    fn engine_exposes_wall_and_monotonic_time_without_aliasing_clock_jumps() {
+        let clock = Arc::new(ManualClock::with_times(1_000, 50));
+        let engine = EpochEngine::new(DeploymentMode::Standalone, clock.clone());
+
+        clock.set_wall_time_ms(10);
+
+        assert_eq!(engine.wall_time_ms(), 10);
+        assert_eq!(engine.monotonic_time_ms(), 50);
+        assert_eq!(engine.now_ms(), engine.wall_time_ms());
     }
 
     #[test]
