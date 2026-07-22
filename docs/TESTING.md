@@ -211,7 +211,8 @@ fresh data directory, creates a local-durable Stream and Queue, acknowledges
 only `job-1001`, kills the node with `SIGKILL`, restarts from the same bytes,
 and proves that the Stream record, acknowledgement count, and only `job-1002`
 survived. The GitHub Pages deploy job depends on this lifecycle test as well as
-the documentation-only frontend build.
+the documentation-only frontend build. Pull-request runs execute both gates but
+cannot upload or deploy Pages; publication is restricted to `main`.
 
 Manifest recovery tests distinguish a safe uncommitted suffix from committed
 data damage. Only bytes beyond the manifest's committed length in the active

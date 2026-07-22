@@ -164,11 +164,11 @@ The Pages artifact contains documentation only—no localhost console client.
 Its configured deployment target is
 [`https://ripan-roy.github.io/epoch/`](https://ripan-roy.github.io/epoch/).
 The workflow executes every displayed Go, Java, and Python seed → forced crash
-→ restart → verification example before deployment. GitHub currently refuses
-to enable Pages while this repository is private on the account's present
-plan, so the URL is not live until the plan supports private Pages or repository
-visibility is explicitly changed. The SDKs remain repository-local pre-alpha
-packages and are not presented as registry releases.
+→ restart → verification example before deployment. Pull requests build and
+verify the same artifact but never publish it; deployment is permitted only
+from `main` (including a manual dispatch that targets `main`). The public site
+is live with enforced HTTPS. The SDKs remain repository-local pre-alpha packages
+and are not presented as registry releases.
 
 Run the local verification suite:
 
