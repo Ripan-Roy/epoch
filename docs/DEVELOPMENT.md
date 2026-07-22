@@ -163,6 +163,7 @@ make audit            # pinned Rust dependency advisory gate
 make test             # local unit tests
 make test-integration # real processes plus exact published SDK quickstarts
 make build            # compile all current components
+make package-shape    # nonpublishing package and clean-consumer checks
 make check            # normal pre-commit gate
 make ci               # local deterministic CI gate
 ```
@@ -171,6 +172,13 @@ make ci               # local deterministic CI gate
 `cargo-audit` installation above. The Make targets remain thin wrappers. When
 debugging a failure, rerun the native command printed by Make rather than adding
 behavior that exists only in the wrapper.
+
+`make package-shape` proves only that the declared private/package boundaries
+and local artifacts are mechanically sound. It is neither a registry dry-run
+nor publication approval: it has no publishing identity and deliberately fails
+to make a release claim while licensing, permanent coordinates, signing, and
+registry ownership remain unresolved. See
+[Package publication](PACKAGE_PUBLICATION.md) for the promotion contract.
 
 ## Protobuf contracts
 

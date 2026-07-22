@@ -335,6 +335,13 @@ Dependency and release gates include Cargo advisory/license policy, Go and
 Python vulnerability scanning, JavaScript dependency scanning, secret scanning,
 SBOM generation, artifact signing, and provenance verification.
 
+The current package-shape layer is deliberately narrower than a release gate.
+It builds and clean-install-tests local Java and Python artifacts, validates
+explicitly private Rust crates, and guards the provisional Go and planned
+TypeScript boundaries without credentials, identity tokens, uploads, or release
+assets. A separate manual policy gate must remain red until every declared
+publication blocker is resolved. See [Package publication](PACKAGE_PUBLICATION.md).
+
 ## Test organization
 
 ```text
@@ -358,6 +365,7 @@ committed and documented.
 | Pipeline | Trigger | Required work |
 | --- | --- | --- |
 | Fast | Every pull request | Format, lint, generation freshness, unit/property tests |
+| Package shape | Every pull request | Private-boundary policy, local artifacts, and clean external consumers; never publish |
 | Integration | Every pull request once available | Standalone and three-node process tests |
 | Simulation | Pull request seed sample; larger nightly matrix | Deterministic failure exploration |
 | Compatibility | Nightly and release | Pinned Redis/Kafka/RabbitMQ client matrix |
@@ -401,3 +409,5 @@ corresponding acceptance evidence is reproducible.
 - [Architecture](ARCHITECTURE.md)
 - [Requirements traceability](REQUIREMENTS_TRACEABILITY.md)
 - [Product requirements](PRD.md)
+- [Package publication](PACKAGE_PUBLICATION.md)
+- [Release readiness](RELEASE_READINESS.md)

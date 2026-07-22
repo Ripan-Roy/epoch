@@ -1,6 +1,6 @@
 {
   "name": "epoch-workspace",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "private": true,
   "description": "One runtime for cache, stream, queue, and event-bus workloads",
   "packageManager": "pnpm@10.28.0",

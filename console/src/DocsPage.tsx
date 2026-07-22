@@ -1,11 +1,14 @@
 import { useEffect, useState, type KeyboardEvent } from "react";
 
+import packageReadiness from "../../release/package-readiness.json";
 import goSource from "./quickstarts/quickstart.go?raw";
 import javaSource from "./quickstarts/Quickstart.java?raw";
 import pythonSource from "./quickstarts/quickstart.py?raw";
 
 const repositoryUrl = "https://github.com/Ripan-Roy/epoch";
 const repositoryDocsUrl = `${repositoryUrl}/blob/main/docs`;
+const packageBlockerLabels = new Map(packageReadiness.blockers.map((blocker) => [blocker.id, blocker.label]));
+const packageSurfaces = Object.entries(packageReadiness.packages);
 
 type LanguageId = "go" | "java" | "python";
 
@@ -216,11 +219,11 @@ export function DocsPage({ section }: DocsPageProps) {
           </dl>
         </section>
 
-        <aside className="docs-access-note" aria-label="Private alpha package access">
-          <strong>Private alpha access</strong>
+        <aside className="docs-access-note" aria-label="Source-only alpha package access">
+          <strong>Source checkout required</strong>
           <span>
-            Running these examples requires access to the repository checkout. The SDK packages are not
-            published to public registries yet; the exact reviewed source remains embedded below.
+            Running these examples requires the public repository checkout. The SDK packages are not published
+            to public registries; source visibility does not grant a distribution license.
           </span>
         </aside>
 
@@ -239,6 +242,9 @@ export function DocsPage({ section }: DocsPageProps) {
               </a>
               <a href="#/docs/sdk-reference" onClick={() => navigateToSection("sdk-reference")}>
                 SDK reference
+              </a>
+              <a href="#/docs/packages" onClick={() => navigateToSection("packages")}>
+                Package status
               </a>
               <a href="#/docs/reference" onClick={() => navigateToSection("reference")}>
                 Design reference
@@ -505,9 +511,77 @@ export function DocsPage({ section }: DocsPageProps) {
               </div>
             </section>
 
-            <section id="reference" className="docs-section" aria-labelledby="reference-title" tabIndex={-1}>
+            <section id="packages" className="docs-section" aria-labelledby="packages-title" tabIndex={-1}>
               <div className="docs-section__heading">
                 <span>05</span>
+                <div>
+                  <p className="eyebrow">NO REGISTRY UPLOAD</p>
+                  <h2 id="packages-title">Package publication status</h2>
+                  <p>
+                    The machine-readable policy below separates installable artifact shape from permission to
+                    publish. Every coordinate remains private, provisional, or unselected.
+                  </p>
+                </div>
+              </div>
+
+              <div className="package-boundary" role="status">
+                <span className="status-dot" data-tone="warn" aria-hidden="true" />
+                <div>
+                  <strong>Registry release blocked</strong>
+                  <p>
+                    Development candidate <code>{packageReadiness.release.version}</code> is source-only. No
+                    registry upload, release asset, or package-manager availability is claimed.
+                  </p>
+                </div>
+              </div>
+
+              <div className="package-status-grid" aria-label="Package ecosystem readiness">
+                {packageSurfaces.map(([ecosystem, packageSurface]) => (
+                  <article key={ecosystem} data-status={packageSurface.publicationStatus}>
+                    <div className="package-status-card__heading">
+                      <span>{ecosystem.toUpperCase()}</span>
+                      <em>{packageSurface.publicationStatus}</em>
+                    </div>
+                    <strong>{packageSurface.label}</strong>
+                    <dl>
+                      <div>
+                        <dt>Version</dt>
+                        <dd>{packageSurface.version}</dd>
+                      </div>
+                      <div>
+                        <dt>Coordinate</dt>
+                        <dd>
+                          <code>
+                            {packageSurface.coordinate ??
+                              packageSurface.provisionalCoordinate ??
+                              "Not selected"}
+                          </code>
+                        </dd>
+                      </div>
+                    </dl>
+                    <p>Blocked by</p>
+                    <ul>
+                      {packageSurface.blockerIds.map((blockerId) => (
+                        <li key={blockerId}>{packageBlockerLabels.get(blockerId) ?? blockerId}</li>
+                      ))}
+                    </ul>
+                  </article>
+                ))}
+              </div>
+
+              <div className="package-policy-links">
+                <a href={`${repositoryDocsUrl}/PACKAGE_PUBLICATION.md`} target="_blank" rel="noreferrer">
+                  Publication contract ↗
+                </a>
+                <a href={`${repositoryDocsUrl}/RELEASE_READINESS.md`} target="_blank" rel="noreferrer">
+                  Release checklist ↗
+                </a>
+              </div>
+            </section>
+
+            <section id="reference" className="docs-section" aria-labelledby="reference-title" tabIndex={-1}>
+              <div className="docs-section__heading">
+                <span>06</span>
                 <div>
                   <p className="eyebrow">SOURCE OF TRUTH</p>
                   <h2 id="reference-title">Go deeper without losing the boundary.</h2>

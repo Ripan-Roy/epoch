@@ -1,0 +1,21 @@
+name: Registry release policy gate
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  policy:
+    name: Require publication approval
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Reject unresolved registry blockers
+        run: python scripts/release/check-package-policy.py --mode release

@@ -6,7 +6,7 @@
 
   <groupId>io.epoch</groupId>
   <artifactId>epoch-sdk</artifactId>
-  <version>0.1.0-alpha.1</version>
+  <version>0.1.0-alpha.2</version>
   <name>Epoch Java SDK</name>
   <description>Guarantee-aware Java client for Epoch.</description>
   <url>https://github.com/Ripan-Roy/epoch</url>
@@ -141,4 +141,66 @@
       </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <profile>
+      <!--
+        This profile is an artifact-shape gate, not a publication profile.
+        This profile builds inspectable Maven artifacts through the local
+        install lifecycle. The Central extension is present so its future
+        settings remain reviewable, while literal skipPublishing prevents it
+        from publishing. Signing and license metadata must be added only after
+        the project selects a real license and provisions a release identity.
+      -->
+      <id>central-bundle</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-source-plugin</artifactId>
+            <version>3.4.0</version>
+            <executions>
+              <execution>
+                <id>attach-sources</id>
+                <phase>package</phase>
+                <goals>
+                  <goal>jar-no-fork</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-javadoc-plugin</artifactId>
+            <version>3.12.0</version>
+            <configuration>
+              <doclint>all,-missing</doclint>
+              <failOnWarnings>true</failOnWarnings>
+            </configuration>
+            <executions>
+              <execution>
+                <id>attach-javadocs</id>
+                <phase>package</phase>
+                <goals>
+                  <goal>jar</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.sonatype.central</groupId>
+            <artifactId>central-publishing-maven-plugin</artifactId>
+            <version>0.11.0</version>
+            <extensions>true</extensions>
+            <configuration>
+              <autoPublish>false</autoPublish>
+              <checksums>all</checksums>
+              <deploymentName>Epoch Java SDK ${project.version} local bundle</deploymentName>
+              <skipPublishing>true</skipPublishing>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>
