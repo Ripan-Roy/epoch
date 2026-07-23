@@ -388,7 +388,10 @@ state machine over the shared committed-command substrate. Given the same
 ordered history, independent voters reproduce fenced acquire/settlement,
 monotonic consumer epochs and applied time, retry/schedule/expiry transitions,
 recorded business rejections, exact renewed-token replay, immutable DLQ/redrive
-history, and one state digest. EPRS recovery completes before its internal
+history, and one state digest. Effective Queue time is the maximum of each
+command's server-assigned candidate and the prior committed effective time, so
+an uncommitted entry retained across leader failover cannot make later replay
+regress or fail-stop. EPRS recovery completes before its internal
 typed listener becomes ready. This remains a bounded experimental mode and
 raises no public durability claim. See
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).

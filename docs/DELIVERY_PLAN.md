@@ -128,7 +128,9 @@ actor boundary. It deterministically applies strict single-partition commands,
 leader/consumer-fenced leases, retry/schedule/expiry, recorded business
 outcomes, and immutable DLQ/redrive history. Typed internal routes, EPRS startup
 replay, real-runtime convergence, leader `SIGKILL`, redelivery, and all-node
-container recovery are executable. This advances the Queue slice but does not
+container recovery are executable. Committed-order time normalization also
+prevents a retained pending entry followed by a lower-clock leader from
+fail-stopping live apply or recovery. This advances the Queue slice but does not
 complete flow control, placement, public routing/SDKs, authenticated transport,
 or production durability evidence. See
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).

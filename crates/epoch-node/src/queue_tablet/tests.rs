@@ -94,6 +94,45 @@ fn recovery_rebuilds_queue_profile_before_exposing_it() {
 }
 
 #[test]
+fn recovery_normalizes_descending_assigned_times_in_committed_log_order() {
+    let first = enqueue("pending-before-failover", "job-1", 1_000, 4);
+    let after_failover = committed(
+        "lower-clock-new-leader",
+        QueueTabletOperation::Maintain(QueueMaintainCommand { partition: 0 }),
+        500,
+        3,
+        5,
+    );
+    let live = QueueTabletService::with_default_config(scope()).unwrap();
+    live.apply(&first).unwrap();
+    live.apply(&after_failover).unwrap();
+    let live_snapshot = live.snapshot().unwrap();
+
+    let recovered = QueueTabletService::with_default_config(scope()).unwrap();
+    recovered
+        .replay(&[after_failover.clone(), first])
+        .expect("committed log order must define a non-regressing effective time");
+
+    let snapshot = recovered.snapshot().unwrap();
+    assert_eq!(snapshot.last_profile_mutation_index, 5);
+    assert_eq!(snapshot.last_applied_time_ms, 1_000);
+    assert_eq!(snapshot.applied_command_count, 2);
+    assert_eq!(snapshot.state_digest, live_snapshot.state_digest);
+    assert_eq!(snapshot.counts, live_snapshot.counts);
+    assert_eq!(
+        recovered
+            .committed_receipt(&after_failover)
+            .unwrap()
+            .applied_at_ms,
+        1_000
+    );
+    assert_eq!(
+        recovered.committed_receipt(&after_failover).unwrap(),
+        live.committed_receipt(&after_failover).unwrap()
+    );
+}
+
+#[test]
 fn malformed_commit_fail_stops_queue_profile_reads_and_future_apply() {
     let service = QueueTabletService::with_default_config(scope()).unwrap();
     let mut malformed = enqueue("enqueue-1", "job-1", 10, 4);

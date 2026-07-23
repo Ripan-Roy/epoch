@@ -524,7 +524,7 @@ fn dead_letter_and_redrive_audits_are_immutable_and_stale_ids_are_fenced() {
 }
 
 #[test]
-fn applied_time_is_monotonic_equal_is_valid_and_deadline_is_exclusive() {
+fn applied_time_is_monotonic_equal_and_regressed_assignments_are_clamped() {
     let mut tablet = QueueTablet::new(scope(), config()).unwrap();
     let enqueue = QueueTabletCommand::enqueue(&scope(), "enqueue", event("one", 100), 100).unwrap();
     apply_command(&mut tablet, &enqueue, 2, 1);
@@ -537,30 +537,43 @@ fn applied_time_is_monotonic_equal_is_valid_and_deadline_is_exclusive() {
     let regression = command(
         "regression",
         99,
-        QueueTabletOperation::Maintain(QueueMaintainCommand { partition: 0 }),
+        QueueTabletOperation::Acquire(QueueAcquireCommand {
+            partition: 0,
+            consumer: "worker".into(),
+            consumer_epoch: 1,
+            max_messages: 1,
+            visibility_timeout_ms: Some(50),
+        }),
     );
-    let payload = regression.encode(&scope()).unwrap();
     let digest_before_regression = tablet.state_digest();
     let applied_before_regression = tablet.applied_command_count();
-    let error = tablet
-        .apply(committed(
-            regression.proposal_id(&scope()).unwrap(),
-            2,
-            3,
-            &payload,
-        ))
-        .unwrap_err();
+    let receipt = apply_command(&mut tablet, &regression, 2, 3);
+    assert_eq!(receipt.applied_at_ms, 100);
+    assert_eq!(acquired_delivery(&receipt).lease_deadline_ms, 150);
+    assert_eq!(tablet.last_applied_time_ms(), 100);
+    assert_eq!(tablet.last_applied_command_index(), 3);
+    assert_ne!(tablet.state_digest(), digest_before_regression);
     assert_eq!(
-        error,
-        TabletError::AppliedTimeRegression {
-            previous: 100,
-            observed: 99
-        }
+        tablet.applied_command_count(),
+        applied_before_regression + 1
     );
-    assert_eq!(tablet.last_applied_command_index(), 2);
-    assert_eq!(tablet.state_digest(), digest_before_regression);
-    assert_eq!(tablet.applied_command_count(), applied_before_regression);
 
+    let replayed = apply_command(&mut tablet, &regression, 2, 3);
+    assert_eq!(replayed.applied_at_ms, 100);
+    assert_eq!(acquired_delivery(&replayed).lease_deadline_ms, 150);
+    assert_eq!(replayed.disposition, QueueTabletDisposition::Replayed);
+
+    let later = command(
+        "later",
+        101,
+        QueueTabletOperation::Maintain(QueueMaintainCommand { partition: 0 }),
+    );
+    assert_eq!(apply_command(&mut tablet, &later, 3, 4).applied_at_ms, 101);
+    assert_eq!(tablet.last_applied_time_ms(), 101);
+}
+
+#[test]
+fn lease_deadline_is_exclusive() {
     assert!(matches!(
         settlement_at(19).outcome,
         QueueTabletOutcome::Applied {

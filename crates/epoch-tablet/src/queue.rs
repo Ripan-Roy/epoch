@@ -98,20 +98,15 @@ impl QueueTablet {
                 committed.proposal_id
             )));
         }
-        if command.applied_at_ms < self.last_applied_time_ms {
-            return Err(TabletError::AppliedTimeRegression {
-                previous: self.last_applied_time_ms,
-                observed: command.applied_at_ms,
-            });
-        }
+        // The committed log, rather than any one leader's wall clock, is the
+        // authoritative time order. An earlier uncommitted entry can survive a
+        // leader change and precede a command assigned by a lower-clock leader.
+        // Clamp at application so every voter and recovery replay derives the
+        // same non-regressing effective time from the same committed prefix.
+        let applied_at_ms = command.applied_at_ms.max(self.last_applied_time_ms);
 
         let mut candidate = self.state.clone();
-        let execution = candidate.execute(
-            &self.scope,
-            committed,
-            command.operation,
-            command.applied_at_ms,
-        );
+        let execution = candidate.execute(&self.scope, committed, command.operation, applied_at_ms);
         let (outcome, next_state) = match execution {
             Ok(result) => (QueueTabletOutcome::Applied { result }, Some(candidate)),
             Err(error) => (recordable_rejected_outcome(error)?, None),
@@ -122,7 +117,7 @@ impl QueueTablet {
             tablet_epoch: self.scope.tablet_epoch,
             term: committed.term,
             commit_index: committed.log_index,
-            applied_at_ms: command.applied_at_ms,
+            applied_at_ms,
             write_evidence: TabletWriteEvidence::FixedVoterMajorityPersisted,
             durable_voter_acks: 2,
             disposition: QueueTabletDisposition::New,
@@ -132,7 +127,7 @@ impl QueueTablet {
         // Complete the fallible auxiliary encoding before swapping the cloned
         // business state, so an unexpected local failure remains atomic too.
         let effective_state = next_state.as_ref().unwrap_or(&self.state);
-        let auxiliary_bytes = encode_auxiliary_state(effective_state, command.applied_at_ms)?;
+        let auxiliary_bytes = encode_auxiliary_state(effective_state, applied_at_ms)?;
         let next_digest = transition_digest(
             self.state_digest,
             committed,
@@ -147,7 +142,7 @@ impl QueueTablet {
         }
         self.state_digest = next_digest;
         self.last_applied_command_index = committed.log_index;
-        self.last_applied_time_ms = command.applied_at_ms;
+        self.last_applied_time_ms = applied_at_ms;
         self.applied.insert(
             committed.proposal_id,
             AppliedCommand {

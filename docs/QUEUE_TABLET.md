@@ -100,7 +100,10 @@ public standalone listener retains its truthful `local_durable` ceiling.
 Writes serialize per node to make time assignment and local request handling
 deterministic. The node chooses
 `max(local_wall_time_ms, last_applied_time_ms)` before proposal; replicas never
-sample clocks while applying. A bounded wait returns `202` with local
+sample clocks while applying. The state machine also clamps each committed
+command to the prior committed effective time. This log-order rule covers an
+earlier pending entry that survives failover before a lower-clock leader's
+entry. A bounded wait returns `202` with local
 `unknown`/`pending` state when commitment is unresolved. Exact semantic retries
 return `200` and disposition `replayed`; a new submission returns `201` even
 when its committed business outcome is `rejected`. `not_leader`, stale-term,
@@ -171,11 +174,14 @@ eligible for a new fenced lease.
 
 ## Monotonic applied time
 
-All time-dependent decisions use `applied_at_ms` captured in the command before
-proposal. Replicas never sample their local wall clock during application.
-Application accepts equal timestamps and rejects a regression before changing
-state. The runtime chooses a value no lower than the last profile-applied value,
-including after wall-clock rollback and EPRS recovery.
+All time-dependent decisions use a deterministic effective `applied_at_ms`.
+The leader captures a candidate value in the command before proposal, and
+replicas never sample their local wall clock during application. In committed
+log order, application chooses `max(command.applied_at_ms,
+last_applied_time_ms)`. Equal timestamps are valid; a lower-clock assignment is
+clamped rather than allowed to regress or fail-stop replay. This remains safe
+when a higher-time pending entry survives leader failover and precedes a new
+leader's command, as well as after wall-clock rollback and EPRS recovery.
 
 Lease deadlines are exclusive: settlement is valid before the deadline and is
 fenced at the deadline. Acquire and renewal clamp the lease to the earliest TTL
@@ -196,9 +202,9 @@ not commit.
 
 Structural divergence remains a `TabletError` and must stop the future
 consensus actor: wrong group or epoch, non-canonical or invalid command bytes,
-proposal mismatch, commit-order regression, applied-time regression,
-conflicting exact-replay metadata, local storage failure, or internal profile
-failure. Those errors do not mutate the tablet.
+proposal mismatch, commit-order regression, conflicting exact-replay metadata,
+local storage failure, or internal profile failure. Those errors do not mutate
+the tablet.
 
 ## Exact replay and lease renewal
 
@@ -266,7 +272,8 @@ The deterministic Queue tablet suite covers:
 - exact renewal replay with the original rotated token;
 - stale leader-term and consumer-epoch rejections;
 - immutable dead-letter/redrive history and stale-history fencing;
-- monotonic applied time and exclusive lease deadlines;
+- monotonic log-order applied time, including descending leader assignments,
+  and exclusive lease deadlines;
 - atomic rejected settlement followed by deterministic redelivery;
 - old-lease conservatism and new-term fencing across leader replacement;
 - TTL/max-age precedence over scheduled readiness;
@@ -279,8 +286,9 @@ enqueue through the crate's public root API while pinning proposal and receipt
 JSON vectors and the original Stream public goldens.
 
 The `epoch-node` real-runtime suite exercises strict HTTP extraction, semantic
-retry/conflict, server time under wall-clock rollback, committed rejection,
-all nine operations, Queue reads, three-voter convergence, and EPRS reopen. The
+retry/conflict, server time under wall-clock rollback, descending assigned-time
+recovery, committed rejection, all nine operations, Queue reads, three-voter
+convergence, and EPRS reopen. The
 Docker gate additionally proves scheduled eligibility, follower rejection,
 active-leader `SIGKILL`, old-term token fencing, conservative redelivery,
 renewal replay, immutable DLQ/redrive reads, all-voter convergence, and exact

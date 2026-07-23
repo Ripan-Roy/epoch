@@ -481,7 +481,10 @@ instead mounts a Queue profile and does not mount opaque or Stream routes:
 
 Every mutation requires a scoped idempotency key and expected term. The leader
 assigns `applied_at_ms = max(wall clock, last profile-applied time)`; clients
-cannot supply it. HTTP accepts 64-bit inputs as numbers or decimal strings and
+cannot supply it. In committed log order, every voter then derives the effective
+time as `max(command.applied_at_ms, prior effective time)`. This also covers a
+higher-time pending entry retained across failover before a lower-clock leader's
+command. HTTP accepts 64-bit inputs as numbers or decimal strings and
 serializes all 64-bit output as decimal strings. Exact semantic retries ignore
 only expected term and the original server time, return the stored result with
 `replayed`, and cannot silently rebind changed input. Committed business
