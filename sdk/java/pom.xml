@@ -17,7 +17,7 @@
     <maven.compiler.release>25</maven.compiler.release>
     <project.build.outputTimestamp>2026-07-22T00:00:00Z</project.build.outputTimestamp>
     <jackson.version>2.22.1</jackson.version>
-    <junit.version>6.1.0</junit.version>
+    <junit.version>6.1.2</junit.version>
   </properties>
 
   <dependencies>
@@ -80,7 +80,7 @@
       <plugin>
         <groupId>com.diffplug.spotless</groupId>
         <artifactId>spotless-maven-plugin</artifactId>
-        <version>3.6.0</version>
+        <version>3.8.0</version>
         <configuration>
           <java>
             <googleJavaFormat>
