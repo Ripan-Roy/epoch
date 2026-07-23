@@ -46,6 +46,7 @@ pub const EXPERIMENTAL_QUEUE_TABLET_REDRIVES_PATH: &str = "/experimental/v1/tabl
 
 const MAX_HISTORY_RECORDS: usize = 1_000;
 const TABLET_REQUEST_BODY_BYTES: usize = MAX_QUEUE_TABLET_COMMAND_BYTES + 16 * 1024;
+pub const DEFAULT_COMMIT_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub struct QueueTabletService {

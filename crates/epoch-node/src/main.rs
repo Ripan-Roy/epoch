@@ -9,12 +9,14 @@ use epoch_node::{
     consensus::{
         CommittedProposalApplier, ConsensusProbeConfig, ConsensusProbeError, ConsensusProbeRuntime,
     },
+    queue_tablet::{self, DEFAULT_COMMIT_WAIT as QUEUE_DEFAULT_COMMIT_WAIT, QueueTabletService},
     router, spawn_maintenance,
-    stream_tablet::{self, DEFAULT_COMMIT_WAIT, StreamTabletService},
+    stream_tablet::{self, DEFAULT_COMMIT_WAIT as STREAM_DEFAULT_COMMIT_WAIT, StreamTabletService},
     validate_allowed_origins,
 };
+use epoch_queue::QueueConfig;
 use epoch_storage::{DEFAULT_WAL_SEGMENT_BYTES, MIN_WAL_SEGMENT_BYTES, StandaloneWal};
-use epoch_tablet::StreamTabletScope;
+use epoch_tablet::{QueueTabletScope, StreamTabletScope};
 use tokio::{net::TcpListener, sync::watch};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -52,14 +54,8 @@ struct Args {
     json_logs: bool,
     #[arg(long, env = "EPOCH_CONSENSUS_PROBE_ENABLED")]
     consensus_probe_enabled: bool,
-    #[arg(long, env = "EPOCH_EXPERIMENTAL_STREAM_TABLET_ENABLED")]
-    experimental_stream_tablet_enabled: bool,
-    #[arg(
-        long,
-        env = "EPOCH_EXPERIMENTAL_STREAM_TABLET_NAME",
-        default_value = "experimental-stream"
-    )]
-    experimental_stream_tablet_name: String,
+    #[command(flatten)]
+    experimental_tablet: ExperimentalTabletArgs,
     #[arg(long, env = "EPOCH_CONSENSUS_NODE_ID")]
     consensus_node_id: Option<u64>,
     #[arg(long, env = "EPOCH_CONSENSUS_GROUP_ID", default_value_t = 1)]
@@ -82,12 +78,53 @@ struct Args {
     consensus_tick_ms: u64,
 }
 
+#[derive(Debug, clap::Args)]
+struct ExperimentalTabletArgs {
+    #[arg(
+        long = "experimental-stream-tablet-enabled",
+        env = "EPOCH_EXPERIMENTAL_STREAM_TABLET_ENABLED"
+    )]
+    stream_enabled: bool,
+    #[arg(
+        long = "experimental-stream-tablet-name",
+        env = "EPOCH_EXPERIMENTAL_STREAM_TABLET_NAME",
+        default_value = "experimental-stream"
+    )]
+    stream_name: String,
+    #[arg(
+        long = "experimental-queue-tablet-enabled",
+        env = "EPOCH_EXPERIMENTAL_QUEUE_TABLET_ENABLED"
+    )]
+    queue_enabled: bool,
+    #[arg(
+        long = "experimental-queue-tablet-name",
+        env = "EPOCH_EXPERIMENTAL_QUEUE_TABLET_NAME",
+        default_value = "experimental-queue"
+    )]
+    queue_name: String,
+}
+
 #[derive(Debug)]
 struct ConsensusProbeLaunch {
     config: ConsensusProbeConfig,
     listen: SocketAddr,
     stable_path: PathBuf,
-    stream_tablet_scope: Option<StreamTabletScope>,
+    tablet_profile: Option<TabletProfileLaunch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TabletProfileLaunch {
+    Stream(StreamTabletScope),
+    Queue(QueueTabletScope),
+}
+
+impl TabletProfileLaunch {
+    const fn name(&self) -> &'static str {
+        match self {
+            Self::Stream(_) => "stream",
+            Self::Queue(_) => "queue",
+        }
+    }
 }
 
 #[tokio::main]
@@ -187,6 +224,10 @@ async fn serve_consensus_mode(
         applied_index = %recovery.applied_index,
         repaired_partial_tail = recovery.repaired_partial_tail,
         profile_replication,
+        tablet_profile = launch
+            .tablet_profile
+            .as_ref()
+            .map_or("opaque", TabletProfileLaunch::name),
         profile_guarantee_ceiling = if profile_replication {
             "experimental_fixed_voter_majority"
         } else {
@@ -212,29 +253,49 @@ async fn start_consensus_mode(
     launch: &ConsensusProbeLaunch,
     clock: Arc<SystemClock>,
 ) -> Result<(ConsensusProbeRuntime, axum::Router, bool), Box<dyn Error>> {
-    if let Some(scope) = launch.stream_tablet_scope.clone() {
-        let tablet = StreamTabletService::new(scope)?;
-        let applier: Arc<dyn CommittedProposalApplier> = tablet.clone();
-        let runtime = ConsensusProbeRuntime::start_with_profile_applier(
-            launch.config.clone(),
-            &launch.stable_path,
-            applier,
-        )
-        .await?;
-        let app = runtime.internal_router().merge(stream_tablet::router(
-            tablet,
-            runtime.handle(),
-            clock,
-            DEFAULT_COMMIT_WAIT,
-        ));
-        Ok((runtime, app, true))
-    } else {
-        let runtime =
-            ConsensusProbeRuntime::start(launch.config.clone(), &launch.stable_path).await?;
-        let app = runtime
-            .internal_router()
-            .merge(runtime.experimental_router());
-        Ok((runtime, app, false))
+    match launch.tablet_profile.clone() {
+        Some(TabletProfileLaunch::Stream(scope)) => {
+            let tablet = StreamTabletService::new(scope)?;
+            let applier: Arc<dyn CommittedProposalApplier> = tablet.clone();
+            let runtime = ConsensusProbeRuntime::start_with_profile_applier(
+                launch.config.clone(),
+                &launch.stable_path,
+                applier,
+            )
+            .await?;
+            let app = runtime.internal_router().merge(stream_tablet::router(
+                tablet,
+                runtime.handle(),
+                clock,
+                STREAM_DEFAULT_COMMIT_WAIT,
+            ));
+            Ok((runtime, app, true))
+        }
+        Some(TabletProfileLaunch::Queue(scope)) => {
+            let tablet = QueueTabletService::new(scope, QueueConfig::default())?;
+            let applier: Arc<dyn CommittedProposalApplier> = tablet.clone();
+            let runtime = ConsensusProbeRuntime::start_with_profile_applier(
+                launch.config.clone(),
+                &launch.stable_path,
+                applier,
+            )
+            .await?;
+            let app = runtime.internal_router().merge(queue_tablet::router(
+                tablet,
+                runtime.handle(),
+                clock,
+                QUEUE_DEFAULT_COMMIT_WAIT,
+            ));
+            Ok((runtime, app, true))
+        }
+        None => {
+            let runtime =
+                ConsensusProbeRuntime::start(launch.config.clone(), &launch.stable_path).await?;
+            let app = runtime
+                .internal_router()
+                .merge(runtime.experimental_router());
+            Ok((runtime, app, false))
+        }
     }
 }
 
@@ -245,10 +306,17 @@ fn boxed_error(error: impl Error + 'static) -> Box<dyn Error> {
 fn consensus_probe_launch(
     args: &Args,
 ) -> Result<Option<ConsensusProbeLaunch>, ConsensusProbeError> {
-    if args.experimental_stream_tablet_enabled && !args.consensus_probe_enabled {
+    if args.experimental_tablet.stream_enabled && args.experimental_tablet.queue_enabled {
         return Err(ConsensusProbeError::InvalidConfiguration(
-            "EPOCH_EXPERIMENTAL_STREAM_TABLET_ENABLED requires EPOCH_CONSENSUS_PROBE_ENABLED"
+            "Stream and Queue tablet profiles are mutually exclusive for one consensus group"
                 .into(),
+        ));
+    }
+    if (args.experimental_tablet.stream_enabled || args.experimental_tablet.queue_enabled)
+        && !args.consensus_probe_enabled
+    {
+        return Err(ConsensusProbeError::InvalidConfiguration(
+            "experimental tablet profiles require EPOCH_CONSENSUS_PROBE_ENABLED".into(),
         ));
     }
     if !args.consensus_probe_enabled {
@@ -276,22 +344,32 @@ fn consensus_probe_launch(
         .join("consensus")
         .join(format!("group-{}", config.group_id().get()))
         .join(format!("node-{}.wal", config.node_id().get()));
-    let stream_tablet_scope = args
-        .experimental_stream_tablet_enabled
-        .then(|| {
+    let tablet_profile = if args.experimental_tablet.stream_enabled {
+        Some(TabletProfileLaunch::Stream(
             StreamTabletScope::new(
                 config.group_id().get(),
                 config.group_epoch().get(),
-                &args.experimental_stream_tablet_name,
+                &args.experimental_tablet.stream_name,
             )
-            .map_err(|error| ConsensusProbeError::InvalidConfiguration(error.to_string()))
-        })
-        .transpose()?;
+            .map_err(|error| ConsensusProbeError::InvalidConfiguration(error.to_string()))?,
+        ))
+    } else if args.experimental_tablet.queue_enabled {
+        Some(TabletProfileLaunch::Queue(
+            QueueTabletScope::new(
+                config.group_id().get(),
+                config.group_epoch().get(),
+                &args.experimental_tablet.queue_name,
+            )
+            .map_err(|error| ConsensusProbeError::InvalidConfiguration(error.to_string()))?,
+        ))
+    } else {
+        None
+    };
     Ok(Some(ConsensusProbeLaunch {
         config,
         listen: args.consensus_listen,
         stable_path,
-        stream_tablet_scope,
+        tablet_profile,
     }))
 }
 
@@ -653,7 +731,7 @@ mod tests {
             launch.stable_path,
             PathBuf::from("/tmp/epoch-probe-test/consensus/group-7/node-2.wal")
         );
-        assert!(launch.stream_tablet_scope.is_none());
+        assert!(launch.tablet_profile.is_none());
     }
 
     #[test]
@@ -676,8 +754,66 @@ mod tests {
         .unwrap();
         let launch = consensus_probe_launch(&args).unwrap().unwrap();
         assert_eq!(
-            launch.stream_tablet_scope,
-            Some(StreamTabletScope::new(7, 3, "orders").unwrap())
+            launch.tablet_profile,
+            Some(TabletProfileLaunch::Stream(
+                StreamTabletScope::new(7, 3, "orders").unwrap()
+            ))
+        );
+    }
+
+    #[test]
+    fn experimental_queue_tablet_requires_the_consensus_runtime() {
+        let args =
+            Args::try_parse_from(["epoch-node", "--experimental-queue-tablet-enabled"]).unwrap();
+        assert!(
+            consensus_probe_launch(&args)
+                .unwrap_err()
+                .to_string()
+                .contains("EPOCH_CONSENSUS_PROBE_ENABLED")
+        );
+    }
+
+    #[test]
+    fn experimental_queue_tablet_uses_the_consensus_group_scope() {
+        let args = Args::try_parse_from([
+            "epoch-node",
+            "--consensus-probe-enabled",
+            "--experimental-queue-tablet-enabled",
+            "--experimental-queue-tablet-name",
+            "jobs",
+            "--consensus-node-id",
+            "2",
+            "--consensus-group-id",
+            "7",
+            "--consensus-group-epoch",
+            "3",
+            "--consensus-peers",
+            "1=http://127.0.0.1:7701,2=http://127.0.0.1:7702,3=http://127.0.0.1:7703",
+        ])
+        .unwrap();
+        let launch = consensus_probe_launch(&args).unwrap().unwrap();
+        assert_eq!(
+            launch.tablet_profile,
+            Some(TabletProfileLaunch::Queue(
+                QueueTabletScope::new(7, 3, "jobs").unwrap()
+            ))
+        );
+    }
+
+    #[test]
+    fn one_consensus_group_cannot_mount_stream_and_queue_profiles_together() {
+        let args = Args::try_parse_from([
+            "epoch-node",
+            "--consensus-probe-enabled",
+            "--experimental-stream-tablet-enabled",
+            "--experimental-queue-tablet-enabled",
+        ])
+        .unwrap();
+        assert!(
+            consensus_probe_launch(&args)
+                .unwrap_err()
+                .to_string()
+                .contains("mutually exclusive")
         );
     }
 }

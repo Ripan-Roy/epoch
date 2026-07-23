@@ -483,13 +483,281 @@ async fn typed_queue_tablet_commits_retries_converges_and_rebuilds() {
     let paths = tablet_paths(temporary.path());
     let cluster = RunningQueueCluster::start(&paths, 1_000).await;
     let client = reqwest::Client::new();
+    assert_follower_and_invalid_request(&cluster, &client).await;
     exercise_enqueue_acquire_ack(&cluster, &client).await;
+    exercise_retry_dead_letter_and_redrive(&cluster, &client).await;
     let digest = converged_digest(&cluster, &client).await;
     cluster.shutdown().await;
 
     let reopened = RunningQueueCluster::start(&paths, 2_000).await;
     assert_rebuilt(&reopened, &client, &digest).await;
     reopened.shutdown().await;
+}
+
+async fn assert_follower_and_invalid_request(
+    cluster: &RunningQueueCluster,
+    client: &reqwest::Client,
+) {
+    let invalid = json!({
+        "idempotency_key": "invalid-1",
+        "expected_term": "1",
+        "operation": {
+            "kind": "enqueue",
+            "envelope": {
+                "id": "invalid",
+                "source": "tests",
+                "type": "job.created",
+                "time_ms": "1",
+                "payload": {},
+                "paylod": "typo"
+            }
+        }
+    });
+    let response = client
+        .post(mutation_url(&cluster.nodes[0]))
+        .json(&invalid)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let document: Value = response.json().await.unwrap();
+    assert_eq!(document["error"]["code"], "invalid_request");
+    assert_eq!(
+        document["error"]["outcome_certainty"],
+        "definite_not_committed"
+    );
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let (leader, term) = cluster.leader().await;
+            let follower = (leader + 1) % cluster.nodes.len();
+            let request = json!({
+                "idempotency_key": "follower-1",
+                "expected_term": term.to_string(),
+                "operation": {"kind": "maintain"}
+            });
+            let response = client
+                .post(mutation_url(&cluster.nodes[follower]))
+                .json(&request)
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            let document: Value = response.json().await.unwrap();
+            if status == StatusCode::SERVICE_UNAVAILABLE
+                && document["error"]["code"] == "not_leader"
+            {
+                assert_eq!(document["error"]["outcome_certainty"], "unknown");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("a stable follower should reject a Queue write");
+}
+
+async fn exercise_retry_dead_letter_and_redrive(
+    cluster: &RunningQueueCluster,
+    client: &reqwest::Client,
+) {
+    let enqueue = json!({
+        "idempotency_key": "enqueue-2",
+        "expected_term": "0",
+        "operation": {
+            "kind": "enqueue",
+            "envelope": {
+                "id": "job-2",
+                "source": "tests",
+                "type": "job.created",
+                "time_ms": "900",
+                "payload": {"id": 2}
+            }
+        }
+    });
+    let (_, enqueued) = post_to_leader(cluster, client, &enqueue).await;
+    assert_eq!(operation_result(&enqueued)["kind"], "enqueued");
+
+    let first_token = acquire_one(cluster, client, "acquire-2", "worker-b").await;
+    let renewed_token = extend_and_replay(cluster, client, &first_token).await;
+    release(cluster, client, &renewed_token).await;
+    let released_token = acquire_one(cluster, client, "acquire-3", "worker-b").await;
+    nack(cluster, client, &released_token).await;
+
+    for node in &cluster.nodes {
+        node.clock.set_wall_time_ms(5_000);
+    }
+    let maintain = json!({
+        "idempotency_key": "maintain-1",
+        "expected_term": "0",
+        "operation": {"kind": "maintain"}
+    });
+    let (_, maintained) = post_to_leader(cluster, client, &maintain).await;
+    assert_eq!(operation_result(&maintained)["kind"], "maintained");
+
+    let retry_token = acquire_one(cluster, client, "acquire-4", "worker-b").await;
+    let dead_letter_history_id = reject(cluster, client, &retry_token).await;
+    redrive(cluster, client, dead_letter_history_id).await;
+    let redriven_token = acquire_one(cluster, client, "acquire-5", "worker-b").await;
+    acknowledge(cluster, client, "ack-2", "worker-b", &redriven_token).await;
+}
+
+async fn acquire_one(
+    cluster: &RunningQueueCluster,
+    client: &reqwest::Client,
+    idempotency_key: &str,
+    consumer: &str,
+) -> String {
+    let acquire = json!({
+        "idempotency_key": idempotency_key,
+        "expected_term": "0",
+        "operation": {
+            "kind": "acquire",
+            "consumer": consumer,
+            "consumer_epoch": "1",
+            "max_messages": 1,
+            "visibility_timeout_ms": "1000"
+        }
+    });
+    let (_, acquired) = post_to_leader(cluster, client, &acquire).await;
+    let result = operation_result(&acquired);
+    assert_eq!(result["kind"], "acquired");
+    assert_eq!(result["deliveries"].as_array().unwrap().len(), 1);
+    result["deliveries"][0]["lease_token"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+async fn extend_and_replay(
+    cluster: &RunningQueueCluster,
+    client: &reqwest::Client,
+    token: &str,
+) -> String {
+    let extend = json!({
+        "idempotency_key": "extend-1",
+        "expected_term": "0",
+        "operation": {
+            "kind": "extend_lease",
+            "consumer": "worker-b",
+            "consumer_epoch": "1",
+            "lease_token": token,
+            "extension_ms": "2000"
+        }
+    });
+    let (_, extended) = post_to_leader(cluster, client, &extend).await;
+    assert_eq!(
+        operation_result(&extended)["kind"],
+        "lease_extended",
+        "{extended}"
+    );
+    let renewed_token = operation_result(&extended)["lease_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (retry_status, replayed) = post_to_leader(cluster, client, &extend).await;
+    assert_eq!(retry_status, StatusCode::OK);
+    assert_eq!(replayed["receipt"]["disposition"], "replayed");
+    assert_eq!(operation_result(&replayed)["lease_token"], renewed_token);
+    renewed_token
+}
+
+async fn release(cluster: &RunningQueueCluster, client: &reqwest::Client, token: &str) {
+    let release = json!({
+        "idempotency_key": "release-1",
+        "expected_term": "0",
+        "operation": {
+            "kind": "release",
+            "consumer": "worker-b",
+            "consumer_epoch": "1",
+            "lease_token": token,
+            "delay_ms": "0",
+            "reason": "yield"
+        }
+    });
+    let (_, released) = post_to_leader(cluster, client, &release).await;
+    assert_eq!(operation_result(&released)["kind"], "released");
+}
+
+async fn nack(cluster: &RunningQueueCluster, client: &reqwest::Client, token: &str) {
+    let nack = json!({
+        "idempotency_key": "nack-1",
+        "expected_term": "0",
+        "operation": {
+            "kind": "nack",
+            "consumer": "worker-b",
+            "consumer_epoch": "1",
+            "lease_token": token,
+            "reason": "retry"
+        }
+    });
+    let (_, nacked) = post_to_leader(cluster, client, &nack).await;
+    assert_eq!(operation_result(&nacked)["kind"], "nacked");
+}
+
+async fn reject(cluster: &RunningQueueCluster, client: &reqwest::Client, token: &str) -> u64 {
+    let reject = json!({
+        "idempotency_key": "reject-1",
+        "expected_term": "0",
+        "operation": {
+            "kind": "reject",
+            "consumer": "worker-b",
+            "consumer_epoch": "1",
+            "lease_token": token,
+            "reason": "poison"
+        }
+    });
+    let (_, rejected) = post_to_leader(cluster, client, &reject).await;
+    let result = operation_result(&rejected);
+    assert_eq!(result["kind"], "dead_lettered");
+    result["dead_letter_history_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+async fn redrive(
+    cluster: &RunningQueueCluster,
+    client: &reqwest::Client,
+    dead_letter_history_id: u64,
+) {
+    let redrive = json!({
+        "idempotency_key": "redrive-1",
+        "expected_term": "0",
+        "operation": {
+            "kind": "redrive",
+            "message_id": "job-2",
+            "dead_letter_history_id": dead_letter_history_id.to_string()
+        }
+    });
+    let (_, redriven) = post_to_leader(cluster, client, &redrive).await;
+    assert_eq!(operation_result(&redriven)["kind"], "redriven");
+}
+
+async fn acknowledge(
+    cluster: &RunningQueueCluster,
+    client: &reqwest::Client,
+    idempotency_key: &str,
+    consumer: &str,
+    token: &str,
+) {
+    let acknowledge = json!({
+        "idempotency_key": idempotency_key,
+        "expected_term": "0",
+        "operation": {
+            "kind": "acknowledge",
+            "consumer": consumer,
+            "consumer_epoch": "1",
+            "lease_token": token
+        }
+    });
+    let (_, acknowledged) = post_to_leader(cluster, client, &acknowledge).await;
+    assert_eq!(operation_result(&acknowledged)["kind"], "acknowledged");
+}
+
+fn operation_result(document: &Value) -> &Value {
+    &document["receipt"]["outcome"]["result"]
 }
 
 async fn exercise_enqueue_acquire_ack(cluster: &RunningQueueCluster, client: &reqwest::Client) {
@@ -523,6 +791,12 @@ async fn exercise_enqueue_acquire_ack(cluster: &RunningQueueCluster, client: &re
         first["receipt"]["proposal_id"]
     );
 
+    let mut conflict = enqueue.clone();
+    conflict["operation"]["envelope"]["payload"] = json!({"id": 99});
+    let (conflict_status, conflict) = post_to_leader(cluster, client, &conflict).await;
+    assert_eq!(conflict_status, StatusCode::CONFLICT);
+    assert_eq!(conflict["error"]["code"], "idempotency_conflict");
+
     for node in &cluster.nodes {
         node.clock.set_wall_time_ms(500);
     }
@@ -543,8 +817,10 @@ async fn exercise_enqueue_acquire_ack(cluster: &RunningQueueCluster, client: &re
         .as_str()
         .unwrap()
         .to_owned();
-    let acknowledge = json!({
-        "idempotency_key": "ack-1",
+    acknowledge(cluster, client, "ack-1", "worker-a", &token).await;
+
+    let stale_ack = json!({
+        "idempotency_key": "stale-ack-1",
         "expected_term": "0",
         "operation": {
             "kind": "acknowledge",
@@ -553,11 +829,10 @@ async fn exercise_enqueue_acquire_ack(cluster: &RunningQueueCluster, client: &re
             "lease_token": token
         }
     });
-    let (_, acknowledged) = post_to_leader(cluster, client, &acknowledge).await;
-    assert_eq!(
-        acknowledged["receipt"]["outcome"]["result"]["kind"],
-        "acknowledged"
-    );
+    let (status, rejected) = post_to_leader(cluster, client, &stale_ack).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(rejected["outcome_certainty"], "committed");
+    assert_eq!(rejected["receipt"]["outcome"]["status"], "rejected");
 }
 
 async fn converged_digest(cluster: &RunningQueueCluster, client: &reqwest::Client) -> Value {
@@ -577,7 +852,7 @@ async fn converged_digest(cluster: &RunningQueueCluster, client: &reqwest::Clien
                     .json()
                     .await
                     .unwrap();
-                if status["applied_command_count"] == "3" {
+                if status["applied_command_count"] == "16" {
                     break status;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -585,8 +860,10 @@ async fn converged_digest(cluster: &RunningQueueCluster, client: &reqwest::Clien
         })
         .await
         .expect("every voter should profile-apply the acknowledged message");
-        assert_eq!(status["applied_command_count"], "3");
-        assert_eq!(status["counts"]["acknowledged"], "1");
+        assert_eq!(status["applied_command_count"], "16");
+        assert_eq!(status["counts"]["acknowledged"], "2");
+        assert_eq!(status["counts"]["dead_lettered"], "0");
+        assert_queue_read_routes(node, client).await;
         if let Some(reference) = &reference_digest {
             assert_eq!(&status["state_digest"], reference);
         } else {
@@ -614,8 +891,80 @@ async fn assert_rebuilt(
             .json()
             .await
             .unwrap();
-        assert_eq!(status["applied_command_count"], "3");
-        assert_eq!(status["counts"]["acknowledged"], "1");
+        assert_eq!(status["applied_command_count"], "16");
+        assert_eq!(status["counts"]["acknowledged"], "2");
+        assert_eq!(status["counts"]["dead_lettered"], "0");
         assert_eq!(&status["state_digest"], expected_digest);
+        assert_queue_read_routes(node, client).await;
     }
+}
+
+async fn assert_queue_read_routes(node: &RunningQueueNode, client: &reqwest::Client) {
+    let counts: Value = client
+        .get(
+            node.base_url
+                .join(EXPERIMENTAL_QUEUE_TABLET_COUNTS_PATH.trim_start_matches('/'))
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(counts["observation_scope"], "local");
+    assert_eq!(counts["counts"]["acknowledged"], "2");
+
+    let dead_letters: Value = client
+        .get(
+            node.base_url
+                .join(EXPERIMENTAL_QUEUE_TABLET_DEAD_LETTERS_PATH.trim_start_matches('/'))
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(dead_letters["records"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        dead_letters["records"][0]["dead_letter"]["message_id"],
+        "job-2"
+    );
+    assert!(dead_letters["records"][0]["history_id"].is_string());
+
+    let redrives: Value = client
+        .get(
+            node.base_url
+                .join(EXPERIMENTAL_QUEUE_TABLET_REDRIVES_PATH.trim_start_matches('/'))
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(redrives["records"].as_array().unwrap().len(), 1);
+    assert_eq!(redrives["records"][0]["message_id"], "job-2");
+    assert!(redrives["records"][0]["history_id"].is_string());
+
+    let proposal_id = queue_proposal_id_for(&scope(), "enqueue-1").unwrap();
+    let mutation: Value = client
+        .get(
+            node.base_url
+                .join(&format!(
+                    "experimental/v1/tablets/queue/mutations/{proposal_id}"
+                ))
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(mutation["state"], "committed");
+    assert_eq!(mutation["outcome_certainty"], "committed");
 }
