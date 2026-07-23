@@ -115,17 +115,17 @@ profile could appear ahead of the later consensus snapshot.
 Every mutation carries format version, tablet ID and epoch, resource name,
 idempotency key, leader-assigned `applied_at_ms`, and one typed operation:
 
-| Operation | Deterministic effect |
-| --- | --- |
-| `Enqueue` | Add or deduplicate one immutable envelope. |
-| `Acquire` | Advance a consumer epoch when allowed, select eligible messages, and create fenced leases before returning deliveries. |
-| `Acknowledge` | Terminally settle the exact current lease. |
-| `ExtendLease` | Replace the current token with one containing a strictly later, bounded deadline. |
-| `Release` | Return the message through the configured immediate or delayed retry path. |
-| `Nack` | Record a failure reason and apply deterministic retry/backoff or dead-letter policy. |
-| `Reject` | Move the leased message directly to dead-letter state. |
-| `Redrive` | Reactivate only the message whose current dead-letter history ID exactly matches. |
-| `Maintain` | Deterministically promote schedules and process lease, TTL, max-age, retry, and expiry boundaries. |
+| Operation | Operation fields | Deterministic effect |
+| --- | --- | --- |
+| `Enqueue` | `partition`, `envelope` | Add or deduplicate one immutable envelope. |
+| `Acquire` | `partition`, `consumer`, `consumer_epoch`, `max_messages`, optional `visibility_timeout_ms` | Advance a consumer epoch when allowed, select eligible messages, and create fenced leases before returning deliveries. |
+| `Acknowledge` | `partition`, `consumer`, `consumer_epoch`, `lease_token` | Terminally settle the exact current lease. |
+| `ExtendLease` | settlement fields plus `extension_ms` | Replace the current token with one containing a strictly later, bounded deadline. |
+| `Release` | settlement fields, `delay_ms`, optional `reason` | Return the message through the configured immediate or delayed retry path. |
+| `Nack` | settlement fields plus `reason` | Record a failure reason and apply deterministic retry/backoff or dead-letter policy. |
+| `Reject` | settlement fields plus `reason` | Move the leased message directly to dead-letter state. |
+| `Redrive` | `partition`, `message_id`, `dead_letter_history_id` | Reactivate only the message whose current dead-letter history ID exactly matches. |
+| `Maintain` | `partition` | Deterministically promote schedules and process lease, TTL, max-age, retry, and expiry boundaries. |
 
 Version 1 accepts only partition `0`. It rejects unknown fields, unsupported
 versions, non-canonical JSON, mismatched scope, and payloads above 512 KiB.
