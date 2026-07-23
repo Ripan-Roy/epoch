@@ -88,7 +88,13 @@ mutation lookup with deterministic time and leader/consumer-fenced leases.
 Real-runtime and container gates prove failover, exact renewal replay,
 convergence, and all-node `SIGKILL` recovery. It remains experimental, has no
 public SDK surface, and does not raise the standalone `local_durable` ceiling.
-See the [Queue tablet guide](docs/QUEUE_TABLET.md),
+
+The Cache profile now has a deterministic single-shard core for pure reads,
+checked revisions, CAS, atomic transactions, increment, expiry, and advisory
+fenced locks. It is not attached to `epoch-node` or EPRS yet and therefore does
+not claim replicated Cache availability or durability. See the
+[Cache tablet core guide](docs/CACHE_TABLET.md),
+[Queue tablet guide](docs/QUEUE_TABLET.md),
 [Stream tablet guide](docs/STREAM_TABLET.md),
 [probe guide](docs/CONSENSUS_PROBE.md), [spike report](docs/CONSENSUS_SPIKE.md),
 and proposed [ADR-0003](docs/adr/0003-consensus-adapter.md). An exhaustive crash

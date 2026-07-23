@@ -442,13 +442,14 @@ export function DocsPage({ section }: DocsPageProps) {
                 <div>
                   <p className="eyebrow">EXPERIMENTAL CLUSTER CORE</p>
                   <h2 id="cluster-milestone-title">
-                    Typed Stream and Queue tablets now cross real consensus.
+                    Stream and Queue cross consensus; Cache has a deterministic tablet core.
                   </h2>
                   <p>
                     These mutually exclusive, opt-in engineering profiles run on a separate, unauthenticated
                     listener. The public SDK quickstart above remains standalone and{" "}
                     <code>local_durable</code>; no SDK or public quorum contract is implied. Two durable
-                    voters are fixed-topology evidence, not multi-zone placement proof.
+                    voters are fixed-topology evidence, not multi-zone placement proof. The Cache tablet is
+                    core-only and is not mounted on that listener yet.
                   </p>
                 </div>
               </div>
@@ -594,6 +595,12 @@ export function DocsPage({ section }: DocsPageProps) {
                   title="Experimental replicated Queue"
                   description="Typed mutations, fenced leases, failover/redelivery, immutable DLQ/redrive history, and all-voter recovery."
                   href={`${repositoryDocsUrl}/QUEUE_TABLET.md`}
+                />
+                <ReferenceCard
+                  eyebrow="CACHE CORE"
+                  title="Experimental replicated Cache core"
+                  description="CAS, atomic transactions, checked expiry, exact replay, and advisory fenced-lock semantics before runtime attachment."
+                  href={`${repositoryDocsUrl}/CACHE_TABLET.md`}
                 />
               </div>
             </section>

@@ -7,6 +7,7 @@ rust-version.workspace = true
 authors.workspace = true
 
 [dependencies]
+epoch-cache = { path = "../epoch-cache" }
 epoch-core = { path = "../epoch-core" }
 epoch-queue = { path = "../epoch-queue" }
 epoch-stream = { path = "../epoch-stream" }

@@ -1,4 +1,9 @@
-//! Memory-first cache state machine.
+//! Memory-first Cache profile state machines.
+//!
+//! [`Cache`] is the original standalone volatile engine. [`CacheShard`] is an
+//! additive deterministic shard core for replicated tablet application; it
+//! provides pure observation, checked revisions, staged transactions, and
+//! canonical recovery evidence without changing the standalone path.
 //!
 //! Volatile operations deliberately have no dependency on the durable storage
 //! crate. A replicated/durable tablet adapter can persist deterministic
@@ -9,8 +14,21 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use epoch_core::{DurabilityProfile, EpochError, EpochResult};
 use serde::{Deserialize, Serialize};
 
+mod replicated;
+
+pub use replicated::{
+    CacheExpiryResult, CacheMutation, CacheMutationResult, CacheObservation, CacheShard,
+    CacheTransaction, CacheTransactionResult, MAX_CACHE_ATOMIC_OPERATIONS,
+    MAX_CACHE_MAINTENANCE_KEYS,
+};
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum CacheValue {
     String(String),
     Blob(Vec<u8>),
@@ -55,6 +73,7 @@ impl Default for CacheConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct SetOptions {
     pub ttl_ms: Option<u64>,
     pub expected_version: Option<u64>,

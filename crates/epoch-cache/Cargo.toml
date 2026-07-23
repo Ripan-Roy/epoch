@@ -9,7 +9,10 @@ authors.workspace = true
 [dependencies]
 epoch-core = { path = "../epoch-core" }
 serde.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true
-
