@@ -22,6 +22,8 @@ pub enum TabletError {
     ConflictingCommand { proposal_id: u64 },
     #[error("committed tablet commands are out of order: index {observed} follows {previous}")]
     CommitOrder { previous: u64, observed: u64 },
+    #[error("tablet command time regressed from {previous} to {observed}")]
+    AppliedTimeRegression { previous: u64, observed: u64 },
     #[error("tablet command could not be encoded: {0}")]
     Encoding(String),
     #[error("tablet command could not be decoded: {0}")]

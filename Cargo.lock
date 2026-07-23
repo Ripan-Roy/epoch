@@ -466,6 +466,7 @@ name = "epoch-tablet"
 version = "0.1.0-alpha.1"
 dependencies = [
  "epoch-core",
+ "epoch-queue",
  "epoch-stream",
  "serde",
  "serde_json",

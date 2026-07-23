@@ -1,10 +1,12 @@
 //! Typed, deterministic state machines applied only after consensus commit.
 //!
-//! The first slice is deliberately narrow: one configured, single-partition
-//! Stream tablet. It owns command validation, deterministic application,
-//! idempotency, and restart replay while the node owns transport and Raft.
+//! The current bounded slices are configured, single-partition Stream and
+//! Queue tablets. They own strict command validation, deterministic
+//! application, idempotency, and replay while the node owns transport and
+//! Raft. Only Stream is attached to the experimental node runtime today.
 
 mod common;
+mod queue;
 
 use std::collections::BTreeMap;
 
@@ -22,6 +24,7 @@ pub use common::{
     TabletError, TabletResult, TabletScope, TabletWriteEvidence as StreamTabletWriteEvidence,
     TabletWriteEvidence,
 };
+pub use queue::*;
 
 pub const STREAM_TABLET_COMMAND_FORMAT_VERSION: u16 = 1;
 // Kept equal to the current consensus proposal ceiling. The state-machine

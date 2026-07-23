@@ -8,6 +8,7 @@ authors.workspace = true
 
 [dependencies]
 epoch-core = { path = "../epoch-core" }
+epoch-queue = { path = "../epoch-queue" }
 epoch-stream = { path = "../epoch-stream" }
 serde.workspace = true
 serde_json.workspace = true
