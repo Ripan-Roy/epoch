@@ -466,6 +466,12 @@ history before the typed status route becomes ready. A live deterministic apply
 failure drains both listeners and exits the process. See
 [Experimental Stream Tablet](STREAM_TABLET.md).
 
+A strict Queue tablet command/receipt/state-machine contract now exists in
+`crates/epoch-tablet`, including fenced lease settlement and immutable
+DLQ/redrive history, but it has no node route or consensus applier yet. It is
+therefore not an additional experimental API. See
+[Replicated Queue Tablet Core](QUEUE_TABLET.md).
+
 Neither experimental mode is the final tablet service. Snapshots/compaction,
 retention deletion, dynamic membership, placement, read barriers, authenticated
 transport, public routing, and SDK support remain absent. The standalone engine
@@ -481,8 +487,9 @@ TLS/authentication metadata, typed `google.rpc.Status` details, public native
 mutation-status lookup, streaming credit, a Rust regional administration
 implementation, long-running operations, metrics on the reserved port, protocol
 gateways, full Go/Java/Python generated SDK parity and compatibility negotiation
-remain unimplemented. The experimental tablet has only the local mutation lookup
-described above. Typed Go, Java, and Python clients cover the provisional
+remain unimplemented. The experimental Stream tablet has only the local
+mutation lookup described above; the Queue tablet has no listener. Typed Go,
+Java, and Python clients cover the provisional
 standalone profile HTTP routes, including explicit local Stream and Queue
 durability; they do not cover the experimental tablet listener. All three use
 injectable transport boundaries and run against the real standalone node;

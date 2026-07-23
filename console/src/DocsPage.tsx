@@ -584,6 +584,12 @@ export function DocsPage({ section }: DocsPageProps) {
                   description="Typed command, fixed-voter majority, failover, idempotency, and all-voter recovery boundary."
                   href={`${repositoryDocsUrl}/STREAM_TABLET.md`}
                 />
+                <ReferenceCard
+                  eyebrow="QUEUE CORE"
+                  title="Replicated Queue tablet"
+                  description="Fenced leases, deterministic time, recorded outcomes, and immutable DLQ/redrive history boundary."
+                  href={`${repositoryDocsUrl}/QUEUE_TABLET.md`}
+                />
               </div>
             </section>
           </article>

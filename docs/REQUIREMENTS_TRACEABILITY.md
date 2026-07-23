@@ -131,12 +131,12 @@ and performance. See [Consensus Feasibility Spike](CONSENSUS_SPIKE.md) and
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
-| QUEUE-001 | P0 | Competing consumers and delivery transitions | M1 prototype → M2 | Slice | G0, G2, G4 | Multi-segment lifecycle restart + failed-settlement isolation; pending: replicated concurrent history check |
-| QUEUE-002 | P0 | Renewable visibility/acquisition lease | M1 prototype → M2 | Slice | G0, G2, G3, G4 | Restart preserves extended lease/token + stale-token unit; pending: monotonic/leader fault suite |
+| QUEUE-001 | P0 | Competing consumers and delivery transitions | M1 prototype → M2 | Slice | G0, G2, G4 | Multi-segment lifecycle restart plus cloned Queue-tablet rejection rollback and identical three-instance enqueue/acquire/reject/redrive/Ack history; pending: real replicated concurrent history |
+| QUEUE-002 | P0 | Renewable visibility/acquisition lease | M1 prototype → M2 | Slice | G0, G2, G3, G4 | Restart preserves extended lease/token; Queue-tablet exact renewed-token replay, exclusive deadline, consumer epoch, old/new leader-term fencing; pending: actor/process fault suite |
 | QUEUE-003 | P0 | Durability-aware publisher confirmation | M1 prototype → M2 | Slice | G0, G2, G3 | Local-durable receipt + injected fsync enqueue/settlement tests; pending: quorum acknowledgement matrix |
-| QUEUE-004 | P0 | Delayed and scheduled messages | M1 prototype → M2 | Slice | G0, G2, G4 | Scheduled state restart/promotion test; pending: schedule precision load report |
-| QUEUE-005 | P0 | Retry/backoff/jitter/attempt-age policy | M1 prototype → M2 | Slice | G0, G2, G4 | Deterministic retry/dead-letter unit suite + maintenance journal replay; pending: broader policy corpus |
-| QUEUE-006 | P0 | Provenance-rich DLQ and redrive | M1 prototype → M2 | Slice | G2, G4, G5 | Reject/redrive restart + duplicate-lease regression; pending: audited provenance history |
+| QUEUE-004 | P0 | Delayed and scheduled messages | M1 prototype → M2 | Slice | G0, G2, G4 | Scheduled restart/promotion plus Queue-tablet monotonic time and TTL/max-age-over-readiness histories; pending: actor timer and precision load report |
+| QUEUE-005 | P0 | Retry/backoff/jitter/attempt-age policy | M1 prototype → M2 | Slice | G0, G2, G4 | Deterministic retry/dead-letter journal replay plus non-zero jitter and terminal-boundary convergence across three Queue tablets; pending: broader policy corpus/process faults |
+| QUEUE-006 | P0 | Provenance-rich DLQ and redrive | M1 prototype → M2 | Slice | G2, G4, G5 | Restart/duplicate-lease regressions plus immutable source-proposal DLQ/redrive history and stale-history fencing in Queue tablet; pending: API authorization/audit export and replicated process proof |
 | QUEUE-007 | P1 | TTL, queue expiry, capacity and overflow | M3 | Planned | G0, G2, G4 | Pending: lifecycle/capacity boundary suite |
 | QUEUE-008 | P1 | FIFO sessions and renewable lock | M5 | Planned | G0, G2, G3, G4 | Pending: per-session order/fencing history |
 | QUEUE-009 | P1 | Dedupe identifier and window | M5 | Planned | G0, G2, G7 | Pending: restart/window suppression suite |

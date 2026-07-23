@@ -71,6 +71,15 @@ profile recovery after all voters receive `SIGKILL`. This mode is documented in
 [Experimental Stream Tablet](STREAM_TABLET.md); it remains separate from the
 public API and SDKs.
 
+The next profile application layer is implemented at crate level in
+`crates/epoch-tablet`: a strict single-partition Queue command/state machine
+with authoritative leader/consumer fencing, monotonic applied time, recorded
+business outcomes, exact renewal replay, and immutable DLQ/redrive history.
+Three-instance tests prove deterministic application of an already committed
+history. The consensus actor, EPRS startup replay, listener, and
+process/container failover gates for Queue remain pending; see
+[Replicated Queue Tablet Core](QUEUE_TABLET.md).
+
 ## Processing contract
 
 ```mermaid

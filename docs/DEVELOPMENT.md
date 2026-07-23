@@ -305,6 +305,9 @@ separate local diagnostic listeners replicate opaque probe bytes; see
 routes with the bounded typed Stream milestone described in
 [Experimental Stream Tablet](STREAM_TABLET.md). The two experimental modes are
 mutually exclusive, and neither changes the public API or SDK guarantee ceiling.
+The next Queue profile state machine exists only inside `epoch-tablet`; it has
+no environment flag or listener yet. See
+[Replicated Queue Tablet Core](QUEUE_TABLET.md).
 
 To discard local data, explicitly add `--volumes` to the Compose down command.
 That is destructive and is intentionally not part of the Make target.
