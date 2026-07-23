@@ -394,10 +394,13 @@ Engines depend on an injectable clock and never call wall time directly. The
 clock exposes wall time for user schedules, monotonic elapsed time for local
 timers, and a persisted hybrid logical clock for ordered state transitions.
 
-Clock observations never move backward. Forward or backward wall-clock
-anomalies are clamped or slewed and emit an operational event. Scheduled work
-may be conservatively late during an anomaly; it must not be acknowledged early
-because a clock jumped.
+Raw wall-clock observations may move in either direction. Process-local
+monotonic time must not move backward, and persisted logical or effective
+state-machine time must not regress in committed order. The current Queue
+tablet clamps each command's candidate time to its prior committed effective
+time. The broader design still requires clock-anomaly uncertainty handling,
+slewing, and operational events. Scheduled work may be conservatively late
+during an anomaly; it must not be acknowledged early because a clock jumped.
 
 Leadership, producer ownership, consumer sessions, queue leases, and transaction
 coordinators use monotonic epochs. Every mutation includes the relevant fence;

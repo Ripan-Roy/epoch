@@ -52,16 +52,18 @@ rotation, checksummed v1 frames, single-writer ownership, global sequence
 validation, manifest-bounded active-suffix repair, restart replay, durable
 identity/topology checks, and crash-safe fresh-layout activation. Existing valid
 single-file journals remain on the legacy writer and are not migrated. G2
-remains open because snapshots, durable index rebuild, compaction, retention,
-and replicated recovery are not implemented.
+remains open because profile snapshots, durable index rebuild, compaction,
+retention, and general production replica recovery are not implemented. The
+bounded EPRS and typed-profile recovery evidence is tracked separately below.
 
 The shared clock now distinguishes wall and process-local monotonic time, and
 hybrid-logical-clock tests cover backward wall jumps, remote observations,
-persisted continuation, and overflow. Durable timer indexes, uncertainty
-handling, leader ownership, and restart/failover integration remain open G2/G3
-work.
+persisted continuation, and overflow. General durable timer indexes,
+uncertainty handling, automatic leader ownership, and cross-profile
+restart/failover integration remain open G2/G3 work; the Queue-specific bounded
+evidence appears below.
 
-The Stage 1 consensus slice supplies partial adapter and local stable-store
+The Stage 2 consensus slice supplies partial adapter and local stable-store
 evidence: a fixed three-voter `raft-rs` group uses Epoch-owned types, bounded
 versioned peer frames, restart-reconstructed proposal lookup, exact-duplicate
 suppression, conflicting-payload fail-stop, SHA-256 applied-history digests,
@@ -76,16 +78,18 @@ three-process smoke proves minority non-commit, partition healing, identical
 receipts/digests, and one-voter plus all-voter `SIGKILL`/same-path reopen without
 duplicate receipt publication. An opt-in node runtime adds bounded real HTTP
 transport and opaque diagnostic status/propose/lookup endpoints. A mutually
-exclusive experimental mode now applies one typed, single-partition Stream
-tablet after commit, rebuilds it from the complete proposal history before
-readiness, returns two-durable-voter evidence, and passes minority non-commit,
-leader-rebinding, catch-up, exact-retry, and all-container `SIGKILL`/reopen
-gates. Public product
+exclusive experimental profile mode now applies either one typed,
+single-partition Stream or Queue tablet after commit and rebuilds it from the
+complete proposal history before readiness. Both return bounded
+two-durable-voter evidence. The executable gates cover minority non-commit,
+leader rebinding, Stream ordering, Queue lease fencing/redelivery/DLQ, catch-up,
+exact retry, convergence, and all-container `SIGKILL`/reopen. Public product
 profiles remain standalone. G3 remains open for the exhaustive crash matrix,
 snapshots, membership and authoritative epoch transitions, read barriers,
 authenticated transport, placement/repair, model and chaos reports, density,
-and performance. See [Consensus Feasibility Spike](CONSENSUS_SPIKE.md) and
-[Experimental Stream Tablet](STREAM_TABLET.md).
+and performance. See [Consensus Feasibility Spike](CONSENSUS_SPIKE.md),
+[Experimental Stream Tablet](STREAM_TABLET.md), and
+[Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
 ## Cache and State
 

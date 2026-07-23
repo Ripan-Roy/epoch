@@ -205,6 +205,7 @@ Run the persistent consensus process smoke directly with:
 make test-consensus-process
 make test-consensus-probe
 make test-stream-tablet
+make test-queue-tablet
 ```
 
 `test-consensus-process` is ignored by Cargo's default suite so it cannot run
@@ -290,9 +291,10 @@ the data directory into a named volume, asserts that a small configured rotation
 threshold creates multiple files under `engine-wal/`, and repeats Stream and
 Queue recovery after replacing the running container.
 
-These tests are segmented-journal evidence only. Snapshot restore, compaction,
-retention deletion, replica recovery, and quorum acknowledgement remain future
-test gates.
+These standalone tests are segmented-journal evidence only. Snapshot restore,
+compaction, retention deletion, and production placement-aware replica recovery
+and quorum acknowledgement remain future gates; the bounded typed Stream/Queue
+fixed-voter evidence is described separately above.
 
 ### 4. History and consistency checking
 

@@ -61,13 +61,14 @@ The evidence now also includes a three-child-process partition and
 `SIGKILL`/same-path-reopen smoke, plus an opt-in `epoch-node` runtime with a
 dedicated actor, bounded ordered HTTP transport, and a static three-container
 topology. Its default mode commits opaque diagnostic bytes. A mutually exclusive
-experimental mode attaches one single-partition Stream state machine, applies
-canonical typed commands after fixed-voter majority commit, and rebuilds that
-state from committed EPRS history before readiness. The typed receipt reports
-only bounded `fixed_voter_majority_persisted` evidence; it is not the public,
-placement-aware `quorum_durable` profile. See
-[Experimental Consensus Probe](../CONSENSUS_PROBE.md) and
-[Experimental Stream Tablet](../STREAM_TABLET.md).
+experimental profile mode attaches either one single-partition Stream or Queue
+state machine, applies canonical typed commands after fixed-voter majority
+commit, and rebuilds that state from committed EPRS history before readiness.
+The typed receipts report only bounded `fixed_voter_majority_persisted`
+evidence; this is not the public, placement-aware `quorum_durable` profile. See
+[Experimental Consensus Probe](../CONSENSUS_PROBE.md),
+[Experimental Stream Tablet](../STREAM_TABLET.md), and
+[Experimental Replicated Queue Tablet](../QUEUE_TABLET.md).
 
 This work does not accept the ADR. A runnable node can use the adapter only
 through the explicitly experimental opaque or typed listener modes; the public

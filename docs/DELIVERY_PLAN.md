@@ -99,7 +99,7 @@ the reusable kernel sub-slice. Consensus, storage, process lifecycle, and
 profile history runners must integrate it before the M1 simulation or emulator
 exit evidence is met.
 
-The Stage 1 consensus spike uses that kernel for a fixed three-voter `raft-rs`
+The Stage 2 consensus spike uses that kernel for a fixed three-voter `raft-rs`
 adapter. Its tests cover majority-only commit, isolated leader replacement and
 catch-up, directed partitions, delayed/reordered and duplicate delivery,
 proposal reconstruction/deduplication, leader transfer, bounded peer frames,
@@ -112,16 +112,18 @@ minority commit, heals and compares all receipts/digests, then sends `SIGKILL`
 to one and all voters before reopening the same EPRS paths without duplicate
 receipt publication. An opt-in node runtime and three-container topology add a
 dedicated bounded HTTP transport. Its default mode carries opaque diagnostic
-proposals; a mutually exclusive experimental mode applies canonical commands to
-one single-partition Stream after fixed-voter majority commit and rebuilds it
-from EPRS history. That typed receipt is bounded fixed-topology evidence, not a
-public or placement-aware quorum-durable acknowledgement, and all public profile
-APIs remain standalone. Exhaustive crash points, snapshots, membership and
+proposals; mutually exclusive experimental profile modes apply canonical
+commands to either one single-partition Stream or Queue after fixed-voter
+majority commit and rebuild it from EPRS history. Those typed receipts are
+bounded fixed-topology evidence, not a public or placement-aware quorum-durable
+acknowledgement, and all public profile APIs remain standalone. Exhaustive crash
+points, snapshots, membership and
 authoritative epoch transitions, read barriers, authenticated transport,
 placement, broader profile/tablet integration, and model/chaos reports remain
 required for the metadata/replication work package and G3. See
-[Consensus Feasibility Spike](CONSENSUS_SPIKE.md) and
-[Experimental Stream Tablet](STREAM_TABLET.md).
+[Consensus Feasibility Spike](CONSENSUS_SPIKE.md),
+[Experimental Stream Tablet](STREAM_TABLET.md), and
+[Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
 The Queue application core now runs behind the same profile-neutral persistent
 actor boundary. It deterministically applies strict single-partition commands,

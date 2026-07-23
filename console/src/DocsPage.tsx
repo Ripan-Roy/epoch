@@ -441,12 +441,14 @@ export function DocsPage({ section }: DocsPageProps) {
                 <span>04</span>
                 <div>
                   <p className="eyebrow">EXPERIMENTAL CLUSTER CORE</p>
-                  <h2 id="cluster-milestone-title">One typed Stream tablet now crosses real consensus.</h2>
+                  <h2 id="cluster-milestone-title">
+                    Typed Stream and Queue tablets now cross real consensus.
+                  </h2>
                   <p>
-                    This opt-in engineering milestone runs on a separate, unauthenticated listener. The public
-                    SDK quickstart above remains standalone and <code>local_durable</code>; no SDK or public
-                    quorum contract is implied. Its two durable voters are fixed-topology evidence, not
-                    multi-zone placement proof.
+                    These mutually exclusive, opt-in engineering profiles run on a separate, unauthenticated
+                    listener. The public SDK quickstart above remains standalone and{" "}
+                    <code>local_durable</code>; no SDK or public quorum contract is implied. Two durable
+                    voters are fixed-topology evidence, not multi-zone placement proof.
                   </p>
                 </div>
               </div>
@@ -454,12 +456,12 @@ export function DocsPage({ section }: DocsPageProps) {
                 <article>
                   <span>MAJORITY</span>
                   <strong>Two of three voters persist before typed success.</strong>
-                  <p>The receipt separates the Raft commit index from the logical Stream offset.</p>
+                  <p>Stream reports its logical offset; Queue records the exact fenced operation outcome.</p>
                 </article>
                 <article>
                   <span>FAILOVER</span>
-                  <strong>A replacement leader appends the next offset.</strong>
-                  <p>The stopped voter rejoins, catches up, and applies each command once.</p>
+                  <strong>A replacement leader preserves ordering and fences stale Queue leases.</strong>
+                  <p>The stopped voter rejoins, catches up, and each profile applies every command once.</p>
                 </article>
                 <article>
                   <span>RECOVERY</span>

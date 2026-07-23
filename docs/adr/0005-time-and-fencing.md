@@ -69,12 +69,18 @@ moving elapsed time backwards and saturates instead of wrapping. A serializable
 `HybridTimestamp` and deterministic `HybridLogicalClock` implement local ticks,
 remote observation, persisted restart state, and explicit overflow failure.
 
+The fixed-voter consensus adapter now exercises leader transfer and replacement.
+Its Queue tablet captures a server-side candidate time before proposal, then
+derives `max(candidate, prior committed effective time)` on every voter and
+during EPRS replay. Tests cover wall-clock rollback, descending assignments in
+committed order, time-dependent lease deadlines, and identical live/recovered
+digests.
+
 This is partial evidence for the decision, not the completed distributed time
 contract. Existing standalone profile commands still record wall-time apply
-instants, and no leader transfer exists yet. Clock-anomaly clamping/slewing,
-audit events, persisted HLC integration in durable commands, leader-epoch timer
-ownership, and failover uncertainty behavior remain gates for the replicated
-runtime.
+instants. General clock-anomaly clamping/slewing, audit events, persisted HLC
+integration in durable commands, automatic leader-owned timer proposal, and a
+complete failover-uncertainty policy remain gates for the replicated runtime.
 
 ## Required verification
 
