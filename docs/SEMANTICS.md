@@ -383,21 +383,25 @@ task. The receipt names this as bounded fixed-voter evidence, not the PRD's
 zone-aware quorum profile. It remains intentionally separate from the public
 standalone API, which continues to reject quorum durability.
 
-The same tablet crate now implements a separate, single-partition Queue state
-machine over the shared committed-command substrate. Given the same ordered
-history, independent instances reproduce fenced acquire/settlement, monotonic
-consumer epochs and applied time, retry/schedule/expiry transitions, recorded
-business rejections, exact renewed-token replay, immutable DLQ/redrive history,
-and one state digest. The Queue core is not attached to the node or consensus
-actor yet, so it adds no runnable clustered Queue mode and raises no public
-durability claim. See [Replicated Queue Tablet Core](QUEUE_TABLET.md).
+The same persistent actor can instead mount a separate, single-partition Queue
+state machine over the shared committed-command substrate. Given the same
+ordered history, independent voters reproduce fenced acquire/settlement,
+monotonic consumer epochs and applied time, retry/schedule/expiry transitions,
+recorded business rejections, exact renewed-token replay, immutable DLQ/redrive
+history, and one state digest. Effective Queue time is the maximum of each
+command's server-assigned candidate and the prior committed effective time, so
+an uncommitted entry retained across leader failover cannot make later replay
+regress or fail-stop. EPRS recovery completes before its internal
+typed listener becomes ready. This remains a bounded experimental mode and
+raises no public durability claim. See
+[Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
 Epoch does **not** yet provide a public clustered durability contract, regional
 catalog/placement, distributed membership fencing, persisted profile snapshots,
 consumer-group coordination, bounded transactions, object tier, geo replication,
 native Protobuf services, compatibility gateways, durable webhook delivery,
 connector execution, or the security controls in [SECURITY.md](SECURITY.md).
-The experimental Stream tablet and crate-level Queue tablet also lack a read
+The experimental Stream and Queue tablets also lack a read
 barrier, authenticated transport, multiple partitions/tablets, and bounded
 idempotency retention. See [STREAM_TABLET.md](STREAM_TABLET.md) and
 [QUEUE_TABLET.md](QUEUE_TABLET.md).

@@ -1,15 +1,15 @@
 # Consensus Feasibility Spike
 
-**Status:** Stage 2 typed single-Stream-tablet integration; still not a public product replication mode
+**Status:** Stage 2 typed Stream- and Queue-tablet integration; still not a public product replication mode
 
 **Decision:** [ADR-0003](adr/0003-consensus-adapter.md) remains Proposed
 
 This document records exactly what the current Epoch consensus slices prove
 and, more importantly, what they do not prove. The public node profiles remain
 standalone-only and reject replicated-memory, quorum, and geo durability. An
-opt-in diagnostic probe and a mutually exclusive typed Stream-tablet mode run
-on the dedicated experimental listener without changing that public guarantee
-ceiling.
+opt-in diagnostic probe and mutually exclusive typed Stream- or Queue-tablet
+modes run on the dedicated experimental listener without changing that public
+guarantee ceiling.
 
 ## Implemented boundary
 
@@ -71,14 +71,15 @@ profile recovery after all voters receive `SIGKILL`. This mode is documented in
 [Experimental Stream Tablet](STREAM_TABLET.md); it remains separate from the
 public API and SDKs.
 
-The next profile application layer is implemented at crate level in
-`crates/epoch-tablet`: a strict single-partition Queue command/state machine
-with authoritative leader/consumer fencing, monotonic applied time, recorded
-business outcomes, exact renewal replay, and immutable DLQ/redrive history.
-Three-instance tests prove deterministic application of an already committed
-history. The consensus actor, EPRS startup replay, listener, and
-process/container failover gates for Queue remain pending; see
-[Replicated Queue Tablet Core](QUEUE_TABLET.md).
+The Queue profile now crosses the same boundary: a strict single-partition
+command/state machine with authoritative leader/consumer fencing, monotonic
+server-assigned time, recorded business outcomes, exact renewal replay, and
+immutable DLQ/redrive history is attached to the actor. EPRS replay completes
+before readiness, and an internal typed listener exposes mutation resolution
+and stale-capable reads. Real-runtime and three-container gates prove active
+leader loss, old-term lease rejection, conservative redelivery, convergence,
+and all-node `SIGKILL` recovery; see
+[Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
 ## Processing contract
 
@@ -166,7 +167,8 @@ This slice does not provide:
 - a linearizable read barrier;
 - mutually authenticated, encrypted, batched production transport;
 - public engine routing, CLI, SDK, or public health integration; the typed
-  Stream milestone is confined to the explicitly experimental listener;
+  Stream and Queue milestones are confined to the explicitly experimental
+  listener;
 - bounded proposal-history memory or a configured idempotency-retention window;
 - segment rotation, a committed-length manifest, arbitrary post-sync
   truncation detection, authenticated anti-rollback evidence, backup generation
@@ -200,6 +202,7 @@ cargo test --locked -p epoch-consensus --test multiprocess persistent_three_node
 cargo test --locked -p epoch-node --all-targets
 docker compose -f deploy/compose/docker-compose.consensus-probe.yml config --quiet
 make test-stream-tablet
+make test-queue-tablet
 cargo clippy --locked -p epoch-consensus --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked -p epoch-consensus --all-features --no-deps
 cargo audit --deny warnings --ignore RUSTSEC-2025-0057

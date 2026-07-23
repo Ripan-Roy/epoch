@@ -1,18 +1,22 @@
 # Experimental Consensus Probe
 
 The consensus probe is an opt-in process/runtime integration for Epoch's
-fixed-three-voter persistent Raft adapter. It replicates opaque diagnostic
-payloads only. Cache, Stream, Queue, and Event Bus APIs remain independent
-standalone engines with a `local_durable` guarantee ceiling.
+fixed-three-voter persistent Raft adapter. Its default mode replicates opaque
+diagnostic payloads. Mutually exclusive opt-in modes can instead attach one
+typed, single-partition Stream or Queue tablet. Public Cache, Stream, Queue,
+and Event Bus APIs remain independent standalone engines with a `local_durable`
+guarantee ceiling.
 
 This surface exists to exercise process lifecycle, real HTTP peer delivery,
 EPRS recovery, election, and proposal lookup without claiming that product
 profile replication is complete.
 
 Setting `EPOCH_EXPERIMENTAL_STREAM_TABLET_ENABLED=true` replaces the opaque
-proposal routes with the first typed profile milestone on the same group. The
-two modes are intentionally mutually exclusive; see
-[Experimental Stream Tablet](STREAM_TABLET.md).
+proposal routes with the typed Stream milestone on the same group. Setting
+`EPOCH_EXPERIMENTAL_QUEUE_TABLET_ENABLED=true` instead mounts the typed Queue
+milestone. Opaque, Stream, and Queue modes are intentionally mutually
+exclusive; see [Experimental Stream Tablet](STREAM_TABLET.md) and
+[Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
 ## Start three local containers
 
@@ -94,6 +98,10 @@ Set `EPOCH_CONSENSUS_PROBE_ENABLED=true` and provide the following values to
 | `EPOCH_CONSENSUS_LISTEN` | Dedicated internal HTTP listener; defaults to `127.0.0.1:7701` |
 | `EPOCH_CONSENSUS_PEERS` | Exactly three `node_id=http://authority` entries |
 | `EPOCH_CONSENSUS_TICK_MS` | Tick interval from 10 ms through 60 seconds; defaults to 100 ms |
+| `EPOCH_EXPERIMENTAL_STREAM_TABLET_ENABLED` | Mount the typed Stream profile instead of opaque routes; defaults to `false` |
+| `EPOCH_EXPERIMENTAL_STREAM_TABLET_NAME` | Resource name for the typed Stream profile |
+| `EPOCH_EXPERIMENTAL_QUEUE_TABLET_ENABLED` | Mount the typed Queue profile instead of opaque routes; defaults to `false` |
+| `EPOCH_EXPERIMENTAL_QUEUE_TABLET_NAME` | Resource name for the typed Queue profile |
 
 Each node stores its stable journal at
 `$EPOCH_DATA_DIR/consensus/group-{group_id}/node-{node_id}.wal`. Configuration
@@ -114,8 +122,9 @@ retains its explicit origin allowlist.
 
 The probe has static membership, plaintext unauthenticated transport, one
 fixed group, no snapshot installation, no compaction, no read barrier, no
-catalog-authorized epoch transition, and no profile state-machine integration.
-Status therefore always reports:
+catalog-authorized epoch transition, and no public or production profile
+integration. The typed Stream and Queue modes are bounded internal milestones,
+not a public durability contract. Default opaque-mode status reports:
 
 ```json
 {

@@ -1,7 +1,9 @@
 //! Native HTTP surface for the standalone Epoch node.
 
 pub mod consensus;
+pub mod queue_tablet;
 pub mod stream_tablet;
+mod tablet_http;
 
 use std::{sync::Arc, time::Duration};
 

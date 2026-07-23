@@ -1,18 +1,21 @@
-# Replicated Queue Tablet Core
+# Experimental Replicated Queue Tablet
 
-**Status:** Deterministic crate-level state machine; not wired to a node runtime
-or public API
+**Status:** Working opt-in fixed-three-voter runtime and internal typed HTTP API;
+experimental and not production-ready
 
 `crates/epoch-tablet` now contains the profile application boundary for one
-configured, single-partition Work Queue tablet. It proves how an already
-committed history can drive Queue delivery, fencing, retries, dead-lettering,
-and replay deterministically. It does not yet prove that the node can propose,
-replicate, recover, or serve those commands.
+configured, single-partition Work Queue tablet. `epoch-node` now attaches that
+profile to the persistent consensus actor, proposes typed mutations, rebuilds
+the profile from EPRS before readiness, and serves a bounded internal HTTP API.
+This is a real replicated milestone, not the final public Queue service.
 
 ## Implemented boundary
 
 ```text
-caller-supplied committed command
+strict typed HTTP mutation
+  -> deterministic scoped proposal ID and leader-assigned time
+  -> fixed-three-voter persistent Raft proposal
+  -> actor-owned committed proposal application
   -> strict canonical QueueTabletCommand v1 decode
   -> scope, order, proposal, and applied-time validation
   -> deterministic Queue transition on a cloned candidate state
@@ -26,33 +29,106 @@ caller-supplied committed command
 - `epoch-tablet` owns committed-command validation, scoped idempotency,
   consumer epochs, authoritative lease-fence derivation, immutable dead-letter
   and redrive history, receipts, and the replicated state digest.
-- `epoch-consensus` remains profile-neutral. No Queue applier is attached to its
-  actor yet.
-- `epoch-node` still serves only the standalone volatile and `local_durable`
-  Queue APIs. There is no experimental Queue listener, HTTP route, container
-  mode, CLI surface, or SDK surface for this tablet.
+- `epoch-consensus` remains profile-neutral. `epoch-node` supplies a Queue
+  `CommittedProposalApplier`; recovery replays the complete applied proposal
+  history before the runtime reports ready, and live application stays on the
+  consensus actor thread.
+- `epoch-node` exposes the typed Queue routes only on the separately configured
+  internal consensus listener. The standalone volatile/`local_durable` API,
+  CLI, and Go/Java/Python SDKs remain separate compatibility paths.
 
 The embedded Queue is forced to `volatile` because the containing consensus
 history, not a second profile WAL, is intended to own clustered persistence.
-At this milestone the crate accepts a `CommittedCommand`; it does not itself
-establish that the command was committed or persisted.
+The tablet crate still accepts only a `CommittedCommand`; the node/consensus
+boundary establishes the bounded fixed-voter persistence evidence before it
+invokes the tablet.
+
+## Runtime selection and typed routes
+
+Queue mode requires the consensus runtime and is mutually exclusive with Stream
+mode for one fixed group:
+
+```shell
+export EPOCH_CONSENSUS_PROBE_ENABLED=true
+export EPOCH_EXPERIMENTAL_QUEUE_TABLET_ENABLED=true
+export EPOCH_EXPERIMENTAL_QUEUE_TABLET_NAME=jobs
+```
+
+The existing `EPOCH_CONSENSUS_NODE_ID`, group ID/epoch, peer list, internal
+listen address, and stable data path configure the three voters. Opaque
+proposal routes are not mounted while a typed profile is selected.
+
+| Method and path | Contract |
+| --- | --- |
+| `GET /experimental/v1/tablets/queue/status` | Local role/leader/term, consensus and profile positions, applied time/count, Queue counts, and state digest. |
+| `POST /experimental/v1/tablets/queue/mutations` | Submit one strict typed operation with `idempotency_key` and `expected_term`. |
+| `GET /experimental/v1/tablets/queue/mutations/{proposal_id}` | Resolve the local observation as `unknown`, `pending`, or `committed`. |
+| `GET /experimental/v1/tablets/queue/counts` | Read stale-capable local profile counts without advancing time. |
+| `GET /experimental/v1/tablets/queue/dead-letters?limit=100` | Read immutable dead-letter history; limit is 1–1,000. |
+| `GET /experimental/v1/tablets/queue/redrives?limit=100` | Read immutable redrive history; limit is 1–1,000. |
+
+The mutation body carries no client timestamp:
+
+```json
+{
+  "idempotency_key": "send-42",
+  "expected_term": "7",
+  "operation": {
+    "kind": "enqueue",
+    "partition": 0,
+    "envelope": {
+      "id": "job-42",
+      "source": "example",
+      "type": "job.created",
+      "time_ms": "1784775000000",
+      "payload": {"job": 42}
+    }
+  }
+}
+```
+
+`operation.kind` accepts `enqueue`, `acquire`, `acknowledge`, `extend_lease`,
+`release`, `nack`, `reject`, `redrive`, and `maintain`, with the fields listed in
+the command table below. All 64-bit HTTP inputs accept either an unsigned JSON
+number or an exact decimal string. Every 64-bit output is a decimal string.
+Unknown top-level, operation, or nested envelope fields are rejected.
+
+The internal listener has no CORS, TLS, authentication, authorization, or SDK
+compatibility commitment. It must not be exposed to untrusted networks. The
+public standalone listener retains its truthful `local_durable` ceiling.
+
+Writes serialize per node to make time assignment and local request handling
+deterministic. The node chooses
+`max(local_wall_time_ms, last_applied_time_ms)` before proposal; replicas never
+sample clocks while applying. The state machine also clamps each committed
+command to the prior committed effective time. This log-order rule covers an
+earlier pending entry that survives failover before a lower-clock leader's
+entry. A bounded wait returns `202` with local
+`unknown`/`pending` state when commitment is unresolved. Exact semantic retries
+return `200` and disposition `replayed`; a new submission returns `201` even
+when its committed business outcome is `rejected`. `not_leader`, stale-term,
+and idempotency-conflict responses retain globally unknown outcome certainty.
+
+Reads are local, stale-capable, and never propose maintenance. Status samples
+the profile before asking the actor for consensus status and fails closed if the
+profile could appear ahead of the later consensus snapshot.
 
 ## Strict command contract
 
 Every mutation carries format version, tablet ID and epoch, resource name,
 idempotency key, leader-assigned `applied_at_ms`, and one typed operation:
 
-| Operation | Deterministic effect |
-| --- | --- |
-| `Enqueue` | Add or deduplicate one immutable envelope. |
-| `Acquire` | Advance a consumer epoch when allowed, select eligible messages, and create fenced leases before returning deliveries. |
-| `Acknowledge` | Terminally settle the exact current lease. |
-| `ExtendLease` | Replace the current token with one containing a strictly later, bounded deadline. |
-| `Release` | Return the message through the configured immediate or delayed retry path. |
-| `Nack` | Record a failure reason and apply deterministic retry/backoff or dead-letter policy. |
-| `Reject` | Move the leased message directly to dead-letter state. |
-| `Redrive` | Reactivate only the message whose current dead-letter history ID exactly matches. |
-| `Maintain` | Deterministically promote schedules and process lease, TTL, max-age, retry, and expiry boundaries. |
+| Operation | Operation fields | Deterministic effect |
+| --- | --- | --- |
+| `Enqueue` | `partition`, `envelope` | Add or deduplicate one immutable envelope. |
+| `Acquire` | `partition`, `consumer`, `consumer_epoch`, `max_messages`, optional `visibility_timeout_ms` | Advance a consumer epoch when allowed, select eligible messages, and create fenced leases before returning deliveries. |
+| `Acknowledge` | `partition`, `consumer`, `consumer_epoch`, `lease_token` | Terminally settle the exact current lease. |
+| `ExtendLease` | settlement fields plus `extension_ms` | Replace the current token with one containing a strictly later, bounded deadline. |
+| `Release` | settlement fields, `delay_ms`, optional `reason` | Return the message through the configured immediate or delayed retry path. |
+| `Nack` | settlement fields plus `reason` | Record a failure reason and apply deterministic retry/backoff or dead-letter policy. |
+| `Reject` | settlement fields plus `reason` | Move the leased message directly to dead-letter state. |
+| `Redrive` | `partition`, `message_id`, `dead_letter_history_id` | Reactivate only the message whose current dead-letter history ID exactly matches. |
+| `Maintain` | `partition` | Deterministically promote schedules and process lease, TTL, max-age, retry, and expiry boundaries. |
 
 Version 1 accepts only partition `0`. It rejects unknown fields, unsupported
 versions, non-canonical JSON, mismatched scope, and payloads above 512 KiB.
@@ -98,11 +174,14 @@ eligible for a new fenced lease.
 
 ## Monotonic applied time
 
-All time-dependent decisions use `applied_at_ms` captured in the command before
-proposal. Replicas never sample their local wall clock during application.
-Application accepts equal timestamps and rejects a regression before changing
-state. The future leader/runtime integration must choose a value no lower than
-the last applied value; that assignment protocol is not implemented yet.
+All time-dependent decisions use a deterministic effective `applied_at_ms`.
+The leader captures a candidate value in the command before proposal, and
+replicas never sample their local wall clock during application. In committed
+log order, application chooses `max(command.applied_at_ms,
+last_applied_time_ms)`. Equal timestamps are valid; a lower-clock assignment is
+clamped rather than allowed to regress or fail-stop replay. This remains safe
+when a higher-time pending entry survives leader failover and precedes a new
+leader's command, as well as after wall-clock rollback and EPRS recovery.
 
 Lease deadlines are exclusive: settlement is valid before the deadline and is
 fenced at the deadline. Acquire and renewal clamp the lease to the earliest TTL
@@ -123,9 +202,9 @@ not commit.
 
 Structural divergence remains a `TabletError` and must stop the future
 consensus actor: wrong group or epoch, non-canonical or invalid command bytes,
-proposal mismatch, commit-order regression, applied-time regression,
-conflicting exact-replay metadata, local storage failure, or internal profile
-failure. Those errors do not mutate the tablet.
+proposal mismatch, commit-order regression, conflicting exact-replay metadata,
+local storage failure, or internal profile failure. Those errors do not mutate
+the tablet.
 
 ## Exact replay and lease renewal
 
@@ -134,7 +213,7 @@ It returns the stored receipt with disposition `replayed` and does not mutate
 the Queue, histories, counters, applied count, or digest. Any difference is a
 conflicting committed command and fails closed.
 
-This makes renewal retry-safe at the tablet boundary. The first committed
+This makes renewal retry-safe through the HTTP boundary. The first committed
 `ExtendLease` rotates the token and stores the exact new token and deadline in
 its receipt; replay returns that same result even though the old token is no
 longer live. A new command attempting to use the superseded token is fenced.
@@ -166,11 +245,11 @@ identical receipts, Queue checksums, histories, counts, and state digests.
 
 Receipts serialize all 64-bit identity, term, position, deadline, time, and
 history values as decimal strings for browser safety. A receipt currently names
-`fixed_voter_majority_persisted` and two durable voter acknowledgements because
-that is the bounded evidence expected from the fixed-three-voter adapter before
-application. The Queue tablet does not establish those facts itself, is not yet
-wired to that adapter, and does not claim the PRD's placement-aware
-`quorum_durable` profile.
+`fixed_voter_majority_persisted` and two durable voter acknowledgements. The
+node returns that receipt only after the fixed-three-voter adapter has persisted
+a majority commit and the local actor has applied it. This is bounded evidence
+for a static trusted topology; it does not claim authenticated peers, placement
+diversity, or the PRD's production `quorum_durable` profile.
 
 ## Verification
 
@@ -179,7 +258,9 @@ Run the crate-level gates with:
 ```shell
 cargo test --locked -p epoch-queue
 cargo test --locked -p epoch-tablet
-cargo clippy --locked -p epoch-queue -p epoch-tablet --all-targets --all-features -- -D warnings
+cargo test --locked -p epoch-node
+cargo clippy --locked -p epoch-queue -p epoch-tablet -p epoch-node --all-targets --all-features -- -D warnings
+make test-queue-tablet
 ```
 
 The deterministic Queue tablet suite covers:
@@ -191,7 +272,8 @@ The deterministic Queue tablet suite covers:
 - exact renewal replay with the original rotated token;
 - stale leader-term and consumer-epoch rejections;
 - immutable dead-letter/redrive history and stale-history fencing;
-- monotonic applied time and exclusive lease deadlines;
+- monotonic log-order applied time, including descending leader assignments,
+  and exclusive lease deadlines;
 - atomic rejected settlement followed by deterministic redelivery;
 - old-lease conservatism and new-term fencing across leader replacement;
 - TTL/max-age precedence over scheduled readiness;
@@ -203,20 +285,27 @@ An external integration test also constructs, encodes, proposes, and applies an
 enqueue through the crate's public root API while pinning proposal and receipt
 JSON vectors and the original Stream public goldens.
 
+The `epoch-node` real-runtime suite exercises strict HTTP extraction, semantic
+retry/conflict, server time under wall-clock rollback, descending assigned-time
+recovery, committed rejection, all nine operations, Queue reads, three-voter
+convergence, and EPRS reopen. The
+Docker gate additionally proves scheduled eligibility, follower rejection,
+active-leader `SIGKILL`, old-term token fencing, conservative redelivery,
+renewal replay, immutable DLQ/redrive reads, all-voter convergence, and exact
+state recovery after every container receives `SIGKILL`. CI retains container
+logs and EPRS state on failure.
+
 ## Deliberate limitations
 
-This milestone has no Queue consensus-actor integration, EPRS startup replay,
-node listener, peer-runtime selection, HTTP/gRPC endpoint, CLI command, SDK
-contract, Compose mode, or end-to-end failover test. The public node remains
-standalone and truthfully capped at `local_durable`.
-
-It also has one resource, one tablet, partition `0`, static configuration,
+This milestone still has no public Queue-tablet route, gRPC service, CLI or SDK
+surface, streaming credit/prefetch, automatic timer proposal, or production
+durability claim. It has one resource, one tablet, partition `0`, static configuration,
 unbounded in-memory idempotency and audit history, no snapshot or compaction,
 no catalog-authorized tablet epoch transition, placement, membership change,
 consumer-group/session coordinator, read barrier, authenticated peer identity,
 token authentication, multi-tenant policy, or exhaustive crash/I/O matrix.
-The deterministic three-instance test is application-history evidence, not
-proof that three processes durably committed that history.
+The Docker proof covers selected process faults, not every crash point,
+filesystem failure, or network partition schedule.
 
 The standalone Queue WAL and legacy token format remain separate compatibility
 paths. Adding this core does not migrate them or raise their guarantee.

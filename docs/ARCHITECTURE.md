@@ -233,13 +233,14 @@ the typed service fails closed and does not apply state from the request task.
 The public API guarantee remains unchanged.
 
 `crates/epoch-tablet` also contains the canonical single-partition Queue tablet
-state machine that will be attached next. It already validates strict commands,
-derives leader- and consumer-fenced leases, records deterministic business
-rejections, preserves immutable dead-letter/redrive provenance, and converges
-on identical receipts and digests when three instances replay the same
-committed history. This is crate-level application evidence only: no Queue
-applier, EPRS recovery path, listener, or clustered Queue API is mounted yet.
-See [Replicated Queue Tablet Core](QUEUE_TABLET.md).
+state machine. `epoch-node` attaches it as the only selected profile for one
+fixed consensus group, rebuilds it from EPRS before readiness, and mounts
+strict mutation/status/count/DLQ/redrive routes on the internal listener. The
+actor alone applies committed commands; reads never advance time; business
+rejections are committed receipts; structural divergence fails the actor and
+drains both listeners. Real-runtime and container gates prove leader-term and
+consumer fencing, scheduled redelivery, immutable history, convergence, and
+all-node `SIGKILL` replay. See [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
 Snapshots, compaction, membership changes, authoritative catalog fencing,
 placement, and read barriers remain disabled. The byte contract is documented in
@@ -247,8 +248,8 @@ placement, and read barriers remain disabled. The byte contract is documented in
 the complete scope and non-claims are recorded in
 [Consensus Feasibility Spike](CONSENSUS_SPIKE.md), the opaque boundary in
 [Experimental Consensus Probe](CONSENSUS_PROBE.md), and the typed milestone in
-[Experimental Stream Tablet](STREAM_TABLET.md). The next typed profile boundary
-is documented in [Replicated Queue Tablet Core](QUEUE_TABLET.md).
+[Experimental Stream Tablet](STREAM_TABLET.md), and the Queue boundary in
+[Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
 Rust peer replication uses batched, framed, mutually authenticated connections
 with separate priorities for control, append, snapshot, and repair traffic.

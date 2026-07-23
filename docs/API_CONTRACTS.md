@@ -466,13 +466,34 @@ history before the typed status route becomes ready. A live deterministic apply
 failure drains both listeners and exits the process. See
 [Experimental Stream Tablet](STREAM_TABLET.md).
 
-A strict Queue tablet command/receipt/state-machine contract now exists in
-`crates/epoch-tablet`, including fenced lease settlement and immutable
-DLQ/redrive history, but it has no node route or consensus applier yet. It is
-therefore not an additional experimental API. See
-[Replicated Queue Tablet Core](QUEUE_TABLET.md).
+When `EPOCH_EXPERIMENTAL_QUEUE_TABLET_ENABLED=true`, the same internal listener
+instead mounts a Queue profile and does not mount opaque or Stream routes:
 
-Neither experimental mode is the final tablet service. Snapshots/compaction,
+- `POST /experimental/v1/tablets/queue/mutations` submits one strict
+  `enqueue`, `acquire`, `acknowledge`, `extend_lease`, `release`, `nack`,
+  `reject`, `redrive`, or `maintain` operation;
+- `GET /experimental/v1/tablets/queue/mutations/{proposal_id}` resolves local
+  `unknown`, `pending`, or `committed` state;
+- `GET /experimental/v1/tablets/queue/status` reports consensus/profile
+  positions, server-applied time, counts, and the complete state digest; and
+- `GET /experimental/v1/tablets/queue/counts`, `/dead-letters`, and `/redrives`
+  expose explicitly local, stale-capable reads that never advance time.
+
+Every mutation requires a scoped idempotency key and expected term. The leader
+assigns `applied_at_ms = max(wall clock, last profile-applied time)`; clients
+cannot supply it. In committed log order, every voter then derives the effective
+time as `max(command.applied_at_ms, prior effective time)`. This also covers a
+higher-time pending entry retained across failover before a lower-clock leader's
+command. HTTP accepts 64-bit inputs as numbers or decimal strings and
+serializes all 64-bit output as decimal strings. Exact semantic retries ignore
+only expected term and the original server time, return the stored result with
+`replayed`, and cannot silently rebind changed input. Committed business
+rejections remain committed outcomes. Lease tokens bind tablet/epoch,
+partition, committed leader term, consumer epoch/identity, message, generation,
+and deadline. Immutable DLQ/redrive history survives EPRS replay. See
+[Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
+
+Neither typed experimental mode is the final tablet service. Snapshots/compaction,
 retention deletion, dynamic membership, placement, read barriers, authenticated
 transport, public routing, and SDK support remain absent. The standalone engine
 journal remains a separate single-node source of truth and is never used by the
@@ -487,11 +508,11 @@ TLS/authentication metadata, typed `google.rpc.Status` details, public native
 mutation-status lookup, streaming credit, a Rust regional administration
 implementation, long-running operations, metrics on the reserved port, protocol
 gateways, full Go/Java/Python generated SDK parity and compatibility negotiation
-remain unimplemented. The experimental Stream tablet has only the local
-mutation lookup described above; the Queue tablet has no listener. Typed Go,
-Java, and Python clients cover the provisional
+remain unimplemented. The experimental Stream and Queue tablets expose only
+the local mutation lookup/read surfaces described above. Typed Go, Java, and
+Python clients cover the provisional
 standalone profile HTTP routes, including explicit local Stream and Queue
-durability; they do not cover the experimental tablet listener. All three use
+durability; they do not cover either experimental tablet listener. All three use
 injectable transport boundaries and run against the real standalone node;
 the exact quickstarts displayed by the documentation each drive an independent
 seed, forced process crash, restart, and recovery proof in CI. Browser calls are

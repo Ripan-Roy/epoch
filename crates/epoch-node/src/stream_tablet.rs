@@ -1,7 +1,6 @@
 //! Experimental typed Stream tablet over the fixed-voter consensus runtime.
 
 use std::{
-    collections::BTreeMap,
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -10,7 +9,6 @@ use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, Query, State, rejection::JsonRejection},
     http::StatusCode,
-    response::{IntoResponse, Response},
     routing::get,
 };
 use epoch_consensus::{
@@ -23,11 +21,15 @@ use epoch_tablet::{
     StreamTabletAppendReceipt, StreamTabletCommand, StreamTabletOperation, StreamTabletScope,
     TabletError, proposal_id_for,
 };
-use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 
 use crate::consensus::{CommittedProposalApplier, ConsensusProbeError, ConsensusProbeHandle};
+use crate::tablet_http::{
+    StrictEventEnvelope, TabletApiError, TabletApiResult, deserialize_strict_event_envelope,
+    deserialize_u64_from_number_or_decimal, hex_digest, serialize_optional_u64_as_decimal,
+    serialize_u64_as_decimal,
+};
 
 pub const EXPERIMENTAL_STREAM_TABLET_STATUS_PATH: &str = "/experimental/v1/tablets/stream/status";
 pub const EXPERIMENTAL_STREAM_TABLET_RECORDS_PATH: &str = "/experimental/v1/tablets/stream/records";
@@ -37,7 +39,7 @@ pub const DEFAULT_COMMIT_WAIT: Duration = Duration::from_secs(5);
 const MAX_FETCH_RECORDS: usize = 1_000;
 const TABLET_REQUEST_BODY_BYTES: usize = MAX_STREAM_TABLET_COMMAND_BYTES + 16 * 1024;
 
-type TabletApiResult<T> = Result<T, StreamTabletApiError>;
+type StreamTabletApiError = TabletApiError;
 
 #[derive(Debug)]
 pub struct StreamTabletService {
@@ -237,151 +239,6 @@ struct AppendRequest {
     partition: u32,
     #[serde(deserialize_with = "deserialize_strict_event_envelope")]
     envelope: EventEnvelope,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StrictEventEnvelope {
-    id: String,
-    source: String,
-    #[serde(rename = "type")]
-    event_type: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    subject: Option<String>,
-    #[serde(
-        deserialize_with = "deserialize_u64_from_number_or_decimal",
-        serialize_with = "serialize_u64_as_decimal"
-    )]
-    time_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    key: Option<String>,
-    #[serde(default)]
-    headers: BTreeMap<String, String>,
-    #[serde(default = "default_content_type")]
-    content_type: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    schema_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    traceparent: Option<String>,
-    #[serde(default)]
-    payload: Value,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_u64_from_number_or_decimal",
-        serialize_with = "serialize_optional_u64_as_decimal"
-    )]
-    deliver_at_ms: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_u64_from_number_or_decimal",
-        serialize_with = "serialize_optional_u64_as_decimal"
-    )]
-    ttl_ms: Option<u64>,
-    #[serde(default)]
-    priority: u8,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    dedupe_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    transaction_id: Option<String>,
-    #[serde(default)]
-    extensions: BTreeMap<String, Value>,
-}
-
-impl From<StrictEventEnvelope> for EventEnvelope {
-    fn from(envelope: StrictEventEnvelope) -> Self {
-        Self {
-            id: envelope.id,
-            source: envelope.source,
-            event_type: envelope.event_type,
-            subject: envelope.subject,
-            time_ms: envelope.time_ms,
-            key: envelope.key,
-            headers: envelope.headers,
-            content_type: envelope.content_type,
-            schema_ref: envelope.schema_ref,
-            traceparent: envelope.traceparent,
-            payload: envelope.payload,
-            deliver_at_ms: envelope.deliver_at_ms,
-            ttl_ms: envelope.ttl_ms,
-            priority: envelope.priority,
-            dedupe_id: envelope.dedupe_id,
-            transaction_id: envelope.transaction_id,
-            extensions: envelope.extensions,
-        }
-    }
-}
-
-impl From<EventEnvelope> for StrictEventEnvelope {
-    fn from(envelope: EventEnvelope) -> Self {
-        Self {
-            id: envelope.id,
-            source: envelope.source,
-            event_type: envelope.event_type,
-            subject: envelope.subject,
-            time_ms: envelope.time_ms,
-            key: envelope.key,
-            headers: envelope.headers,
-            content_type: envelope.content_type,
-            schema_ref: envelope.schema_ref,
-            traceparent: envelope.traceparent,
-            payload: envelope.payload,
-            deliver_at_ms: envelope.deliver_at_ms,
-            ttl_ms: envelope.ttl_ms,
-            priority: envelope.priority,
-            dedupe_id: envelope.dedupe_id,
-            transaction_id: envelope.transaction_id,
-            extensions: envelope.extensions,
-        }
-    }
-}
-
-fn deserialize_strict_event_envelope<'de, D>(deserializer: D) -> Result<EventEnvelope, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    StrictEventEnvelope::deserialize(deserializer).map(Into::into)
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum U64Input {
-    Number(u64),
-    Decimal(String),
-}
-
-fn deserialize_u64_from_number_or_decimal<'de, D>(deserializer: D) -> Result<u64, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    deserialize_u64_input(U64Input::deserialize(deserializer)?).map_err(serde::de::Error::custom)
-}
-
-fn deserialize_optional_u64_from_number_or_decimal<'de, D>(
-    deserializer: D,
-) -> Result<Option<u64>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Option::<U64Input>::deserialize(deserializer)?.map_or(Ok(None), |input| {
-        deserialize_u64_input(input)
-            .map(Some)
-            .map_err(serde::de::Error::custom)
-    })
-}
-
-fn deserialize_u64_input(input: U64Input) -> Result<u64, &'static str> {
-    match input {
-        U64Input::Number(value) => Ok(value),
-        U64Input::Decimal(value) => value
-            .parse()
-            .map_err(|_| "expected an unsigned decimal integer"),
-    }
-}
-
-fn default_content_type() -> String {
-    "application/json".to_owned()
 }
 
 async fn append_record(
@@ -791,182 +648,11 @@ impl StreamTabletMutationResponse {
     }
 }
 
-#[derive(Debug)]
-enum StreamTabletApiError {
-    RequestBody { status: StatusCode, message: String },
-    InvalidRequest(String),
-    IdempotencyConflict,
-    Consensus(ConsensusProbeError),
-    Tablet(TabletError),
-    Profile(String),
-}
-
-impl From<ConsensusProbeError> for StreamTabletApiError {
-    fn from(error: ConsensusProbeError) -> Self {
-        Self::Consensus(error)
-    }
-}
-
-impl From<TabletError> for StreamTabletApiError {
-    fn from(error: TabletError) -> Self {
-        Self::Tablet(error)
-    }
-}
-
-impl From<String> for StreamTabletApiError {
-    fn from(error: String) -> Self {
-        Self::Profile(error)
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct ErrorEnvelope {
-    error: ErrorBody,
-}
-
-#[derive(Debug, Serialize)]
-struct ErrorBody {
-    code: &'static str,
-    message: String,
-    outcome_certainty: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(serialize_with = "serialize_optional_u64_as_decimal")]
-    leader_hint: Option<u64>,
-}
-
-impl IntoResponse for StreamTabletApiError {
-    fn into_response(self) -> Response {
-        let (status, code, message, certainty, leader_hint) = match self {
-            Self::RequestBody { status, message } => (
-                status,
-                "invalid_request",
-                message,
-                "definite_not_committed",
-                None,
-            ),
-            Self::InvalidRequest(message) => (
-                StatusCode::BAD_REQUEST,
-                "invalid_request",
-                message,
-                "definite_not_committed",
-                None,
-            ),
-            Self::IdempotencyConflict => (
-                StatusCode::CONFLICT,
-                "idempotency_conflict",
-                "idempotency key is already bound to different semantic input".into(),
-                "unknown",
-                None,
-            ),
-            Self::Tablet(error) => (
-                StatusCode::BAD_REQUEST,
-                "invalid_tablet_command",
-                error.to_string(),
-                "definite_not_committed",
-                None,
-            ),
-            Self::Profile(message) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "profile_unavailable",
-                message,
-                "unknown",
-                None,
-            ),
-            Self::Consensus(ConsensusProbeError::Consensus(ConsensusError::NotLeader {
-                leader_hint,
-            })) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "not_leader",
-                "request reached a follower".into(),
-                "unknown",
-                leader_hint.map(epoch_consensus::NodeId::get),
-            ),
-            Self::Consensus(ConsensusProbeError::Consensus(ConsensusError::StaleTerm {
-                ..
-            })) => (
-                StatusCode::CONFLICT,
-                "stale_term",
-                "expected_term does not match the current term".into(),
-                // The local lookup and proposal attempt are not atomic. A
-                // newer leader can commit this deterministic proposal ID
-                // between them, so this node cannot make a global negative
-                // claim from a stale-term rejection alone.
-                "unknown",
-                None,
-            ),
-            Self::Consensus(ConsensusProbeError::Consensus(
-                ConsensusError::ConflictingProposal(_),
-            )) => (
-                StatusCode::CONFLICT,
-                "idempotency_conflict",
-                "proposal ID is already bound to different command bytes".into(),
-                "unknown",
-                None,
-            ),
-            Self::Consensus(error) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "consensus_unavailable",
-                error.to_string(),
-                "unknown",
-                None,
-            ),
-        };
-        (
-            status,
-            Json(ErrorEnvelope {
-                error: ErrorBody {
-                    code,
-                    message,
-                    outcome_certainty: certainty,
-                    leader_hint,
-                },
-            }),
-        )
-            .into_response()
-    }
-}
-
-fn hex_digest(digest: [u8; 32]) -> String {
-    let mut encoded = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(encoded, "{byte:02x}");
-    }
-    encoded
-}
-
-#[allow(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "serde serialize_with requires a shared reference"
-)]
-fn serialize_u64_as_decimal<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_str(&value.to_string())
-}
-
-#[allow(
-    clippy::ref_option,
-    reason = "serde serialize_with requires a shared reference to the field"
-)]
-fn serialize_optional_u64_as_decimal<S>(
-    value: &Option<u64>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    match value {
-        Some(value) => serializer.serialize_some(&value.to_string()),
-        None => serializer.serialize_none(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
 
+    use axum::response::IntoResponse;
     use epoch_consensus::{
         CommitReceipt, ConsensusRole, GroupEpoch, GroupId, LogIndex, NodeId, ProposalId, Term,
     };

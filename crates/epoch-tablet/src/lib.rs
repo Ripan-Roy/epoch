@@ -3,7 +3,8 @@
 //! The current bounded slices are configured, single-partition Stream and
 //! Queue tablets. They own strict command validation, deterministic
 //! application, idempotency, and replay while the node owns transport and
-//! Raft. Only Stream is attached to the experimental node runtime today.
+//! Raft. Stream and Queue attach to the experimental node runtime as mutually
+//! exclusive profiles for one fixed consensus group.
 
 mod common;
 mod queue;
