@@ -1,25 +1,29 @@
-# Experimental Replicated Cache Tablet Core
+# Experimental Replicated Cache Tablet
 
-**Status:** Deterministic profile core implemented and tested; not attached to
-the node runtime or a public API
+**Status:** Deterministic single-shard profile mounted and tested on the
+experimental fixed-three-voter runtime; not a public API or production claim
 
-`epoch-cache` and `epoch-tablet` implement the bounded first replicated Cache and
-State slice. The slice exists to make shard-local mutation, optimistic
-concurrency, TTL, and lock fencing deterministic before those semantics are
-connected to the fixed-three-voter runtime. It is not yet a deployable durable
-Cache profile and does not change the standalone node's volatile-only Cache
-guarantee ceiling.
+`epoch-cache`, `epoch-tablet`, and `epoch-node` implement the bounded first
+replicated Cache and State slice. A strict internal API proposes canonical
+single-shard mutations through the same persistent three-voter actor used by
+the Stream and Queue milestones. Every voter rebuilds the Cache from retained
+EPRS history before readiness. This remains engineering evidence, not a
+placement-aware durable Cache product, and it does not change the standalone
+node's volatile-only Cache guarantee ceiling.
 
 ## Boundary
 
 ```text
-strict canonical CacheTabletCommand v1
+strict internal HTTP DTO + idempotency key + expected current term
+  -> leader-role/term validation and canonical CacheTabletCommand v1 proposal
+  -> fixed-voter majority persistence and consensus commit
   -> tablet scope, size, and operation validation
   -> committed-order effective time
   -> deterministic CacheShard transaction on staged state
   -> optional advisory lock-guard validation
   -> recorded applied or rejected outcome
   -> exact replay receipt and chained state digest
+  -> EPRS rebuild before the internal listener becomes ready
 ```
 
 - `epoch-cache::CacheShard` owns deterministic values, a shard-global revision,
@@ -28,9 +32,10 @@ strict canonical CacheTabletCommand v1
 - `epoch-tablet::CacheTablet` owns committed-command validation, scoped
   idempotency, advisory fenced locks, committed receipts, exact replay, and the
   complete replicated state digest.
-- `epoch-consensus` remains profile-neutral. Attaching this tablet to the node,
-  recovering it from EPRS, and proving three-process failover are the next
-  milestone; none is implied by the core-only tests.
+- `epoch-consensus` remains profile-neutral. `CacheTabletService` supplies its
+  committed-proposal applier, fail-stops on structural divergence, rebuilds a
+  fresh tablet from sorted committed history, and never applies a missed commit
+  from an HTTP request task.
 - The existing standalone `Cache` remains a separate volatile compatibility
   path. The new shard is additive and does not silently route volatile writes
   through consensus.
@@ -39,6 +44,35 @@ Version 1 supports one shard (`shard = 0`), no eviction, and at most 128
 distinct-key mutations in one transaction. Cross-shard transactions, snapshot
 restore, change capture, collection-specific mutations, and compatibility
 protocols remain outside this slice.
+
+## Internal runtime API
+
+The Cache profile is opt-in and mutually exclusive with the opaque, Stream, and
+Queue modes for one fixed consensus group. Enable it with
+`EPOCH_EXPERIMENTAL_CACHE_TABLET_ENABLED=true` and optionally set
+`EPOCH_EXPERIMENTAL_CACHE_TABLET_NAME`. Its routes exist only on the separate
+internal listener, which defaults to `127.0.0.1:7701`:
+
+| Method and path | Contract |
+| --- | --- |
+| `GET /experimental/v1/tablets/cache/status` | Local role, term, consensus/profile positions, revision, retained entries, live locks, and digests. |
+| `POST /experimental/v1/tablets/cache/mutations` | Submit one strict typed mutation with `idempotency_key` and `expected_term`. |
+| `GET /experimental/v1/tablets/cache/mutations/{proposal_id}` | Resolve the local observation as unknown, pending, or committed. |
+| `GET /experimental/v1/tablets/cache/observations?key=...` | Pure local observation with explicitly stale-capable consistency. |
+
+Mutation success is returned only after the fixed voter majority has persisted
+the entry and the local profile actor has applied it. A new receipt returns
+`201`; an exact semantic retry returns `200`; an unresolved proposal returns
+`202`. Followers return `not_leader`; a stale expected term returns
+`stale_term`. Both have unknown global outcome because lookup and submission
+cannot prove that another leader did not commit the deterministic proposal ID.
+
+The HTTP boundary accepts signed and unsigned 64-bit values as JSON numbers or
+decimal strings and emits them as decimal strings. It rejects unknown fields,
+duplicate set members, duplicate map/sorted-set keys, oversized bodies, and
+invalid values before proposal. Observations are local and stale-capable and
+report `linearizable_read_barrier: false`; a status lookup is not a read barrier.
+The listener is unauthenticated and has no SDK compatibility commitment.
 
 ## Command operations
 
@@ -59,7 +93,7 @@ idempotency key, server-assigned candidate time, and one typed operation:
 
 Unknown fields, non-canonical JSON, unsupported versions, invalid scope,
 oversized payloads, invalid values, and operations outside the bounded v1
-surface fail before application. Public 64-bit JSON outputs use decimal strings
+surface fail before application. HTTP 64-bit JSON outputs use decimal strings
 so browsers do not lose precision.
 
 ## Revisions, CAS, and transactions
@@ -136,11 +170,13 @@ the deadline the lease is expired.
 A lease token can authorize only a committed command carrying the same Raft
 entry term under which the token was created or renewed. It cannot authorize a
 new command admitted in a different term. An already-appended same-term command
-may still commit after a leadership change; stronger current-leader fencing
-belongs to the pending runtime barrier. The old lock nevertheless remains
-reserved until its deadline, so a new leader cannot create a second owner early.
-Locks are advisory unless a mutation supplies a guard, in which case guard
-validation and the value mutation are one atomic transition.
+may still commit after a leadership change. New HTTP mutations include an
+expected term that the actor checks atomically with leader role before proposal;
+this fences newly admitted stale-term requests without changing already-appended
+Raft history. The old lock nevertheless remains reserved until its deadline, so
+a new leader cannot create a second owner early. Locks are advisory unless a
+mutation supplies a guard, in which case guard validation and the value mutation
+are one atomic transition.
 
 Callers must propagate the fencing token to the protected downstream resource
 and have that resource reject tokens older than the greatest token it has
@@ -160,6 +196,12 @@ payload. It returns the original receipt with `replayed` disposition and does
 not mutate revision, locks, values, counters, applied count, or digest. Reusing
 the proposal ID with different committed metadata or bytes fails closed.
 
+At the HTTP boundary, the semantic retry identity is the scoped idempotency key
+plus the typed operation. The expected term and server-assigned time are not
+client semantics. A request matching a pending or committed command returns its
+stored state/receipt; changing any operation input returns
+`idempotency_conflict` without rebinding the proposal ID.
+
 The initial digest commits to the Cache domain, tablet scope, and normalized
 configuration. Every transition chains the previous digest with committed
 metadata, the payload digest, effective time, canonical sorted values, canonical
@@ -167,9 +209,26 @@ sorted locks, shard revision, and the complete applied or rejected outcome.
 Independent tablets replaying one committed history must produce identical
 receipts, observations, lock state, recovery checksums, and digests.
 
+## Runtime recovery and read scope
+
+On startup the consensus runtime opens and validates EPRS, derives the complete
+committed proposal history, and asks `CacheTabletService` to replay it in log
+order into a fresh tablet before routing becomes ready. Live commands are
+profile-applied synchronously on the consensus actor before commit notification
+or successful lookup. A malformed history, commit-order mismatch, or lookup of
+a commit without its actor-applied receipt fails the profile closed and drains
+the node rather than serving divergent state.
+
+Status samples the profile before the later actor-owned consensus snapshot, so
+it rejects an impossible profile index ahead of the reported consensus-applied
+index. Cache observations never advance time or reclaim storage. Expired values
+are logically absent, while `retained_entry_count` includes their physical
+storage until a committed `Maintain` command reclaims them. There is no
+background expiry loop or linearizable `ReadIndex` path in this slice.
+
 ## Verification scope
 
-The core gate covers:
+The deterministic and runtime gates cover:
 
 - strict command decoding, bounds, scope, proposal identity, and browser-safe
   receipt encoding;
@@ -183,21 +242,31 @@ The core gate covers:
   deadlines, active-owner epoch fencing, corrupt tokens, old terms, and guarded
   writes;
 - descending candidate times, exact replay, commit ordering, malformed committed
-  commands, and independent-replay convergence.
+  commands, and independent-replay convergence;
+- strict recursive HTTP DTOs, browser-safe signed/unsigned 64-bit boundaries,
+  semantic idempotency, body limits, follower and stale-term responses, and
+  truthful local-read/status labels;
+- real three-runtime majority application, fail-stop behavior, convergence, and
+  EPRS reopen; and
+- three-container leader replacement, old-token fencing, voter catch-up, and
+  all-node `SIGKILL` recovery.
 
 Run it with:
 
 ```shell
 cargo test --locked -p epoch-cache
 cargo test --locked -p epoch-tablet
-cargo clippy --locked -p epoch-cache -p epoch-tablet --all-targets --all-features -- -D warnings
+cargo test --locked -p epoch-node --all-targets
+make test-cache-tablet
+cargo clippy --locked -p epoch-cache -p epoch-tablet -p epoch-node --all-targets --all-features -- -D warnings
 ```
 
-This evidence moves CACHE-006 from planned to a tested core slice. It does not
-complete CACHE-006 or CACHE-007: the node runtime, typed transport, concurrent
-history checker, fixed-voter failover/reopen gate, snapshot path, authenticated
-transport, production placement, and exhaustive fault matrix remain required.
-The in-memory exact-replay map also retains one complete receipt per unique
-proposal without a retention window; large overwritten values can therefore
-outlive the current Cache entry. Bounded idempotency retention and its advertised
-retry window are required before this core can become a long-running service.
+This advances CACHE-006 and CACHE-007 to a tested internal fixed-voter slice. It
+does not complete either requirement: a concurrent history checker,
+linearizable reads, multi-shard routing, profile snapshots/compaction,
+authenticated transport, public APIs/SDKs, placement, and the exhaustive fault
+matrix remain required. The in-memory exact-replay map also retains one complete
+receipt per unique proposal without a retention window; large overwritten
+values can therefore outlive the current Cache entry. Bounded idempotency
+retention and its advertised retry window are required before this can become a
+long-running service.

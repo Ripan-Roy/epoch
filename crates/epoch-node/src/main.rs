@@ -3,9 +3,11 @@ use std::{
 };
 
 use clap::Parser;
+use epoch_cache::CacheConfig;
 use epoch_core::{DeploymentMode, SystemClock};
 use epoch_engine::EpochEngine;
 use epoch_node::{
+    cache_tablet::{self, CacheTabletService, DEFAULT_COMMIT_WAIT as CACHE_DEFAULT_COMMIT_WAIT},
     consensus::{
         CommittedProposalApplier, ConsensusProbeConfig, ConsensusProbeError, ConsensusProbeRuntime,
     },
@@ -16,7 +18,7 @@ use epoch_node::{
 };
 use epoch_queue::QueueConfig;
 use epoch_storage::{DEFAULT_WAL_SEGMENT_BYTES, MIN_WAL_SEGMENT_BYTES, StandaloneWal};
-use epoch_tablet::{QueueTabletScope, StreamTabletScope};
+use epoch_tablet::{CacheTabletScope, QueueTabletScope, StreamTabletScope};
 use tokio::{net::TcpListener, sync::watch};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -102,6 +104,17 @@ struct ExperimentalTabletArgs {
         default_value = "experimental-queue"
     )]
     queue_name: String,
+    #[arg(
+        long = "experimental-cache-tablet-enabled",
+        env = "EPOCH_EXPERIMENTAL_CACHE_TABLET_ENABLED"
+    )]
+    cache_enabled: bool,
+    #[arg(
+        long = "experimental-cache-tablet-name",
+        env = "EPOCH_EXPERIMENTAL_CACHE_TABLET_NAME",
+        default_value = "experimental-cache"
+    )]
+    cache_name: String,
 }
 
 #[derive(Debug)]
@@ -116,6 +129,7 @@ struct ConsensusProbeLaunch {
 enum TabletProfileLaunch {
     Stream(StreamTabletScope),
     Queue(QueueTabletScope),
+    Cache(CacheTabletScope),
 }
 
 impl TabletProfileLaunch {
@@ -123,6 +137,7 @@ impl TabletProfileLaunch {
         match self {
             Self::Stream(_) => "stream",
             Self::Queue(_) => "queue",
+            Self::Cache(_) => "cache",
         }
     }
 }
@@ -288,6 +303,23 @@ async fn start_consensus_mode(
             ));
             Ok((runtime, app, true))
         }
+        Some(TabletProfileLaunch::Cache(scope)) => {
+            let tablet = CacheTabletService::new(scope, CacheConfig::default())?;
+            let applier: Arc<dyn CommittedProposalApplier> = tablet.clone();
+            let runtime = ConsensusProbeRuntime::start_with_profile_applier(
+                launch.config.clone(),
+                &launch.stable_path,
+                applier,
+            )
+            .await?;
+            let app = runtime.internal_router().merge(cache_tablet::router(
+                tablet,
+                runtime.handle(),
+                clock,
+                CACHE_DEFAULT_COMMIT_WAIT,
+            ));
+            Ok((runtime, app, true))
+        }
         None => {
             let runtime =
                 ConsensusProbeRuntime::start(launch.config.clone(), &launch.stable_path).await?;
@@ -306,15 +338,21 @@ fn boxed_error(error: impl Error + 'static) -> Box<dyn Error> {
 fn consensus_probe_launch(
     args: &Args,
 ) -> Result<Option<ConsensusProbeLaunch>, ConsensusProbeError> {
-    if args.experimental_tablet.stream_enabled && args.experimental_tablet.queue_enabled {
+    let enabled_profile_count = [
+        args.experimental_tablet.stream_enabled,
+        args.experimental_tablet.queue_enabled,
+        args.experimental_tablet.cache_enabled,
+    ]
+    .into_iter()
+    .filter(|enabled| *enabled)
+    .count();
+    if enabled_profile_count > 1 {
         return Err(ConsensusProbeError::InvalidConfiguration(
-            "Stream and Queue tablet profiles are mutually exclusive for one consensus group"
+            "Stream, Queue, and Cache tablet profiles are mutually exclusive for one consensus group"
                 .into(),
         ));
     }
-    if (args.experimental_tablet.stream_enabled || args.experimental_tablet.queue_enabled)
-        && !args.consensus_probe_enabled
-    {
+    if enabled_profile_count == 1 && !args.consensus_probe_enabled {
         return Err(ConsensusProbeError::InvalidConfiguration(
             "experimental tablet profiles require EPOCH_CONSENSUS_PROBE_ENABLED".into(),
         ));
@@ -359,6 +397,15 @@ fn consensus_probe_launch(
                 config.group_id().get(),
                 config.group_epoch().get(),
                 &args.experimental_tablet.queue_name,
+            )
+            .map_err(|error| ConsensusProbeError::InvalidConfiguration(error.to_string()))?,
+        ))
+    } else if args.experimental_tablet.cache_enabled {
+        Some(TabletProfileLaunch::Cache(
+            CacheTabletScope::new(
+                config.group_id().get(),
+                config.group_epoch().get(),
+                &args.experimental_tablet.cache_name,
             )
             .map_err(|error| ConsensusProbeError::InvalidConfiguration(error.to_string()))?,
         ))
@@ -801,7 +848,46 @@ mod tests {
     }
 
     #[test]
-    fn one_consensus_group_cannot_mount_stream_and_queue_profiles_together() {
+    fn experimental_cache_tablet_requires_the_consensus_runtime() {
+        let args =
+            Args::try_parse_from(["epoch-node", "--experimental-cache-tablet-enabled"]).unwrap();
+        assert!(
+            consensus_probe_launch(&args)
+                .unwrap_err()
+                .to_string()
+                .contains("EPOCH_CONSENSUS_PROBE_ENABLED")
+        );
+    }
+
+    #[test]
+    fn experimental_cache_tablet_uses_the_consensus_group_scope() {
+        let args = Args::try_parse_from([
+            "epoch-node",
+            "--consensus-probe-enabled",
+            "--experimental-cache-tablet-enabled",
+            "--experimental-cache-tablet-name",
+            "sessions",
+            "--consensus-node-id",
+            "2",
+            "--consensus-group-id",
+            "7",
+            "--consensus-group-epoch",
+            "3",
+            "--consensus-peers",
+            "1=http://127.0.0.1:7701,2=http://127.0.0.1:7702,3=http://127.0.0.1:7703",
+        ])
+        .unwrap();
+        let launch = consensus_probe_launch(&args).unwrap().unwrap();
+        assert_eq!(
+            launch.tablet_profile,
+            Some(TabletProfileLaunch::Cache(
+                CacheTabletScope::new(7, 3, "sessions").unwrap()
+            ))
+        );
+    }
+
+    #[test]
+    fn one_consensus_group_cannot_mount_multiple_typed_profiles() {
         let args = Args::try_parse_from([
             "epoch-node",
             "--consensus-probe-enabled",
@@ -811,6 +897,34 @@ mod tests {
         .unwrap();
         assert!(
             consensus_probe_launch(&args)
+                .unwrap_err()
+                .to_string()
+                .contains("mutually exclusive")
+        );
+
+        let queue_and_cache = Args::try_parse_from([
+            "epoch-node",
+            "--consensus-probe-enabled",
+            "--experimental-queue-tablet-enabled",
+            "--experimental-cache-tablet-enabled",
+        ])
+        .unwrap();
+        assert!(
+            consensus_probe_launch(&queue_and_cache)
+                .unwrap_err()
+                .to_string()
+                .contains("mutually exclusive")
+        );
+
+        let stream_and_cache = Args::try_parse_from([
+            "epoch-node",
+            "--consensus-probe-enabled",
+            "--experimental-stream-tablet-enabled",
+            "--experimental-cache-tablet-enabled",
+        ])
+        .unwrap();
+        assert!(
+            consensus_probe_launch(&stream_and_cache)
                 .unwrap_err()
                 .to_string()
                 .contains("mutually exclusive")

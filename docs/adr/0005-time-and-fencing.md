@@ -73,21 +73,22 @@ moving elapsed time backwards and saturates instead of wrapping. A serializable
 remote observation, persisted restart state, and explicit overflow failure.
 
 The fixed-voter consensus adapter now exercises leader transfer and replacement.
-Its Queue tablet captures a server-side candidate time before proposal, then
-derives `max(candidate, prior committed effective time)` on every voter and
-during EPRS replay. Tests cover wall-clock rollback, descending assignments in
-committed order, time-dependent lease deadlines, and identical live/recovered
-digests.
+Its Queue and Cache tablets capture a server-side candidate time before
+proposal, then derive `max(candidate, prior committed effective time)` on every
+voter and during EPRS replay. Tests cover wall-clock rollback, descending
+assignments in committed order, time-dependent lease deadlines, and identical
+live/recovered digests.
 
-The core-only Cache tablet follows the same committed-order normalization for
-TTL and lock decisions. Cache lock renewal, release, and guarded mutations
+The Cache tablet follows the same committed-order normalization for TTL and
+lock decisions. Cache lock renewal, release, and guarded mutations
 reject tokens whose bound term differs from the committed command term, as well
 as rotated opaque tokens, while the downstream fencing token remains the
 ordered pair `(tablet_epoch, acquisition_log_index)`. An already-appended
-same-term command may commit after a leadership change; current-leader barriers
-remain runtime work. A leader change does not let a second owner acquire before
-the old exclusive deadline. These properties currently have deterministic
-state-machine tests but not the Queue tablet's node/EPRS failover evidence.
+same-term command may commit after a leadership change. New mutations are
+admitted only when their expected term matches the actor's current leader term;
+this is not a read barrier. A leader change does not let a second owner acquire
+before the old exclusive deadline. Deterministic, real-runtime, and container
+tests cover node/EPRS failover and recovery for this bounded topology.
 
 Cache owner epochs are retained only while that owner has an active lock. This
 bounds owner history; after the last release or expiry, a later acquisition may

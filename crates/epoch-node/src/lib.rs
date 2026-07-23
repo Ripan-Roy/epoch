@@ -1,5 +1,6 @@
 //! Native HTTP surface for the standalone Epoch node.
 
+pub mod cache_tablet;
 pub mod consensus;
 pub mod queue_tablet;
 pub mod stream_tablet;

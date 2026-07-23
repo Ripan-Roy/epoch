@@ -204,6 +204,8 @@ impl CacheTablet {
         self.state.shard.revision()
     }
 
+    /// Returns physically retained entries, including expired values that have
+    /// not yet been reclaimed by a committed maintenance command.
     pub fn cache_entry_count(&self) -> usize {
         self.state.shard.len()
     }

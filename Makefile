@@ -8,7 +8,7 @@ NODE_LTS := $(if $(wildcard /opt/homebrew/opt/node@24/bin/node),/opt/homebrew/op
 PNPM_ENV := PATH="/opt/homebrew/opt/node@24/bin:$$PATH"
 JAVA_MVN := ./sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress
 
-.PHONY: help bootstrap-check generate generate-check format format-check lint audit test test-unit test-consensus-process test-consensus-probe test-stream-tablet test-queue-tablet test-integration build check ci compose-config compose-up compose-down compose-probe-config compose-probe-up compose-probe-down clean
+.PHONY: help bootstrap-check generate generate-check format format-check lint audit test test-unit test-consensus-process test-consensus-probe test-stream-tablet test-queue-tablet test-cache-tablet test-integration build check ci compose-config compose-up compose-down compose-probe-config compose-probe-up compose-probe-down clean
 
 help: ## Show available commands.
 	@awk 'BEGIN {FS = ":.*## "; printf "Epoch development commands:\n\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -108,7 +108,10 @@ test-stream-tablet: ## Prove typed Stream fixed-voter majority, failover, and SI
 test-queue-tablet: ## Prove typed Queue leases, failover, DLQ/redrive, and SIGKILL replay.
 	@bash tests/integration/queue-tablet.sh
 
-test-integration: test-consensus-process test-consensus-probe test-stream-tablet test-queue-tablet ## Exercise real processes through consensus, the CLI, and Go/Java/Python SDKs.
+test-cache-tablet: ## Prove typed Cache CAS, transactions, TTL, fenced locks, failover, and SIGKILL replay.
+	@bash tests/integration/cache-tablet.sh
+
+test-integration: test-consensus-process test-consensus-probe test-stream-tablet test-queue-tablet test-cache-tablet ## Exercise real processes through consensus, the CLI, and Go/Java/Python SDKs.
 	@bash tests/integration/smoke.sh
 	@bash tests/integration/docs-quickstarts.sh
 

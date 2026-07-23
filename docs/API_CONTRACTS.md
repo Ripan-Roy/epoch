@@ -493,15 +493,29 @@ partition, committed leader term, consumer epoch/identity, message, generation,
 and deadline. Immutable DLQ/redrive history survives EPRS replay. See
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
-The repository also contains the canonical v1 command and receipt boundary for
-a single-shard Cache tablet. Its bounded Set/Delete/CAS/Increment/Transaction,
-advisory lock, and expiry-maintenance operations are state-machine APIs only;
-there is no mounted HTTP or gRPC route and no SDK commitment yet. The core uses
-decimal-string 64-bit receipt fields, strict canonical JSON, recorded business
-rejections, exact committed replay, and deterministic committed-order time. See
-[Experimental Replicated Cache Tablet Core](CACHE_TABLET.md).
+The mutually exclusive Cache mode mounts a canonical single-shard Cache tablet
+on that same internal listener:
 
-Neither typed experimental mode is the final tablet service. Snapshots/compaction,
+- `POST /experimental/v1/tablets/cache/mutations` submits one strict
+  Set/Delete/CAS/Increment/Transaction/lock/Maintain operation with an
+  idempotency key and expected current term;
+- `GET /experimental/v1/tablets/cache/mutations/{proposal_id}` resolves local
+  unknown, pending, or committed state without applying a missed command;
+- `GET /experimental/v1/tablets/cache/observations?key=...` returns a pure,
+  explicitly local and stale-capable observation; and
+- `GET /experimental/v1/tablets/cache/status` reports consensus/profile
+  positions, retained entries, active locks, revisions, and recovery/state
+  digests.
+
+The API accepts 64-bit counter and metadata inputs as JSON numbers or decimal
+strings and serializes every signed or unsigned 64-bit output as a decimal
+string. It rejects unknown fields and duplicate collection members/keys before
+proposal, records deterministic business rejections as committed outcomes,
+replays exact semantic retries, and assigns committed-order effective time on
+the server. There is no linearizable read barrier, public gRPC route, or SDK
+commitment. See [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
+
+None of the three typed experimental modes is the final tablet service. Snapshots/compaction,
 retention deletion, dynamic membership, placement, read barriers, authenticated
 transport, public routing, and SDK support remain absent. The standalone engine
 journal remains a separate single-node source of truth and is never used by the
@@ -516,11 +530,11 @@ TLS/authentication metadata, typed `google.rpc.Status` details, public native
 mutation-status lookup, streaming credit, a Rust regional administration
 implementation, long-running operations, metrics on the reserved port, protocol
 gateways, full Go/Java/Python generated SDK parity and compatibility negotiation
-remain unimplemented. The experimental Stream and Queue tablets expose only
+remain unimplemented. The experimental Stream, Queue, and Cache tablets expose only
 the local mutation lookup/read surfaces described above. Typed Go, Java, and
 Python clients cover the provisional
 standalone profile HTTP routes, including explicit local Stream and Queue
-durability; they do not cover either experimental tablet listener. All three use
+durability; they do not cover the experimental tablet listener. All three use
 injectable transport boundaries and run against the real standalone node;
 the exact quickstarts displayed by the documentation each drive an independent
 seed, forced process crash, restart, and recovery proof in CI. Browser calls are
@@ -530,7 +544,6 @@ to native clients. The Go control HTTP registry, browser console, current JSON
 payload structs, and Rust error enum are provisional scaffolding and may be
 migrated before any public compatibility promise.
 
-The Cache tablet is earlier still: it exposes a Rust command/state-machine
-contract but is not selectable in `epoch-node`, is not recovered from EPRS, and
-has no experimental transport route. Its exact-replay receipt map is currently
-unbounded and has no advertised retry window.
+The Cache tablet rebuilds by replaying the retained EPRS committed history
+before readiness. It has no profile snapshot/compaction path, and its
+exact-replay receipt map is currently unbounded with no advertised retry window.

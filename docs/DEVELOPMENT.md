@@ -306,10 +306,14 @@ routes with the bounded typed Stream milestone described in
 [Experimental Stream Tablet](STREAM_TABLET.md).
 `EPOCH_EXPERIMENTAL_QUEUE_TABLET_ENABLED=true` instead mounts the typed Queue
 mutation/status/history routes described in
-[Experimental Replicated Queue Tablet](QUEUE_TABLET.md). Stream, Queue, and
-opaque proposal modes are mutually exclusive for one group, and none changes
-the public API or SDK guarantee ceiling. Run `make test-stream-tablet` or
-`make test-queue-tablet` for the disposable three-container proofs.
+[Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
+`EPOCH_EXPERIMENTAL_CACHE_TABLET_ENABLED=true` selects the single-shard Cache
+mutation/status/observation routes described in
+[Experimental Replicated Cache Tablet](CACHE_TABLET.md). Stream, Queue, Cache,
+and opaque proposal modes are mutually exclusive for one group, and none changes
+the public API or SDK guarantee ceiling. Run `make test-stream-tablet`,
+`make test-queue-tablet`, or `make test-cache-tablet` for the disposable
+three-container proofs.
 
 To discard local data, explicitly add `--volumes` to the Compose down command.
 That is destructive and is intentionally not part of the Make target.

@@ -396,26 +396,27 @@ typed listener becomes ready. This remains a bounded experimental mode and
 raises no public durability claim. See
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
-The Cache profile now also has a deterministic, single-shard tablet core, but
-no node/runtime attachment yet. Its pure observations, checked global value
+The Cache profile now also has a deterministic, single-shard tablet on the
+opt-in fixed-voter runtime. Its pure observations, checked global value
 revision, non-repeating item versions, staged same-shard transactions,
 deterministic expiry, committed-order effective time, and composite fenced locks
-are executable as Rust state-machine tests. It does not make standalone Cache
-durable and is not fixed-voter failover evidence. See
-[Experimental Replicated Cache Tablet Core](CACHE_TABLET.md).
+rebuild from EPRS before readiness. Writes require expected-current-term
+admission and majority persistence before the local profile receipt is returned.
+Reads remain explicitly local and stale-capable. This does not make the
+standalone Cache durable or establish placement-aware public quorum durability.
+See [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
 
 Epoch does **not** yet provide a public clustered durability contract, regional
 catalog/placement, distributed membership fencing, persisted profile snapshots,
 consumer-group coordination, bounded transactions, object tier, geo replication,
 native Protobuf services, compatibility gateways, durable webhook delivery,
 connector execution, or the security controls in [SECURITY.md](SECURITY.md).
-The experimental Stream and Queue tablets also lack a read
+The experimental Stream, Queue, and Cache tablets also lack a read
 barrier, authenticated transport, multiple partitions/tablets, and bounded
 idempotency retention. See [STREAM_TABLET.md](STREAM_TABLET.md) and
-[QUEUE_TABLET.md](QUEUE_TABLET.md). The Cache tablet additionally lacks a node
-runtime, typed HTTP surface, EPRS recovery gate, and bounded idempotency-receipt
-retention; see
-[CACHE_TABLET.md](CACHE_TABLET.md).
+[QUEUE_TABLET.md](QUEUE_TABLET.md). The Cache tablet additionally lacks profile
+snapshots/compaction, background active expiry, and bounded
+idempotency-receipt retention; see [CACHE_TABLET.md](CACHE_TABLET.md).
 
 Current JSON-shaped payloads, standalone epochs, HTTP endpoints, and local WAL
 frames are provisional scaffold interfaces. They are not frozen compatibility

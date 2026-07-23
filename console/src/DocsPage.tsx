@@ -442,14 +442,14 @@ export function DocsPage({ section }: DocsPageProps) {
                 <div>
                   <p className="eyebrow">EXPERIMENTAL CLUSTER CORE</p>
                   <h2 id="cluster-milestone-title">
-                    Stream and Queue cross consensus; Cache has a deterministic tablet core.
+                    Stream, Queue, and Cache cross the same persistent consensus boundary.
                   </h2>
                   <p>
                     These mutually exclusive, opt-in engineering profiles run on a separate, unauthenticated
                     listener. The public SDK quickstart above remains standalone and{" "}
                     <code>local_durable</code>; no SDK or public quorum contract is implied. Two durable
-                    voters are fixed-topology evidence, not multi-zone placement proof. The Cache tablet is
-                    core-only and is not mounted on that listener yet.
+                    voters are fixed-topology evidence, not multi-zone placement proof. Cache observations
+                    are explicitly local and stale-capable; there is no linearizable read barrier yet.
                   </p>
                 </div>
               </div>
@@ -457,11 +457,11 @@ export function DocsPage({ section }: DocsPageProps) {
                 <article>
                   <span>MAJORITY</span>
                   <strong>Two of three voters persist before typed success.</strong>
-                  <p>Stream reports its logical offset; Queue records the exact fenced operation outcome.</p>
+                  <p>Each typed profile applies the exact committed outcome before returning success.</p>
                 </article>
                 <article>
                   <span>FAILOVER</span>
-                  <strong>A replacement leader preserves ordering and fences stale Queue leases.</strong>
+                  <strong>A replacement leader preserves ordering and fences stale lease tokens.</strong>
                   <p>The stopped voter rejoins, catches up, and each profile applies every command once.</p>
                 </article>
                 <article>
@@ -474,7 +474,7 @@ export function DocsPage({ section }: DocsPageProps) {
               </div>
               <CodeBlock
                 label="Disposable three-container proofs"
-                value={"make test-stream-tablet\nmake test-queue-tablet"}
+                value={"make test-stream-tablet\nmake test-queue-tablet\nmake test-cache-tablet"}
               />
             </section>
 
@@ -597,9 +597,9 @@ export function DocsPage({ section }: DocsPageProps) {
                   href={`${repositoryDocsUrl}/QUEUE_TABLET.md`}
                 />
                 <ReferenceCard
-                  eyebrow="CACHE CORE"
-                  title="Experimental replicated Cache core"
-                  description="CAS, atomic transactions, checked expiry, exact replay, and advisory fenced-lock semantics before runtime attachment."
+                  eyebrow="CACHE TABLET"
+                  title="Experimental replicated Cache"
+                  description="CAS, atomic transactions, checked expiry, fenced locks, failover, exact EPRS replay, and stale-capable local observations."
                   href={`${repositoryDocsUrl}/CACHE_TABLET.md`}
                 />
               </div>
