@@ -81,11 +81,13 @@ digests.
 
 The core-only Cache tablet follows the same committed-order normalization for
 TTL and lock decisions. Cache lock renewal, release, and guarded mutations
-reject old-term or rotated opaque tokens, while the downstream fencing token
-remains the ordered pair `(tablet_epoch, acquisition_log_index)`. A leader
-change does not let a second owner acquire before the old exclusive deadline.
-These properties currently have deterministic state-machine tests but not the
-Queue tablet's node/EPRS failover evidence.
+reject tokens whose bound term differs from the committed command term, as well
+as rotated opaque tokens, while the downstream fencing token remains the
+ordered pair `(tablet_epoch, acquisition_log_index)`. An already-appended
+same-term command may commit after a leadership change; current-leader barriers
+remain runtime work. A leader change does not let a second owner acquire before
+the old exclusive deadline. These properties currently have deterministic
+state-machine tests but not the Queue tablet's node/EPRS failover evidence.
 
 Cache owner epochs are retained only while that owner has an active lock. This
 bounds owner history; after the last release or expiry, a later acquisition may

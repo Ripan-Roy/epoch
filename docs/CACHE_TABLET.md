@@ -133,11 +133,14 @@ expiry, or renewal makes the old lease token unusable. A later acquisition has
 a larger committed log index, or a larger tablet epoch after reincarnation. At
 the deadline the lease is expired.
 
-A token created in an old leader term cannot renew, release, or guard a value
-mutation after leadership changes. The old lock nevertheless remains reserved
-until its deadline; a new leader cannot create a second owner early. Locks are
-advisory unless a mutation supplies a guard, in which case guard validation and
-the value mutation are one atomic transition.
+A lease token can authorize only a committed command carrying the same Raft
+entry term under which the token was created or renewed. It cannot authorize a
+new command admitted in a different term. An already-appended same-term command
+may still commit after a leadership change; stronger current-leader fencing
+belongs to the pending runtime barrier. The old lock nevertheless remains
+reserved until its deadline, so a new leader cannot create a second owner early.
+Locks are advisory unless a mutation supplies a guard, in which case guard
+validation and the value mutation are one atomic transition.
 
 Callers must propagate the fencing token to the protected downstream resource
 and have that resource reject tokens older than the greatest token it has

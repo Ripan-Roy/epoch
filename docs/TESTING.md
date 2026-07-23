@@ -171,8 +171,9 @@ The Cache core suite checks pure observations, checked shard revisions and
 non-repeating item versions, distinct-key transaction bounds, absent-state ABA
 protection, atomic rollback on version/type/counter/deadline/revision/capacity
 failure, deterministic expiry, no-eviction behavior, advisory lock contention,
-token rotation, active-owner epoch and leader-term fencing, bounded owner-history
-reclamation, guarded writes, descending candidate-time clamping, exact replay,
+token rotation, active-owner epoch and cross-entry-term fencing, bounded
+owner-history reclamation, guarded writes, descending candidate-time clamping,
+exact replay,
 and independent-tablet digest
 convergence. These are in-process deterministic state-machine tests. Cache
 node/EPRS recovery, real-process leader failover, and a concurrent

@@ -247,7 +247,7 @@ The Cache profile now has a separate deterministic core boundary. An additive
 pure reads, bounded staged transactions, checked counter/TTL arithmetic, and
 deterministic expiry without changing the original volatile `Cache`. The
 single-shard `epoch-tablet::CacheTablet` adds canonical committed commands,
-absent-state ABA protection, advisory leader-term-fenced locks, exact replay,
+absent-state ABA protection, advisory entry-term-fenced locks, exact replay,
 recorded rejection outcomes, and a chained digest. It is not yet attached to
 the node or consensus actor, so it supplies state-machine evidence rather than
 a clustered Cache service. See [Experimental Replicated Cache Tablet Core](CACHE_TABLET.md).
@@ -385,9 +385,12 @@ not repeat versions. Reads treat an expired value as absent without mutating
 state; explicit maintenance reclaims values in `(deadline, key)` order.
 Committed Cache commands clamp candidate time to the prior effective time.
 Advisory locks use `(tablet_epoch, acquisition_log_index)` as their downstream
-fence, rotate opaque lease tokens on renewal, and reject old-term tokens without
-allowing a second owner before the exclusive deadline. Node/runtime attachment,
-snapshots, multi-shard routing, and the full concurrency history remain open.
+fence, rotate opaque lease tokens on renewal, and reject tokens on commands
+admitted under a different term without allowing a second owner before the
+exclusive deadline. Already-appended same-term commands can still commit after
+a leadership change; current-leader barriers remain runtime work. Node/runtime
+attachment, snapshots, multi-shard routing, and the full concurrency history
+remain open.
 
 ### 8.4 Event Bus
 
