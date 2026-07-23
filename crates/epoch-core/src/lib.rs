@@ -204,10 +204,11 @@ impl EventEnvelope {
 
 /// Supplies both user-visible wall time and process-local elapsed time.
 ///
-/// Engines use the wall clock for scheduled instants and timestamps. Timeout
-/// implementations use the monotonic clock so a wall-clock adjustment cannot
-/// shorten a lease or retry delay. Implementations must never move their
-/// monotonic value backwards.
+/// Engines use the wall clock for scheduled instants and timestamps.
+/// Process-local waiting and timeout implementations should use the monotonic
+/// clock. Persisted state-machine deadlines must separately apply their
+/// documented logical-time and fencing rules across restart or leader change.
+/// Implementations must never move their monotonic value backwards.
 pub trait Clock: Send + Sync + std::fmt::Debug {
     fn wall_time_ms(&self) -> u64;
 

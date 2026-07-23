@@ -73,8 +73,8 @@ public API and SDKs.
 
 The Queue profile now crosses the same boundary: a strict single-partition
 command/state machine with authoritative leader/consumer fencing, monotonic
-server-assigned time, recorded business outcomes, exact renewal replay, and
-immutable DLQ/redrive history is attached to the actor. EPRS replay completes
+committed effective time, recorded business outcomes, exact renewal replay,
+and immutable DLQ/redrive history is attached to the actor. EPRS replay completes
 before readiness, and an internal typed listener exposes mutation resolution
 and stale-capable reads. Real-runtime and three-container gates prove active
 leader loss, old-term lease rejection, conservative redelivery, convergence,
