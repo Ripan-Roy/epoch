@@ -303,11 +303,13 @@ separate local diagnostic listeners replicate opaque probe bytes; see
 [Experimental Consensus Probe](CONSENSUS_PROBE.md). Setting
 `EPOCH_EXPERIMENTAL_STREAM_TABLET_ENABLED=true` replaces those opaque proposal
 routes with the bounded typed Stream milestone described in
-[Experimental Stream Tablet](STREAM_TABLET.md). The two experimental modes are
-mutually exclusive, and neither changes the public API or SDK guarantee ceiling.
-The next Queue profile state machine exists only inside `epoch-tablet`; it has
-no environment flag or listener yet. See
-[Replicated Queue Tablet Core](QUEUE_TABLET.md).
+[Experimental Stream Tablet](STREAM_TABLET.md).
+`EPOCH_EXPERIMENTAL_QUEUE_TABLET_ENABLED=true` instead mounts the typed Queue
+mutation/status/history routes described in
+[Experimental Replicated Queue Tablet](QUEUE_TABLET.md). Stream, Queue, and
+opaque proposal modes are mutually exclusive for one group, and none changes
+the public API or SDK guarantee ceiling. Run `make test-stream-tablet` or
+`make test-queue-tablet` for the disposable three-container proofs.
 
 To discard local data, explicitly add `--volumes` to the Compose down command.
 That is destructive and is intentionally not part of the Make target.

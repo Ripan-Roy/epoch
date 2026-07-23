@@ -123,14 +123,15 @@ required for the metadata/replication work package and G3. See
 [Consensus Feasibility Spike](CONSENSUS_SPIKE.md) and
 [Experimental Stream Tablet](STREAM_TABLET.md).
 
-The Queue application core now exists behind the same profile-neutral tablet
-boundary. It deterministically applies strict single-partition Queue commands,
-leader/consumer fenced leases, retry/schedule/expiry, recorded business
-outcomes, and immutable DLQ/redrive history across identical committed
-histories. This advances the Queue slice but does not complete the work package:
-actor/EPRS integration, real failover, typed routes, flow control, placement,
-and public durability evidence remain pending. See
-[Replicated Queue Tablet Core](QUEUE_TABLET.md).
+The Queue application core now runs behind the same profile-neutral persistent
+actor boundary. It deterministically applies strict single-partition commands,
+leader/consumer-fenced leases, retry/schedule/expiry, recorded business
+outcomes, and immutable DLQ/redrive history. Typed internal routes, EPRS startup
+replay, real-runtime convergence, leader `SIGKILL`, redelivery, and all-node
+container recovery are executable. This advances the Queue slice but does not
+complete flow control, placement, public routing/SDKs, authenticated transport,
+or production durability evidence. See
+[Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
 The segmented-WAL work package is implemented as the single-node storage
 sub-slice at `$EPOCH_DATA_DIR/engine-wal/segment-*.wal`. The implementation has

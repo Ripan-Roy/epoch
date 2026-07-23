@@ -154,14 +154,17 @@ public product acknowledgement, or complete G3 evidence. Those scenarios remain
 required before G3 or the emulator is complete; see
 [Consensus Feasibility Spike](CONSENSUS_SPIKE.md).
 
-The Queue-tablet crate layer separately checks deterministic application of an
-already committed history. Its suite covers strict canonical commands,
-three-instance convergence, leader/consumer/token fencing, exact renewed-token
-replay, monotonic command time, exclusive deadlines, rejection rollback,
-non-zero jitter, TTL/max-age precedence, immutable DLQ/redrive provenance,
-browser-safe receipts, and pinned proposal/command/digest vectors. These are not
-runtime or durability tests; Queue actor/EPRS/process/container coverage remains
-required. See [Replicated Queue Tablet Core](QUEUE_TABLET.md).
+The Queue-tablet layers check strict canonical commands, three-instance
+convergence, leader/consumer/token fencing, exact renewed-token replay,
+monotonic command time, exclusive deadlines, rejection rollback, non-zero
+jitter, TTL/max-age precedence, immutable DLQ/redrive provenance, browser-safe
+receipts, and pinned proposal/command/digest vectors. A real three-runtime test
+drives every Queue operation through typed HTTP and EPRS reopen. The container
+gate adds scheduled eligibility, follower rejection, leader `SIGKILL`,
+old-term-token fencing, redelivery, DLQ/redrive reads, convergence, and all-node
+`SIGKILL` replay. This is bounded fixed-voter evidence, not a complete crash,
+I/O-fault, or production placement matrix. See
+[Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
 ### 3. Integration tests
 

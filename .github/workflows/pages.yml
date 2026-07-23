@@ -59,6 +59,7 @@ jobs:
           test -f console/dist/index.html
           grep -Eq '(src|href)="/epoch/' console/dist/index.html
           grep -Rq 'One lifecycle, three real clients' console/dist/assets
+          grep -Rq 'Experimental replicated Queue' console/dist/assets
           if grep -Eq '(src|href)="/assets/' console/dist/index.html; then
             echo 'build contains an asset URL outside /epoch/' >&2
             exit 1

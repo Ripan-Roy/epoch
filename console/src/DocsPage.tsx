@@ -469,7 +469,10 @@ export function DocsPage({ section }: DocsPageProps) {
                   </p>
                 </article>
               </div>
-              <CodeBlock label="Disposable three-container proof" value="make test-stream-tablet" />
+              <CodeBlock
+                label="Disposable three-container proofs"
+                value={"make test-stream-tablet\nmake test-queue-tablet"}
+              />
             </section>
 
             <section
@@ -585,9 +588,9 @@ export function DocsPage({ section }: DocsPageProps) {
                   href={`${repositoryDocsUrl}/STREAM_TABLET.md`}
                 />
                 <ReferenceCard
-                  eyebrow="QUEUE CORE"
-                  title="Replicated Queue tablet"
-                  description="Fenced leases, deterministic time, recorded outcomes, and immutable DLQ/redrive history boundary."
+                  eyebrow="QUEUE TABLET"
+                  title="Experimental replicated Queue"
+                  description="Typed mutations, fenced leases, failover/redelivery, immutable DLQ/redrive history, and all-voter recovery."
                   href={`${repositoryDocsUrl}/QUEUE_TABLET.md`}
                 />
               </div>
