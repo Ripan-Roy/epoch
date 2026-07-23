@@ -73,20 +73,26 @@ and comparison. It is test infrastructure and does not raise the standalone
 node's guarantee ceiling.
 
 `crates/epoch-consensus` contains fixed-three-voter memory and EPRS-backed
-`raft-rs` feasibility adapters. `crates/epoch-tablet` adds the first typed
-profile application boundary: one opt-in, single-partition Stream tablet whose
-canonical commands commit through the real three-node runtime and rebuild from
-the consensus log. Unit, real-runtime, and three-container gates prove typed
-leader errors, minority non-commit, majority-before-success, bounded
-two-durable-voter evidence, semantic retry/rebinding, ordered offsets, leader
-replacement, catch-up, and all-node `SIGKILL` replay.
-It remains on the unauthenticated experimental listener; the public standalone
-API and SDKs still reject quorum durability. An exhaustive crash matrix,
-snapshots, membership/epoch transitions, read barriers, authenticated transport,
-placement, and multi-tablet routing remain open; see the
-[Stream tablet guide](docs/STREAM_TABLET.md), [probe guide](docs/CONSENSUS_PROBE.md),
-[spike report](docs/CONSENSUS_SPIKE.md), and proposed
-[ADR-0003](docs/adr/0003-consensus-adapter.md).
+`raft-rs` feasibility adapters. `crates/epoch-tablet` supplies separate typed
+profile state machines. Its opt-in, single-partition Stream tablet commits
+through the real three-node runtime and rebuilds from the consensus log. Unit,
+real-runtime, and three-container gates prove typed leader errors, minority
+non-commit, majority-before-success, bounded two-durable-voter evidence,
+semantic retry/rebinding, ordered offsets, leader replacement, catch-up, and
+all-node `SIGKILL` replay.
+
+The same crate now has a strict single-partition Queue tablet core: committed
+histories deterministically reproduce fenced acquire/settlement, monotonic
+consumer epochs and applied time, exact renewal replay, retry/scheduling, and
+immutable dead-letter/redrive evidence. This Queue slice is crate-level only;
+it has no node actor, listener, HTTP/API, SDK, or container wiring and does not
+raise the public standalone `local_durable` ceiling. See the
+[Queue tablet core](docs/QUEUE_TABLET.md),
+[Stream tablet guide](docs/STREAM_TABLET.md),
+[probe guide](docs/CONSENSUS_PROBE.md), [spike report](docs/CONSENSUS_SPIKE.md),
+and proposed [ADR-0003](docs/adr/0003-consensus-adapter.md). An exhaustive crash
+matrix, snapshots, membership/epoch transitions, read barriers, authenticated
+transport, placement, and multi-tablet routing remain open.
 
 ## Quick start
 

@@ -1,83 +1,36 @@
 //! Typed, deterministic state machines applied only after consensus commit.
 //!
-//! The first slice is deliberately narrow: one configured, single-partition
-//! Stream tablet. It owns command validation, deterministic application,
-//! idempotency, and restart replay while the node owns transport and Raft.
+//! The current bounded slices are configured, single-partition Stream and
+//! Queue tablets. They own strict command validation, deterministic
+//! application, idempotency, and replay while the node owns transport and
+//! Raft. Only Stream is attached to the experimental node runtime today.
+
+mod common;
+mod queue;
 
 use std::collections::BTreeMap;
 
-use epoch_core::{DurabilityProfile, EpochError, EventEnvelope, validate_resource_name};
+use common::{
+    AppliedCommand, hash_length_prefixed, proposal_id_from_domain, serialize_u64_as_decimal,
+    validate_committed_command_scope, validate_idempotency_key,
+};
+use epoch_core::{DurabilityProfile, EventEnvelope};
 use epoch_stream::{Stream, StreamConfig, StreamRecord};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use thiserror::Error;
+
+pub use common::{
+    AppliedCommandMetadata, CommittedCommand, MAX_IDEMPOTENCY_KEY_BYTES, StreamTabletScope,
+    TabletError, TabletResult, TabletScope, TabletWriteEvidence as StreamTabletWriteEvidence,
+    TabletWriteEvidence,
+};
+pub use queue::*;
 
 pub const STREAM_TABLET_COMMAND_FORMAT_VERSION: u16 = 1;
 // Kept equal to the current consensus proposal ceiling. The state-machine
 // boundary repeats the check so a command can never validate here and then be
 // rejected only after it reaches Raft.
 pub const MAX_STREAM_TABLET_COMMAND_BYTES: usize = 512 * 1024;
-pub const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
-
-pub type TabletResult<T> = Result<T, TabletError>;
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum TabletError {
-    #[error("invalid tablet command: {0}")]
-    InvalidCommand(String),
-    #[error("tablet command targets group {observed}; expected {expected}")]
-    GroupMismatch { expected: u64, observed: u64 },
-    #[error("tablet command epoch {observed} was fenced by epoch {expected}")]
-    FencedEpoch { expected: u64, observed: u64 },
-    #[error("tablet command {proposal_id} conflicts with its committed payload")]
-    ConflictingCommand { proposal_id: u64 },
-    #[error("committed tablet commands are out of order: index {observed} follows {previous}")]
-    CommitOrder { previous: u64, observed: u64 },
-    #[error("tablet command could not be encoded: {0}")]
-    Encoding(String),
-    #[error("tablet command could not be decoded: {0}")]
-    Decoding(String),
-    #[error(transparent)]
-    Profile(#[from] EpochError),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StreamTabletScope {
-    pub tablet_id: u64,
-    pub tablet_epoch: u64,
-    pub resource: String,
-}
-
-impl StreamTabletScope {
-    pub fn new(
-        tablet_id: u64,
-        tablet_epoch: u64,
-        resource: impl Into<String>,
-    ) -> TabletResult<Self> {
-        let scope = Self {
-            tablet_id,
-            tablet_epoch,
-            resource: resource.into(),
-        };
-        scope.validate()?;
-        Ok(scope)
-    }
-
-    fn validate(&self) -> TabletResult<()> {
-        if self.tablet_id == 0 {
-            return Err(TabletError::InvalidCommand(
-                "tablet_id must be non-zero".into(),
-            ));
-        }
-        if self.tablet_epoch == 0 {
-            return Err(TabletError::InvalidCommand(
-                "tablet_epoch must be non-zero".into(),
-            ));
-        }
-        validate_resource_name(&self.resource)?;
-        Ok(())
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -207,65 +160,11 @@ impl StreamTabletCommand {
 }
 
 pub fn proposal_id_for(scope: &StreamTabletScope, idempotency_key: &str) -> TabletResult<u64> {
-    scope.validate()?;
-    validate_idempotency_key(idempotency_key)?;
-    let mut hasher = Sha256::new();
-    hasher.update(b"epoch/stream-tablet/proposal-id/v1\0");
-    hasher.update(scope.tablet_id.to_be_bytes());
-    hasher.update(scope.tablet_epoch.to_be_bytes());
-    hash_length_prefixed(&mut hasher, scope.resource.as_bytes());
-    hash_length_prefixed(&mut hasher, idempotency_key.as_bytes());
-    let digest = hasher.finalize();
-    let mut bytes = [0_u8; 8];
-    bytes.copy_from_slice(&digest[..8]);
-    let proposal_id = u64::from_be_bytes(bytes);
-    Ok(if proposal_id == 0 { 1 } else { proposal_id })
-}
-
-fn validate_idempotency_key(value: &str) -> TabletResult<()> {
-    let length = value.len();
-    if value.trim().is_empty() {
-        return Err(TabletError::InvalidCommand(
-            "idempotency_key is required".into(),
-        ));
-    }
-    if length > MAX_IDEMPOTENCY_KEY_BYTES {
-        return Err(TabletError::InvalidCommand(format!(
-            "idempotency_key is {length} bytes; maximum is {MAX_IDEMPOTENCY_KEY_BYTES}"
-        )));
-    }
-    if value.chars().any(char::is_control) {
-        return Err(TabletError::InvalidCommand(
-            "idempotency_key cannot contain control characters".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn hash_length_prefixed(hasher: &mut Sha256, value: &[u8]) {
-    hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
-    hasher.update(value);
-}
-
-#[allow(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "serde serialize_with requires a shared reference"
-)]
-fn serialize_u64_as_decimal<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_str(&value.to_string())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CommittedCommand<'a> {
-    pub group_id: u64,
-    pub group_epoch: u64,
-    pub proposal_id: u64,
-    pub term: u64,
-    pub log_index: u64,
-    pub payload: &'a [u8],
+    proposal_id_from_domain(
+        b"epoch/stream-tablet/proposal-id/v1\0",
+        scope,
+        idempotency_key,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -292,29 +191,17 @@ pub struct StreamTabletAppendReceipt {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum StreamTabletWriteEvidence {
-    FixedVoterMajorityPersisted,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
 pub enum StreamTabletAppendDisposition {
     New,
     Replayed,
     ProfileDeduplicated,
 }
 
-#[derive(Debug, Clone)]
-struct AppliedCommand {
-    payload_digest: [u8; 32],
-    receipt: StreamTabletAppendReceipt,
-}
-
 #[derive(Debug)]
 pub struct StreamTablet {
     scope: StreamTabletScope,
     stream: Stream,
-    applied: BTreeMap<u64, AppliedCommand>,
+    applied: BTreeMap<u64, AppliedCommand<StreamTabletAppendReceipt>>,
     last_applied_command_index: u64,
     state_digest: [u8; 32],
 }
@@ -354,7 +241,7 @@ impl StreamTablet {
         committed: CommittedCommand<'_>,
     ) -> TabletResult<StreamTabletAppendReceipt> {
         self.validate_commit_scope(committed)?;
-        let payload_digest: [u8; 32] = Sha256::digest(committed.payload).into();
+        let metadata = AppliedCommandMetadata::from_committed(committed);
         if let Some(mut receipt) = self.receipt_for_committed(committed)? {
             receipt.disposition = StreamTabletAppendDisposition::Replayed;
             return Ok(receipt);
@@ -398,12 +285,12 @@ impl StreamTablet {
                 StreamTabletAppendDisposition::New
             },
         };
-        self.advance_digest(committed, payload_digest, &receipt);
+        self.advance_digest(committed, metadata.payload_digest, &receipt);
         self.last_applied_command_index = committed.log_index;
         self.applied.insert(
             committed.proposal_id,
             AppliedCommand {
-                payload_digest,
+                metadata,
                 receipt: receipt.clone(),
             },
         );
@@ -426,15 +313,7 @@ impl StreamTablet {
         let Some(previous) = self.applied.get(&committed.proposal_id) else {
             return Ok(None);
         };
-        let payload_digest: [u8; 32] = Sha256::digest(committed.payload).into();
-        if previous.payload_digest != payload_digest
-            || previous.receipt.term != committed.term
-            || previous.receipt.commit_index != committed.log_index
-        {
-            return Err(TabletError::ConflictingCommand {
-                proposal_id: committed.proposal_id,
-            });
-        }
+        previous.metadata.validate_exact(committed)?;
         Ok(Some(previous.receipt.clone()))
     }
 
@@ -457,24 +336,7 @@ impl StreamTablet {
     }
 
     fn validate_commit_scope(&self, committed: CommittedCommand<'_>) -> TabletResult<()> {
-        if committed.group_id != self.scope.tablet_id {
-            return Err(TabletError::GroupMismatch {
-                expected: self.scope.tablet_id,
-                observed: committed.group_id,
-            });
-        }
-        if committed.group_epoch != self.scope.tablet_epoch {
-            return Err(TabletError::FencedEpoch {
-                expected: self.scope.tablet_epoch,
-                observed: committed.group_epoch,
-            });
-        }
-        if committed.proposal_id == 0 || committed.term == 0 || committed.log_index == 0 {
-            return Err(TabletError::InvalidCommand(
-                "committed proposal_id, term, and log_index must be non-zero".into(),
-            ));
-        }
-        Ok(())
+        validate_committed_command_scope(&self.scope, committed)
     }
 
     fn advance_digest(
@@ -633,6 +495,14 @@ mod tests {
         assert_eq!(tablet.applied_command_count(), 1);
         assert_eq!(tablet.fetch(0, 10).unwrap().len(), 1);
         assert_eq!(tablet.state_digest(), digest);
+        assert_eq!(
+            digest,
+            [
+                0xc1, 0x30, 0xe8, 0x46, 0x59, 0x49, 0xd7, 0x2c, 0x4d, 0x37, 0x4d, 0x05, 0xa3, 0xb7,
+                0xb2, 0x00, 0xa5, 0x85, 0x3d, 0x7c, 0xdf, 0x34, 0x55, 0xe4, 0xd6, 0xc3, 0x5a, 0x29,
+                0x4f, 0x18, 0x39, 0x5f,
+            ]
+        );
     }
 
     #[test]
@@ -669,6 +539,14 @@ mod tests {
             tablet.apply(committed(proposal_id, 2, 4, &conflicting_payload)),
             Err(TabletError::ConflictingCommand { .. })
         ));
+        assert!(matches!(
+            tablet.apply(committed(proposal_id, 3, 4, &payload)),
+            Err(TabletError::ConflictingCommand { .. })
+        ));
+        assert!(matches!(
+            tablet.apply(committed(proposal_id, 2, 5, &payload)),
+            Err(TabletError::ConflictingCommand { .. })
+        ));
 
         let (next_id, next_payload) = encoded("request-2", "two", 12);
         assert!(matches!(
@@ -682,6 +560,7 @@ mod tests {
     fn proposal_id_is_stable_and_scope_separated() {
         let scope = scope();
         let first = proposal_id_for(&scope, "request-1").unwrap();
+        assert_eq!(first, 298_544_817_787_184_225);
         assert_eq!(first, proposal_id_for(&scope, "request-1").unwrap());
         assert_ne!(first, proposal_id_for(&scope, "request-2").unwrap());
         assert_ne!(

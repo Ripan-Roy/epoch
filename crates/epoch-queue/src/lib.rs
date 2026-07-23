@@ -11,6 +11,14 @@ use epoch_core::{AckMetadata, DurabilityProfile, EpochError, EpochResult, EventE
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod lease;
+
+#[cfg(test)]
+use lease::FENCED_LEASE_TOKEN_PREFIX;
+pub use lease::{
+    FencedLeaseTokenMetadata, LEASE_FENCE_FORMAT_VERSION, LeaseFence, MAX_FENCED_LEASE_TOKEN_BYTES,
+};
+
 const RECOVERY_STATE_CHECKSUM_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -105,6 +113,12 @@ pub struct EnqueueReceipt {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Delivery {
     pub message: QueueMessage,
+    pub lease_token: String,
+    pub lease_deadline_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LeaseRenewal {
     pub lease_token: String,
     pub lease_deadline_ms: u64,
 }
@@ -264,20 +278,7 @@ impl Queue {
                 "visibility timeout must be greater than zero".into(),
             ));
         }
-        let mut candidates: Vec<(String, u8, u64)> = self
-            .order
-            .iter()
-            .filter_map(|id| {
-                self.messages.get(id).and_then(|message| {
-                    (message.state == QueueState::Ready).then_some((
-                        id.clone(),
-                        message.envelope.priority,
-                        message.commit_position,
-                    ))
-                })
-            })
-            .collect();
-        candidates.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.2.cmp(&right.2)));
+        let candidates = self.lease_candidates();
         let mut deliveries = Vec::new();
         for (id, _, _) in candidates.into_iter().take(max_messages) {
             self.lease_generation = self.lease_generation.saturating_add(1);
@@ -302,15 +303,175 @@ impl Queue {
         Ok(deliveries)
     }
 
+    /// Acquires Queue work using a token fenced by replicated ownership epochs.
+    ///
+    /// The returned token remains opaque to clients. Unlike `acquire`, its
+    /// deterministic representation binds tablet id, tablet epoch, partition,
+    /// leader term, consumer identity/epoch, message id, lease generation, and
+    /// deadline.
+    pub fn acquire_fenced(
+        &mut self,
+        consumer: &str,
+        max_messages: usize,
+        visibility_timeout_ms: Option<u64>,
+        now_ms: u64,
+        fence: LeaseFence,
+    ) -> EpochResult<Vec<Delivery>> {
+        fence.validate()?;
+        if consumer.is_empty() {
+            return Err(EpochError::InvalidArgument("consumer is required".into()));
+        }
+        self.maintain_fenced(now_ms)?;
+        let visibility = visibility_timeout_ms.unwrap_or(self.config.visibility_timeout_ms);
+        if visibility == 0 {
+            return Err(EpochError::InvalidArgument(
+                "visibility timeout must be greater than zero".into(),
+            ));
+        }
+        let candidates: Vec<_> = self
+            .lease_candidates()
+            .into_iter()
+            .take(max_messages)
+            .collect();
+        let acquisition_count = u64::try_from(candidates.len())
+            .map_err(|_| EpochError::Capacity("fenced acquisition batch is too large".into()))?;
+        self.lease_generation
+            .checked_add(acquisition_count)
+            .ok_or_else(|| EpochError::Capacity("queue lease generation is exhausted".into()))?;
+        self.commit_position
+            .checked_add(acquisition_count)
+            .ok_or_else(|| EpochError::Capacity("queue commit position is exhausted".into()))?;
+
+        let mut generation = self.lease_generation;
+        let mut commit_position = self.commit_position;
+        let mut planned = Vec::with_capacity(candidates.len());
+        for (id, _, _) in candidates {
+            generation = generation.checked_add(1).ok_or_else(|| {
+                EpochError::Capacity("queue lease generation is exhausted".into())
+            })?;
+            commit_position = commit_position
+                .checked_add(1)
+                .ok_or_else(|| EpochError::Capacity("queue commit position is exhausted".into()))?;
+            let requested_deadline_ms = now_ms.saturating_add(visibility);
+            let deadline_ms = self
+                .messages
+                .get(&id)
+                .and_then(|message| self.terminal_deadline_ms(message))
+                .map_or(requested_deadline_ms, |bound| {
+                    requested_deadline_ms.min(bound)
+                });
+            if deadline_ms <= now_ms {
+                return Err(EpochError::Unavailable(
+                    "message reached its terminal deadline before fenced acquisition".into(),
+                ));
+            }
+            let token = FencedLeaseTokenMetadata::new(
+                fence,
+                consumer.to_owned(),
+                id.clone(),
+                generation,
+                deadline_ms,
+            )?
+            .encode()?;
+            planned.push((id, generation, commit_position, deadline_ms, token));
+        }
+
+        let mut deliveries = Vec::with_capacity(planned.len());
+        for (id, generation, commit_position, deadline_ms, token) in planned {
+            self.lease_generation = generation;
+            self.commit_position = commit_position;
+            let message = self.messages.get_mut(&id).expect("candidate exists");
+            message.attempt = message.attempt.saturating_add(1);
+            message.state = QueueState::Leased {
+                consumer: consumer.to_owned(),
+                token: token.clone(),
+                deadline_ms,
+                generation,
+            };
+            deliveries.push(Delivery {
+                message: message.clone(),
+                lease_token: token,
+                lease_deadline_ms: deadline_ms,
+            });
+        }
+        Ok(deliveries)
+    }
+
+    fn lease_candidates(&self) -> Vec<(String, u8, u64)> {
+        let mut candidates: Vec<_> = self
+            .order
+            .iter()
+            .filter_map(|id| {
+                self.messages.get(id).and_then(|message| {
+                    (message.state == QueueState::Ready).then_some((
+                        id.clone(),
+                        message.envelope.priority,
+                        message.commit_position,
+                    ))
+                })
+            })
+            .collect();
+        candidates.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.2.cmp(&right.2)));
+        candidates
+    }
+
+    /// Parses a fenced token and proves that it names the Queue's current lease.
+    pub fn fenced_lease_metadata(&self, token: &str) -> EpochResult<FencedLeaseTokenMetadata> {
+        let metadata = FencedLeaseTokenMetadata::parse(token)?;
+        let message = self
+            .messages
+            .get(metadata.message_id())
+            .ok_or(EpochError::Fenced)?;
+        match &message.state {
+            QueueState::Leased {
+                consumer,
+                token: live_token,
+                deadline_ms,
+                generation,
+                ..
+            } if live_token == token
+                && consumer == metadata.consumer()
+                && *deadline_ms == metadata.lease_deadline_ms
+                && *generation == metadata.lease_generation =>
+            {
+                Ok(metadata)
+            }
+            _ => Err(EpochError::Fenced),
+        }
+    }
+
     pub fn acknowledge(&mut self, token: &str, now_ms: u64) -> EpochResult<AckMetadata> {
+        self.reject_live_fenced_token_on_legacy_path(token)?;
         self.maintain(now_ms);
-        let id = self.message_id_for_live_token(token)?;
+        let id = self.message_id_for_live_legacy_token(token)?;
         self.commit_position = self.commit_position.saturating_add(1);
         self.messages.get_mut(&id).expect("token resolved").state = QueueState::Acknowledged;
         Ok(AckMetadata::standalone(
             self.commit_position,
             self.config.durability,
         ))
+    }
+
+    pub fn acknowledge_fenced(
+        &mut self,
+        token: &str,
+        expected_fence: LeaseFence,
+        now_ms: u64,
+    ) -> EpochResult<AckMetadata> {
+        expected_fence.validate()?;
+        Self::validate_expected_fence_metadata(token, expected_fence)?;
+        self.maintain_fenced(now_ms)?;
+        let (id, _) = self.message_id_for_expected_fence(token, expected_fence)?;
+        let commit_position = self.next_fenced_commit_position()?;
+        self.messages.get_mut(&id).expect("token resolved").state = QueueState::Acknowledged;
+        self.commit_position = commit_position;
+        Ok(AckMetadata {
+            durability: self.config.durability,
+            resource_epoch: expected_fence.tablet_epoch(),
+            commit_position,
+            replica_acks: 1,
+            duplicate: false,
+        })
     }
 
     pub fn extend_lease(
@@ -324,8 +485,9 @@ impl Queue {
                 "lease extension must be greater than zero".into(),
             ));
         }
+        self.reject_live_fenced_token_on_legacy_path(token)?;
         self.maintain(now_ms);
-        let id = self.message_id_for_live_token(token)?;
+        let id = self.message_id_for_live_legacy_token(token)?;
         let message = self.messages.get_mut(&id).expect("token resolved");
         let QueueState::Leased { deadline_ms, .. } = &mut message.state else {
             return Err(EpochError::Fenced);
@@ -335,6 +497,67 @@ impl Queue {
         Ok(*deadline_ms)
     }
 
+    /// Renews a fenced lease without crossing its TTL or retry max-age boundary.
+    ///
+    /// The renewed token replaces the old token so its embedded deadline stays
+    /// truthful. Retrying after a lost response is provided by the containing
+    /// Queue-tablet command's idempotency key, not by token rotation itself.
+    pub fn extend_lease_fenced_bounded(
+        &mut self,
+        token: &str,
+        expected_fence: LeaseFence,
+        extension_ms: u64,
+        now_ms: u64,
+    ) -> EpochResult<LeaseRenewal> {
+        if extension_ms == 0 {
+            return Err(EpochError::InvalidArgument(
+                "lease extension must be greater than zero".into(),
+            ));
+        }
+        expected_fence.validate()?;
+        Self::validate_expected_fence_metadata(token, expected_fence)?;
+        self.maintain_fenced(now_ms)?;
+        let (id, metadata) = self.message_id_for_expected_fence(token, expected_fence)?;
+        let terminal_deadline_ms = self
+            .messages
+            .get(&id)
+            .and_then(|message| self.terminal_deadline_ms(message));
+        let requested_deadline_ms = now_ms.saturating_add(extension_ms);
+        let deadline_ms = terminal_deadline_ms.map_or(requested_deadline_ms, |bound| {
+            requested_deadline_ms.min(bound)
+        });
+        if deadline_ms <= metadata.lease_deadline_ms {
+            return Err(EpochError::Conflict(
+                "bounded lease extension must produce a later deadline".into(),
+            ));
+        }
+        let renewed_token = FencedLeaseTokenMetadata::new(
+            metadata.fence,
+            metadata.consumer,
+            id.clone(),
+            metadata.lease_generation,
+            deadline_ms,
+        )?
+        .encode()?;
+        let commit_position = self.next_fenced_commit_position()?;
+        let message = self.messages.get_mut(&id).expect("token resolved");
+        let QueueState::Leased {
+            token: live_token,
+            deadline_ms: live_deadline_ms,
+            ..
+        } = &mut message.state
+        else {
+            return Err(EpochError::Fenced);
+        };
+        live_token.clone_from(&renewed_token);
+        *live_deadline_ms = deadline_ms;
+        self.commit_position = commit_position;
+        Ok(LeaseRenewal {
+            lease_token: renewed_token,
+            lease_deadline_ms: deadline_ms,
+        })
+    }
+
     pub fn release(
         &mut self,
         token: &str,
@@ -342,10 +565,63 @@ impl Queue {
         reason: Option<String>,
         now_ms: u64,
     ) -> EpochResult<()> {
+        self.reject_live_fenced_token_on_legacy_path(token)?;
         self.maintain(now_ms);
-        let id = self.message_id_for_live_token(token)?;
+        let id = self.message_id_for_live_legacy_token(token)?;
         self.retry_or_dead_letter(&id, delay_ms, reason, now_ms);
         Ok(())
+    }
+
+    pub fn release_fenced(
+        &mut self,
+        token: &str,
+        expected_fence: LeaseFence,
+        delay_ms: u64,
+        reason: Option<String>,
+        now_ms: u64,
+    ) -> EpochResult<()> {
+        expected_fence.validate()?;
+        Self::validate_expected_fence_metadata(token, expected_fence)?;
+        self.maintain_fenced(now_ms)?;
+        let (id, _) = self.message_id_for_expected_fence(token, expected_fence)?;
+        self.retry_or_dead_letter_fenced(&id, delay_ms, reason, now_ms)
+    }
+
+    /// Negatively acknowledges a delivery and applies configured retry policy.
+    pub fn nack(&mut self, token: &str, reason: impl Into<String>, now_ms: u64) -> EpochResult<()> {
+        let reason = reason.into();
+        if reason.trim().is_empty() {
+            return Err(EpochError::InvalidArgument(
+                "nack reason is required".into(),
+            ));
+        }
+        self.reject_live_fenced_token_on_legacy_path(token)?;
+        self.maintain(now_ms);
+        let id = self.message_id_for_live_legacy_token(token)?;
+        let delay_ms = self.retry_delay_for(&id);
+        self.retry_or_dead_letter(&id, delay_ms, Some(reason), now_ms);
+        Ok(())
+    }
+
+    pub fn nack_fenced(
+        &mut self,
+        token: &str,
+        expected_fence: LeaseFence,
+        reason: impl Into<String>,
+        now_ms: u64,
+    ) -> EpochResult<()> {
+        let reason = reason.into();
+        if reason.trim().is_empty() {
+            return Err(EpochError::InvalidArgument(
+                "nack reason is required".into(),
+            ));
+        }
+        expected_fence.validate()?;
+        Self::validate_expected_fence_metadata(token, expected_fence)?;
+        self.maintain_fenced(now_ms)?;
+        let (id, _) = self.message_id_for_expected_fence(token, expected_fence)?;
+        let delay_ms = self.retry_delay_for(&id);
+        self.retry_or_dead_letter_fenced(&id, delay_ms, Some(reason), now_ms)
     }
 
     pub fn reject(
@@ -354,10 +630,25 @@ impl Queue {
         reason: impl Into<String>,
         now_ms: u64,
     ) -> EpochResult<()> {
+        self.reject_live_fenced_token_on_legacy_path(token)?;
         self.maintain(now_ms);
-        let id = self.message_id_for_live_token(token)?;
-        self.dead_letter(&id, reason.into(), now_ms);
+        let id = self.message_id_for_live_legacy_token(token)?;
+        self.move_to_dead_letter(&id, reason.into(), now_ms);
         Ok(())
+    }
+
+    pub fn reject_fenced(
+        &mut self,
+        token: &str,
+        expected_fence: LeaseFence,
+        reason: impl Into<String>,
+        now_ms: u64,
+    ) -> EpochResult<()> {
+        expected_fence.validate()?;
+        Self::validate_expected_fence_metadata(token, expected_fence)?;
+        self.maintain_fenced(now_ms)?;
+        let (id, _) = self.message_id_for_expected_fence(token, expected_fence)?;
+        self.move_to_dead_letter_fenced(&id, reason.into(), now_ms)
     }
 
     pub fn get(&self, message_id: &str) -> Option<QueueMessage> {
@@ -366,6 +657,22 @@ impl Queue {
 
     pub fn dead_letters(&self, limit: usize) -> Vec<DeadLetter> {
         self.dead_letters.iter().take(limit).cloned().collect()
+    }
+
+    /// Returns the active dead-letter evidence for one message, if any.
+    pub fn dead_letter(&self, message_id: &str) -> Option<DeadLetter> {
+        if !self
+            .messages
+            .get(message_id)
+            .is_some_and(|message| matches!(message.state, QueueState::DeadLettered { .. }))
+        {
+            return None;
+        }
+        self.dead_letters
+            .iter()
+            .rev()
+            .find(|letter| letter.message_id == message_id)
+            .cloned()
     }
 
     pub fn redrive(&mut self, message_id: &str, now_ms: u64) -> EpochResult<()> {
@@ -438,6 +745,88 @@ impl Queue {
         }
     }
 
+    /// Applies maintenance for replicated Queue commands, including max age.
+    ///
+    /// Standalone v1 replay continues to use `maintain`, whose historical
+    /// transition behavior is intentionally unchanged.
+    pub fn maintain_fenced(&mut self, now_ms: u64) -> EpochResult<()> {
+        let actions: Vec<_> = self
+            .order
+            .iter()
+            .filter_map(|id| {
+                self.messages.get(id).and_then(|message| {
+                    if matches!(
+                        message.state,
+                        QueueState::Acknowledged
+                            | QueueState::Expired
+                            | QueueState::DeadLettered { .. }
+                    ) {
+                        return None;
+                    }
+                    let ttl_expired = message
+                        .envelope
+                        .ttl_ms
+                        .is_some_and(|ttl| message.enqueued_at_ms.saturating_add(ttl) <= now_ms);
+                    if ttl_expired {
+                        return Some((id.clone(), MaintenanceAction::Expire));
+                    }
+                    let max_age_expired = self.config.retry.max_age_ms.is_some_and(|max_age| {
+                        message.enqueued_at_ms.saturating_add(max_age) <= now_ms
+                    });
+                    if max_age_expired {
+                        return Some((id.clone(), MaintenanceAction::Expire));
+                    }
+                    match message.state {
+                        QueueState::Scheduled { eligible_at_ms } if eligible_at_ms <= now_ms => {
+                            Some((id.clone(), MaintenanceAction::Ready))
+                        }
+                        QueueState::Leased { deadline_ms, .. } if deadline_ms <= now_ms => {
+                            Some((id.clone(), MaintenanceAction::LeaseExpired))
+                        }
+                        _ => None,
+                    }
+                })
+            })
+            .collect();
+        let committed_action_count = actions
+            .iter()
+            .filter(|(_, action)| *action != MaintenanceAction::Ready)
+            .count();
+        let committed_action_count = u64::try_from(committed_action_count)
+            .map_err(|_| EpochError::Capacity("fenced maintenance batch is too large".into()))?;
+        self.commit_position
+            .checked_add(committed_action_count)
+            .ok_or_else(|| EpochError::Capacity("queue commit position is exhausted".into()))?;
+
+        self.cleanup_dedupe(now_ms);
+        for (id, action) in actions {
+            match action {
+                MaintenanceAction::Expire => {
+                    let commit_position = self.next_fenced_commit_position()?;
+                    if let Some(message) = self.messages.get_mut(&id) {
+                        message.state = QueueState::Expired;
+                    }
+                    self.commit_position = commit_position;
+                }
+                MaintenanceAction::Ready => {
+                    if let Some(message) = self.messages.get_mut(&id) {
+                        message.state = QueueState::Ready;
+                    }
+                }
+                MaintenanceAction::LeaseExpired => {
+                    let delay = self.retry_delay_for(&id);
+                    self.retry_or_dead_letter_fenced(
+                        &id,
+                        delay,
+                        Some("visibility_timeout".into()),
+                        now_ms,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn counts(&self) -> QueueCounts {
         let mut counts = QueueCounts::default();
         for message in self.messages.values() {
@@ -479,6 +868,57 @@ impl Queue {
             .ok_or(EpochError::Fenced)
     }
 
+    fn reject_live_fenced_token_on_legacy_path(&self, token: &str) -> EpochResult<()> {
+        if self.message_id_for_live_token(token).is_ok()
+            && FencedLeaseTokenMetadata::parse(token).is_ok()
+        {
+            Err(EpochError::Fenced)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn message_id_for_live_legacy_token(&self, token: &str) -> EpochResult<String> {
+        let id = self.message_id_for_live_token(token)?;
+        if FencedLeaseTokenMetadata::parse(token).is_ok() {
+            Err(EpochError::Fenced)
+        } else {
+            Ok(id)
+        }
+    }
+
+    fn message_id_for_expected_fence(
+        &self,
+        token: &str,
+        expected_fence: LeaseFence,
+    ) -> EpochResult<(String, FencedLeaseTokenMetadata)> {
+        let metadata = self
+            .fenced_lease_metadata(token)
+            .map_err(|_| EpochError::Fenced)?;
+        if metadata.fence != expected_fence {
+            return Err(EpochError::Fenced);
+        }
+        Ok((metadata.message_id.clone(), metadata))
+    }
+
+    fn validate_expected_fence_metadata(
+        token: &str,
+        expected_fence: LeaseFence,
+    ) -> EpochResult<()> {
+        let metadata = FencedLeaseTokenMetadata::parse(token).map_err(|_| EpochError::Fenced)?;
+        if metadata.fence == expected_fence {
+            Ok(())
+        } else {
+            Err(EpochError::Fenced)
+        }
+    }
+
+    fn next_fenced_commit_position(&self) -> EpochResult<u64> {
+        self.commit_position
+            .checked_add(1)
+            .ok_or_else(|| EpochError::Capacity("queue commit position is exhausted".into()))
+    }
+
     fn retry_or_dead_letter(
         &mut self,
         id: &str,
@@ -494,7 +934,7 @@ impl Queue {
                     })
             });
         if should_dead_letter {
-            self.dead_letter(
+            self.move_to_dead_letter(
                 id,
                 reason.unwrap_or_else(|| "retry_exhausted".into()),
                 now_ms,
@@ -514,7 +954,45 @@ impl Queue {
         self.commit_position = self.commit_position.saturating_add(1);
     }
 
-    fn dead_letter(&mut self, id: &str, reason: String, now_ms: u64) {
+    fn retry_or_dead_letter_fenced(
+        &mut self,
+        id: &str,
+        delay_ms: u64,
+        reason: Option<String>,
+        now_ms: u64,
+    ) -> EpochResult<()> {
+        let should_dead_letter =
+            self.messages.get(id).is_some_and(|message| {
+                message.attempt >= self.config.retry.max_attempts
+                    || self.config.retry.max_age_ms.is_some_and(|max_age| {
+                        now_ms.saturating_sub(message.enqueued_at_ms) >= max_age
+                    })
+            });
+        if should_dead_letter {
+            return self.move_to_dead_letter_fenced(
+                id,
+                reason.unwrap_or_else(|| "retry_exhausted".into()),
+                now_ms,
+            );
+        }
+        let commit_position = self.next_fenced_commit_position()?;
+        let message = self
+            .messages
+            .get_mut(id)
+            .ok_or_else(|| EpochError::NotFound(id.to_owned()))?;
+        message.last_error = reason;
+        message.state = if delay_ms == 0 {
+            QueueState::Ready
+        } else {
+            QueueState::Scheduled {
+                eligible_at_ms: now_ms.saturating_add(delay_ms),
+            }
+        };
+        self.commit_position = commit_position;
+        Ok(())
+    }
+
+    fn move_to_dead_letter(&mut self, id: &str, reason: String, now_ms: u64) {
         if let Some(message) = self.messages.get_mut(id) {
             message.state = QueueState::DeadLettered {
                 reason: reason.clone(),
@@ -531,6 +1009,34 @@ impl Queue {
             });
             self.commit_position = self.commit_position.saturating_add(1);
         }
+    }
+
+    fn move_to_dead_letter_fenced(
+        &mut self,
+        id: &str,
+        reason: String,
+        now_ms: u64,
+    ) -> EpochResult<()> {
+        let commit_position = self.next_fenced_commit_position()?;
+        let message = self
+            .messages
+            .get_mut(id)
+            .ok_or_else(|| EpochError::NotFound(id.to_owned()))?;
+        message.state = QueueState::DeadLettered {
+            reason: reason.clone(),
+        };
+        message.last_error = Some(reason.clone());
+        self.dead_letters.push_back(DeadLetter {
+            message_id: id.to_owned(),
+            envelope: message.envelope.clone(),
+            reason,
+            original_enqueued_at_ms: message.enqueued_at_ms,
+            dead_lettered_at_ms: now_ms,
+            attempts: message.attempt,
+            last_error: message.last_error.clone(),
+        });
+        self.commit_position = commit_position;
+        Ok(())
     }
 
     fn retry_delay_for(&self, id: &str) -> u64 {
@@ -564,6 +1070,24 @@ impl Queue {
 
     fn cleanup_dedupe(&mut self, now_ms: u64) {
         self.dedupe.retain(|_, entry| entry.expires_at_ms > now_ms);
+    }
+
+    fn terminal_deadline_ms(&self, message: &QueueMessage) -> Option<u64> {
+        let ttl_deadline_ms = message
+            .envelope
+            .ttl_ms
+            .map(|ttl_ms| message.enqueued_at_ms.saturating_add(ttl_ms));
+        let max_age_deadline_ms = self
+            .config
+            .retry
+            .max_age_ms
+            .map(|max_age_ms| message.enqueued_at_ms.saturating_add(max_age_ms));
+        match (ttl_deadline_ms, max_age_deadline_ms) {
+            (Some(ttl), Some(max_age)) => Some(ttl.min(max_age)),
+            (Some(ttl), None) => Some(ttl),
+            (None, Some(max_age)) => Some(max_age),
+            (None, None) => None,
+        }
     }
 }
 
@@ -848,7 +1372,7 @@ pub struct QueueCounts {
     pub dead_lettered: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MaintenanceAction {
     Expire,
     Ready,
@@ -865,6 +1389,10 @@ mod tests {
         let mut event = EventEnvelope::new("tests", "work.requested", json!({"id": id}), 0);
         event.id = id.into();
         event
+    }
+
+    fn lease_fence() -> LeaseFence {
+        LeaseFence::new(7, 11, 3, 13, 17).unwrap()
     }
 
     fn checksum_fixture_queue() -> Queue {
@@ -913,6 +1441,393 @@ mod tests {
             .unwrap();
         queue.acquire("worker-b", 1, None, 14).unwrap();
         queue
+    }
+
+    #[test]
+    fn fenced_acquire_is_deterministic_and_server_metadata_requires_a_live_token() {
+        let fence = lease_fence();
+        let mut first_queue = Queue::new(QueueConfig::default()).unwrap();
+        first_queue.enqueue(event("message.with.é"), 10).unwrap();
+        let mut replayed_queue = first_queue.clone();
+
+        let first = first_queue
+            .acquire_fenced("worker", 1, Some(50), 20, fence)
+            .unwrap()
+            .remove(0);
+        let replayed = replayed_queue
+            .acquire_fenced("worker", 1, Some(50), 20, fence)
+            .unwrap()
+            .remove(0);
+        assert_eq!(first.lease_token, replayed.lease_token);
+        assert_eq!(
+            first_queue.recovery_state_checksum(),
+            replayed_queue.recovery_state_checksum()
+        );
+        assert!(first.lease_token.starts_with(FENCED_LEASE_TOKEN_PREFIX));
+
+        let metadata = FencedLeaseTokenMetadata::parse(&first.lease_token).unwrap();
+        assert_eq!(metadata.fence(), fence);
+        assert_eq!(metadata.consumer(), "worker");
+        assert_eq!(metadata.message_id(), "message.with.é");
+        assert_eq!(metadata.lease_generation(), 1);
+        assert_eq!(metadata.lease_deadline_ms(), 70);
+        assert_eq!(
+            first_queue
+                .fenced_lease_metadata(&first.lease_token)
+                .unwrap(),
+            metadata
+        );
+
+        let mut corrupted = first.lease_token.clone();
+        let replacement = if corrupted.ends_with('0') { '1' } else { '0' };
+        corrupted.pop();
+        corrupted.push(replacement);
+        assert!(matches!(
+            FencedLeaseTokenMetadata::parse(&corrupted),
+            Err(EpochError::InvalidArgument(_))
+        ));
+
+        assert_eq!(
+            first_queue.acknowledge(&first.lease_token, 21),
+            Err(EpochError::Fenced)
+        );
+        let stale_fence = LeaseFence::new(7, 11, 3, 14, 17).unwrap();
+        assert_eq!(
+            first_queue.acknowledge_fenced(&first.lease_token, stale_fence, 21),
+            Err(EpochError::Fenced)
+        );
+        first_queue
+            .acknowledge_fenced(&first.lease_token, fence, 21)
+            .unwrap();
+        assert_eq!(
+            first_queue.fenced_lease_metadata(&first.lease_token),
+            Err(EpochError::Fenced)
+        );
+    }
+
+    #[test]
+    fn fenced_acquisition_rejects_an_oversized_token_before_mutation() {
+        let oversized_id = "m".repeat(MAX_FENCED_LEASE_TOKEN_BYTES);
+        let mut oversized_queue = Queue::new(QueueConfig::default()).unwrap();
+        oversized_queue.enqueue(event(&oversized_id), 0).unwrap();
+        let commit_position = oversized_queue.commit_position;
+        assert!(matches!(
+            oversized_queue.acquire_fenced("worker", 1, None, 1, lease_fence()),
+            Err(EpochError::InvalidArgument(_))
+        ));
+        assert_eq!(oversized_queue.commit_position, commit_position);
+        assert_eq!(oversized_queue.counts().ready, 1);
+    }
+
+    #[test]
+    fn standalone_acquire_retains_the_v1_token_shape() {
+        let mut queue = Queue::new(QueueConfig::default()).unwrap();
+        queue.enqueue(event("one"), 0).unwrap();
+
+        let delivery = queue.acquire("worker", 1, None, 0).unwrap().remove(0);
+
+        assert_eq!(delivery.lease_token, "one.1.2");
+    }
+
+    #[test]
+    fn legacy_token_with_fenced_prefix_remains_a_valid_v1_token() {
+        let mut queue = Queue::new(QueueConfig::default()).unwrap();
+        queue.enqueue(event("epoch.queue.lease.foo"), 0).unwrap();
+        let delivery = queue.acquire("worker", 1, Some(10), 0).unwrap().remove(0);
+        assert!(delivery.lease_token.starts_with(FENCED_LEASE_TOKEN_PREFIX));
+
+        assert_eq!(
+            queue.extend_lease(&delivery.lease_token, 20, 1).unwrap(),
+            21
+        );
+        queue.acknowledge(&delivery.lease_token, 2).unwrap();
+        assert_eq!(queue.counts().acknowledged, 1);
+    }
+
+    #[test]
+    fn fenced_tokens_require_expected_fence_settlement_entry_points() {
+        let fence = lease_fence();
+        let mut base = Queue::new(QueueConfig {
+            retry: RetryPolicy {
+                initial_delay_ms: 0,
+                max_delay_ms: 0,
+                jitter_percent: 0,
+                ..RetryPolicy::default()
+            },
+            ..QueueConfig::default()
+        })
+        .unwrap();
+        base.enqueue(event("settle"), 0).unwrap();
+        let delivery = base
+            .acquire_fenced("worker", 1, Some(10), 0, fence)
+            .unwrap()
+            .remove(0);
+
+        let mut queue = base.clone();
+        assert_eq!(
+            queue.acknowledge(&delivery.lease_token, 1),
+            Err(EpochError::Fenced)
+        );
+        let mut queue = base.clone();
+        assert_eq!(
+            queue.nack(&delivery.lease_token, "failed", 1),
+            Err(EpochError::Fenced)
+        );
+        let mut queue = base.clone();
+        assert_eq!(
+            queue.release(&delivery.lease_token, 0, None, 1),
+            Err(EpochError::Fenced)
+        );
+        let mut queue = base.clone();
+        assert_eq!(
+            queue.reject(&delivery.lease_token, "failed", 1),
+            Err(EpochError::Fenced)
+        );
+        let mut queue = base.clone();
+        assert_eq!(
+            queue.extend_lease(&delivery.lease_token, 20, 1),
+            Err(EpochError::Fenced)
+        );
+
+        let mut queue = base.clone();
+        queue
+            .acknowledge_fenced(&delivery.lease_token, fence, 1)
+            .unwrap();
+        assert_eq!(queue.counts().acknowledged, 1);
+
+        let mut queue = base.clone();
+        queue
+            .nack_fenced(&delivery.lease_token, fence, "retry", 1)
+            .unwrap();
+        assert_eq!(queue.counts().ready, 1);
+
+        let mut queue = base.clone();
+        queue
+            .release_fenced(&delivery.lease_token, fence, 0, Some("release".into()), 1)
+            .unwrap();
+        assert_eq!(queue.counts().ready, 1);
+
+        let mut queue = base;
+        queue
+            .reject_fenced(&delivery.lease_token, fence, "reject", 1)
+            .unwrap();
+        assert_eq!(queue.dead_letter("settle").unwrap().reason, "reject");
+    }
+
+    #[test]
+    fn nack_uses_deterministic_configured_backoff_and_terminal_policy() {
+        let mut queue = Queue::new(QueueConfig {
+            retry: RetryPolicy {
+                strategy: BackoffStrategy::Exponential,
+                initial_delay_ms: 10,
+                max_delay_ms: 100,
+                jitter_percent: 0,
+                max_attempts: 3,
+                max_age_ms: None,
+            },
+            ..QueueConfig::default()
+        })
+        .unwrap();
+        queue.enqueue(event("poison"), 0).unwrap();
+
+        let first = queue.acquire("worker", 1, None, 0).unwrap().remove(0);
+        queue.nack(&first.lease_token, "first failure", 1).unwrap();
+        assert_eq!(
+            queue.get("poison").unwrap().state,
+            QueueState::Scheduled { eligible_at_ms: 11 }
+        );
+        assert!(queue.acquire("worker", 1, None, 10).unwrap().is_empty());
+
+        let second = queue.acquire("worker", 1, None, 11).unwrap().remove(0);
+        queue
+            .nack(&second.lease_token, "second failure", 12)
+            .unwrap();
+        assert_eq!(
+            queue.get("poison").unwrap().state,
+            QueueState::Scheduled { eligible_at_ms: 32 }
+        );
+
+        let third = queue.acquire("worker", 1, None, 32).unwrap().remove(0);
+        queue.nack(&third.lease_token, "final failure", 33).unwrap();
+        let evidence = queue.dead_letter("poison").unwrap();
+        assert_eq!(evidence.reason, "final failure");
+        assert_eq!(evidence.attempts, 3);
+        assert_eq!(evidence.last_error.as_deref(), Some("final failure"));
+        assert!(queue.dead_letter("missing").is_none());
+
+        queue.redrive("poison", 34).unwrap();
+        assert!(queue.dead_letter("poison").is_none());
+    }
+
+    #[test]
+    fn bounded_renewal_reissues_fenced_token_at_earliest_terminal_deadline() {
+        let config = QueueConfig {
+            retry: RetryPolicy {
+                max_age_ms: Some(80),
+                ..RetryPolicy::default()
+            },
+            ..QueueConfig::default()
+        };
+        let fence = lease_fence();
+
+        let mut clamp_queue = Queue::new(config.clone()).unwrap();
+        let mut clamp_event = event("initial-clamp");
+        clamp_event.ttl_ms = Some(40);
+        clamp_queue.enqueue(clamp_event, 10).unwrap();
+        let clamped = clamp_queue
+            .acquire_fenced("worker", 1, Some(1_000), 20, fence)
+            .unwrap()
+            .remove(0);
+        assert_eq!(clamped.lease_deadline_ms, 50);
+        assert_eq!(
+            FencedLeaseTokenMetadata::parse(&clamped.lease_token)
+                .unwrap()
+                .lease_deadline_ms(),
+            50
+        );
+
+        let mut ttl_queue = Queue::new(config.clone()).unwrap();
+        let mut ttl_event = event("ttl-bound");
+        ttl_event.ttl_ms = Some(40);
+        ttl_queue.enqueue(ttl_event, 10).unwrap();
+        let ttl_delivery = ttl_queue
+            .acquire_fenced("worker", 1, Some(10), 20, fence)
+            .unwrap()
+            .remove(0);
+        let commit_position = ttl_queue.commit_position;
+        assert!(matches!(
+            ttl_queue.extend_lease_fenced_bounded(&ttl_delivery.lease_token, fence, 1, 21),
+            Err(EpochError::Conflict(_))
+        ));
+        assert_eq!(ttl_queue.commit_position, commit_position);
+        assert_eq!(
+            ttl_queue
+                .fenced_lease_metadata(&ttl_delivery.lease_token)
+                .unwrap()
+                .lease_deadline_ms(),
+            30
+        );
+        let ttl_renewal = ttl_queue
+            .extend_lease_fenced_bounded(&ttl_delivery.lease_token, fence, 1_000, 25)
+            .unwrap();
+        assert_eq!(ttl_renewal.lease_deadline_ms, 50);
+        assert_ne!(ttl_renewal.lease_token, ttl_delivery.lease_token);
+        assert_eq!(
+            ttl_queue.fenced_lease_metadata(&ttl_delivery.lease_token),
+            Err(EpochError::Fenced)
+        );
+        assert_eq!(
+            ttl_queue
+                .fenced_lease_metadata(&ttl_renewal.lease_token)
+                .unwrap()
+                .lease_deadline_ms(),
+            50
+        );
+        assert_eq!(
+            ttl_queue.extend_lease_fenced_bounded(&ttl_delivery.lease_token, fence, 1_000, 26),
+            Err(EpochError::Fenced)
+        );
+
+        let mut max_age_queue = Queue::new(config).unwrap();
+        let mut max_age_event = event("max-age-bound");
+        max_age_event.ttl_ms = Some(100);
+        max_age_queue.enqueue(max_age_event, 10).unwrap();
+        let max_age_delivery = max_age_queue
+            .acquire_fenced("worker", 1, Some(10), 20, fence)
+            .unwrap()
+            .remove(0);
+        let max_age_renewal = max_age_queue
+            .extend_lease_fenced_bounded(&max_age_delivery.lease_token, fence, 1_000, 25)
+            .unwrap();
+        assert_eq!(max_age_renewal.lease_deadline_ms, 90);
+        assert_eq!(
+            FencedLeaseTokenMetadata::parse(&max_age_renewal.lease_token)
+                .unwrap()
+                .lease_deadline_ms(),
+            90
+        );
+    }
+
+    #[test]
+    fn fenced_maintenance_enforces_max_age_without_changing_legacy_replay() {
+        let config = QueueConfig {
+            retry: RetryPolicy {
+                max_age_ms: Some(10),
+                ..RetryPolicy::default()
+            },
+            ..QueueConfig::default()
+        };
+        let mut legacy = Queue::new(config.clone()).unwrap();
+        legacy.enqueue(event("legacy"), 0).unwrap();
+        assert_eq!(legacy.acquire("worker", 1, None, 10).unwrap().len(), 1);
+
+        let mut fenced = Queue::new(config).unwrap();
+        fenced.enqueue(event("fenced"), 0).unwrap();
+        assert!(
+            fenced
+                .acquire_fenced("worker", 1, None, 10, lease_fence())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(fenced.counts().expired, 1);
+        assert!(fenced.dead_letter("fenced").is_none());
+        let commit_position = fenced.commit_position;
+        fenced.maintain_fenced(11).unwrap();
+        assert_eq!(fenced.commit_position, commit_position);
+    }
+
+    #[test]
+    fn fenced_mutations_fail_closed_when_monotonic_counters_are_exhausted() {
+        let fence = lease_fence();
+        let mut generation_exhausted = Queue::new(QueueConfig::default()).unwrap();
+        generation_exhausted
+            .enqueue(event("generation"), 0)
+            .unwrap();
+        generation_exhausted.lease_generation = u64::MAX;
+        let commit_position = generation_exhausted.commit_position;
+        assert!(matches!(
+            generation_exhausted.acquire_fenced("worker", 1, None, 0, fence),
+            Err(EpochError::Capacity(_))
+        ));
+        assert_eq!(generation_exhausted.commit_position, commit_position);
+        assert_eq!(generation_exhausted.counts().ready, 1);
+
+        let mut commit_exhausted = Queue::new(QueueConfig::default()).unwrap();
+        commit_exhausted.enqueue(event("commit"), 0).unwrap();
+        commit_exhausted.commit_position = u64::MAX;
+        assert!(matches!(
+            commit_exhausted.acquire_fenced("worker", 1, None, 0, fence),
+            Err(EpochError::Capacity(_))
+        ));
+        assert_eq!(commit_exhausted.counts().ready, 1);
+
+        let mut settlement_exhausted = Queue::new(QueueConfig::default()).unwrap();
+        settlement_exhausted
+            .enqueue(event("settlement"), 0)
+            .unwrap();
+        let delivery = settlement_exhausted
+            .acquire_fenced("worker", 1, None, 0, fence)
+            .unwrap()
+            .remove(0);
+        settlement_exhausted.commit_position = u64::MAX;
+        assert!(matches!(
+            settlement_exhausted.acknowledge_fenced(&delivery.lease_token, fence, 1),
+            Err(EpochError::Capacity(_))
+        ));
+        assert!(matches!(
+            settlement_exhausted.get("settlement").unwrap().state,
+            QueueState::Leased { .. }
+        ));
+
+        let mut legacy = Queue::new(QueueConfig::default()).unwrap();
+        legacy.enqueue(event("legacy-saturation"), 0).unwrap();
+        legacy.lease_generation = u64::MAX;
+        legacy.commit_position = u64::MAX;
+        let delivery = legacy.acquire("worker", 1, None, 0).unwrap().remove(0);
+        assert_eq!(
+            delivery.lease_token,
+            format!("legacy-saturation.{}.{}", u64::MAX, u64::MAX)
+        );
     }
 
     #[test]

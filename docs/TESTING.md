@@ -154,6 +154,15 @@ public product acknowledgement, or complete G3 evidence. Those scenarios remain
 required before G3 or the emulator is complete; see
 [Consensus Feasibility Spike](CONSENSUS_SPIKE.md).
 
+The Queue-tablet crate layer separately checks deterministic application of an
+already committed history. Its suite covers strict canonical commands,
+three-instance convergence, leader/consumer/token fencing, exact renewed-token
+replay, monotonic command time, exclusive deadlines, rejection rollback,
+non-zero jitter, TTL/max-age precedence, immutable DLQ/redrive provenance,
+browser-safe receipts, and pinned proposal/command/digest vectors. These are not
+runtime or durability tests; Queue actor/EPRS/process/container coverage remains
+required. See [Replicated Queue Tablet Core](QUEUE_TABLET.md).
+
 ### 3. Integration tests
 
 Integration tests start real Epoch processes with isolated temporary data
