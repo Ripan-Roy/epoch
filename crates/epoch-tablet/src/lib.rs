@@ -1,11 +1,13 @@
 //! Typed, deterministic state machines applied only after consensus commit.
 //!
 //! The current bounded slices are configured, single-partition Stream and
-//! Queue tablets. They own strict command validation, deterministic
-//! application, idempotency, and replay while the node owns transport and
-//! Raft. Stream and Queue attach to the experimental node runtime as mutually
-//! exclusive profiles for one fixed consensus group.
+//! Queue tablets plus a single-shard Cache tablet core. They own strict command
+//! validation, deterministic application, idempotency, and replay while the
+//! node owns transport and Raft. Stream and Queue attach to the experimental
+//! node runtime as mutually exclusive profiles for one fixed consensus group;
+//! Cache remains core-only until its runtime and EPRS recovery gate are added.
 
+mod cache;
 mod common;
 mod queue;
 
@@ -20,6 +22,7 @@ use epoch_stream::{Stream, StreamConfig, StreamRecord};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub use cache::*;
 pub use common::{
     AppliedCommandMetadata, CommittedCommand, MAX_IDEMPOTENCY_KEY_BYTES, StreamTabletScope,
     TabletError, TabletResult, TabletScope, TabletWriteEvidence as StreamTabletWriteEvidence,

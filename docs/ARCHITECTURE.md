@@ -242,6 +242,16 @@ drains both listeners. Real-runtime and container gates prove leader-term and
 consumer fencing, scheduled redelivery, immutable history, convergence, and
 all-node `SIGKILL` replay. See [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
+The Cache profile now has a separate deterministic core boundary. An additive
+`epoch-cache::CacheShard` uses sorted state, a checked shard-global revision,
+pure reads, bounded staged transactions, checked counter/TTL arithmetic, and
+deterministic expiry without changing the original volatile `Cache`. The
+single-shard `epoch-tablet::CacheTablet` adds canonical committed commands,
+absent-state ABA protection, advisory entry-term-fenced locks, exact replay,
+recorded rejection outcomes, and a chained digest. It is not yet attached to
+the node or consensus actor, so it supplies state-machine evidence rather than
+a clustered Cache service. See [Experimental Replicated Cache Tablet Core](CACHE_TABLET.md).
+
 Snapshots, compaction, membership changes, authoritative catalog fencing,
 placement, and read barriers remain disabled. The byte contract is documented in
 [EPRS v1 consensus stable journal](../spec/formats/consensus-stable-store-v1.md);
@@ -249,7 +259,8 @@ the complete scope and non-claims are recorded in
 [Consensus Feasibility Spike](CONSENSUS_SPIKE.md), the opaque boundary in
 [Experimental Consensus Probe](CONSENSUS_PROBE.md), and the typed milestone in
 [Experimental Stream Tablet](STREAM_TABLET.md), and the Queue boundary in
-[Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
+[Experimental Replicated Queue Tablet](QUEUE_TABLET.md), and the core-only Cache
+boundary in [Experimental Replicated Cache Tablet Core](CACHE_TABLET.md).
 
 Rust peer replication uses batched, framed, mutually authenticated connections
 with separate priorities for control, append, snapshot, and repair traffic.
@@ -367,6 +378,20 @@ unless an explicitly supported transaction domain is selected. RESP
 compatibility must report unsupported cross-slot or scripting behavior instead
 of silently weakening it.
 
+The first replicated Cache core intentionally supports only shard `0`,
+`no-eviction`, and bounded distinct-key transactions. Item versions are drawn
+from a checked shard-global revision so delete/recreate and expiry/recreate do
+not repeat versions. Reads treat an expired value as absent without mutating
+state; explicit maintenance reclaims values in `(deadline, key)` order.
+Committed Cache commands clamp candidate time to the prior effective time.
+Advisory locks use `(tablet_epoch, acquisition_log_index)` as their downstream
+fence, rotate opaque lease tokens on renewal, and reject tokens on commands
+admitted under a different term without allowing a second owner before the
+exclusive deadline. Already-appended same-term commands can still commit after
+a leadership change; current-leader barriers remain runtime work. Node/runtime
+attachment, snapshots, multi-shard routing, and the full concurrency history
+remain open.
+
 ### 8.4 Event Bus
 
 A durable bus publish first commits to an ingress or archive tablet. The record
@@ -397,8 +422,8 @@ timers, and a persisted hybrid logical clock for ordered state transitions.
 Raw wall-clock observations may move in either direction. Process-local
 monotonic time must not move backward, and persisted logical or effective
 state-machine time must not regress in committed order. The current Queue
-tablet clamps each command's candidate time to its prior committed effective
-time. The broader design still requires clock-anomaly uncertainty handling,
+tablet and core-only Cache tablet clamp each command's candidate time to its
+prior committed effective time. The broader design still requires clock-anomaly uncertainty handling,
 slewing, and operational events. Scheduled work may be conservatively late
 during an anomaly; it must not be acknowledged early because a clock jumped.
 

@@ -493,6 +493,14 @@ partition, committed leader term, consumer epoch/identity, message, generation,
 and deadline. Immutable DLQ/redrive history survives EPRS replay. See
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
+The repository also contains the canonical v1 command and receipt boundary for
+a single-shard Cache tablet. Its bounded Set/Delete/CAS/Increment/Transaction,
+advisory lock, and expiry-maintenance operations are state-machine APIs only;
+there is no mounted HTTP or gRPC route and no SDK commitment yet. The core uses
+decimal-string 64-bit receipt fields, strict canonical JSON, recorded business
+rejections, exact committed replay, and deterministic committed-order time. See
+[Experimental Replicated Cache Tablet Core](CACHE_TABLET.md).
+
 Neither typed experimental mode is the final tablet service. Snapshots/compaction,
 retention deletion, dynamic membership, placement, read barriers, authenticated
 transport, public routing, and SDK support remain absent. The standalone engine
@@ -521,3 +529,8 @@ accepted only from the exact HTTP(S) origins configured by
 to native clients. The Go control HTTP registry, browser console, current JSON
 payload structs, and Rust error enum are provisional scaffolding and may be
 migrated before any public compatibility promise.
+
+The Cache tablet is earlier still: it exposes a Rust command/state-machine
+contract but is not selectable in `epoch-node`, is not recovered from EPRS, and
+has no experimental transport route. Its exact-replay receipt map is currently
+unbounded and has no advertised retry window.

@@ -167,6 +167,19 @@ old-term-token fencing, redelivery, DLQ/redrive reads, convergence, and all-node
 I/O-fault, or production placement matrix. See
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
+The Cache core suite checks pure observations, checked shard revisions and
+non-repeating item versions, distinct-key transaction bounds, absent-state ABA
+protection, atomic rollback on version/type/counter/deadline/revision/capacity
+failure, deterministic expiry, no-eviction behavior, advisory lock contention,
+token rotation, active-owner epoch and cross-entry-term fencing, bounded
+owner-history reclamation, guarded writes, descending candidate-time clamping,
+exact replay,
+and independent-tablet digest
+convergence. These are in-process deterministic state-machine tests. Cache
+node/EPRS recovery, real-process leader failover, and a concurrent
+linearizability history remain required; see
+[Experimental Replicated Cache Tablet Core](CACHE_TABLET.md).
+
 ### 3. Integration tests
 
 Integration tests start real Epoch processes with isolated temporary data

@@ -90,6 +90,9 @@ authenticated transport, placement/repair, model and chaos reports, density,
 and performance. See [Consensus Feasibility Spike](CONSENSUS_SPIKE.md),
 [Experimental Stream Tablet](STREAM_TABLET.md), and
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
+The deterministic Cache shard and tablet state-machine core are tracked
+separately because they do not yet have a node runtime or fixed-voter failover
+proof; see [Experimental Replicated Cache Tablet Core](CACHE_TABLET.md).
 
 ## Cache and State
 
@@ -100,7 +103,7 @@ and performance. See [Consensus Feasibility Spike](CONSENSUS_SPIKE.md),
 | CACHE-003 | P0 | Eviction policy family | M1 prototype → M2 | Slice | G0, G4, G5 | Pending: memory-pressure policy benchmark |
 | CACHE-004 | P0 | Shard-local atomic operations | M1 prototype → M2 | Slice | G0, G3, G4 | Pending: linearizability report |
 | CACHE-005 | P0 | Pipeline, multiplex, batch, pool guidance | M1 → M2 | Slice | G1, G4 | Pending: ordering and throughput suite |
-| CACHE-006 | P0 | CAS, optimistic transaction, increment, fenced lock | M2 | Planned | G0, G3, G4 | Pending: concurrency history and stale-token test |
+| CACHE-006 | P0 | CAS, optimistic transaction, increment, fenced lock | M2 | Slice | G0, G3, G4 | Deterministic shard/tablet tests cover non-ABA revisions, atomic rollback, checked increment/TTL, expiry order, guarded fenced locks, cross-entry-term token rejection, time clamping, exact replay, and convergence; pending: current-leader runtime barrier, node/EPRS failover, concurrent history checker, public surface, and production fault matrix |
 | CACHE-007 | P0 | Volatile, replicated-memory, quorum modes | M1 prototype → M2 | Slice | G0, G2, G3, G4 | Pending: durability fault matrix |
 | CACHE-008 | P1 | Snapshot, WAL restore, backup, PITR | M3 | Planned | G2, G5, G7 | Segmented WAL is not a Cache snapshot; pending: snapshot/backup/PITR implementation and restore drill |
 | CACHE-009 | P1 | Explicitly lossy Pub/Sub and patterns | M3 | Planned | G0, G4, G6 | Pending: route and disconnect semantics suite |

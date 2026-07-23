@@ -40,6 +40,9 @@ Every ownership domain uses a monotonic fence:
 - producers use producer ID and producer epoch;
 - consumer groups and FIFO sessions use generation/owner epoch;
 - queue deliveries use message ID, lease generation, leader epoch, and expiry;
+- cache locks use tablet epoch plus acquisition log index for downstream
+  fencing, and active-owner epoch, leader term, lease generation, and expiry for
+  the current opaque lease token;
 - transactions use coordinator and producer epochs.
 
 Every mutating request validates all applicable fences. A token from a previous
@@ -75,6 +78,22 @@ derives `max(candidate, prior committed effective time)` on every voter and
 during EPRS replay. Tests cover wall-clock rollback, descending assignments in
 committed order, time-dependent lease deadlines, and identical live/recovered
 digests.
+
+The core-only Cache tablet follows the same committed-order normalization for
+TTL and lock decisions. Cache lock renewal, release, and guarded mutations
+reject tokens whose bound term differs from the committed command term, as well
+as rotated opaque tokens, while the downstream fencing token remains the
+ordered pair `(tablet_epoch, acquisition_log_index)`. An already-appended
+same-term command may commit after a leadership change; current-leader barriers
+remain runtime work. A leader change does not let a second owner acquire before
+the old exclusive deadline. These properties currently have deterministic
+state-machine tests but not the Queue tablet's node/EPRS failover evidence.
+
+Cache owner epochs are retained only while that owner has an active lock. This
+bounds owner history; after the last release or expiry, a later acquisition may
+use a lower owner epoch but necessarily receives a higher acquisition log-index
+fence. Downstream systems order the composite acquisition fence, not owner epoch
+alone.
 
 This is partial evidence for the decision, not the completed distributed time
 contract. Existing standalone profile commands still record wall-time apply
