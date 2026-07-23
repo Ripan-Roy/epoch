@@ -1,15 +1,15 @@
 # Consensus Feasibility Spike
 
-**Status:** Stage 2 typed single-Stream-tablet integration; still not a public product replication mode
+**Status:** Stage 2 typed Stream- and Queue-tablet integration; still not a public product replication mode
 
 **Decision:** [ADR-0003](adr/0003-consensus-adapter.md) remains Proposed
 
 This document records exactly what the current Epoch consensus slices prove
 and, more importantly, what they do not prove. The public node profiles remain
 standalone-only and reject replicated-memory, quorum, and geo durability. An
-opt-in diagnostic probe and a mutually exclusive typed Stream-tablet mode run
-on the dedicated experimental listener without changing that public guarantee
-ceiling.
+opt-in diagnostic probe and mutually exclusive typed Stream- or Queue-tablet
+modes run on the dedicated experimental listener without changing that public
+guarantee ceiling.
 
 ## Implemented boundary
 
@@ -167,7 +167,8 @@ This slice does not provide:
 - a linearizable read barrier;
 - mutually authenticated, encrypted, batched production transport;
 - public engine routing, CLI, SDK, or public health integration; the typed
-  Stream milestone is confined to the explicitly experimental listener;
+  Stream and Queue milestones are confined to the explicitly experimental
+  listener;
 - bounded proposal-history memory or a configured idempotency-retention window;
 - segment rotation, a committed-length manifest, arbitrary post-sync
   truncation detection, authenticated anti-rollback evidence, backup generation
