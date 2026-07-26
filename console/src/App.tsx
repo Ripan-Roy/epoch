@@ -60,35 +60,12 @@ function DocumentationApp() {
         Skip to main content
       </a>
 
-      <header className="topbar">
-        <div className="shell topbar__inner">
-          <a className="brand" href="#/docs" aria-label="Epoch documentation home">
-            <span className="brand__mark" aria-hidden="true">
-              E
-            </span>
-            <span>
-              <strong>Epoch</strong>
-              <small>developer docs</small>
-            </span>
-          </a>
-          <div className="topbar__right">
-            <nav className="topnav" aria-label="Primary navigation">
-              <a href="#/docs" aria-current="page">
-                Docs
-              </a>
-              <a href="https://github.com/Ripan-Roy/epoch" target="_blank" rel="noreferrer">
-                GitHub <span aria-hidden="true">↗</span>
-              </a>
-            </nav>
-            <span className="alpha-pill">FOUNDATION ALPHA</span>
-          </div>
-        </div>
-      </header>
+      <DocsHeader />
 
       <DocsPage section={section} />
 
-      <footer>
-        <div className="shell footer__inner">
+      <footer className="docs-footer">
+        <div className="docs-header-shell footer__inner">
           <span>Epoch Docs · 0.1 alpha</span>
           <span>Reported state only. No silent guarantee upgrades.</span>
         </div>
@@ -187,37 +164,7 @@ function EpochApp() {
         Skip to main content
       </a>
 
-      <header className="topbar">
-        <div className="shell topbar__inner">
-          <a
-            className="brand"
-            href={route.page === "docs" ? "#/docs" : "#/console"}
-            aria-label={route.page === "docs" ? "Epoch documentation home" : "Epoch runtime console home"}
-          >
-            <span className="brand__mark" aria-hidden="true">
-              E
-            </span>
-            <span>
-              <strong>Epoch</strong>
-              <small>{route.page === "docs" ? "developer docs" : "runtime console"}</small>
-            </span>
-          </a>
-          <div className="topbar__right">
-            <nav className="topnav" aria-label="Primary navigation">
-              <a href="#/console" aria-current={route.page === "console" ? "page" : undefined}>
-                Console
-              </a>
-              <a href="#/docs" aria-current={route.page === "docs" ? "page" : undefined}>
-                Docs
-              </a>
-              <a href="https://github.com/Ripan-Roy/epoch" target="_blank" rel="noreferrer">
-                GitHub <span aria-hidden="true">↗</span>
-              </a>
-            </nav>
-            <span className="alpha-pill">FOUNDATION ALPHA</span>
-          </div>
-        </div>
-      </header>
+      {route.page === "docs" ? <DocsHeader showConsoleLink /> : <ConsoleHeader />}
 
       {route.page === "docs" ? (
         <DocsPage section={route.section} />
@@ -381,13 +328,71 @@ function EpochApp() {
         </main>
       )}
 
-      <footer>
-        <div className="shell footer__inner">
+      <footer className={route.page === "docs" ? "docs-footer" : undefined}>
+        <div className={route.page === "docs" ? "docs-header-shell footer__inner" : "shell footer__inner"}>
           <span>Epoch {route.page === "docs" ? "Docs" : "Console"} · 0.1 alpha</span>
           <span>Reported state only. No silent guarantee upgrades.</span>
         </div>
       </footer>
     </>
+  );
+}
+
+function DocsHeader({ showConsoleLink = false }: { showConsoleLink?: boolean }) {
+  return (
+    <header className="topbar topbar--docs">
+      <div className="docs-header-shell docs-header">
+        <div className="docs-header__product">
+          <a className="brand brand--docs" href="#/docs" aria-label="Epoch documentation home">
+            <span className="brand__mark" aria-hidden="true">
+              E
+            </span>
+            <strong>Epoch</strong>
+          </a>
+          <span className="docs-header__divider" aria-hidden="true" />
+          <span className="docs-header__label">Documentation</span>
+        </div>
+        <nav className="docs-header__nav" aria-label="Primary navigation">
+          <a href="#/docs/quickstart">Quickstart</a>
+          <a href="#/docs/sdk-reference">SDKs</a>
+          {showConsoleLink ? <a href="#/console">Console</a> : null}
+          <a href="https://github.com/Ripan-Roy/epoch" target="_blank" rel="noreferrer">
+            GitHub <span aria-hidden="true">↗</span>
+          </a>
+          <span className="docs-version">v0.1 alpha</span>
+        </nav>
+      </div>
+    </header>
+  );
+}
+
+function ConsoleHeader() {
+  return (
+    <header className="topbar">
+      <div className="shell topbar__inner">
+        <a className="brand" href="#/console" aria-label="Epoch runtime console home">
+          <span className="brand__mark" aria-hidden="true">
+            E
+          </span>
+          <span>
+            <strong>Epoch</strong>
+            <small>runtime console</small>
+          </span>
+        </a>
+        <div className="topbar__right">
+          <nav className="topnav" aria-label="Primary navigation">
+            <a href="#/console" aria-current="page">
+              Console
+            </a>
+            <a href="#/docs">Docs</a>
+            <a href="https://github.com/Ripan-Roy/epoch" target="_blank" rel="noreferrer">
+              GitHub <span aria-hidden="true">↗</span>
+            </a>
+          </nav>
+          <span className="alpha-pill">FOUNDATION ALPHA</span>
+        </div>
+      </div>
+    </header>
   );
 }
 

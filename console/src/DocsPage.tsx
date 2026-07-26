@@ -1,4 +1,4 @@
-import { useEffect, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 
 import goSource from "./quickstarts/quickstart.go?raw";
 import javaSource from "./quickstarts/Quickstart.java?raw";
@@ -130,13 +130,112 @@ interface DocsPageProps {
   section: string | null;
 }
 
+type DocsSectionId =
+  "quickstart" | "restart" | "guarantees" | "cluster-milestone" | "sdk-reference" | "reference";
+
+interface DocsNavigationGroup {
+  label: string;
+  items: ReadonlyArray<{
+    id: DocsSectionId;
+    label: string;
+  }>;
+}
+
+const docsNavigation: ReadonlyArray<DocsNavigationGroup> = [
+  {
+    label: "Get started",
+    items: [
+      { id: "quickstart", label: "Quickstart" },
+      { id: "restart", label: "Restart verification" },
+    ],
+  },
+  {
+    label: "Core concepts",
+    items: [
+      { id: "guarantees", label: "Guarantees & errors" },
+      { id: "cluster-milestone", label: "Cluster milestone" },
+    ],
+  },
+  {
+    label: "SDKs & reference",
+    items: [
+      { id: "sdk-reference", label: "SDK reference" },
+      { id: "reference", label: "Design reference" },
+    ],
+  },
+];
+
+const docsSections = docsNavigation.flatMap((group) => group.items);
+
 export function DocsPage({ section }: DocsPageProps) {
   const [language, setLanguage] = useState<LanguageId>("go");
+  const [activeSection, setActiveSection] = useState<DocsSectionId>(
+    isDocsSection(section) ? section : "quickstart",
+  );
+  const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
+  const mobileNavigationButton = useRef<HTMLButtonElement>(null);
   const guide = languageGuides.find((candidate) => candidate.id === language) ?? languageGuides[0];
 
   useEffect(() => {
     navigateToSection(section);
+    if (isDocsSection(section)) {
+      setActiveSection(section);
+    }
   }, [section]);
+
+  useEffect(() => {
+    const observedSections = docsSections
+      .map(({ id }) => document.getElementById(id))
+      .filter((candidate): candidate is HTMLElement => candidate !== null);
+    if (!("IntersectionObserver" in window) || observedSections.length === 0) {
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort(
+            (left, right) => Math.abs(left.boundingClientRect.top) - Math.abs(right.boundingClientRect.top),
+          );
+        const current = visible[0]?.target.id;
+        if (isDocsSection(current)) {
+          setActiveSection(current);
+        }
+      },
+      {
+        rootMargin: "-18% 0px -68% 0px",
+        threshold: 0,
+      },
+    );
+
+    observedSections.forEach((candidate) => observer.observe(candidate));
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!mobileNavigationOpen) {
+      return;
+    }
+
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      setMobileNavigationOpen(false);
+      mobileNavigationButton.current?.focus();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [mobileNavigationOpen]);
+
+  function handleNavigation(id: DocsSectionId) {
+    setActiveSection(id);
+    setMobileNavigationOpen(false);
+    if (window.location.hash === `#/docs/${id}`) {
+      navigateToSection(id);
+    }
+  }
 
   function handleLanguageKey(event: KeyboardEvent<HTMLButtonElement>, current: LanguageId) {
     const currentIndex = languageGuides.findIndex((candidate) => candidate.id === current);
@@ -169,10 +268,10 @@ export function DocsPage({ section }: DocsPageProps) {
 
   return (
     <main id="main-content" className="docs-main" tabIndex={-1}>
-      <div className="shell">
+      <div className="docs-shell">
         <section className="docs-hero" aria-labelledby="docs-title">
           <div>
-            <p className="eyebrow">STANDALONE QUICKSTART</p>
+            <p className="eyebrow">Epoch documentation</p>
             <h1 id="docs-title">Prove the guarantee. Then build on it.</h1>
             <p className="docs-hero__lede">
               Create a durable Stream and Work Queue, move real events through both, restart the process, and
@@ -224,29 +323,37 @@ export function DocsPage({ section }: DocsPageProps) {
           </span>
         </aside>
 
+        <div className="docs-mobile-navigation">
+          <button
+            ref={mobileNavigationButton}
+            type="button"
+            aria-expanded={mobileNavigationOpen}
+            aria-controls="mobile-docs-navigation"
+            onClick={() => setMobileNavigationOpen((open) => !open)}
+          >
+            <span className="docs-mobile-navigation__icon" aria-hidden="true">
+              <i />
+              <i />
+              <i />
+            </span>
+            <span>
+              <small>Documentation</small>
+              {docsSections.find(({ id }) => id === activeSection)?.label ?? "Browse"}
+            </span>
+            <span aria-hidden="true">{mobileNavigationOpen ? "×" : "⌄"}</span>
+          </button>
+          {mobileNavigationOpen ? (
+            <DocsNavigation
+              id="mobile-docs-navigation"
+              activeSection={activeSection}
+              onNavigate={handleNavigation}
+            />
+          ) : null}
+        </div>
+
         <div className="docs-layout">
-          <aside className="docs-sidebar">
-            <nav aria-label="Documentation sections">
-              <p>On this page</p>
-              <a href="#/docs/quickstart" onClick={() => navigateToSection("quickstart")}>
-                Quickstart
-              </a>
-              <a href="#/docs/restart" onClick={() => navigateToSection("restart")}>
-                Restart verification
-              </a>
-              <a href="#/docs/guarantees" onClick={() => navigateToSection("guarantees")}>
-                Guarantees &amp; errors
-              </a>
-              <a href="#/docs/cluster-milestone" onClick={() => navigateToSection("cluster-milestone")}>
-                Cluster milestone
-              </a>
-              <a href="#/docs/sdk-reference" onClick={() => navigateToSection("sdk-reference")}>
-                SDK reference
-              </a>
-              <a href="#/docs/reference" onClick={() => navigateToSection("reference")}>
-                Design reference
-              </a>
-            </nav>
+          <aside className="docs-sidebar" aria-label="Documentation navigation">
+            <DocsNavigation activeSection={activeSection} onNavigate={handleNavigation} />
             <div className="docs-sidebar__status">
               <span className="status-dot" data-tone="good" aria-hidden="true" />
               <span>
@@ -611,10 +718,69 @@ export function DocsPage({ section }: DocsPageProps) {
               </div>
             </section>
           </article>
+
+          <aside className="docs-toc">
+            <nav aria-label="On this page">
+              <p>On this page</p>
+              {docsSections.map(({ id, label }) => (
+                <a
+                  key={id}
+                  href={`#/docs/${id}`}
+                  aria-current={activeSection === id ? "location" : undefined}
+                  onClick={() => handleNavigation(id)}
+                >
+                  {label}
+                </a>
+              ))}
+            </nav>
+            <a
+              className="docs-toc__edit"
+              href={`${repositoryUrl}/edit/main/console/src/DocsPage.tsx`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Edit this page <span aria-hidden="true">↗</span>
+            </a>
+          </aside>
         </div>
       </div>
     </main>
   );
+}
+
+function DocsNavigation({
+  id,
+  activeSection,
+  onNavigate,
+}: {
+  id?: string;
+  activeSection: DocsSectionId;
+  onNavigate: (id: DocsSectionId) => void;
+}) {
+  return (
+    <nav id={id} className="docs-navigation" aria-label="Documentation sections">
+      {docsNavigation.map((group) => (
+        <div key={group.label} className="docs-navigation__group">
+          <p>{group.label}</p>
+          {group.items.map((item) => (
+            <a
+              key={item.id}
+              href={`#/docs/${item.id}`}
+              aria-current={activeSection === item.id ? "location" : undefined}
+              onClick={() => onNavigate(item.id)}
+            >
+              <span aria-hidden="true" />
+              {item.label}
+            </a>
+          ))}
+        </div>
+      ))}
+    </nav>
+  );
+}
+
+function isDocsSection(candidate: string | null | undefined): candidate is DocsSectionId {
+  return docsSections.some(({ id }) => id === candidate);
 }
 
 function navigateToSection(section: string | null) {
