@@ -13,6 +13,8 @@ notes explicitly list additional verified artifacts.
   shard-to-tablet routing identity.
 - Versioned tablet descriptors in the regional Protobuf contract, including
   separate desired replicas and observed placement fields.
+- A table-based delivery checklist covering program gates, milestone readiness,
+  the active multi-tablet slice, pull-request quality gates, and releases.
 
 ## [0.1.0-alpha.2] - 2026-07-27
 

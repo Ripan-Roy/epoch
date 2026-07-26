@@ -10,6 +10,8 @@ tooling while retaining the distinct semantics that make each workload useful.
 Epoch is currently an early engineering scaffold. Interfaces, storage formats,
 and compatibility claims are not stable, and no production guarantee is
 implied yet. The source of truth for product scope is [the PRD](docs/PRD.md).
+Delivery status and release gates are tracked in the
+[delivery checklist](docs/DELIVERY_CHECKLIST.md).
 The runnable node supports volatile resources for all four profiles and an
 explicit `local_durable` mode for Streams and Work Queues. Durable Stream
 records/offsets and Queue messages/leases/settlements are fsynced into a
