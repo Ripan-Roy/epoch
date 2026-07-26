@@ -393,6 +393,13 @@ creation, enqueue, lease, settlement, redrive, and maintenance commands are
 fsynced before becoming visible and replayed on restart. Cache and Event Bus
 still accept only `volatile`, and every replication or geo mode is rejected.
 
+Standalone Event Bus creation accepts `durability`, `archive`, and optional
+`max_subscriptions`/`max_archive_events`. Omitted limits default to 1,024 and
+100,000. Values must be non-zero and cannot exceed 100,000 subscriptions or
+10,000,000 archived events. Replay responses are capped at 10,000 records.
+Route-plan and publish positions are checked counters; capacity or counter
+exhaustion rejects atomically.
+
 The v1 frames retain their checksum and global sequence across segment
 boundaries. Segment rotation targets `--wal-segment-bytes` /
 `EPOCH_WAL_SEGMENT_BYTES` (64 MiB by default), but rotation is not retention or
@@ -514,6 +521,13 @@ proposal, records deterministic business rejections as committed outcomes,
 replays exact semantic retries, and assigns committed-order effective time on
 the server. There is no linearizable read barrier, public gRPC route, or SDK
 commitment. See [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
+
+`epoch-tablet` additionally exposes a core-only canonical Event Bus tablet for
+subscription upsert/removal and publish. It records browser-safe fixed-voter
+receipts, exact retries, route-plan versions, delivery count and a SHA-256
+digest of the transformed ordered delivery plan. It has no node route, target
+outbox, transport, recovery service, CLI, or SDK commitment yet. See
+[Deterministic Event Bus Tablet Core](BUS_TABLET.md).
 
 None of the three typed experimental modes is the final tablet service. Snapshots/compaction,
 retention deletion, dynamic membership, placement, read barriers, authenticated

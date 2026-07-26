@@ -182,6 +182,18 @@ convergence, and all-node `SIGKILL` replay. A concurrent linearizability history
 read barrier, I/O-fault matrix, and production placement proof remain required;
 see [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
 
+The Event Bus core suite checks a route truth table across event type, source,
+subject, headers, JSON equality, Unicode wildcard matching, deterministic
+lexical fan-out and transformation. Boundary tests cover strict configuration,
+filter, JSON path, resource, and HTTP target validation; subscription/archive
+capacity; replay bounds; and atomic route-plan/publish counter exhaustion.
+Tablet tests add canonical command decoding, scoped proposal identity, exact
+replay, conflicting and out-of-order commit rejection, recordable capacity
+failure, complete business-state digests, and three-independent-tablet
+convergence. A real fixed-voter runtime, EPRS reopen, durable target outbox,
+backpressure, and crash-at-dispatch history remain open; see
+[Deterministic Event Bus Tablet Core](BUS_TABLET.md).
+
 ### 3. Integration tests
 
 Integration tests start real Epoch processes with isolated temporary data

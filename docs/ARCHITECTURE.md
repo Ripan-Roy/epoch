@@ -254,6 +254,18 @@ history before readiness, and exposes strict mutation, lookup, status, and pure
 local-observation routes only on the internal listener. See
 [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
 
+The Event Bus now has a core-only typed tablet boundary. The standalone route
+engine stores subscriptions in canonical name order, validates bounded filters,
+transforms, resource targets, and absolute HTTP(S) targets, and uses checked
+route-plan and publish positions. `epoch-tablet::BusTablet` adds canonical
+upsert/remove/publish commands, scoped proposal IDs, committed-order time,
+exact receipt replay, recordable atomic capacity rejection, deterministic
+delivery-plan evidence, and a chained digest over the complete recoverable Bus
+state. Identical committed histories converge in the three-instance test. This
+tablet is not mounted by `epoch-node`: target dispatch needs a durable
+per-subscription outbox and crash recovery before a replicated Bus runtime can
+claim delivery. See [Deterministic Event Bus Tablet Core](BUS_TABLET.md).
+
 Snapshots, compaction, membership changes, authoritative catalog fencing,
 placement, and read barriers remain disabled. The byte contract is documented in
 [EPRS v1 consensus stable journal](../spec/formats/consensus-stable-store-v1.md);
@@ -406,6 +418,14 @@ not mean a webhook or external target completed.
 Filters compile into a bounded, deterministic representation. Network
 enrichment and connectors run outside the storage role with explicit timeout,
 memory, secret, and egress policy.
+
+The current core slice evaluates immutable in-memory route plans rather than a
+compiled filter bytecode. It bounds a resource to 100,000 subscriptions, each
+configured route to 64 patterns and 64 filter/transform entries per collection,
+replay responses to 10,000 records, and target URLs to 8 KiB. Resource
+configuration selects lower operational limits (defaults: 1,024 subscriptions
+and 100,000 archived events). Capacity and `u64` position exhaustion reject
+before mutation; no ordering counter saturates or wraps.
 
 ### 8.5 Cross-profile pipes
 

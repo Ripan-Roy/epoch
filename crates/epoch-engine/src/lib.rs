@@ -318,7 +318,7 @@ impl EpochEngine {
     pub fn create_bus(&self, name: &str, config: BusConfig) -> EpochResult<BusHandle> {
         validate_resource_name(name)?;
         self.validate_durability(ResourceKind::EventBus, config.durability)?;
-        let bus = Arc::new(Mutex::new(EventBus::new(config)));
+        let bus = Arc::new(Mutex::new(EventBus::new(config)?));
         insert_unique(&self.buses, name, bus.clone())?;
         Ok(bus)
     }

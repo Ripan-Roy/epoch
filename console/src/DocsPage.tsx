@@ -602,6 +602,12 @@ export function DocsPage({ section }: DocsPageProps) {
                   description="CAS, atomic transactions, checked expiry, fenced locks, failover, exact EPRS replay, and stale-capable local observations."
                   href={`${repositoryDocsUrl}/CACHE_TABLET.md`}
                 />
+                <ReferenceCard
+                  eyebrow="BUS TABLET CORE"
+                  title="Deterministic Event Bus route plan"
+                  description="Bounded subscriptions, strict filters and targets, canonical commands, atomic archive capacity, exact replay, and convergence evidence."
+                  href={`${repositoryDocsUrl}/BUS_TABLET.md`}
+                />
               </div>
             </section>
           </article>

@@ -68,7 +68,7 @@ The traceability register marks the following as **Slice**. A Slice entry can be
   the M1 segmented WAL is only a prerequisite and is not Cache restore evidence.
 - Stream: STREAM-001, STREAM-002 basic retention, STREAM-004, and STREAM-005.
 - Queue: QUEUE-001–QUEUE-006 and native credit flow for QUEUE-011.
-- Bus: basic direct/fan-out routing for BUS-001 and the native/CloudEvents-shaped envelope foundation for BUS-005.
+- Bus: bounded deterministic direct/fan-out routing for BUS-001, filter/archive/transform sub-slices for BUS-002/BUS-006/BUS-007, and the native/CloudEvents-shaped envelope foundation for BUS-005. The typed tablet is core-only until durable target dispatch and runtime recovery are implemented.
 - Managed/control foundations: MGD-002, MGD-004, MGD-011, MGD-012, MGD-014; CTRL-001, CTRL-002, CTRL-004.
 - Developer/runtime: DX-001–DX-004, DX-006; GOV-006; PKG-001–PKG-005 and PKG-009.
 
@@ -83,7 +83,7 @@ The traceability register marks the following as **Slice**. A Slice entry can be
 | Stream slice | Rust | Key routing, committed offsets, fetch, retention baseline, visible ack policy | Ordered recovery and no-early-ack history |
 | Queue slice | Rust | Ready/scheduled/leased/acked/DLQ state, renewal, retry, redrive | Crash-at-every-transition history check |
 | Cache slice | Rust | One volatile memory shard, core types, TTL, eviction, atomic batch, pipeline | Linearizability, expiry, and eviction tests; snapshot/restore remains M3 |
-| Route slice | Rust | Envelope-normalized direct/fan-out delivery into a queue or stream | Route truth table and backpressure test |
+| Route slice | Rust | Bounded envelope-normalized direct/fan-out plan with canonical replicated commands | Route/filter truth table, atomic capacity boundaries, exact replay, and three-tablet convergence; runtime target backpressure remains open |
 | Standalone and cluster lifecycle | Rust | One selectable node binary, local admin API, truthful mode/guarantee health | Disconnected standalone and three-node smoke suites |
 | CLI, SDK, emulator | Rust, Go, Java, Python | Create, append/publish, consume/ack, inspect, deterministic local testing | Cross-language executable quickstarts in CI |
 | Control-plane contract scaffold | Go | Reconciler skeleton that uses only gRPC contracts; no record-path ownership | Boundary test and dependency audit |
@@ -113,9 +113,11 @@ to one and all voters before reopening the same EPRS paths without duplicate
 receipt publication. An opt-in node runtime and three-container topology add a
 dedicated bounded HTTP transport. Its default mode carries opaque diagnostic
 proposals; mutually exclusive experimental profile modes apply canonical
-commands to either one single-partition Stream or Queue after fixed-voter
-majority commit and rebuild it from EPRS history. Those typed receipts are
-bounded fixed-topology evidence, not a public or placement-aware quorum-durable
+commands to one single-partition Stream or Queue or one single-shard Cache
+after fixed-voter majority commit and rebuild it from EPRS history. Event Bus
+now has the same canonical state-machine boundary in the tablet crate but is
+not mounted or rebuilt by the node. Those typed receipts are bounded
+fixed-topology evidence, not a public or placement-aware quorum-durable
 acknowledgement, and all public profile APIs remain standalone. Exhaustive crash
 points, snapshots, membership and
 authoritative epoch transitions, read barriers, authenticated transport,

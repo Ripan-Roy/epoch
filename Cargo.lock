@@ -338,6 +338,8 @@ dependencies = [
  "epoch-core",
  "serde",
  "serde_json",
+ "sha2",
+ "url",
 ]
 
 [[package]]
@@ -467,6 +469,7 @@ dependencies = [
 name = "epoch-tablet"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "epoch-bus",
  "epoch-cache",
  "epoch-core",
  "epoch-queue",
