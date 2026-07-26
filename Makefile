@@ -8,7 +8,7 @@ NODE_LTS := $(if $(wildcard /opt/homebrew/opt/node@24/bin/node),/opt/homebrew/op
 PNPM_ENV := PATH="/opt/homebrew/opt/node@24/bin:$$PATH"
 JAVA_MVN := ./sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress
 
-.PHONY: help bootstrap-check generate generate-check format format-check lint audit test test-unit test-consensus-process test-consensus-probe test-stream-tablet test-queue-tablet test-cache-tablet test-bus-tablet test-integration build check ci compose-config compose-up compose-down compose-probe-config compose-probe-up compose-probe-down clean
+.PHONY: help bootstrap-check generate generate-check release-check format format-check lint audit test test-unit test-consensus-process test-consensus-probe test-stream-tablet test-queue-tablet test-cache-tablet test-bus-tablet test-integration build check ci compose-config compose-up compose-down compose-probe-config compose-probe-up compose-probe-down clean
 
 help: ## Show available commands.
 	@awk 'BEGIN {FS = ":.*## "; printf "Epoch development commands:\n\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -54,6 +54,9 @@ generate-check: ## Fail when generated bindings are stale.
 	if [ -d sdk/go/gen ]; then cp -R sdk/go/gen "$$epoch_generate_snapshot/generated"; else mkdir "$$epoch_generate_snapshot/generated"; fi; \
 	$(MAKE) generate; \
 	diff -ru "$$epoch_generate_snapshot/generated" sdk/go/gen
+
+release-check: ## Verify synchronized cross-language release metadata.
+	@./scripts/check-release-version.sh
 
 format: ## Format Rust, Go, Java, Python, and JavaScript/TypeScript sources.
 	@if [ -f Cargo.toml ]; then cargo fmt --all; fi
@@ -125,7 +128,7 @@ build: ## Build all available workspace components.
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) -DskipTests package; fi
 	@$(PNPM_ENV) pnpm run build
 
-check: generate-check format-check lint test-unit audit ## Run the local pre-commit gate.
+check: generate-check release-check format-check lint test-unit audit ## Run the local pre-commit gate.
 
 ci: bootstrap-check check build test-integration compose-config compose-probe-config ## Run the deterministic CI gate available locally.
 

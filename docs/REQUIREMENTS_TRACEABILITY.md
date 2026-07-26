@@ -47,6 +47,13 @@ Dependency gates are:
 | G9 Geo | Replication checkpoints, promotion, failback, loop prevention, residency, RPO, and RTO are proven in drills. |
 | G10 Release | Signed artifacts, SBOM, packaging, migration, documentation, and support matrices are release-ready. |
 
+The source-preview release path now checks one repository version against Rust,
+Go, Java, Python, and TypeScript metadata, accepts release tags only at the
+current `main` commit, and keeps curated notes in the repository. This is
+partial G10 evidence only: licensing, signed binaries, SBOM/provenance,
+registry packages, installation matrices, migration support, and production
+support limits remain open.
+
 The segmented standalone WAL supplies partial G2 evidence: configured physical
 rotation, checksummed v1 frames, single-writer ownership, global sequence
 validation, manifest-bounded active-suffix repair, restart replay, durable
