@@ -715,6 +715,12 @@ export function DocsPage({ section }: DocsPageProps) {
                   description="Replicated ingress, per-subscription outbox leases, retry/DLQ history, archive replay, failover, EPRS recovery, and explicit executor non-claims."
                   href={`${repositoryDocsUrl}/BUS_TABLET.md`}
                 />
+                <ReferenceCard
+                  eyebrow="RELEASE"
+                  title="v0.1.0-alpha.2 release notes"
+                  description="Verified milestone highlights, source-only artifacts, compatibility guidance, and explicit alpha limitations."
+                  href={`${repositoryDocsUrl}/releases/v0.1.0-alpha.2.md`}
+                />
               </div>
             </section>
           </article>

@@ -93,6 +93,8 @@ jobs:
         run: |
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color
           shellcheck scripts/*.sh tests/integration/*.sh
+      - name: Verify synchronized release metadata
+        run: ./scripts/check-release-version.sh
       - name: Check Go formatting
         run: |
           mapfile -t go_files < <(find control operator sdk/go console/src/quickstarts -type f -name '*.go' 2>/dev/null)

@@ -14,6 +14,7 @@ import { profileDefinitions } from "./profileDefinitions";
 
 const refreshIntervalMs = 15_000;
 const docsOnly = import.meta.env.VITE_DOCS_ONLY === "true";
+const releaseVersion = "0.1.0-alpha.2";
 
 const durabilityRank: Record<DurabilityProfile, number> = {
   volatile: 0,
@@ -330,7 +331,9 @@ function EpochApp() {
 
       <footer className={route.page === "docs" ? "docs-footer" : undefined}>
         <div className={route.page === "docs" ? "docs-header-shell footer__inner" : "shell footer__inner"}>
-          <span>Epoch {route.page === "docs" ? "Docs" : "Console"} · 0.1 alpha</span>
+          <span>
+            Epoch {route.page === "docs" ? "Docs" : "Console"} · {releaseVersion}
+          </span>
           <span>Reported state only. No silent guarantee upgrades.</span>
         </div>
       </footer>
@@ -359,7 +362,7 @@ function DocsHeader({ showConsoleLink = false }: { showConsoleLink?: boolean }) 
           <a href="https://github.com/Ripan-Roy/epoch" target="_blank" rel="noreferrer">
             GitHub <span aria-hidden="true">↗</span>
           </a>
-          <span className="docs-version">v0.1 alpha</span>
+          <span className="docs-version">v{releaseVersion}</span>
         </nav>
       </div>
     </header>

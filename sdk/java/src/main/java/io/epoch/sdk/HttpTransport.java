@@ -20,7 +20,7 @@ import java.util.StringJoiner;
 
 /** JDK HTTP client transport with no networking dependency beyond Java itself. */
 public final class HttpTransport implements Transport {
-  private static final String USER_AGENT = "epoch-java/0.1.0-alpha.1";
+  private static final String USER_AGENT = "epoch-java/0.1.0-alpha.2";
 
   private final String baseUrl;
   private final Duration timeout;

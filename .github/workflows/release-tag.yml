@@ -1,0 +1,37 @@
+name: Release tag verification
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify version and main provenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Verify synchronized version and tag
+        run: ./scripts/check-release-version.sh "$GITHUB_REF_NAME"
+
+      - name: Require the current main commit
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          tagged_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          main_commit="$(git rev-parse refs/remotes/origin/main)"
+          test "$tagged_commit" = "$main_commit" || {
+            echo "release tag must point at the current main commit" >&2
+            exit 1
+          }

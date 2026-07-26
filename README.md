@@ -200,6 +200,14 @@ from `main` (including a manual dispatch that targets `main`). The public site
 is live with enforced HTTPS. The SDKs remain repository-local pre-alpha packages
 and are not presented as registry releases.
 
+Verified milestones are published as
+[GitHub prereleases](https://github.com/Ripan-Roy/epoch/releases) from tagged
+`main` commits with version-controlled release notes. The current alpha
+releases remain source-only: they do not publish registry packages, container
+images, installers, or signed binaries. See
+[Releasing](docs/RELEASING.md) for the protected release procedure and
+[Changelog](CHANGELOG.md) for the release history.
+
 Run the local verification suite:
 
 ```shell
