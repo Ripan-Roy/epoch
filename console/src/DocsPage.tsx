@@ -232,6 +232,9 @@ export function DocsPage({ section }: DocsPageProps) {
   function handleNavigation(id: DocsSectionId) {
     setActiveSection(id);
     setMobileNavigationOpen(false);
+    if (window.location.hash === `#/docs/${id}`) {
+      navigateToSection(id);
+    }
   }
 
   function handleLanguageKey(event: KeyboardEvent<HTMLButtonElement>, current: LanguageId) {

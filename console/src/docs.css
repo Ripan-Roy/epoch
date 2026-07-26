@@ -317,8 +317,7 @@
   gap: 0.2rem;
 }
 
-.docs-navigation__group > p,
-.docs-toc nav > p {
+.docs-navigation__group > p {
   margin: 0 0 0.45rem;
   padding-inline: 0.55rem;
   color: #6f7874;
@@ -408,7 +407,12 @@
 }
 
 .docs-toc nav > p {
+  margin: 0 0 0.45rem;
   padding: 0;
+  color: #6f7874;
+  font-size: 0.65rem;
+  font-weight: 680;
+  letter-spacing: 0.01em;
 }
 
 .docs-toc nav a {
