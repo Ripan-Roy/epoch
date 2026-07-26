@@ -135,6 +135,22 @@ status:   observed_generation, conditions, achieved placement, endpoints, operat
 `spec` is declarative. `status` is service-owned and cannot be supplied by a
 client. Profile kind and immutable identity cannot change in place.
 
+`ResourceStatus.tablets` reports one descriptor per routable shard:
+
+- tablet ID and consensus-group ID as separate nonzero identities;
+- shard index, immutable workload profile, tablet epoch, and resource
+  generation;
+- desired replica count separately from observed voter node IDs;
+- observed leader node ID and tablet lifecycle phase.
+
+An empty voter list or leader ID does not mean the desired placement has been
+achieved. Callers must use the phase and conditions, and data requests must
+carry the resource generation and tablet epoch returned by routing. The initial
+deterministic catalog allocates and replays these identities, but the public
+multi-tablet router remains unavailable until catalog consensus and runtime
+group supervision pass their fault gates. See
+[ADR-0009](adr/0009-regional-tablet-catalog.md).
+
 ## 4. Native services
 
 ### CacheService

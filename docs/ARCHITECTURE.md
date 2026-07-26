@@ -232,6 +232,16 @@ an HTTP lookup ever observes a commit without the exact actor-applied receipt,
 the typed service fails closed and does not apply state from the request task.
 The public API guarantee remains unchanged.
 
+The first multi-tablet foundation now lives in `epoch-catalog`. It is an
+I/O-free deterministic regional state machine with fully qualified resource
+keys, monotonic generations, exact request-token replay, canonical commands,
+never-reused tablet and consensus-group identities, stable shard expansion, and
+bidirectional resource/shard/tablet lookup. It deliberately does not claim
+placement or public multi-tablet service: the next runtime steps are catalog
+consensus, group supervision, peer-message demultiplexing, typed tablet
+materialization, and generation/epoch-fenced public routing. See
+[ADR-0009](adr/0009-regional-tablet-catalog.md).
+
 `crates/epoch-tablet` also contains the canonical single-partition Queue tablet
 state machine. `epoch-node` attaches it as the only selected profile for one
 fixed consensus group, rebuilds it from EPRS before readiness, and mounts
@@ -271,10 +281,11 @@ execution remains explicitly unimplemented: the outbox proves durable intent
 and settlements, not that a target side effect occurred. See
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
-Snapshots, compaction, membership changes, authoritative catalog fencing,
-placement, and read barriers remain disabled. The byte contract is documented in
-[EPRS v1 consensus stable journal](../spec/formats/consensus-stable-store-v1.md);
-the complete scope and non-claims are recorded in
+Snapshots, compaction, membership changes, catalog consensus and runtime
+fencing, placement, and read barriers remain disabled. The byte contract is
+documented in [EPRS v1 consensus stable
+journal](../spec/formats/consensus-stable-store-v1.md); the complete scope and
+non-claims are recorded in
 [Consensus Feasibility Spike](CONSENSUS_SPIKE.md), the opaque boundary in
 [Experimental Consensus Probe](CONSENSUS_PROBE.md), and the typed milestone in
 [Experimental Stream Tablet](STREAM_TABLET.md), and the Queue boundary in
@@ -719,3 +730,4 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0006: Delivery Sequence and Initial Wedge](adr/0006-delivery-sequence.md)
 - [ADR-0007: Provisional Repository and Toolchains](adr/0007-repository-and-toolchains.md)
 - [ADR-0008: Segmented Standalone WAL](adr/0008-segmented-standalone-wal.md)
+- [ADR-0009: Deterministic Regional Tablet Catalog](adr/0009-regional-tablet-catalog.md)

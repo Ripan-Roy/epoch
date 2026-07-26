@@ -1,6 +1,10 @@
 # Epoch Delivery Plan
 
-This plan converts the architecture direction in [PRD.md](./PRD.md) into an executable sequence. The exhaustive requirement-to-milestone mapping lives in [REQUIREMENTS_TRACEABILITY.md](./REQUIREMENTS_TRACEABILITY.md).
+This plan converts the architecture direction in [PRD.md](./PRD.md) into an
+executable sequence. The exhaustive requirement-to-milestone mapping lives in
+[REQUIREMENTS_TRACEABILITY.md](./REQUIREMENTS_TRACEABILITY.md), while the
+maintained gate and release tables live in
+[DELIVERY_CHECKLIST.md](./DELIVERY_CHECKLIST.md).
 
 ## Delivery position
 

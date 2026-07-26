@@ -692,6 +692,12 @@ export function DocsPage({ section }: DocsPageProps) {
                   href={`${repositoryDocsUrl}/TESTING.md`}
                 />
                 <ReferenceCard
+                  eyebrow="DELIVERY"
+                  title="Delivery checklist"
+                  description="Table-based program gates, current core work, pull-request requirements, and release readiness."
+                  href={`${repositoryDocsUrl}/DELIVERY_CHECKLIST.md`}
+                />
+                <ReferenceCard
                   eyebrow="CLUSTER CORE"
                   title="Experimental Stream tablet"
                   description="Typed command, fixed-voter majority, failover, idempotency, and all-voter recovery boundary."

@@ -4,6 +4,18 @@ Epoch uses prerelease versions while its APIs, storage formats, and operational
 contracts remain provisional. GitHub releases are source previews unless their
 notes explicitly list additional verified artifacts.
 
+## Unreleased
+
+### Added
+
+- Deterministic Rust regional catalog state machine for fully qualified
+  resources, monotonic generations, canonical lifecycle commands, and stable
+  shard-to-tablet routing identity.
+- Versioned tablet descriptors in the regional Protobuf contract, including
+  separate desired replicas and observed placement fields.
+- A table-based delivery checklist covering program gates, milestone readiness,
+  the active multi-tablet slice, pull-request quality gates, and releases.
+
 ## [0.1.0-alpha.2] - 2026-07-27
 
 This release adds deterministic replicated tablet slices for Stream, Queue,

@@ -10,6 +10,8 @@ tooling while retaining the distinct semantics that make each workload useful.
 Epoch is currently an early engineering scaffold. Interfaces, storage formats,
 and compatibility claims are not stable, and no production guarantee is
 implied yet. The source of truth for product scope is [the PRD](docs/PRD.md).
+Delivery status and release gates are tracked in the
+[delivery checklist](docs/DELIVERY_CHECKLIST.md).
 The runnable node supports volatile resources for all four profiles and an
 explicit `local_durable` mode for Streams and Work Queues. Durable Stream
 records/offsets and Queue messages/leases/settlements are fsynced into a
@@ -80,6 +82,11 @@ real-runtime, and three-container gates prove typed leader errors, minority
 non-commit, majority-before-success, bounded two-durable-voter evidence,
 semantic retry/rebinding, ordered offsets, leader replacement, catch-up, and
 all-node `SIGKILL` replay.
+
+`crates/epoch-catalog` supplies deterministic multi-resource generations and
+shard/tablet/group routing identity. The node still mounts one experimental
+consensus group at a time; catalog consensus and runtime group multiplexing are
+the next bounded core slices.
 
 The strict single-partition Queue tablet now runs through that same persistent
 three-node actor boundary. Its internal typed API covers enqueue, acquire,

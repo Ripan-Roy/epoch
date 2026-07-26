@@ -319,6 +319,13 @@ none changes the public API or SDK guarantee ceiling. Run
 `make test-stream-tablet`, `make test-queue-tablet`, `make test-cache-tablet`,
 or `make test-bus-tablet` for the disposable three-container proofs.
 
+`epoch-catalog` is the test-first multi-tablet foundation. It owns deterministic
+resource generations, shard/tablet/group identity, canonical lifecycle
+commands, and routing lookup without I/O or Tokio. Run
+`cargo test -p epoch-catalog --all-targets`. Catalog consensus, runtime group
+multiplexing, placement, and public multi-tablet routing remain subsequent
+slices; see [ADR-0009](adr/0009-regional-tablet-catalog.md).
+
 To discard local data, explicitly add `--volumes` to the Compose down command.
 That is destructive and is intentionally not part of the Make target.
 
