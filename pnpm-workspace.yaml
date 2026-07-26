@@ -5,4 +5,7 @@ packages:
   - sdk/typescript
   - tools/*
 
+overrides:
+  brace-expansion: 5.0.8
+
 onlyBuiltDependencies: []
