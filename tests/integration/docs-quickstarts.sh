@@ -103,8 +103,9 @@ python3 -m venv "$epoch_docs_tmp/python"
 "$epoch_docs_tmp/python/bin/python" -m pip install \
   --disable-pip-version-check --no-deps --editable ./sdk/python
 
-./sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress \
-  -DskipTests package dependency:build-classpath \
+"$epoch_repo_root/scripts/retry-command.sh" 3 2 \
+  ./sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress \
+  --update-snapshots -DskipTests package dependency:build-classpath \
   -Dmdep.outputFile=target/docs-runtime-classpath.txt
 epoch_java_runtime_classpath="$(cat sdk/java/target/docs-runtime-classpath.txt)"
 epoch_java_classes="$epoch_docs_tmp/java-classes"
