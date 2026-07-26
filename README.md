@@ -96,13 +96,16 @@ increment, explicit expiry maintenance, advisory fenced locks, status, and
 mutation lookup. It remains experimental, stale-read capable, single-shard,
 unauthenticated, and outside the public SDK contract.
 
-The Event Bus route-plan/ingress tablet is the fourth opt-in typed profile. It
-replicates subscription changes and publish ingress, rebuilds route/archive
-state from EPRS before serving, and exposes strict internal mutation, status,
-lookup, and filtered archive-replay routes. Real-runtime and container gates
-prove retry/conflict behavior, leader failover, convergence, and all-node
-recovery. Target dispatch/outboxes are explicitly absent, so it makes no
-webhook, Queue, Stream, HTTP, or pull-delivery claim. See the
+The Event Bus ingress/outbox tablet is the fourth opt-in typed profile. It
+replicates subscription changes and publish ingress, atomically creates one
+durable delivery record per matching subscription, and rebuilds route, archive,
+lease, retry, acknowledgement, dead-letter, and attempt-history state from EPRS
+before serving. Strict internal mutations cover fenced acquire/ack/fail and
+bounded timeout maintenance; a bounded local query exposes the ledger.
+Real-runtime and container gates prove retry/conflict behavior, target
+isolation, leader failover, convergence, and all-node recovery. No built-in
+Queue, Stream, webhook, HTTP, or network pull executor exists yet, so outbox
+state is not a target-delivery claim. See the
 [Cache tablet guide](docs/CACHE_TABLET.md),
 [Queue tablet guide](docs/QUEUE_TABLET.md),
 [Stream tablet guide](docs/STREAM_TABLET.md),

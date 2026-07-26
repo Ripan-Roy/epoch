@@ -89,13 +89,15 @@ before readiness; real-runtime and container gates prove term admission,
 failover fencing, catch-up, convergence, and all-node recovery. See
 [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
 
-The Event Bus profile attaches a canonical single-partition route-plan/ingress
-state machine. Strict mutations replicate subscription changes and publish
-ingress; each voter reproduces route-plan evidence, archive state, and complete
-digests before exposing status or local filtered replay. Real-runtime and
-container gates prove semantic retry/conflict, leader loss, catch-up,
-convergence, and all-node recovery. It has no target outbox or dispatch and
-makes no delivery claim; see
+The Event Bus profile attaches a canonical single-partition ingress/outbox
+state machine. Strict mutations replicate subscription changes, publish
+ingress, fenced acquire/ack/fail, and bounded lease-expiry maintenance; each
+voter reproduces route-plan evidence, archive state, independent delivery
+attempts, and complete digests before exposing status or local filtered
+archive/delivery queries. Real-runtime and container gates prove semantic
+retry/conflict, target isolation, leader loss, catch-up, convergence, and
+all-node recovery. It has no built-in target executor and makes no external
+side-effect claim; see
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 ## Processing contract

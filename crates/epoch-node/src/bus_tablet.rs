@@ -1,4 +1,4 @@
-//! Experimental typed Event Bus route-plan tablet over fixed-voter consensus.
+//! Experimental Event Bus ingress/outbox tablet over fixed-voter consensus.
 
 use std::{
     sync::{Arc, RwLock},
@@ -11,7 +11,11 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use epoch_bus::{ArchivedEvent, BusConfig, EventFilter, MAX_REPLAY_EVENTS, Subscription};
+use epoch_bus::{
+    ArchivedEvent, BusConfig, DeliveryAttempt, DeliveryAttemptOutcome, DeliveryCounts,
+    DeliveryPolicy, DeliveryRecord, DeliveryRetryPolicy, DeliveryState, DeliveryStateKind,
+    EventFilter, MAX_DELIVERY_QUERY_RESULTS, MAX_REPLAY_EVENTS, Subscription, SubscriptionTarget,
+};
 use epoch_consensus::{
     CommittedProposal, ConsensusError, ConsensusRole, ConsensusStatus, ProposalLookup,
 };
@@ -36,6 +40,8 @@ pub const EXPERIMENTAL_BUS_TABLET_MUTATION_PATH: &str =
     "/experimental/v1/tablets/bus/mutations/{proposal_id}";
 pub const EXPERIMENTAL_BUS_TABLET_ARCHIVE_REPLAY_PATH: &str =
     "/experimental/v1/tablets/bus/archive/replay";
+pub const EXPERIMENTAL_BUS_TABLET_DELIVERY_QUERY_PATH: &str =
+    "/experimental/v1/tablets/bus/deliveries/query";
 
 const TABLET_REQUEST_BODY_BYTES: usize = MAX_BUS_TABLET_COMMAND_BYTES + 16 * 1024;
 const DEFAULT_REPLAY_LIMIT: usize = 100;
@@ -138,6 +144,7 @@ impl BusTabletService {
             .tablet
             .read()
             .map_err(|_| "Event Bus tablet read lock was poisoned".to_owned())?;
+        let delivery_counts = tablet.delivery_counts();
         Ok(BusTabletSnapshot {
             last_profile_mutation_index: tablet.last_applied_command_index(),
             last_applied_time_ms: tablet.last_applied_time_ms(),
@@ -155,6 +162,7 @@ impl BusTabletService {
                 tablet.archived_event_count(),
                 "Event Bus archive count",
             )?,
+            delivery_counts,
             business_state_digest: hex_digest(tablet.business_state_digest()),
             state_digest: hex_digest(tablet.state_digest()),
         })
@@ -186,9 +194,40 @@ impl BusTabletService {
             Err(error) => Err(BusArchiveReplayError::Profile(self.fail(error.to_string()))),
         }
     }
+
+    fn query_deliveries(
+        &self,
+        request: &BusDeliveryQueryRequest,
+    ) -> Result<Vec<DeliveryRecord>, BusDeliveryQueryError> {
+        self.ensure_healthy()
+            .map_err(BusDeliveryQueryError::Profile)?;
+        let result = self
+            .tablet
+            .read()
+            .map_err(|_| {
+                BusDeliveryQueryError::Profile("Event Bus tablet read lock was poisoned".to_owned())
+            })?
+            .deliveries(
+                request.subscription.as_deref(),
+                request.state,
+                request.limit,
+            );
+        match result {
+            Ok(records) => Ok(records),
+            Err(TabletError::Profile(EpochError::InvalidArgument(message))) => {
+                Err(BusDeliveryQueryError::InvalidRequest(message))
+            }
+            Err(error) => Err(BusDeliveryQueryError::Profile(self.fail(error.to_string()))),
+        }
+    }
 }
 
 enum BusArchiveReplayError {
+    InvalidRequest(String),
+    Profile(String),
+}
+
+enum BusDeliveryQueryError {
     InvalidRequest(String),
     Profile(String),
 }
@@ -264,6 +303,10 @@ pub fn router(
             EXPERIMENTAL_BUS_TABLET_ARCHIVE_REPLAY_PATH,
             post(replay_archive),
         )
+        .route(
+            EXPERIMENTAL_BUS_TABLET_DELIVERY_QUERY_PATH,
+            post(query_deliveries),
+        )
         .layer(DefaultBodyLimit::max(TABLET_REQUEST_BODY_BYTES))
         .with_state(state)
 }
@@ -280,9 +323,40 @@ struct BusMutationRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum BusOperationRequest {
-    UpsertSubscription { subscription: Subscription },
-    RemoveSubscription { name: String },
-    Publish { envelope: Box<StrictEventEnvelope> },
+    UpsertSubscription {
+        subscription: Subscription,
+    },
+    RemoveSubscription {
+        name: String,
+    },
+    Publish {
+        envelope: Box<StrictEventEnvelope>,
+    },
+    AcquireDeliveries {
+        subscription: String,
+        dispatcher: String,
+        #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+        dispatcher_epoch: u64,
+        max_deliveries: u16,
+    },
+    AcknowledgeDelivery {
+        delivery_id: String,
+        dispatcher: String,
+        #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+        dispatcher_epoch: u64,
+        lease_token: String,
+    },
+    FailDelivery {
+        delivery_id: String,
+        dispatcher: String,
+        #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+        dispatcher_epoch: u64,
+        lease_token: String,
+        reason: String,
+    },
+    MaintainDeliveries {
+        max_deliveries: u16,
+    },
 }
 
 impl BusOperationRequest {
@@ -296,6 +370,44 @@ impl BusOperationRequest {
             }
             Self::Publish { envelope } => BusTabletOperation::Publish {
                 envelope: envelope.as_ref().clone().into(),
+            },
+            Self::AcquireDeliveries {
+                subscription,
+                dispatcher,
+                dispatcher_epoch,
+                max_deliveries,
+            } => BusTabletOperation::AcquireDeliveries {
+                subscription: subscription.clone(),
+                dispatcher: dispatcher.clone(),
+                dispatcher_epoch: *dispatcher_epoch,
+                max_deliveries: *max_deliveries,
+            },
+            Self::AcknowledgeDelivery {
+                delivery_id,
+                dispatcher,
+                dispatcher_epoch,
+                lease_token,
+            } => BusTabletOperation::AcknowledgeDelivery {
+                delivery_id: delivery_id.clone(),
+                dispatcher: dispatcher.clone(),
+                dispatcher_epoch: *dispatcher_epoch,
+                lease_token: lease_token.clone(),
+            },
+            Self::FailDelivery {
+                delivery_id,
+                dispatcher,
+                dispatcher_epoch,
+                lease_token,
+                reason,
+            } => BusTabletOperation::FailDelivery {
+                delivery_id: delivery_id.clone(),
+                dispatcher: dispatcher.clone(),
+                dispatcher_epoch: *dispatcher_epoch,
+                lease_token: lease_token.clone(),
+                reason: reason.clone(),
+            },
+            Self::MaintainDeliveries { max_deliveries } => BusTabletOperation::MaintainDeliveries {
+                max_deliveries: *max_deliveries,
             },
         }
     }
@@ -538,6 +650,49 @@ async fn replay_archive(
     }))
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BusDeliveryQueryRequest {
+    #[serde(default)]
+    subscription: Option<String>,
+    #[serde(default)]
+    state: Option<DeliveryStateKind>,
+    #[serde(default = "default_replay_limit")]
+    limit: usize,
+}
+
+async fn query_deliveries(
+    State(state): State<BusTabletApiState>,
+    request: Result<Json<BusDeliveryQueryRequest>, JsonRejection>,
+) -> TabletApiResult<Json<BusDeliveryQueryResponse>> {
+    let Json(request) = request.map_err(|rejection| TabletApiError::RequestBody {
+        status: rejection.status(),
+        message: rejection.body_text(),
+    })?;
+    if request.limit == 0 || request.limit > MAX_DELIVERY_QUERY_RESULTS {
+        return Err(TabletApiError::InvalidRequest(format!(
+            "limit must be between 1 and {MAX_DELIVERY_QUERY_RESULTS}"
+        )));
+    }
+    let records = state
+        .service
+        .query_deliveries(&request)
+        .map_err(|error| match error {
+            BusDeliveryQueryError::InvalidRequest(message) => {
+                TabletApiError::InvalidRequest(message)
+            }
+            BusDeliveryQueryError::Profile(message) => TabletApiError::Profile(message),
+        })?
+        .into_iter()
+        .map(BusDeliveryRecordResponse::from)
+        .collect();
+    Ok(Json(BusDeliveryQueryResponse {
+        observation_scope: "local",
+        read_consistency: "local_profile_applied_stale_capable",
+        records,
+    }))
+}
+
 async fn tablet_status(
     State(state): State<BusTabletApiState>,
 ) -> TabletApiResult<Json<BusTabletStatus>> {
@@ -561,6 +716,7 @@ struct BusTabletSnapshot {
     subscription_count: u64,
     commit_position: u64,
     archived_event_count: u64,
+    delivery_counts: DeliveryCounts,
     business_state_digest: String,
     state_digest: String,
 }
@@ -600,6 +756,14 @@ struct BusTabletStatus {
     commit_position: u64,
     #[serde(serialize_with = "serialize_u64_as_decimal")]
     archived_event_count: u64,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    pending_delivery_count: u64,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    in_flight_delivery_count: u64,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    acknowledged_delivery_count: u64,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    dead_lettered_delivery_count: u64,
     business_state_digest: String,
     state_digest: String,
     write_guarantee: &'static str,
@@ -610,8 +774,8 @@ struct BusTabletStatus {
 }
 
 impl BusTabletStatus {
-    const TARGET_DISPATCH: &'static str = "not_implemented";
-    const DURABLE_TARGET_OUTBOX: bool = false;
+    const TARGET_DISPATCH: &'static str = "external_executor_not_implemented";
+    const DURABLE_TARGET_OUTBOX: bool = true;
 
     fn new(
         scope: &BusTabletScope,
@@ -626,7 +790,7 @@ impl BusTabletStatus {
             ));
         }
         Ok(Self {
-            capability: "single_partition_event_bus_route_plan_tablet",
+            capability: "single_partition_event_bus_ingress_outbox_tablet",
             stability: "experimental",
             production_readiness: "not_production_ready",
             tablet_id: scope.tablet_id,
@@ -645,6 +809,22 @@ impl BusTabletStatus {
             subscription_count: profile.subscription_count,
             commit_position: profile.commit_position,
             archived_event_count: profile.archived_event_count,
+            pending_delivery_count: usize_to_u64(
+                profile.delivery_counts.pending,
+                "pending Event Bus delivery count",
+            )?,
+            in_flight_delivery_count: usize_to_u64(
+                profile.delivery_counts.in_flight,
+                "in-flight Event Bus delivery count",
+            )?,
+            acknowledged_delivery_count: usize_to_u64(
+                profile.delivery_counts.acknowledged,
+                "acknowledged Event Bus delivery count",
+            )?,
+            dead_lettered_delivery_count: usize_to_u64(
+                profile.delivery_counts.dead_lettered,
+                "dead-lettered Event Bus delivery count",
+            )?,
             business_state_digest: profile.business_state_digest,
             state_digest: profile.state_digest,
             write_guarantee: "fixed_three_voter_majority_persisted_then_local_profile_applied",
@@ -690,6 +870,232 @@ impl From<ArchivedEvent> for BusArchivedEventResponse {
             received_at_ms: record.received_at_ms,
             route_plan_version: record.route_plan_version,
             envelope: record.envelope.into(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct BusDeliveryQueryResponse {
+    observation_scope: &'static str,
+    read_consistency: &'static str,
+    records: Vec<BusDeliveryRecordResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct BusDeliveryRecordResponse {
+    delivery_id: String,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    publish_position: u64,
+    subscription: String,
+    target: SubscriptionTarget,
+    envelope: StrictEventEnvelope,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    route_plan_version: u64,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    created_at_ms: u64,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_u64_as_decimal"
+    )]
+    expires_at_ms: Option<u64>,
+    policy: BusDeliveryPolicyResponse,
+    state: BusDeliveryStateResponse,
+    attempts: Vec<BusDeliveryAttemptResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct BusDeliveryPolicyResponse {
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    timeout_ms: u64,
+    max_in_flight: u16,
+    retry: BusDeliveryRetryPolicyResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct BusDeliveryRetryPolicyResponse {
+    strategy: &'static str,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    initial_delay_ms: u64,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    max_delay_ms: u64,
+    jitter_percent: u8,
+    max_attempts: u32,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_u64_as_decimal"
+    )]
+    max_age_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum BusDeliveryStateResponse {
+    Pending {
+        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        eligible_at_ms: u64,
+    },
+    InFlight {
+        dispatcher: String,
+        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        dispatcher_epoch: u64,
+        attempt: u32,
+        lease_token: String,
+        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        lease_deadline_ms: u64,
+    },
+    Acknowledged {
+        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        acknowledged_at_ms: u64,
+    },
+    DeadLettered {
+        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        dead_lettered_at_ms: u64,
+        reason: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct BusDeliveryAttemptResponse {
+    attempt: u32,
+    dispatcher: String,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    dispatcher_epoch: u64,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    leader_term: u64,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    started_at_ms: u64,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    lease_deadline_ms: u64,
+    outcome: BusDeliveryAttemptOutcomeResponse,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum BusDeliveryAttemptOutcomeResponse {
+    InFlight,
+    Acknowledged {
+        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        completed_at_ms: u64,
+    },
+    Failed {
+        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        failed_at_ms: u64,
+        reason: String,
+        #[serde(
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "serialize_optional_u64_as_decimal"
+        )]
+        retry_at_ms: Option<u64>,
+    },
+}
+
+impl From<DeliveryRecord> for BusDeliveryRecordResponse {
+    fn from(record: DeliveryRecord) -> Self {
+        Self {
+            delivery_id: record.delivery_id,
+            publish_position: record.publish_position,
+            subscription: record.subscription,
+            target: record.target,
+            envelope: record.envelope.into(),
+            route_plan_version: record.route_plan_version,
+            created_at_ms: record.created_at_ms,
+            expires_at_ms: record.expires_at_ms,
+            policy: record.policy.into(),
+            state: record.state.into(),
+            attempts: record.attempts.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<DeliveryPolicy> for BusDeliveryPolicyResponse {
+    fn from(policy: DeliveryPolicy) -> Self {
+        Self {
+            timeout_ms: policy.timeout_ms,
+            max_in_flight: policy.max_in_flight,
+            retry: policy.retry.into(),
+        }
+    }
+}
+
+impl From<DeliveryRetryPolicy> for BusDeliveryRetryPolicyResponse {
+    fn from(policy: DeliveryRetryPolicy) -> Self {
+        let strategy = match policy.strategy {
+            epoch_bus::DeliveryBackoffStrategy::Exponential => "exponential",
+            epoch_bus::DeliveryBackoffStrategy::Fixed => "fixed",
+        };
+        Self {
+            strategy,
+            initial_delay_ms: policy.initial_delay_ms,
+            max_delay_ms: policy.max_delay_ms,
+            jitter_percent: policy.jitter_percent,
+            max_attempts: policy.max_attempts,
+            max_age_ms: policy.max_age_ms,
+        }
+    }
+}
+
+impl From<DeliveryState> for BusDeliveryStateResponse {
+    fn from(state: DeliveryState) -> Self {
+        match state {
+            DeliveryState::Pending { eligible_at_ms } => Self::Pending { eligible_at_ms },
+            DeliveryState::InFlight {
+                dispatcher,
+                dispatcher_epoch,
+                attempt,
+                lease_token,
+                lease_deadline_ms,
+                ..
+            } => Self::InFlight {
+                dispatcher,
+                dispatcher_epoch,
+                attempt,
+                lease_token,
+                lease_deadline_ms,
+            },
+            DeliveryState::Acknowledged { acknowledged_at_ms } => {
+                Self::Acknowledged { acknowledged_at_ms }
+            }
+            DeliveryState::DeadLettered {
+                dead_lettered_at_ms,
+                reason,
+            } => Self::DeadLettered {
+                dead_lettered_at_ms,
+                reason,
+            },
+        }
+    }
+}
+
+impl From<DeliveryAttempt> for BusDeliveryAttemptResponse {
+    fn from(attempt: DeliveryAttempt) -> Self {
+        Self {
+            attempt: attempt.attempt,
+            dispatcher: attempt.dispatcher,
+            dispatcher_epoch: attempt.dispatcher_epoch,
+            leader_term: attempt.leader_term,
+            started_at_ms: attempt.started_at_ms,
+            lease_deadline_ms: attempt.lease_deadline_ms,
+            outcome: attempt.outcome.into(),
+        }
+    }
+}
+
+impl From<DeliveryAttemptOutcome> for BusDeliveryAttemptOutcomeResponse {
+    fn from(outcome: DeliveryAttemptOutcome) -> Self {
+        match outcome {
+            DeliveryAttemptOutcome::InFlight => Self::InFlight,
+            DeliveryAttemptOutcome::Acknowledged { completed_at_ms } => {
+                Self::Acknowledged { completed_at_ms }
+            }
+            DeliveryAttemptOutcome::Failed {
+                failed_at_ms,
+                reason,
+                retry_at_ms,
+            } => Self::Failed {
+                failed_at_ms,
+                reason,
+                retry_at_ms,
+            },
         }
     }
 }
@@ -838,6 +1244,27 @@ mod tests {
             panic!("expected publish");
         };
         assert_eq!(envelope.time_ms, 9_007_199_254_740_993);
+
+        let acquire: BusMutationRequest = serde_json::from_value(json!({
+            "idempotency_key": "acquire-1",
+            "expected_term": "7",
+            "operation": {
+                "kind": "acquire_deliveries",
+                "subscription": "sink",
+                "dispatcher": "sender",
+                "dispatcher_epoch": "9007199254740993",
+                "max_deliveries": 10
+            }
+        }))
+        .unwrap();
+        assert!(matches!(
+            acquire.operation.to_tablet_operation(),
+            BusTabletOperation::AcquireDeliveries {
+                dispatcher_epoch: 9_007_199_254_740_993,
+                max_deliveries: 10,
+                ..
+            }
+        ));
 
         assert!(
             serde_json::from_value::<BusMutationRequest>(json!({
@@ -1035,10 +1462,67 @@ mod tests {
     }
 
     #[test]
-    fn status_contract_does_not_claim_target_delivery() {
-        assert_eq!(BusTabletStatus::TARGET_DISPATCH, "not_implemented");
+    fn delivery_response_uses_browser_safe_integer_strings_through_attempt_history() {
+        let response = BusDeliveryRecordResponse::from(DeliveryRecord {
+            delivery_id: "epoch.bus.delivery.v1.1.audit".into(),
+            publish_position: u64::MAX,
+            subscription: "audit".into(),
+            target: SubscriptionTarget::Pull,
+            envelope: event("event-1"),
+            route_plan_version: u64::MAX - 1,
+            created_at_ms: u64::MAX - 2,
+            expires_at_ms: Some(u64::MAX - 1),
+            policy: DeliveryPolicy {
+                timeout_ms: u64::MAX,
+                max_in_flight: 1,
+                retry: DeliveryRetryPolicy {
+                    strategy: epoch_bus::DeliveryBackoffStrategy::Fixed,
+                    initial_delay_ms: u64::MAX - 3,
+                    max_delay_ms: u64::MAX - 2,
+                    jitter_percent: 0,
+                    max_attempts: 2,
+                    max_age_ms: Some(u64::MAX - 1),
+                },
+            },
+            state: DeliveryState::Pending {
+                eligible_at_ms: u64::MAX,
+            },
+            attempts: vec![DeliveryAttempt {
+                attempt: 1,
+                dispatcher: "sender".into(),
+                dispatcher_epoch: u64::MAX,
+                leader_term: u64::MAX - 1,
+                started_at_ms: u64::MAX - 2,
+                lease_deadline_ms: u64::MAX - 1,
+                outcome: DeliveryAttemptOutcome::Failed {
+                    failed_at_ms: u64::MAX,
+                    reason: "retry".into(),
+                    retry_at_ms: Some(u64::MAX),
+                },
+            }],
+        });
+        let document = serde_json::to_value(response).unwrap();
+        assert_eq!(document["publish_position"], u64::MAX.to_string());
+        assert_eq!(document["policy"]["timeout_ms"], u64::MAX.to_string());
+        assert_eq!(document["state"]["eligible_at_ms"], u64::MAX.to_string());
+        assert_eq!(
+            document["attempts"][0]["dispatcher_epoch"],
+            u64::MAX.to_string()
+        );
+        assert_eq!(
+            document["attempts"][0]["outcome"]["retry_at_ms"],
+            u64::MAX.to_string()
+        );
+    }
+
+    #[test]
+    fn status_contract_claims_the_ledger_but_not_an_external_executor() {
+        assert_eq!(
+            BusTabletStatus::TARGET_DISPATCH,
+            "external_executor_not_implemented"
+        );
         const {
-            assert!(!BusTabletStatus::DURABLE_TARGET_OUTBOX);
+            assert!(BusTabletStatus::DURABLE_TARGET_OUTBOX);
         }
     }
 
@@ -1302,6 +1786,39 @@ mod tests {
         }
     }
 
+    async fn assert_acknowledged_delivery_on_every_node(
+        cluster: &RunningBusCluster,
+        client: &reqwest::Client,
+    ) {
+        for node in &cluster.nodes {
+            let (status, deliveries) = post_json(
+                client,
+                node,
+                EXPERIMENTAL_BUS_TABLET_DELIVERY_QUERY_PATH,
+                &json!({
+                    "subscription": "orders",
+                    "state": "acknowledged",
+                    "limit": 10
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(deliveries["observation_scope"], "local");
+            assert_eq!(deliveries["records"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                deliveries["records"][0]["delivery_id"],
+                "epoch.bus.delivery.v1.1.orders"
+            );
+            assert_eq!(deliveries["records"][0]["publish_position"], "1");
+            assert_eq!(deliveries["records"][0]["state"]["kind"], "acknowledged");
+            assert_eq!(deliveries["records"][0]["attempts"][0]["attempt"], 1);
+            assert_eq!(
+                deliveries["records"][0]["attempts"][0]["outcome"]["kind"],
+                "acknowledged"
+            );
+        }
+    }
+
     async fn assert_invalid_replay_is_a_client_error(
         client: &reqwest::Client,
         leader: &RunningBusNode,
@@ -1395,7 +1912,75 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(conflict["error"]["code"], "idempotency_conflict");
         assert_eq!(conflict["error"]["outcome_certainty"], "unknown");
-        publish_commit_index
+        let delivery_commit_index = commit_delivery_ack(client, leader, term).await;
+        assert!(delivery_commit_index > publish_commit_index);
+        delivery_commit_index
+    }
+
+    async fn commit_delivery_ack(
+        client: &reqwest::Client,
+        leader: &RunningBusNode,
+        term: u64,
+    ) -> u64 {
+        let (status, acquired) = post_json(
+            client,
+            leader,
+            EXPERIMENTAL_BUS_TABLET_MUTATIONS_PATH,
+            &json!({
+                "idempotency_key": "acquire-1",
+                "expected_term": term.to_string(),
+                "operation": {
+                    "kind": "acquire_deliveries",
+                    "subscription": "orders",
+                    "dispatcher": "sender",
+                    "dispatcher_epoch": "1",
+                    "max_deliveries": 1
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let delivery = &acquired["receipt"]["outcome"]["result"]["deliveries"][0];
+        assert_eq!(
+            acquired["receipt"]["outcome"]["result"]["kind"],
+            "deliveries_acquired"
+        );
+        assert_eq!(delivery["delivery_id"], "epoch.bus.delivery.v1.1.orders");
+        assert_eq!(delivery["publish_position"], "1");
+        assert_eq!(delivery["attempt"], 1);
+        assert_eq!(delivery["lease_deadline_ms"], "31000");
+
+        let (status, acknowledged) = post_json(
+            client,
+            leader,
+            EXPERIMENTAL_BUS_TABLET_MUTATIONS_PATH,
+            &json!({
+                "idempotency_key": "ack-1",
+                "expected_term": term.to_string(),
+                "operation": {
+                    "kind": "acknowledge_delivery",
+                    "delivery_id": delivery["delivery_id"],
+                    "dispatcher": "sender",
+                    "dispatcher_epoch": "1",
+                    "lease_token": delivery["lease_token"]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            acknowledged["receipt"]["outcome"]["result"]["kind"],
+            "delivery_acknowledged"
+        );
+        assert_eq!(
+            acknowledged["receipt"]["outcome"]["result"]["delivery_id"],
+            "epoch.bus.delivery.v1.1.orders"
+        );
+        acknowledged["receipt"]["commit_index"]
+            .as_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
     }
 
     async fn assert_converged_status(
@@ -1410,8 +1995,15 @@ mod tests {
             assert_eq!(status["subscription_count"], "1");
             assert_eq!(status["commit_position"], "1");
             assert_eq!(status["archived_event_count"], "1");
-            assert_eq!(status["target_dispatch"], "not_implemented");
-            assert_eq!(status["durable_target_outbox"], false);
+            assert_eq!(
+                status["target_dispatch"],
+                "external_executor_not_implemented"
+            );
+            assert_eq!(status["durable_target_outbox"], true);
+            assert_eq!(status["pending_delivery_count"], "0");
+            assert_eq!(status["in_flight_delivery_count"], "0");
+            assert_eq!(status["acknowledged_delivery_count"], "1");
+            assert_eq!(status["dead_lettered_delivery_count"], "0");
             assert_eq!(status["state_digest"], state_digest);
         }
         state_digest
@@ -1431,6 +2023,7 @@ mod tests {
             commit_route_publish_retry_and_conflict(&client, leader, term).await;
         let state_digest = assert_converged_status(&cluster, &client, publish_commit_index).await;
         assert_replay_on_every_node(&cluster, &client).await;
+        assert_acknowledged_delivery_on_every_node(&cluster, &client).await;
         cluster.shutdown().await;
 
         let reopened = RunningBusCluster::start(&paths).await;
@@ -1439,8 +2032,10 @@ mod tests {
         for status in recovered_statuses {
             assert_eq!(status["state_digest"], state_digest);
             assert_eq!(status["archived_event_count"], "1");
+            assert_eq!(status["acknowledged_delivery_count"], "1");
         }
         assert_replay_on_every_node(&reopened, &client).await;
+        assert_acknowledged_delivery_on_every_node(&reopened, &client).await;
         reopened.shutdown().await;
     }
 }

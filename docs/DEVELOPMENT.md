@@ -311,7 +311,8 @@ mutation/status/history routes described in
 mutation/status/observation routes described in
 [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
 `EPOCH_EXPERIMENTAL_BUS_TABLET_ENABLED=true` selects the Event Bus
-route-plan/ingress mutation, status, and archive-replay routes described in
+ingress/outbox mutation, status, archive-replay, and delivery-query routes
+described in
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md). Stream, Queue,
 Cache, Bus, and opaque proposal modes are mutually exclusive for one group, and
 none changes the public API or SDK guarantee ceiling. Run

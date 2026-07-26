@@ -189,13 +189,17 @@ filter, JSON path, resource, and HTTP target validation; subscription/archive
 capacity; replay bounds; and atomic route-plan/publish counter exhaustion.
 Tablet tests add canonical command decoding, scoped proposal identity, exact
 replay, conflicting and out-of-order commit rejection, recordable capacity
-failure, complete business-state digests, and three-independent-tablet
-convergence. Node tests add strict recursive DTOs, browser-safe integers,
-semantic retry/conflict, fail-stop behavior, three real HTTP runtimes, and EPRS
-reopen. The container gate adds follower rejection, majority-before-success,
-leader loss, catch-up, archive/digest agreement, all-node `SIGKILL`, and
-same-volume recovery. Durable target outboxes, backpressure, and
-crash-at-dispatch history remain open; see
+failure, atomic lexical outbox creation, term/dispatcher fencing, independent
+target failure, retry eligibility, attempt exhaustion, dead-letter state,
+bounded lease-expiry maintenance, complete business-state digests, and
+three-independent-tablet convergence. Node tests add strict recursive DTOs,
+browser-safe attempt history, semantic retry/conflict, fail-stop behavior,
+committed acquire/ack, bounded delivery queries, three real HTTP runtimes, and
+EPRS reopen. The container gate adds follower rejection,
+majority-before-success, acquire/ack replication, leader loss, catch-up,
+archive/outbox/digest agreement, all-node `SIGKILL`, and same-volume recovery.
+Built-in target executors, rate limiting, redrive/retention, and
+crash-at-network-dispatch history remain open; see
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 ### 3. Integration tests

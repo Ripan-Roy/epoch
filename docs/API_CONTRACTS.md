@@ -394,11 +394,14 @@ fsynced before becoming visible and replayed on restart. Cache and Event Bus
 still accept only `volatile`, and every replication or geo mode is rejected.
 
 Standalone Event Bus creation accepts `durability`, `archive`, and optional
-`max_subscriptions`/`max_archive_events`. Omitted limits default to 1,024 and
-100,000. Values must be non-zero and cannot exceed 100,000 subscriptions or
-10,000,000 archived events. Replay responses are capped at 10,000 records.
-Route-plan and publish positions are checked counters; capacity or counter
-exhaustion rejects atomically.
+`max_subscriptions`/`max_archive_events`; the shared configuration codec also
+defaults `delivery_outbox: false` and `max_outbox_deliveries: 100000`.
+Standalone engine creation rejects `delivery_outbox: true` because its public
+routes do not mount the replicated lease/settlement protocol. The experimental
+Bus tablet forces it on internally. Capacity values must be non-zero and cannot
+exceed 100,000 subscriptions or 10,000,000 archived/outbox records. Replay
+responses are capped at 10,000 records. Route-plan and publish positions are
+checked counters; capacity or counter exhaustion rejects atomically.
 
 The v1 frames retain their checksum and global sequence across segment
 boundaries. Segment rotation targets `--wal-segment-bytes` /
@@ -523,26 +526,36 @@ the server. There is no linearizable read barrier, public gRPC route, or SDK
 commitment. See [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
 
 The mutually exclusive Event Bus mode mounts a canonical single-partition
-route-plan/ingress tablet on the internal listener:
+ingress/outbox tablet on the internal listener:
 
 - `POST /experimental/v1/tablets/bus/mutations` submits a strict
-  `upsert_subscription`, `remove_subscription`, or `publish` operation;
+  `upsert_subscription`, `remove_subscription`, `publish`,
+  `acquire_deliveries`, `acknowledge_delivery`, `fail_delivery`, or
+  `maintain_deliveries` operation;
 - `GET /experimental/v1/tablets/bus/mutations/{proposal_id}` resolves local
   unknown, pending, or committed state;
 - `GET /experimental/v1/tablets/bus/status` reports consensus/profile
   positions, route/archive counters, complete recovery/state digests, and
   explicit target-delivery non-claims; and
 - `POST /experimental/v1/tablets/bus/archive/replay` performs bounded inclusive
-  time-range and optional filtered replay against local applied archive state.
+  time-range and optional filtered replay against local applied archive state;
+  and
+- `POST /experimental/v1/tablets/bus/deliveries/query` returns a bounded,
+  explicitly local and stale-capable view of delivery state and attempt
+  history.
 
 The same strict idempotency, server-owned non-regressing time, browser-safe
 64-bit JSON, majority-before-success, recovery-before-readiness, and fail-stop
 rules apply. A publish receipt includes the route-plan version, ingress
 position, delivery count, and SHA-256 digest of the transformed ordered
-delivery plan. It proves deterministic replicated route selection, not target
-delivery. Status therefore reports `target_dispatch: not_implemented` and
-`durable_target_outbox: false`. There is no target outbox/transport, public
-route, CLI, or SDK commitment yet. See
+delivery plan. Every match also creates a stable per-subscription record with
+captured timeout/max-in-flight/retry policy. Acquires are fenced by leader term
+and dispatcher epoch; ack, failure, retry, timeout maintenance, and dead-letter
+state are replicated and recovered. Status therefore reports
+`target_dispatch: external_executor_not_implemented` and
+`durable_target_outbox: true`. There is no built-in target transport, public
+route, CLI, or SDK commitment yet, and a dispatcher acknowledgement is not
+proof of an arbitrary external business side effect. See
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 None of the four typed experimental modes is the final tablet service. Snapshots/compaction,

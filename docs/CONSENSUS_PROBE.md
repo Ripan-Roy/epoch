@@ -3,7 +3,7 @@
 The consensus probe is an opt-in process/runtime integration for Epoch's
 fixed-three-voter persistent Raft adapter. Its default mode replicates opaque
 diagnostic payloads. Mutually exclusive opt-in modes can instead attach one
-typed, single-partition Stream, Queue, or Event Bus route-plan/ingress tablet,
+typed, single-partition Stream, Queue, or Event Bus ingress/outbox tablet,
 or one single-shard Cache tablet. Public Cache, Stream, Queue, and Event Bus
 APIs remain independent standalone engines with a `local_durable` guarantee
 ceiling.
@@ -17,7 +17,7 @@ proposal routes with the typed Stream milestone on the same group. Setting
 `EPOCH_EXPERIMENTAL_QUEUE_TABLET_ENABLED=true` instead mounts the typed Queue
 milestone. `EPOCH_EXPERIMENTAL_CACHE_TABLET_ENABLED=true` mounts the typed Cache
 milestone. `EPOCH_EXPERIMENTAL_BUS_TABLET_ENABLED=true` mounts the typed Event
-Bus ingress/route-plan milestone. Opaque, Stream, Queue, Cache, and Bus modes are intentionally mutually
+Bus ingress/outbox milestone. Opaque, Stream, Queue, Cache, and Bus modes are intentionally mutually
 exclusive; see [Experimental Stream Tablet](STREAM_TABLET.md),
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md), and
 [Experimental Replicated Cache Tablet](CACHE_TABLET.md), and
@@ -109,7 +109,7 @@ Set `EPOCH_CONSENSUS_PROBE_ENABLED=true` and provide the following values to
 | `EPOCH_EXPERIMENTAL_QUEUE_TABLET_NAME` | Resource name for the typed Queue profile |
 | `EPOCH_EXPERIMENTAL_CACHE_TABLET_ENABLED` | Mount the typed Cache profile instead of opaque routes; defaults to `false` |
 | `EPOCH_EXPERIMENTAL_CACHE_TABLET_NAME` | Resource name for the typed Cache profile |
-| `EPOCH_EXPERIMENTAL_BUS_TABLET_ENABLED` | Mount the typed Event Bus route-plan/ingress profile instead of opaque routes; defaults to `false` |
+| `EPOCH_EXPERIMENTAL_BUS_TABLET_ENABLED` | Mount the typed Event Bus ingress/outbox profile instead of opaque routes; defaults to `false` |
 | `EPOCH_EXPERIMENTAL_BUS_TABLET_NAME` | Resource name for the typed Event Bus profile |
 
 Each node stores its stable journal at

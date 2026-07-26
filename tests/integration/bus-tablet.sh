@@ -10,6 +10,7 @@ epoch_use_existing_image="${EPOCH_BUS_TABLET_USE_EXISTING_IMAGE:-0}"
 epoch_status_path=/experimental/v1/tablets/bus/status
 epoch_mutations_path=/experimental/v1/tablets/bus/mutations
 epoch_replay_path=/experimental/v1/tablets/bus/archive/replay
+epoch_delivery_query_path=/experimental/v1/tablets/bus/deliveries/query
 epoch_opaque_status_path=/experimental/v1/consensus/status
 epoch_response_file=
 
@@ -116,6 +117,14 @@ archive_replay() {
     "http://127.0.0.1:${epoch_peer_ports[node_id - 1]}${epoch_replay_path}"
 }
 
+delivery_query() {
+  local node_id=$1
+  curl --fail --silent --show-error \
+    --header 'content-type: application/json' \
+    --data '{"limit":100}' \
+    "http://127.0.0.1:${epoch_peer_ports[node_id - 1]}${epoch_delivery_query_path}"
+}
+
 submit_mutation() {
   local node_id=$1
   local body=$2
@@ -212,6 +221,7 @@ for field in (
 
 wait_for_state() {
   local expected_events=$1
+  local expected_acknowledged=$2
   local statuses=()
   local node_id
   local status
@@ -225,20 +235,26 @@ wait_for_state() {
       fi
       statuses+=("$status")
     done
-    if [[ ${#statuses[@]} -eq 3 ]] && python3 - "$expected_events" "${statuses[@]}" <<'PYTHON'
+    if [[ ${#statuses[@]} -eq 3 ]] && python3 - \
+      "$expected_events" "$expected_acknowledged" "${statuses[@]}" <<'PYTHON'
 import json
 import sys
 
 expected = int(sys.argv[1])
-statuses = [json.loads(value) for value in sys.argv[2:]]
+acknowledged = int(sys.argv[2])
+statuses = [json.loads(value) for value in sys.argv[3:]]
 digests = {status["state_digest"] for status in statuses}
 valid = len(digests) == 1 and all(
     status["route_plan_version"] == "2"
     and status["subscription_count"] == "1"
     and status["commit_position"] == str(expected)
     and status["archived_event_count"] == str(expected)
-    and status["target_dispatch"] == "not_implemented"
-    and status["durable_target_outbox"] is False
+    and status["target_dispatch"] == "external_executor_not_implemented"
+    and status["durable_target_outbox"] is True
+    and status["pending_delivery_count"] == str(expected - acknowledged)
+    and status["in_flight_delivery_count"] == "0"
+    and status["acknowledged_delivery_count"] == str(acknowledged)
+    and status["dead_lettered_delivery_count"] == "0"
     and int(status["consensus_applied_index"]) >= int(status["last_profile_mutation_index"])
     for status in statuses
 )
@@ -251,6 +267,40 @@ PYTHON
   done
   printf 'Event Bus voters did not converge on %s archived events\n' "$expected_events" >&2
   return 1
+}
+
+assert_delivery_counts() {
+  local expected_pending=$1
+  local expected_acknowledged=$2
+  local node_id
+  local deliveries
+  for node_id in 1 2 3; do
+    deliveries="$(delivery_query "$node_id")"
+    python3 -c '
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+pending = int(sys.argv[2])
+acknowledged = int(sys.argv[3])
+assert document["observation_scope"] == "local", document
+assert document["read_consistency"] == "local_profile_applied_stale_capable", document
+records = document["records"]
+states = [record["state"]["kind"] for record in records]
+assert states.count("pending") == pending, document
+assert states.count("acknowledged") == acknowledged, document
+for record in records:
+    assert isinstance(record["publish_position"], str), record
+    assert isinstance(record["route_plan_version"], str), record
+    assert isinstance(record["created_at_ms"], str), record
+    assert isinstance(record["envelope"]["time_ms"], str), record
+    for attempt in record["attempts"]:
+        assert isinstance(attempt["dispatcher_epoch"], str), attempt
+        assert isinstance(attempt["leader_term"], str), attempt
+        assert isinstance(attempt["started_at_ms"], str), attempt
+        assert isinstance(attempt["lease_deadline_ms"], str), attempt
+' "$deliveries" "$expected_pending" "$expected_acknowledged"
+  done
 }
 
 assert_archive_count() {
@@ -325,8 +375,28 @@ epoch_status_code="$(submit_mutation \
   "$epoch_leader" "$epoch_publish_conflict" "$epoch_response_file")"
 [[ "$epoch_status_code" == 409 ]]
 assert_error "$(<"$epoch_response_file")" idempotency_conflict
-wait_for_state 1
+
+epoch_acquire_one="{\"idempotency_key\":\"acquire-1\",\"expected_term\":\"${epoch_term}\",\"operation\":{\"kind\":\"acquire_deliveries\",\"subscription\":\"orders\",\"dispatcher\":\"sender\",\"dispatcher_epoch\":\"1\",\"max_deliveries\":1}}"
+epoch_status_code="$(submit_mutation \
+  "$epoch_leader" "$epoch_acquire_one" "$epoch_response_file")"
+[[ "$epoch_status_code" == 201 ]]
+assert_committed "$(<"$epoch_response_file")" deliveries_acquired new
+epoch_delivery_id="$(python3 -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["receipt"]["outcome"]["result"]["deliveries"][0]["delivery_id"])' \
+  "$epoch_response_file")"
+epoch_lease_token="$(python3 -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["receipt"]["outcome"]["result"]["deliveries"][0]["lease_token"])' \
+  "$epoch_response_file")"
+[[ "$epoch_delivery_id" == epoch.bus.delivery.v1.1.orders ]]
+epoch_ack_one="{\"idempotency_key\":\"ack-1\",\"expected_term\":\"${epoch_term}\",\"operation\":{\"kind\":\"acknowledge_delivery\",\"delivery_id\":\"${epoch_delivery_id}\",\"dispatcher\":\"sender\",\"dispatcher_epoch\":\"1\",\"lease_token\":\"${epoch_lease_token}\"}}"
+epoch_status_code="$(submit_mutation \
+  "$epoch_leader" "$epoch_ack_one" "$epoch_response_file")"
+[[ "$epoch_status_code" == 201 ]]
+assert_committed "$(<"$epoch_response_file")" delivery_acknowledged new
+
+wait_for_state 1 1
 assert_archive_count 1
+assert_delivery_counts 0 1
 
 "${epoch_compose[@]}" kill "${epoch_services[epoch_leader - 1]}" >/dev/null
 read -r epoch_new_leader epoch_new_term < <(wait_for_leader "$epoch_leader")
@@ -338,14 +408,16 @@ assert_committed "$(<"$epoch_response_file")" published new
 
 "${epoch_compose[@]}" up --no-build --detach "${epoch_services[epoch_leader - 1]}" >/dev/null
 wait_for_nodes
-wait_for_state 2
+wait_for_state 2 1
 assert_archive_count 2
+assert_delivery_counts 1 1
 
 "${epoch_compose[@]}" kill >/dev/null
 "${epoch_compose[@]}" up --no-build --detach >/dev/null
 wait_for_nodes
-wait_for_state 2
+wait_for_state 2 1
 assert_archive_count 2
+assert_delivery_counts 1 1
 
 printf 'Event Bus tablet integration passed (leader %s, failover leader %s)\n' \
   "$epoch_leader" "$epoch_new_leader"

@@ -1,6 +1,6 @@
 //! Versioned Event Bus tablet commands and their strict canonical codec.
 
-use epoch_bus::Subscription;
+use epoch_bus::{MAX_DELIVERY_ACQUIRE_BATCH, MAX_DELIVERY_REASON_BYTES, Subscription};
 use epoch_core::{EventEnvelope, validate_resource_name};
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +9,8 @@ use crate::{TabletError, TabletResult, TabletScope};
 
 pub const BUS_TABLET_COMMAND_FORMAT_VERSION: u16 = 1;
 pub const MAX_BUS_TABLET_COMMAND_BYTES: usize = 512 * 1024;
+pub const MAX_BUS_DELIVERY_ID_BYTES: usize = 512;
+pub const MAX_BUS_DELIVERY_LEASE_TOKEN_BYTES: usize = 256;
 
 pub type BusTabletScope = TabletScope;
 
@@ -27,9 +29,37 @@ pub struct BusTabletCommand {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BusTabletOperation {
-    UpsertSubscription { subscription: Subscription },
-    RemoveSubscription { name: String },
-    Publish { envelope: EventEnvelope },
+    UpsertSubscription {
+        subscription: Subscription,
+    },
+    RemoveSubscription {
+        name: String,
+    },
+    Publish {
+        envelope: EventEnvelope,
+    },
+    AcquireDeliveries {
+        subscription: String,
+        dispatcher: String,
+        dispatcher_epoch: u64,
+        max_deliveries: u16,
+    },
+    AcknowledgeDelivery {
+        delivery_id: String,
+        dispatcher: String,
+        dispatcher_epoch: u64,
+        lease_token: String,
+    },
+    FailDelivery {
+        delivery_id: String,
+        dispatcher: String,
+        dispatcher_epoch: u64,
+        lease_token: String,
+        reason: String,
+    },
+    MaintainDeliveries {
+        max_deliveries: u16,
+    },
 }
 
 impl BusTabletCommand {
@@ -163,6 +193,47 @@ impl BusTabletCommand {
             BusTabletOperation::Publish { envelope } => {
                 envelope.validate()?;
             }
+            BusTabletOperation::AcquireDeliveries {
+                subscription,
+                dispatcher,
+                dispatcher_epoch,
+                max_deliveries,
+            } => {
+                validate_resource_name(subscription)?;
+                validate_dispatcher(dispatcher, *dispatcher_epoch)?;
+                validate_delivery_batch(*max_deliveries)?;
+            }
+            BusTabletOperation::AcknowledgeDelivery {
+                delivery_id,
+                dispatcher,
+                dispatcher_epoch,
+                lease_token,
+            } => {
+                validate_delivery_settlement(
+                    delivery_id,
+                    dispatcher,
+                    *dispatcher_epoch,
+                    lease_token,
+                )?;
+            }
+            BusTabletOperation::FailDelivery {
+                delivery_id,
+                dispatcher,
+                dispatcher_epoch,
+                lease_token,
+                reason,
+            } => {
+                validate_delivery_settlement(
+                    delivery_id,
+                    dispatcher,
+                    *dispatcher_epoch,
+                    lease_token,
+                )?;
+                validate_required_bounded("reason", reason, MAX_DELIVERY_REASON_BYTES)?;
+            }
+            BusTabletOperation::MaintainDeliveries { max_deliveries } => {
+                validate_delivery_batch(*max_deliveries)?;
+            }
         }
         Ok(())
     }
@@ -180,4 +251,52 @@ fn command_too_large(length: usize) -> TabletError {
     TabletError::InvalidCommand(format!(
         "encoded command is {length} bytes; maximum is {MAX_BUS_TABLET_COMMAND_BYTES}"
     ))
+}
+
+fn validate_dispatcher(dispatcher: &str, dispatcher_epoch: u64) -> TabletResult<()> {
+    validate_resource_name(dispatcher)?;
+    if dispatcher_epoch == 0 {
+        return Err(TabletError::InvalidCommand(
+            "dispatcher_epoch must be non-zero".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_delivery_batch(max_deliveries: u16) -> TabletResult<()> {
+    if max_deliveries == 0 || usize::from(max_deliveries) > MAX_DELIVERY_ACQUIRE_BATCH {
+        return Err(TabletError::InvalidCommand(format!(
+            "max_deliveries must be between 1 and {MAX_DELIVERY_ACQUIRE_BATCH}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_delivery_settlement(
+    delivery_id: &str,
+    dispatcher: &str,
+    dispatcher_epoch: u64,
+    lease_token: &str,
+) -> TabletResult<()> {
+    validate_required_bounded("delivery_id", delivery_id, MAX_BUS_DELIVERY_ID_BYTES)?;
+    validate_dispatcher(dispatcher, dispatcher_epoch)?;
+    validate_required_bounded(
+        "lease_token",
+        lease_token,
+        MAX_BUS_DELIVERY_LEASE_TOKEN_BYTES,
+    )
+}
+
+fn validate_required_bounded(field: &str, value: &str, maximum: usize) -> TabletResult<()> {
+    if value.is_empty() || value.len() > maximum {
+        return Err(TabletError::InvalidCommand(format!(
+            "{field} must be between 1 and {maximum} bytes"
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(TabletError::InvalidCommand(format!(
+            "{field} cannot contain control characters"
+        )));
+    }
+    Ok(())
 }

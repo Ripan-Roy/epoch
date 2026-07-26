@@ -712,7 +712,7 @@ export function DocsPage({ section }: DocsPageProps) {
                 <ReferenceCard
                   eyebrow="BUS TABLET"
                   title="Experimental replicated Event Bus"
-                  description="Strict route-plan and ingress mutations, fixed-voter commit, archive replay, failover, EPRS recovery, and explicit target-delivery non-claims."
+                  description="Replicated ingress, per-subscription outbox leases, retry/DLQ history, archive replay, failover, EPRS recovery, and explicit executor non-claims."
                   href={`${repositoryDocsUrl}/BUS_TABLET.md`}
                 />
               </div>

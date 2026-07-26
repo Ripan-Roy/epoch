@@ -111,7 +111,7 @@ test-queue-tablet: ## Prove typed Queue leases, failover, DLQ/redrive, and SIGKI
 test-cache-tablet: ## Prove typed Cache CAS, transactions, TTL, fenced locks, failover, and SIGKILL replay.
 	@bash tests/integration/cache-tablet.sh
 
-test-bus-tablet: ## Prove Event Bus route-plan replication, archive replay, failover, and SIGKILL recovery.
+test-bus-tablet: ## Prove Event Bus ingress/outbox settlement, failover, and SIGKILL recovery.
 	@bash tests/integration/bus-tablet.sh
 
 test-integration: test-consensus-process test-consensus-probe test-stream-tablet test-queue-tablet test-cache-tablet test-bus-tablet ## Exercise real processes through consensus, the CLI, and Go/Java/Python SDKs.
