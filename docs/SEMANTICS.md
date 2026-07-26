@@ -430,17 +430,30 @@ Reads remain explicitly local and stale-capable. This does not make the
 standalone Cache durable or establish placement-aware public quorum durability.
 See [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
 
+The Event Bus profile mounts the same committed-command boundary for canonical
+subscription changes and publish ingress. Each voter deterministically derives
+the captured route-plan version, transformed ordered delivery-plan digest,
+archive record, publish position, and chained state digest. Startup rebuilds
+that complete state from EPRS before the internal listener is returned. Archive
+replay is local and stale-capable. The route plan names potential targets but
+does not dispatch them: status explicitly reports that target dispatch and a
+durable target outbox are absent. Thus a committed publish means replicated
+ingress and deterministic routing evidence, never webhook/Queue/Stream/pull
+delivery. See [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
+
 Epoch does **not** yet provide a public clustered durability contract, regional
 catalog/placement, distributed membership fencing, persisted profile snapshots,
 consumer-group coordination, bounded transactions, object tier, geo replication,
 native Protobuf services, compatibility gateways, durable webhook delivery,
 connector execution, or the security controls in [SECURITY.md](SECURITY.md).
-The experimental Stream, Queue, and Cache tablets also lack a read
+The experimental Stream, Queue, Cache, and Event Bus tablets also lack a read
 barrier, authenticated transport, multiple partitions/tablets, and bounded
 idempotency retention. See [STREAM_TABLET.md](STREAM_TABLET.md) and
 [QUEUE_TABLET.md](QUEUE_TABLET.md). The Cache tablet additionally lacks profile
 snapshots/compaction, background active expiry, and bounded
-idempotency-receipt retention; see [CACHE_TABLET.md](CACHE_TABLET.md).
+idempotency-receipt retention; see [CACHE_TABLET.md](CACHE_TABLET.md). The Bus
+profile additionally lacks per-target outboxes, dispatch, retries, DLQs, replay
+attempt lineage, and target security; see [BUS_TABLET.md](BUS_TABLET.md).
 
 Current JSON-shaped payloads, standalone epochs, HTTP endpoints, and local WAL
 frames are provisional scaffold interfaces. They are not frozen compatibility

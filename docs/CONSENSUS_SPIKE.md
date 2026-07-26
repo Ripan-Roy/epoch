@@ -1,16 +1,16 @@
 # Consensus Feasibility Spike
 
-**Status:** Stage 2 typed Stream, Queue, and Cache tablet integration; still not
-a public product replication mode
+**Status:** Stage 2 typed Stream, Queue, Cache, and Event Bus tablet
+integration; still not a public product replication mode
 
 **Decision:** [ADR-0003](adr/0003-consensus-adapter.md) remains Proposed
 
 This document records exactly what the current Epoch consensus slices prove
 and, more importantly, what they do not prove. The public node profiles remain
 standalone-only and reject replicated-memory, quorum, and geo durability. An
-opt-in diagnostic probe and mutually exclusive typed Stream, Queue, or Cache
-tablet modes run on the dedicated experimental listener without changing that
-public guarantee ceiling.
+opt-in diagnostic probe and mutually exclusive typed Stream, Queue, Cache, or
+Event Bus tablet modes run on the dedicated experimental listener without
+changing that public guarantee ceiling.
 
 ## Implemented boundary
 
@@ -81,6 +81,22 @@ and stale-capable reads. Real-runtime and three-container gates prove active
 leader loss, old-term lease rejection, conservative redelivery, convergence,
 and all-node `SIGKILL` recovery; see
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
+
+The Cache profile attaches a canonical single-shard state machine with checked
+revisions, atomic transactions, deterministic expiry, and fenced advisory
+locks. Its actor-owned mutation and local observation routes rebuild from EPRS
+before readiness; real-runtime and container gates prove term admission,
+failover fencing, catch-up, convergence, and all-node recovery. See
+[Experimental Replicated Cache Tablet](CACHE_TABLET.md).
+
+The Event Bus profile attaches a canonical single-partition route-plan/ingress
+state machine. Strict mutations replicate subscription changes and publish
+ingress; each voter reproduces route-plan evidence, archive state, and complete
+digests before exposing status or local filtered replay. Real-runtime and
+container gates prove semantic retry/conflict, leader loss, catch-up,
+convergence, and all-node recovery. It has no target outbox or dispatch and
+makes no delivery claim; see
+[Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 ## Processing contract
 
@@ -168,7 +184,7 @@ This slice does not provide:
 - a linearizable read barrier;
 - mutually authenticated, encrypted, batched production transport;
 - public engine routing, CLI, SDK, or public health integration; the typed
-  Stream, Queue, and Cache milestones are confined to the explicitly experimental
+  Stream, Queue, Cache, and Event Bus milestones are confined to the explicitly experimental
   listener;
 - bounded proposal-history memory or a configured idempotency-retention window;
 - segment rotation, a committed-length manifest, arbitrary post-sync
@@ -205,6 +221,7 @@ docker compose -f deploy/compose/docker-compose.consensus-probe.yml config --qui
 make test-stream-tablet
 make test-queue-tablet
 make test-cache-tablet
+make test-bus-tablet
 cargo clippy --locked -p epoch-consensus --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked -p epoch-consensus --all-features --no-deps
 cargo audit --deny warnings --ignore RUSTSEC-2025-0057

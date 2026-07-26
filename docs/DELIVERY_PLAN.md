@@ -68,7 +68,11 @@ The traceability register marks the following as **Slice**. A Slice entry can be
   the M1 segmented WAL is only a prerequisite and is not Cache restore evidence.
 - Stream: STREAM-001, STREAM-002 basic retention, STREAM-004, and STREAM-005.
 - Queue: QUEUE-001–QUEUE-006 and native credit flow for QUEUE-011.
-- Bus: bounded deterministic direct/fan-out routing for BUS-001, filter/archive/transform sub-slices for BUS-002/BUS-006/BUS-007, and the native/CloudEvents-shaped envelope foundation for BUS-005. The typed tablet is core-only until durable target dispatch and runtime recovery are implemented.
+- Bus: bounded deterministic direct/fan-out routing for BUS-001,
+  filter/archive/transform sub-slices for BUS-002/BUS-006/BUS-007, and the
+  native/CloudEvents-shaped envelope foundation for BUS-005. The typed
+  route-plan/ingress tablet is mounted with EPRS recovery; durable target
+  dispatch/outboxes remain open.
 - Managed/control foundations: MGD-002, MGD-004, MGD-011, MGD-012, MGD-014; CTRL-001, CTRL-002, CTRL-004.
 - Developer/runtime: DX-001–DX-004, DX-006; GOV-006; PKG-001–PKG-005 and PKG-009.
 
@@ -83,7 +87,7 @@ The traceability register marks the following as **Slice**. A Slice entry can be
 | Stream slice | Rust | Key routing, committed offsets, fetch, retention baseline, visible ack policy | Ordered recovery and no-early-ack history |
 | Queue slice | Rust | Ready/scheduled/leased/acked/DLQ state, renewal, retry, redrive | Crash-at-every-transition history check |
 | Cache slice | Rust | One volatile memory shard, core types, TTL, eviction, atomic batch, pipeline | Linearizability, expiry, and eviction tests; snapshot/restore remains M3 |
-| Route slice | Rust | Bounded envelope-normalized direct/fan-out plan with canonical replicated commands | Route/filter truth table, atomic capacity boundaries, exact replay, and three-tablet convergence; runtime target backpressure remains open |
+| Route slice | Rust | Bounded envelope-normalized direct/fan-out plan with canonical replicated commands | Route/filter truth table, atomic capacity boundaries, exact replay, real-runtime/EPRS/container convergence and recovery; target dispatch/backpressure remains open |
 | Standalone and cluster lifecycle | Rust | One selectable node binary, local admin API, truthful mode/guarantee health | Disconnected standalone and three-node smoke suites |
 | CLI, SDK, emulator | Rust, Go, Java, Python | Create, append/publish, consume/ack, inspect, deterministic local testing | Cross-language executable quickstarts in CI |
 | Control-plane contract scaffold | Go | Reconciler skeleton that uses only gRPC contracts; no record-path ownership | Boundary test and dependency audit |
@@ -113,10 +117,11 @@ to one and all voters before reopening the same EPRS paths without duplicate
 receipt publication. An opt-in node runtime and three-container topology add a
 dedicated bounded HTTP transport. Its default mode carries opaque diagnostic
 proposals; mutually exclusive experimental profile modes apply canonical
-commands to one single-partition Stream or Queue or one single-shard Cache
-after fixed-voter majority commit and rebuild it from EPRS history. Event Bus
-now has the same canonical state-machine boundary in the tablet crate but is
-not mounted or rebuilt by the node. Those typed receipts are bounded
+commands to one single-partition Stream, Queue, or Event Bus route-plan/ingress
+tablet or one single-shard Cache after fixed-voter majority commit and rebuild
+it from EPRS history. The Bus profile replicates route plans, publish ingress,
+and archive state while explicitly declining target-delivery claims. Those
+typed receipts are bounded
 fixed-topology evidence, not a public or placement-aware quorum-durable
 acknowledgement, and all public profile APIs remain standalone. Exhaustive crash
 points, snapshots, membership and
@@ -152,6 +157,16 @@ container gates exercise failover, catch-up, fenced locks, convergence, and
 all-node recovery. Concurrent history checking, public routing/SDKs,
 linearizable reads, profile snapshots/compaction, and production durability
 evidence remain open. See [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
+
+The Event Bus application work now runs behind the same actor-owned persistent
+boundary. Strict internal routes cover subscription mutation, publish ingress,
+mutation lookup, status, and bounded filtered archive replay. Real-runtime and
+container gates prove majority-before-success, semantic retry/conflict,
+follower rejection, leader replacement, catch-up, digest/archive convergence,
+and all-node EPRS recovery. This advances BUS-001 and BUS-006, but target
+outboxes/dispatch, per-target retry and DLQ policy, backpressure isolation,
+public routing/SDKs, authentication, snapshots, and production placement remain
+open. See [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 The segmented-WAL work package is implemented as the single-node storage
 sub-slice at `$EPOCH_DATA_DIR/engine-wal/segment-*.wal`. The implementation has

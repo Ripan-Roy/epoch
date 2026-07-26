@@ -1,21 +1,25 @@
-# Deterministic Event Bus Tablet Core
+# Experimental Replicated Event Bus Tablet
 
-**Status:** Working bounded replicated state-machine core; not mounted by
-`epoch-node` and not a public durability or delivery claim
+**Status:** Working bounded fixed-three-voter route-plan/ingress profile,
+mounted only on the experimental internal listener; not a public durability or
+target-delivery claim
 
 `epoch-bus` and `epoch-tablet` implement the first canonical Event Bus route-plan
 boundary. The standalone engine owns validated subscriptions, deterministic
 filtering and transformation, checked publish positions, and bounded archive
-replay. `BusTablet` applies strict commands only after a caller supplies
-consensus commit metadata, records exact retry receipts, and chains every
-committed outcome into a deterministic state digest.
+replay. `BusTablet` applies strict commands only after consensus commit, records
+exact retry receipts, and chains every committed outcome into a deterministic
+state digest. `epoch-node` can mount that state machine as the one typed profile
+for a fixed consensus group, rebuild it from EPRS before exposing the internal
+API, and fail-stop the process if committed application diverges.
 
 ## Boundary
 
 ```text
 canonical BusTabletCommand v1
-  -> tablet scope, size, idempotency, and operation validation
-  -> fixed-voter committed metadata supplied by the consensus boundary
+  -> strict internal HTTP DTO and semantic idempotency validation
+  -> current leader/term admission and fixed-voter majority persistence
+  -> actor-owned committed metadata supplied to the tablet
   -> committed-order effective time
   -> operation on a cloned EventBus candidate
   -> applied result or deterministic rejected outcome
@@ -29,12 +33,40 @@ exhaustion therefore leave the prior route/archive state intact. A recordable
 business rejection still consumes its committed log index and is included in
 the tablet digest.
 
-This crate boundary does not itself prove that a majority persisted a command.
-Its receipt names `fixed_voter_majority_persisted` because its caller contract
-is `CommittedCommand`, the same post-commit boundary used by the mounted typed
-profiles. `epoch-node` does not yet construct a Bus tablet or expose its
-commands. That integration requires retained-history rebuild and real
-fixed-voter tests before the evidence is externally reachable.
+The tablet crate alone does not prove that a majority persisted a command. The
+mounted service supplies that proof through the same actor-owned post-commit
+boundary as the other typed profiles. It reports
+`fixed_voter_majority_persisted` with two durable voter acknowledgements only
+after the local tablet applies the committed command. This is evidence for the
+fixed trusted three-node topology, not the PRD's placement-aware public quorum
+durability.
+
+## Runtime API
+
+Set `EPOCH_CONSENSUS_PROBE_ENABLED=true` and
+`EPOCH_EXPERIMENTAL_BUS_TABLET_ENABLED=true`; optionally set
+`EPOCH_EXPERIMENTAL_BUS_TABLET_NAME`. Bus, Cache, Queue, Stream, and opaque
+proposal modes are mutually exclusive for one group. The typed routes exist
+only on the separate internal consensus listener:
+
+| Route | Contract |
+| --- | --- |
+| `GET /experimental/v1/tablets/bus/status` | Local consensus/profile positions, route/archive counters, complete digests, and explicit delivery non-claims. |
+| `POST /experimental/v1/tablets/bus/mutations` | Strict `upsert_subscription`, `remove_subscription`, or `publish` command with an idempotency key and expected term. |
+| `GET /experimental/v1/tablets/bus/mutations/{proposal_id}` | Local `unknown`, `pending`, or `committed` outcome resolution. |
+| `POST /experimental/v1/tablets/bus/archive/replay` | Inclusive time-range and optional filtered replay from the local applied profile. |
+
+All 64-bit JSON values are emitted as exact decimal strings. Mutation input
+accepts a JSON number or decimal string for `expected_term` and envelope time
+fields. Unknown fields are rejected at the request, operation, subscription,
+filter, target, transform, and envelope boundaries. The leader owns
+`applied_at_ms`; retries compare only semantic input, so changing an expected
+term does not conflict while changing the operation does.
+
+Status reports `target_dispatch: not_implemented` and
+`durable_target_outbox: false`. A publish receipt proves replicated ingress,
+the captured deterministic route plan, and archive state. It does not claim
+that a pull, Queue, Stream, webhook, or HTTP target received anything.
 
 ## Configuration and hard limits
 
@@ -134,12 +166,22 @@ The tests cover:
 - atomic route-plan, archive, and publish-position exhaustion;
 - strict canonical command size/version/scope validation;
 - scoped proposal identity, exact retry, conflict, and commit ordering;
-- recordable capacity rejection without partial business mutation; and
+- recordable capacity rejection without partial business mutation;
 - identical results, archive state, positions, and digests across three
-  independent tablets replaying one committed history.
+  independent tablets replaying one committed history;
+- strict DTOs, browser-safe metadata, semantic retry/conflict, actor-missed
+  commit fail-stop, and recovery ordering;
+- three real HTTP consensus runtimes committing, converging, shutting down, and
+  reopening from EPRS; and
+- a three-container gate with follower rejection, leader loss, catch-up, archive
+  agreement, all-node `SIGKILL`, and same-volume recovery.
 
-Still required before mounting the profile are an actor-owned apply service,
-strict internal HTTP DTOs, EPRS rebuild-before-readiness, real three-runtime and
-all-node `SIGKILL` tests, durable per-subscription delivery/outbox state,
-backpressure isolation, retry/DLQ ledgers, replay attempt lineage, snapshots,
-compaction, authentication, target egress security, and public SDK contracts.
+Reproduce the deployment proof with:
+
+```shell
+make test-bus-tablet
+```
+
+Still required are durable per-subscription delivery/outbox state, backpressure
+isolation, retry/DLQ ledgers, replay attempt lineage, snapshots, compaction,
+authentication, target egress security, and public API/SDK contracts.

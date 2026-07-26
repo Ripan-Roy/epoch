@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use epoch_core::{
     AckMetadata, DurabilityProfile, EpochError, EpochResult, EventEnvelope, validate_resource_name,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -115,14 +115,102 @@ fn matches_patterns(patterns: &[String], value: Option<&str>) -> bool {
         || value.is_some_and(|value| patterns.iter().any(|pattern| glob_matches(pattern, value)))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SubscriptionTarget {
     Pull,
     Queue { resource: String },
     Stream { resource: String },
     Webhook { url: String },
     Http { url: String },
+}
+
+impl<'de> Deserialize<'de> for SubscriptionTarget {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        StrictSubscriptionTarget::deserialize(deserializer).map(Into::into)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StrictSubscriptionTarget {
+    Pull(StrictPullTarget),
+    Queue(StrictResourceTarget<QueueTargetKind>),
+    Stream(StrictResourceTarget<StreamTargetKind>),
+    Webhook(StrictUrlTarget<WebhookTargetKind>),
+    Http(StrictUrlTarget<HttpTargetKind>),
+}
+
+impl From<StrictSubscriptionTarget> for SubscriptionTarget {
+    fn from(target: StrictSubscriptionTarget) -> Self {
+        match target {
+            StrictSubscriptionTarget::Pull(_) => Self::Pull,
+            StrictSubscriptionTarget::Queue(target) => Self::Queue {
+                resource: target.resource,
+            },
+            StrictSubscriptionTarget::Stream(target) => Self::Stream {
+                resource: target.resource,
+            },
+            StrictSubscriptionTarget::Webhook(target) => Self::Webhook { url: target.url },
+            StrictSubscriptionTarget::Http(target) => Self::Http { url: target.url },
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictPullTarget {
+    #[serde(rename = "kind")]
+    _kind: PullTargetKind,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictResourceTarget<Kind> {
+    #[serde(rename = "kind")]
+    _kind: Kind,
+    resource: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictUrlTarget<Kind> {
+    #[serde(rename = "kind")]
+    _kind: Kind,
+    url: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PullTargetKind {
+    Pull,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum QueueTargetKind {
+    Queue,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StreamTargetKind {
+    Stream,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WebhookTargetKind {
+    Webhook,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum HttpTargetKind {
+    Http,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -800,6 +888,46 @@ mod tests {
         ));
         assert_eq!(bus.subscription_count(), 0);
         assert_eq!(bus.route_plan_version(), 1);
+    }
+
+    #[test]
+    fn target_json_rejects_unknown_fields_for_every_variant() {
+        assert!(
+            serde_json::from_value::<SubscriptionTarget>(json!({
+                "kind": "pull",
+                "url": "https://example.com"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SubscriptionTarget>(json!({
+                "kind": "queue",
+                "resource": "orders",
+                "unexpected": true
+            }))
+            .is_err()
+        );
+        for target in [
+            SubscriptionTarget::Pull,
+            SubscriptionTarget::Queue {
+                resource: "orders".into(),
+            },
+            SubscriptionTarget::Stream {
+                resource: "audit".into(),
+            },
+            SubscriptionTarget::Webhook {
+                url: "https://example.com/hook".into(),
+            },
+            SubscriptionTarget::Http {
+                url: "https://example.com/events".into(),
+            },
+        ] {
+            let encoded = serde_json::to_value(&target).unwrap();
+            assert_eq!(
+                serde_json::from_value::<SubscriptionTarget>(encoded).unwrap(),
+                target
+            );
+        }
     }
 
     #[test]
