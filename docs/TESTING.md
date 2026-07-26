@@ -182,7 +182,7 @@ convergence, and all-node `SIGKILL` replay. A concurrent linearizability history
 read barrier, I/O-fault matrix, and production placement proof remain required;
 see [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
 
-The Event Bus core suite checks a route truth table across event type, source,
+The Event Bus suite checks a route truth table across event type, source,
 subject, headers, JSON equality, Unicode wildcard matching, deterministic
 lexical fan-out and transformation. Boundary tests cover strict configuration,
 filter, JSON path, resource, and HTTP target validation; subscription/archive
@@ -190,9 +190,13 @@ capacity; replay bounds; and atomic route-plan/publish counter exhaustion.
 Tablet tests add canonical command decoding, scoped proposal identity, exact
 replay, conflicting and out-of-order commit rejection, recordable capacity
 failure, complete business-state digests, and three-independent-tablet
-convergence. A real fixed-voter runtime, EPRS reopen, durable target outbox,
-backpressure, and crash-at-dispatch history remain open; see
-[Deterministic Event Bus Tablet Core](BUS_TABLET.md).
+convergence. Node tests add strict recursive DTOs, browser-safe integers,
+semantic retry/conflict, fail-stop behavior, three real HTTP runtimes, and EPRS
+reopen. The container gate adds follower rejection, majority-before-success,
+leader loss, catch-up, archive/digest agreement, all-node `SIGKILL`, and
+same-volume recovery. Durable target outboxes, backpressure, and
+crash-at-dispatch history remain open; see
+[Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 ### 3. Integration tests
 
@@ -234,6 +238,7 @@ make test-consensus-probe
 make test-stream-tablet
 make test-queue-tablet
 make test-cache-tablet
+make test-bus-tablet
 ```
 
 `test-consensus-process` is ignored by Cargo's default suite so it cannot run
@@ -276,6 +281,14 @@ rotation/fencing. It kills the leader, proves the replacement term rejects the
 old lock token as a committed outcome, catches the old voter up, compares every
 profile digest/observation, then kills and reopens all voters from their EPRS
 volumes. Reads remain explicitly local and stale-capable throughout.
+
+`test-bus-tablet` selects the fourth typed mode. It rejects a follower write,
+commits a subscription and publish only through the leader majority, checks
+exact retry and changed-input conflict, compares route/archive counters and
+state digests on all voters, performs browser-safe filtered archive replay,
+kills the leader, commits through its replacement, catches the old voter up,
+then kills and reopens all voters from their EPRS volumes. Status must continue
+to report that target dispatch and a durable target outbox are not implemented.
 
 `tests/integration/docs-quickstarts.sh` separately executes the exact Go, Java,
 and Python source imported into the documentation page. Each language gets a
@@ -330,7 +343,7 @@ Queue recovery after replacing the running container.
 
 These standalone tests are segmented-journal evidence only. Snapshot restore,
 compaction, retention deletion, and production placement-aware replica recovery
-and quorum acknowledgement remain future gates; the bounded typed Stream/Queue/Cache
+and quorum acknowledgement remain future gates; the bounded typed Stream/Queue/Cache/Bus
 fixed-voter evidence is described separately above.
 
 ### 4. History and consistency checking

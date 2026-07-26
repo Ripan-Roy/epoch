@@ -235,6 +235,12 @@ jobs:
           EPOCH_PROBE_IMAGE: epoch/node:ci
           EPOCH_CACHE_TABLET_USE_EXISTING_IMAGE: "1"
         run: bash tests/integration/cache-tablet.sh
+      - name: Prove Event Bus route-plan replication, archive replay, failover, and SIGKILL recovery
+        env:
+          EPOCH_BUS_TABLET_ARTIFACT_DIR: ${{ runner.temp }}/epoch-bus-tablet
+          EPOCH_PROBE_IMAGE: epoch/node:ci
+          EPOCH_BUS_TABLET_USE_EXISTING_IMAGE: "1"
+        run: bash tests/integration/bus-tablet.sh
       - name: Prove mounted local durability across container replacement
         run: |
           wait_for_health() {
@@ -320,5 +326,6 @@ jobs:
             ${{ runner.temp }}/epoch-stream-tablet
             ${{ runner.temp }}/epoch-queue-tablet
             ${{ runner.temp }}/epoch-cache-tablet
+            ${{ runner.temp }}/epoch-bus-tablet
           if-no-files-found: ignore
           retention-days: 7

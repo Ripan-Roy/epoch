@@ -710,9 +710,9 @@ export function DocsPage({ section }: DocsPageProps) {
                   href={`${repositoryDocsUrl}/CACHE_TABLET.md`}
                 />
                 <ReferenceCard
-                  eyebrow="BUS TABLET CORE"
-                  title="Deterministic Event Bus route plan"
-                  description="Bounded subscriptions, strict filters and targets, canonical commands, atomic archive capacity, exact replay, and convergence evidence."
+                  eyebrow="BUS TABLET"
+                  title="Experimental replicated Event Bus"
+                  description="Strict route-plan and ingress mutations, fixed-voter commit, archive replay, failover, EPRS recovery, and explicit target-delivery non-claims."
                   href={`${repositoryDocsUrl}/BUS_TABLET.md`}
                 />
               </div>

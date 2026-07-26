@@ -522,14 +522,30 @@ replays exact semantic retries, and assigns committed-order effective time on
 the server. There is no linearizable read barrier, public gRPC route, or SDK
 commitment. See [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
 
-`epoch-tablet` additionally exposes a core-only canonical Event Bus tablet for
-subscription upsert/removal and publish. It records browser-safe fixed-voter
-receipts, exact retries, route-plan versions, delivery count and a SHA-256
-digest of the transformed ordered delivery plan. It has no node route, target
-outbox, transport, recovery service, CLI, or SDK commitment yet. See
-[Deterministic Event Bus Tablet Core](BUS_TABLET.md).
+The mutually exclusive Event Bus mode mounts a canonical single-partition
+route-plan/ingress tablet on the internal listener:
 
-None of the three typed experimental modes is the final tablet service. Snapshots/compaction,
+- `POST /experimental/v1/tablets/bus/mutations` submits a strict
+  `upsert_subscription`, `remove_subscription`, or `publish` operation;
+- `GET /experimental/v1/tablets/bus/mutations/{proposal_id}` resolves local
+  unknown, pending, or committed state;
+- `GET /experimental/v1/tablets/bus/status` reports consensus/profile
+  positions, route/archive counters, complete recovery/state digests, and
+  explicit target-delivery non-claims; and
+- `POST /experimental/v1/tablets/bus/archive/replay` performs bounded inclusive
+  time-range and optional filtered replay against local applied archive state.
+
+The same strict idempotency, server-owned non-regressing time, browser-safe
+64-bit JSON, majority-before-success, recovery-before-readiness, and fail-stop
+rules apply. A publish receipt includes the route-plan version, ingress
+position, delivery count, and SHA-256 digest of the transformed ordered
+delivery plan. It proves deterministic replicated route selection, not target
+delivery. Status therefore reports `target_dispatch: not_implemented` and
+`durable_target_outbox: false`. There is no target outbox/transport, public
+route, CLI, or SDK commitment yet. See
+[Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
+
+None of the four typed experimental modes is the final tablet service. Snapshots/compaction,
 retention deletion, dynamic membership, placement, read barriers, authenticated
 transport, public routing, and SDK support remain absent. The standalone engine
 journal remains a separate single-node source of truth and is never used by the
@@ -544,7 +560,7 @@ TLS/authentication metadata, typed `google.rpc.Status` details, public native
 mutation-status lookup, streaming credit, a Rust regional administration
 implementation, long-running operations, metrics on the reserved port, protocol
 gateways, full Go/Java/Python generated SDK parity and compatibility negotiation
-remain unimplemented. The experimental Stream, Queue, and Cache tablets expose only
+remain unimplemented. The experimental Stream, Queue, Cache, and Event Bus tablets expose only
 the local mutation lookup/read surfaces described above. Typed Go, Java, and
 Python clients cover the provisional
 standalone profile HTTP routes, including explicit local Stream and Queue

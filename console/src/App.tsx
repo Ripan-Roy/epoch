@@ -175,8 +175,8 @@ function EpochApp() {
               <strong>Evidence before promises.</strong>
               <span>
                 This console reflects one local Rust node. Streams and Queues can opt into WAL-backed local
-                durability; Cache, Event Bus, and volatile resources remain process-local. Replication and
-                quorum are not wired yet.
+                durability; Cache, Event Bus, and volatile resources remain process-local. Experimental
+                replication is not wired into this public console.
               </span>
             </aside>
 

@@ -254,17 +254,21 @@ history before readiness, and exposes strict mutation, lookup, status, and pure
 local-observation routes only on the internal listener. See
 [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
 
-The Event Bus now has a core-only typed tablet boundary. The standalone route
-engine stores subscriptions in canonical name order, validates bounded filters,
-transforms, resource targets, and absolute HTTP(S) targets, and uses checked
-route-plan and publish positions. `epoch-tablet::BusTablet` adds canonical
-upsert/remove/publish commands, scoped proposal IDs, committed-order time,
-exact receipt replay, recordable atomic capacity rejection, deterministic
-delivery-plan evidence, and a chained digest over the complete recoverable Bus
-state. Identical committed histories converge in the three-instance test. This
-tablet is not mounted by `epoch-node`: target dispatch needs a durable
-per-subscription outbox and crash recovery before a replicated Bus runtime can
-claim delivery. See [Deterministic Event Bus Tablet Core](BUS_TABLET.md).
+The Event Bus has a bounded typed route-plan/ingress tablet. The standalone
+route engine stores subscriptions in canonical name order, validates bounded
+filters, transforms, resource targets, and absolute HTTP(S) targets, and uses
+checked route-plan and publish positions. `epoch-tablet::BusTablet` adds
+canonical upsert/remove/publish commands, scoped proposal IDs, committed-order
+time, exact receipt replay, recordable atomic capacity rejection,
+deterministic delivery-plan evidence, and a chained digest over the complete
+recoverable Bus state. `epoch-node` mounts it as a fourth mutually exclusive
+typed profile, rebuilds it from EPRS before readiness, and exposes strict
+mutation/status/archive routes on the internal listener. Real-runtime and
+container tests prove fixed-voter convergence, leader replacement, catch-up,
+and all-node recovery. Target dispatch remains explicitly unimplemented:
+durable per-subscription outboxes and crash recovery are required before this
+runtime can claim delivery. See
+[Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 Snapshots, compaction, membership changes, authoritative catalog fencing,
 placement, and read barriers remain disabled. The byte contract is documented in
@@ -426,6 +430,14 @@ replay responses to 10,000 records, and target URLs to 8 KiB. Resource
 configuration selects lower operational limits (defaults: 1,024 subscriptions
 and 100,000 archived events). Capacity and `u64` position exhaustion reject
 before mutation; no ordering counter saturates or wraps.
+
+The experimental replicated profile persists each subscription mutation and
+publish ingress command through the fixed voter set before applying it locally.
+Its status surface reports route/archive counters and complete digests, plus
+`target_dispatch: not_implemented` and `durable_target_outbox: false`. Archive
+replay is an explicitly local, stale-capable observation. The delivery-plan
+digest proves which deterministic transformed targets were selected; it is not
+evidence that any target accepted a delivery.
 
 ### 8.5 Cross-profile pipes
 

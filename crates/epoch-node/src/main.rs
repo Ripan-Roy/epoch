@@ -3,10 +3,12 @@ use std::{
 };
 
 use clap::Parser;
+use epoch_bus::BusConfig;
 use epoch_cache::CacheConfig;
 use epoch_core::{DeploymentMode, SystemClock};
 use epoch_engine::EpochEngine;
 use epoch_node::{
+    bus_tablet::{self, BusTabletService, DEFAULT_COMMIT_WAIT as BUS_DEFAULT_COMMIT_WAIT},
     cache_tablet::{self, CacheTabletService, DEFAULT_COMMIT_WAIT as CACHE_DEFAULT_COMMIT_WAIT},
     consensus::{
         CommittedProposalApplier, ConsensusProbeConfig, ConsensusProbeError, ConsensusProbeRuntime,
@@ -18,7 +20,7 @@ use epoch_node::{
 };
 use epoch_queue::QueueConfig;
 use epoch_storage::{DEFAULT_WAL_SEGMENT_BYTES, MIN_WAL_SEGMENT_BYTES, StandaloneWal};
-use epoch_tablet::{CacheTabletScope, QueueTabletScope, StreamTabletScope};
+use epoch_tablet::{BusTabletScope, CacheTabletScope, QueueTabletScope, StreamTabletScope};
 use tokio::{net::TcpListener, sync::watch};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -81,6 +83,10 @@ struct Args {
 }
 
 #[derive(Debug, clap::Args)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Clap exposes each mutually exclusive profile as an explicit opt-in flag"
+)]
 struct ExperimentalTabletArgs {
     #[arg(
         long = "experimental-stream-tablet-enabled",
@@ -115,6 +121,17 @@ struct ExperimentalTabletArgs {
         default_value = "experimental-cache"
     )]
     cache_name: String,
+    #[arg(
+        long = "experimental-bus-tablet-enabled",
+        env = "EPOCH_EXPERIMENTAL_BUS_TABLET_ENABLED"
+    )]
+    bus_enabled: bool,
+    #[arg(
+        long = "experimental-bus-tablet-name",
+        env = "EPOCH_EXPERIMENTAL_BUS_TABLET_NAME",
+        default_value = "experimental-bus"
+    )]
+    bus_name: String,
 }
 
 #[derive(Debug)]
@@ -130,6 +147,7 @@ enum TabletProfileLaunch {
     Stream(StreamTabletScope),
     Queue(QueueTabletScope),
     Cache(CacheTabletScope),
+    Bus(BusTabletScope),
 }
 
 impl TabletProfileLaunch {
@@ -138,6 +156,7 @@ impl TabletProfileLaunch {
             Self::Stream(_) => "stream",
             Self::Queue(_) => "queue",
             Self::Cache(_) => "cache",
+            Self::Bus(_) => "bus",
         }
     }
 }
@@ -320,6 +339,23 @@ async fn start_consensus_mode(
             ));
             Ok((runtime, app, true))
         }
+        Some(TabletProfileLaunch::Bus(scope)) => {
+            let tablet = BusTabletService::new(scope, BusConfig::default())?;
+            let applier: Arc<dyn CommittedProposalApplier> = tablet.clone();
+            let runtime = ConsensusProbeRuntime::start_with_profile_applier(
+                launch.config.clone(),
+                &launch.stable_path,
+                applier,
+            )
+            .await?;
+            let app = runtime.internal_router().merge(bus_tablet::router(
+                tablet,
+                runtime.handle(),
+                clock,
+                BUS_DEFAULT_COMMIT_WAIT,
+            ));
+            Ok((runtime, app, true))
+        }
         None => {
             let runtime =
                 ConsensusProbeRuntime::start(launch.config.clone(), &launch.stable_path).await?;
@@ -342,13 +378,14 @@ fn consensus_probe_launch(
         args.experimental_tablet.stream_enabled,
         args.experimental_tablet.queue_enabled,
         args.experimental_tablet.cache_enabled,
+        args.experimental_tablet.bus_enabled,
     ]
     .into_iter()
     .filter(|enabled| *enabled)
     .count();
     if enabled_profile_count > 1 {
         return Err(ConsensusProbeError::InvalidConfiguration(
-            "Stream, Queue, and Cache tablet profiles are mutually exclusive for one consensus group"
+            "Stream, Queue, Cache, and Event Bus tablet profiles are mutually exclusive for one consensus group"
                 .into(),
         ));
     }
@@ -406,6 +443,15 @@ fn consensus_probe_launch(
                 config.group_id().get(),
                 config.group_epoch().get(),
                 &args.experimental_tablet.cache_name,
+            )
+            .map_err(|error| ConsensusProbeError::InvalidConfiguration(error.to_string()))?,
+        ))
+    } else if args.experimental_tablet.bus_enabled {
+        Some(TabletProfileLaunch::Bus(
+            BusTabletScope::new(
+                config.group_id().get(),
+                config.group_epoch().get(),
+                &args.experimental_tablet.bus_name,
             )
             .map_err(|error| ConsensusProbeError::InvalidConfiguration(error.to_string()))?,
         ))
@@ -887,6 +933,45 @@ mod tests {
     }
 
     #[test]
+    fn experimental_bus_tablet_requires_the_consensus_runtime() {
+        let args =
+            Args::try_parse_from(["epoch-node", "--experimental-bus-tablet-enabled"]).unwrap();
+        assert!(
+            consensus_probe_launch(&args)
+                .unwrap_err()
+                .to_string()
+                .contains("EPOCH_CONSENSUS_PROBE_ENABLED")
+        );
+    }
+
+    #[test]
+    fn experimental_bus_tablet_uses_the_consensus_group_scope() {
+        let args = Args::try_parse_from([
+            "epoch-node",
+            "--consensus-probe-enabled",
+            "--experimental-bus-tablet-enabled",
+            "--experimental-bus-tablet-name",
+            "events",
+            "--consensus-node-id",
+            "2",
+            "--consensus-group-id",
+            "7",
+            "--consensus-group-epoch",
+            "3",
+            "--consensus-peers",
+            "1=http://127.0.0.1:7701,2=http://127.0.0.1:7702,3=http://127.0.0.1:7703",
+        ])
+        .unwrap();
+        let launch = consensus_probe_launch(&args).unwrap().unwrap();
+        assert_eq!(
+            launch.tablet_profile,
+            Some(TabletProfileLaunch::Bus(
+                BusTabletScope::new(7, 3, "events").unwrap()
+            ))
+        );
+    }
+
+    #[test]
     fn one_consensus_group_cannot_mount_multiple_typed_profiles() {
         let args = Args::try_parse_from([
             "epoch-node",
@@ -925,6 +1010,20 @@ mod tests {
         .unwrap();
         assert!(
             consensus_probe_launch(&stream_and_cache)
+                .unwrap_err()
+                .to_string()
+                .contains("mutually exclusive")
+        );
+
+        let cache_and_bus = Args::try_parse_from([
+            "epoch-node",
+            "--consensus-probe-enabled",
+            "--experimental-cache-tablet-enabled",
+            "--experimental-bus-tablet-enabled",
+        ])
+        .unwrap();
+        assert!(
+            consensus_probe_launch(&cache_and_bus)
                 .unwrap_err()
                 .to_string()
                 .contains("mutually exclusive")

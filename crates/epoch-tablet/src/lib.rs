@@ -3,10 +3,10 @@
 //! The current bounded slices are configured, single-partition Stream, Queue,
 //! and Event Bus tablets plus a single-shard Cache tablet. They own strict
 //! command validation, deterministic application, idempotency, and replay while
-//! the node owns transport and Raft. Stream, Queue, and Cache attach to the
-//! experimental node runtime as mutually exclusive profiles for one fixed
-//! consensus group. Event Bus remains core-only until its typed runtime,
-//! durable target outbox, and EPRS recovery gate are added.
+//! the node owns transport and Raft. Stream, Queue, Cache, and Event Bus attach
+//! to the experimental node runtime as mutually exclusive profiles for one
+//! fixed consensus group. Event Bus replication covers ingress, route-plan
+//! evidence, and archive state; durable target dispatch/outboxes remain open.
 
 mod bus;
 mod cache;

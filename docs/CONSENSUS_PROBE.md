@@ -3,9 +3,10 @@
 The consensus probe is an opt-in process/runtime integration for Epoch's
 fixed-three-voter persistent Raft adapter. Its default mode replicates opaque
 diagnostic payloads. Mutually exclusive opt-in modes can instead attach one
-typed, single-partition Stream, Queue, or Cache tablet. Public Cache, Stream,
-Queue, and Event Bus APIs remain independent standalone engines with a
-`local_durable` guarantee ceiling.
+typed, single-partition Stream, Queue, or Event Bus route-plan/ingress tablet,
+or one single-shard Cache tablet. Public Cache, Stream, Queue, and Event Bus
+APIs remain independent standalone engines with a `local_durable` guarantee
+ceiling.
 
 This surface exists to exercise process lifecycle, real HTTP peer delivery,
 EPRS recovery, election, and proposal lookup without claiming that product
@@ -15,10 +16,12 @@ Setting `EPOCH_EXPERIMENTAL_STREAM_TABLET_ENABLED=true` replaces the opaque
 proposal routes with the typed Stream milestone on the same group. Setting
 `EPOCH_EXPERIMENTAL_QUEUE_TABLET_ENABLED=true` instead mounts the typed Queue
 milestone. `EPOCH_EXPERIMENTAL_CACHE_TABLET_ENABLED=true` mounts the typed Cache
-milestone. Opaque, Stream, Queue, and Cache modes are intentionally mutually
+milestone. `EPOCH_EXPERIMENTAL_BUS_TABLET_ENABLED=true` mounts the typed Event
+Bus ingress/route-plan milestone. Opaque, Stream, Queue, Cache, and Bus modes are intentionally mutually
 exclusive; see [Experimental Stream Tablet](STREAM_TABLET.md),
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md), and
-[Experimental Replicated Cache Tablet](CACHE_TABLET.md).
+[Experimental Replicated Cache Tablet](CACHE_TABLET.md), and
+[Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 ## Start three local containers
 
@@ -106,6 +109,8 @@ Set `EPOCH_CONSENSUS_PROBE_ENABLED=true` and provide the following values to
 | `EPOCH_EXPERIMENTAL_QUEUE_TABLET_NAME` | Resource name for the typed Queue profile |
 | `EPOCH_EXPERIMENTAL_CACHE_TABLET_ENABLED` | Mount the typed Cache profile instead of opaque routes; defaults to `false` |
 | `EPOCH_EXPERIMENTAL_CACHE_TABLET_NAME` | Resource name for the typed Cache profile |
+| `EPOCH_EXPERIMENTAL_BUS_TABLET_ENABLED` | Mount the typed Event Bus route-plan/ingress profile instead of opaque routes; defaults to `false` |
+| `EPOCH_EXPERIMENTAL_BUS_TABLET_NAME` | Resource name for the typed Event Bus profile |
 
 Each node stores its stable journal at
 `$EPOCH_DATA_DIR/consensus/group-{group_id}/node-{node_id}.wal`. Configuration
@@ -127,7 +132,7 @@ retains its explicit origin allowlist.
 The probe has static membership, plaintext unauthenticated transport, one
 fixed group, no snapshot installation, no compaction, no read barrier, no
 catalog-authorized epoch transition, and no public or production profile
-integration. The typed Stream, Queue, and Cache modes are bounded internal milestones,
+integration. The typed Stream, Queue, Cache, and Event Bus modes are bounded internal milestones,
 not a public durability contract. Default opaque-mode status reports:
 
 ```json
