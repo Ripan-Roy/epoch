@@ -79,10 +79,11 @@ receipts/digests, and one-voter plus all-voter `SIGKILL`/same-path reopen withou
 duplicate receipt publication. An opt-in node runtime adds bounded real HTTP
 transport and opaque diagnostic status/propose/lookup endpoints. A mutually
 exclusive experimental profile mode now applies either one typed,
-single-partition Stream or Queue tablet after commit and rebuilds it from the
-complete proposal history before readiness. Both return bounded
-two-durable-voter evidence. The executable gates cover minority non-commit,
-leader rebinding, Stream ordering, Queue lease fencing/redelivery/DLQ, catch-up,
+single-partition Stream or Queue tablet or one single-shard Cache tablet after
+commit and rebuilds it from the complete proposal history before readiness.
+All three return bounded two-durable-voter evidence. The Event Bus has a
+deterministic tablet core but is not yet a runtime mode. The executable gates
+cover minority non-commit, leader rebinding, typed profile semantics, catch-up,
 exact retry, convergence, and all-container `SIGKILL`/reopen. Public product
 profiles remain standalone. G3 remains open for the exhaustive crash matrix,
 snapshots, membership and authoritative epoch transitions, read barriers,
@@ -158,13 +159,13 @@ durability.
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
-| BUS-001 | P0 | Topics, subscriptions, route/fan-out/wildcards | M1 basic → M2 | Slice | G0, G1, G4 | Pending: route truth-table/property suite |
-| BUS-002 | P0 | Attribute and JSON-content filters | M4 | Planned | G0, G4 | Pending: compiled/interpreted differential suite |
+| BUS-001 | P0 | Topics, subscriptions, route/fan-out/wildcards | M1 basic → M2 | Slice | G0, G1, G4 | Deterministic lexical fan-out, Unicode wildcard truth table, bounded canonical route updates, typed command/replay, and three-tablet digest convergence; pending: mounted runtime/backpressure history |
+| BUS-002 | P0 | Attribute and JSON-content filters | M4 | Slice | G0, G4 | Conjunctive event/source/subject/header/JSON truth table plus strict bounded path/map validation; pending: compiled/interpreted differential suite |
 | BUS-003 | P0 | Pull, push, webhook, queue, stream targets | M4 | Planned | G0, G4, G5, G6 | Pending: per-target failure/backpressure suite |
 | BUS-004 | P0 | Per-target retry, timeout, rate, DLQ | M4 | Planned | G0, G2, G4, G5 | Pending: target-isolation history |
 | BUS-005 | P0 | CloudEvents 1.0 over HTTP | M1 envelope → M4 | Slice | G0, G1, G6 | Pending: CloudEvents conformance/round-trip |
-| BUS-006 | P1 | Archive and filtered replay | M4 | Planned | G2, G5, G7 | Pending: archive/replay reconciliation |
-| BUS-007 | P1 | Declarative input transformation | M4 | Planned | G0, G4, G7 | Pending: deterministic transform golden suite |
+| BUS-006 | P1 | Archive and filtered replay | M4 | Slice | G2, G5, G7 | Inclusive time/filter replay, bounded response, checked archive capacity, atomic rejection, and replicated recovery-state digest; pending: durable runtime/replay-attempt reconciliation and retention |
+| BUS-007 | P1 | Declarative input transformation | M4 | Slice | G0, G4, G7 | Deterministic header addition and payload projection included in the delivery-plan digest/convergence suite; pending: broader golden corpus and runtime target evidence |
 | BUS-008 | P2 | Bounded synchronous enrichment | M6 | Planned | G5, G7, G8 | Pending: timeout/size/isolation security suite |
 | BUS-009 | P1 | Schema validation integration | M4 | Planned | G5, G7 | Pending: schema rejection/reference trace |
 | BUS-010 | P1 | MQTT 5 state and QoS mapping | M4 | Planned | G0, G4, G6 | Pending: named MQTT conformance matrix |
@@ -229,7 +230,7 @@ durability.
 |---|---:|---|---|---|---|---|
 | DX-001 | P0 | Official Go, Java, and Python SDKs | M1 one SDK → M2 | Slice | G0, G1, G4, G10 | Go/Java/Python HTTP unit + independent exact-source crash/restart quickstarts, including selectable local Stream/Queue durability, and Go generated bindings; pending: native streaming contract/version matrix for all three |
 | DX-002 | P0 | Generated guarantee-aware API docs | M1 → M2 | Slice | G0, G1, G10 | Hand-authored guarantee/error guidance and exact executable Go/Java/Python examples are built as a docs-only Pages artifact; pending: generated API reference and full doc lint |
-| DX-003 | P0 | Deterministic single-binary emulator | M1 → M2 | Slice | G1, G2, G4, G10 | Seeded scheduler, virtual clocks/fault plan/transport, golden EPTR history, fixed-voter consensus, real-process EPRS/SIGKILL, opaque probe, and typed Stream/Queue/Cache tablets; pending: executable replay bundle, Bus profile, and runnable emulator controls |
+| DX-003 | P0 | Deterministic single-binary emulator | M1 → M2 | Slice | G1, G2, G4, G10 | Seeded scheduler, virtual clocks/fault plan/transport, golden EPTR history, fixed-voter consensus, real-process EPRS/SIGKILL, typed Stream/Queue/Cache runtimes, and deterministic Bus tablet core; pending: executable replay bundle, mounted Bus profile, and runnable emulator controls |
 | DX-004 | P0 | Test containers and ephemeral namespaces | M1 → M2 | Slice | G1, G5, G10 | Unique three-node Compose project, independent ephemeral volumes, dynamically allocated loopback ports, failover/catch-up CI, and scoped cleanup; pending: broader parallel profile lifecycle/isolation matrix |
 | DX-005 | P1 | Audited/redacted console message browser | M3 → M4 | Planned | G5, G7, G8 | Pending: access/redaction/action audit matrix |
 | DX-006 | P0 | Explain live guarantees and cost drivers | M1 basic → M2 | Slice | G0, G3, G5 | Pending: live-state reconciliation suite |

@@ -257,6 +257,23 @@ For a durable Bus, Publish commits the normalized envelope and route-plan
 version to an ingress/archive tablet. Its success does not wait for every
 target. Route evaluation is deterministic for the captured plan version.
 
+The current standalone engine and typed tablet core make the first part of that
+contract concrete. Subscription names are evaluated in lexical order,
+wildcards operate on Unicode scalar values, and event-type, source, subject,
+header, and JSON-equality predicates are conjunctive across filter dimensions.
+Patterns within one dimension are alternatives. A publish captures one
+route-plan version before evaluating every subscription. Its transformed
+delivery list is hashed into the committed tablet receipt so voters can compare
+the exact plan without retaining one envelope copy per target in every receipt.
+
+Route updates and publishes use checked `u64` counters. Subscription capacity,
+archive capacity, malformed filters/paths/targets, replay limits, and counter
+exhaustion fail before live Bus state changes. A rejected tablet business
+operation still advances the consensus command index and chained tablet digest,
+but preserves the prior route/archive state. Exact retries require identical
+proposal term, index, and command bytes and return the stored outcome without
+rerouting.
+
 Each durable subscription owns independent target state:
 
 ```text
@@ -280,6 +297,13 @@ record.
 Archive replay creates new delivery attempts linked to the archived origin.
 Replay and redrive preview count, target, rate, duplicate exposure, and cost
 before execution.
+
+The implemented core currently returns bounded archived records selected by
+inclusive receive-time range and the same filter evaluator. It does not yet
+create durable delivery attempts. Runtime dispatch, independent subscription
+ledgers, retry/DLQ state, signed webhooks, SSRF policy, archive retention, and
+replay-origin lineage remain required before the durable semantics above are a
+product claim.
 
 ## 9. Pipes and cross-profile behavior
 

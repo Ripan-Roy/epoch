@@ -98,6 +98,7 @@ unauthenticated, and outside the public SDK contract. See the
 [Cache tablet guide](docs/CACHE_TABLET.md),
 [Queue tablet guide](docs/QUEUE_TABLET.md),
 [Stream tablet guide](docs/STREAM_TABLET.md),
+[Event Bus tablet core guide](docs/BUS_TABLET.md),
 [probe guide](docs/CONSENSUS_PROBE.md), [spike report](docs/CONSENSUS_SPIKE.md),
 and proposed [ADR-0003](docs/adr/0003-consensus-adapter.md). An exhaustive crash
 matrix, snapshots, membership/epoch transitions, read barriers, authenticated

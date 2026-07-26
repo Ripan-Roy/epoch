@@ -497,7 +497,7 @@ async fn bus_remove_subscription(
         .engine
         .bus(&name)?
         .lock()
-        .remove_subscription(&subscription_name)
+        .remove_subscription(&subscription_name)?
     {
         Ok(StatusCode::NO_CONTENT)
     } else {
