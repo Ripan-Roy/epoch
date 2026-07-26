@@ -8,6 +8,7 @@ members = [
   "crates/epoch-tablet",
   "crates/epoch-queue",
   "crates/epoch-bus",
+  "crates/epoch-catalog",
   "crates/epoch-engine",
   "crates/epoch-node",
   "crates/epoch-cli",

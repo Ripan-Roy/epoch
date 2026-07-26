@@ -81,6 +81,11 @@ non-commit, majority-before-success, bounded two-durable-voter evidence,
 semantic retry/rebinding, ordered offsets, leader replacement, catch-up, and
 all-node `SIGKILL` replay.
 
+`crates/epoch-catalog` supplies deterministic multi-resource generations and
+shard/tablet/group routing identity. The node still mounts one experimental
+consensus group at a time; catalog consensus and runtime group multiplexing are
+the next bounded core slices.
+
 The strict single-partition Queue tablet now runs through that same persistent
 three-node actor boundary. Its internal typed API covers enqueue, acquire,
 renewal, settlement, retry/scheduling, maintenance, DLQ, redrive, status, and

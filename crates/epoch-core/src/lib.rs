@@ -81,16 +81,28 @@ pub enum DeploymentMode {
     Managed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceKind {
     Cache,
+    Table,
     Stream,
     Queue,
     EventBus,
     Subscription,
     Schema,
     Pipe,
+    Connector,
+    Policy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkloadProfile {
+    CacheAndState,
+    StreamLog,
+    WorkQueue,
+    EventBus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

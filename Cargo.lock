@@ -353,6 +353,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "epoch-catalog"
+version = "0.1.0-alpha.2"
+dependencies = [
+ "epoch-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "epoch-cli"
 version = "0.1.0-alpha.2"
 dependencies = [

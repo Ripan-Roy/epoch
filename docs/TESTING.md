@@ -202,6 +202,16 @@ Built-in target executors, rate limiting, redrive/retention, and
 crash-at-network-dispatch history remain open; see
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
+The `epoch-catalog` unit suite begins at the regional multi-tablet boundary. It
+proves collision-free identity across resources and shards, stable existing
+routes during expansion, monotonic generation fencing, delete/recreate without
+tablet ID reuse, exact idempotency replay and token-rebinding rejection,
+profile immutability, resource-kind/profile compatibility, strict name and
+capacity bounds, canonical versioned command decoding, and identical snapshots
+after command replay. These are state-machine tests only; catalog consensus,
+group supervision, placement, and public routing require later real-process and
+container evidence.
+
 ### 3. Integration tests
 
 Integration tests start real Epoch processes with isolated temporary data

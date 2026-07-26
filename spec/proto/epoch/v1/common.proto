@@ -92,6 +92,15 @@ enum ConditionState {
   CONDITION_STATE_UNKNOWN = 3;
 }
 
+// TabletPhase reports one physical shard replica group's lifecycle.
+enum TabletPhase {
+  TABLET_PHASE_UNSPECIFIED = 0;
+  TABLET_PHASE_PENDING = 1;
+  TABLET_PHASE_SERVING = 2;
+  TABLET_PHASE_DRAINING = 3;
+  TABLET_PHASE_FAILED = 4;
+}
+
 // Envelope is the common native record accepted across workload profiles.
 message Envelope {
   string id = 1;
@@ -156,6 +165,22 @@ message Condition {
   google.protobuf.Timestamp last_transition_time = 6;
 }
 
+// TabletDescriptor is the routable identity of one resource shard. Tablet and
+// consensus-group identifiers are separate contracts even when the first
+// allocator advances them together.
+message TabletDescriptor {
+  uint64 tablet_id = 1;
+  uint64 consensus_group_id = 2;
+  uint32 shard_index = 3;
+  WorkloadProfile workload_profile = 4;
+  uint64 tablet_epoch = 5;
+  uint64 resource_generation = 6;
+  uint32 desired_replicas = 7;
+  repeated uint64 voter_node_ids = 8;
+  uint64 leader_node_id = 9;
+  TabletPhase phase = 10;
+}
+
 // ResourceStatus reports achieved state separately from desired state.
 message ResourceStatus {
   ResourcePhase phase = 1;
@@ -164,6 +189,7 @@ message ResourceStatus {
   DurabilityProfile achieved_durability = 4;
   uint64 resource_epoch = 5;
   repeated Condition conditions = 6;
+  repeated TabletDescriptor tablets = 7;
 }
 
 // Resource combines desired state, monotonic generation, and observed state.

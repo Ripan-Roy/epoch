@@ -189,7 +189,7 @@ durability.
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
 | MGD-001 | P1 | Serverless and dedicated choices | M4 | Planned | G4, G5, G8, G10 | Pending: topology/semantic/isolation matrix |
-| MGD-002 | P0 | Automatic placement and online rebalance | M1 prototype → M2 | Slice | G2, G3, G5 | Pending: constraint/rebalance chaos report |
+| MGD-002 | P0 | Automatic placement and online rebalance | M1 prototype → M2 | Slice | G2, G3, G5 | Deterministic Rust catalog allocates distinct tablet/group identities, preserves existing routes during shard expansion, and separates desired replicas from observed placement; pending: catalog consensus, group supervisor, placement constraints, reconciliation, online transfer/rebalance, and chaos report |
 | MGD-003 | P1 | Policy-bound multidimensional autoscaling | M4 | Planned | G5, G8 | Pending: hysteresis/headroom load report |
 | MGD-004 | P0 | Multi-zone replicas and failover | M1 prototype → M2 | Slice | G2, G3, G5 | Bounded fixed-voter evidence now includes EPRS persistence, real-runtime/container leader replacement, catch-up, minority non-commit, and all-voter `SIGKILL` replay; pending: placement domains, public durability policy, broader process/zone fault matrix, and failover SLO report |
 | MGD-005 | P1 | Geo DR, switch, promotion, failback | M4 → M5 | Planned | G3, G8, G9 | Pending: RPO/RTO and split-brain drill |
