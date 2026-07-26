@@ -266,13 +266,13 @@ route-plan version before evaluating every subscription. Its transformed
 delivery list is hashed into the committed tablet receipt so voters can compare
 the exact plan without retaining one envelope copy per target in every receipt.
 
-Route updates and publishes use checked `u64` counters. Subscription capacity,
-archive capacity, malformed filters/paths/targets, replay limits, and counter
-exhaustion fail before live Bus state changes. A rejected tablet business
-operation still advances the consensus command index and chained tablet digest,
-but preserves the prior route/archive state. Exact retries require identical
-proposal term, index, and command bytes and return the stored outcome without
-rerouting.
+Route updates and publishes use checked `u64` counters. Subscription, archive,
+and outbox capacity, malformed filters/paths/targets/policies, replay/query
+limits, deadline overflow, and counter exhaustion fail before live Bus state
+changes. A rejected tablet business operation still advances the consensus
+command index and chained tablet digest, but preserves the prior business
+state. Exact retries require identical proposal term, index, and command bytes
+and return the stored outcome without rerouting or redispatching.
 
 Each durable subscription owns independent target state:
 
@@ -298,12 +298,19 @@ Archive replay creates new delivery attempts linked to the archived origin.
 Replay and redrive preview count, target, rate, duplicate exposure, and cost
 before execution.
 
-The implemented core currently returns bounded archived records selected by
-inclusive receive-time range and the same filter evaluator. It does not yet
-create durable delivery attempts. Runtime dispatch, independent subscription
-ledgers, retry/DLQ state, signed webhooks, SSRF policy, archive retention, and
-replay-origin lineage remain required before the durable semantics above are a
-product claim.
+The implemented tablet core now atomically creates one bounded delivery record
+per matched subscription. It captures target and timeout/max-in-flight/retry
+policy, assigns a stable ID, fences leases by leader term and dispatcher epoch,
+retains immutable attempts, schedules deterministic retry, and records terminal
+acknowledgement or dead-letter state. Expired leases advance only through a
+committed bounded maintenance operation. The complete ledger participates in
+EPRS replay and the v2 recovery digest, and a bounded local query exposes it.
+
+The core still has no target executor: it does not perform Queue/Stream writes,
+serve public pull/long-poll, or send webhook/HTTP requests. Rate limiting,
+redrive and terminal retention, signed webhooks, SSRF policy, archive retention,
+and replay-origin lineage remain required before the full durable semantics
+above are a product claim.
 
 ## 9. Pipes and cross-profile behavior
 
@@ -431,15 +438,20 @@ standalone Cache durable or establish placement-aware public quorum durability.
 See [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
 
 The Event Bus profile mounts the same committed-command boundary for canonical
-subscription changes and publish ingress. Each voter deterministically derives
-the captured route-plan version, transformed ordered delivery-plan digest,
-archive record, publish position, and chained state digest. Startup rebuilds
-that complete state from EPRS before the internal listener is returned. Archive
-replay is local and stale-capable. The route plan names potential targets but
-does not dispatch them: status explicitly reports that target dispatch and a
-durable target outbox are absent. Thus a committed publish means replicated
-ingress and deterministic routing evidence, never webhook/Queue/Stream/pull
-delivery. See [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
+subscription changes, publish ingress, and independent delivery state. Each
+voter deterministically derives the captured route-plan version, transformed
+ordered delivery-plan digest, archive record, publish position, per-subscription
+outbox record, fenced attempt history, retry/dead-letter state, and chained
+digest. Startup rebuilds that complete state from EPRS before the internal
+listener is returned. Archive replay and delivery-ledger queries are local and
+stale-capable. Internal dispatchers acquire under both leader term and
+dispatcher epoch, then commit an acknowledgement or failure; lease expiry is an
+explicit bounded maintenance command. Status reports
+`durable_target_outbox: true` and
+`target_dispatch: external_executor_not_implemented`. Thus a committed publish
+means replicated ingress and durable delivery intent, never by itself a
+webhook/Queue/Stream/HTTP side effect. See
+[Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 Epoch does **not** yet provide a public clustered durability contract, regional
 catalog/placement, distributed membership fencing, persisted profile snapshots,
@@ -452,8 +464,9 @@ idempotency retention. See [STREAM_TABLET.md](STREAM_TABLET.md) and
 [QUEUE_TABLET.md](QUEUE_TABLET.md). The Cache tablet additionally lacks profile
 snapshots/compaction, background active expiry, and bounded
 idempotency-receipt retention; see [CACHE_TABLET.md](CACHE_TABLET.md). The Bus
-profile additionally lacks per-target outboxes, dispatch, retries, DLQs, replay
-attempt lineage, and target security; see [BUS_TABLET.md](BUS_TABLET.md).
+profile additionally lacks target executors, rate limiting, redrive/terminal
+retention, replay-attempt lineage, public pull/push contracts, and target
+security; see [BUS_TABLET.md](BUS_TABLET.md).
 
 Current JSON-shaped payloads, standalone epochs, HTTP endpoints, and local WAL
 frames are provisional scaffold interfaces. They are not frozen compatibility

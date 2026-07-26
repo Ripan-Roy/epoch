@@ -318,6 +318,12 @@ impl EpochEngine {
     pub fn create_bus(&self, name: &str, config: BusConfig) -> EpochResult<BusHandle> {
         validate_resource_name(name)?;
         self.validate_durability(ResourceKind::EventBus, config.durability)?;
+        if config.delivery_outbox {
+            return Err(EpochError::InvalidArgument(
+                "standalone Event Bus delivery_outbox is unavailable; use the experimental replicated Bus tablet"
+                    .into(),
+            ));
+        }
         let bus = Arc::new(Mutex::new(EventBus::new(config)?));
         insert_unique(&self.buses, name, bus.clone())?;
         Ok(bus)
@@ -1057,7 +1063,7 @@ fn replay_queue_settlement(
 mod tests {
     use std::collections::BTreeMap;
 
-    use epoch_bus::{EventFilter, EventTransform};
+    use epoch_bus::{DeliveryPolicy, EventFilter, EventTransform};
     use epoch_core::ManualClock;
     use epoch_storage::MemoryLog;
     use serde_json::json;
@@ -1201,6 +1207,7 @@ mod tests {
                         add_headers: BTreeMap::from([("routed-by".into(), "epoch".into())]),
                         ..EventTransform::default()
                     },
+                    delivery_policy: DeliveryPolicy::default(),
                 },
             )
             .unwrap();
@@ -1215,6 +1222,21 @@ mod tests {
             engine.queue("fulfillment").unwrap().lock().counts().ready,
             1
         );
+    }
+
+    #[test]
+    fn standalone_bus_rejects_the_unmounted_delivery_ledger() {
+        let engine = EpochEngine::default();
+        assert!(matches!(
+            engine.create_bus(
+                "orders",
+                BusConfig {
+                    delivery_outbox: true,
+                    ..BusConfig::default()
+                },
+            ),
+            Err(EpochError::InvalidArgument(_))
+        ));
     }
 
     #[test]

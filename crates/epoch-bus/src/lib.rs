@@ -1,6 +1,8 @@
-//! Event routing, subscription filtering, transformation, and archive replay.
+//! Event routing, filtering, transformation, archive replay, and delivery state.
 
 use std::collections::BTreeMap;
+
+mod delivery;
 
 use epoch_core::{
     AckMetadata, DurabilityProfile, EpochError, EpochResult, EventEnvelope, validate_resource_name,
@@ -9,6 +11,16 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::Url;
+
+pub use delivery::{
+    DEFAULT_MAX_OUTBOX_DELIVERIES, DeliveryAttempt, DeliveryAttemptOutcome,
+    DeliveryBackoffStrategy, DeliveryCounts, DeliveryFence, DeliveryLease,
+    DeliveryMaintenanceResult, DeliveryPolicy, DeliveryRecord, DeliveryRetryPolicy, DeliveryState,
+    DeliveryStateKind, MAX_BUS_OUTBOX_DELIVERIES, MAX_DELIVERY_ACQUIRE_BATCH,
+    MAX_DELIVERY_ATTEMPTS, MAX_DELIVERY_IN_FLIGHT, MAX_DELIVERY_QUERY_RESULTS,
+    MAX_DELIVERY_REASON_BYTES, MAX_DELIVERY_TIMEOUT_MS,
+};
+use delivery::{DeliveryLedger, delivery_id};
 
 pub const DEFAULT_MAX_SUBSCRIPTIONS: usize = 1_024;
 pub const DEFAULT_MAX_ARCHIVE_EVENTS: usize = 100_000;
@@ -31,10 +43,14 @@ pub const MAX_TARGET_URL_BYTES: usize = 8 * 1024;
 pub struct BusConfig {
     pub durability: DurabilityProfile,
     pub archive: bool,
+    #[serde(default)]
+    pub delivery_outbox: bool,
     #[serde(default = "default_max_subscriptions")]
     pub max_subscriptions: usize,
     #[serde(default = "default_max_archive_events")]
     pub max_archive_events: usize,
+    #[serde(default = "default_max_outbox_deliveries")]
+    pub max_outbox_deliveries: usize,
 }
 
 impl Default for BusConfig {
@@ -42,8 +58,10 @@ impl Default for BusConfig {
         Self {
             durability: DurabilityProfile::Volatile,
             archive: true,
+            delivery_outbox: false,
             max_subscriptions: DEFAULT_MAX_SUBSCRIPTIONS,
             max_archive_events: DEFAULT_MAX_ARCHIVE_EVENTS,
+            max_outbox_deliveries: DEFAULT_MAX_OUTBOX_DELIVERIES,
         }
     }
 }
@@ -54,6 +72,10 @@ const fn default_max_subscriptions() -> usize {
 
 const fn default_max_archive_events() -> usize {
     DEFAULT_MAX_ARCHIVE_EVENTS
+}
+
+const fn default_max_outbox_deliveries() -> usize {
+    DEFAULT_MAX_OUTBOX_DELIVERIES
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -278,6 +300,8 @@ pub struct Subscription {
     pub target: SubscriptionTarget,
     #[serde(default)]
     pub transform: EventTransform,
+    #[serde(default, skip_serializing_if = "DeliveryPolicy::is_default")]
+    pub delivery_policy: DeliveryPolicy,
 }
 
 impl Subscription {
@@ -285,6 +309,7 @@ impl Subscription {
         validate_resource_name(&self.name)?;
         self.filter.validate()?;
         self.transform.validate()?;
+        self.delivery_policy.validate()?;
         match &self.target {
             SubscriptionTarget::Pull => {}
             SubscriptionTarget::Queue { resource } | SubscriptionTarget::Stream { resource } => {
@@ -300,10 +325,12 @@ impl Subscription {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoutedDelivery {
+    pub delivery_id: String,
     pub subscription: String,
     pub target: SubscriptionTarget,
     pub envelope: EventEnvelope,
     pub route_plan_version: u64,
+    pub delivery_policy: DeliveryPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -327,17 +354,21 @@ pub struct EventBus {
     route_plan_version: u64,
     commit_position: u64,
     archive: Vec<ArchivedEvent>,
+    delivery_ledger: DeliveryLedger,
 }
 
 impl EventBus {
     pub fn new(config: BusConfig) -> EpochResult<Self> {
         validate_config(&config)?;
+        let delivery_ledger =
+            DeliveryLedger::new(config.delivery_outbox, config.max_outbox_deliveries);
         Ok(Self {
             config,
             subscriptions: BTreeMap::new(),
             route_plan_version: 1,
             commit_position: 0,
             archive: Vec::new(),
+            delivery_ledger,
         })
     }
 
@@ -397,12 +428,16 @@ impl EventBus {
             .values()
             .filter(|subscription| subscription.filter.matches(&event))
             .map(|subscription| RoutedDelivery {
+                delivery_id: delivery_id(position, &subscription.name),
                 subscription: subscription.name.clone(),
                 target: subscription.target.clone(),
                 envelope: subscription.transform.apply(&event),
                 route_plan_version,
+                delivery_policy: subscription.delivery_policy.clone(),
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let mut next_delivery_ledger = self.delivery_ledger.clone();
+        next_delivery_ledger.append_publish(position, now_ms, &deliveries)?;
         self.commit_position = position;
         if self.config.archive {
             self.archive.push(ArchivedEvent {
@@ -412,6 +447,7 @@ impl EventBus {
                 envelope: event,
             });
         }
+        self.delivery_ledger = next_delivery_ledger;
         Ok(PublishResult {
             acknowledgement: AckMetadata::standalone(position, self.config.durability),
             deliveries,
@@ -467,6 +503,78 @@ impl EventBus {
         self.archive.len()
     }
 
+    pub fn acquire_deliveries(
+        &mut self,
+        subscription: &str,
+        dispatcher: &str,
+        max_deliveries: usize,
+        now_ms: u64,
+        fence: DeliveryFence,
+    ) -> EpochResult<Vec<DeliveryLease>> {
+        let mut candidate = self.delivery_ledger.clone();
+        let deliveries =
+            candidate.acquire(subscription, dispatcher, max_deliveries, now_ms, fence)?;
+        self.delivery_ledger = candidate;
+        Ok(deliveries)
+    }
+
+    pub fn acknowledge_delivery(
+        &mut self,
+        delivery_id: &str,
+        dispatcher: &str,
+        lease_token: &str,
+        fence: DeliveryFence,
+        now_ms: u64,
+    ) -> EpochResult<DeliveryRecord> {
+        let mut candidate = self.delivery_ledger.clone();
+        let record = candidate.acknowledge(delivery_id, dispatcher, lease_token, fence, now_ms)?;
+        self.delivery_ledger = candidate;
+        Ok(record)
+    }
+
+    pub fn fail_delivery(
+        &mut self,
+        delivery_id: &str,
+        dispatcher: &str,
+        lease_token: &str,
+        fence: DeliveryFence,
+        reason: &str,
+        now_ms: u64,
+    ) -> EpochResult<DeliveryRecord> {
+        let mut candidate = self.delivery_ledger.clone();
+        let record = candidate.fail(delivery_id, dispatcher, lease_token, fence, reason, now_ms)?;
+        self.delivery_ledger = candidate;
+        Ok(record)
+    }
+
+    pub fn maintain_deliveries(
+        &mut self,
+        now_ms: u64,
+        max_deliveries: usize,
+    ) -> EpochResult<DeliveryMaintenanceResult> {
+        let mut candidate = self.delivery_ledger.clone();
+        let result = candidate.maintain(now_ms, max_deliveries)?;
+        self.delivery_ledger = candidate;
+        Ok(result)
+    }
+
+    pub fn delivery(&self, delivery_id: &str) -> Option<DeliveryRecord> {
+        self.delivery_ledger.get(delivery_id)
+    }
+
+    pub fn deliveries(
+        &self,
+        subscription: Option<&str>,
+        state: Option<DeliveryStateKind>,
+        limit: usize,
+    ) -> EpochResult<Vec<DeliveryRecord>> {
+        self.delivery_ledger.query(subscription, state, limit)
+    }
+
+    pub fn delivery_counts(&self) -> DeliveryCounts {
+        self.delivery_ledger.counts()
+    }
+
     /// Deterministic digest of all state required to rebuild route and replay behavior.
     pub fn recovery_state_digest(&self) -> EpochResult<[u8; 32]> {
         let encoded = serde_json::to_vec(&(
@@ -475,10 +583,11 @@ impl EventBus {
             self.route_plan_version,
             self.commit_position,
             &self.archive,
+            &self.delivery_ledger,
         ))
         .map_err(|error| EpochError::Internal(error.to_string()))?;
         let mut hasher = Sha256::new();
-        hasher.update(b"epoch/event-bus/recovery-state/v1\0");
+        hasher.update(b"epoch/event-bus/recovery-state/v2\0");
         hasher.update(encoded);
         Ok(hasher.finalize().into())
     }
@@ -498,6 +607,11 @@ fn validate_config(config: &BusConfig) -> EpochResult<()> {
         "max_archive_events",
         config.max_archive_events,
         MAX_BUS_ARCHIVE_EVENTS,
+    )?;
+    validate_capacity(
+        "max_outbox_deliveries",
+        config.max_outbox_deliveries,
+        MAX_BUS_OUTBOX_DELIVERIES,
     )
 }
 
@@ -657,6 +771,7 @@ mod tests {
                 },
                 target: SubscriptionTarget::Pull,
                 transform: EventTransform::default(),
+                delivery_policy: DeliveryPolicy::default(),
             })
             .unwrap();
         }
@@ -679,6 +794,7 @@ mod tests {
                 add_headers: BTreeMap::from([("routed-by".into(), "epoch".into())]),
                 payload_projection: BTreeMap::from([("total".into(), "order.total".into())]),
             },
+            delivery_policy: DeliveryPolicy::default(),
         })
         .unwrap();
         let routed = bus
@@ -719,6 +835,26 @@ mod tests {
             serde_json::from_str(r#"{"durability":"volatile","archive":true}"#).unwrap();
         assert_eq!(config.max_subscriptions, DEFAULT_MAX_SUBSCRIPTIONS);
         assert_eq!(config.max_archive_events, DEFAULT_MAX_ARCHIVE_EVENTS);
+        assert!(!config.delivery_outbox);
+        assert_eq!(config.max_outbox_deliveries, DEFAULT_MAX_OUTBOX_DELIVERIES);
+
+        let legacy_subscription: Subscription = serde_json::from_value(json!({
+            "name": "audit",
+            "filter": {},
+            "target": {"kind": "pull"},
+            "transform": {}
+        }))
+        .unwrap();
+        assert_eq!(
+            legacy_subscription.delivery_policy,
+            DeliveryPolicy::default()
+        );
+        assert!(
+            serde_json::to_value(&legacy_subscription)
+                .unwrap()
+                .get("delivery_policy")
+                .is_none()
+        );
 
         let mut first = EventBus::new(config.clone()).unwrap();
         let mut second = EventBus::new(config).unwrap();
@@ -939,12 +1075,312 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn publish_persists_a_bounded_lexical_delivery_outbox_atomically() {
+        let mut bus = EventBus::new(BusConfig {
+            delivery_outbox: true,
+            max_outbox_deliveries: 2,
+            ..BusConfig::default()
+        })
+        .unwrap();
+        for name in ["worker", "audit"] {
+            bus.upsert_subscription(subscription(name, SubscriptionTarget::Pull))
+                .unwrap();
+        }
+
+        let published = bus.publish(event("order.created"), 100).unwrap();
+        assert_eq!(
+            published
+                .deliveries
+                .iter()
+                .map(|delivery| delivery.delivery_id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "epoch.bus.delivery.v1.1.audit",
+                "epoch.bus.delivery.v1.1.worker"
+            ]
+        );
+        let records = bus.deliveries(None, None, 10).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].subscription, "audit");
+        assert!(matches!(
+            records[0].state,
+            DeliveryState::Pending {
+                eligible_at_ms: 100
+            }
+        ));
+
+        let digest = bus.recovery_state_digest().unwrap();
+        assert!(matches!(
+            bus.publish(event("order.cancelled"), 101),
+            Err(EpochError::Capacity(_))
+        ));
+        assert_eq!(bus.commit_position(), 1);
+        assert_eq!(bus.archived_event_count(), 1);
+        assert_eq!(bus.delivery_counts().pending, 2);
+        assert_eq!(bus.recovery_state_digest().unwrap(), digest);
+    }
+
+    #[test]
+    fn failed_delivery_retries_at_its_boundary_without_affecting_other_targets() {
+        let mut bus = EventBus::new(BusConfig {
+            delivery_outbox: true,
+            ..BusConfig::default()
+        })
+        .unwrap();
+        for name in ["beta", "alpha"] {
+            let mut route = subscription(name, SubscriptionTarget::Pull);
+            route.delivery_policy = DeliveryPolicy {
+                timeout_ms: 10,
+                max_in_flight: 1,
+                retry: DeliveryRetryPolicy {
+                    strategy: DeliveryBackoffStrategy::Fixed,
+                    initial_delay_ms: 10,
+                    max_delay_ms: 10,
+                    jitter_percent: 0,
+                    max_attempts: 2,
+                    max_age_ms: None,
+                },
+            };
+            bus.upsert_subscription(route).unwrap();
+        }
+        bus.publish(event("order.created"), 100).unwrap();
+        let fence = DeliveryFence::new(7, 3, 2, 1).unwrap();
+
+        let first = bus
+            .acquire_deliveries("alpha", "dispatcher", 10, 100, fence)
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].attempt, 1);
+        let delivery_id = first[0].delivery_id.clone();
+        let token = first[0].lease_token.clone();
+        let failed = bus
+            .fail_delivery(
+                &delivery_id,
+                "dispatcher",
+                &token,
+                fence,
+                "target unavailable",
+                101,
+            )
+            .unwrap();
+        assert!(matches!(
+            failed.state,
+            DeliveryState::Pending {
+                eligible_at_ms: 111
+            }
+        ));
+        assert!(matches!(
+            bus.delivery("epoch.bus.delivery.v1.1.beta").unwrap().state,
+            DeliveryState::Pending {
+                eligible_at_ms: 100
+            }
+        ));
+        assert!(
+            bus.acquire_deliveries("alpha", "dispatcher", 10, 110, fence)
+                .unwrap()
+                .is_empty()
+        );
+
+        let second = bus
+            .acquire_deliveries("alpha", "dispatcher", 10, 111, fence)
+            .unwrap();
+        assert_eq!(second[0].attempt, 2);
+        let dead_lettered = bus
+            .fail_delivery(
+                &delivery_id,
+                "dispatcher",
+                &second[0].lease_token,
+                fence,
+                "still unavailable",
+                112,
+            )
+            .unwrap();
+        assert!(matches!(
+            dead_lettered.state,
+            DeliveryState::DeadLettered {
+                dead_lettered_at_ms: 112,
+                ..
+            }
+        ));
+        assert_eq!(dead_lettered.attempts.len(), 2);
+        assert_eq!(bus.delivery_counts().dead_lettered, 1);
+        assert_eq!(bus.delivery_counts().pending, 1);
+    }
+
+    #[test]
+    fn lease_deadline_is_exclusive_and_maintenance_is_bounded() {
+        let mut bus = EventBus::new(BusConfig {
+            delivery_outbox: true,
+            ..BusConfig::default()
+        })
+        .unwrap();
+        let mut route = subscription("audit", SubscriptionTarget::Pull);
+        route.delivery_policy = DeliveryPolicy {
+            timeout_ms: 10,
+            max_in_flight: 1,
+            retry: DeliveryRetryPolicy {
+                strategy: DeliveryBackoffStrategy::Fixed,
+                initial_delay_ms: 5,
+                max_delay_ms: 5,
+                jitter_percent: 0,
+                max_attempts: 2,
+                max_age_ms: None,
+            },
+        };
+        bus.upsert_subscription(route).unwrap();
+        bus.publish(event("order.created"), 100).unwrap();
+        let fence = DeliveryFence::new(7, 3, 2, 1).unwrap();
+        bus.acquire_deliveries("audit", "dispatcher", 1, 100, fence)
+            .unwrap();
+
+        assert_eq!(bus.maintain_deliveries(109, 1).unwrap().processed, 0);
+        let maintained = bus.maintain_deliveries(110, 1).unwrap();
+        assert_eq!(maintained.processed, 1);
+        assert_eq!(maintained.retried, 1);
+        assert!(matches!(
+            bus.delivery("epoch.bus.delivery.v1.1.audit").unwrap().state,
+            DeliveryState::Pending {
+                eligible_at_ms: 115
+            }
+        ));
+    }
+
+    #[test]
+    fn stale_dispatcher_epoch_and_changed_leader_term_are_fenced() {
+        let mut bus = EventBus::new(BusConfig {
+            delivery_outbox: true,
+            ..BusConfig::default()
+        })
+        .unwrap();
+        bus.upsert_subscription(subscription("audit", SubscriptionTarget::Pull))
+            .unwrap();
+        bus.publish(event("order.created"), 100).unwrap();
+        let original_fence = DeliveryFence::new(7, 3, 2, 1).unwrap();
+        let delivery = bus
+            .acquire_deliveries("audit", "dispatcher", 1, 100, original_fence)
+            .unwrap()
+            .remove(0);
+
+        assert!(matches!(
+            bus.acknowledge_delivery(
+                &delivery.delivery_id,
+                "dispatcher",
+                &delivery.lease_token,
+                DeliveryFence::new(7, 3, 3, 1).unwrap(),
+                101,
+            ),
+            Err(EpochError::Fenced)
+        ));
+        assert!(matches!(
+            bus.acquire_deliveries(
+                "audit",
+                "dispatcher",
+                1,
+                101,
+                DeliveryFence::new(7, 3, 2, 2).unwrap(),
+            ),
+            Ok(ref deliveries) if deliveries.is_empty()
+        ));
+        assert!(matches!(
+            bus.acknowledge_delivery(
+                &delivery.delivery_id,
+                "dispatcher",
+                &delivery.lease_token,
+                original_fence,
+                102,
+            ),
+            Err(EpochError::Fenced)
+        ));
+    }
+
+    #[test]
+    fn delivery_policy_is_strict_bounded_and_defaults_without_wire_drift() {
+        let unknown_retry = json!({
+            "name": "audit",
+            "filter": {},
+            "target": {"kind": "pull"},
+            "delivery_policy": {
+                "timeout_ms": 100,
+                "max_in_flight": 1,
+                "retry": {
+                    "strategy": "fixed",
+                    "initial_delay_ms": 1,
+                    "max_delay_ms": 1,
+                    "jitter_percent": 0,
+                    "max_attempts": 1,
+                    "max_age_ms": null,
+                    "unexpected": true
+                }
+            }
+        });
+        assert!(serde_json::from_value::<Subscription>(unknown_retry).is_err());
+
+        let mut bus = EventBus::new(BusConfig::default()).unwrap();
+        let mut invalid = subscription("audit", SubscriptionTarget::Pull);
+        invalid.delivery_policy.max_in_flight = 0;
+        assert!(matches!(
+            bus.upsert_subscription(invalid),
+            Err(EpochError::InvalidArgument(_))
+        ));
+        assert_eq!(bus.subscription_count(), 0);
+    }
+
+    #[test]
+    fn delivery_deadline_overflow_rejects_without_partial_state_or_epoch_fencing() {
+        let mut bus = EventBus::new(BusConfig {
+            delivery_outbox: true,
+            ..BusConfig::default()
+        })
+        .unwrap();
+        let mut expiring = subscription("audit", SubscriptionTarget::Pull);
+        expiring.delivery_policy.retry.max_age_ms = Some(10);
+        bus.upsert_subscription(expiring).unwrap();
+        assert!(matches!(
+            bus.publish(event("order.created"), u64::MAX - 5),
+            Err(EpochError::Capacity(_))
+        ));
+        assert_eq!(bus.commit_position(), 0);
+        assert_eq!(bus.archived_event_count(), 0);
+        assert_eq!(bus.delivery_counts(), DeliveryCounts::default());
+
+        let mut bus = EventBus::new(BusConfig {
+            delivery_outbox: true,
+            ..BusConfig::default()
+        })
+        .unwrap();
+        bus.upsert_subscription(subscription("audit", SubscriptionTarget::Pull))
+            .unwrap();
+        bus.publish(event("order.created"), 0).unwrap();
+        assert!(matches!(
+            bus.acquire_deliveries(
+                "audit",
+                "dispatcher",
+                1,
+                u64::MAX,
+                DeliveryFence::new(7, 3, 2, 2).unwrap(),
+            ),
+            Err(EpochError::Capacity(_))
+        ));
+        let acquired = bus
+            .acquire_deliveries(
+                "audit",
+                "dispatcher",
+                1,
+                0,
+                DeliveryFence::new(7, 3, 2, 1).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(acquired.len(), 1);
+    }
+
     fn subscription(name: &str, target: SubscriptionTarget) -> Subscription {
         Subscription {
             name: name.into(),
             filter: EventFilter::default(),
             target,
             transform: EventTransform::default(),
+            delivery_policy: DeliveryPolicy::default(),
         }
     }
 }

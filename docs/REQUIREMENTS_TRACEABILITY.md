@@ -79,10 +79,11 @@ receipts/digests, and one-voter plus all-voter `SIGKILL`/same-path reopen withou
 duplicate receipt publication. An opt-in node runtime adds bounded real HTTP
 transport and opaque diagnostic status/propose/lookup endpoints. A mutually
 exclusive experimental profile mode now applies either one typed,
-single-partition Stream, Queue, or Event Bus route-plan/ingress tablet or one single-shard Cache tablet after
+single-partition Stream, Queue, or Event Bus ingress/outbox tablet or one single-shard Cache tablet after
 commit and rebuilds it from the complete proposal history before readiness.
-All four return bounded two-durable-voter evidence. The Event Bus status
-explicitly excludes target dispatch/outbox delivery claims. The executable gates
+All four return bounded two-durable-voter evidence. The Event Bus retains
+independent delivery intent and attempt state but explicitly excludes a built-in
+target executor or external-delivery claim. The executable gates
 cover minority non-commit, leader rebinding, typed profile semantics, catch-up,
 exact retry, convergence, and all-container `SIGKILL`/reopen. Public product
 profiles remain standalone. G3 remains open for the exhaustive crash matrix,
@@ -160,10 +161,10 @@ durability.
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
-| BUS-001 | P0 | Topics, subscriptions, route/fan-out/wildcards | M1 basic → M2 | Slice | G0, G1, G4 | Deterministic lexical fan-out, Unicode wildcard truth table, bounded canonical route updates, strict mounted runtime, majority-before-success, failover/catch-up, EPRS/all-node recovery, and digest convergence; pending: durable target outbox/backpressure history |
+| BUS-001 | P0 | Topics, subscriptions, route/fan-out/wildcards | M1 basic → M2 | Slice | G0, G1, G4 | Deterministic lexical fan-out, Unicode wildcard truth table, bounded canonical route updates, atomic per-subscription outbox creation, majority-before-success, failover/catch-up, EPRS/all-node recovery, and complete digest convergence; pending: public multi-topic/tablet routing and executor-level backpressure proof |
 | BUS-002 | P0 | Attribute and JSON-content filters | M4 | Slice | G0, G4 | Conjunctive event/source/subject/header/JSON truth table plus strict bounded path/map validation; pending: compiled/interpreted differential suite |
-| BUS-003 | P0 | Pull, push, webhook, queue, stream targets | M4 | Planned | G0, G4, G5, G6 | Pending: per-target failure/backpressure suite |
-| BUS-004 | P0 | Per-target retry, timeout, rate, DLQ | M4 | Planned | G0, G2, G4, G5 | Pending: target-isolation history |
+| BUS-003 | P0 | Pull, push, webhook, queue, stream targets | M4 | Slice | G0, G4, G5, G6 | Internal target-shaped records and a fenced acquire/ack/fail protocol are replicated, queried, recovered, and target-isolated; pending: built-in long-poll/push/Queue/Stream/webhook/HTTP executors and public contracts |
+| BUS-004 | P0 | Per-target retry, timeout, rate, DLQ | M4 | Slice | G0, G2, G4, G5 | Captured per-subscription timeout/max-in-flight/retry policy, deterministic backoff/jitter, bounded lease-expiry maintenance, attempt exhaustion, dead-letter state, fencing, real-runtime/container convergence, and EPRS recovery; pending: rate limiting, redrive/retention, executor crash matrix, authorization, and external audit |
 | BUS-005 | P0 | CloudEvents 1.0 over HTTP | M1 envelope → M4 | Slice | G0, G1, G6 | Pending: CloudEvents conformance/round-trip |
 | BUS-006 | P1 | Archive and filtered replay | M4 | Slice | G2, G5, G7 | Inclusive time/filter replay, bounded browser-safe response, checked archive capacity, atomic rejection, replicated recovery-state digest, real-runtime convergence, and EPRS/container recovery; pending: replay-attempt reconciliation and retention |
 | BUS-007 | P1 | Declarative input transformation | M4 | Slice | G0, G4, G7 | Deterministic header addition and payload projection included in the delivery-plan digest/convergence suite; pending: broader golden corpus and runtime target evidence |

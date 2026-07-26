@@ -61,6 +61,7 @@ jobs:
           grep -Rq 'One lifecycle, three real clients' console/dist/assets
           grep -Rq 'Experimental replicated Queue' console/dist/assets
           grep -Rq 'Experimental replicated Event Bus' console/dist/assets
+          grep -Rq 'per-subscription outbox leases' console/dist/assets
           if grep -Eq '(src|href)="/assets/' console/dist/index.html; then
             echo 'build contains an asset URL outside /epoch/' >&2
             exit 1

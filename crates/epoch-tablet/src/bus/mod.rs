@@ -1,4 +1,4 @@
-//! Canonical replicated Event Bus route-plan state machine.
+//! Canonical replicated Event Bus ingress and delivery-ledger state machine.
 
 mod command;
 mod digest;
@@ -6,7 +6,10 @@ mod model;
 
 use std::collections::BTreeMap;
 
-use epoch_bus::{ArchivedEvent, BusConfig, EventBus, EventFilter};
+use epoch_bus::{
+    ArchivedEvent, BusConfig, DeliveryCounts, DeliveryFence, DeliveryRecord, DeliveryState,
+    DeliveryStateKind, EventBus, EventFilter,
+};
 use epoch_core::{DurabilityProfile, EpochError, EpochResult};
 
 use crate::common::{AppliedCommand, validate_committed_command_scope};
@@ -39,6 +42,7 @@ impl BusTablet {
         // Consensus supplies durability evidence; the standalone engine label
         // cannot truthfully describe a committed tablet mutation.
         config.durability = DurabilityProfile::Volatile;
+        config.delivery_outbox = true;
         let bus = EventBus::new(config)?;
         let business_state_digest = bus.recovery_state_digest()?;
         let state_digest = initial_state_digest(&scope, business_state_digest);
@@ -85,7 +89,13 @@ impl BusTablet {
         }
         let applied_at_ms = command.applied_at_ms.max(self.last_applied_time_ms);
         let mut candidate = self.bus.clone();
-        let execution = execute(&mut candidate, command.operation, applied_at_ms);
+        let execution = execute(
+            &mut candidate,
+            &self.scope,
+            committed,
+            command.operation,
+            applied_at_ms,
+        );
         let (outcome, next_bus) = match execution {
             Ok(result) => (BusTabletOutcome::Applied { result }, Some(candidate)),
             Err(error) => (recordable_rejected_outcome(error)?, None),
@@ -186,6 +196,23 @@ impl BusTablet {
         self.bus.archived_event_count()
     }
 
+    pub fn delivery(&self, delivery_id: &str) -> Option<DeliveryRecord> {
+        self.bus.delivery(delivery_id)
+    }
+
+    pub fn deliveries(
+        &self,
+        subscription: Option<&str>,
+        state: Option<DeliveryStateKind>,
+        limit: usize,
+    ) -> TabletResult<Vec<DeliveryRecord>> {
+        Ok(self.bus.deliveries(subscription, state, limit)?)
+    }
+
+    pub fn delivery_counts(&self) -> DeliveryCounts {
+        self.bus.delivery_counts()
+    }
+
     pub const fn business_state_digest(&self) -> [u8; 32] {
         self.business_state_digest
     }
@@ -197,6 +224,8 @@ impl BusTablet {
 
 fn execute(
     bus: &mut EventBus,
+    scope: &BusTabletScope,
+    committed: CommittedCommand<'_>,
     operation: BusTabletOperation,
     applied_at_ms: u64,
 ) -> EpochResult<BusTabletOperationResult> {
@@ -228,7 +257,177 @@ fn execute(
                 delivery_plan_digest: delivery_plan_digest(&result.deliveries)?,
             })
         }
+        BusTabletOperation::AcquireDeliveries {
+            subscription,
+            dispatcher,
+            dispatcher_epoch,
+            max_deliveries,
+        } => execute_acquire(
+            bus,
+            DeliveryExecution::new(scope, committed, applied_at_ms),
+            &subscription,
+            &dispatcher,
+            dispatcher_epoch,
+            max_deliveries,
+        ),
+        BusTabletOperation::AcknowledgeDelivery {
+            delivery_id,
+            dispatcher,
+            dispatcher_epoch,
+            lease_token,
+        } => execute_acknowledge(
+            bus,
+            DeliveryExecution::new(scope, committed, applied_at_ms),
+            delivery_id,
+            &dispatcher,
+            dispatcher_epoch,
+            &lease_token,
+        ),
+        BusTabletOperation::FailDelivery {
+            delivery_id,
+            dispatcher,
+            dispatcher_epoch,
+            lease_token,
+            reason,
+        } => execute_failure(
+            bus,
+            DeliveryExecution::new(scope, committed, applied_at_ms),
+            delivery_id,
+            &dispatcher,
+            dispatcher_epoch,
+            &lease_token,
+            &reason,
+        ),
+        BusTabletOperation::MaintainDeliveries { max_deliveries } => {
+            execute_maintenance(bus, max_deliveries, applied_at_ms)
+        }
     }
+}
+
+#[derive(Clone, Copy)]
+struct DeliveryExecution<'a> {
+    scope: &'a BusTabletScope,
+    committed: CommittedCommand<'a>,
+    applied_at_ms: u64,
+}
+
+impl<'a> DeliveryExecution<'a> {
+    const fn new(
+        scope: &'a BusTabletScope,
+        committed: CommittedCommand<'a>,
+        applied_at_ms: u64,
+    ) -> Self {
+        Self {
+            scope,
+            committed,
+            applied_at_ms,
+        }
+    }
+
+    fn fence(self, dispatcher_epoch: u64) -> EpochResult<DeliveryFence> {
+        DeliveryFence::new(
+            self.scope.tablet_id,
+            self.scope.tablet_epoch,
+            self.committed.term,
+            dispatcher_epoch,
+        )
+    }
+}
+
+fn execute_acquire(
+    bus: &mut EventBus,
+    execution: DeliveryExecution<'_>,
+    subscription: &str,
+    dispatcher: &str,
+    dispatcher_epoch: u64,
+    max_deliveries: u16,
+) -> EpochResult<BusTabletOperationResult> {
+    let fence = execution.fence(dispatcher_epoch)?;
+    let deliveries = bus
+        .acquire_deliveries(
+            subscription,
+            dispatcher,
+            usize::from(max_deliveries),
+            execution.applied_at_ms,
+            fence,
+        )?
+        .into_iter()
+        .map(BusTabletDelivery::from)
+        .collect();
+    Ok(BusTabletOperationResult::DeliveriesAcquired { deliveries })
+}
+
+fn execute_acknowledge(
+    bus: &mut EventBus,
+    execution: DeliveryExecution<'_>,
+    delivery_id: String,
+    dispatcher: &str,
+    dispatcher_epoch: u64,
+    lease_token: &str,
+) -> EpochResult<BusTabletOperationResult> {
+    let fence = execution.fence(dispatcher_epoch)?;
+    bus.acknowledge_delivery(
+        &delivery_id,
+        dispatcher,
+        lease_token,
+        fence,
+        execution.applied_at_ms,
+    )?;
+    Ok(BusTabletOperationResult::DeliveryAcknowledged { delivery_id })
+}
+
+fn execute_failure(
+    bus: &mut EventBus,
+    execution: DeliveryExecution<'_>,
+    delivery_id: String,
+    dispatcher: &str,
+    dispatcher_epoch: u64,
+    lease_token: &str,
+    reason: &str,
+) -> EpochResult<BusTabletOperationResult> {
+    let fence = execution.fence(dispatcher_epoch)?;
+    let record = bus.fail_delivery(
+        &delivery_id,
+        dispatcher,
+        lease_token,
+        fence,
+        reason,
+        execution.applied_at_ms,
+    )?;
+    let (state, next_eligible_at_ms) = match record.state {
+        DeliveryState::Pending { eligible_at_ms } => {
+            (DeliveryStateKind::Pending, Some(eligible_at_ms))
+        }
+        DeliveryState::DeadLettered { .. } => (DeliveryStateKind::DeadLettered, None),
+        _ => {
+            return Err(EpochError::Internal(
+                "failed delivery did not settle to pending or dead-lettered".into(),
+            ));
+        }
+    };
+    Ok(BusTabletOperationResult::DeliveryFailed {
+        delivery_id,
+        state,
+        next_eligible_at_ms,
+    })
+}
+
+fn execute_maintenance(
+    bus: &mut EventBus,
+    max_deliveries: u16,
+    applied_at_ms: u64,
+) -> EpochResult<BusTabletOperationResult> {
+    let result = bus.maintain_deliveries(applied_at_ms, usize::from(max_deliveries))?;
+    Ok(BusTabletOperationResult::DeliveriesMaintained {
+        processed: count_as_u16(result.processed, "delivery maintenance")?,
+        retried: count_as_u16(result.retried, "delivery retry")?,
+        dead_lettered: count_as_u16(result.dead_lettered, "delivery dead-letter")?,
+        counts: result.counts.try_into()?,
+    })
+}
+
+fn count_as_u16(value: usize, field: &str) -> EpochResult<u16> {
+    u16::try_from(value).map_err(|_| EpochError::Internal(format!("{field} count exceeds u16")))
 }
 
 fn recordable_rejected_outcome(error: EpochError) -> TabletResult<BusTabletOutcome> {

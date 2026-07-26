@@ -13,7 +13,7 @@ pub(super) fn initial_state_digest(
     business_state_digest: [u8; 32],
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"epoch/event-bus-tablet/state/v1\0");
+    hasher.update(b"epoch/event-bus-tablet/state/v2\0");
     hasher.update(scope.tablet_id.to_be_bytes());
     hasher.update(scope.tablet_epoch.to_be_bytes());
     hash_length_prefixed(&mut hasher, scope.resource.as_bytes());
@@ -32,7 +32,7 @@ pub(super) fn transition_digest(
     let outcome =
         serde_json::to_vec(outcome).map_err(|error| TabletError::Encoding(error.to_string()))?;
     let mut hasher = Sha256::new();
-    hasher.update(b"epoch/event-bus-tablet/state-transition/v1\0");
+    hasher.update(b"epoch/event-bus-tablet/state-transition/v2\0");
     hasher.update(previous);
     hasher.update(committed.proposal_id.to_be_bytes());
     hasher.update(committed.term.to_be_bytes());
@@ -47,7 +47,15 @@ pub(super) fn transition_digest(
 pub(super) fn delivery_plan_digest(deliveries: &[RoutedDelivery]) -> EpochResult<String> {
     let encoded =
         serde_json::to_vec(deliveries).map_err(|error| EpochError::Internal(error.to_string()))?;
-    let digest: [u8; 32] = Sha256::digest(encoded).into();
+    let mut hasher = Sha256::new();
+    hasher.update(b"epoch/event-bus-tablet/delivery-plan/v2\0");
+    hasher.update(
+        u64::try_from(encoded.len())
+            .map_err(|_| EpochError::Internal("delivery plan exceeds u64 bytes".into()))?
+            .to_be_bytes(),
+    );
+    hasher.update(encoded);
+    let digest: [u8; 32] = hasher.finalize().into();
     Ok(lower_hex(&digest))
 }
 

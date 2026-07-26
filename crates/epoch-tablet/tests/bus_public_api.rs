@@ -1,4 +1,6 @@
-use epoch_bus::{BusConfig, EventFilter, EventTransform, Subscription, SubscriptionTarget};
+use epoch_bus::{
+    BusConfig, DeliveryPolicy, EventFilter, EventTransform, Subscription, SubscriptionTarget,
+};
 use epoch_core::EventEnvelope;
 use epoch_tablet::{
     BUS_TABLET_COMMAND_FORMAT_VERSION, BusTablet, BusTabletCommand, BusTabletDisposition,
@@ -25,6 +27,7 @@ fn bus_route_plan_is_usable_through_the_public_crate_api() {
             },
             target: SubscriptionTarget::Pull,
             transform: EventTransform::default(),
+            delivery_policy: DeliveryPolicy::default(),
         },
         1_700_000_000_123,
     )

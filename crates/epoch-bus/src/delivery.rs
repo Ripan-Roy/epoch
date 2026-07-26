@@ -1,0 +1,832 @@
+//! Durable, target-isolated Event Bus delivery ledger.
+//!
+//! This module owns only replicated delivery intent and settlement state. It
+//! deliberately performs no network I/O: dispatch workers lease records,
+//! execute target-specific work outside the state machine, then commit an
+//! acknowledgement or failure.
+
+use std::collections::BTreeMap;
+
+use epoch_core::{EpochError, EpochResult, EventEnvelope, validate_resource_name};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::{RoutedDelivery, SubscriptionTarget};
+
+pub const DEFAULT_MAX_OUTBOX_DELIVERIES: usize = 100_000;
+pub const MAX_BUS_OUTBOX_DELIVERIES: usize = 10_000_000;
+pub const MAX_DELIVERY_QUERY_RESULTS: usize = 10_000;
+pub const MAX_DELIVERY_ACQUIRE_BATCH: usize = 100;
+pub const MAX_DELIVERY_ATTEMPTS: u32 = 100;
+pub const MAX_DELIVERY_IN_FLIGHT: u16 = 1_000;
+pub const MAX_DELIVERY_TIMEOUT_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+pub const MAX_DELIVERY_REASON_BYTES: usize = 4 * 1_024;
+pub const MAX_DISPATCHER_BYTES: usize = 128;
+
+const DELIVERY_ID_PREFIX: &str = "epoch.bus.delivery.v1";
+const DELIVERY_LEASE_PREFIX: &str = "epoch.bus.delivery.lease.v1.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryBackoffStrategy {
+    #[default]
+    Exponential,
+    Fixed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryRetryPolicy {
+    pub strategy: DeliveryBackoffStrategy,
+    pub initial_delay_ms: u64,
+    pub max_delay_ms: u64,
+    pub jitter_percent: u8,
+    pub max_attempts: u32,
+    pub max_age_ms: Option<u64>,
+}
+
+impl Default for DeliveryRetryPolicy {
+    fn default() -> Self {
+        Self {
+            strategy: DeliveryBackoffStrategy::Exponential,
+            initial_delay_ms: 1_000,
+            max_delay_ms: 60_000,
+            jitter_percent: 10,
+            max_attempts: 8,
+            max_age_ms: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryPolicy {
+    pub timeout_ms: u64,
+    pub max_in_flight: u16,
+    #[serde(default)]
+    pub retry: DeliveryRetryPolicy,
+}
+
+impl Default for DeliveryPolicy {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 30_000,
+            max_in_flight: 16,
+            retry: DeliveryRetryPolicy::default(),
+        }
+    }
+}
+
+impl DeliveryPolicy {
+    pub(crate) fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    pub(crate) fn validate(&self) -> EpochResult<()> {
+        if self.timeout_ms == 0 || self.timeout_ms > MAX_DELIVERY_TIMEOUT_MS {
+            return Err(EpochError::InvalidArgument(format!(
+                "delivery timeout_ms must be between 1 and {MAX_DELIVERY_TIMEOUT_MS}"
+            )));
+        }
+        if self.max_in_flight == 0 || self.max_in_flight > MAX_DELIVERY_IN_FLIGHT {
+            return Err(EpochError::InvalidArgument(format!(
+                "delivery max_in_flight must be between 1 and {MAX_DELIVERY_IN_FLIGHT}"
+            )));
+        }
+        if self.retry.max_attempts == 0 || self.retry.max_attempts > MAX_DELIVERY_ATTEMPTS {
+            return Err(EpochError::InvalidArgument(format!(
+                "delivery retry max_attempts must be between 1 and {MAX_DELIVERY_ATTEMPTS}"
+            )));
+        }
+        if self.retry.initial_delay_ms > self.retry.max_delay_ms {
+            return Err(EpochError::InvalidArgument(
+                "delivery retry initial_delay_ms must not exceed max_delay_ms".into(),
+            ));
+        }
+        if self.retry.max_delay_ms > MAX_DELIVERY_TIMEOUT_MS {
+            return Err(EpochError::InvalidArgument(format!(
+                "delivery retry max_delay_ms must not exceed {MAX_DELIVERY_TIMEOUT_MS}"
+            )));
+        }
+        if self.retry.jitter_percent > 100 {
+            return Err(EpochError::InvalidArgument(
+                "delivery retry jitter_percent cannot exceed 100".into(),
+            ));
+        }
+        if self.retry.max_age_ms == Some(0) {
+            return Err(EpochError::InvalidArgument(
+                "delivery retry max_age_ms must be greater than zero".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Replicated ownership coordinates for one dispatch attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DeliveryFence {
+    tablet_id: u64,
+    tablet_epoch: u64,
+    leader_term: u64,
+    dispatcher_epoch: u64,
+}
+
+impl DeliveryFence {
+    pub fn new(
+        tablet_id: u64,
+        tablet_epoch: u64,
+        leader_term: u64,
+        dispatcher_epoch: u64,
+    ) -> EpochResult<Self> {
+        let fence = Self {
+            tablet_id,
+            tablet_epoch,
+            leader_term,
+            dispatcher_epoch,
+        };
+        fence.validate()?;
+        Ok(fence)
+    }
+
+    fn validate(self) -> EpochResult<()> {
+        if self.tablet_id == 0
+            || self.tablet_epoch == 0
+            || self.leader_term == 0
+            || self.dispatcher_epoch == 0
+        {
+            return Err(EpochError::InvalidArgument(
+                "delivery fence coordinates must be non-zero".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub const fn dispatcher_epoch(self) -> u64 {
+        self.dispatcher_epoch
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryStateKind {
+    Pending,
+    InFlight,
+    Acknowledged,
+    DeadLettered,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DeliveryState {
+    Pending {
+        eligible_at_ms: u64,
+    },
+    InFlight {
+        dispatcher: String,
+        dispatcher_epoch: u64,
+        attempt: u32,
+        lease_token: String,
+        lease_deadline_ms: u64,
+        fence: DeliveryFence,
+    },
+    Acknowledged {
+        acknowledged_at_ms: u64,
+    },
+    DeadLettered {
+        dead_lettered_at_ms: u64,
+        reason: String,
+    },
+}
+
+impl DeliveryState {
+    pub const fn kind(&self) -> DeliveryStateKind {
+        match self {
+            Self::Pending { .. } => DeliveryStateKind::Pending,
+            Self::InFlight { .. } => DeliveryStateKind::InFlight,
+            Self::Acknowledged { .. } => DeliveryStateKind::Acknowledged,
+            Self::DeadLettered { .. } => DeliveryStateKind::DeadLettered,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DeliveryAttemptOutcome {
+    InFlight,
+    Acknowledged {
+        completed_at_ms: u64,
+    },
+    Failed {
+        failed_at_ms: u64,
+        reason: String,
+        retry_at_ms: Option<u64>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeliveryAttempt {
+    pub attempt: u32,
+    pub dispatcher: String,
+    pub dispatcher_epoch: u64,
+    pub leader_term: u64,
+    pub started_at_ms: u64,
+    pub lease_deadline_ms: u64,
+    pub outcome: DeliveryAttemptOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DeliveryRecord {
+    pub delivery_id: String,
+    pub publish_position: u64,
+    pub subscription: String,
+    pub target: SubscriptionTarget,
+    pub envelope: EventEnvelope,
+    pub route_plan_version: u64,
+    pub created_at_ms: u64,
+    pub expires_at_ms: Option<u64>,
+    pub policy: DeliveryPolicy,
+    pub state: DeliveryState,
+    pub attempts: Vec<DeliveryAttempt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DeliveryLease {
+    pub delivery_id: String,
+    pub publish_position: u64,
+    pub subscription: String,
+    pub target: SubscriptionTarget,
+    pub envelope: EventEnvelope,
+    pub route_plan_version: u64,
+    pub attempt: u32,
+    pub lease_token: String,
+    pub lease_deadline_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct DeliveryCounts {
+    pub pending: usize,
+    pub in_flight: usize,
+    pub acknowledged: usize,
+    pub dead_lettered: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct DeliveryMaintenanceResult {
+    pub processed: usize,
+    pub retried: usize,
+    pub dead_lettered: usize,
+    pub counts: DeliveryCounts,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DeliveryLedger {
+    enabled: bool,
+    max_deliveries: usize,
+    records: BTreeMap<String, DeliveryRecord>,
+    dispatcher_epochs: BTreeMap<String, u64>,
+}
+
+impl DeliveryLedger {
+    pub(crate) fn new(enabled: bool, max_deliveries: usize) -> Self {
+        Self {
+            enabled,
+            max_deliveries,
+            records: BTreeMap::new(),
+            dispatcher_epochs: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn append_publish(
+        &mut self,
+        publish_position: u64,
+        created_at_ms: u64,
+        deliveries: &[RoutedDelivery],
+    ) -> EpochResult<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let next_len = self
+            .records
+            .len()
+            .checked_add(deliveries.len())
+            .ok_or_else(|| EpochError::Capacity("delivery outbox size overflow".into()))?;
+        if next_len > self.max_deliveries {
+            return Err(EpochError::Capacity(format!(
+                "event bus delivery outbox reached its {} record limit",
+                self.max_deliveries
+            )));
+        }
+
+        let mut additions = Vec::with_capacity(deliveries.len());
+        for delivery in deliveries {
+            delivery.delivery_policy.validate()?;
+            let expires_at_ms = delivery
+                .delivery_policy
+                .retry
+                .max_age_ms
+                .map(|max_age_ms| {
+                    created_at_ms.checked_add(max_age_ms).ok_or_else(|| {
+                        EpochError::Capacity("delivery max-age deadline overflow".into())
+                    })
+                })
+                .transpose()?;
+            if self.records.contains_key(&delivery.delivery_id)
+                || additions
+                    .iter()
+                    .any(|(delivery_id, _)| delivery_id == &delivery.delivery_id)
+            {
+                return Err(EpochError::Internal(format!(
+                    "duplicate deterministic delivery id {}",
+                    delivery.delivery_id
+                )));
+            }
+            additions.push((
+                delivery.delivery_id.clone(),
+                DeliveryRecord {
+                    delivery_id: delivery.delivery_id.clone(),
+                    publish_position,
+                    subscription: delivery.subscription.clone(),
+                    target: delivery.target.clone(),
+                    envelope: delivery.envelope.clone(),
+                    route_plan_version: delivery.route_plan_version,
+                    created_at_ms,
+                    expires_at_ms,
+                    policy: delivery.delivery_policy.clone(),
+                    state: DeliveryState::Pending {
+                        eligible_at_ms: created_at_ms,
+                    },
+                    attempts: Vec::new(),
+                },
+            ));
+        }
+        self.records.extend(additions);
+        Ok(())
+    }
+
+    pub(crate) fn acquire(
+        &mut self,
+        subscription: &str,
+        dispatcher: &str,
+        max_deliveries: usize,
+        now_ms: u64,
+        fence: DeliveryFence,
+    ) -> EpochResult<Vec<DeliveryLease>> {
+        ensure_enabled(self.enabled)?;
+        validate_resource_name(subscription)?;
+        validate_dispatcher(dispatcher)?;
+        validate_batch_limit(max_deliveries, MAX_DELIVERY_ACQUIRE_BATCH)?;
+        fence.validate()?;
+        self.accept_dispatcher_epoch(dispatcher, fence.dispatcher_epoch())?;
+
+        let initial_in_flight = self
+            .records
+            .values()
+            .filter(|record| {
+                record.subscription == subscription
+                    && record.state.kind() == DeliveryStateKind::InFlight
+            })
+            .count();
+        let mut candidates = self
+            .records
+            .values()
+            .filter_map(|record| match record.state {
+                DeliveryState::Pending { eligible_at_ms }
+                    if record.subscription == subscription && eligible_at_ms <= now_ms =>
+                {
+                    Some((
+                        record.publish_position,
+                        record.subscription.clone(),
+                        record.delivery_id.clone(),
+                    ))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        candidates.sort();
+
+        let mut leases = Vec::new();
+        for (_, _, delivery_id) in candidates {
+            if leases.len() >= max_deliveries {
+                break;
+            }
+            let record = self
+                .records
+                .get_mut(&delivery_id)
+                .ok_or_else(|| EpochError::Internal("delivery candidate disappeared".into()))?;
+            let effective_in_flight = initial_in_flight
+                .checked_add(leases.len())
+                .ok_or_else(|| EpochError::Capacity("delivery in-flight count overflow".into()))?;
+            if effective_in_flight >= usize::from(record.policy.max_in_flight) {
+                break;
+            }
+            let attempt = u32::try_from(record.attempts.len())
+                .map_err(|_| EpochError::Capacity("delivery attempt count overflow".into()))?
+                .checked_add(1)
+                .ok_or_else(|| EpochError::Capacity("delivery attempt count overflow".into()))?;
+            if attempt > record.policy.retry.max_attempts {
+                return Err(EpochError::Internal(format!(
+                    "pending delivery {} exceeded its retry policy",
+                    record.delivery_id
+                )));
+            }
+            let lease_deadline_ms = now_ms
+                .checked_add(record.policy.timeout_ms)
+                .ok_or_else(|| EpochError::Capacity("delivery lease deadline overflow".into()))?;
+            let lease_token = lease_token(
+                &record.delivery_id,
+                dispatcher,
+                attempt,
+                lease_deadline_ms,
+                fence,
+            );
+            record.attempts.push(DeliveryAttempt {
+                attempt,
+                dispatcher: dispatcher.to_owned(),
+                dispatcher_epoch: fence.dispatcher_epoch(),
+                leader_term: fence.leader_term,
+                started_at_ms: now_ms,
+                lease_deadline_ms,
+                outcome: DeliveryAttemptOutcome::InFlight,
+            });
+            record.state = DeliveryState::InFlight {
+                dispatcher: dispatcher.to_owned(),
+                dispatcher_epoch: fence.dispatcher_epoch(),
+                attempt,
+                lease_token: lease_token.clone(),
+                lease_deadline_ms,
+                fence,
+            };
+            leases.push(DeliveryLease {
+                delivery_id: record.delivery_id.clone(),
+                publish_position: record.publish_position,
+                subscription: record.subscription.clone(),
+                target: record.target.clone(),
+                envelope: record.envelope.clone(),
+                route_plan_version: record.route_plan_version,
+                attempt,
+                lease_token,
+                lease_deadline_ms,
+            });
+        }
+        Ok(leases)
+    }
+
+    pub(crate) fn acknowledge(
+        &mut self,
+        delivery_id: &str,
+        dispatcher: &str,
+        lease_token: &str,
+        fence: DeliveryFence,
+        now_ms: u64,
+    ) -> EpochResult<DeliveryRecord> {
+        ensure_enabled(self.enabled)?;
+        validate_dispatcher(dispatcher)?;
+        fence.validate()?;
+        self.authorize(delivery_id, dispatcher, lease_token, fence)?;
+        let record = self
+            .records
+            .get_mut(delivery_id)
+            .ok_or_else(|| EpochError::NotFound(delivery_id.to_owned()))?;
+        complete_current_attempt(
+            record,
+            DeliveryAttemptOutcome::Acknowledged {
+                completed_at_ms: now_ms,
+            },
+        )?;
+        record.state = DeliveryState::Acknowledged {
+            acknowledged_at_ms: now_ms,
+        };
+        Ok(record.clone())
+    }
+
+    pub(crate) fn fail(
+        &mut self,
+        delivery_id: &str,
+        dispatcher: &str,
+        lease_token: &str,
+        fence: DeliveryFence,
+        reason: &str,
+        now_ms: u64,
+    ) -> EpochResult<DeliveryRecord> {
+        ensure_enabled(self.enabled)?;
+        validate_dispatcher(dispatcher)?;
+        validate_reason(reason)?;
+        fence.validate()?;
+        self.authorize(delivery_id, dispatcher, lease_token, fence)?;
+        self.settle_failure(delivery_id, reason, now_ms)
+    }
+
+    pub(crate) fn maintain(
+        &mut self,
+        now_ms: u64,
+        max_deliveries: usize,
+    ) -> EpochResult<DeliveryMaintenanceResult> {
+        ensure_enabled(self.enabled)?;
+        validate_batch_limit(max_deliveries, MAX_DELIVERY_ACQUIRE_BATCH)?;
+        let mut expired = self
+            .records
+            .values()
+            .filter_map(|record| match record.state {
+                DeliveryState::InFlight {
+                    lease_deadline_ms, ..
+                } if lease_deadline_ms <= now_ms => {
+                    Some((lease_deadline_ms, record.delivery_id.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        expired.sort();
+        expired.truncate(max_deliveries);
+
+        let mut result = DeliveryMaintenanceResult::default();
+        for (_, delivery_id) in expired {
+            let settled = self.settle_failure(&delivery_id, "delivery_lease_timeout", now_ms)?;
+            result.processed += 1;
+            match settled.state {
+                DeliveryState::Pending { .. } => result.retried += 1,
+                DeliveryState::DeadLettered { .. } => result.dead_lettered += 1,
+                _ => {
+                    return Err(EpochError::Internal(
+                        "lease maintenance produced a non-settled state".into(),
+                    ));
+                }
+            }
+        }
+        result.counts = self.counts();
+        Ok(result)
+    }
+
+    pub(crate) fn get(&self, delivery_id: &str) -> Option<DeliveryRecord> {
+        self.records.get(delivery_id).cloned()
+    }
+
+    pub(crate) fn query(
+        &self,
+        subscription: Option<&str>,
+        state: Option<DeliveryStateKind>,
+        limit: usize,
+    ) -> EpochResult<Vec<DeliveryRecord>> {
+        ensure_enabled(self.enabled)?;
+        if let Some(subscription) = subscription {
+            validate_resource_name(subscription)?;
+        }
+        validate_batch_limit(limit, MAX_DELIVERY_QUERY_RESULTS)?;
+        let mut records = self
+            .records
+            .values()
+            .filter(|record| {
+                subscription.is_none_or(|name| record.subscription == name)
+                    && state.is_none_or(|kind| record.state.kind() == kind)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| {
+            (left.publish_position, &left.subscription)
+                .cmp(&(right.publish_position, &right.subscription))
+        });
+        records.truncate(limit);
+        Ok(records)
+    }
+
+    pub(crate) fn counts(&self) -> DeliveryCounts {
+        let mut counts = DeliveryCounts::default();
+        for record in self.records.values() {
+            match record.state.kind() {
+                DeliveryStateKind::Pending => counts.pending += 1,
+                DeliveryStateKind::InFlight => counts.in_flight += 1,
+                DeliveryStateKind::Acknowledged => counts.acknowledged += 1,
+                DeliveryStateKind::DeadLettered => counts.dead_lettered += 1,
+            }
+        }
+        counts
+    }
+
+    fn accept_dispatcher_epoch(
+        &mut self,
+        dispatcher: &str,
+        requested_epoch: u64,
+    ) -> EpochResult<()> {
+        match self.dispatcher_epochs.get(dispatcher).copied() {
+            Some(current) if requested_epoch < current => Err(EpochError::Fenced),
+            Some(current) if requested_epoch == current => Ok(()),
+            _ => {
+                self.dispatcher_epochs
+                    .insert(dispatcher.to_owned(), requested_epoch);
+                Ok(())
+            }
+        }
+    }
+
+    fn authorize(
+        &self,
+        delivery_id: &str,
+        dispatcher: &str,
+        lease_token: &str,
+        fence: DeliveryFence,
+    ) -> EpochResult<()> {
+        if self.dispatcher_epochs.get(dispatcher).copied() != Some(fence.dispatcher_epoch()) {
+            return Err(EpochError::Fenced);
+        }
+        let record = self
+            .records
+            .get(delivery_id)
+            .ok_or_else(|| EpochError::NotFound(delivery_id.to_owned()))?;
+        match &record.state {
+            DeliveryState::InFlight {
+                dispatcher: owner,
+                lease_token: active_token,
+                fence: active_fence,
+                ..
+            } if owner == dispatcher && active_token == lease_token && *active_fence == fence => {
+                Ok(())
+            }
+            _ => Err(EpochError::Fenced),
+        }
+    }
+
+    fn settle_failure(
+        &mut self,
+        delivery_id: &str,
+        reason: &str,
+        now_ms: u64,
+    ) -> EpochResult<DeliveryRecord> {
+        let record = self
+            .records
+            .get_mut(delivery_id)
+            .ok_or_else(|| EpochError::NotFound(delivery_id.to_owned()))?;
+        let attempt = record
+            .attempts
+            .last()
+            .ok_or_else(|| EpochError::Internal("delivery has no active attempt".into()))?
+            .attempt;
+        let mut terminal = attempt >= record.policy.retry.max_attempts
+            || record
+                .expires_at_ms
+                .is_some_and(|deadline| deadline <= now_ms);
+        let retry_at_ms = if terminal {
+            None
+        } else {
+            let delay = retry_delay(&record.delivery_id, attempt, &record.policy.retry);
+            let retry_at_ms = now_ms
+                .checked_add(delay)
+                .ok_or_else(|| EpochError::Capacity("delivery retry deadline overflow".into()))?;
+            if record
+                .expires_at_ms
+                .is_some_and(|deadline| retry_at_ms >= deadline)
+            {
+                terminal = true;
+                None
+            } else {
+                Some(retry_at_ms)
+            }
+        };
+        complete_current_attempt(
+            record,
+            DeliveryAttemptOutcome::Failed {
+                failed_at_ms: now_ms,
+                reason: reason.to_owned(),
+                retry_at_ms,
+            },
+        )?;
+        record.state = if terminal {
+            DeliveryState::DeadLettered {
+                dead_lettered_at_ms: now_ms,
+                reason: reason.to_owned(),
+            }
+        } else {
+            DeliveryState::Pending {
+                eligible_at_ms: retry_at_ms
+                    .ok_or_else(|| EpochError::Internal("retry deadline is missing".into()))?,
+            }
+        };
+        Ok(record.clone())
+    }
+}
+
+pub(crate) fn delivery_id(publish_position: u64, subscription: &str) -> String {
+    format!("{DELIVERY_ID_PREFIX}.{publish_position}.{subscription}")
+}
+
+fn complete_current_attempt(
+    record: &mut DeliveryRecord,
+    outcome: DeliveryAttemptOutcome,
+) -> EpochResult<()> {
+    let attempt = record
+        .attempts
+        .last_mut()
+        .ok_or_else(|| EpochError::Internal("delivery has no current attempt".into()))?;
+    if attempt.outcome != DeliveryAttemptOutcome::InFlight {
+        return Err(EpochError::Internal(
+            "delivery current attempt was already settled".into(),
+        ));
+    }
+    attempt.outcome = outcome;
+    Ok(())
+}
+
+fn retry_delay(delivery_id: &str, attempt: u32, policy: &DeliveryRetryPolicy) -> u64 {
+    let base = match policy.strategy {
+        DeliveryBackoffStrategy::Fixed => policy.initial_delay_ms,
+        DeliveryBackoffStrategy::Exponential => policy
+            .initial_delay_ms
+            .saturating_mul(2_u64.saturating_pow(attempt.saturating_sub(1).min(63))),
+    }
+    .min(policy.max_delay_ms);
+    if policy.jitter_percent == 0 || base == 0 {
+        return base;
+    }
+    let span = base.saturating_mul(u64::from(policy.jitter_percent)) / 100;
+    if span == 0 {
+        return base;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"epoch/event-bus/delivery-jitter/v1\0");
+    hash_length_prefixed(&mut hasher, delivery_id.as_bytes());
+    hasher.update(attempt.to_be_bytes());
+    let digest = hasher.finalize();
+    let sample = u64::from_be_bytes(
+        digest[..8]
+            .try_into()
+            .expect("SHA-256 prefix is eight bytes"),
+    );
+    base.saturating_sub(span)
+        .saturating_add(sample % span.saturating_mul(2).saturating_add(1))
+}
+
+fn lease_token(
+    delivery_id: &str,
+    dispatcher: &str,
+    attempt: u32,
+    lease_deadline_ms: u64,
+    fence: DeliveryFence,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"epoch/event-bus/delivery-lease/v1\0");
+    hash_length_prefixed(&mut hasher, delivery_id.as_bytes());
+    hash_length_prefixed(&mut hasher, dispatcher.as_bytes());
+    hasher.update(attempt.to_be_bytes());
+    hasher.update(lease_deadline_ms.to_be_bytes());
+    hasher.update(fence.tablet_id.to_be_bytes());
+    hasher.update(fence.tablet_epoch.to_be_bytes());
+    hasher.update(fence.leader_term.to_be_bytes());
+    hasher.update(fence.dispatcher_epoch.to_be_bytes());
+    format!("{DELIVERY_LEASE_PREFIX}{}", lower_hex(&hasher.finalize()))
+}
+
+fn hash_length_prefixed(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(value);
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
+fn ensure_enabled(enabled: bool) -> EpochResult<()> {
+    if enabled {
+        Ok(())
+    } else {
+        Err(EpochError::Unavailable(
+            "durable delivery outbox is disabled".into(),
+        ))
+    }
+}
+
+fn validate_batch_limit(value: usize, maximum: usize) -> EpochResult<()> {
+    if value == 0 || value > maximum {
+        return Err(EpochError::InvalidArgument(format!(
+            "delivery batch limit must be between 1 and {maximum}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_dispatcher(dispatcher: &str) -> EpochResult<()> {
+    if dispatcher.len() > MAX_DISPATCHER_BYTES {
+        return Err(EpochError::InvalidArgument(format!(
+            "dispatcher is {} bytes; maximum is {MAX_DISPATCHER_BYTES}",
+            dispatcher.len()
+        )));
+    }
+    validate_resource_name(dispatcher)
+}
+
+fn validate_reason(reason: &str) -> EpochResult<()> {
+    if reason.is_empty() || reason.len() > MAX_DELIVERY_REASON_BYTES {
+        return Err(EpochError::InvalidArgument(format!(
+            "delivery failure reason must be between 1 and {MAX_DELIVERY_REASON_BYTES} bytes"
+        )));
+    }
+    if reason.chars().any(char::is_control) {
+        return Err(EpochError::InvalidArgument(
+            "delivery failure reason cannot contain control characters".into(),
+        ));
+    }
+    Ok(())
+}

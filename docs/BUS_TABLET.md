@@ -1,17 +1,21 @@
 # Experimental Replicated Event Bus Tablet
 
-**Status:** Working bounded fixed-three-voter route-plan/ingress profile,
-mounted only on the experimental internal listener; not a public durability or
-target-delivery claim
+**Status:** Working bounded fixed-three-voter ingress and per-subscription
+delivery-ledger profile, mounted only on the experimental internal listener;
+not a public target-execution claim
 
-`epoch-bus` and `epoch-tablet` implement the first canonical Event Bus route-plan
-boundary. The standalone engine owns validated subscriptions, deterministic
-filtering and transformation, checked publish positions, and bounded archive
-replay. `BusTablet` applies strict commands only after consensus commit, records
-exact retry receipts, and chains every committed outcome into a deterministic
-state digest. `epoch-node` can mount that state machine as the one typed profile
-for a fixed consensus group, rebuild it from EPRS before exposing the internal
-API, and fail-stop the process if committed application diverges.
+`epoch-bus` and `epoch-tablet` implement a canonical Event Bus ingress and
+delivery-ledger boundary. The standalone engine owns validated subscriptions,
+deterministic filtering and transformation, checked publish positions, and
+bounded archive replay. The replicated tablet additionally enables a bounded
+outbox: each matched subscription receives a stable delivery ID, captured
+policy, independent lease/attempt history, retry eligibility, acknowledgement,
+and terminal dead-letter state. `BusTablet` applies strict commands only after
+consensus commit, records exact retry receipts, and chains every committed
+outcome into a deterministic state digest. `epoch-node` mounts that state
+machine as the one typed profile for a fixed consensus group, rebuilds it from
+EPRS before exposing the internal API, and fail-stops if committed application
+diverges.
 
 ## Boundary
 
@@ -23,15 +27,15 @@ canonical BusTabletCommand v1
   -> committed-order effective time
   -> operation on a cloned EventBus candidate
   -> applied result or deterministic rejected outcome
-  -> complete recoverable Bus-state digest
+  -> complete recoverable route, archive, outbox, dispatcher-epoch, and attempt digest
   -> exact receipt replay and chained tablet transition digest
 ```
 
 The candidate is installed only after the operation and digest complete.
-Subscription capacity, archive capacity, malformed input, and checked-counter
-exhaustion therefore leave the prior route/archive state intact. A recordable
-business rejection still consumes its committed log index and is included in
-the tablet digest.
+Subscription, archive, and outbox capacity, malformed input, lease/retry
+deadline overflow, and checked-counter exhaustion therefore leave the prior
+business state intact. A recordable business rejection still consumes its
+committed log index and is included in the tablet digest.
 
 The tablet crate alone does not prove that a majority persisted a command. The
 mounted service supplies that proof through the same actor-owned post-commit
@@ -51,10 +55,11 @@ only on the separate internal consensus listener:
 
 | Route | Contract |
 | --- | --- |
-| `GET /experimental/v1/tablets/bus/status` | Local consensus/profile positions, route/archive counters, complete digests, and explicit delivery non-claims. |
-| `POST /experimental/v1/tablets/bus/mutations` | Strict `upsert_subscription`, `remove_subscription`, or `publish` command with an idempotency key and expected term. |
+| `GET /experimental/v1/tablets/bus/status` | Local consensus/profile positions, route/archive/outbox counters, complete digests, and explicit executor non-claims. |
+| `POST /experimental/v1/tablets/bus/mutations` | Strict route/publish plus `acquire_deliveries`, `acknowledge_delivery`, `fail_delivery`, and `maintain_deliveries` commands with an idempotency key and expected term. |
 | `GET /experimental/v1/tablets/bus/mutations/{proposal_id}` | Local `unknown`, `pending`, or `committed` outcome resolution. |
 | `POST /experimental/v1/tablets/bus/archive/replay` | Inclusive time-range and optional filtered replay from the local applied profile. |
+| `POST /experimental/v1/tablets/bus/deliveries/query` | Bounded local, stale-capable delivery-ledger and immutable attempt-history observation. |
 
 All 64-bit JSON values are emitted as exact decimal strings. Mutation input
 accepts a JSON number or decimal string for `expected_term` and envelope time
@@ -63,10 +68,12 @@ filter, target, transform, and envelope boundaries. The leader owns
 `applied_at_ms`; retries compare only semantic input, so changing an expected
 term does not conflict while changing the operation does.
 
-Status reports `target_dispatch: not_implemented` and
-`durable_target_outbox: false`. A publish receipt proves replicated ingress,
-the captured deterministic route plan, and archive state. It does not claim
-that a pull, Queue, Stream, webhook, or HTTP target received anything.
+Status reports `target_dispatch: external_executor_not_implemented` and
+`durable_target_outbox: true`. A publish receipt proves replicated ingress,
+the captured deterministic route plan, archive state, and durable delivery
+intent. An acknowledgement proves only that an internal dispatcher committed
+the target result it observed. No built-in Queue, Stream, webhook, HTTP, or
+network pull executor runs in this milestone.
 
 ## Configuration and hard limits
 
@@ -77,10 +84,20 @@ that a pull, Queue, Stream, webhook, or HTTP target received anything.
 | --- | ---: | ---: | --- |
 | `max_subscriptions` | 1,024 | 100,000 | Named routes retained by one Bus |
 | `max_archive_events` | 100,000 | 10,000,000 | Archived ingress records retained in this in-memory slice |
+| `delivery_outbox` | `false` standalone; forced `true` by `BusTablet` | n/a | Retain independent delivery state for every matching subscription |
+| `max_outbox_deliveries` | 100,000 | 10,000,000 | All pending, in-flight, acknowledged, and dead-lettered records retained by the bounded ledger |
 
-Both limits must be non-zero. The archive limit is validated even when archive
-capture is disabled so enabling it never reveals an invalid latent
-configuration. Replay returns at most 10,000 records per call.
+All three capacity limits must be non-zero. Archive and outbox limits are
+validated even when their feature is disabled so enabling it never reveals an
+invalid latent configuration. Replay and delivery queries return at most
+10,000 records per call; acquisition and maintenance process at most 100.
+
+Each subscription has a backward-compatible `delivery_policy`. Its defaults
+are a 30-second attempt timeout, 16 in-flight records, exponential retry from
+1 to 60 seconds with 10% deterministic jitter, eight attempts, and no max age.
+The hard bounds are 1,000 in-flight records, 100 attempts, and seven days for
+timeout or maximum retry delay. The policy is captured into each delivery so a
+later route edit cannot retroactively change existing work.
 
 One subscription permits at most 64 patterns in each pattern collection, 64
 header predicates, 64 JSON-equality predicates, 64 headers added by a
@@ -97,7 +114,50 @@ idempotency key, candidate application time, and one operation:
 | --- | --- |
 | `upsert_subscription` | Validate and insert or replace one named route, then advance the checked route-plan version. |
 | `remove_subscription` | Remove a present route and advance the version, or return a stable `removed: false` result without changing it. |
-| `publish` | Validate the envelope, capture the current route-plan version, evaluate routes in lexical subscription-name order, optionally archive, and advance the checked publish position. |
+| `publish` | Validate the envelope, capture the route-plan version, evaluate routes in lexical name order, atomically append one outbox record per match, optionally archive, and advance the checked publish position. |
+| `acquire_deliveries` | Lease an ordered bounded batch for one subscription under the current leader term and dispatcher epoch. |
+| `acknowledge_delivery` | Fence by exact active lease and commit terminal acknowledgement. |
+| `fail_delivery` | Fence by exact active lease and commit deterministic retry eligibility or terminal dead-letter state. |
+| `maintain_deliveries` | Settle a bounded batch of expired leases as timeout failures. |
+
+An internal dispatcher first commits an acquisition:
+
+```json
+{
+  "idempotency_key": "acquire-orders-42",
+  "expected_term": "7",
+  "operation": {
+    "kind": "acquire_deliveries",
+    "subscription": "orders",
+    "dispatcher": "webhook-sender",
+    "dispatcher_epoch": "3",
+    "max_deliveries": 10
+  }
+}
+```
+
+The `deliveries_acquired` receipt contains the transformed envelope, stable
+`delivery_id`, attempt number, opaque lease token, and exact decimal-string
+deadline. After the target-specific worker finishes, it commits either
+`acknowledge_delivery` with the same dispatcher identity, epoch, ID, and token,
+or `fail_delivery` with those fields plus a bounded reason. A failure receipt
+reports `pending` with `next_eligible_at_ms` or `dead_lettered`. An exact retry
+of any mutation returns its original result and never runs the transition
+twice.
+
+The current ledger can be inspected without mutation:
+
+```json
+{
+  "subscription": "orders",
+  "state": "dead_lettered",
+  "limit": 100
+}
+```
+
+Post that body to `/experimental/v1/tablets/bus/deliveries/query`. The result
+contains captured target/policy, current state, and immutable attempt outcomes.
+It is a local stale-capable observation, not a linearizable read.
 
 Unknown fields, unsupported versions, non-canonical JSON, oversized payloads,
 wrong tablet scope, invalid proposal identity, and malformed operations fail
@@ -125,9 +185,10 @@ remain future runtime work.
 
 Transforms add bounded headers and optionally project named top-level output
 fields from deterministic JSON paths. Each publish receipt retains the route
-plan version, position, delivery count, and lowercase SHA-256 digest of the
-ordered fully transformed delivery list. It does not retain an envelope copy
-per target.
+plan version, position, delivery count, and versioned lowercase SHA-256 digest
+of the ordered fully transformed delivery list. The outbox separately retains
+the transformed envelope and captured target/policy required for later
+dispatch; receipts remain bounded to count and digest.
 
 ## Ordering, replay, and digests
 
@@ -143,12 +204,21 @@ stored result with disposition `replayed` and changes no counters, archive
 records, receipt count, or digest. Reusing the proposal ID with different
 committed metadata fails closed.
 
-The business-state digest covers normalized configuration, sorted
-subscriptions, route-plan version, publish position, and archive. The tablet
+The v2 business-state digest covers normalized configuration, sorted
+subscriptions, route-plan version, publish position, archive, every outbox
+record and attempt, and dispatcher epoch high-water marks. The v2 tablet
 transition digest additionally covers the prior tablet digest, proposal ID,
 term, log index, payload digest, effective application time, business-state
 digest, and canonical outcome. Deterministic rejection changes the tablet
 history digest but not the business-state digest.
+
+Delivery IDs are `epoch.bus.delivery.v1.<publish-position>.<subscription>`.
+Attempts are ordered by publish position and subscription, observe an inclusive
+retry-eligibility boundary, and use an exclusive lease deadline. A newer
+dispatcher epoch fences older settlement tokens; a leader-term change also
+fences the old lease. Failure of one record cannot mutate another target.
+Terminal records and immutable attempts remain in the bounded ledger; pruning,
+retention, and redrive are intentionally not implemented yet.
 
 Archive replay selects records by inclusive receive-time range, applies the
 same validated filter evaluator, preserves publish order, and enforces the
@@ -167,14 +237,19 @@ The tests cover:
 - strict canonical command size/version/scope validation;
 - scoped proposal identity, exact retry, conflict, and commit ordering;
 - recordable capacity rejection without partial business mutation;
+- atomic lexical outbox creation and capacity rejection;
+- dispatcher/leader fencing, bounded in-flight isolation, exact lease
+  acknowledgement, retry boundaries, timeout maintenance, attempt exhaustion,
+  and dead-letter state;
 - identical results, archive state, positions, and digests across three
   independent tablets replaying one committed history;
 - strict DTOs, browser-safe metadata, semantic retry/conflict, actor-missed
   commit fail-stop, and recovery ordering;
 - three real HTTP consensus runtimes committing, converging, shutting down, and
   reopening from EPRS; and
-- a three-container gate with follower rejection, leader loss, catch-up, archive
-  agreement, all-node `SIGKILL`, and same-volume recovery.
+- a three-container gate with follower rejection, committed acquire/ack,
+  leader loss, catch-up, archive/outbox agreement, all-node `SIGKILL`, and
+  same-volume recovery.
 
 Reproduce the deployment proof with:
 
@@ -182,6 +257,7 @@ Reproduce the deployment proof with:
 make test-bus-tablet
 ```
 
-Still required are durable per-subscription delivery/outbox state, backpressure
-isolation, retry/DLQ ledgers, replay attempt lineage, snapshots, compaction,
-authentication, target egress security, and public API/SDK contracts.
+Still required are the target executors themselves, rate limiting, redrive and
+terminal-record retention, replay attempt lineage, built-in Queue/Stream writes,
+long-poll and push transports, webhook/HTTP security and signing, snapshots,
+compaction, authentication, and public API/SDK contracts.

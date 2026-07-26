@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 
-use epoch_bus::{BusConfig, EventFilter, EventTransform, Subscription, SubscriptionTarget};
+use epoch_bus::{
+    BusConfig, DeliveryBackoffStrategy, DeliveryPolicy, DeliveryRetryPolicy, DeliveryState,
+    EventFilter, EventTransform, Subscription, SubscriptionTarget,
+};
 use epoch_core::{EpochError, EventEnvelope};
 use serde_json::{Value, json};
 
@@ -33,6 +36,7 @@ fn subscription(name: &str, target: SubscriptionTarget) -> Subscription {
         },
         target,
         transform: EventTransform::default(),
+        delivery_policy: DeliveryPolicy::default(),
     }
 }
 
@@ -187,8 +191,8 @@ fn exact_replay_returns_original_result_without_mutating_state() {
     assert_eq!(
         digest,
         [
-            68, 31, 94, 164, 70, 196, 153, 240, 76, 148, 25, 193, 133, 250, 98, 53, 163, 178, 143,
-            80, 178, 25, 144, 178, 188, 106, 130, 77, 43, 192, 106, 108,
+            150, 209, 60, 201, 34, 99, 218, 148, 227, 242, 74, 50, 250, 3, 158, 61, 242, 216, 76,
+            14, 201, 32, 60, 41, 228, 224, 110, 149, 173, 53, 19, 122,
         ]
     );
 }
@@ -325,6 +329,160 @@ fn identical_committed_history_converges_on_every_voter() {
             expected
         );
     }
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one sequential lifecycle test keeps acquire, retry, acknowledgement, exact replay, and full recovery evidence together"
+)]
+fn delivery_commands_are_fenced_retriable_and_recoverable() {
+    let mut route = subscription("audit", SubscriptionTarget::Pull);
+    route.delivery_policy = DeliveryPolicy {
+        timeout_ms: 10,
+        max_in_flight: 1,
+        retry: DeliveryRetryPolicy {
+            strategy: DeliveryBackoffStrategy::Fixed,
+            initial_delay_ms: 5,
+            max_delay_ms: 5,
+            jitter_percent: 0,
+            max_attempts: 2,
+            max_age_ms: None,
+        },
+    };
+    let commands = [
+        BusTabletCommand::upsert_subscription(&scope(), "route-audit", route, 100).unwrap(),
+        BusTabletCommand::publish(&scope(), "publish-1", event("evt-1", "order.created"), 101)
+            .unwrap(),
+        BusTabletCommand::new(
+            &scope(),
+            "acquire-1",
+            102,
+            BusTabletOperation::AcquireDeliveries {
+                subscription: "audit".into(),
+                dispatcher: "sender".into(),
+                dispatcher_epoch: 1,
+                max_deliveries: 1,
+            },
+        )
+        .unwrap(),
+    ];
+    let mut tablet = BusTablet::new(scope(), BusConfig::default()).unwrap();
+    let mut last_receipt = None;
+    for (offset, command) in commands.iter().enumerate() {
+        let (proposal_id, payload) = encoded(command);
+        last_receipt = Some(
+            tablet
+                .apply(committed(
+                    proposal_id,
+                    2,
+                    u64::try_from(offset).unwrap() + 4,
+                    &payload,
+                ))
+                .unwrap(),
+        );
+    }
+    let BusTabletOutcome::Applied {
+        result: BusTabletOperationResult::DeliveriesAcquired { deliveries },
+    } = last_receipt.unwrap().outcome
+    else {
+        panic!("expected a delivery lease");
+    };
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].attempt, 1);
+    let delivery_id = deliveries[0].delivery_id.clone();
+    let first_token = deliveries[0].lease_token.clone();
+
+    let failed = BusTabletCommand::new(
+        &scope(),
+        "fail-1",
+        103,
+        BusTabletOperation::FailDelivery {
+            delivery_id: delivery_id.clone(),
+            dispatcher: "sender".into(),
+            dispatcher_epoch: 1,
+            lease_token: first_token,
+            reason: "downstream unavailable".into(),
+        },
+    )
+    .unwrap();
+    let (proposal_id, payload) = encoded(&failed);
+    tablet
+        .apply(committed(proposal_id, 2, 7, &payload))
+        .unwrap();
+    assert!(matches!(
+        tablet.delivery(&delivery_id).unwrap().state,
+        DeliveryState::Pending {
+            eligible_at_ms: 108
+        }
+    ));
+
+    let reacquire = BusTabletCommand::new(
+        &scope(),
+        "acquire-2",
+        108,
+        BusTabletOperation::AcquireDeliveries {
+            subscription: "audit".into(),
+            dispatcher: "sender".into(),
+            dispatcher_epoch: 1,
+            max_deliveries: 1,
+        },
+    )
+    .unwrap();
+    let (proposal_id, payload) = encoded(&reacquire);
+    let receipt = tablet
+        .apply(committed(proposal_id, 2, 8, &payload))
+        .unwrap();
+    let BusTabletOutcome::Applied {
+        result: BusTabletOperationResult::DeliveriesAcquired { deliveries },
+    } = receipt.outcome
+    else {
+        panic!("expected a retry lease");
+    };
+    assert_eq!(deliveries[0].attempt, 2);
+
+    let acknowledge = BusTabletCommand::new(
+        &scope(),
+        "ack-2",
+        109,
+        BusTabletOperation::AcknowledgeDelivery {
+            delivery_id: delivery_id.clone(),
+            dispatcher: "sender".into(),
+            dispatcher_epoch: 1,
+            lease_token: deliveries[0].lease_token.clone(),
+        },
+    )
+    .unwrap();
+    let (proposal_id, payload) = encoded(&acknowledge);
+    let committed_ack = committed(proposal_id, 2, 9, &payload);
+    let original = tablet.apply(committed_ack).unwrap();
+    let digest = tablet.state_digest();
+    let replayed = tablet.apply(committed_ack).unwrap();
+    assert_eq!(original.outcome, replayed.outcome);
+    assert_eq!(tablet.state_digest(), digest);
+    assert_eq!(tablet.delivery_counts().acknowledged, 1);
+
+    let mut recovered = BusTablet::new(scope(), BusConfig::default()).unwrap();
+    for (index, command) in commands
+        .iter()
+        .chain([&failed, &reacquire, &acknowledge])
+        .enumerate()
+    {
+        let (proposal_id, payload) = encoded(command);
+        recovered
+            .apply(committed(
+                proposal_id,
+                2,
+                u64::try_from(index).unwrap() + 4,
+                &payload,
+            ))
+            .unwrap();
+    }
+    assert_eq!(recovered.state_digest(), tablet.state_digest());
+    assert_eq!(
+        recovered.business_state_digest(),
+        tablet.business_state_digest()
+    );
 }
 
 #[test]
