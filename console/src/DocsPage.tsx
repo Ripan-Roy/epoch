@@ -448,8 +448,8 @@ export function DocsPage({ section }: DocsPageProps) {
                     These mutually exclusive, opt-in engineering profiles run on a separate, unauthenticated
                     listener. The public SDK quickstart above remains standalone and{" "}
                     <code>local_durable</code>; no SDK or public quorum contract is implied. Two durable
-                    voters are fixed-topology evidence, not multi-zone placement proof. Cache observations
-                    are explicitly local and stale-capable; there is no linearizable read barrier yet.
+                    voters are fixed-topology evidence, not multi-zone placement proof. Cache observations are
+                    explicitly local and stale-capable; there is no linearizable read barrier yet.
                   </p>
                 </div>
               </div>
