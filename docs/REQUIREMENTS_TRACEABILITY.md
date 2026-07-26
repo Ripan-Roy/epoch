@@ -89,22 +89,22 @@ snapshots, membership and authoritative epoch transitions, read barriers,
 authenticated transport, placement/repair, model and chaos reports, density,
 and performance. See [Consensus Feasibility Spike](CONSENSUS_SPIKE.md),
 [Experimental Stream Tablet](STREAM_TABLET.md), and
-[Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
-The deterministic Cache shard and tablet state-machine core are tracked
-separately because they do not yet have a node runtime or fixed-voter failover
-proof; see [Experimental Replicated Cache Tablet Core](CACHE_TABLET.md).
+[Experimental Replicated Queue Tablet](QUEUE_TABLET.md), and
+[Experimental Replicated Cache Tablet](CACHE_TABLET.md). The Cache proof is
+still a fixed-topology internal milestone, not placement-aware public quorum
+durability.
 
 ## Cache and State
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
-| CACHE-001 | P0 | Core scalar and collection types | M1 prototype → M2 | Slice | G0, G1, G4 | Pending: type/property and persistence matrix |
-| CACHE-002 | P0 | Key/default TTL and expiry events | M1 → M2 | Slice | G0, G1, G2, G4 | Pending: deterministic-clock expiry history |
-| CACHE-003 | P0 | Eviction policy family | M1 prototype → M2 | Slice | G0, G4, G5 | Pending: memory-pressure policy benchmark |
-| CACHE-004 | P0 | Shard-local atomic operations | M1 prototype → M2 | Slice | G0, G3, G4 | Pending: linearizability report |
+| CACHE-001 | P0 | Core scalar and collection types | M1 prototype → M2 | Slice | G0, G1, G4 | Strict Cache values participate in canonical commands, digests, EPRS replay, and browser-safe observations; pending: type-specific mutation/property matrix |
+| CACHE-002 | P0 | Key/default TTL and expiry events | M1 → M2 | Slice | G0, G1, G2, G4 | Deterministic expiry, pure passive reads, committed maintenance, time rollback, failover, and replay are tested; pending: background active expiry and expiry events |
+| CACHE-003 | P0 | Eviction policy family | M1 prototype → M2 | Slice | G0, G4, G5 | Deterministic no-eviction capacity and rollback are tested; pending: LRU/LFU/TTL/random volatile/all-key policies and memory-pressure benchmarks |
+| CACHE-004 | P0 | Shard-local atomic operations | M1 prototype → M2 | Slice | G0, G3, G4 | Bounded distinct-key atomic success/rollback is covered through engine, tablet, runtime, and container tests; pending: concurrent linearizability report |
 | CACHE-005 | P0 | Pipeline, multiplex, batch, pool guidance | M1 → M2 | Slice | G1, G4 | Pending: ordering and throughput suite |
-| CACHE-006 | P0 | CAS, optimistic transaction, increment, fenced lock | M2 | Slice | G0, G3, G4 | Deterministic shard/tablet tests cover non-ABA revisions, atomic rollback, checked increment/TTL, expiry order, guarded fenced locks, cross-entry-term token rejection, time clamping, exact replay, and convergence; pending: current-leader runtime barrier, node/EPRS failover, concurrent history checker, public surface, and production fault matrix |
-| CACHE-007 | P0 | Volatile, replicated-memory, quorum modes | M1 prototype → M2 | Slice | G0, G2, G3, G4 | Pending: durability fault matrix |
+| CACHE-006 | P0 | CAS, optimistic transaction, increment, fenced lock | M2 | Slice | G0, G3, G4 | Deterministic plus real-runtime/container tests cover non-ABA revisions, atomic rollback, checked increment/TTL, expiry order, guarded locks, current-term write admission, cross-entry-term token rejection, failover, EPRS replay, and convergence; pending: concurrent history checker, linearizable reads, public surface, and production fault matrix |
+| CACHE-007 | P0 | Volatile, replicated-memory, quorum modes | M1 prototype → M2 | Slice | G0, G2, G3, G4 | Standalone volatile Cache remains separate; the internal Cache tablet proves fixed-three-voter majority persistence and all-voter replay without claiming the public quorum mode; pending: placement-aware durability fault matrix and public routing |
 | CACHE-008 | P1 | Snapshot, WAL restore, backup, PITR | M3 | Planned | G2, G5, G7 | Segmented WAL is not a Cache snapshot; pending: snapshot/backup/PITR implementation and restore drill |
 | CACHE-009 | P1 | Explicitly lossy Pub/Sub and patterns | M3 | Planned | G0, G4, G6 | Pending: route and disconnect semantics suite |
 | CACHE-010 | P1 | Durable mutation change stream | M3 | Planned | G2, G4, G7 | Pending: mutation-to-offset reconciliation |
@@ -229,7 +229,7 @@ proof; see [Experimental Replicated Cache Tablet Core](CACHE_TABLET.md).
 |---|---:|---|---|---|---|---|
 | DX-001 | P0 | Official Go, Java, and Python SDKs | M1 one SDK → M2 | Slice | G0, G1, G4, G10 | Go/Java/Python HTTP unit + independent exact-source crash/restart quickstarts, including selectable local Stream/Queue durability, and Go generated bindings; pending: native streaming contract/version matrix for all three |
 | DX-002 | P0 | Generated guarantee-aware API docs | M1 → M2 | Slice | G0, G1, G10 | Hand-authored guarantee/error guidance and exact executable Go/Java/Python examples are built as a docs-only Pages artifact; pending: generated API reference and full doc lint |
-| DX-003 | P0 | Deterministic single-binary emulator | M1 → M2 | Slice | G1, G2, G4, G10 | Seeded scheduler, virtual clocks/fault plan/transport, golden EPTR history, fixed-voter consensus, real-process EPRS/SIGKILL, opaque probe, and typed Stream/Queue tablets; pending: executable replay bundle, Cache/Bus profiles, and runnable emulator controls |
+| DX-003 | P0 | Deterministic single-binary emulator | M1 → M2 | Slice | G1, G2, G4, G10 | Seeded scheduler, virtual clocks/fault plan/transport, golden EPTR history, fixed-voter consensus, real-process EPRS/SIGKILL, opaque probe, and typed Stream/Queue/Cache tablets; pending: executable replay bundle, Bus profile, and runnable emulator controls |
 | DX-004 | P0 | Test containers and ephemeral namespaces | M1 → M2 | Slice | G1, G5, G10 | Unique three-node Compose project, independent ephemeral volumes, dynamically allocated loopback ports, failover/catch-up CI, and scoped cleanup; pending: broader parallel profile lifecycle/isolation matrix |
 | DX-005 | P1 | Audited/redacted console message browser | M3 → M4 | Planned | G5, G7, G8 | Pending: access/redaction/action audit matrix |
 | DX-006 | P0 | Explain live guarantees and cost drivers | M1 basic → M2 | Slice | G0, G3, G5 | Pending: live-state reconciliation suite |
@@ -252,10 +252,10 @@ proof; see [Experimental Replicated Cache Tablet Core](CACHE_TABLET.md).
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
-| PKG-001 | P0 | Selective four-profile Rust node | M1 scaffold → M4 complete | Slice | G1, G4, G10 | Pending: feature/config startup matrix |
-| PKG-002 | P0 | Shared engine/format standalone and cluster | M1 → M2 | Slice | G1, G2, G3, G10 | Checksummed segmented standalone format plus canonical typed Stream and Queue commands applied from EPRS without a second clustered WAL; pending: supported standalone-to-cluster format/migration equivalence |
+| PKG-001 | P0 | Selective four-profile Rust node | M1 scaffold → M4 complete | Slice | G1, G4, G10 | One binary selects mutually exclusive opaque, Stream, Queue, or Cache consensus modes while retaining all four standalone profiles; pending: simultaneous multi-profile groups and complete feature/config startup matrix |
+| PKG-002 | P0 | Shared engine/format standalone and cluster | M1 → M2 | Slice | G1, G2, G3, G10 | Checksummed segmented standalone format plus canonical typed Stream, Queue, and Cache commands applied from EPRS without a second clustered WAL; pending: supported standalone-to-cluster format/migration equivalence |
 | PKG-003 | P0 | Standalone without hosted Go services | M1 | Slice | G1, G2, G10 | Rust node restart/recovery test; pending: extended disconnected lifecycle suite |
-| PKG-004 | P0 | Three-node quorum/failover/placement | M1 prototype → M2 | Slice | G2, G3, G10 | Deterministic and real-process EPRS histories, opaque HTTP probe, plus typed Stream/Queue majority commit, failover, catch-up, fencing, and three-container `SIGKILL` replay; pending: public multi-tablet quorum, placement, exhaustive faults, and published report |
+| PKG-004 | P0 | Three-node quorum/failover/placement | M1 prototype → M2 | Slice | G2, G3, G10 | Deterministic and real-process EPRS histories, opaque HTTP probe, plus typed Stream/Queue/Cache majority commit, failover, catch-up, fencing, and three-container `SIGKILL` replay; pending: public multi-tablet quorum, placement, exhaustive faults, and published report |
 | PKG-005 | P0 | OCI, Kubernetes dev, signed binaries | M1 dev → M2 | Slice | G1, G5, G10 | Pending: clean-install/signature/SBOM CI |
 | PKG-006 | P1 | Rust embedded engine with guarantee ceiling | M2 experimental → M3 | Planned | G0, G1, G2, G10 | Pending: lifecycle/persistence contract suite |
 | PKG-007 | P1 | Supervised sidecar/child for other languages | M2 → M3 | Planned | G1, G5, G10 | Pending: crash/isolation/upgrade matrix |

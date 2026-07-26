@@ -167,18 +167,20 @@ old-term-token fencing, redelivery, DLQ/redrive reads, convergence, and all-node
 I/O-fault, or production placement matrix. See
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
-The Cache core suite checks pure observations, checked shard revisions and
+The Cache suite checks pure observations, checked shard revisions and
 non-repeating item versions, distinct-key transaction bounds, absent-state ABA
 protection, atomic rollback on version/type/counter/deadline/revision/capacity
 failure, deterministic expiry, no-eviction behavior, advisory lock contention,
 token rotation, active-owner epoch and cross-entry-term fencing, bounded
 owner-history reclamation, guarded writes, descending candidate-time clamping,
-exact replay,
-and independent-tablet digest
-convergence. These are in-process deterministic state-machine tests. Cache
-node/EPRS recovery, real-process leader failover, and a concurrent
-linearizability history remain required; see
-[Experimental Replicated Cache Tablet Core](CACHE_TABLET.md).
+exact replay, and independent-tablet digest convergence. Node-service tests add
+strict recursive HTTP decoding, decimal 64-bit boundaries, fail-stop recovery,
+real three-runtime majority application, and EPRS reopen. The container gate
+adds follower/stale-term rejection, exact retry/conflict, CAS/transaction
+rollback, TTL maintenance, lock fencing across leader replacement, catch-up,
+convergence, and all-node `SIGKILL` replay. A concurrent linearizability history,
+read barrier, I/O-fault matrix, and production placement proof remain required;
+see [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
 
 ### 3. Integration tests
 
@@ -219,6 +221,7 @@ make test-consensus-process
 make test-consensus-probe
 make test-stream-tablet
 make test-queue-tablet
+make test-cache-tablet
 ```
 
 `test-consensus-process` is ignored by Cargo's default suite so it cannot run
@@ -252,6 +255,15 @@ tests additionally prove strict command/request decoding, browser-safe 64-bit
 identity/position/time encoding,
 actor-only application, and process supervision after an injected live profile
 apply failure.
+
+`test-cache-tablet` selects the third typed mode. It exercises strict decimal
+inputs, follower and stale-term admission, exact retry and rebinding conflict,
+CAS including missing-state ABA protection, atomic transaction rollback,
+checked increment, TTL plus explicit maintenance, and advisory lock token
+rotation/fencing. It kills the leader, proves the replacement term rejects the
+old lock token as a committed outcome, catches the old voter up, compares every
+profile digest/observation, then kills and reopens all voters from their EPRS
+volumes. Reads remain explicitly local and stale-capable throughout.
 
 `tests/integration/docs-quickstarts.sh` separately executes the exact Go, Java,
 and Python source imported into the documentation page. Each language gets a
@@ -306,7 +318,7 @@ Queue recovery after replacing the running container.
 
 These standalone tests are segmented-journal evidence only. Snapshot restore,
 compaction, retention deletion, and production placement-aware replica recovery
-and quorum acknowledgement remain future gates; the bounded typed Stream/Queue
+and quorum acknowledgement remain future gates; the bounded typed Stream/Queue/Cache
 fixed-voter evidence is described separately above.
 
 ### 4. History and consistency checking

@@ -131,6 +131,13 @@ enum U64Input {
     Decimal(String),
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum I64Input {
+    Number(i64),
+    Decimal(String),
+}
+
 pub(crate) fn deserialize_u64_from_number_or_decimal<'de, D>(
     deserializer: D,
 ) -> Result<u64, D::Error>
@@ -153,12 +160,30 @@ where
     })
 }
 
+pub(crate) fn deserialize_i64_from_number_or_decimal<'de, D>(
+    deserializer: D,
+) -> Result<i64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_i64_input(I64Input::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+}
+
 fn deserialize_u64_input(input: U64Input) -> Result<u64, &'static str> {
     match input {
         U64Input::Number(value) => Ok(value),
         U64Input::Decimal(value) => value
             .parse()
             .map_err(|_| "expected an unsigned decimal integer"),
+    }
+}
+
+fn deserialize_i64_input(input: I64Input) -> Result<i64, &'static str> {
+    match input {
+        I64Input::Number(value) => Ok(value),
+        I64Input::Decimal(value) => value
+            .parse()
+            .map_err(|_| "expected a signed decimal integer"),
     }
 }
 
@@ -333,5 +358,48 @@ where
     match value {
         Some(value) => serializer.serialize_some(&value.to_string()),
         None => serializer.serialize_none(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde::Deserialize;
+    use serde_json::{Value, json};
+
+    use super::deserialize_i64_from_number_or_decimal;
+
+    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    struct SignedInput {
+        #[serde(deserialize_with = "deserialize_i64_from_number_or_decimal")]
+        value: i64,
+    }
+
+    #[test]
+    fn signed_i64_accepts_numbers_and_full_range_decimal_strings() {
+        assert_eq!(
+            serde_json::from_value::<SignedInput>(json!({"value": -42})).unwrap(),
+            SignedInput { value: -42 }
+        );
+        assert_eq!(
+            serde_json::from_value::<SignedInput>(json!({"value": i64::MIN.to_string()})).unwrap(),
+            SignedInput { value: i64::MIN }
+        );
+        assert_eq!(
+            serde_json::from_value::<SignedInput>(json!({"value": i64::MAX.to_string()})).unwrap(),
+            SignedInput { value: i64::MAX }
+        );
+    }
+
+    #[test]
+    fn signed_i64_rejects_non_integral_and_out_of_range_inputs() {
+        for value in [
+            json!(1.5),
+            json!("1.5"),
+            json!("9223372036854775808"),
+            json!("-9223372036854775809"),
+            Value::Bool(true),
+        ] {
+            assert!(serde_json::from_value::<SignedInput>(json!({"value": value})).is_err());
+        }
     }
 }

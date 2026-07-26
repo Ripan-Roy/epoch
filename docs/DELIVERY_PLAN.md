@@ -137,16 +137,19 @@ complete flow control, placement, public routing/SDKs, authenticated transport,
 or production durability evidence. See
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
-The Cache application work now has a bounded deterministic core before runtime
-attachment. A new sorted `CacheShard` provides a pure read path, checked
+The Cache application work now has a bounded deterministic tablet runtime. A
+sorted `CacheShard` provides a pure read path, checked
 non-repeating revision/version allocation, bounded staged transactions, checked
 counters and TTLs, no-eviction capacity, and ordered expiry. Its typed tablet
 adds absent-state ABA fencing, advisory composite lock fences, canonical
 committed outcomes, exact replay, time normalization, and convergence digests.
-This advances CACHE-006 to a core slice; EPRS/node integration, concurrent
-history checking, public routing/SDKs, snapshot recovery, and production
-durability evidence remain open. See
-[Experimental Replicated Cache Tablet Core](CACHE_TABLET.md).
+`epoch-node` mounts it as an opt-in mutually exclusive profile, rejects stale
+term admission, rebuilds from EPRS before readiness, and exposes only strict
+internal mutation and stale-capable local-observation routes. Real-runtime and
+container gates exercise failover, catch-up, fenced locks, convergence, and
+all-node recovery. Concurrent history checking, public routing/SDKs,
+linearizable reads, profile snapshots/compaction, and production durability
+evidence remain open. See [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
 
 The segmented-WAL work package is implemented as the single-node storage
 sub-slice at `$EPOCH_DATA_DIR/engine-wal/segment-*.wal`. The implementation has

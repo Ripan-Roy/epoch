@@ -229,6 +229,12 @@ jobs:
           EPOCH_PROBE_IMAGE: epoch/node:ci
           EPOCH_QUEUE_TABLET_USE_EXISTING_IMAGE: "1"
         run: bash tests/integration/queue-tablet.sh
+      - name: Prove typed Cache CAS, transactions, TTL, fencing, failover, and SIGKILL replay
+        env:
+          EPOCH_CACHE_TABLET_ARTIFACT_DIR: ${{ runner.temp }}/epoch-cache-tablet
+          EPOCH_PROBE_IMAGE: epoch/node:ci
+          EPOCH_CACHE_TABLET_USE_EXISTING_IMAGE: "1"
+        run: bash tests/integration/cache-tablet.sh
       - name: Prove mounted local durability across container replacement
         run: |
           wait_for_health() {
@@ -313,5 +319,6 @@ jobs:
             ${{ runner.temp }}/epoch-consensus-probe
             ${{ runner.temp }}/epoch-stream-tablet
             ${{ runner.temp }}/epoch-queue-tablet
+            ${{ runner.temp }}/epoch-cache-tablet
           if-no-files-found: ignore
           retention-days: 7

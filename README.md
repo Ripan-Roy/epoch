@@ -89,11 +89,13 @@ Real-runtime and container gates prove failover, exact renewal replay,
 convergence, and all-node `SIGKILL` recovery. It remains experimental, has no
 public SDK surface, and does not raise the standalone `local_durable` ceiling.
 
-The Cache profile now has a deterministic single-shard core for pure reads,
-checked revisions, CAS, atomic transactions, increment, expiry, and advisory
-fenced locks. It is not attached to `epoch-node` or EPRS yet and therefore does
-not claim replicated Cache availability or durability. See the
-[Cache tablet core guide](docs/CACHE_TABLET.md),
+The deterministic single-shard Cache tablet now runs through the same opt-in
+fixed-voter actor and rebuilds from EPRS before serving. Its internal typed API
+covers pure local observations, checked revisions, CAS, atomic transactions,
+increment, explicit expiry maintenance, advisory fenced locks, status, and
+mutation lookup. It remains experimental, stale-read capable, single-shard,
+unauthenticated, and outside the public SDK contract. See the
+[Cache tablet guide](docs/CACHE_TABLET.md),
 [Queue tablet guide](docs/QUEUE_TABLET.md),
 [Stream tablet guide](docs/STREAM_TABLET.md),
 [probe guide](docs/CONSENSUS_PROBE.md), [spike report](docs/CONSENSUS_SPIKE.md),
