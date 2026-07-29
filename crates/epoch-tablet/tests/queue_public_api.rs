@@ -1,11 +1,12 @@
 use epoch_core::EventEnvelope;
 use epoch_tablet::{
     CommittedCommand, MAX_QUEUE_ACQUIRE_BATCH_SIZE, MAX_QUEUE_CONSUMER_BYTES,
-    MAX_QUEUE_MESSAGE_ID_BYTES, MAX_QUEUE_REASON_BYTES, MAX_QUEUE_TABLET_COMMAND_BYTES,
-    QUEUE_TABLET_COMMAND_FORMAT_VERSION, QueueEnqueueCommand, QueueTablet, QueueTabletCommand,
-    QueueTabletDisposition, QueueTabletOperation, QueueTabletOperationResult, QueueTabletOutcome,
-    QueueTabletReceipt, QueueTabletScope, QueueTabletWriteEvidence, StreamTabletCommand,
-    StreamTabletScope, proposal_id_for, queue_proposal_id_for,
+    MAX_QUEUE_CONSUMER_IN_FLIGHT, MAX_QUEUE_MESSAGE_ID_BYTES, MAX_QUEUE_REASON_BYTES,
+    MAX_QUEUE_TABLET_COMMAND_BYTES, QUEUE_TABLET_COMMAND_FORMAT_VERSION, QueueCreditAcquireCommand,
+    QueueEnqueueCommand, QueueTablet, QueueTabletCommand, QueueTabletDisposition,
+    QueueTabletOperation, QueueTabletOperationResult, QueueTabletOutcome, QueueTabletReceipt,
+    QueueTabletScope, QueueTabletWriteEvidence, StreamTabletCommand, StreamTabletScope,
+    proposal_id_for, queue_proposal_id_for,
 };
 use serde_json::{Value, json};
 
@@ -109,12 +110,55 @@ fn queue_enqueue_is_usable_through_the_public_crate_api() {
         })
     );
 
-    assert_eq!(QUEUE_TABLET_COMMAND_FORMAT_VERSION, 1);
+    assert_eq!(QUEUE_TABLET_COMMAND_FORMAT_VERSION, 2);
     assert_eq!(MAX_QUEUE_TABLET_COMMAND_BYTES, 512 * 1024);
     assert_eq!(MAX_QUEUE_ACQUIRE_BATCH_SIZE, 100);
+    assert_eq!(MAX_QUEUE_CONSUMER_IN_FLIGHT, 10_000);
     assert_eq!(MAX_QUEUE_CONSUMER_BYTES, 256);
     assert_eq!(MAX_QUEUE_REASON_BYTES, 4 * 1024);
     assert_eq!(MAX_QUEUE_MESSAGE_ID_BYTES, 1024);
+}
+
+#[test]
+fn queue_credit_acquire_uses_v2_without_invalidating_v1_commands() {
+    let scope = QueueTabletScope::new(11, 4, "jobs").unwrap();
+    let flow_controlled = QueueTabletCommand::new(
+        &scope,
+        "receive-request-1",
+        1_700_000_000_123,
+        QueueTabletOperation::AcquireWithCredit(QueueCreditAcquireCommand {
+            partition: 0,
+            consumer: "worker-1".into(),
+            consumer_epoch: 3,
+            credit: 25,
+            max_in_flight: 100,
+            visibility_timeout_ms: Some(30_000),
+        }),
+    )
+    .unwrap();
+    assert_eq!(flow_controlled.format_version, 2);
+    let payload = flow_controlled.encode(&scope).unwrap();
+    assert_eq!(
+        String::from_utf8(payload.clone()).unwrap(),
+        r#"{"format_version":2,"tablet_id":11,"tablet_epoch":4,"resource":"jobs","idempotency_key":"receive-request-1","applied_at_ms":1700000000123,"operation":{"kind":"acquire_with_credit","partition":0,"consumer":"worker-1","consumer_epoch":3,"credit":25,"max_in_flight":100,"visibility_timeout_ms":30000}}"#
+    );
+    assert_eq!(
+        QueueTabletCommand::decode(&payload, &scope).unwrap(),
+        flow_controlled
+    );
+
+    let v1 = QueueTabletCommand::enqueue(
+        &scope,
+        "legacy-enqueue",
+        event("job-1", "job.created", 1_700_000_000_000),
+        1_700_000_000_001,
+    )
+    .unwrap();
+    assert_eq!(v1.format_version, 1);
+    assert_eq!(
+        QueueTabletCommand::decode(&v1.encode(&scope).unwrap(), &scope).unwrap(),
+        v1
+    );
 }
 
 #[test]

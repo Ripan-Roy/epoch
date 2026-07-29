@@ -179,6 +179,21 @@ impl QueueTablet {
         self.state.consumer_epochs.get(consumer).copied()
     }
 
+    pub fn consumer_in_flight(&self, consumer: &str) -> usize {
+        self.state.queue.in_flight_for_consumer(consumer)
+    }
+
+    pub fn consumer_flow(&self, consumer: &str) -> TabletResult<QueueTabletConsumerFlow> {
+        command::validate_consumer_name(consumer)?;
+        let in_flight = u64::try_from(self.consumer_in_flight(consumer))
+            .map_err(|_| TabletError::Encoding("consumer in-flight count exceeds u64".into()))?;
+        Ok(QueueTabletConsumerFlow {
+            consumer: consumer.to_owned(),
+            consumer_epoch: self.consumer_epoch(consumer),
+            in_flight,
+        })
+    }
+
     pub fn dead_letter_history(&self, limit: usize) -> Vec<QueueTabletDeadLetterHistory> {
         self.state
             .dead_letter_history
@@ -236,6 +251,9 @@ impl QueueTabletBusinessState {
             }
             QueueTabletOperation::Acquire(command) => {
                 self.execute_acquire(scope, committed, &command, applied_at_ms)?
+            }
+            QueueTabletOperation::AcquireWithCredit(command) => {
+                self.execute_acquire_with_credit(scope, committed, &command, applied_at_ms)?
             }
             QueueTabletOperation::Acknowledge(command) => {
                 self.execute_acknowledge(scope, committed, &command, applied_at_ms)?
@@ -312,6 +330,71 @@ impl QueueTabletBusinessState {
             .collect();
         Ok(QueueTabletOperationResult::Acquired {
             deliveries,
+            flow_control: None,
+            new_dead_letter_history_ids: Vec::new(),
+        })
+    }
+
+    fn execute_acquire_with_credit(
+        &mut self,
+        scope: &QueueTabletScope,
+        committed: CommittedCommand<'_>,
+        command: &QueueCreditAcquireCommand,
+        applied_at_ms: u64,
+    ) -> Result<QueueTabletOperationResult, EpochError> {
+        self.accept_consumer_epoch(&command.consumer, command.consumer_epoch)?;
+        let fence = LeaseFence::new(
+            scope.tablet_id,
+            scope.tablet_epoch,
+            command.partition,
+            committed.term,
+            command.consumer_epoch,
+        )?;
+
+        // The concurrency observation and acquisition must share one cloned
+        // state-machine transition. Maintenance first removes leases whose
+        // committed deadline has elapsed; the subsequent acquire repeats the
+        // idempotent maintenance pass before creating new leases.
+        self.queue.maintain_fenced(applied_at_ms)?;
+        let in_flight_before = self.queue.in_flight_for_consumer(&command.consumer);
+        let available = usize::from(command.max_in_flight).saturating_sub(in_flight_before);
+        let granted = usize::from(command.credit).min(available);
+        let deliveries = self
+            .queue
+            .acquire_fenced(
+                &command.consumer,
+                granted,
+                command.visibility_timeout_ms,
+                applied_at_ms,
+                fence,
+            )?
+            .into_iter()
+            .map(|delivery| {
+                let message = delivery.message;
+                QueueTabletDelivery {
+                    message_id: message.id,
+                    envelope: message.envelope.into(),
+                    attempt: message.attempt,
+                    lease_token: delivery.lease_token,
+                    lease_deadline_ms: delivery.lease_deadline_ms,
+                }
+            })
+            .collect();
+        let in_flight_after = self.queue.in_flight_for_consumer(&command.consumer);
+        let remaining_capacity = usize::from(command.max_in_flight).saturating_sub(in_flight_after);
+        let convert_count = |value: usize| {
+            u64::try_from(value)
+                .map_err(|_| EpochError::Internal("consumer in-flight count exceeds u64".into()))
+        };
+        Ok(QueueTabletOperationResult::Acquired {
+            deliveries,
+            flow_control: Some(QueueTabletFlowControl {
+                requested_credit: command.credit,
+                max_in_flight: command.max_in_flight,
+                in_flight_before: convert_count(in_flight_before)?,
+                in_flight_after: convert_count(in_flight_after)?,
+                remaining_capacity: convert_count(remaining_capacity)?,
+            }),
             new_dead_letter_history_ids: Vec::new(),
         })
     }

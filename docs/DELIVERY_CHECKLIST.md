@@ -1,8 +1,8 @@
 # Epoch Delivery Checklist
 
-**Last reviewed:** 29 July 2026
+**Last reviewed:** 30 July 2026
 **Current release:** `v0.1.0-alpha.3`
-**Current core target:** quorum-confirmed regional read barriers
+**Current core target:** Queue consumer credit and in-flight concurrency
 
 This is the operational checklist for turning PRD scope into verified,
 releasable increments. [PRD.md](PRD.md) owns product scope,
@@ -93,16 +93,29 @@ complete.
 
 | ID | Checklist item | Boundary | State | Evidence / acceptance |
 |---|---|---|---:|---|
-| RB-01 | Keep Raft implementation types behind Epoch-owned contracts | Rust consensus | 🟡 | Typed request/completion IDs carry group, epoch, and expected term without exporting `raft-rs` types |
-| RB-02 | Complete only after majority confirmation and local apply | Rust consensus | 🟡 | Safe ReadIndex completion requires quorum `ReadState` plus `applied_index >= read_index`; new-leader requests wait for a current-term commit |
-| RB-03 | Bound, cancel, and fence pending reads | Rust consensus + actor | 🟡 | 1,024-request cap, unique IDs, caller timeout cancellation, and role/term invalidation are locally tested |
-| RB-04 | Apply typed profile state before releasing read proof | Rust node actor | 🟡 | Commit application precedes barrier notification; a real three-runtime test proves success with a majority and timeout without one |
-| RB-05 | Make regional reads linearizable by default without silent downgrade | Rust gateway | 🟡 | Typed GETs and Event Bus query POSTs use leader barriers; explicit `local_stale` alone bypasses them |
-| RB-06 | Return machine-readable consistency evidence and errors | HTTP contract | 🟡 | Response headers/JSON carry achieved consistency and exact term/read/applied indexes; timeout is retryable 503 |
-| RB-07 | Preserve authorization semantics | Rust auth | 🟡 | Event Bus query POSTs require `data.read`; mutation POSTs still require `data.write` |
-| RB-08 | Prove the full process path | Integration | 🟡 | Regional process test performs a linearizable leader read, validates evidence, and retains explicit stale convergence reads |
-| RB-09 | Document design and non-claims | Documentation | 🟡 | ADR-0013 and API/runtime/consensus/profile/testing/traceability docs distinguish regional barriers from direct stale routes |
-| RB-10 | Pass protected pull-request evidence | GitHub | ⬜ | Required CI and Pages must pass before this increment is verified on `main` |
+| RB-01 | Keep Raft implementation types behind Epoch-owned contracts | Rust consensus | ✅ | Typed request/completion IDs carry group, epoch, and expected term without exporting `raft-rs` types |
+| RB-02 | Complete only after majority confirmation and local apply | Rust consensus | ✅ | Safe ReadIndex completion requires quorum `ReadState` plus `applied_index >= read_index`; new-leader requests wait for a current-term commit |
+| RB-03 | Bound, cancel, and fence pending reads | Rust consensus + actor | ✅ | 1,024-request cap, unique IDs, caller timeout cancellation, and role/term invalidation are locally tested |
+| RB-04 | Apply typed profile state before releasing read proof | Rust node actor | ✅ | Commit application precedes barrier notification; a real three-runtime test proves success with a majority and timeout without one |
+| RB-05 | Make regional reads linearizable by default without silent downgrade | Rust gateway | ✅ | Typed GETs and Event Bus query POSTs use leader barriers; explicit `local_stale` alone bypasses them |
+| RB-06 | Return machine-readable consistency evidence and errors | HTTP contract | ✅ | Response headers/JSON carry achieved consistency and exact term/read/applied indexes; timeout is retryable 503 |
+| RB-07 | Preserve authorization semantics | Rust auth | ✅ | Event Bus query POSTs require `data.read`; mutation POSTs still require `data.write` |
+| RB-08 | Prove the full process path | Integration | ✅ | Regional process test performs a linearizable leader read, validates evidence, and retains explicit stale convergence reads |
+| RB-09 | Document design and non-claims | Documentation | ✅ | ADR-0013 and API/runtime/consensus/profile/testing/traceability docs distinguish regional barriers from direct stale routes |
+| RB-10 | Pass protected pull-request evidence | GitHub | ✅ | PR #42 was squash-merged as `77debaf2`; exact-main CI `30482274859` and Pages `30482275423` passed |
+
+## Current Queue delivery: consumer credit and concurrency
+
+| ID | Checklist item | Boundary | State | Evidence / acceptance |
+|---|---|---|---:|---|
+| QF-01 | Freeze bounded credit/window semantics and non-claims | Semantics + ADR | 🟡 | ADR-0014 defines the atomic grant formula, cross-epoch identity scope, explicit maintenance, and native-streaming/fairness non-claims |
+| QF-02 | Preserve historical command compatibility | Rust tablet contract | 🟡 | Existing operations remain canonical v1; only `AcquireWithCredit` emits v2; public golden tests pin both encodings |
+| QF-03 | Enforce the consumer window atomically | Rust Queue/tablet | 🟡 | Actor-serialized cloned transition counts authoritative live leases and fails bounds before live mutation |
+| QF-04 | Return exact flow evidence and a pure observation | Rust HTTP | 🟡 | Acquire receipts expose requested/window/before/after/remaining values; consumer-flow GET exposes applied epoch/count without sampling time |
+| QF-05 | Prove saturation and replenishment through real consensus | Rust tests | 🟡 | Deterministic tests plus a real three-runtime HTTP cluster prove independent windows, cross-epoch accounting, saturation, and Ack replenishment |
+| QF-06 | Exercise the container boundary | Compose integration | 🟡 | Queue campaign uses v2 credit, checks exact evidence and consumer-flow read, then retains failover and all-node recovery coverage |
+| QF-07 | Keep product claims and traceability aligned | Documentation + console | 🟡 | Queue/API/semantics/architecture/testing/plan/traceability/user docs name the bounded slice and remaining work |
+| QF-08 | Pass protected pull-request evidence | GitHub | ⬜ | Required CI and Pages must pass before this increment is verified on `main` |
 
 ## Current security delivery: bootstrap trust baseline
 

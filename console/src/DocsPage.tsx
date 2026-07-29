@@ -563,9 +563,13 @@ export function DocsPage({ section }: DocsPageProps) {
                     still has one process owner and these regional routes remain experimental. Regional reads
                     default to a safe leader <code>ReadIndex</code>, wait for majority confirmation and local
                     profile apply, and expose exact barrier evidence; callers must explicitly request{" "}
-                    <code>local_stale</code> to bypass that barrier. Managed HTTP/gRPC and regional HTTP
-                    require a shared deny-by-default bootstrap bearer policy, but that is not OIDC, TLS/mTLS,
-                    credential expiry/revocation, or immutable audit export.
+                    <code>local_stale</code> to bypass that barrier. Queue acquire can now declare request
+                    credit and a per-consumer <code>max_in_flight</code> window; the replicated transition
+                    returns exact saturation and remaining-capacity evidence, and settlement replenishes the
+                    window. This is the experimental HTTP slice, not yet native bidirectional streaming or
+                    stable SDK support. Managed HTTP/gRPC and regional HTTP require a shared deny-by-default
+                    bootstrap bearer policy, but that is not OIDC, TLS/mTLS, credential expiry/revocation, or
+                    immutable audit export.
                   </p>
                 </div>
               </div>
@@ -576,6 +580,14 @@ export function DocsPage({ section }: DocsPageProps) {
                   <p>
                     Generation/tablet fences reject stale routes; default reads require quorum-confirmed
                     ReadIndex evidence with no silent downgrade.
+                  </p>
+                </article>
+                <article>
+                  <span>QUEUE FLOW</span>
+                  <strong>Consumer credit cannot exceed its declared live-lease window.</strong>
+                  <p>
+                    Repeated receive saturates at zero; Ack, Nack, Release, Reject, or expiry processing
+                    replenishes capacity from replicated state.
                   </p>
                 </article>
                 <article>
@@ -746,8 +758,14 @@ export function DocsPage({ section }: DocsPageProps) {
                 <ReferenceCard
                   eyebrow="QUEUE TABLET"
                   title="Experimental replicated Queue"
-                  description="Typed mutations, fenced leases, failover/redelivery, immutable DLQ/redrive history, and all-voter recovery."
+                  description="Typed mutations, fenced leases, bounded consumer credit, failover/redelivery, immutable DLQ/redrive history, and all-voter recovery."
                   href={`${repositoryDocsUrl}/QUEUE_TABLET.md`}
+                />
+                <ReferenceCard
+                  eyebrow="FLOW CONTROL"
+                  title="Queue credit and in-flight windows"
+                  description="Atomic grant semantics, cross-epoch consumer accounting, command compatibility, flow evidence, and streaming non-claims."
+                  href={`${repositoryDocsUrl}/adr/0014-queue-consumer-credit.md`}
                 />
                 <ReferenceCard
                   eyebrow="CACHE TABLET"

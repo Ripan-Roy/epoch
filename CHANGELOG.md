@@ -35,6 +35,12 @@ notes explicitly list additional verified artifacts.
 - Linearizable-by-default regional reads for all typed GETs and Event Bus query
   POSTs, with explicit `local_stale` opt-in, exact barrier evidence, bounded
   timeout configuration, and no silent consistency downgrade.
+- Replicated Queue consumer flow control with bounded request credit,
+  per-consumer in-flight windows across consumer epochs, exact saturation and
+  remaining-capacity evidence, and an applied-state consumer-flow read.
+- Additive Queue command format v2 for flow-controlled acquire while every
+  legacy operation remains canonical v1, plus deterministic, real-three-node,
+  and container coverage for saturation and settlement replenishment.
 
 ### Limitations
 
@@ -52,6 +58,10 @@ notes explicitly list additional verified artifacts.
   surface. Direct profile routes remain stale-capable; follower forwarding,
   dynamic membership, stable SDK exposure, and cross-tablet read transactions
   remain unimplemented.
+- Queue credit is currently an experimental HTTP request/response slice. Native
+  bidirectional receive, connection-scoped credit, automatic prefetch,
+  cross-consumer fairness, indexed backlog-scale counting, and stable SDK
+  exposure remain unimplemented.
 
 ## [0.1.0-alpha.3] - 2026-07-29
 

@@ -658,7 +658,9 @@ instead mounts a Queue profile and does not mount opaque or Stream routes:
 - `GET /experimental/v1/tablets/queue/status` reports consensus/profile
   positions, server-applied time, counts, and the complete state digest; and
 - `GET /experimental/v1/tablets/queue/counts`, `/dead-letters`, and `/redrives`
-  expose explicitly local, stale-capable reads that never advance time.
+  expose explicitly local, stale-capable reads that never advance time; and
+- `GET /experimental/v1/tablets/queue/consumers/{consumer}/flow` reports the
+  applied consumer epoch and current live-lease count.
 
 Every mutation requires a scoped idempotency key and expected term. The leader
 assigns `applied_at_ms = max(wall clock, last profile-applied time)`; clients
@@ -671,8 +673,15 @@ only expected term and the original server time, return the stored result with
 `replayed`, and cannot silently rebind changed input. Committed business
 rejections remain committed outcomes. Lease tokens bind tablet/epoch,
 partition, committed leader term, consumer epoch/identity, message, generation,
-and deadline. Immutable DLQ/redrive history survives EPRS replay. See
-[Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
+and deadline. An `acquire` that supplies `max_in_flight` treats `max_messages`
+as request credit and grants at most the unused per-consumer window. Its receipt
+returns before/after/remaining capacity evidence. Legacy acquires remain
+canonical command v1; only the additive flow-controlled operation uses v2.
+Immutable DLQ/redrive history survives EPRS replay. The regional
+`.../data/consumers/{consumer}/flow` wrapper defaults to a leader ReadIndex like
+every other regional GET. See
+[Experimental Replicated Queue Tablet](QUEUE_TABLET.md) and
+[ADR-0014](adr/0014-queue-consumer-credit.md).
 
 The mutually exclusive Cache mode mounts a canonical single-shard Cache tablet
 on that same internal listener:
@@ -745,11 +754,12 @@ this document. `epoch-control` serves the current four-method RegionalAdmin
 subset on gRPC port 8081 and the health/registry/browser BFF on HTTP port 8080.
 Rust port 7600 remains reserved for the future native data gRPC service.
 
-TLS/mTLS, OIDC authentication metadata, typed `google.rpc.Status` details, public native
-mutation-status lookup, streaming credit, a stable Rust gRPC regional
-administration implementation, long-running operations, metrics on the reserved
-port, protocol gateways, full Go/Java/Python generated SDK parity, and
-compatibility negotiation remain unimplemented. The experimental Stream,
+TLS/mTLS, OIDC authentication metadata, typed `google.rpc.Status` details,
+public native mutation-status lookup, native bidirectional streaming and
+connection-scoped credit, a stable Rust gRPC regional administration
+implementation, long-running operations, metrics on the reserved port,
+protocol gateways, full Go/Java/Python generated SDK parity, and compatibility
+negotiation remain unimplemented. The experimental Stream,
 Queue, Cache, and Event Bus tablets expose only the mutation/read surfaces
 described above. Typed Go, Java, and Python clients cover the provisional
 standalone profile HTTP routes, including explicit local Stream and Queue

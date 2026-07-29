@@ -842,6 +842,26 @@ impl Queue {
         counts
     }
 
+    /// Returns the number of live leases currently owned by one consumer.
+    ///
+    /// Expiry is driven by an explicit maintenance/acquire transition. This
+    /// observation therefore describes the applied Queue state and never
+    /// samples wall time or changes eligibility.
+    pub fn in_flight_for_consumer(&self, consumer: &str) -> usize {
+        self.messages
+            .values()
+            .filter(|message| {
+                matches!(
+                    &message.state,
+                    QueueState::Leased {
+                        consumer: owner,
+                        ..
+                    } if owner == consumer
+                )
+            })
+            .count()
+    }
+
     fn active_len(&self) -> usize {
         self.messages
             .values()
@@ -1527,6 +1547,31 @@ mod tests {
         let delivery = queue.acquire("worker", 1, None, 0).unwrap().remove(0);
 
         assert_eq!(delivery.lease_token, "one.1.2");
+    }
+
+    #[test]
+    fn consumer_in_flight_tracks_applied_lease_state_without_sampling_time() {
+        let mut queue = Queue::new(QueueConfig::default()).unwrap();
+        queue.enqueue(event("one"), 0).unwrap();
+        queue.enqueue(event("two"), 0).unwrap();
+        queue.enqueue(event("three"), 0).unwrap();
+
+        let worker_a = queue.acquire("worker-a", 2, Some(10), 0).unwrap();
+        queue.acquire("worker-b", 1, Some(10), 0).unwrap();
+        assert_eq!(queue.in_flight_for_consumer("worker-a"), 2);
+        assert_eq!(queue.in_flight_for_consumer("worker-b"), 1);
+        assert_eq!(queue.in_flight_for_consumer("unknown"), 0);
+
+        queue
+            .acknowledge(&worker_a[0].lease_token, 1)
+            .expect("settlement removes one applied lease");
+        assert_eq!(queue.in_flight_for_consumer("worker-a"), 1);
+
+        // An observation does not implicitly expire a lease using wall time.
+        assert_eq!(queue.in_flight_for_consumer("worker-b"), 1);
+        queue.maintain(10);
+        assert_eq!(queue.in_flight_for_consumer("worker-a"), 0);
+        assert_eq!(queue.in_flight_for_consumer("worker-b"), 0);
     }
 
     #[test]

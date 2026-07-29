@@ -12,6 +12,7 @@ epoch_mutations_path=/experimental/v1/tablets/queue/mutations
 epoch_counts_path=/experimental/v1/tablets/queue/counts
 epoch_dead_letters_path=/experimental/v1/tablets/queue/dead-letters
 epoch_redrives_path=/experimental/v1/tablets/queue/redrives
+epoch_consumer_flow_path=/experimental/v1/tablets/queue/consumers/worker-a/flow
 epoch_stream_status_path=/experimental/v1/tablets/stream/status
 epoch_opaque_status_path=/experimental/v1/consensus/status
 epoch_internal_peer_message_path=/internal/v1/consensus/messages
@@ -279,7 +280,11 @@ assert_listener_boundaries() {
   local path
   local status_code
   curl --fail --silent --show-error "http://127.0.0.1:${public_port}/healthz" >/dev/null
-  for path in "$epoch_internal_peer_message_path" "$epoch_status_path" "$epoch_mutations_path"; do
+  for path in \
+    "$epoch_internal_peer_message_path" \
+    "$epoch_status_path" \
+    "$epoch_mutations_path" \
+    "$epoch_consumer_flow_path"; do
     status_code="$(curl --silent --output /dev/null --write-out '%{http_code}' \
       "http://127.0.0.1:${public_port}${path}")"
     [[ "$status_code" == 404 ]]
@@ -379,11 +384,23 @@ epoch_code="$(mutate_current_leader enqueue-scheduled "$epoch_schedule_operation
 [[ "$epoch_code" == 201 || "$epoch_code" == 200 ]]
 assert_applied "$(<"$epoch_response_file")" enqueued
 
-epoch_empty_acquire='{"kind":"acquire","consumer":"worker-a","consumer_epoch":"1","max_messages":1,"visibility_timeout_ms":"1200"}'
+epoch_empty_acquire='{"kind":"acquire","consumer":"worker-a","consumer_epoch":"1","max_messages":1,"max_in_flight":1,"visibility_timeout_ms":"1200"}'
 epoch_code="$(mutate_current_leader acquire-empty "$epoch_empty_acquire")"
 [[ "$epoch_code" == 201 || "$epoch_code" == 200 ]]
 assert_applied "$(<"$epoch_response_file")" acquired
 [[ "$(operation_value "$(<"$epoch_response_file")" deliveries)" == '[]' ]]
+python3 -c '
+import json
+import sys
+flow = json.loads(sys.argv[1])["receipt"]["outcome"]["result"]["flow_control"]
+assert flow == {
+    "requested_credit": 1,
+    "max_in_flight": 1,
+    "in_flight_before": "0",
+    "in_flight_after": "0",
+    "remaining_capacity": "1",
+}, flow
+' "$(<"$epoch_response_file")"
 
 python3 -c '
 import sys
@@ -395,8 +412,29 @@ time.sleep(delay)
 epoch_code="$(mutate_current_leader acquire-scheduled "$epoch_empty_acquire")"
 [[ "$epoch_code" == 201 || "$epoch_code" == 200 ]]
 assert_applied "$(<"$epoch_response_file")" acquired
+python3 -c '
+import json
+import sys
+flow = json.loads(sys.argv[1])["receipt"]["outcome"]["result"]["flow_control"]
+assert flow["in_flight_before"] == "0", flow
+assert flow["in_flight_after"] == "1", flow
+assert flow["remaining_capacity"] == "0", flow
+' "$(<"$epoch_response_file")"
 epoch_old_token="$(delivery_value "$(<"$epoch_response_file")" lease_token)"
 epoch_old_deadline="$(delivery_value "$(<"$epoch_response_file")" lease_deadline_ms)"
+read -r epoch_flow_leader _ < <(wait_for_leader)
+epoch_consumer_flow="$(tablet_get "$epoch_flow_leader" "$epoch_consumer_flow_path")"
+python3 -c '
+import json
+import sys
+document = json.loads(sys.argv[1])
+assert document["observation_scope"] == "local", document
+assert document["flow"] == {
+    "consumer": "worker-a",
+    "consumer_epoch": "1",
+    "in_flight": "1",
+}, document
+' "$epoch_consumer_flow"
 
 read -r epoch_old_leader epoch_old_term < <(wait_for_leader)
 epoch_old_service="${epoch_services[epoch_old_leader - 1]}"
@@ -452,7 +490,7 @@ wait_for_nodes
 epoch_dlq_enqueue='{"kind":"enqueue","envelope":{"id":"job-dlq","source":"integration","type":"job.created","time_ms":"1","payload":{"id":2}}}'
 epoch_code="$(mutate_current_leader enqueue-dlq "$epoch_dlq_enqueue")"
 [[ "$epoch_code" == 201 || "$epoch_code" == 200 ]]
-epoch_dlq_acquire='{"kind":"acquire","consumer":"worker-b","consumer_epoch":"1","max_messages":1,"visibility_timeout_ms":"3000"}'
+epoch_dlq_acquire='{"kind":"acquire","consumer":"worker-b","consumer_epoch":"1","max_messages":1,"max_in_flight":1,"visibility_timeout_ms":"3000"}'
 epoch_code="$(mutate_current_leader acquire-dlq "$epoch_dlq_acquire")"
 [[ "$epoch_code" == 201 || "$epoch_code" == 200 ]]
 epoch_dlq_token="$(delivery_value "$(<"$epoch_response_file")" lease_token)"
@@ -503,4 +541,4 @@ wait_for_nodes
 wait_for_applied_count 14
 assert_cluster_state "$epoch_pre_kill_digest"
 
-printf 'Epoch typed Queue lease/failover/DLQ/redrive/SIGKILL replay smoke passed.\n'
+printf 'Epoch typed Queue credit/lease/failover/DLQ/redrive/SIGKILL replay smoke passed.\n'

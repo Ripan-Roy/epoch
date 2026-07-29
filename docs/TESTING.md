@@ -158,13 +158,15 @@ The Queue-tablet layers check strict canonical commands, three-instance
 convergence, leader/consumer/token fencing, exact renewed-token replay,
 monotonic committed-order time including descending leader assignments,
 exclusive deadlines, rejection rollback, non-zero jitter, TTL/max-age
-precedence, immutable DLQ/redrive provenance, browser-safe receipts, and pinned
-proposal/command/digest vectors. A real three-runtime test drives every Queue
-operation through typed HTTP and EPRS reopen. The container
-gate adds scheduled eligibility, follower rejection, leader `SIGKILL`,
+precedence, credit/window saturation, consumer isolation, settlement
+replenishment, immutable DLQ/redrive provenance, browser-safe receipts, and
+pinned proposal/command/digest vectors. A real three-runtime test drives every
+Queue operation plus flow-controlled receive and consumer-flow observation
+through typed HTTP and EPRS reopen. The container gate adds bounded credit
+evidence, scheduled eligibility, follower rejection, leader `SIGKILL`,
 old-term-token fencing, redelivery, DLQ/redrive reads, convergence, and all-node
-`SIGKILL` replay. This is bounded fixed-voter evidence, not a complete crash,
-I/O-fault, or production placement matrix. See
+`SIGKILL` replay. This is bounded fixed-voter evidence, not a native streaming,
+fairness, complete crash/I/O-fault, or production placement matrix. See
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
 The Cache suite checks pure observations, checked shard revisions and

@@ -220,6 +220,20 @@ the delivery. The delivery attempt increments when this lease is granted. The
 opaque lease token binds resource, partition, message, leader epoch, consumer or
 session generation, lease generation, and deadline.
 
+A flow-controlled acquire grants explicit request credit inside a declared
+per-consumer in-flight window. The atomic delivery bound is
+`min(credit, max_in_flight - current_in_flight, ready)`. The count includes
+every live lease for that consumer identity even when an older consumer epoch
+created it; advancing an epoch cannot manufacture overlapping capacity.
+Settlement or explicit expiry processing replenishes capacity. Different
+consumer identities have independent windows.
+
+The applied in-flight count is state-machine state, not a wall-clock
+observation. Reading it never expires leases. The current experimental HTTP
+slice returns exact before/after/remaining evidence but does not claim a native
+bidirectional receive stream, connection-scoped credit, fairness, or automatic
+prefetch. See [ADR-0014](adr/0014-queue-consumer-credit.md).
+
 Settlement behavior is:
 
 - **Ack:** terminal success after the acknowledgement state commits.
@@ -461,10 +475,12 @@ catalog/placement, distributed membership fencing, persisted profile snapshots,
 consumer-group coordination, bounded transactions, object tier, geo replication,
 native Protobuf services, compatibility gateways, durable webhook delivery,
 connector execution, or the security controls in [SECURITY.md](SECURITY.md).
-The experimental Stream, Queue, Cache, and Event Bus tablets also lack a read
-barrier, authenticated transport, multiple partitions/tablets, and bounded
-idempotency retention. See [STREAM_TABLET.md](STREAM_TABLET.md) and
-[QUEUE_TABLET.md](QUEUE_TABLET.md). The Cache tablet additionally lacks profile
+The direct experimental Stream, Queue, Cache, and Event Bus profile routes also
+lack a read barrier, authenticated transport, multiple partitions/tablets, and
+bounded idempotency retention. The regional resource/shard wrapper supplies a
+leader ReadIndex by default; it does not change the direct-route contract. See
+[STREAM_TABLET.md](STREAM_TABLET.md) and [QUEUE_TABLET.md](QUEUE_TABLET.md).
+The Cache tablet additionally lacks profile
 snapshots/compaction, background active expiry, and bounded
 idempotency-receipt retention; see [CACHE_TABLET.md](CACHE_TABLET.md). The Bus
 profile additionally lacks target executors, rate limiting, redrive/terminal

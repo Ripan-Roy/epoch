@@ -102,9 +102,13 @@ The strict single-partition Queue tablet now runs through that same persistent
 three-node actor boundary. Its internal typed API covers enqueue, acquire,
 renewal, settlement, retry/scheduling, maintenance, DLQ, redrive, status, and
 mutation lookup with deterministic time and leader/consumer-fenced leases.
-Real-runtime and container gates prove failover, exact renewal replay,
-convergence, and all-node `SIGKILL` recovery. It remains experimental, has no
-public SDK surface, and does not raise the standalone `local_durable` ceiling.
+Flow-controlled acquire adds bounded request credit, a per-consumer live-lease
+window, exact capacity evidence, and a pure consumer-flow read while preserving
+legacy command bytes. Real-runtime and container gates prove saturation,
+settlement replenishment, failover, exact renewal replay, convergence, and
+all-node `SIGKILL` recovery. Native bidirectional receive/fairness and the
+stable SDK surface remain open; this does not raise the standalone
+`local_durable` ceiling.
 
 The deterministic single-shard Cache tablet now runs through the same opt-in
 fixed-voter actor and rebuilds from EPRS before serving. Its internal typed API

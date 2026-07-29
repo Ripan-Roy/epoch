@@ -129,6 +129,30 @@ pub struct QueueTabletCounts {
     pub dead_lettered: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct QueueTabletFlowControl {
+    pub requested_credit: u16,
+    pub max_in_flight: u16,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    pub in_flight_before: u64,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    pub in_flight_after: u64,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    pub remaining_capacity: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct QueueTabletConsumerFlow {
+    pub consumer: String,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_u64_as_decimal"
+    )]
+    pub consumer_epoch: Option<u64>,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    pub in_flight: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum QueueTabletOperationResult {
@@ -138,6 +162,8 @@ pub enum QueueTabletOperationResult {
     },
     Acquired {
         deliveries: Vec<QueueTabletDelivery>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        flow_control: Option<QueueTabletFlowControl>,
         new_dead_letter_history_ids: Vec<String>,
     },
     Acknowledged {
