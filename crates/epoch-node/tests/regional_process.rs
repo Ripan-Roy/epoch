@@ -401,6 +401,16 @@ fn profile_write(kind: &str, term: u64) -> (&'static str, Value) {
     }
 }
 
+fn is_retryable_leadership_response(status: StatusCode, document: &Value) -> bool {
+    let code = document["code"]
+        .as_str()
+        .or_else(|| document["error"]["code"].as_str());
+    matches!(
+        status,
+        StatusCode::CONFLICT | StatusCode::SERVICE_UNAVAILABLE
+    ) && matches!(code, Some("not_leader" | "stale_term"))
+}
+
 async fn write_profile(
     client: &Client,
     cluster: &ProcessCluster,
@@ -408,23 +418,66 @@ async fn write_profile(
     name: &str,
     indexes: &[usize],
 ) {
-    let routes = wait_for_routes(client, cluster, kind, name, indexes).await;
-    let (leader, term) = writable_route(&routes, indexes);
-    let (operation, body) = profile_write(kind, term);
-    let response = client
-        .post(data_url(&cluster.nodes[leader], kind, name, operation))
-        .header("x-epoch-resource-generation", "1")
-        .header("x-epoch-tablet-epoch", "1")
-        .json(&body)
-        .send()
-        .await
-        .expect("profile write should receive a response");
-    assert!(
-        response.status().is_success(),
-        "{kind}/{name} write failed with {}: {}",
-        response.status(),
-        response.text().await.unwrap_or_default()
-    );
+    let result = tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            let routes = wait_for_routes(client, cluster, kind, name, indexes).await;
+            let (leader, term) = writable_route(&routes, indexes);
+            let (operation, body) = profile_write(kind, term);
+            let response = client
+                .post(data_url(&cluster.nodes[leader], kind, name, operation))
+                .header("x-epoch-resource-generation", "1")
+                .header("x-epoch-tablet-epoch", "1")
+                .json(&body)
+                .send()
+                .await
+                .expect("profile write should receive a response");
+            let status = response.status();
+            if status.is_success() {
+                return Ok(());
+            }
+            let encoded = response.text().await.unwrap_or_default();
+            let document = serde_json::from_str(&encoded).unwrap_or(Value::Null);
+            if !is_retryable_leadership_response(status, &document) {
+                return Err(format!(
+                    "{kind}/{name} write failed with {status}: {encoded}"
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => panic!("{error}\n{}", cluster.diagnostics()),
+        Err(error) => panic!(
+            "{kind}/{name} write did not survive a leadership transition: {error}\n{}",
+            cluster.diagnostics()
+        ),
+    }
+}
+
+#[test]
+fn retry_classifier_accepts_only_explicit_leadership_transitions() {
+    assert!(is_retryable_leadership_response(
+        StatusCode::CONFLICT,
+        &json!({"code": "not_leader"})
+    ));
+    assert!(is_retryable_leadership_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        &json!({"error": {"code": "not_leader"}})
+    ));
+    assert!(is_retryable_leadership_response(
+        StatusCode::CONFLICT,
+        &json!({"error": {"code": "stale_term"}})
+    ));
+    assert!(!is_retryable_leadership_response(
+        StatusCode::CONFLICT,
+        &json!({"code": "catalog_conflict"})
+    ));
+    assert!(!is_retryable_leadership_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        &json!({"error": {"code": "not_leader"}})
+    ));
 }
 
 fn exact_u64(value: &Value) -> Option<u64> {
