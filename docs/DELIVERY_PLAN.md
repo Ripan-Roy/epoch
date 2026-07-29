@@ -17,11 +17,12 @@ now covers a consensus-backed catalog, several fixed-voter groups per Rust
 process, simultaneous four-profile materialization and fenced routing, Go
 desired-state reconciliation and browser BFF, transactional single-owner Go
 metadata recovery, Go and Rust process loss, catch-up, exact replay, and
-same-volume all-node recovery. The regional foundation has passed protected
-`main` CI; this durable-control increment still requires its own PR evidence.
-Replicated multi-instance hosted metadata, authenticated APIs,
-dynamic/zone-aware placement, repair/rebalance, and the broader M2
-profile/security/performance gates remain open.
+same-volume all-node recovery. The durable-control and bootstrap trust
+increments have passed protected `main` CI. The active feature validates
+policy-protected configured-endpoint region/zone/class evidence and incremental group capacity before
+catalog mutation. Replicated multi-instance hosted metadata, production
+identity, dynamic membership/voter selection, repair/rebalance, and the broader
+M2 profile/security/performance gates remain open.
 
 ## Dependency-driven architecture sequence
 

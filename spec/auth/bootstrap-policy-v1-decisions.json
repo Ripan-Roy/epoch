@@ -62,6 +62,18 @@
       "allowed": true
     },
     {
+      "name": "control service may inspect regional topology",
+      "token": "epoch-dev-control-v1",
+      "action": "topology.read",
+      "scope": {
+        "organization": "",
+        "project": "",
+        "environment": "",
+        "namespace": ""
+      },
+      "allowed": true
+    },
+    {
       "name": "control service may not mutate data",
       "token": "epoch-dev-control-v1",
       "action": "data.write",

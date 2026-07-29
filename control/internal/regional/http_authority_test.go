@@ -79,6 +79,79 @@ func TestHTTPAuthorityAppliesThroughAvailableNodeAndObservesPlacement(t *testing
 	}
 }
 
+func TestHTTPAuthorityCollectsCompleteAuthenticatedTopologyInventory(t *testing.T) {
+	const token = "regional-control-token"
+	servers := make([]*httptest.Server, 0, 3)
+	for node := 1; node <= 3; node++ {
+		node := node
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			if request.URL.Path != "/experimental/v1/regional/topology" {
+				t.Errorf("path = %s", request.URL.Path)
+			}
+			if request.Header.Get("authorization") != "Bearer "+token {
+				t.Errorf("authorization header was not propagated")
+			}
+			writeAuthorityJSON(writer, http.StatusOK, map[string]any{
+				"node_id":                  strconv.Itoa(node),
+				"region":                   "ap-south",
+				"zone":                     "ap-south-1" + string(rune('a'+node-1)),
+				"node_class":               "general-purpose",
+				"consensus_voter_node_ids": []string{"1", "2", "3"},
+				"capacity": map[string]any{
+					"max_consensus_groups":       16,
+					"used_consensus_groups":      node,
+					"available_consensus_groups": 16 - node,
+				},
+			})
+		}))
+		servers = append(servers, server)
+		t.Cleanup(server.Close)
+	}
+	authority, err := NewAuthenticatedHTTPAuthority(serverURLs(servers), nil, token)
+	if err != nil {
+		t.Fatalf("NewAuthenticatedHTTPAuthority() error = %v", err)
+	}
+
+	inventory, err := authority.Inventory(t.Context())
+	if err != nil {
+		t.Fatalf("Inventory() error = %v", err)
+	}
+	if len(inventory.Nodes) != 3 || inventory.Nodes[1].NodeID != 2 ||
+		inventory.Nodes[1].Zone != "ap-south-1b" ||
+		inventory.Nodes[1].AvailableConsensusGroups != 14 {
+		t.Fatalf("inventory = %+v", inventory)
+	}
+}
+
+func TestHTTPAuthorityInventoryFailsClosedOnPartialEvidence(t *testing.T) {
+	healthy := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writeAuthorityJSON(writer, http.StatusOK, map[string]any{
+			"node_id": "1", "region": "local", "zone": "local-a", "node_class": "general",
+			"consensus_voter_node_ids": []string{"1", "2", "3"},
+			"capacity": map[string]any{
+				"max_consensus_groups": 16, "used_consensus_groups": 1,
+				"available_consensus_groups": 15,
+			},
+		})
+	}))
+	unavailable := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writeAuthorityJSON(writer, http.StatusServiceUnavailable, map[string]any{
+			"code": "topology_unavailable",
+		})
+	}))
+	t.Cleanup(healthy.Close)
+	t.Cleanup(unavailable.Close)
+	authority, err := NewHTTPAuthority([]string{healthy.URL, unavailable.URL}, nil)
+	if err != nil {
+		t.Fatalf("NewHTTPAuthority() error = %v", err)
+	}
+
+	_, err = authority.Inventory(t.Context())
+	if err == nil || !IsRetryable(err) {
+		t.Fatalf("Inventory() error = %v, want retryable partial inventory failure", err)
+	}
+}
+
 func TestHTTPAuthorityClassifiesFollowerResponsesAsRetryable(t *testing.T) {
 	servers := make([]*httptest.Server, 0, 2)
 	for range 2 {

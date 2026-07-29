@@ -11,8 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"epoch.local/epoch/control/internal/resources"
@@ -49,6 +51,7 @@ type AuthorityDeleteObservation struct {
 
 // Authority is the narrow boundary owned by regional Rust control.
 type Authority interface {
+	Inventory(context.Context) (NodeInventory, error)
 	Apply(context.Context, AuthorityApplyRequest) (AuthorityObservation, error)
 	Observe(context.Context, resources.ResourceKey) (AuthorityObservation, error)
 	Delete(context.Context, AuthorityDeleteRequest) (AuthorityDeleteObservation, error)
@@ -112,6 +115,7 @@ func IsRetryable(err error) bool {
 type Reconciler struct {
 	registry  *resources.Registry
 	authority Authority
+	mutations sync.Mutex
 }
 
 // NewReconciler constructs a regional reconciler.
@@ -126,10 +130,11 @@ func NewReconciler(registry *resources.Registry, authority Authority) *Reconcile
 }
 
 type desiredSpec struct {
-	ShardCount    uint32         `json:"shard_count"`
-	ReplicaCount  uint16         `json:"replica_count"`
-	Replicas      uint32         `json:"replicas"`
-	Configuration map[string]any `json:"configuration"`
+	ShardCount    uint32          `json:"shard_count"`
+	ReplicaCount  uint16          `json:"replica_count"`
+	Replicas      uint32          `json:"replicas"`
+	Placement     PlacementPolicy `json:"placement"`
+	Configuration map[string]any  `json:"configuration"`
 }
 
 // Reconcile applies a new desired generation once, then observes the already
@@ -138,6 +143,9 @@ func (reconciler *Reconciler) Reconcile(
 	ctx context.Context,
 	key resources.ResourceKey,
 ) (resources.Resource, error) {
+	reconciler.mutations.Lock()
+	defer reconciler.mutations.Unlock()
+
 	resource, err := reconciler.registry.Get(key)
 	if err != nil {
 		return resources.Resource{}, err
@@ -145,6 +153,14 @@ func (reconciler *Reconciler) Reconcile(
 	spec, err := decodeDesiredSpec(resource.Spec)
 	if err != nil {
 		return reconciler.fail(resource, false, err)
+	}
+	existingShards := resource.Status.ObservedShardCount
+	if existingShards == 0 {
+		existingShards = uint32(len(resource.Status.Tablets))
+	}
+	placement, err := reconciler.admit(ctx, resource, spec, existingShards)
+	if err != nil {
+		return reconciler.fail(resource, IsRetryable(err), err)
 	}
 
 	var observation AuthorityObservation
@@ -162,11 +178,11 @@ func (reconciler *Reconciler) Reconcile(
 	if err != nil {
 		return reconciler.fail(resource, IsRetryable(err), err)
 	}
-	if err := validateObservation(resource, spec, observation); err != nil {
+	if err := validateObservation(resource, spec, placement, observation); err != nil {
 		return reconciler.fail(resource, false, err)
 	}
 
-	status := statusFromObservation(resource.Generation, spec, observation)
+	status := statusFromObservation(resource.Generation, spec, placement, observation)
 	updated, err := reconciler.registry.UpdateStatus(
 		resource.ResourceKey,
 		resource.Generation,
@@ -178,12 +194,66 @@ func (reconciler *Reconciler) Reconcile(
 	return updated, nil
 }
 
+func (reconciler *Reconciler) admit(
+	ctx context.Context,
+	resource resources.Resource,
+	spec desiredSpec,
+	existingShards uint32,
+) (PlacementDecision, error) {
+	inventory, inventoryErr := reconciler.authority.Inventory(ctx)
+	if inventoryErr == nil {
+		return AdmitPlacement(
+			spec.Placement,
+			uint32(spec.ReplicaCount),
+			spec.ShardCount,
+			existingShards,
+			inventory,
+		)
+	}
+	// A catalog mutation always requires a fresh, complete capacity sample.
+	if resource.Status.ObservedGeneration < resource.Generation ||
+		!IsRetryable(inventoryErr) ||
+		resource.Status.Placement == nil {
+		return PlacementDecision{}, inventoryErr
+	}
+	// During a transient node outage, the last generation-fenced admission
+	// remains evidence of intended fixed-voter topology. Route sampling below
+	// still determines current serving voters and degrades honestly.
+	return AdmitPlacement(
+		spec.Placement,
+		uint32(spec.ReplicaCount),
+		spec.ShardCount,
+		existingShards,
+		inventoryFromStatus(resource.Status.Placement),
+	)
+}
+
+func inventoryFromStatus(status *resources.PlacementStatus) NodeInventory {
+	nodes := make([]RegionalNode, 0, len(status.Nodes))
+	for _, node := range status.Nodes {
+		nodes = append(nodes, RegionalNode{
+			NodeID:                   node.NodeID,
+			Region:                   node.Region,
+			Zone:                     node.Zone,
+			NodeClass:                node.NodeClass,
+			ConsensusVoterNodeIDs:    append([]uint64(nil), node.ConsensusVoterNodeIDs...),
+			MaxConsensusGroups:       node.MaxConsensusGroups,
+			UsedConsensusGroups:      node.UsedConsensusGroups,
+			AvailableConsensusGroups: node.AvailableConsensusGroups,
+		})
+	}
+	return NodeInventory{Nodes: nodes}
+}
+
 // Delete removes observed regional state before deleting Go desired metadata.
 // A disconnected authority leaves the desired resource intact for safe retry.
 func (reconciler *Reconciler) Delete(
 	ctx context.Context,
 	request resources.DeleteRequest,
 ) (resources.DeleteResult, error) {
+	reconciler.mutations.Lock()
+	defer reconciler.mutations.Unlock()
+
 	resource, err := reconciler.registry.Get(request.Key)
 	if err != nil {
 		// The registry checks completed tokens before it evaluates missing
@@ -245,6 +315,7 @@ func (reconciler *Reconciler) fail(
 	// is not evidence of present serving placement. Keep the last observed
 	// generation for reconciliation routing, but fail closed on topology.
 	status.Tablets = nil
+	status.Placement = nil
 	updated, updateErr := reconciler.registry.UpdateStatus(
 		resource.ResourceKey,
 		resource.Generation,
@@ -338,6 +409,7 @@ func mutationToken(operation string, resource resources.Resource) string {
 func validateObservation(
 	resource resources.Resource,
 	spec desiredSpec,
+	placement PlacementDecision,
 	observation AuthorityObservation,
 ) error {
 	if observation.Generation != resource.Generation {
@@ -368,6 +440,13 @@ func validateObservation(
 				"regional tablet generation or desired replicas do not match the resource",
 			)
 		}
+		for _, voter := range tablet.VoterNodeIDs {
+			if !slices.Contains(placement.VoterNodeIDs, voter) {
+				return invalidAuthorityError(
+					"regional tablet reported a voter outside the admitted fixed voter set",
+				)
+			}
+		}
 	}
 	return nil
 }
@@ -375,6 +454,7 @@ func validateObservation(
 func statusFromObservation(
 	generation uint64,
 	spec desiredSpec,
+	placement PlacementDecision,
 	observation AuthorityObservation,
 ) resources.ResourceStatus {
 	tablets := append([]resources.TabletStatus(nil), observation.Tablets...)
@@ -394,8 +474,35 @@ func statusFromObservation(
 	return resources.ResourceStatus{
 		Phase:              phase,
 		ObservedGeneration: generation,
+		ObservedShardCount: spec.ShardCount,
 		Message:            message,
 		Tablets:            tablets,
+		Placement:          placementStatus(placement),
+	}
+}
+
+func placementStatus(decision PlacementDecision) *resources.PlacementStatus {
+	nodes := make([]resources.RegionalNodeStatus, 0, len(decision.Nodes))
+	for _, node := range decision.Nodes {
+		used := node.UsedConsensusGroups + decision.AdditionalGroupsPerNode
+		available := node.AvailableConsensusGroups - decision.AdditionalGroupsPerNode
+		nodes = append(nodes, resources.RegionalNodeStatus{
+			NodeID:                   node.NodeID,
+			Region:                   node.Region,
+			Zone:                     node.Zone,
+			NodeClass:                node.NodeClass,
+			ConsensusVoterNodeIDs:    append([]uint64(nil), node.ConsensusVoterNodeIDs...),
+			MaxConsensusGroups:       node.MaxConsensusGroups,
+			UsedConsensusGroups:      used,
+			AvailableConsensusGroups: available,
+		})
+	}
+	return &resources.PlacementStatus{
+		AllowedRegions:    append([]string(nil), decision.Policy.AllowedRegions...),
+		MinimumZones:      decision.Policy.MinimumZones,
+		RequiredNodeClass: decision.Policy.RequiredNodeClass,
+		AchievedZones:     decision.AchievedZones,
+		Nodes:             nodes,
 	}
 }
 

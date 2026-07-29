@@ -321,7 +321,12 @@ volumes and dynamic loopback ports, then builds and launches the real
 authenticated Go desired state and reconciled into the Rust catalog with a
 separate control-workload credential; the browser BFF must return exact-origin
 CORS, decimal-string 64-bit IDs, one leader, and three actually observed
-voters. Every direct regional catalog/route/data request also authenticates.
+voters. Before mutation, the campaign verifies three distinct configured
+zones, identical peer-derived voter sets, and live group counts from the
+authorization-protected Rust topology endpoints. It also requests more shards than the
+limiting node can host, waits for the stable capacity reason, and proves the
+catalog resource was never created. Every direct regional
+catalog/route/data/topology request also authenticates.
 It then sends `SIGKILL` to the Go process, reopens
 the same bbolt metadata file, proves the original apply token replays without a
 second Rust mutation, and waits for placement to reconcile ready again. The

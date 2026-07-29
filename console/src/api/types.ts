@@ -53,6 +53,7 @@ export interface RegionalResource {
   phase: RegionalResourcePhase;
   summary: string;
   risks: string[];
+  placement: RegionalPlacementEvidence | null;
 }
 
 export interface ManagedRegionalTablet {
@@ -64,6 +65,44 @@ export interface ManagedRegionalTablet {
   desired_replicas: number;
   voter_node_ids: string[];
   leader_node_id: string | null;
+}
+
+export interface ManagedRegionalNode {
+  node_id: string;
+  region: string;
+  zone: string;
+  node_class: string;
+  consensus_voter_node_ids: string[];
+  max_consensus_groups: number;
+  used_consensus_groups: number;
+  available_consensus_groups: number;
+}
+
+export interface ManagedRegionalPlacement {
+  allowed_regions: string[];
+  minimum_zones: number;
+  required_node_class?: string;
+  achieved_zones: number;
+  nodes: ManagedRegionalNode[];
+}
+
+export interface RegionalPlacementNode {
+  nodeId: string;
+  region: string;
+  zone: string;
+  nodeClass: string;
+  consensusVoterNodeIds: string[];
+  maxConsensusGroups: number;
+  usedConsensusGroups: number;
+  availableConsensusGroups: number;
+}
+
+export interface RegionalPlacementEvidence {
+  allowedRegions: string[];
+  minimumZones: number;
+  requiredNodeClass: string | null;
+  achievedZones: number;
+  nodes: RegionalPlacementNode[];
 }
 
 export interface ManagedRegionalResource {
@@ -81,6 +120,7 @@ export interface ManagedRegionalResource {
   phase: RegionalResourcePhase;
   message?: string;
   tablets: ManagedRegionalTablet[];
+  placement?: ManagedRegionalPlacement;
 }
 
 export interface ManagedRegionalInventory {

@@ -175,6 +175,7 @@ func TestHTTPRegionalInventoryIsBrowserSafeAndExcludesLocalResources(t *testing.
 		Phase:              PhaseReady,
 		ObservedGeneration: created.Resource.Generation,
 		Message:            "regional placement converged",
+		ObservedShardCount: 1,
 		Tablets: []TabletStatus{{
 			TabletID:           largeID,
 			ConsensusGroupID:   largeID + 1,
@@ -185,6 +186,29 @@ func TestHTTPRegionalInventoryIsBrowserSafeAndExcludesLocalResources(t *testing.
 			VoterNodeIDs:       []uint64{largeID + 3, largeID + 4, largeID + 5},
 			LeaderNodeID:       largeID + 4,
 		}},
+		Placement: &PlacementStatus{
+			AllowedRegions:    []string{"ap-south"},
+			MinimumZones:      3,
+			RequiredNodeClass: "general-purpose",
+			AchievedZones:     3,
+			Nodes: []RegionalNodeStatus{
+				{
+					NodeID: 1, Region: "ap-south", Zone: "ap-south-1a",
+					NodeClass: "general-purpose", ConsensusVoterNodeIDs: []uint64{1, 2, 3},
+					MaxConsensusGroups: 16, UsedConsensusGroups: 2, AvailableConsensusGroups: 14,
+				},
+				{
+					NodeID: 2, Region: "ap-south", Zone: "ap-south-1b",
+					NodeClass: "general-purpose", ConsensusVoterNodeIDs: []uint64{1, 2, 3},
+					MaxConsensusGroups: 16, UsedConsensusGroups: 2, AvailableConsensusGroups: 14,
+				},
+				{
+					NodeID: 3, Region: "ap-south", Zone: "ap-south-1c",
+					NodeClass: "general-purpose", ConsensusVoterNodeIDs: []uint64{1, 2, 3},
+					MaxConsensusGroups: 16, UsedConsensusGroups: 2, AvailableConsensusGroups: 14,
+				},
+			},
+		},
 	}); err != nil {
 		t.Fatalf("update regional status: %v", err)
 	}
@@ -251,6 +275,20 @@ func TestHTTPRegionalInventoryIsBrowserSafeAndExcludesLocalResources(t *testing.
 		voters[1] != "9007199254740997" ||
 		voters[2] != "9007199254740998" {
 		t.Fatalf("regional voter_node_ids = %#v", tablet["voter_node_ids"])
+	}
+	placement, ok := resource["placement"].(map[string]any)
+	if !ok ||
+		placement["minimum_zones"] != float64(3) ||
+		placement["achieved_zones"] != float64(3) {
+		t.Fatalf("regional placement = %#v", resource["placement"])
+	}
+	nodes, ok := placement["nodes"].([]any)
+	if !ok || len(nodes) != 3 {
+		t.Fatalf("regional placement nodes = %#v", placement["nodes"])
+	}
+	node, ok := nodes[0].(map[string]any)
+	if !ok || node["node_id"] != "1" || node["zone"] != "ap-south-1a" {
+		t.Fatalf("regional placement node = %#v", nodes[0])
 	}
 }
 

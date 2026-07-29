@@ -273,11 +273,15 @@ The current generated `epoch.v1.RegionalAdminService` is a bounded Go-hosted
 bridge with `ApplyResource`, `GetResource`, `ListResources`, and
 `DeleteResource`. Apply validates a fully qualified data-bearing resource,
 profile/kind agreement, nonzero shard count, and the currently fixed replica
-count of three. It stores desired state, immediately reconciles through the
-Rust authority, and returns pending desired state when the region is
-unavailable. Definitive conflicts fail; exact apply and delete retries return
-their original result without applying the Rust mutation twice. Delete commits
-the Rust tombstone before removing Go desired metadata.
+count of three. `ResourceSpec.placement` can require allowed regions, a minimum
+zone count, and a node class. Before Rust catalog mutation, Go authenticates to
+every configured node, verifies an identical fixed-voter inventory, and checks
+incremental group capacity. Unsatisfied constraints fail before catalog apply.
+It stores desired state, immediately reconciles through the Rust authority, and
+returns pending desired state when the region is unavailable. Definitive
+conflicts fail; exact apply and delete retries return their original result
+without applying the Rust mutation twice. Delete commits the Rust tombstone
+before removing Go desired metadata.
 
 This subset has bounded list pages but no watch, opaque continuation, plan,
 backup, repair, purge, or long-running operation surface. Its single-owner Go
@@ -316,6 +320,25 @@ voter node IDs, and optional leader node ID are JSON decimal strings so a
 browser cannot lose 64-bit precision. Desired replicas and observed voters are
 separate fields; an authority outage returns `pending` with no current tablet
 placement rather than retaining a stale leader claim.
+
+The optional `placement` object contains the requested region/zone/class
+constraints, achieved zone count, and policy-protected configured-endpoint topology plus
+maximum/used/available consensus-group counts. Node and voter IDs remain
+decimal strings. These fields prove the fixed-voter admission decision; they do
+not claim rack separation, dynamic membership, or online rebalancing.
+
+The Rust node-local alpha inventory used by Go is:
+
+```text
+GET /experimental/v1/regional/topology
+```
+
+It requires `topology.read`, reports the fixed peer-derived voter set, and
+computes live used groups as catalog group 1 plus materialized tablets. Go
+requires a complete consistent response from every configured endpoint before
+any mutation. Capacity failures use `consensus_group_capacity` and retain the
+limiting node, required groups, and available groups in the internal admission
+error; the current public status exposes the stable reason in its message.
 
 The TypeScript console calls this Go endpoint only. Browser CORS is granted to
 exact HTTP(S) origins configured by `EPOCH_CONTROL_ALLOWED_ORIGINS`; wildcards,

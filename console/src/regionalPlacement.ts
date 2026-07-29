@@ -1,6 +1,7 @@
 import type {
   ManagedRegionalResource,
   RegionalResource,
+  RegionalPlacementEvidence,
   RegionalResourcePhase,
   RegionalTabletPlacement,
 } from "./api/types";
@@ -14,6 +15,7 @@ export interface RegionalPlacementAssessment {
 export function assessRegionalPlacement(
   tablets: RegionalTabletPlacement[],
   expectedShardCount: number,
+  topology: RegionalPlacementEvidence | null = null,
 ): RegionalPlacementAssessment {
   if (tablets.length === 0) {
     return {
@@ -56,10 +58,49 @@ export function assessRegionalPlacement(
       risks,
     };
   }
+  const topologyRisk = assessTopologyEvidence(tablets, topology);
+  if (topologyRisk !== null) {
+    return {
+      phase: topologyRisk.phase,
+      summary: `${shardLabel} serving · ${voterSummary}${topologyRisk.summarySuffix}`,
+      risks: topologyRisk.risks,
+    };
+  }
   return {
     phase: "ready",
     summary: `${shardLabel} serving · ${voterSummary} observed`,
     risks: ["Node count is observed; zone, rack, and failure-domain separation are not yet verified."],
+  };
+}
+
+function assessTopologyEvidence(
+  tablets: RegionalTabletPlacement[],
+  topology: RegionalPlacementEvidence | null,
+): { phase: RegionalResourcePhase; summarySuffix: string; risks: string[] } | null {
+  if (topology === null) {
+    return null;
+  }
+  const nodeIDs = new Set(topology.nodes.map((node) => node.nodeId));
+  const zones = new Set(topology.nodes.map((node) => node.zone));
+  const unknownVoter = tablets.some((tablet) => tablet.voterNodeIds.some((voter) => !nodeIDs.has(voter)));
+  if (
+    topology.minimumZones < 1 ||
+    topology.achievedZones < topology.minimumZones ||
+    zones.size < topology.minimumZones ||
+    unknownVoter
+  ) {
+    return {
+      phase: "degraded",
+      summarySuffix: " · topology evidence inconsistent",
+      risks: ["Reported topology does not prove the admitted placement constraints."],
+    };
+  }
+  return {
+    phase: "ready",
+    summarySuffix: ` · ${topology.achievedZones} configured zones observed`,
+    risks: [
+      "Configured zone labels agree across allowlisted responses; physical rack separation, Rust server identity, membership changes, and dynamic rebalancing remain outside this alpha.",
+    ],
   };
 }
 
@@ -74,7 +115,25 @@ export function mapRegionalInventory(resource: ManagedRegionalResource): Regiona
     voterNodeIds: [...tablet.voter_node_ids],
     leaderNodeId: tablet.leader_node_id,
   }));
-  const placement = assessRegionalPlacement(tablets, resource.shard_count);
+  const topology: RegionalPlacementEvidence | null = resource.placement
+    ? {
+        allowedRegions: [...resource.placement.allowed_regions],
+        minimumZones: resource.placement.minimum_zones,
+        requiredNodeClass: resource.placement.required_node_class ?? null,
+        achievedZones: resource.placement.achieved_zones,
+        nodes: resource.placement.nodes.map((node) => ({
+          nodeId: node.node_id,
+          region: node.region,
+          zone: node.zone,
+          nodeClass: node.node_class,
+          consensusVoterNodeIds: [...node.consensus_voter_node_ids],
+          maxConsensusGroups: node.max_consensus_groups,
+          usedConsensusGroups: node.used_consensus_groups,
+          availableConsensusGroups: node.available_consensus_groups,
+        })),
+      }
+    : null;
+  const placement = assessRegionalPlacement(tablets, resource.shard_count, topology);
   const risks = [...placement.risks];
   let phase = resource.phase;
   let summary = placement.summary;
@@ -102,5 +161,6 @@ export function mapRegionalInventory(resource: ManagedRegionalResource): Regiona
     phase,
     summary,
     risks,
+    placement: topology,
   };
 }

@@ -14,12 +14,14 @@ const POLICY: &[u8] = include_bytes!("../../../spec/auth/bootstrap-policy-v1.exa
 const CATALOG_RESOURCE: &str = "/experimental/v1/regional/catalog/resources/{organization}/{project}/{environment}/{namespace}/{kind}/{name}";
 const RESOURCE_ROUTE: &str = "/experimental/v1/regional/resources/{organization}/{project}/{environment}/{namespace}/{kind}/{name}/shards/{shard}";
 const DATA_ROUTE: &str = "/experimental/v1/regional/resources/{organization}/{project}/{environment}/{namespace}/{kind}/{name}/shards/{shard}/data/{*operation}";
+const TOPOLOGY_ROUTE: &str = "/experimental/v1/regional/topology";
 
 fn protected_router() -> Router {
     let router = Router::new()
         .route(CATALOG_RESOURCE, any(|| async { StatusCode::NO_CONTENT }))
         .route(RESOURCE_ROUTE, any(|| async { StatusCode::NO_CONTENT }))
-        .route(DATA_ROUTE, any(|| async { StatusCode::NO_CONTENT }));
+        .route(DATA_ROUTE, any(|| async { StatusCode::NO_CONTENT }))
+        .route(TOPOLOGY_ROUTE, any(|| async { StatusCode::NO_CONTENT }));
     let policy = BootstrapPolicy::from_json(POLICY).unwrap();
     with_regional_auth(router, Arc::new(policy))
 }
@@ -76,6 +78,15 @@ async fn regional_control_workload_can_reconcile_catalog_but_not_data() {
     )
     .await;
     assert_eq!(catalog.status(), StatusCode::NO_CONTENT);
+
+    let topology = call(
+        router.clone(),
+        Method::GET,
+        "/experimental/v1/regional/topology",
+        Some("epoch-dev-control-v1"),
+    )
+    .await;
+    assert_eq!(topology.status(), StatusCode::NO_CONTENT);
 
     let resource_named_data = call(
         router.clone(),

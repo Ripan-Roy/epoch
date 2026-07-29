@@ -444,7 +444,8 @@ baseline at the managed and regional public boundaries:
 - `epoch-control` uses the distinct credential supplied by
   `EPOCH_CONTROL_REGIONAL_TOKEN` for every Rust catalog or route request.
   Regional `epoch-node` processes independently authenticate and authorize
-  catalog apply/delete/read, route read, and typed data read/write actions.
+  catalog apply/delete/read, route read, topology read, and typed data
+  read/write actions. Topology responses contain no bearer or tenant payload.
 - Authentication failures and authorization decisions produce bounded
   structured events with request/principal/policy/action/decision/reason/scope
   fields and no credential or payload field. The console keeps an interactively
@@ -454,6 +455,9 @@ baseline at the managed and regional public boundaries:
 Health and CORS preflight remain public. The stable standalone local-emulator
 HTTP API also remains unauthenticated and must stay on a trusted interface.
 Consensus peer port 7701 is still plaintext and unauthenticated.
+The bootstrap bearer authenticates Go to Rust; plain HTTP does not authenticate
+the Rust server to Go. The configured endpoint allowlist and consistent voter
+set narrow accidental misconfiguration but are not a substitute for mTLS.
 
 This is not the complete security architecture above. There is still no OIDC,
 credential expiry/revocation service, TLS/mTLS identity, signed forwarded

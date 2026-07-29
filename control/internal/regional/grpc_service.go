@@ -450,7 +450,34 @@ func statusToProto(observed resources.ResourceStatus) *epochv1.ResourceStatus {
 			Message:            observed.Message,
 			ObservedGeneration: observed.ObservedGeneration,
 		}},
-		Tablets: tablets,
+		Tablets:   tablets,
+		Placement: placementToProto(observed.Placement),
+	}
+}
+
+func placementToProto(observed *resources.PlacementStatus) *epochv1.PlacementStatus {
+	if observed == nil {
+		return nil
+	}
+	nodes := make([]*epochv1.RegionalNodeObservation, 0, len(observed.Nodes))
+	for _, node := range observed.Nodes {
+		nodes = append(nodes, &epochv1.RegionalNodeObservation{
+			NodeId:                   node.NodeID,
+			Region:                   node.Region,
+			Zone:                     node.Zone,
+			NodeClass:                node.NodeClass,
+			ConsensusVoterNodeIds:    append([]uint64(nil), node.ConsensusVoterNodeIDs...),
+			MaxConsensusGroups:       node.MaxConsensusGroups,
+			UsedConsensusGroups:      node.UsedConsensusGroups,
+			AvailableConsensusGroups: node.AvailableConsensusGroups,
+		})
+	}
+	return &epochv1.PlacementStatus{
+		AllowedRegions:    append([]string(nil), observed.AllowedRegions...),
+		MinimumZones:      observed.MinimumZones,
+		RequiredNodeClass: observed.RequiredNodeClass,
+		AchievedZones:     observed.AchievedZones,
+		Nodes:             nodes,
 	}
 }
 

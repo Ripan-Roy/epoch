@@ -30,6 +30,7 @@ use tracing::{error, info};
 const CATALOG_ROOT: &str = "/experimental/v1/regional/catalog";
 const CATALOG_RESOURCE_PREFIX: &str = "/experimental/v1/regional/catalog/resources/";
 const RESOURCE_PREFIX: &str = "/experimental/v1/regional/resources/";
+const TOPOLOGY_PATH: &str = "/experimental/v1/regional/topology";
 const MAX_REQUEST_ID_BYTES: usize = 128;
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
@@ -154,6 +155,9 @@ fn decision_reason(principal: &Principal, action: Action, allowed: bool) -> Deci
 }
 
 fn action_for_request(method: &Method, path: &str) -> Action {
+    if path == TOPOLOGY_PATH {
+        return Action::TopologyRead;
+    }
     if path == CATALOG_ROOT || path.starts_with(CATALOG_RESOURCE_PREFIX) {
         return match *method {
             Method::PUT | Method::POST | Method::PATCH => Action::CatalogApply,
@@ -177,7 +181,7 @@ fn action_for_request(method: &Method, path: &str) -> Action {
 }
 
 fn scope_for_path(path: &str) -> Result<ResourceScope, ()> {
-    if path == CATALOG_ROOT {
+    if path == CATALOG_ROOT || path == TOPOLOGY_PATH {
         return Ok(ResourceScope::new("", "", "", ""));
     }
     let remainder = path

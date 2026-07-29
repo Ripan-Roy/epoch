@@ -19,6 +19,7 @@ import (
 const (
 	maxAuthorityResponseBytes = 1 << 20
 	maxAuthorityBearerBytes   = 4 << 10
+	regionalTopologyPath      = "/experimental/v1/regional/topology"
 )
 
 // HTTPAuthority adapts the current Rust regional catalog and discovery routes
@@ -166,6 +167,21 @@ type routeDocument struct {
 	AcceptsWrites      bool           `json:"accepts_writes"`
 }
 
+type topologyDocument struct {
+	NodeID                decimalUint64    `json:"node_id"`
+	Region                string           `json:"region"`
+	Zone                  string           `json:"zone"`
+	NodeClass             string           `json:"node_class"`
+	ConsensusVoterNodeIDs []decimalUint64  `json:"consensus_voter_node_ids"`
+	Capacity              capacityDocument `json:"capacity"`
+}
+
+type capacityDocument struct {
+	MaxConsensusGroups       uint32 `json:"max_consensus_groups"`
+	UsedConsensusGroups      uint32 `json:"used_consensus_groups"`
+	AvailableConsensusGroups uint32 `json:"available_consensus_groups"`
+}
+
 type decimalUint64 uint64
 
 func (value *decimalUint64) UnmarshalJSON(encoded []byte) error {
@@ -183,6 +199,55 @@ func (value *decimalUint64) UnmarshalJSON(encoded []byte) error {
 	}
 	*value = decimalUint64(parsed)
 	return nil
+}
+
+// Inventory samples every configured regional endpoint. A missing or malformed
+// node fails the whole operation so admission never reasons from a partial
+// failure-domain or capacity view.
+func (authority *HTTPAuthority) Inventory(ctx context.Context) (NodeInventory, error) {
+	nodes := make([]RegionalNode, 0, len(authority.endpoints))
+	for _, endpoint := range authority.endpoints {
+		response, status, err := authority.requestEndpoint(
+			ctx,
+			endpoint,
+			http.MethodGet,
+			regionalTopologyPath,
+			nil,
+		)
+		if err != nil {
+			return NodeInventory{}, availabilityError(
+				"regional topology inventory is incomplete: " + err.Error(),
+			)
+		}
+		if status < 200 || status >= 300 {
+			return NodeInventory{}, availabilityError(
+				"regional topology inventory is incomplete: " +
+					authorityErrorMessage(response, status),
+			)
+		}
+		var topology topologyDocument
+		if err := decodeAuthorityJSON(response, &topology); err != nil {
+			return NodeInventory{}, err
+		}
+		voters := make([]uint64, 0, len(topology.ConsensusVoterNodeIDs))
+		for _, voter := range topology.ConsensusVoterNodeIDs {
+			voters = append(voters, uint64(voter))
+		}
+		nodes = append(nodes, RegionalNode{
+			NodeID:                   uint64(topology.NodeID),
+			Region:                   topology.Region,
+			Zone:                     topology.Zone,
+			NodeClass:                topology.NodeClass,
+			ConsensusVoterNodeIDs:    voters,
+			MaxConsensusGroups:       topology.Capacity.MaxConsensusGroups,
+			UsedConsensusGroups:      topology.Capacity.UsedConsensusGroups,
+			AvailableConsensusGroups: topology.Capacity.AvailableConsensusGroups,
+		})
+	}
+	sort.Slice(nodes, func(left, right int) bool {
+		return nodes[left].NodeID < nodes[right].NodeID
+	})
+	return NodeInventory{Nodes: nodes}, nil
 }
 
 // Apply idempotently sends one desired generation to the first available

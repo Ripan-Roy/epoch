@@ -243,10 +243,15 @@ local role and observed leader; data dispatch requires exact resource-generation
 and tablet-epoch fences and rejects a follower instead of forwarding or
 inventing success.
 
-The current placement is deliberately fixed at three configured voters. It is
-real multi-group execution and recovery, but it is not zone-aware placement,
-dynamic membership, online rebalance, or a stable authenticated public API. See
-[ADR-0009](adr/0009-regional-tablet-catalog.md).
+The current placement remains fixed at three configured voters, but it is now
+topology-aware at admission. Every Rust node reports its authenticated
+region/zone/class, exact fixed voter set, and live consensus-group capacity.
+Go requires a complete consistent inventory before catalog mutation, validates
+allowed regions, minimum zones, and node class, and charges only newly added
+shards. This is real constraint validation and capacity rejection, not dynamic
+membership, voter selection, online rebalance, rack placement, or a stable
+public API. See [ADR-0009](adr/0009-regional-tablet-catalog.md) and
+[ADR-0012](adr/0012-topology-aware-admission.md).
 
 `crates/epoch-tablet` also contains the canonical single-partition Queue tablet
 state machine. `epoch-node` attaches it as the only selected profile for one
@@ -287,9 +292,9 @@ execution remains explicitly unimplemented: the outbox proves durable intent
 and settlements, not that a target side effect occurred. See
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
-Snapshots, compaction, membership changes, constraint-aware placement,
-online transfer/repair, authenticated transport, and read barriers remain
-disabled. The byte contract is
+Snapshots, compaction, membership changes, general placement solving,
+online transfer/repair/rebalance, authenticated peer transport, and read
+barriers remain disabled. The byte contract is
 documented in [EPRS v1 consensus stable
 journal](../spec/formats/consensus-stable-store-v1.md); the complete scope and
 non-claims are recorded in
@@ -529,10 +534,13 @@ three-or-more-node cluster enables quorum profiles.
 
 The current alpha implements the first bounded form of this layer: one
 three-voter catalog group, a capped multi-group supervisor, catalog-driven
-four-profile materialization, and experimental HTTP discovery/data dispatch.
-It proves fixed placement, fencing, failover, catch-up, and same-volume reopen;
-it does not yet implement the target placement solver, membership changes,
-repair planner, or stable gRPC administration server in Rust.
+four-profile materialization, experimental HTTP discovery/data dispatch, and
+an authorization-protected node-local topology/capacity endpoint. Go validates
+region/zone/class constraints and limiting group capacity against all fixed
+voters before catalog mutation. It proves fixed-voter topology admission,
+fencing, failover, catch-up, and same-volume reopen; it does not yet implement
+general voter selection, membership changes, repair/rebalance planning, or a
+stable gRPC administration server in Rust.
 
 ### 11.2 Go managed plane
 
@@ -558,11 +566,16 @@ desired state, while the Rust catalog is authoritative for live data-plane
 state.
 
 The current Go alpha runs a real `RegionalAdminService` gRPC server and a
-periodic reconciler. Its multi-endpoint HTTP authority adapter applies desired
-generations to Rust, samples each configured node's route identity, and records
-only matching observed voters and leaders. Availability loss clears the
-placement sample rather than presenting it as current; a later observation is
-generation-fenced so it cannot mark newer desired state ready. The browser
+periodic reconciler. Its multi-endpoint HTTP authority adapter first collects
+policy-protected topology and live group capacity from every configured Rust
+node. It fails a mutation before catalog apply when the fixed voters cannot
+satisfy the requested regions, zone count, node class, or additional shard
+capacity. It then applies desired generations to Rust, samples each configured
+node's route identity, and records only matching observed voters and leaders.
+A partial outage reuses only the generation-fenced admitted topology while
+fresh route evidence becomes degraded; total authority loss clears the current
+sample. A later observation remains generation-fenced so it cannot mark newer
+desired state ready. The browser
 console reads `GET /v1/regional/resources` from the Go BFF and never contacts a
 Rust storage node. Every 64-bit value in that browser contract is a decimal
 string and CORS is granted only to exact configured HTTP(S) origins.

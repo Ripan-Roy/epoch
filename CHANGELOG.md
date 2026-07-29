@@ -21,6 +21,15 @@ notes explicitly list additional verified artifacts.
 - A session-only managed-control credential flow in the console, authenticated
   real-process/container recovery tests, ADR-0011, and end-to-end operator
   documentation.
+- A policy-protected Rust topology endpoint that reports configured
+  region/zone/class, the peer-derived fixed voter set, and live
+  consensus-group capacity.
+- Topology-aware Go admission for allowed regions, minimum zones, required node
+  class, and incremental shard capacity, with stable limiting-node rejection
+  before Rust catalog mutation.
+- Generated Protobuf and browser-safe status for requested versus achieved
+  placement, plus console evidence for verified configured zones and per-node
+  group capacity.
 
 ### Limitations
 
@@ -30,6 +39,10 @@ notes explicitly list additional verified artifacts.
   and production secret delivery remain unimplemented.
 - The standalone local-emulator API and consensus peer listener remain
   unauthenticated.
+- Placement remains the immutable three-voter set. There is no rack-aware
+  general solver, dynamic membership, transactional multi-controller
+  reservation, multidimensional capacity model, online transfer, repair, or
+  rebalance. Plain HTTP also does not authenticate the Rust server to Go.
 
 ## [0.1.0-alpha.3] - 2026-07-29
 

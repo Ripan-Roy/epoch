@@ -236,8 +236,8 @@ function EpochApp() {
               <strong>Evidence before promises.</strong>
               <span>
                 Local resources and managed regional placement are reported separately. The Go control plane
-                reports only Rust routes it actually observed; zone and failure-domain separation remain
-                unverified.
+                reports only Rust routes and configured topology it actually observed; physical failure-domain
+                identity and dynamic membership remain explicit non-claims.
               </span>
             </aside>
 
@@ -410,6 +410,12 @@ function EpochApp() {
                                   Shard {tablet.shardIndex} · voters{" "}
                                   {tablet.voterNodeIds.length > 0 ? tablet.voterNodeIds.join(", ") : "none"} ·
                                   leader {tablet.leaderNodeId ?? "none"}
+                                </li>
+                              ))}
+                              {resource.placement?.nodes.map((node) => (
+                                <li key={`node-${node.nodeId}`}>
+                                  Node {node.nodeId} · {node.region}/{node.zone} · {node.nodeClass} · capacity{" "}
+                                  {node.availableConsensusGroups}/{node.maxConsensusGroups} groups available
                                 </li>
                               ))}
                             </ul>

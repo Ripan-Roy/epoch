@@ -78,12 +78,52 @@ test("managed inventory maps browser-safe identifiers without contacting data no
         leader_node_id: "9007199254740998",
       },
     ],
+    placement: {
+      allowed_regions: ["ap-south"],
+      minimum_zones: 3,
+      required_node_class: "general-purpose",
+      achieved_zones: 3,
+      nodes: [
+        {
+          node_id: "9007199254740997",
+          region: "ap-south",
+          zone: "ap-south-1a",
+          node_class: "general-purpose",
+          consensus_voter_node_ids: ["9007199254740997", "9007199254740998", "9007199254740999"],
+          max_consensus_groups: 16,
+          used_consensus_groups: 2,
+          available_consensus_groups: 14,
+        },
+        {
+          node_id: "9007199254740998",
+          region: "ap-south",
+          zone: "ap-south-1b",
+          node_class: "general-purpose",
+          consensus_voter_node_ids: ["9007199254740997", "9007199254740998", "9007199254740999"],
+          max_consensus_groups: 16,
+          used_consensus_groups: 2,
+          available_consensus_groups: 14,
+        },
+        {
+          node_id: "9007199254740999",
+          region: "ap-south",
+          zone: "ap-south-1c",
+          node_class: "general-purpose",
+          consensus_voter_node_ids: ["9007199254740997", "9007199254740998", "9007199254740999"],
+          max_consensus_groups: 16,
+          used_consensus_groups: 2,
+          available_consensus_groups: 14,
+        },
+      ],
+    },
   });
 
   assert.equal(mapped.generation, "9007199254740993");
   assert.equal(mapped.phase, "ready");
   assert.equal(mapped.tablets[0]?.tabletId, "9007199254740994");
   assert.equal(mapped.tablets[0]?.leaderNodeId, "9007199254740998");
+  assert.match(mapped.summary, /3 configured zones observed/);
+  assert.equal(mapped.placement?.nodes[1]?.availableConsensusGroups, 14);
 });
 
 test("managed ready state fails closed when placement evidence is incomplete", () => {
