@@ -736,9 +736,9 @@ export function DocsPage({ section }: DocsPageProps) {
                 />
                 <ReferenceCard
                   eyebrow="RELEASE"
-                  title="v0.1.0-alpha.2 release notes"
+                  title="v0.1.0-alpha.3 release notes"
                   description="Verified milestone highlights, source-only artifacts, compatibility guidance, and explicit alpha limitations."
-                  href={`${repositoryDocsUrl}/releases/v0.1.0-alpha.2.md`}
+                  href={`${repositoryDocsUrl}/releases/v0.1.0-alpha.3.md`}
                 />
               </div>
             </section>

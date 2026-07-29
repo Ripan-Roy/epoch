@@ -22,7 +22,7 @@ import { profileDefinitions } from "./profileDefinitions";
 
 const refreshIntervalMs = 15_000;
 const docsOnly = import.meta.env.VITE_DOCS_ONLY === "true";
-const releaseVersion = "0.1.0-alpha.2";
+const releaseVersion = "0.1.0-alpha.3";
 
 const durabilityRank: Record<DurabilityProfile, number> = {
   volatile: 0,
