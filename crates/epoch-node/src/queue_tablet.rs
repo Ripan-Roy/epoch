@@ -17,12 +17,13 @@ use epoch_consensus::{
 use epoch_core::Clock;
 use epoch_queue::QueueConfig;
 use epoch_tablet::{
-    CommittedCommand, MAX_QUEUE_TABLET_COMMAND_BYTES, QueueAcknowledgeCommand, QueueAcquireCommand,
-    QueueEnqueueCommand, QueueExtendLeaseCommand, QueueMaintainCommand, QueueNackCommand,
-    QueueRedriveCommand, QueueRejectCommand, QueueReleaseCommand, QueueTablet, QueueTabletCommand,
-    QueueTabletCounts, QueueTabletDeadLetterHistory, QueueTabletDisposition, QueueTabletOperation,
-    QueueTabletReceipt, QueueTabletRedriveHistory, QueueTabletScope, TabletError,
-    queue_proposal_id_for,
+    CommittedCommand, MAX_QUEUE_CONSUMER_BYTES, MAX_QUEUE_TABLET_COMMAND_BYTES,
+    QueueAcknowledgeCommand, QueueAcquireCommand, QueueCreditAcquireCommand, QueueEnqueueCommand,
+    QueueExtendLeaseCommand, QueueMaintainCommand, QueueNackCommand, QueueRedriveCommand,
+    QueueRejectCommand, QueueReleaseCommand, QueueTablet, QueueTabletCommand,
+    QueueTabletConsumerFlow, QueueTabletCounts, QueueTabletDeadLetterHistory,
+    QueueTabletDisposition, QueueTabletOperation, QueueTabletReceipt, QueueTabletRedriveHistory,
+    QueueTabletScope, TabletError, queue_proposal_id_for,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
@@ -43,6 +44,8 @@ pub const EXPERIMENTAL_QUEUE_TABLET_COUNTS_PATH: &str = "/experimental/v1/tablet
 pub const EXPERIMENTAL_QUEUE_TABLET_DEAD_LETTERS_PATH: &str =
     "/experimental/v1/tablets/queue/dead-letters";
 pub const EXPERIMENTAL_QUEUE_TABLET_REDRIVES_PATH: &str = "/experimental/v1/tablets/queue/redrives";
+pub const EXPERIMENTAL_QUEUE_TABLET_CONSUMER_FLOW_PATH: &str =
+    "/experimental/v1/tablets/queue/consumers/{consumer}/flow";
 
 const MAX_HISTORY_RECORDS: usize = 1_000;
 const TABLET_REQUEST_BODY_BYTES: usize = MAX_QUEUE_TABLET_COMMAND_BYTES + 16 * 1024;
@@ -185,6 +188,15 @@ impl QueueTabletService {
             .map_err(|_| "Queue tablet read lock was poisoned".to_owned())?
             .redrive_history(limit))
     }
+
+    fn consumer_flow(&self, consumer: &str) -> Result<QueueTabletConsumerFlow, String> {
+        self.ensure_healthy()?;
+        self.tablet
+            .read()
+            .map_err(|_| "Queue tablet read lock was poisoned".to_owned())?
+            .consumer_flow(consumer)
+            .map_err(|error| error.to_string())
+    }
 }
 
 fn committed_command(committed: &CommittedProposal) -> CommittedCommand<'_> {
@@ -262,6 +274,10 @@ pub fn router(
             EXPERIMENTAL_QUEUE_TABLET_REDRIVES_PATH,
             get(redrive_history),
         )
+        .route(
+            EXPERIMENTAL_QUEUE_TABLET_CONSUMER_FLOW_PATH,
+            get(consumer_flow),
+        )
         .layer(DefaultBodyLimit::max(TABLET_REQUEST_BODY_BYTES))
         .with_state(state)
 }
@@ -290,6 +306,8 @@ enum QueueOperationRequest {
         #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
         consumer_epoch: u64,
         max_messages: u16,
+        #[serde(default)]
+        max_in_flight: Option<u16>,
         #[serde(
             default,
             deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
@@ -372,14 +390,16 @@ impl QueueOperationRequest {
                 consumer,
                 consumer_epoch,
                 max_messages,
+                max_in_flight,
                 visibility_timeout_ms,
-            } => QueueTabletOperation::Acquire(QueueAcquireCommand {
-                partition: *partition,
-                consumer: consumer.clone(),
-                consumer_epoch: *consumer_epoch,
-                max_messages: *max_messages,
-                visibility_timeout_ms: *visibility_timeout_ms,
-            }),
+            } => acquire_operation(
+                *partition,
+                consumer,
+                *consumer_epoch,
+                *max_messages,
+                *max_in_flight,
+                *visibility_timeout_ms,
+            ),
             Self::Acknowledge {
                 partition,
                 consumer,
@@ -454,11 +474,44 @@ impl QueueOperationRequest {
                 message_id: message_id.clone(),
                 dead_letter_history_id: *dead_letter_history_id,
             }),
-            Self::Maintain { partition } => QueueTabletOperation::Maintain(QueueMaintainCommand {
-                partition: *partition,
-            }),
+            Self::Maintain { partition } => maintain_operation(*partition),
         }
     }
+}
+
+fn acquire_operation(
+    partition: u32,
+    consumer: &str,
+    consumer_epoch: u64,
+    credit: u16,
+    max_in_flight: Option<u16>,
+    visibility_timeout_ms: Option<u64>,
+) -> QueueTabletOperation {
+    max_in_flight.map_or_else(
+        || {
+            QueueTabletOperation::Acquire(QueueAcquireCommand {
+                partition,
+                consumer: consumer.to_owned(),
+                consumer_epoch,
+                max_messages: credit,
+                visibility_timeout_ms,
+            })
+        },
+        |max_in_flight| {
+            QueueTabletOperation::AcquireWithCredit(QueueCreditAcquireCommand {
+                partition,
+                consumer: consumer.to_owned(),
+                consumer_epoch,
+                credit,
+                max_in_flight,
+                visibility_timeout_ms,
+            })
+        },
+    )
+}
+
+fn maintain_operation(partition: u32) -> QueueTabletOperation {
+    QueueTabletOperation::Maintain(QueueMaintainCommand { partition })
 }
 
 async fn submit_mutation(
@@ -709,6 +762,38 @@ async fn redrive_history(
     }))
 }
 
+async fn consumer_flow(
+    State(state): State<QueueTabletApiState>,
+    Path(consumer): Path<String>,
+    read: Option<Extension<TabletReadMetadata>>,
+) -> TabletApiResult<Json<QueueTabletConsumerFlowResponse>> {
+    validate_consumer_flow_name(&consumer)?;
+    Ok(Json(QueueTabletConsumerFlowResponse {
+        read: tablet_read_metadata(read),
+        flow: state.service.consumer_flow(&consumer)?,
+    }))
+}
+
+fn validate_consumer_flow_name(consumer: &str) -> TabletApiResult<()> {
+    if consumer.trim().is_empty() {
+        return Err(TabletApiError::InvalidRequest(
+            "consumer is required".into(),
+        ));
+    }
+    if consumer.len() > MAX_QUEUE_CONSUMER_BYTES {
+        return Err(TabletApiError::InvalidRequest(format!(
+            "consumer is {} bytes; maximum is {MAX_QUEUE_CONSUMER_BYTES}",
+            consumer.len()
+        )));
+    }
+    if consumer.chars().any(char::is_control) {
+        return Err(TabletApiError::InvalidRequest(
+            "consumer cannot contain control characters".into(),
+        ));
+    }
+    Ok(())
+}
+
 async fn tablet_status(
     State(state): State<QueueTabletApiState>,
     read: Option<Extension<TabletReadMetadata>>,
@@ -839,6 +924,13 @@ struct QueueTabletRedrivesResponse {
     #[serde(flatten)]
     read: TabletReadMetadata,
     records: Vec<QueueTabletRedriveHistory>,
+}
+
+#[derive(Debug, Serialize)]
+struct QueueTabletConsumerFlowResponse {
+    #[serde(flatten)]
+    read: TabletReadMetadata,
+    flow: QueueTabletConsumerFlow,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]

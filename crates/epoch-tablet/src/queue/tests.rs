@@ -810,6 +810,150 @@ fn nonzero_jitter_and_followup_after_rejection_are_deterministic() {
 }
 
 #[test]
+fn consumer_credit_never_exceeds_the_declared_in_flight_window() {
+    let mut tablet = queue_with_jobs(6);
+    let first = credit_acquire("worker-credit-1", 10, "worker", 4, 2);
+    assert_eq!(first.format_version, 2);
+    let (deliveries, flow) = expect_credit_acquired(apply_command(&mut tablet, &first, 2, 7));
+    assert_eq!(deliveries.len(), 2);
+    assert_eq!(
+        flow,
+        QueueTabletFlowControl {
+            requested_credit: 4,
+            max_in_flight: 2,
+            in_flight_before: 0,
+            in_flight_after: 2,
+            remaining_capacity: 0,
+        }
+    );
+    let first_token = deliveries[0].lease_token.clone();
+    assert_eq!(tablet.consumer_in_flight("worker"), 2);
+
+    let saturated = credit_acquire("worker-credit-2", 11, "worker", 4, 2);
+    let (deliveries, flow) = expect_credit_acquired(apply_command(&mut tablet, &saturated, 2, 8));
+    assert!(deliveries.is_empty());
+    assert_eq!(flow.in_flight_before, 2);
+    assert_eq!(flow.in_flight_after, 2);
+    assert_eq!(flow.remaining_capacity, 0);
+
+    let other = credit_acquire("other-credit", 12, "other-worker", 3, 1);
+    let (deliveries, _) = expect_credit_acquired(apply_command(&mut tablet, &other, 2, 9));
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(tablet.consumer_in_flight("other-worker"), 1);
+
+    let restarted = command(
+        "other-credit-new-epoch",
+        12,
+        QueueTabletOperation::AcquireWithCredit(QueueCreditAcquireCommand {
+            partition: 0,
+            consumer: "other-worker".into(),
+            consumer_epoch: 2,
+            credit: 3,
+            max_in_flight: 1,
+            visibility_timeout_ms: Some(100),
+        }),
+    );
+    let (deliveries, flow) = expect_credit_acquired(apply_command(&mut tablet, &restarted, 2, 10));
+    assert!(deliveries.is_empty());
+    assert_eq!(flow.in_flight_before, 1);
+
+    let acknowledge = command(
+        "worker-ack",
+        13,
+        QueueTabletOperation::Acknowledge(QueueAcknowledgeCommand {
+            partition: 0,
+            consumer: "worker".into(),
+            consumer_epoch: 1,
+            lease_token: first_token,
+        }),
+    );
+    apply_command(&mut tablet, &acknowledge, 2, 11);
+    assert_eq!(tablet.consumer_in_flight("worker"), 1);
+
+    let replenished = credit_acquire("worker-credit-3", 14, "worker", 4, 2);
+    let (deliveries, flow) =
+        expect_credit_acquired(apply_command(&mut tablet, &replenished, 2, 12));
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(flow.in_flight_before, 1);
+    assert_eq!(flow.in_flight_after, 2);
+    assert_eq!(flow.remaining_capacity, 0);
+}
+
+fn queue_with_jobs(count: u64) -> QueueTablet {
+    let mut tablet = QueueTablet::new(scope(), config()).unwrap();
+    for index in 0..count {
+        let enqueue = QueueTabletCommand::enqueue(
+            &scope(),
+            format!("enqueue-{index}"),
+            event(&format!("job-{index}"), index + 1),
+            index + 1,
+        )
+        .unwrap();
+        apply_command(&mut tablet, &enqueue, 2, index + 1);
+    }
+    tablet
+}
+
+fn credit_acquire(
+    key: &str,
+    applied_at_ms: u64,
+    consumer: &str,
+    credit: u16,
+    max_in_flight: u16,
+) -> QueueTabletCommand {
+    command(
+        key,
+        applied_at_ms,
+        QueueTabletOperation::AcquireWithCredit(QueueCreditAcquireCommand {
+            partition: 0,
+            consumer: consumer.into(),
+            consumer_epoch: 1,
+            credit,
+            max_in_flight,
+            visibility_timeout_ms: Some(100),
+        }),
+    )
+}
+
+fn expect_credit_acquired(
+    receipt: QueueTabletReceipt,
+) -> (Vec<QueueTabletDelivery>, QueueTabletFlowControl) {
+    match receipt.outcome {
+        QueueTabletOutcome::Applied {
+            result:
+                QueueTabletOperationResult::Acquired {
+                    deliveries,
+                    flow_control: Some(flow),
+                    ..
+                },
+        } => (deliveries, flow),
+        outcome => panic!("expected flow-controlled acquisition: {outcome:?}"),
+    }
+}
+
+#[test]
+fn flow_control_command_bounds_fail_before_queue_mutation() {
+    for max_in_flight in [0, MAX_QUEUE_CONSUMER_IN_FLIGHT + 1] {
+        assert!(matches!(
+            QueueTabletCommand::new(
+                &scope(),
+                format!("bad-window-{max_in_flight}"),
+                1,
+                QueueTabletOperation::AcquireWithCredit(QueueCreditAcquireCommand {
+                    partition: 0,
+                    consumer: "worker".into(),
+                    consumer_epoch: 1,
+                    credit: 1,
+                    max_in_flight,
+                    visibility_timeout_ms: Some(100),
+                }),
+            ),
+            Err(TabletError::InvalidCommand(_))
+        ));
+    }
+}
+
+#[test]
 fn receipt_json_keeps_nested_u64_values_browser_safe() {
     let large = 9_007_199_254_740_993_u64;
     let mut tablet = QueueTablet::new(scope(), config()).unwrap();

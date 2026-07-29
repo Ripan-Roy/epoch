@@ -94,6 +94,7 @@ fn hash_operation_result_v1(hasher: &mut Sha256, result: &QueueTabletOperationRe
         }
         QueueTabletOperationResult::Acquired {
             deliveries,
+            flow_control,
             new_dead_letter_history_ids,
         } => {
             hasher.update([1]);
@@ -106,6 +107,16 @@ fn hash_operation_result_v1(hasher: &mut Sha256, result: &QueueTabletOperationRe
                 hasher.update(delivery.lease_deadline_ms.to_be_bytes());
             }
             hash_strings_v1(hasher, new_dead_letter_history_ids);
+            if let Some(flow) = flow_control {
+                // This suffix extends the v1 outcome hash without changing
+                // historical results whose flow-control evidence is absent.
+                hasher.update([0xf0]);
+                hasher.update(flow.requested_credit.to_be_bytes());
+                hasher.update(flow.max_in_flight.to_be_bytes());
+                hasher.update(flow.in_flight_before.to_be_bytes());
+                hasher.update(flow.in_flight_after.to_be_bytes());
+                hasher.update(flow.remaining_capacity.to_be_bytes());
+            }
         }
         QueueTabletOperationResult::Acknowledged { message_id } => {
             hasher.update([2]);

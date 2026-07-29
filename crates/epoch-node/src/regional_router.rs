@@ -671,6 +671,17 @@ mod tests {
             "records"
         ));
         assert!(is_read_operation(
+            &Method::GET,
+            WorkloadProfile::WorkQueue,
+            "consumers/worker-a/flow"
+        ));
+        assert_eq!(
+            profile_uri(WorkloadProfile::WorkQueue, "consumers/worker-a/flow", None)
+                .unwrap()
+                .path(),
+            "/experimental/v1/tablets/queue/consumers/worker-a/flow"
+        );
+        assert!(is_read_operation(
             &Method::POST,
             WorkloadProfile::EventBus,
             "archive/replay"

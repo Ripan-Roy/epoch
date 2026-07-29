@@ -172,7 +172,7 @@ durability.
 | QUEUE-008 | P1 | FIFO sessions and renewable lock | M5 | Planned | G0, G2, G3, G4 | Pending: per-session order/fencing history |
 | QUEUE-009 | P1 | Dedupe identifier and window | M5 | Planned | G0, G2, G7 | Pending: restart/window suppression suite |
 | QUEUE-010 | P1 | Fair priority bands | M5 | Planned | G0, G2, G4 | Pending: eligibility/starvation benchmark |
-| QUEUE-011 | P0 | Credit/prefetch and consumer concurrency | M1 native → M2 | Slice | G0, G4, G6 | Pending: flow-control saturation suite |
+| QUEUE-011 | P0 | Credit/prefetch and consumer concurrency | M1 native → M2 | Slice | G0, G4, G6 | Deterministic and real-three-runtime suites prove bounded request credit, per-consumer saturation across epochs, independent consumer windows, settlement replenishment, exact capacity evidence, and pure consumer-flow observations; the Docker Queue campaign exercises v2 acquire evidence and the read route while preserving v1 commands; pending: native bidirectional connection credit, automatic prefetch, fairness/backpressure load report, indexed backlog performance, and stable SDK surface |
 | QUEUE-012 | P1 | Dispatch shaping and circuit breaker | M5 | Planned | G4, G5, G8 | Pending: downstream protection load report |
 | QUEUE-013 | P2 | Deferred retrieval by identifier | M6 | Planned | G2, G4, G5 | Pending: deferred lifecycle/access suite |
 | QUEUE-014 | P2 | Request/reply and temporary destinations | M6 | Planned | G0, G4, G6 | Pending: correlation/cleanup failure suite |

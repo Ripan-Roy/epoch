@@ -255,6 +255,49 @@ fn lease_and_history_inputs_accept_decimal_u64_fields() {
 }
 
 #[test]
+fn acquire_request_selects_credit_command_only_when_a_window_is_declared() {
+    let legacy: QueueMutationRequest = serde_json::from_value(json!({
+        "idempotency_key": "legacy-acquire",
+        "expected_term": "2",
+        "operation": {
+            "kind": "acquire",
+            "consumer": "worker-a",
+            "consumer_epoch": "1",
+            "max_messages": 3
+        }
+    }))
+    .unwrap();
+    assert!(matches!(
+        legacy.operation.to_tablet_operation(),
+        QueueTabletOperation::Acquire(QueueAcquireCommand {
+            max_messages: 3,
+            ..
+        })
+    ));
+
+    let flow_controlled: QueueMutationRequest = serde_json::from_value(json!({
+        "idempotency_key": "credit-acquire",
+        "expected_term": "2",
+        "operation": {
+            "kind": "acquire",
+            "consumer": "worker-a",
+            "consumer_epoch": "1",
+            "max_messages": 3,
+            "max_in_flight": 7
+        }
+    }))
+    .unwrap();
+    assert!(matches!(
+        flow_controlled.operation.to_tablet_operation(),
+        QueueTabletOperation::AcquireWithCredit(QueueCreditAcquireCommand {
+            credit: 3,
+            max_in_flight: 7,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn request_identity_ignores_only_expected_term_and_server_time() {
     let request: QueueMutationRequest = serde_json::from_value(json!({
         "idempotency_key": "enqueue-1",
@@ -483,6 +526,14 @@ fn mutation_url(node: &RunningQueueNode) -> Url {
         .unwrap()
 }
 
+fn consumer_flow_url(node: &RunningQueueNode, consumer: &str) -> Url {
+    node.base_url
+        .join(&format!(
+            "experimental/v1/tablets/queue/consumers/{consumer}/flow"
+        ))
+        .unwrap()
+}
+
 async fn post_to_leader(
     cluster: &RunningQueueCluster,
     client: &reqwest::Client,
@@ -531,6 +582,103 @@ async fn typed_queue_tablet_commits_retries_converges_and_rebuilds() {
     let reopened = RunningQueueCluster::start(&paths, 2_000).await;
     assert_rebuilt(&reopened, &client, &digest).await;
     reopened.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn consumer_credit_saturates_and_replenishes_across_a_real_cluster() {
+    let temporary = TempDir::new().unwrap();
+    let paths = tablet_paths(temporary.path());
+    let cluster = RunningQueueCluster::start(&paths, 1_000).await;
+    let client = reqwest::Client::new();
+
+    for sequence in 1..=3 {
+        let enqueue = json!({
+            "idempotency_key": format!("flow-enqueue-{sequence}"),
+            "expected_term": "0",
+            "operation": {
+                "kind": "enqueue",
+                "envelope": {
+                    "id": format!("flow-job-{sequence}"),
+                    "source": "tests",
+                    "type": "job.created",
+                    "time_ms": "900",
+                    "payload": {"sequence": sequence}
+                }
+            }
+        });
+        let (status, document) = post_to_leader(&cluster, &client, &enqueue).await;
+        assert!(matches!(status, StatusCode::CREATED | StatusCode::OK));
+        assert_eq!(operation_result(&document)["kind"], "enqueued");
+    }
+
+    let acquire = |idempotency_key: &str| {
+        json!({
+            "idempotency_key": idempotency_key,
+            "expected_term": "0",
+            "operation": {
+                "kind": "acquire",
+                "consumer": "flow-worker",
+                "consumer_epoch": "1",
+                "max_messages": 3,
+                "max_in_flight": 2,
+                "visibility_timeout_ms": "1000"
+            }
+        })
+    };
+    let (_, first) = post_to_leader(&cluster, &client, &acquire("flow-acquire-1")).await;
+    let first_result = operation_result(&first);
+    assert_eq!(first_result["deliveries"].as_array().unwrap().len(), 2);
+    assert_eq!(first_result["flow_control"]["requested_credit"], 3);
+    assert_eq!(first_result["flow_control"]["max_in_flight"], 2);
+    assert_eq!(first_result["flow_control"]["in_flight_before"], "0");
+    assert_eq!(first_result["flow_control"]["in_flight_after"], "2");
+    assert_eq!(first_result["flow_control"]["remaining_capacity"], "0");
+
+    let (_, saturated) =
+        post_to_leader(&cluster, &client, &acquire("flow-acquire-saturated")).await;
+    let saturated_result = operation_result(&saturated);
+    assert!(
+        saturated_result["deliveries"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(saturated_result["flow_control"]["in_flight_before"], "2");
+    assert_eq!(saturated_result["flow_control"]["in_flight_after"], "2");
+
+    let (leader, _) = cluster.leader().await;
+    let flow: Value = client
+        .get(consumer_flow_url(&cluster.nodes[leader], "flow-worker"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(flow["observation_scope"], "local");
+    assert_eq!(flow["flow"]["consumer"], "flow-worker");
+    assert_eq!(flow["flow"]["consumer_epoch"], "1");
+    assert_eq!(flow["flow"]["in_flight"], "2");
+
+    let token = first_result["deliveries"][0]["lease_token"]
+        .as_str()
+        .unwrap();
+    acknowledge(&cluster, &client, "flow-ack-1", "flow-worker", token).await;
+    let (_, replenished) =
+        post_to_leader(&cluster, &client, &acquire("flow-acquire-replenished")).await;
+    let replenished_result = operation_result(&replenished);
+    assert_eq!(
+        replenished_result["deliveries"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(replenished_result["flow_control"]["in_flight_before"], "1");
+    assert_eq!(replenished_result["flow_control"]["in_flight_after"], "2");
+    assert_eq!(
+        replenished_result["flow_control"]["remaining_capacity"],
+        "0"
+    );
+
+    cluster.shutdown().await;
 }
 
 async fn assert_follower_and_invalid_request(

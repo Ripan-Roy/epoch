@@ -154,13 +154,15 @@ required for the metadata/replication work package and G3. See
 The Queue application core now runs behind the same profile-neutral persistent
 actor boundary. It deterministically applies strict single-partition commands,
 leader/consumer-fenced leases, retry/schedule/expiry, recorded business
-outcomes, and immutable DLQ/redrive history. Typed internal routes, EPRS startup
-replay, real-runtime convergence, leader `SIGKILL`, redelivery, and all-node
-container recovery are executable. Committed-order time normalization also
-prevents a retained pending entry followed by a lower-clock leader from
-fail-stopping live apply or recovery. This advances the Queue slice but does not
-complete flow control, placement, public routing/SDKs, authenticated transport,
-or production durability evidence. See
+outcomes, immutable DLQ/redrive history, and credit-bounded per-consumer
+in-flight windows. Typed internal routes, exact flow evidence, EPRS startup
+replay, real-runtime saturation/replenishment, leader `SIGKILL`, redelivery, and
+all-node container recovery are executable. Committed-order time normalization
+also prevents a retained pending entry followed by a lower-clock leader from
+fail-stopping live apply or recovery. This advances QUEUE-011 but does not
+complete native bidirectional receive, connection credit, fairness/load proof,
+placement, stable public routing/SDKs, authenticated transport, or production
+durability evidence. See
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
 The Cache application work now has a bounded deterministic tablet runtime. A

@@ -16,7 +16,7 @@ strict typed HTTP mutation
   -> deterministic scoped proposal ID and leader-assigned time
   -> fixed-three-voter persistent Raft proposal
   -> actor-owned committed proposal application
-  -> strict canonical QueueTabletCommand v1 decode
+  -> strict canonical QueueTabletCommand v1/v2 decode
   -> scope, order, proposal, and applied-time validation
   -> deterministic Queue transition on a cloned candidate state
   -> recorded applied or rejected business outcome
@@ -66,6 +66,7 @@ proposal routes are not mounted while a typed profile is selected.
 | `GET /experimental/v1/tablets/queue/counts` | Read stale-capable local profile counts without advancing time. |
 | `GET /experimental/v1/tablets/queue/dead-letters?limit=100` | Read immutable dead-letter history; limit is 1–1,000. |
 | `GET /experimental/v1/tablets/queue/redrives?limit=100` | Read immutable redrive history; limit is 1–1,000. |
+| `GET /experimental/v1/tablets/queue/consumers/{consumer}/flow` | Read the applied consumer epoch and current live-lease count without advancing time. |
 
 The mutation body carries no client timestamp:
 
@@ -92,6 +93,25 @@ The mutation body carries no client timestamp:
 the command table below. All 64-bit HTTP inputs accept either an unsigned JSON
 number or an exact decimal string. Every 64-bit output is a decimal string.
 Unknown top-level, operation, or nested envelope fields are rejected.
+
+An `acquire` may additionally declare `max_in_flight`. In that case
+`max_messages` is the credit granted by this request and the replicated
+transition delivers no more than the remaining consumer capacity:
+
+```json
+{
+  "idempotency_key": "receive-42",
+  "expected_term": "7",
+  "operation": {
+    "kind": "acquire",
+    "consumer": "worker-a",
+    "consumer_epoch": "3",
+    "max_messages": 20,
+    "max_in_flight": 64,
+    "visibility_timeout_ms": "30000"
+  }
+}
+```
 
 The internal listener has no CORS, TLS, authentication, authorization, or SDK
 compatibility commitment. It must not be exposed to untrusted networks. The
@@ -127,7 +147,8 @@ idempotency key, leader-assigned `applied_at_ms`, and one typed operation:
 | Operation | Operation fields | Deterministic effect |
 | --- | --- | --- |
 | `Enqueue` | `partition`, `envelope` | Add or deduplicate one immutable envelope. |
-| `Acquire` | `partition`, `consumer`, `consumer_epoch`, `max_messages`, optional `visibility_timeout_ms` | Advance a consumer epoch when allowed, select eligible messages, and create fenced leases before returning deliveries. |
+| `Acquire` v1 | `partition`, `consumer`, `consumer_epoch`, `max_messages`, optional `visibility_timeout_ms` | Preserve the original batch-bounded behavior for requests that omit a concurrency window. |
+| `AcquireWithCredit` v2 | `partition`, `consumer`, `consumer_epoch`, `credit`, `max_in_flight`, optional `visibility_timeout_ms` | Advance a consumer epoch when allowed and create no more leases than both granted credit and remaining consumer capacity permit. |
 | `Acknowledge` | `partition`, `consumer`, `consumer_epoch`, `lease_token` | Terminally settle the exact current lease. |
 | `ExtendLease` | settlement fields plus `extension_ms` | Replace the current token with one containing a strictly later, bounded deadline. |
 | `Release` | settlement fields, `delay_ms`, optional `reason` | Return the message through the configured immediate or delayed retry path. |
@@ -136,11 +157,15 @@ idempotency key, leader-assigned `applied_at_ms`, and one typed operation:
 | `Redrive` | `partition`, `message_id`, `dead_letter_history_id` | Reactivate only the message whose current dead-letter history ID exactly matches. |
 | `Maintain` | `partition` | Deterministically promote schedules and process lease, TTL, max-age, retry, and expiry boundaries. |
 
-Version 1 accepts only partition `0`. It rejects unknown fields, unsupported
-versions, non-canonical JSON, mismatched scope, and payloads above 512 KiB.
+Versions 1 and 2 accept only partition `0`. Existing operations continue to
+emit version 1; only `AcquireWithCredit` emits version 2, preserving historical
+canonical payloads and proposal vectors. Each operation rejects any mismatched
+version, unknown fields, non-canonical JSON, mismatched scope, and payloads
+above 512 KiB.
 Idempotency keys are limited to 128 bytes; message IDs to 1,024 bytes; consumer
 identities to 256 bytes; reasons to 4 KiB; lease tokens to 4 KiB; and acquire
-batches to 1–100 messages. Required text cannot be blank or contain control
+batches/credit to 1–100 messages. A declared consumer window is limited to
+1–10,000 live leases. Required text cannot be blank or contain control
 characters. Visibility timeouts, consumer epochs, lease extensions, and
 dead-letter history IDs must be non-zero where present.
 
@@ -177,6 +202,36 @@ A term change therefore fences settlement with an old-leader token. It does not
 prematurely create a second owner: a new-term acquire remains empty before the
 old deadline, and maintenance at the exclusive deadline makes the message
 eligible for a new fenced lease.
+
+## Consumer credit and concurrency
+
+A flow-controlled acquire atomically computes:
+
+```text
+grant = min(requested credit, max_in_flight - current in_flight, ready count)
+```
+
+The current count includes every applied live lease for the consumer identity,
+even when an older consumer epoch created it. Advancing the epoch therefore
+cannot bypass the concurrency window. Different consumer identities have
+independent windows. Ack, Nack, Release, Reject, or explicit expiry processing
+frees capacity according to the resulting applied state.
+
+The `Acquired` result includes `flow_control` evidence with
+`requested_credit`, `max_in_flight`, `in_flight_before`, `in_flight_after`, and
+`remaining_capacity`. The consumer-flow GET returns the currently applied
+epoch and count. Neither observation samples wall time; expiry remains an
+explicit committed maintenance/acquire transition. The direct GET is local and
+stale-capable, while the regional
+`.../data/consumers/{consumer}/flow` path defaults to the same leader ReadIndex
+barrier as other regional reads.
+
+The current implementation scans authoritative applied Queue state rather than
+maintaining a second counter index. It is deterministic and recovery-safe, but
+the scan is linear in retained messages. Native bidirectional receive streams,
+connection-scoped credit replenishment, automatic prefetch, fairness, dispatch
+shaping, and backlog-scale indexing remain open. See
+[ADR-0014](adr/0014-queue-consumer-credit.md).
 
 ## Monotonic applied time
 
@@ -276,6 +331,8 @@ The deterministic Queue tablet suite covers:
 - identical enqueue, acquire, reject, redrive, reacquire, and Ack history on
   three independent voters;
 - exact renewal replay with the original rotated token;
+- credit/window saturation, independent consumer windows, settlement
+  replenishment, and applied-state consumer-flow observations;
 - stale leader-term and consumer-epoch rejections;
 - immutable dead-letter/redrive history and stale-history fencing;
 - monotonic log-order applied time, including descending leader assignments,
@@ -295,17 +352,20 @@ The `epoch-node` real-runtime suite exercises strict HTTP extraction, semantic
 retry/conflict, server time under wall-clock rollback, descending assigned-time
 recovery, committed rejection, all nine operations, Queue reads, three-voter
 convergence, and EPRS reopen. The
-Docker gate additionally proves scheduled eligibility, follower rejection,
-active-leader `SIGKILL`, old-term token fencing, conservative redelivery,
-renewal replay, immutable DLQ/redrive reads, all-voter convergence, and exact
-state recovery after every container receives `SIGKILL`. CI retains container
-logs and EPRS state on failure.
+Docker gate additionally proves scheduled eligibility, bounded acquire-credit
+evidence and consumer-flow reads, follower rejection, active-leader `SIGKILL`,
+old-term token fencing, conservative redelivery, renewal replay, immutable
+DLQ/redrive reads, all-voter convergence, and exact state recovery after every
+container receives `SIGKILL`. CI retains container logs and EPRS state on
+failure.
 
 ## Deliberate limitations
 
-This milestone still has no public Queue-tablet route, gRPC service, CLI or SDK
-surface, streaming credit/prefetch, automatic timer proposal, or production
-durability claim. It has one resource, one tablet, partition `0`, static configuration,
+This milestone still has no stable public Queue-tablet route, gRPC service, CLI
+or SDK surface, native bidirectional receive stream, connection-scoped credit
+replenishment, automatic prefetch/fairness, automatic timer proposal, or
+production durability claim. It has one resource, one tablet, partition `0`,
+static configuration,
 unbounded in-memory idempotency and audit history, no snapshot or compaction,
 no catalog-authorized tablet epoch transition, dynamic placement, membership change,
 consumer-group/session coordinator, follower read routing, authenticated peer identity,

@@ -177,6 +177,14 @@ profile-specific tablet router. A stale generation/epoch, wrong profile,
 missing resource/shard, unavailable group, or nonleader is rejected before
 typed mutation handling. The router does not silently proxy a write.
 
+For a Queue resource, `POST .../data/mutations` may submit an `acquire` with
+`max_messages` request credit and `max_in_flight` consumer capacity. The
+committed receipt reports exact before/after/remaining capacity.
+`GET .../data/consumers/{consumer}/flow` observes the applied consumer epoch
+and live-lease count through the read-consistency rules below. This is the
+experimental bounded HTTP slice; it is not the future native bidirectional
+receive stream.
+
 Regional reads are linearizable by default and therefore must target the
 current leader. Epoch submits a safe Raft `ReadIndex`, waits for majority
 confirmation, applies locally through the returned index, and only then reads

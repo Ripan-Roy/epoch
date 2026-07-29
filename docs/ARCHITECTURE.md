@@ -260,12 +260,13 @@ public API. See [ADR-0009](adr/0009-regional-tablet-catalog.md),
 `crates/epoch-tablet` also contains the canonical single-partition Queue tablet
 state machine. `epoch-node` attaches it as the only selected profile for one
 fixed consensus group, rebuilds it from EPRS before readiness, and mounts
-strict mutation/status/count/DLQ/redrive routes on the internal listener. The
+strict mutation/status/count/DLQ/redrive/consumer-flow routes on the internal listener. The
 actor alone applies committed commands; reads never advance time; business
 rejections are committed receipts; structural divergence fails the actor and
 drains both listeners. Real-runtime and container gates prove leader-term and
-consumer fencing, scheduled redelivery, immutable history, convergence, and
-all-node `SIGKILL` replay. See [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
+consumer fencing, bounded consumer credit, settlement replenishment, scheduled
+redelivery, immutable history, convergence, and all-node `SIGKILL` replay. See
+[Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
 The Cache profile now has a separate deterministic tablet boundary. An additive
 `epoch-cache::CacheShard` uses sorted state, a checked shard-global revision,
@@ -401,6 +402,14 @@ Acquire is a committed transition that chooses eligible records and creates
 fenced lease tokens. Ack, Nack, Release, Reject, and Extend validate the tablet,
 leader, consumer/session, message, and lease generations before committing.
 Expired or superseded tokens cannot mutate state.
+
+The replicated Queue's additive flow-control transition combines request credit
+with a per-consumer live-lease window inside the same actor-serialized cloned
+state change. It counts authoritative lease state across consumer epochs,
+returns exact before/after capacity evidence, and preserves legacy v1 command
+bytes by using command v2 only for the new operation. The consumer-flow read is
+pure; regional routing supplies its normal default ReadIndex barrier. See
+[ADR-0014](adr/0014-queue-consumer-credit.md).
 
 In the standalone slice, a local-durable Queue uses deterministic command
 replay. The engine clones the current state, validates and applies a proposed
