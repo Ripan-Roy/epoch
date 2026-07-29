@@ -226,6 +226,19 @@ impl ConsensusProbeConfig {
         self.tick_interval
     }
 
+    pub fn for_group(&self, group_id: u64, group_epoch: u64) -> ConsensusProbeResult<Self> {
+        Self::new(
+            self.node_id.get(),
+            group_id,
+            group_epoch,
+            self.peer_urls
+                .iter()
+                .map(|(node_id, url)| (node_id.get(), url.clone())),
+            self.tick_interval,
+        )?
+        .with_queue_capacities(self.command_queue_capacity, self.outbound_queue_capacity)
+    }
+
     pub fn peer_url(&self, node_id: NodeId) -> Option<&Url> {
         self.peer_urls.get(&node_id)
     }
@@ -506,6 +519,35 @@ impl ConsensusProbeHandle {
 
     pub async fn receive_wire(&self, frame: &[u8]) -> ConsensusProbeResult<ConsensusStatus> {
         let message = PeerMessage::from_wire(frame, self.node_id)?;
+        self.receive_message(message).await
+    }
+
+    pub(crate) async fn receive_message(
+        &self,
+        message: PeerMessage,
+    ) -> ConsensusProbeResult<ConsensusStatus> {
+        if message.to() != self.node_id {
+            return Err(ConsensusError::InvalidMessage(format!(
+                "peer-message for node {} was routed to node {}",
+                message.to(),
+                self.node_id
+            ))
+            .into());
+        }
+        if message.group_id() != self.group_id {
+            return Err(ConsensusError::GroupMismatch {
+                expected: self.group_id,
+                observed: message.group_id(),
+            }
+            .into());
+        }
+        if message.group_epoch() != self.group_epoch {
+            return Err(ConsensusError::FencedEpoch {
+                expected: self.group_epoch,
+                observed: message.group_epoch(),
+            }
+            .into());
+        }
         self.request(|reply| ActorCommand::Receive { message, reply })
             .await
     }
@@ -547,7 +589,10 @@ impl ConsensusProbeHandle {
     }
 
     #[cfg(test)]
-    async fn inject_failure(&self, error: ConsensusProbeError) -> ConsensusProbeResult<()> {
+    pub(crate) async fn inject_failure(
+        &self,
+        error: ConsensusProbeError,
+    ) -> ConsensusProbeResult<()> {
         self.request(|reply| ActorCommand::InjectFailure { error, reply })
             .await
     }
@@ -747,6 +792,10 @@ impl ConsensusProbeRuntime {
 
     pub fn handle(&self) -> ConsensusProbeHandle {
         self.handle.clone()
+    }
+
+    pub fn subscribe_actor_failure(&self) -> watch::Receiver<Option<ConsensusProbeError>> {
+        self.actor_failure.clone()
     }
 
     pub const fn recovery(&self) -> PersistentRecovery {
@@ -1518,13 +1567,16 @@ mod tests {
     use std::sync::Arc;
 
     use axum::{body::Body, http::Request};
+    use epoch_catalog::{ApplyResource, CatalogCommand, ResourceName, ResourceSpec};
     use epoch_consensus::{InMemoryRaftAdapter, LogIndex};
+    use epoch_core::{ResourceKind, WorkloadProfile};
     use http_body_util::BodyExt;
     use serde_json::{Value, json};
     use tempfile::TempDir;
     use tower::ServiceExt;
 
     use super::*;
+    use crate::catalog_tablet::{CatalogTabletScope, CatalogTabletService};
 
     fn peer_url(port: u16) -> Url {
         Url::parse(&format!("http://127.0.0.1:{port}/")).expect("test peer URL should parse")
@@ -2000,7 +2052,8 @@ mod tests {
     }
 
     struct TestProbeCluster {
-        _directories: Vec<TempDir>,
+        directories: Vec<TempDir>,
+        peers: Vec<(u64, Url)>,
         runtimes: Vec<ConsensusProbeRuntime>,
         servers: Vec<Option<JoinHandle<()>>>,
     }
@@ -2082,7 +2135,8 @@ mod tests {
                 runtimes.push(runtime);
             }
             Self {
-                _directories: directories,
+                directories,
+                peers,
                 runtimes,
                 servers,
             }
@@ -2107,9 +2161,15 @@ mod tests {
             );
         }
 
-        async fn shutdown(self) {
+        async fn stop(&mut self) {
+            for server in &mut self.servers {
+                if let Some(server) = server.take() {
+                    server.abort();
+                    let _ = server.await;
+                }
+            }
             let mut shutdowns = tokio::task::JoinSet::new();
-            for runtime in self.runtimes {
+            for runtime in std::mem::take(&mut self.runtimes) {
                 shutdowns.spawn(runtime.shutdown());
             }
             while let Some(result) = shutdowns.join_next().await {
@@ -2117,10 +2177,61 @@ mod tests {
                     .expect("shutdown task should not panic")
                     .expect("runtime should stop cleanly");
             }
-            for server in self.servers.into_iter().flatten() {
-                server.abort();
-                let _ = server.await;
+        }
+
+        async fn restart_with_appliers(
+            &mut self,
+            appliers: Vec<Option<Arc<dyn CommittedProposalApplier>>>,
+        ) {
+            assert!(
+                self.runtimes.is_empty(),
+                "cluster must be stopped before restart"
+            );
+            assert_eq!(appliers.len(), 3, "one applier slot is required per voter");
+            let mut listeners = Vec::new();
+            for (_, peer) in &self.peers {
+                let address = peer
+                    .socket_addrs(|| None)
+                    .expect("peer URL should resolve without DNS")
+                    .into_iter()
+                    .next()
+                    .expect("peer URL should contain a socket address");
+                listeners.push(
+                    tokio::net::TcpListener::bind(address)
+                        .await
+                        .expect("peer listener should rebind"),
+                );
             }
+            for (index, listener) in listeners.into_iter().enumerate() {
+                let node_id = u64::try_from(index + 1).expect("three node IDs fit in u64");
+                let config = ConsensusProbeConfig::new(
+                    node_id,
+                    77,
+                    1,
+                    self.peers.clone(),
+                    Duration::from_millis(20),
+                )
+                .expect("cluster config should be valid");
+                let stable_path = self.directories[index].path().join("raft.wal");
+                let runtime = if let Some(applier) = appliers[index].clone() {
+                    ConsensusProbeRuntime::start_with_profile_applier(config, stable_path, applier)
+                        .await
+                } else {
+                    ConsensusProbeRuntime::start(config, stable_path).await
+                }
+                .expect("probe runtime should restart");
+                let router = runtime.internal_router();
+                self.servers.push(Some(tokio::spawn(async move {
+                    axum::serve(listener, router)
+                        .await
+                        .expect("restarted peer server should run");
+                })));
+                self.runtimes.push(runtime);
+            }
+        }
+
+        async fn shutdown(mut self) {
+            self.stop().await;
         }
 
         async fn shutdown_after_actor_failure(self) {
@@ -2224,6 +2335,27 @@ mod tests {
         .expect("a live majority leader should accept the proposal")
     }
 
+    fn catalog_command(token: &str, name: &str, shards: u32) -> CatalogCommand {
+        CatalogCommand::Apply(ApplyResource {
+            request_token: token.into(),
+            expected_generation: None,
+            name: ResourceName::new(
+                "acme",
+                "payments",
+                "production",
+                "core",
+                ResourceKind::Stream,
+                name,
+            )
+            .expect("test resource name should be valid"),
+            spec: ResourceSpec {
+                workload_profile: WorkloadProfile::StreamLog,
+                shard_count: shards,
+                replica_count: 3,
+            },
+        })
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn three_probe_runtimes_elect_and_commit_over_real_http() {
         let cluster = TestProbeCluster::start().await;
@@ -2248,6 +2380,99 @@ mod tests {
             };
             assert_eq!(committed.payload, payload);
         }
+        cluster.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn catalog_converges_recovers_and_continues_over_three_real_voters() {
+        let scope = CatalogTabletScope::new(77, 1).expect("catalog scope should be valid");
+        let services = (0..3)
+            .map(|_| CatalogTabletService::new(scope))
+            .collect::<Vec<_>>();
+        let appliers = services
+            .iter()
+            .map(|service| Some(Arc::clone(service) as Arc<dyn CommittedProposalApplier>))
+            .collect();
+        let mut cluster =
+            TestProbeCluster::start_with_appliers(DEFAULT_OUTBOUND_QUEUE_CAPACITY, appliers).await;
+        let handles = cluster.handles();
+        let _ = wait_for_leader(&handles).await;
+
+        for (proposal_id, command) in [
+            (701, catalog_command("orders-v1", "orders", 2)),
+            (702, catalog_command("audit-v1", "audit", 1)),
+        ] {
+            let proposed = propose_through_current_leader(
+                &handles,
+                proposal_id,
+                command
+                    .encode()
+                    .expect("catalog command should encode canonically"),
+            )
+            .await;
+            assert!(matches!(
+                proposed,
+                ProposalLookup::Pending { .. } | ProposalLookup::Committed(_)
+            ));
+            let _ = wait_for_commit(&handles, proposal_id).await;
+        }
+
+        let before_restart = services
+            .iter()
+            .map(|service| service.snapshot().expect("catalog should be healthy"))
+            .collect::<Vec<_>>();
+        assert!(
+            before_restart.windows(2).all(|pair| pair[0] == pair[1]),
+            "all voters should expose the same committed catalog"
+        );
+        assert_eq!(before_restart[0].resource_count, 2);
+        assert_eq!(before_restart[0].tablet_count, 3);
+
+        cluster.stop().await;
+        let recovered_services = (0..3)
+            .map(|_| CatalogTabletService::new(scope))
+            .collect::<Vec<_>>();
+        let recovered_appliers = recovered_services
+            .iter()
+            .map(|service| Some(Arc::clone(service) as Arc<dyn CommittedProposalApplier>))
+            .collect();
+        cluster.restart_with_appliers(recovered_appliers).await;
+
+        let after_restart = recovered_services
+            .iter()
+            .map(|service| {
+                service
+                    .snapshot()
+                    .expect("replayed catalog should be healthy")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(after_restart, before_restart);
+
+        let recovered_handles = cluster.handles();
+        let _ = wait_for_leader(&recovered_handles).await;
+        let command = catalog_command("ledger-v1", "ledger", 2);
+        let proposed = propose_through_current_leader(
+            &recovered_handles,
+            703,
+            command
+                .encode()
+                .expect("catalog command should encode canonically"),
+        )
+        .await;
+        assert!(matches!(
+            proposed,
+            ProposalLookup::Pending { .. } | ProposalLookup::Committed(_)
+        ));
+        let _ = wait_for_commit(&recovered_handles, 703).await;
+
+        let continued = recovered_services
+            .iter()
+            .map(|service| service.snapshot().expect("catalog should remain healthy"))
+            .collect::<Vec<_>>();
+        assert!(continued.windows(2).all(|pair| pair[0] == pair[1]));
+        assert_eq!(continued[0].resource_count, 3);
+        assert_eq!(continued[0].tablet_count, 5);
+        assert_eq!(continued[0].applied_command_count, 3);
         cluster.shutdown().await;
     }
 

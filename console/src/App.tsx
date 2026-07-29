@@ -1,10 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { apiBaseUrl, createResource, getHealth, listResources } from "./api/client";
+import {
+  apiBaseUrl,
+  controlBaseUrl,
+  createResource,
+  getHealth,
+  listRegionalResources,
+  listResources,
+} from "./api/client";
 import type {
   CreateResourceInput,
   DurabilityProfile,
   EngineHealth,
+  RegionalResource,
   ResourceKind,
   ResourceSummary,
 } from "./api/types";
@@ -79,8 +87,10 @@ function EpochApp() {
   const [route, setRoute] = useState<AppRoute>(readRoute);
   const [health, setHealth] = useState<EngineHealth | null>(null);
   const [resources, setResources] = useState<ResourceSummary[]>([]);
+  const [regionalResources, setRegionalResources] = useState<RegionalResource[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [regionalError, setRegionalError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [lastChecked, setLastChecked] = useState<Date | null>(null);
 
@@ -88,21 +98,38 @@ function EpochApp() {
     if (!quiet) {
       setLoading(true);
     }
-    try {
-      const [nextHealth, nextResources] = await Promise.all([getHealth(), listResources()]);
+    const [nodeResult, regionalResult] = await Promise.allSettled([
+      Promise.all([getHealth(), listResources()]),
+      listRegionalResources(),
+    ]);
+    if (nodeResult.status === "fulfilled") {
+      const [nextHealth, nextResources] = nodeResult.value;
       setHealth(nextHealth);
       setResources(nextResources);
       setLoadError(null);
-      setLastChecked(new Date());
-    } catch (caught) {
+    } else {
       setHealth(null);
       setResources([]);
-      setLoadError(caught instanceof Error ? caught.message : "The Epoch node could not be reached.");
-      setLastChecked(new Date());
-    } finally {
-      if (!quiet) {
-        setLoading(false);
-      }
+      setLoadError(
+        nodeResult.reason instanceof Error
+          ? nodeResult.reason.message
+          : "The Epoch node could not be reached.",
+      );
+    }
+    if (regionalResult.status === "fulfilled") {
+      setRegionalResources(regionalResult.value);
+      setRegionalError(null);
+    } else {
+      setRegionalResources([]);
+      setRegionalError(
+        regionalResult.reason instanceof Error
+          ? regionalResult.reason.message
+          : "Regional placement could not be observed.",
+      );
+    }
+    setLastChecked(new Date());
+    if (!quiet) {
+      setLoading(false);
     }
   }, []);
 
@@ -175,9 +202,9 @@ function EpochApp() {
             <aside className="alpha-banner" aria-label="Alpha limitations">
               <strong>Evidence before promises.</strong>
               <span>
-                This console reflects one local Rust node. Streams and Queues can opt into WAL-backed local
-                durability; Cache, Event Bus, and volatile resources remain process-local. Experimental
-                replication is not wired into this public console.
+                Local resources and managed regional placement are reported separately. The Go control plane
+                reports only Rust routes it actually observed; zone and failure-domain separation remain
+                unverified.
               </span>
             </aside>
 
@@ -247,13 +274,102 @@ function EpochApp() {
               </StatusCard>
             </section>
 
+            <section className="section resources-section" aria-labelledby="regional-title">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">REGIONAL PLACEMENT</p>
+                  <h2 id="regional-title">Observed catalog and serving risk</h2>
+                </div>
+                <p>
+                  Read through the managed control BFF at <code>{controlBaseUrl}</code>. Desired replicas
+                  never count as observed voters.
+                </p>
+              </div>
+
+              {regionalError ? (
+                <div className="callout callout--warning" role="status">
+                  <strong>Regional state unavailable</strong>
+                  <span>{regionalError}</span>
+                  <span>Local node controls remain available independently.</span>
+                </div>
+              ) : null}
+
+              {!regionalError && regionalResources.length === 0 ? (
+                <div className="empty-state">
+                  <strong>No regional resources in the committed catalog.</strong>
+                  <span>Create desired state through RegionalAdmin, then refresh placement.</span>
+                </div>
+              ) : null}
+
+              {regionalResources.length > 0 ? (
+                <div className="table-wrap">
+                  <table>
+                    <caption className="sr-only">
+                      Regional resources, observed generations, placements, and risks
+                    </caption>
+                    <thead>
+                      <tr>
+                        <th scope="col">Resource</th>
+                        <th scope="col">Generation</th>
+                        <th scope="col">State</th>
+                        <th scope="col">Observed placement</th>
+                        <th scope="col">Remaining risk</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {regionalResources.map((resource) => (
+                        <tr key={resource.canonicalName}>
+                          <th scope="row">
+                            <span className="resource-name">{resource.name}</span>
+                            <code className="resource-path">{resource.canonicalName}</code>
+                          </th>
+                          <td>
+                            {resource.generation}
+                            <span className="resource-generation-detail">
+                              observed {resource.observedGeneration}
+                            </span>
+                          </td>
+                          <td>
+                            <span className="phase-token" data-phase={resource.phase}>
+                              {formatEnum(resource.phase)}
+                            </span>
+                          </td>
+                          <td>
+                            <strong className="placement-summary">{resource.summary}</strong>
+                            <ul className="tablet-list">
+                              {resource.tablets.map((tablet) => (
+                                <li key={tablet.tabletId}>
+                                  Shard {tablet.shardIndex} · voters{" "}
+                                  {tablet.voterNodeIds.length > 0 ? tablet.voterNodeIds.join(", ") : "none"} ·
+                                  leader {tablet.leaderNodeId ?? "none"}
+                                </li>
+                              ))}
+                            </ul>
+                          </td>
+                          <td>
+                            <ul className="risk-list">
+                              {resource.risks.map((risk) => (
+                                <li key={risk}>{risk}</li>
+                              ))}
+                            </ul>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
+            </section>
+
             <section className="section" aria-labelledby="create-title">
               <div className="section-heading">
                 <div>
                   <p className="eyebrow">CREATE</p>
                   <h2 id="create-title">Choose behavior, not a vendor analogy.</h2>
                 </div>
-                <p>Alpha forms intentionally expose only the local guarantees implemented by this node.</p>
+                <p>
+                  These alpha forms target the standalone node API; regional desired state uses RegionalAdmin.
+                </p>
               </div>
               <div className="profile-grid">
                 {profileDefinitions.map((definition) => (

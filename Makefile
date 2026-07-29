@@ -8,7 +8,7 @@ NODE_LTS := $(if $(wildcard /opt/homebrew/opt/node@24/bin/node),/opt/homebrew/op
 PNPM_ENV := PATH="/opt/homebrew/opt/node@24/bin:$$PATH"
 JAVA_MVN := ./sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress
 
-.PHONY: help bootstrap-check generate generate-check release-check format format-check lint audit test test-unit test-retry-command test-consensus-process test-consensus-probe test-stream-tablet test-queue-tablet test-cache-tablet test-bus-tablet test-integration build check ci compose-config compose-up compose-down compose-probe-config compose-probe-up compose-probe-down clean
+.PHONY: help bootstrap-check generate generate-check release-check format format-check lint audit test test-unit test-retry-command test-consensus-process test-consensus-probe test-stream-tablet test-queue-tablet test-cache-tablet test-bus-tablet test-regional-runtime test-integration build check ci compose-config compose-up compose-down compose-probe-config compose-probe-up compose-probe-down compose-regional-config compose-regional-up compose-regional-down clean
 
 help: ## Show available commands.
 	@awk 'BEGIN {FS = ":.*## "; printf "Epoch development commands:\n\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -120,7 +120,10 @@ test-cache-tablet: ## Prove typed Cache CAS, transactions, TTL, fenced locks, fa
 test-bus-tablet: ## Prove Event Bus ingress/outbox settlement, failover, and SIGKILL recovery.
 	@bash tests/integration/bus-tablet.sh
 
-test-integration: test-consensus-process test-consensus-probe test-stream-tablet test-queue-tablet test-cache-tablet test-bus-tablet ## Exercise real processes through consensus, the CLI, and Go/Java/Python SDKs.
+test-regional-runtime: ## Prove Go-to-Rust regional BFF, four-profile failover, and all-node recovery.
+	@python3 tests/integration/regional-runtime.py
+
+test-integration: test-consensus-process test-consensus-probe test-stream-tablet test-queue-tablet test-cache-tablet test-bus-tablet test-regional-runtime ## Exercise real processes through consensus, the CLI, and Go/Java/Python SDKs.
 	@bash tests/integration/smoke.sh
 	@bash tests/integration/docs-quickstarts.sh
 
@@ -133,7 +136,7 @@ build: ## Build all available workspace components.
 
 check: generate-check release-check format-check lint test-unit audit ## Run the local pre-commit gate.
 
-ci: bootstrap-check check build test-integration compose-config compose-probe-config ## Run the deterministic CI gate available locally.
+ci: bootstrap-check check build test-integration compose-config compose-probe-config compose-regional-config ## Run the deterministic CI gate available locally.
 
 compose-config: ## Validate the development Compose model.
 	docker compose -f deploy/compose/docker-compose.yml config --quiet
@@ -152,6 +155,15 @@ compose-probe-up: ## Build and start the experimental fixed-voter consensus prob
 
 compose-probe-down: ## Stop the consensus probe without deleting its three volumes.
 	docker compose -f deploy/compose/docker-compose.consensus-probe.yml down
+
+compose-regional-config: ## Validate the three-node regional multi-tablet model.
+	docker compose -f deploy/compose/docker-compose.regional.yml config --quiet
+
+compose-regional-up: ## Build and start the three-node regional multi-tablet model.
+	docker compose -f deploy/compose/docker-compose.regional.yml up --build --detach
+
+compose-regional-down: ## Stop the regional model without deleting its three volumes.
+	docker compose -f deploy/compose/docker-compose.regional.yml down
 
 clean: ## Remove language build output (runtime data is retained).
 	@if [ -f Cargo.toml ]; then cargo clean; fi

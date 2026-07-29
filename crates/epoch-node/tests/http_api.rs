@@ -14,7 +14,10 @@ use axum::{
 };
 use epoch_core::{DeploymentMode, ManualClock};
 use epoch_engine::EpochEngine;
-use epoch_node::router;
+use epoch_node::{
+    regional_router::{RESOURCE_GENERATION_HEADER, TABLET_EPOCH_HEADER},
+    router,
+};
 use epoch_storage::FileWal;
 use http_body_util::BodyExt as _;
 use serde_json::{Value, json};
@@ -126,7 +129,9 @@ async fn cors_allows_only_an_explicit_browser_origin() {
             .expect("allowed headers are returned")
             .to_str()
             .expect("headers are text")
-            .eq_ignore_ascii_case("content-type")
+            .split(',')
+            .map(str::trim)
+            .any(|header| header.eq_ignore_ascii_case("content-type"))
     );
 
     let denied = app
@@ -170,6 +175,52 @@ async fn cors_blocks_headers_outside_the_json_contract() {
             .expect("headers are text")
             .contains("x-epoch-secret")
     );
+}
+
+#[tokio::test]
+async fn cors_allows_regional_fencing_headers() {
+    let app = app_with_origins(&["https://console.example"]).expect("origin is valid");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri(
+                    "/experimental/v1/regional/resources/acme/shop/dev/core/stream/orders/shards/0/data/records",
+                )
+                .header(ORIGIN, "https://console.example")
+                .header(ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .header(
+                    ACCESS_CONTROL_REQUEST_HEADERS,
+                    format!(
+                        "content-type,{RESOURCE_GENERATION_HEADER},{TABLET_EPOCH_HEADER}"
+                    ),
+                )
+                .body(Body::empty())
+                .expect("preflight request builds"),
+        )
+        .await
+        .expect("router returns a response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let allowed_headers = response
+        .headers()
+        .get(ACCESS_CONTROL_ALLOW_HEADERS)
+        .expect("configured headers are returned")
+        .to_str()
+        .expect("headers are text")
+        .to_ascii_lowercase();
+    for header in [
+        "content-type",
+        RESOURCE_GENERATION_HEADER,
+        TABLET_EPOCH_HEADER,
+    ] {
+        assert!(
+            allowed_headers
+                .split(',')
+                .map(str::trim)
+                .any(|allowed| allowed == header),
+            "{header} should be allowed, got {allowed_headers}"
+        );
+    }
 }
 
 #[test]

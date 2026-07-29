@@ -208,9 +208,19 @@ routes during expansion, monotonic generation fencing, delete/recreate without
 tablet ID reuse, exact idempotency replay and token-rebinding rejection,
 profile immutability, resource-kind/profile compatibility, strict name and
 capacity bounds, canonical versioned command decoding, and identical snapshots
-after command replay. These are state-machine tests only; catalog consensus,
-group supervision, placement, and public routing require later real-process and
-container evidence.
+after command replay.
+
+Node integration tests extend that state machine through dedicated catalog
+consensus, shared peer-frame group/epoch demultiplexing, bounded multi-group
+supervision, catalog-driven typed tablet materialization, and resource/shard
+routing. They reject unknown group/epoch, stale generation, stale tablet epoch,
+nonleader writes, wrong profile dispatch, missing routes, and inconsistent
+materialization. `regional_process` starts three actual `epoch-node` binaries,
+creates all four profiles in distinct groups, commits through each leader,
+kills and replaces a data leader, catches it up, kills all three processes, and
+reopens the same directories before comparing catalog and profile digests.
+This proves the current fixed-voter topology; it does not prove dynamic
+membership, zone constraints, read barriers, or exhaustive crash/I/O faults.
 
 ### 3. Integration tests
 
@@ -253,6 +263,7 @@ make test-stream-tablet
 make test-queue-tablet
 make test-cache-tablet
 make test-bus-tablet
+make test-regional-runtime
 ```
 
 `test-consensus-process` is ignored by Cargo's default suite so it cannot run
@@ -303,6 +314,20 @@ state digests on all voters, performs browser-safe filtered archive replay,
 kills the leader, commits through its replacement, catches the old voter up,
 then kills and reopens all voters from their EPRS volumes. Status must continue
 to report that target dispatch and a durable target outbox are not implemented.
+
+`test-regional-runtime` starts three regional containers with independent EPRS
+volumes and dynamic loopback ports, then builds and launches the real
+`epoch-control` process against those nodes. One resource is accepted through
+Go desired state and reconciled into the Rust catalog; the browser BFF must
+return exact-origin CORS, decimal-string 64-bit IDs, one leader, and three
+actually observed voters. The campaign also creates Cache, Stream, Queue, and
+Event Bus resources directly through the Rust catalog and commits one typed
+operation per profile. It kills the managed Stream leader, waits for the Go BFF
+to report degraded two-voter placement, commits through the replacement,
+restarts and catches up the old voter, kills every node, verifies Go clears
+stale placement while authority is unavailable, and reopens the same volumes
+before comparing catalog/profile digests. CI captures control logs, container
+logs, port assignments, and scoped state evidence on failure.
 
 `tests/integration/docs-quickstarts.sh` separately executes the exact Go, Java,
 and Python source imported into the documentation page. Each language gets a

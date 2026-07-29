@@ -14,9 +14,10 @@ use epoch_node::{
         CommittedProposalApplier, ConsensusProbeConfig, ConsensusProbeError, ConsensusProbeRuntime,
     },
     queue_tablet::{self, DEFAULT_COMMIT_WAIT as QUEUE_DEFAULT_COMMIT_WAIT, QueueTabletService},
+    regional_runtime::{RegionalNodeRuntime, RegionalRuntimeConfig},
     router, spawn_maintenance,
     stream_tablet::{self, DEFAULT_COMMIT_WAIT as STREAM_DEFAULT_COMMIT_WAIT, StreamTabletService},
-    validate_allowed_origins,
+    validate_allowed_origins, with_public_http_layers,
 };
 use epoch_queue::QueueConfig;
 use epoch_storage::{DEFAULT_WAL_SEGMENT_BYTES, MIN_WAL_SEGMENT_BYTES, StandaloneWal};
@@ -29,6 +30,7 @@ const DEFAULT_ALLOWED_ORIGINS: &str =
     "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:4173,http://localhost:4173";
 const DEFAULT_CONSENSUS_LISTEN: &str = "127.0.0.1:7701";
 const DEFAULT_CONSENSUS_TICK_MS: u64 = 100;
+const DEFAULT_REGIONAL_MAX_GROUPS: usize = 4_096;
 const SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
@@ -58,6 +60,14 @@ struct Args {
     json_logs: bool,
     #[arg(long, env = "EPOCH_CONSENSUS_PROBE_ENABLED")]
     consensus_probe_enabled: bool,
+    #[arg(long, env = "EPOCH_REGIONAL_RUNTIME_ENABLED")]
+    regional_runtime_enabled: bool,
+    #[arg(
+        long,
+        env = "EPOCH_REGIONAL_MAX_GROUPS",
+        default_value_t = DEFAULT_REGIONAL_MAX_GROUPS
+    )]
+    regional_max_groups: usize,
     #[command(flatten)]
     experimental_tablet: ExperimentalTabletArgs,
     #[arg(long, env = "EPOCH_CONSENSUS_NODE_ID")]
@@ -142,6 +152,14 @@ struct ConsensusProbeLaunch {
     tablet_profile: Option<TabletProfileLaunch>,
 }
 
+#[derive(Debug)]
+struct RegionalRuntimeLaunch {
+    config: ConsensusProbeConfig,
+    listen: SocketAddr,
+    data_dir: PathBuf,
+    max_groups: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TabletProfileLaunch {
     Stream(StreamTabletScope),
@@ -165,6 +183,7 @@ impl TabletProfileLaunch {
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     validate_allowed_origins(&args.allowed_origins)?;
+    let regional_runtime = regional_runtime_launch(&args)?;
     let consensus_probe = consensus_probe_launch(&args)?;
     let filter = EnvFilter::try_new(&args.log).unwrap_or_else(|_| EnvFilter::new("info"));
     if args.json_logs {
@@ -213,7 +232,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "Epoch standalone node is listening"
     );
 
-    let serving_result = if let Some(launch) = consensus_probe {
+    let serving_result = if let Some(launch) = regional_runtime {
+        serve_regional_mode(launch, listener, app, clock, &args.allowed_origins).await
+    } else if let Some(launch) = consensus_probe {
         serve_consensus_mode(launch, listener, app, clock).await
     } else {
         axum::serve(listener, app)
@@ -224,6 +245,52 @@ async fn main() -> Result<(), Box<dyn Error>> {
     maintenance.abort();
     let _ = maintenance.await;
     serving_result
+}
+
+async fn serve_regional_mode(
+    launch: RegionalRuntimeLaunch,
+    public_listener: TcpListener,
+    public_app: axum::Router,
+    clock: Arc<SystemClock>,
+    allowed_origins: &[String],
+) -> Result<(), Box<dyn Error>> {
+    let peer_listener = TcpListener::bind(launch.listen).await?;
+    let node_id = launch.config.node_id();
+    let catalog_group_id = launch.config.group_id();
+    let catalog_group_epoch = launch.config.group_epoch();
+    let tick_interval = launch.config.tick_interval();
+    let mut runtime = RegionalNodeRuntime::start(RegionalRuntimeConfig::new(
+        launch.config,
+        &launch.data_dir,
+        launch.max_groups,
+        clock,
+    ))
+    .await?;
+    let regional_public = with_public_http_layers(runtime.public_router(), allowed_origins)?;
+    let public_app = public_app.merge(regional_public);
+    info!(
+        address = %launch.listen,
+        %node_id,
+        %catalog_group_id,
+        %catalog_group_epoch,
+        tick_ms = tick_interval.as_millis(),
+        max_groups = launch.max_groups,
+        data_dir = %launch.data_dir.display(),
+        profile_guarantee_ceiling = "experimental_fixed_voter_majority",
+        peer_authentication = "none",
+        "experimental regional multi-tablet runtime is listening"
+    );
+    let server_result = serve_with_consensus_probe(
+        public_listener,
+        public_app,
+        peer_listener,
+        runtime.peer_router(),
+        runtime.wait_for_failure(),
+    )
+    .await
+    .map_err(boxed_error);
+    let runtime_result = runtime.shutdown().await.map_err(boxed_error);
+    server_result.and(runtime_result)
 }
 
 async fn serve_consensus_mode(
@@ -371,6 +438,54 @@ fn boxed_error(error: impl Error + 'static) -> Box<dyn Error> {
     Box::new(error)
 }
 
+fn regional_runtime_launch(
+    args: &Args,
+) -> Result<Option<RegionalRuntimeLaunch>, ConsensusProbeError> {
+    if !args.regional_runtime_enabled {
+        return Ok(None);
+    }
+    if args.consensus_probe_enabled {
+        return Err(ConsensusProbeError::InvalidConfiguration(
+            "regional runtime and legacy single-group consensus probe are mutually exclusive"
+                .into(),
+        ));
+    }
+    if [
+        args.experimental_tablet.stream_enabled,
+        args.experimental_tablet.queue_enabled,
+        args.experimental_tablet.cache_enabled,
+        args.experimental_tablet.bus_enabled,
+    ]
+    .into_iter()
+    .any(|enabled| enabled)
+    {
+        return Err(ConsensusProbeError::InvalidConfiguration(
+            "regional runtime materializes tablet profiles from catalog state; fixed profile flags are not allowed"
+                .into(),
+        ));
+    }
+    if args.regional_max_groups < 2 {
+        return Err(ConsensusProbeError::InvalidConfiguration(
+            "EPOCH_REGIONAL_MAX_GROUPS must allow the catalog and at least one data group".into(),
+        ));
+    }
+    let node_id = required_consensus_node_id(args)?;
+    let peer_spec = required_consensus_peers(args)?;
+    let config = ConsensusProbeConfig::from_peer_spec(
+        node_id,
+        args.consensus_group_id,
+        args.consensus_group_epoch,
+        peer_spec,
+        Duration::from_millis(args.consensus_tick_ms),
+    )?;
+    Ok(Some(RegionalRuntimeLaunch {
+        config,
+        listen: args.consensus_listen,
+        data_dir: args.data_dir.clone(),
+        max_groups: args.regional_max_groups,
+    }))
+}
+
 fn consensus_probe_launch(
     args: &Args,
 ) -> Result<Option<ConsensusProbeLaunch>, ConsensusProbeError> {
@@ -397,16 +512,8 @@ fn consensus_probe_launch(
     if !args.consensus_probe_enabled {
         return Ok(None);
     }
-    let node_id = args.consensus_node_id.ok_or_else(|| {
-        ConsensusProbeError::InvalidConfiguration(
-            "EPOCH_CONSENSUS_NODE_ID is required when the probe is enabled".into(),
-        )
-    })?;
-    let peer_spec = args.consensus_peers.as_deref().ok_or_else(|| {
-        ConsensusProbeError::InvalidConfiguration(
-            "EPOCH_CONSENSUS_PEERS is required when the probe is enabled".into(),
-        )
-    })?;
+    let node_id = required_consensus_node_id(args)?;
+    let peer_spec = required_consensus_peers(args)?;
     let config = ConsensusProbeConfig::from_peer_spec(
         node_id,
         args.consensus_group_id,
@@ -466,13 +573,32 @@ fn consensus_probe_launch(
     }))
 }
 
-async fn serve_with_consensus_probe(
+fn required_consensus_node_id(args: &Args) -> Result<u64, ConsensusProbeError> {
+    args.consensus_node_id.ok_or_else(|| {
+        ConsensusProbeError::InvalidConfiguration(
+            "EPOCH_CONSENSUS_NODE_ID is required when a consensus runtime is enabled".into(),
+        )
+    })
+}
+
+fn required_consensus_peers(args: &Args) -> Result<&str, ConsensusProbeError> {
+    args.consensus_peers.as_deref().ok_or_else(|| {
+        ConsensusProbeError::InvalidConfiguration(
+            "EPOCH_CONSENSUS_PEERS is required when a consensus runtime is enabled".into(),
+        )
+    })
+}
+
+async fn serve_with_consensus_probe<E>(
     public_listener: TcpListener,
     public_app: axum::Router,
     consensus_listener: TcpListener,
     consensus_app: axum::Router,
-    actor_failure: impl Future<Output = ConsensusProbeError>,
-) -> std::io::Result<()> {
+    actor_failure: impl Future<Output = E>,
+) -> std::io::Result<()>
+where
+    E: Error + Send + Sync + 'static,
+{
     serve_with_consensus_probe_until(
         public_listener,
         public_app,
@@ -484,14 +610,17 @@ async fn serve_with_consensus_probe(
     .await
 }
 
-async fn serve_with_consensus_probe_until(
+async fn serve_with_consensus_probe_until<E>(
     public_listener: TcpListener,
     public_app: axum::Router,
     consensus_listener: TcpListener,
     consensus_app: axum::Router,
     shutdown: impl Future<Output = ()>,
-    actor_failure: impl Future<Output = ConsensusProbeError>,
-) -> std::io::Result<()> {
+    actor_failure: impl Future<Output = E>,
+) -> std::io::Result<()>
+where
+    E: Error + Send + Sync + 'static,
+{
     let (drain_tx, public_shutdown) = watch::channel(false);
     let consensus_shutdown = public_shutdown.clone();
     let public_server = async move {
@@ -748,6 +877,80 @@ mod tests {
         let args = Args::try_parse_from(["epoch-node"]).unwrap();
         assert!(!args.consensus_probe_enabled);
         assert!(consensus_probe_launch(&args).unwrap().is_none());
+        assert!(!args.regional_runtime_enabled);
+        assert!(regional_runtime_launch(&args).unwrap().is_none());
+    }
+
+    #[test]
+    fn regional_runtime_uses_catalog_group_shared_peer_listener_and_capacity() {
+        let args = Args::try_parse_from([
+            "epoch-node",
+            "--regional-runtime-enabled",
+            "--data-dir",
+            "/tmp/epoch-regional-test",
+            "--consensus-node-id",
+            "2",
+            "--consensus-group-id",
+            "7",
+            "--consensus-group-epoch",
+            "3",
+            "--consensus-listen",
+            "127.0.0.1:7702",
+            "--consensus-peers",
+            "1=http://127.0.0.1:7701,2=http://127.0.0.1:7702,3=http://127.0.0.1:7703",
+            "--consensus-tick-ms",
+            "250",
+            "--regional-max-groups",
+            "64",
+        ])
+        .unwrap();
+        let launch = regional_runtime_launch(&args).unwrap().unwrap();
+
+        assert_eq!(launch.config.node_id().get(), 2);
+        assert_eq!(launch.config.group_id().get(), 7);
+        assert_eq!(launch.config.group_epoch().get(), 3);
+        assert_eq!(launch.config.tick_interval(), Duration::from_millis(250));
+        assert_eq!(launch.listen, "127.0.0.1:7702".parse().unwrap());
+        assert_eq!(launch.data_dir, PathBuf::from("/tmp/epoch-regional-test"));
+        assert_eq!(launch.max_groups, 64);
+    }
+
+    #[test]
+    fn regional_runtime_rejects_legacy_probe_fixed_profiles_and_missing_identity() {
+        let both_modes = Args::try_parse_from([
+            "epoch-node",
+            "--regional-runtime-enabled",
+            "--consensus-probe-enabled",
+        ])
+        .unwrap();
+        assert!(
+            regional_runtime_launch(&both_modes)
+                .unwrap_err()
+                .to_string()
+                .contains("mutually exclusive")
+        );
+
+        let fixed_profile = Args::try_parse_from([
+            "epoch-node",
+            "--regional-runtime-enabled",
+            "--experimental-stream-tablet-enabled",
+        ])
+        .unwrap();
+        assert!(
+            regional_runtime_launch(&fixed_profile)
+                .unwrap_err()
+                .to_string()
+                .contains("fixed profile flags")
+        );
+
+        let missing_identity =
+            Args::try_parse_from(["epoch-node", "--regional-runtime-enabled"]).unwrap();
+        assert!(
+            regional_runtime_launch(&missing_identity)
+                .unwrap_err()
+                .to_string()
+                .contains("EPOCH_CONSENSUS_NODE_ID")
+        );
     }
 
     #[test]

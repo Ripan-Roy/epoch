@@ -28,6 +28,66 @@ export interface ResourceCreated {
   resource_epoch: number;
 }
 
+export type RegionalResourcePhase = "pending" | "ready" | "degraded" | "failed";
+export type RegionalDataKind = "cache" | "table" | "stream" | "queue" | "event_bus";
+
+export interface RegionalTabletPlacement {
+  tabletId: string;
+  consensusGroupId: string;
+  shardIndex: number;
+  tabletEpoch: string;
+  resourceGeneration: string;
+  desiredReplicas: number;
+  voterNodeIds: string[];
+  leaderNodeId: string | null;
+}
+
+export interface RegionalResource {
+  canonicalName: string;
+  kind: RegionalDataKind;
+  name: string;
+  generation: string;
+  observedGeneration: string;
+  workloadProfile: string;
+  tablets: RegionalTabletPlacement[];
+  phase: RegionalResourcePhase;
+  summary: string;
+  risks: string[];
+}
+
+export interface ManagedRegionalTablet {
+  tablet_id: string;
+  consensus_group_id: string;
+  shard_index: number;
+  tablet_epoch: string;
+  resource_generation: string;
+  desired_replicas: number;
+  voter_node_ids: string[];
+  leader_node_id: string | null;
+}
+
+export interface ManagedRegionalResource {
+  canonical_name: string;
+  organization: string;
+  project: string;
+  environment: string;
+  namespace: string;
+  kind: RegionalDataKind;
+  name: string;
+  generation: string;
+  observed_generation: string;
+  workload_profile: string;
+  shard_count: number;
+  phase: RegionalResourcePhase;
+  message?: string;
+  tablets: ManagedRegionalTablet[];
+}
+
+export interface ManagedRegionalInventory {
+  resources: ManagedRegionalResource[];
+  count: number;
+}
+
 export interface CacheConfig {
   max_entries: number;
   default_ttl_ms: number | null;

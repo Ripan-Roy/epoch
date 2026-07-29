@@ -4,10 +4,11 @@
 //! live outside this crate so the same commands can be replayed by the
 //! standalone, clustered, and managed regional runtimes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use epoch_core::{ResourceKind, WorkloadProfile};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 const MAX_NAME_COMPONENT_BYTES: usize = 128;
@@ -18,6 +19,38 @@ const MAX_COMMAND_BYTES: usize = 512 * 1024;
 pub const CATALOG_COMMAND_FORMAT_VERSION: u16 = 1;
 
 pub type CatalogResult<T> = Result<T, CatalogError>;
+
+/// Deterministic consensus proposal identity for a regional catalog request.
+///
+/// Reusing a request token with different command bytes therefore reaches the
+/// consensus conflict boundary before it could be applied under a new ID.
+pub fn catalog_proposal_id_for(
+    group_id: u64,
+    group_epoch: u64,
+    request_token: &str,
+) -> CatalogResult<u64> {
+    if group_id == 0 || group_epoch == 0 {
+        return Err(CatalogError::InvalidSpec(
+            "catalog group ID and epoch must be non-zero".into(),
+        ));
+    }
+    validate_request_token(request_token)?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"epoch/catalog/proposal-id/v1\0");
+    hasher.update(group_id.to_be_bytes());
+    hasher.update(group_epoch.to_be_bytes());
+    hasher.update(
+        u64::try_from(request_token.len())
+            .map_err(|_| CatalogError::IdentityExhausted)?
+            .to_be_bytes(),
+    );
+    hasher.update(request_token.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    let proposal_id = u64::from_be_bytes(bytes);
+    Ok(if proposal_id == 0 { 1 } else { proposal_id })
+}
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum CatalogError {
@@ -48,6 +81,8 @@ pub enum CatalogError {
     CommandTooLarge,
     #[error("catalog command could not be decoded: {0}")]
     Decoding(String),
+    #[error("catalog state could not be encoded: {0}")]
+    Encoding(String),
     #[error("unsupported catalog command format version {0}")]
     UnsupportedCommandVersion(u16),
     #[error("catalog command is not in canonical v1 encoding")]
@@ -94,7 +129,7 @@ impl ResourceName {
         validate_name_component("name", &self.name)
     }
 
-    fn display_name(&self) -> String {
+    pub fn canonical_name(&self) -> String {
         format!(
             "{}/{}/{}/{}/{:?}/{}",
             self.organization, self.project, self.environment, self.namespace, self.kind, self.name
@@ -237,7 +272,8 @@ impl CatalogCommand {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CatalogMutation {
     Applied {
         resource: ResourceRecord,
@@ -295,18 +331,28 @@ pub struct TabletRoute {
     pub tablet: TabletDescriptor,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct CompletedRequest {
     command: CatalogCommand,
     mutation: CatalogMutation,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ResourceGeneration {
+    name: ResourceName,
+    generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CatalogSnapshot {
     resources: Vec<ResourceRecord>,
-    last_generations: BTreeMap<ResourceName, u64>,
+    last_generations: Vec<ResourceGeneration>,
     next_tablet_id: u64,
     next_consensus_group_id: u64,
+    reserved_consensus_group_ids: Vec<u64>,
     completed_requests: BTreeMap<String, CompletedRequest>,
 }
 
@@ -317,6 +363,7 @@ pub struct Catalog {
     tablet_index: BTreeMap<u64, (ResourceName, u32)>,
     next_tablet_id: u64,
     next_consensus_group_id: u64,
+    reserved_consensus_group_ids: BTreeSet<u64>,
     completed_requests: BTreeMap<String, CompletedRequest>,
 }
 
@@ -334,8 +381,20 @@ impl Catalog {
             tablet_index: BTreeMap::new(),
             next_tablet_id: 1,
             next_consensus_group_id: 1,
+            reserved_consensus_group_ids: BTreeSet::new(),
             completed_requests: BTreeMap::new(),
         }
+    }
+
+    pub fn with_reserved_consensus_group(group_id: u64) -> CatalogResult<Self> {
+        if group_id == 0 {
+            return Err(CatalogError::InvalidSpec(
+                "reserved consensus group ID must be non-zero".into(),
+            ));
+        }
+        let mut catalog = Self::new();
+        catalog.reserved_consensus_group_ids.insert(group_id);
+        Ok(catalog)
     }
 
     pub fn apply(&mut self, command: CatalogCommand) -> CatalogResult<CatalogMutation> {
@@ -364,7 +423,7 @@ impl Catalog {
     pub fn resource(&self, name: &ResourceName) -> CatalogResult<&ResourceRecord> {
         self.resources
             .get(name)
-            .ok_or_else(|| CatalogError::NotFound(name.display_name()))
+            .ok_or_else(|| CatalogError::NotFound(name.canonical_name()))
     }
 
     pub fn resources(&self) -> impl ExactSizeIterator<Item = &ResourceRecord> {
@@ -379,7 +438,7 @@ impl Catalog {
             })?)
             .filter(|tablet| tablet.shard_index == shard_index)
             .ok_or_else(|| {
-                CatalogError::NotFound(format!("{} shard {shard_index}", name.display_name()))
+                CatalogError::NotFound(format!("{} shard {shard_index}", name.canonical_name()))
             })
     }
 
@@ -405,11 +464,37 @@ impl Catalog {
     pub fn snapshot(&self) -> CatalogSnapshot {
         CatalogSnapshot {
             resources: self.resources.values().cloned().collect(),
-            last_generations: self.last_generations.clone(),
+            last_generations: self
+                .last_generations
+                .iter()
+                .map(|(name, generation)| ResourceGeneration {
+                    name: name.clone(),
+                    generation: *generation,
+                })
+                .collect(),
             next_tablet_id: self.next_tablet_id,
             next_consensus_group_id: self.next_consensus_group_id,
+            reserved_consensus_group_ids: self
+                .reserved_consensus_group_ids
+                .iter()
+                .copied()
+                .collect(),
             completed_requests: self.completed_requests.clone(),
         }
+    }
+
+    pub fn state_digest(&self) -> CatalogResult<[u8; 32]> {
+        let encoded = serde_json::to_vec(&self.snapshot())
+            .map_err(|error| CatalogError::Encoding(error.to_string()))?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"epoch/catalog/state/v1\0");
+        hasher.update(
+            u64::try_from(encoded.len())
+                .map_err(|_| CatalogError::IdentityExhausted)?
+                .to_be_bytes(),
+        );
+        hasher.update(encoded);
+        Ok(hasher.finalize().into())
     }
 
     fn apply_resource(&mut self, request: &ApplyResource) -> CatalogResult<CatalogMutation> {
@@ -469,9 +554,10 @@ impl Catalog {
             .map_err(|_| CatalogError::IdentityExhausted)?
             ..request.spec.shard_count
         {
+            let consensus_group_id = self.allocate_consensus_group_id()?;
             let tablet = TabletDescriptor {
                 tablet_id: self.next_tablet_id,
-                consensus_group_id: self.next_consensus_group_id,
+                consensus_group_id,
                 shard_index,
                 tablet_epoch: 1,
                 resource_generation: generation,
@@ -479,7 +565,6 @@ impl Catalog {
                 replica_count: request.spec.replica_count,
             };
             self.next_tablet_id += 1;
-            self.next_consensus_group_id += 1;
             tablets.push(tablet);
         }
         let resource = ResourceRecord {
@@ -545,11 +630,36 @@ impl Catalog {
             .checked_add(additional)
             .and_then(|next| next.checked_sub(1))
             .ok_or(CatalogError::IdentityExhausted)?;
-        self.next_consensus_group_id
-            .checked_add(additional)
-            .and_then(|next| next.checked_sub(1))
-            .ok_or(CatalogError::IdentityExhausted)?;
+        let mut next_group_id = self.next_consensus_group_id;
+        for _ in 0..additional {
+            while self.reserved_consensus_group_ids.contains(&next_group_id) {
+                next_group_id = next_group_id
+                    .checked_add(1)
+                    .ok_or(CatalogError::IdentityExhausted)?;
+            }
+            next_group_id = next_group_id
+                .checked_add(1)
+                .ok_or(CatalogError::IdentityExhausted)?;
+        }
         Ok(())
+    }
+
+    fn allocate_consensus_group_id(&mut self) -> CatalogResult<u64> {
+        while self
+            .reserved_consensus_group_ids
+            .contains(&self.next_consensus_group_id)
+        {
+            self.next_consensus_group_id = self
+                .next_consensus_group_id
+                .checked_add(1)
+                .ok_or(CatalogError::IdentityExhausted)?;
+        }
+        let allocated = self.next_consensus_group_id;
+        self.next_consensus_group_id = self
+            .next_consensus_group_id
+            .checked_add(1)
+            .ok_or(CatalogError::IdentityExhausted)?;
+        Ok(allocated)
     }
 }
 

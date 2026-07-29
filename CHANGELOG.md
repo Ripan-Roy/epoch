@@ -13,8 +13,32 @@ notes explicitly list additional verified artifacts.
   shard-to-tablet routing identity.
 - Versioned tablet descriptors in the regional Protobuf contract, including
   separate desired replicas and observed placement fields.
+- A dedicated three-voter catalog consensus group, shared group/epoch peer
+  transport, bounded multi-group supervisor, and catalog-driven simultaneous
+  Cache, Stream, Queue, and Event Bus materialization in one Rust node process.
+- Experimental resource/shard discovery and typed data dispatch with exact
+  resource-generation and tablet-epoch fencing, nonleader rejection, decimal
+  64-bit JSON, and deterministic route identity.
+- A real Go `RegionalAdminService`, generation-fenced desired-state reconciler,
+  multi-endpoint Rust authority adapter, idempotent apply/delete lifecycle, and
+  exact-origin browser inventory BFF that reports only observed voters/leaders.
+- A regional console view for desired/observed generations, pending, ready,
+  degraded, and failed state, per-shard voters/leaders, and explicit
+  failure-domain non-claims. The console obtains regional state only through
+  the Go BFF.
+- Real-process and three-container campaigns covering several consensus groups,
+  all four profiles, Go-to-Rust apply, leader `SIGKILL`, truthful degradation,
+  catch-up, all-node `SIGKILL`, same-volume reopen, and digest convergence.
 - A table-based delivery checklist covering program gates, milestone readiness,
   the active multi-tablet slice, pull-request quality gates, and releases.
+
+### Limitations
+
+- Regional placement is fixed to three configured voters; zone/rack constraints,
+  dynamic membership, online rebalance, repair, snapshots, compaction, and read
+  barriers are not implemented.
+- Regional Rust HTTP routes and the console/control surfaces are experimental
+  and unauthenticated. Go desired state and replay metadata are in memory.
 
 ## [0.1.0-alpha.2] - 2026-07-27
 
