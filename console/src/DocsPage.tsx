@@ -554,9 +554,10 @@ export function DocsPage({ section }: DocsPageProps) {
                   <p>
                     Three Rust nodes now run a dedicated catalog group plus simultaneous Cache, Stream, Queue,
                     and Event Bus tablets behind resource/shard routing. The Go control plane reconciles
-                    desired state through Rust and exposes observed placement to the browser; the console
-                    never contacts a storage node. The public SDK quickstart above remains standalone and{" "}
-                    <code>local_durable</code>. Fixed three-voter evidence is not zone-aware placement, and
+                    desired state through Rust, transactionally persists management metadata, and exposes
+                    observed placement to the browser; the console never contacts a storage node. The public
+                    SDK quickstart above remains standalone and <code>local_durable</code>. Fixed three-voter
+                    evidence is not zone-aware placement, the Go metadata database has one process owner, and
                     these regional routes remain experimental and unauthenticated.
                   </p>
                 </div>
@@ -576,10 +577,10 @@ export function DocsPage({ section }: DocsPageProps) {
                 </article>
                 <article>
                   <span>RECOVERY</span>
-                  <strong>All groups rebuild the same catalog and profile digests.</strong>
+                  <strong>Go intent and Rust groups recover from their owned durable state.</strong>
                   <p>
-                    A full <code>SIGKILL</code> cycle reopens the same EPRS volumes and restores serving
-                    state.
+                    Control restart preserves exact retries; a full data-plane <code>SIGKILL</code> cycle
+                    reopens the same EPRS volumes and profile digests.
                   </p>
                 </article>
               </div>

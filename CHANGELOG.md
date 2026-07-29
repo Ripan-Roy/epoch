@@ -22,13 +22,18 @@ notes explicitly list additional verified artifacts.
 - A real Go `RegionalAdminService`, generation-fenced desired-state reconciler,
   multi-endpoint Rust authority adapter, idempotent apply/delete lifecycle, and
   exact-origin browser inventory BFF that reports only observed voters/leaders.
+- A versioned, single-owner bbolt control registry that transactionally persists
+  desired resources, observed status, request outcomes, and generation
+  tombstones before acknowledgement; startup recovers exact replay state and
+  fails closed for corruption, unknown schemas, or concurrent ownership.
 - A regional console view for desired/observed generations, pending, ready,
   degraded, and failed state, per-shard voters/leaders, and explicit
   failure-domain non-claims. The console obtains regional state only through
   the Go BFF.
 - Real-process and three-container campaigns covering several consensus groups,
-  all four profiles, Go-to-Rust apply, leader `SIGKILL`, truthful degradation,
-  catch-up, all-node `SIGKILL`, same-volume reopen, and digest convergence.
+  all four profiles, Go-to-Rust apply, Go control `SIGKILL`/same-file replay,
+  leader `SIGKILL`, truthful degradation, catch-up, all-node `SIGKILL`,
+  same-volume reopen, and digest convergence.
 - A table-based delivery checklist covering program gates, milestone readiness,
   the active multi-tablet slice, pull-request quality gates, and releases.
 
@@ -47,7 +52,9 @@ notes explicitly list additional verified artifacts.
   dynamic membership, online rebalance, repair, snapshots, compaction, and read
   barriers are not implemented.
 - Regional Rust HTTP routes and the console/control surfaces are experimental
-  and unauthenticated. Go desired state and replay metadata are in memory.
+  and unauthenticated. Go metadata durability is single-process and
+  single-owner; it is not replicated, multi-instance linearizable, or backed up
+  automatically.
 
 ## [0.1.0-alpha.2] - 2026-07-27
 

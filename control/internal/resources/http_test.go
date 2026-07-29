@@ -19,7 +19,9 @@ func TestHTTPResourceLifecycle(t *testing.T) {
 	}
 	var healthBody map[string]any
 	decodeResponse(t, health, &healthBody)
-	if healthBody["data_path_owner"] != "rust" || healthBody["registry"] != "in_memory" {
+	if healthBody["data_path_owner"] != "rust" ||
+		healthBody["registry"] != "memory" ||
+		healthBody["registry_durable"] != false {
 		t.Fatalf("health response = %#v", healthBody)
 	}
 

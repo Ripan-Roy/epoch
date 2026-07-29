@@ -200,7 +200,9 @@ the unauthenticated alpha node on a trusted network.
 
 Regional console inventory additionally requires `epoch-control` on port 8080.
 Its browser allowlist is `EPOCH_CONTROL_ALLOWED_ORIGINS`, and the console points
-to it with `VITE_EPOCH_CONTROL_BASE_URL`. See the
+to it with `VITE_EPOCH_CONTROL_BASE_URL`. Management metadata is transactionally
+stored at `data/control/registry.db` by default; set
+`EPOCH_CONTROL_STATE_PATH` to choose another single-owner file. See the
 [regional runtime guide](docs/REGIONAL_RUNTIME.md) for the exact three-node
 startup and Go-to-Rust verification path.
 

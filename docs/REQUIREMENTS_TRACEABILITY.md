@@ -2,7 +2,7 @@
 
 This register turns the prioritized catalog in [PRD.md](./PRD.md) into a delivery and verification index. It is intentionally terse: the PRD remains the source of semantic detail, while this document owns milestone, dependency, status, and evidence tracking.
 
-Last synchronized with PRD version 0.3 on 22 July 2026.
+Last synchronized with PRD version 0.3 on 29 July 2026.
 
 ## How to use this register
 
@@ -210,8 +210,8 @@ durability.
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
-| CTRL-001 | P0 | Idempotent declarative resource API | M1 → M2 | Slice | G0, G1, G3 | Generated RegionalAdmin gRPC Apply/Get/List/Delete, exact apply/delete replay, token-rebinding rejection, Rust catalog replay, disconnect/reconnect, conflict mapping, and a real Go-to-Rust apply pass; pending: durable hosted request ledger, authorization, long-running operation lookup, and unknown-outcome retention report |
-| CTRL-002 | P0 | Strong versioned metadata and OCC | M1 prototype → M2 | Slice | G0, G2, G3 | Monotonic Rust and Go generations, expected-generation conflicts, catalog tombstones, generation-fenced late status rejection, and browser-safe desired/observed generations pass; pending: durable Go metadata, multi-instance linearizability, watch/resume, and metadata recovery report |
+| CTRL-001 | P0 | Idempotent declarative resource API | M1 → M2 | Slice | G0, G1, G3 | Generated RegionalAdmin gRPC Apply/Get/List/Delete, transactionally persisted apply/delete outcomes, exact replay across Go `SIGKILL`, token-rebinding rejection, Rust catalog replay, disconnect/reconnect, conflict mapping, and real Go-to-Rust apply pass; pending: authorization, long-running operation lookup, multi-instance ownership, and an advertised unknown-outcome/token-retention report |
+| CTRL-002 | P0 | Strong versioned metadata and OCC | M1 prototype → M2 | Slice | G0, G2, G3 | Monotonic Rust and Go generations, expected-generation conflicts, durable Go/Rust tombstones, generation-fenced status, browser-safe desired/observed generations, version/corruption fail-closed tests, and single-owner metadata recovery pass; pending: multi-instance linearizability, management leader election, watch/resume, migration/backup policy, and broader metadata recovery report |
 | CTRL-003 | P0 | Placement/residency/tenancy constraints | M2 | Planned | G0, G3, G5 | Pending: solver/admission corpus |
 | CTRL-004 | P0 | Safe topology and repair operations | M1 prototype → M2 | Slice | G2, G3, G5 | In-memory caught-up leader-transfer history; pending: membership, split/merge, repair/rebalance, persistent transition, and chaos evidence |
 | CTRL-005 | P0 | Safe admission and limiting-resource reason | M2 | Planned | G3, G5, G8 | Pending: reserve/saturation rejection report |
@@ -240,7 +240,7 @@ durability.
 | DX-001 | P0 | Official Go, Java, and Python SDKs | M1 one SDK → M2 | Slice | G0, G1, G4, G10 | Go/Java/Python HTTP unit + independent exact-source crash/restart quickstarts, including selectable local Stream/Queue durability, and Go generated bindings; pending: native streaming contract/version matrix for all three |
 | DX-002 | P0 | Generated guarantee-aware API docs | M1 → M2 | Slice | G0, G1, G10 | Hand-authored guarantee/error guidance and exact executable Go/Java/Python examples are built as a docs-only Pages artifact; pending: generated API reference and full doc lint |
 | DX-003 | P0 | Deterministic single-binary emulator | M1 → M2 | Slice | G1, G2, G4, G10 | Seeded scheduler, virtual clocks/fault plan/transport, golden EPTR history, fixed-voter consensus, real-process EPRS/SIGKILL, and typed Stream/Queue/Cache/Bus runtimes; pending: executable replay bundle and runnable emulator controls |
-| DX-004 | P0 | Test containers and ephemeral namespaces | M1 → M2 | Slice | G1, G5, G10 | A unique three-node Compose project uses independent ephemeral volumes and dynamic loopback ports, builds a real Go control binary, proves Go-to-Rust apply/BFF plus simultaneous four-profile failover/catch-up/all-node recovery, captures scoped failure evidence, and cleans only its own resources; pending: parallel campaigns, broader lifecycle/isolation, and injected disk/network matrices |
+| DX-004 | P0 | Test containers and ephemeral namespaces | M1 → M2 | Slice | G1, G5, G10 | A unique three-node Compose project uses independent ephemeral volumes and dynamic loopback ports, builds a real Go control binary, proves Go `SIGKILL`/metadata reopen/exact replay plus Go-to-Rust apply/BFF and simultaneous four-profile failover/catch-up/all-node recovery, captures scoped failure evidence, and cleans only its own resources; pending: parallel campaigns, broader lifecycle/isolation, and injected disk/network matrices |
 | DX-005 | P1 | Audited/redacted console message browser | M3 → M4 | Planned | G5, G7, G8 | Pending: access/redaction/action audit matrix |
 | DX-006 | P0 | Explain live guarantees and cost drivers | M1 basic → M2 | Slice | G0, G3, G5 | The TypeScript console consumes only the Go BFF and displays desired versus observed generation, pending/ready/degraded/failed phase, per-shard observed voters/leader, missing placement, and explicit unverified zone/rack risk; pending: achieved durability/cost inputs, authenticated access, browser accessibility evidence, and historical topology context |
 | DX-007 | P1 | Compatibility usage scanner | M3 | Planned | G0, G6 | Pending: unsupported-feature fixture corpus |

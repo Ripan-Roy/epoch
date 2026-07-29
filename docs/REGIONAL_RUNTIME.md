@@ -15,7 +15,7 @@ TypeScript console
         |
         | GET /v1/regional/resources
         v
-Go epoch-control (desired state + observed status, currently in memory)
+Go epoch-control (durable desired state + observed status)
         |
         | apply/observe/delete against every configured Rust endpoint
         v
@@ -50,8 +50,14 @@ Start the Go bridge against all three Rust endpoints:
 ```shell
 EPOCH_CONTROL_REGIONAL_ENDPOINTS=http://127.0.0.1:18661,http://127.0.0.1:18662,http://127.0.0.1:18663 \
 EPOCH_CONTROL_ALLOWED_ORIGINS=http://127.0.0.1:5173 \
+EPOCH_CONTROL_STATE_PATH=.epoch/control/registry.db \
 go run ./control/cmd/epoch-control
 ```
+
+The process owns that database exclusively. `GET /healthz` reports
+`"registry":"bbolt_v1"` and `"registry_durable":true`. Corruption, an unknown
+schema version, or another process already holding the file makes startup fail
+closed.
 
 Start the console in another terminal:
 
@@ -139,7 +145,9 @@ typed mutation handling. The router does not silently proxy a write.
 - Reopening the same Rust volumes replays the catalog first, rematerializes data
   groups, and rebuilds each typed state machine before readiness.
 - Exact Go apply/delete retries and exact Rust catalog mutation retries replay
-  the original result. Rebinding a token to different input conflicts.
+  the original result. Go desired state, observed status, request outcomes, and
+  tombstone generations survive a control-process `SIGKILL`. Rebinding a token
+  to different input conflicts.
 - Delete commits a Rust catalog tombstone before Go removes desired metadata.
   Recreating the name receives new tablet/group identities and a later
   generation.
@@ -151,7 +159,8 @@ make test-regional-runtime
 ```
 
 It builds the real Go control binary, creates a resource through Go, verifies
-the BFF/CORS/placement contract, creates and mutates all four profiles, kills a
+the BFF/CORS/placement contract, kills and reopens Go against the same metadata
+file, proves exact replay, creates and mutates all four profiles, kills a
 leader, catches it up, kills all nodes, reopens the same volumes, compares
 digests, and deletes only its scoped containers/network/volumes.
 
@@ -162,7 +171,9 @@ digests, and deletes only its scoped containers/network/volumes.
   compaction, retention deletion, and read barriers are absent.
 - Rust regional HTTP, Go management, and the console are unauthenticated alpha
   surfaces without TLS.
-- Go desired state and token records are process-local memory.
+- Go management metadata is durable for one process and one bbolt file. It is
+  not replicated, multi-instance linearizable, backed up automatically, or
+  protected by management leader election.
 - There is no public regional SDK contract. Go, Java, and Python SDKs currently
   cover the standalone HTTP profiles documented on the published docs page.
 - The BFF reports node identity only; zone/rack/failure-domain separation is

@@ -280,8 +280,12 @@ their original result without applying the Rust mutation twice. Delete commits
 the Rust tombstone before removing Go desired metadata.
 
 This subset has bounded list pages but no watch, opaque continuation, plan,
-backup, repair, purge, or long-running operation surface. Its Go metadata and
-request-token ledger are in memory and are not a durability claim.
+backup, repair, purge, or long-running operation surface. Its single-owner Go
+registry transactionally persists desired resources, observed status,
+generation tombstones, and original request-token outcomes before
+acknowledgement. Startup rejects corruption, an unknown schema, or concurrent
+ownership. This is process-crash durability, not multi-instance linearizability
+or a replicated hosted database.
 
 ## 6. Hosted management API
 
@@ -669,10 +673,12 @@ seed, forced process crash, restart, and recovery proof in CI.
 
 Node browser calls use exact origins from `EPOCH_ALLOWED_ORIGINS`; Go BFF calls
 use `EPOCH_CONTROL_ALLOWED_ORIGINS`. Requests without an `Origin` header remain
-available to native clients. The Go control registry is in memory, the console
-has no authentication, and the current HTTP payloads and Rust error enum remain
-provisional scaffolding that may change before any public compatibility
-promise.
+available to native clients. The Go control registry uses a versioned,
+single-owner bbolt database selected by `EPOCH_CONTROL_STATE_PATH`; its health
+response names `bbolt_v1` and reports durable registry state. The console has no
+authentication, and the current HTTP payloads, storage schema, and Rust error
+enum remain provisional scaffolding that may change before any public
+compatibility promise.
 
 The Cache tablet rebuilds by replaying the retained EPRS committed history
 before readiness. It has no profile snapshot/compaction path, and its

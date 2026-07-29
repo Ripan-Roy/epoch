@@ -16,6 +16,7 @@ func TestLoadConfigUsesExplicitRegionalEndpointsAndInterval(t *testing.T) {
 		"EPOCH_CONTROL_ALLOWED_ORIGINS",
 		" http://127.0.0.1:5173,https://console.example.com ,,",
 	)
+	t.Setenv("EPOCH_CONTROL_STATE_PATH", "/tmp/epoch-control-test/registry.db")
 	t.Setenv("EPOCH_CONTROL_RECONCILE_INTERVAL", "250ms")
 	config, err := loadConfig()
 	if err != nil {
@@ -25,6 +26,7 @@ func TestLoadConfigUsesExplicitRegionalEndpointsAndInterval(t *testing.T) {
 		config.grpcAddress != "127.0.0.1:18081" ||
 		len(config.regionalEndpoints) != 2 ||
 		len(config.allowedOrigins) != 2 ||
+		config.statePath != "/tmp/epoch-control-test/registry.db" ||
 		config.reconcileInterval != 250*time.Millisecond {
 		t.Fatalf("config = %+v", config)
 	}

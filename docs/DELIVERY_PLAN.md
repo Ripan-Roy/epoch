@@ -15,11 +15,13 @@ The credible program remains the PRD's 21–26 month route to initial GA for an 
 The active M1/M2 boundary is the regional multi-tablet feature. Local evidence
 now covers a consensus-backed catalog, several fixed-voter groups per Rust
 process, simultaneous four-profile materialization and fenced routing, Go
-desired-state reconciliation and browser BFF, leader loss, catch-up, and
-same-volume all-node recovery. It remains a slice until protected-branch CI is
-green. Durable hosted metadata, authenticated APIs, dynamic/zone-aware
-placement, repair/rebalance, and the broader M2 profile/security/performance
-gates remain open.
+desired-state reconciliation and browser BFF, transactional single-owner Go
+metadata recovery, Go and Rust process loss, catch-up, exact replay, and
+same-volume all-node recovery. The regional foundation has passed protected
+`main` CI; this durable-control increment still requires its own PR evidence.
+Replicated multi-instance hosted metadata, authenticated APIs,
+dynamic/zone-aware placement, repair/rebalance, and the broader M2
+profile/security/performance gates remain open.
 
 ## Dependency-driven architecture sequence
 
@@ -103,7 +105,7 @@ The traceability register marks the following as **Slice**. A Slice entry can be
 | Route slice | Rust | Bounded envelope-normalized direct/fan-out plan and independent delivery ledger with canonical replicated commands | Route/filter truth table, atomic outbox capacity, fenced acquire/ack/fail, retry/DLQ isolation, exact replay, and real-runtime/EPRS/container convergence; built-in target execution remains open |
 | Standalone and cluster lifecycle | Rust | One selectable node binary, local admin API, truthful mode/guarantee health | Disconnected standalone and three-node smoke suites |
 | CLI, SDK, emulator | Rust, Go, Java, Python | Create, append/publish, consume/ack, inspect, deterministic local testing | Cross-language executable quickstarts in CI |
-| Control-plane contract scaffold | Go | Reconciler skeleton that uses only gRPC contracts; no record-path ownership | Boundary test and dependency audit |
+| Control-plane contract and durable registry | Go | Reconciler using only administration contracts plus versioned transactional management metadata; no record-path ownership | Boundary/dependency audit, commit-before-visible tests, and real-process metadata reopen |
 | Trust and diagnostics baseline | Rust | mTLS-ready identity boundary, audit event skeleton, golden metrics/traces, explain output | Required-event/metric fault assertions |
 | Packaging | Release tooling | Development OCI image, Kubernetes dev manifest, signed development binary/SBOM path | Clean-room install and signature CI |
 

@@ -26,6 +26,7 @@ const (
 	defaultGRPCAddress       = ":8081"
 	defaultRegionalEndpoints = "http://127.0.0.1:7601"
 	defaultAllowedOrigins    = "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:4173,http://localhost:4173"
+	defaultStatePath         = "data/control/registry.db"
 	defaultReconcileInterval = time.Second
 	shutdownTimeout          = 10 * time.Second
 )
@@ -35,6 +36,7 @@ type controlConfig struct {
 	grpcAddress       string
 	regionalEndpoints []string
 	allowedOrigins    []string
+	statePath         string
 	reconcileInterval time.Duration
 }
 
@@ -52,7 +54,7 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, logger *slog.Logger) error {
+func run(ctx context.Context, logger *slog.Logger) (runError error) {
 	config, err := loadConfig()
 	if err != nil {
 		return err
@@ -61,7 +63,13 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	registry := resources.NewRegistry()
+	registry, err := resources.OpenDurableRegistry(config.statePath)
+	if err != nil {
+		return fmt.Errorf("open durable control metadata: %w", err)
+	}
+	defer func() {
+		runError = errors.Join(runError, registry.Close())
+	}()
 	reconciler := regional.NewReconciler(registry, authority)
 	grpcServer := grpc.NewServer()
 	epochv1.RegisterRegionalAdminServiceServer(
@@ -114,7 +122,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		"allowed_browser_origins",
 		config.allowedOrigins,
 		"registry",
-		"in_memory",
+		registry.Mode(),
 		"data_path_owner",
 		"rust",
 	)
@@ -172,6 +180,7 @@ func loadConfig() (controlConfig, error) {
 		allowedOrigins: splitEndpoints(
 			envOrDefault("EPOCH_CONTROL_ALLOWED_ORIGINS", defaultAllowedOrigins),
 		),
+		statePath:         envOrDefault("EPOCH_CONTROL_STATE_PATH", defaultStatePath),
 		reconcileInterval: defaultReconcileInterval,
 	}
 	if len(config.regionalEndpoints) == 0 {
