@@ -27,7 +27,10 @@ use crate::{
         ConsensusGroupSupervisor, ConsensusGroupSupervisorError, SupervisedConsensusGroupFailure,
         shared_internal_peer_router,
     },
-    regional_router::regional_tablet_router,
+    regional_router::{
+        DEFAULT_REGIONAL_READ_BARRIER_TIMEOUT, MAX_REGIONAL_READ_BARRIER_TIMEOUT,
+        regional_tablet_router_with_read_timeout,
+    },
     regional_topology::{NodeTopology, regional_topology_router},
     tablet_materializer::{RegionalTabletMaterializer, TabletMaterializerError},
 };
@@ -43,6 +46,7 @@ pub struct RegionalRuntimeConfig {
     pub clock: Arc<dyn Clock>,
     pub catalog_commit_wait: Duration,
     pub profile_commit_wait: Duration,
+    pub read_barrier_timeout: Duration,
 }
 
 impl fmt::Debug for RegionalRuntimeConfig {
@@ -55,6 +59,7 @@ impl fmt::Debug for RegionalRuntimeConfig {
             .field("topology", &self.topology)
             .field("catalog_commit_wait", &self.catalog_commit_wait)
             .field("profile_commit_wait", &self.profile_commit_wait)
+            .field("read_barrier_timeout", &self.read_barrier_timeout)
             .finish_non_exhaustive()
     }
 }
@@ -83,12 +88,19 @@ impl RegionalRuntimeConfig {
             clock,
             catalog_commit_wait: DEFAULT_CATALOG_COMMIT_WAIT,
             profile_commit_wait: DEFAULT_PROFILE_COMMIT_WAIT,
+            read_barrier_timeout: DEFAULT_REGIONAL_READ_BARRIER_TIMEOUT,
         }
     }
 
     #[must_use]
     pub fn with_topology(mut self, topology: NodeTopology) -> Self {
         self.topology = topology;
+        self
+    }
+
+    #[must_use]
+    pub fn with_read_barrier_timeout(mut self, timeout: Duration) -> Self {
+        self.read_barrier_timeout = timeout;
         self
     }
 }
@@ -147,9 +159,13 @@ impl RegionalNodeRuntime {
                     .into(),
             ));
         }
-        if config.catalog_commit_wait.is_zero() || config.profile_commit_wait.is_zero() {
+        if config.catalog_commit_wait.is_zero()
+            || config.profile_commit_wait.is_zero()
+            || config.read_barrier_timeout.is_zero()
+            || config.read_barrier_timeout > MAX_REGIONAL_READ_BARRIER_TIMEOUT
+        {
             return Err(RegionalRuntimeError::InvalidConfiguration(
-                "catalog and profile commit waits must be non-zero".into(),
+                "catalog/profile waits must be non-zero and the read barrier wait must be between 1 ms and 60 seconds".into(),
             ));
         }
         let catalog_scope = CatalogTabletScope::new(
@@ -194,7 +210,10 @@ impl RegionalNodeRuntime {
         catalog_state.reconcile_latest().await?;
 
         let public_router = regional_catalog_router(catalog_state.clone())
-            .merge(regional_tablet_router(directory.clone()))
+            .merge(regional_tablet_router_with_read_timeout(
+                directory.clone(),
+                config.read_barrier_timeout,
+            ))
             .merge(regional_topology_router(config.topology, directory));
         let (stop, failure, background) =
             spawn_background(catalog_state.clone(), catalog_commits, group_failures);

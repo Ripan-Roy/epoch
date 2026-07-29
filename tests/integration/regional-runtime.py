@@ -24,6 +24,10 @@ FENCE_HEADERS = {
     "x-epoch-resource-generation": "1",
     "x-epoch-tablet-epoch": "1",
 }
+LOCAL_STALE_FENCE_HEADERS = {
+    **FENCE_HEADERS,
+    "x-epoch-read-consistency": "local_stale",
+}
 TIMEOUT_SECONDS = 30.0
 ADMIN_TOKEN = "epoch-dev-admin-v1"
 CONTROL_TOKEN = "epoch-dev-control-v1"
@@ -718,7 +722,7 @@ def wait_for_profile_apply(
                 node,
                 "GET",
                 f"{resource.route_path}/data/status",
-                headers=FENCE_HEADERS,
+                headers=LOCAL_STALE_FENCE_HEADERS,
             )
             if response.status != 200:
                 return None

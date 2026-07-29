@@ -597,7 +597,8 @@ mod tests {
         consensus::{CommittedProposalApplier, ConsensusProbeConfig},
         consensus_groups::{ConsensusGroupSupervisor, shared_internal_peer_router},
         regional_router::{
-            RESOURCE_GENERATION_HEADER, TABLET_EPOCH_HEADER, regional_tablet_router,
+            READ_CONSISTENCY_HEADER, RESOURCE_GENERATION_HEADER, TABLET_EPOCH_HEADER,
+            regional_tablet_router,
         },
         tablet_materializer::TabletDirectory,
     };
@@ -873,6 +874,7 @@ mod tests {
                             ))
                             .header(RESOURCE_GENERATION_HEADER, "1")
                             .header(TABLET_EPOCH_HEADER, "1")
+                            .header(READ_CONSISTENCY_HEADER, "local_stale")
                             .body(Body::empty())
                             .unwrap(),
                         )

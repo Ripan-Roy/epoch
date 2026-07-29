@@ -17,11 +17,12 @@ now covers a consensus-backed catalog, several fixed-voter groups per Rust
 process, simultaneous four-profile materialization and fenced routing, Go
 desired-state reconciliation and browser BFF, transactional single-owner Go
 metadata recovery, Go and Rust process loss, catch-up, exact replay, and
-same-volume all-node recovery. The durable-control and bootstrap trust
-increments have passed protected `main` CI. The active feature validates
-policy-protected configured-endpoint region/zone/class evidence and incremental group capacity before
-catalog mutation. Replicated multi-instance hosted metadata, production
-identity, dynamic membership/voter selection, repair/rebalance, and the broader
+same-volume all-node recovery. The durable-control, bootstrap trust, and
+topology-admission increments have passed protected `main` CI. The active
+feature adds safe quorum-confirmed leader ReadIndex barriers and
+linearizable-by-default regional reads while preserving an explicit local-stale
+mode. Replicated multi-instance hosted metadata, production identity, follower
+routing, dynamic membership/voter selection, repair/rebalance, and the broader
 M2 profile/security/performance gates remain open.
 
 ## Dependency-driven architecture sequence
@@ -141,11 +142,12 @@ built-in executor or external-side-effect claim. Those
 typed receipts are bounded
 fixed-topology evidence, not a public or placement-aware quorum-durable
 acknowledgement, and all public profile APIs remain standalone. Exhaustive crash
-points, snapshots, membership and
-authoritative epoch transitions, read barriers, authenticated transport,
-placement, broader profile/tablet integration, and model/chaos reports remain
+points, snapshots, membership and authoritative epoch transitions,
+follower-served linearizable reads, authenticated transport, dynamic placement,
+broader profile/tablet integration, and model/chaos reports remain
 required for the metadata/replication work package and G3. See
 [Consensus Feasibility Spike](CONSENSUS_SPIKE.md),
+[Quorum Read Barriers](adr/0013-quorum-read-barriers.md),
 [Experimental Stream Tablet](STREAM_TABLET.md), and
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 

@@ -6,7 +6,7 @@ use std::{
 };
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{DefaultBodyLimit, Path, Query, State, rejection::JsonRejection},
     http::StatusCode,
     routing::get,
@@ -26,9 +26,9 @@ use tokio::sync::{Mutex, broadcast};
 
 use crate::consensus::{CommittedProposalApplier, ConsensusProbeError, ConsensusProbeHandle};
 use crate::tablet_http::{
-    StrictEventEnvelope, TabletApiError, TabletApiResult, deserialize_strict_event_envelope,
-    deserialize_u64_from_number_or_decimal, hex_digest, serialize_optional_u64_as_decimal,
-    serialize_u64_as_decimal,
+    StrictEventEnvelope, TabletApiError, TabletApiResult, TabletReadMetadata,
+    deserialize_strict_event_envelope, deserialize_u64_from_number_or_decimal, hex_digest,
+    serialize_optional_u64_as_decimal, serialize_u64_as_decimal, tablet_read_metadata,
 };
 
 pub const EXPERIMENTAL_STREAM_TABLET_STATUS_PATH: &str = "/experimental/v1/tablets/stream/status";
@@ -451,6 +451,7 @@ const fn default_fetch_limit() -> usize {
 async fn fetch_records(
     State(state): State<StreamTabletApiState>,
     Query(query): Query<FetchQuery>,
+    read: Option<Extension<TabletReadMetadata>>,
 ) -> TabletApiResult<Json<StreamTabletFetchResponse>> {
     if query.limit == 0 || query.limit > MAX_FETCH_RECORDS {
         return Err(StreamTabletApiError::InvalidRequest(format!(
@@ -458,8 +459,7 @@ async fn fetch_records(
         )));
     }
     Ok(Json(StreamTabletFetchResponse {
-        observation_scope: "local",
-        read_consistency: "local_profile_applied_stale_capable",
+        read: tablet_read_metadata(read),
         records: state
             .service
             .fetch(query.offset, query.limit)?
@@ -471,16 +471,18 @@ async fn fetch_records(
 
 async fn tablet_status(
     State(state): State<StreamTabletApiState>,
+    read: Option<Extension<TabletReadMetadata>>,
 ) -> TabletApiResult<Json<StreamTabletStatus>> {
     // Read the profile first, then enqueue the actor status request. The
     // profile snapshot may be stale, but it can never be ahead of the later
     // consensus-applied snapshot.
     let profile = state.service.snapshot()?;
     let consensus = state.consensus.status().await?;
-    Ok(Json(StreamTabletStatus::new(
+    Ok(Json(StreamTabletStatus::new_with_read(
         state.service.scope(),
         &consensus,
         profile,
+        tablet_read_metadata(read),
     )?))
 }
 
@@ -517,15 +519,25 @@ struct StreamTabletStatus {
     applied_command_count: usize,
     state_digest: String,
     write_guarantee: &'static str,
-    read_consistency: &'static str,
-    linearizable_read_barrier: bool,
+    #[serde(flatten)]
+    read: TabletReadMetadata,
 }
 
 impl StreamTabletStatus {
+    #[cfg(test)]
     fn new(
         scope: &StreamTabletScope,
         consensus: &ConsensusStatus,
         profile: StreamTabletSnapshot,
+    ) -> Result<Self, String> {
+        Self::new_with_read(scope, consensus, profile, TabletReadMetadata::local_stale())
+    }
+
+    fn new_with_read(
+        scope: &StreamTabletScope,
+        consensus: &ConsensusStatus,
+        profile: StreamTabletSnapshot,
+        read: TabletReadMetadata,
     ) -> Result<Self, String> {
         if profile.last_profile_mutation_index > consensus.applied_index.get() {
             return Err(format!(
@@ -556,16 +568,15 @@ impl StreamTabletStatus {
             applied_command_count: profile.applied_command_count,
             state_digest: profile.state_digest,
             write_guarantee: "fixed_three_voter_majority_persisted_then_local_profile_applied",
-            read_consistency: "local_profile_applied_stale_capable",
-            linearizable_read_barrier: false,
+            read,
         })
     }
 }
 
 #[derive(Debug, Serialize)]
 struct StreamTabletFetchResponse {
-    observation_scope: &'static str,
-    read_consistency: &'static str,
+    #[serde(flatten)]
+    read: TabletReadMetadata,
     records: Vec<StreamTabletRecordResponse>,
 }
 

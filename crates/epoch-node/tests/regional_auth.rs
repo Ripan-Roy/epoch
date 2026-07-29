@@ -48,6 +48,24 @@ async fn regional_authentication_and_scope_fail_closed() {
     .await;
     assert_eq!(exact_reader.status(), StatusCode::NO_CONTENT);
 
+    let bus_query = call(
+        router.clone(),
+        Method::POST,
+        "/experimental/v1/regional/resources/acme/payments/production/orders/event-bus/events/shards/0/data/archive/replay",
+        Some("epoch-dev-reader-v1"),
+    )
+    .await;
+    assert_eq!(bus_query.status(), StatusCode::NO_CONTENT);
+
+    let bus_mutation = call(
+        router.clone(),
+        Method::POST,
+        "/experimental/v1/regional/resources/acme/payments/production/orders/event-bus/events/shards/0/data/mutations",
+        Some("epoch-dev-reader-v1"),
+    )
+    .await;
+    assert_eq!(bus_mutation.status(), StatusCode::FORBIDDEN);
+
     let cross_tenant = call(
         router.clone(),
         Method::GET,

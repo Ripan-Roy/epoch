@@ -6,7 +6,7 @@ use std::{
 };
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{DefaultBodyLimit, Path, State, rejection::JsonRejection},
     http::StatusCode,
     routing::{get, post},
@@ -30,8 +30,9 @@ use tokio::sync::{Mutex, broadcast};
 
 use crate::consensus::{CommittedProposalApplier, ConsensusProbeError, ConsensusProbeHandle};
 use crate::tablet_http::{
-    StrictEventEnvelope, TabletApiError, TabletApiResult, deserialize_u64_from_number_or_decimal,
-    hex_digest, serialize_optional_u64_as_decimal, serialize_u64_as_decimal,
+    StrictEventEnvelope, TabletApiError, TabletApiResult, TabletReadMetadata,
+    deserialize_u64_from_number_or_decimal, hex_digest, serialize_optional_u64_as_decimal,
+    serialize_u64_as_decimal, tablet_read_metadata,
 };
 
 pub const EXPERIMENTAL_BUS_TABLET_STATUS_PATH: &str = "/experimental/v1/tablets/bus/status";
@@ -620,6 +621,7 @@ const fn default_replay_limit() -> usize {
 
 async fn replay_archive(
     State(state): State<BusTabletApiState>,
+    read: Option<Extension<TabletReadMetadata>>,
     request: Result<Json<BusArchiveReplayRequest>, JsonRejection>,
 ) -> TabletApiResult<Json<BusArchiveReplayResponse>> {
     let Json(request) = request.map_err(|rejection| TabletApiError::RequestBody {
@@ -644,8 +646,7 @@ async fn replay_archive(
         .map(BusArchivedEventResponse::from)
         .collect();
     Ok(Json(BusArchiveReplayResponse {
-        observation_scope: "local",
-        read_consistency: "local_profile_applied_stale_capable",
+        read: tablet_read_metadata(read),
         records,
     }))
 }
@@ -663,6 +664,7 @@ struct BusDeliveryQueryRequest {
 
 async fn query_deliveries(
     State(state): State<BusTabletApiState>,
+    read: Option<Extension<TabletReadMetadata>>,
     request: Result<Json<BusDeliveryQueryRequest>, JsonRejection>,
 ) -> TabletApiResult<Json<BusDeliveryQueryResponse>> {
     let Json(request) = request.map_err(|rejection| TabletApiError::RequestBody {
@@ -687,23 +689,24 @@ async fn query_deliveries(
         .map(BusDeliveryRecordResponse::from)
         .collect();
     Ok(Json(BusDeliveryQueryResponse {
-        observation_scope: "local",
-        read_consistency: "local_profile_applied_stale_capable",
+        read: tablet_read_metadata(read),
         records,
     }))
 }
 
 async fn tablet_status(
     State(state): State<BusTabletApiState>,
+    read: Option<Extension<TabletReadMetadata>>,
 ) -> TabletApiResult<Json<BusTabletStatus>> {
     // Sampling the profile first guarantees it cannot appear ahead of the
     // later actor-owned consensus snapshot.
     let profile = state.service.snapshot()?;
     let consensus = state.consensus.status().await?;
-    Ok(Json(BusTabletStatus::new(
+    Ok(Json(BusTabletStatus::new_with_read(
         state.service.scope(),
         &consensus,
         profile,
+        tablet_read_metadata(read),
     )?))
 }
 
@@ -767,8 +770,8 @@ struct BusTabletStatus {
     business_state_digest: String,
     state_digest: String,
     write_guarantee: &'static str,
-    read_consistency: &'static str,
-    linearizable_read_barrier: bool,
+    #[serde(flatten)]
+    read: TabletReadMetadata,
     target_dispatch: &'static str,
     durable_target_outbox: bool,
 }
@@ -777,10 +780,11 @@ impl BusTabletStatus {
     const TARGET_DISPATCH: &'static str = "external_executor_not_implemented";
     const DURABLE_TARGET_OUTBOX: bool = true;
 
-    fn new(
+    fn new_with_read(
         scope: &BusTabletScope,
         consensus: &ConsensusStatus,
         profile: BusTabletSnapshot,
+        read: TabletReadMetadata,
     ) -> Result<Self, String> {
         if profile.last_profile_mutation_index > consensus.applied_index.get() {
             return Err(format!(
@@ -828,8 +832,7 @@ impl BusTabletStatus {
             business_state_digest: profile.business_state_digest,
             state_digest: profile.state_digest,
             write_guarantee: "fixed_three_voter_majority_persisted_then_local_profile_applied",
-            read_consistency: "local_profile_applied_stale_capable",
-            linearizable_read_barrier: false,
+            read,
             target_dispatch: Self::TARGET_DISPATCH,
             durable_target_outbox: Self::DURABLE_TARGET_OUTBOX,
         })
@@ -847,8 +850,8 @@ const fn role_name(role: ConsensusRole) -> &'static str {
 
 #[derive(Debug, Serialize)]
 struct BusArchiveReplayResponse {
-    observation_scope: &'static str,
-    read_consistency: &'static str,
+    #[serde(flatten)]
+    read: TabletReadMetadata,
     records: Vec<BusArchivedEventResponse>,
 }
 
@@ -876,8 +879,8 @@ impl From<ArchivedEvent> for BusArchivedEventResponse {
 
 #[derive(Debug, Serialize)]
 struct BusDeliveryQueryResponse {
-    observation_scope: &'static str,
-    read_consistency: &'static str,
+    #[serde(flatten)]
+    read: TabletReadMetadata,
     records: Vec<BusDeliveryRecordResponse>,
 }
 

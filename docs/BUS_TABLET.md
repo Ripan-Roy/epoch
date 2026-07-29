@@ -157,7 +157,11 @@ The current ledger can be inspected without mutation:
 
 Post that body to `/experimental/v1/tablets/bus/deliveries/query`. The result
 contains captured target/policy, current state, and immutable attempt outcomes.
-It is a local stale-capable observation, not a linearizable read.
+It is a local stale-capable observation when called on the direct internal
+profile route. Regional archive replay and delivery-query POSTs are classified
+as `data.read`, default to a safe leader ReadIndex barrier, and report exact
+term/read/applied evidence. `x-epoch-read-consistency: local_stale` is the
+explicit opt-in to this direct behavior.
 
 Unknown fields, unsupported versions, non-canonical JSON, oversized payloads,
 wrong tablet scope, invalid proposal identity, and malformed operations fail

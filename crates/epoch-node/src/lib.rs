@@ -42,7 +42,9 @@ use tower_http::{
 };
 use url::Url;
 
-use crate::regional_router::{RESOURCE_GENERATION_HEADER, TABLET_EPOCH_HEADER};
+use crate::regional_router::{
+    READ_CONSISTENCY_HEADER, READ_INDEX_HEADER, RESOURCE_GENERATION_HEADER, TABLET_EPOCH_HEADER,
+};
 
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -114,6 +116,12 @@ fn cors_layer(allowed_origins: &[String]) -> EpochResult<CorsLayer> {
             HeaderName::from_static("x-request-id"),
             HeaderName::from_static(RESOURCE_GENERATION_HEADER),
             HeaderName::from_static(TABLET_EPOCH_HEADER),
+            HeaderName::from_static(READ_CONSISTENCY_HEADER),
+        ])
+        .expose_headers([
+            HeaderName::from_static("x-request-id"),
+            HeaderName::from_static(READ_CONSISTENCY_HEADER),
+            HeaderName::from_static(READ_INDEX_HEADER),
         ]))
 }
 

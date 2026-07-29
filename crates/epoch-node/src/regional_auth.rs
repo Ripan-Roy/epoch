@@ -165,12 +165,18 @@ fn action_for_request(method: &Method, path: &str) -> Action {
             _ => Action::CatalogRead,
         };
     }
-    let is_data_route = path
+    let data_segments = path
         .strip_prefix(RESOURCE_PREFIX)
-        .and_then(|remainder| remainder.split('/').nth(8))
-        == Some("data");
-    if is_data_route {
-        if *method == Method::GET {
+        .map(|remainder| remainder.split('/').collect::<Vec<_>>())
+        .filter(|segments| segments.get(8) == Some(&"data"));
+    if let Some(segments) = data_segments {
+        let is_bus_query = *method == Method::POST
+            && segments.get(4) == Some(&"event-bus")
+            && matches!(
+                segments.get(9..),
+                Some(["archive", "replay"] | ["deliveries", "query"])
+            );
+        if *method == Method::GET || is_bus_query {
             Action::DataRead
         } else {
             Action::DataWrite

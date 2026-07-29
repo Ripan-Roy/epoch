@@ -560,9 +560,12 @@ export function DocsPage({ section }: DocsPageProps) {
                     now report configured region, zone, class, and live group capacity; Go validates requested
                     regions, minimum zones, class, and incremental capacity before touching the catalog. That
                     is not dynamic membership, rack placement, or online rebalance. The Go metadata database
-                    still has one process owner and these regional routes remain experimental. Managed
-                    HTTP/gRPC and regional HTTP require a shared deny-by-default bootstrap bearer policy, but
-                    that is not OIDC, TLS/mTLS, credential expiry/revocation, or immutable audit export.
+                    still has one process owner and these regional routes remain experimental. Regional reads
+                    default to a safe leader <code>ReadIndex</code>, wait for majority confirmation and local
+                    profile apply, and expose exact barrier evidence; callers must explicitly request{" "}
+                    <code>local_stale</code> to bypass that barrier. Managed HTTP/gRPC and regional HTTP
+                    require a shared deny-by-default bootstrap bearer policy, but that is not OIDC, TLS/mTLS,
+                    credential expiry/revocation, or immutable audit export.
                   </p>
                 </div>
               </div>
@@ -570,7 +573,10 @@ export function DocsPage({ section }: DocsPageProps) {
                 <article>
                   <span>MAJORITY</span>
                   <strong>Catalog and data groups commit through durable voter majorities.</strong>
-                  <p>Generation and tablet-epoch fences reject stale routes before typed dispatch.</p>
+                  <p>
+                    Generation/tablet fences reject stale routes; default reads require quorum-confirmed
+                    ReadIndex evidence with no silent downgrade.
+                  </p>
                 </article>
                 <article>
                   <span>ADMISSION + OBSERVATION</span>
@@ -722,8 +728,14 @@ export function DocsPage({ section }: DocsPageProps) {
                 <ReferenceCard
                   eyebrow="REGIONAL RUNTIME"
                   title="Multi-tablet operations"
-                  description="Catalog authority, topology and capacity admission, Go reconciliation, browser BFF, fenced routes, recovery campaign, and explicit non-claims."
+                  description="Catalog authority, topology/capacity admission, fenced routes, quorum-confirmed reads, recovery campaign, and explicit non-claims."
                   href={`${repositoryDocsUrl}/REGIONAL_RUNTIME.md`}
+                />
+                <ReferenceCard
+                  eyebrow="CONSISTENCY"
+                  title="Quorum read barriers"
+                  description="Safe ReadIndex admission, majority and local-apply completion, explicit stale opt-in, timeout behavior, and non-claims."
+                  href={`${repositoryDocsUrl}/adr/0013-quorum-read-barriers.md`}
                 />
                 <ReferenceCard
                   eyebrow="CLUSTER CORE"

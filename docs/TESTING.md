@@ -219,8 +219,13 @@ materialization. `regional_process` starts three actual `epoch-node` binaries,
 creates all four profiles in distinct groups, commits through each leader,
 kills and replaces a data leader, catches it up, kills all three processes, and
 reopens the same directories before comparing catalog and profile digests.
-This proves the current fixed-voter topology; it does not prove dynamic
-membership, zone constraints, read barriers, or exhaustive crash/I/O faults.
+It also performs a default regional leader read, requires safe ReadIndex
+headers/JSON evidence, and uses explicit `local_stale` only for all-follower
+convergence polling. Consensus tests separately prove no barrier completion on
+an isolated leader, real-HTTP timeout without a majority, follower/stale-term
+rejection, and cancellation. This proves the current fixed-voter topology; it
+does not prove dynamic membership, follower routing, exhaustive
+linearizability, or exhaustive crash/I/O faults.
 
 ### 3. Integration tests
 
@@ -327,6 +332,10 @@ authorization-protected Rust topology endpoints. It also requests more shards th
 limiting node can host, waits for the stable capacity reason, and proves the
 catalog resource was never created. Every direct regional
 catalog/route/data/topology request also authenticates.
+The process campaign performs a linearizable-by-default Stream read on the
+current leader and verifies the quorum barrier term, read index, applied index,
+and response headers. Polls that intentionally compare every follower opt into
+`local_stale`; no test depends on an implicit consistency downgrade.
 It then sends `SIGKILL` to the Go process, reopens
 the same bbolt metadata file, proves the original apply token replays without a
 second Rust mutation, and waits for placement to reconcile ready again. The

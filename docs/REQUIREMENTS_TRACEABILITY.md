@@ -102,10 +102,15 @@ independent delivery intent and attempt state but explicitly excludes a built-in
 target executor or external-delivery claim. The executable gates
 cover minority non-commit, leader rebinding, typed profile semantics, catch-up,
 exact retry, convergence, and all-container `SIGKILL`/reopen. Public product
-profiles remain standalone. G3 remains open for the exhaustive crash matrix,
-snapshots, membership and authoritative epoch transitions, read barriers,
-authenticated transport, placement/repair, model and chaos reports, density,
-and performance. See [Consensus Feasibility Spike](CONSENSUS_SPIKE.md),
+profiles remain standalone. The regional boundary now adds safe leader
+ReadIndex requests that require majority confirmation and local typed-profile
+application; default regional reads expose exact barrier evidence, explicit
+`local_stale` reads remain available, and a minority times out without
+downgrade. G3 remains open for the exhaustive crash matrix, snapshots,
+membership and authoritative epoch transitions, follower read routing,
+authenticated transport, dynamic placement/repair, model and chaos reports,
+density, and performance. See [Consensus Feasibility Spike](CONSENSUS_SPIKE.md),
+[ADR-0013](adr/0013-quorum-read-barriers.md),
 [Experimental Stream Tablet](STREAM_TABLET.md), and
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md), and
 [Experimental Replicated Cache Tablet](CACHE_TABLET.md), and
@@ -122,7 +127,7 @@ durability.
 | CACHE-003 | P0 | Eviction policy family | M1 prototype → M2 | Slice | G0, G4, G5 | Deterministic no-eviction capacity and rollback are tested; pending: LRU/LFU/TTL/random volatile/all-key policies and memory-pressure benchmarks |
 | CACHE-004 | P0 | Shard-local atomic operations | M1 prototype → M2 | Slice | G0, G3, G4 | Bounded distinct-key atomic success/rollback is covered through engine, tablet, runtime, and container tests; pending: concurrent linearizability report |
 | CACHE-005 | P0 | Pipeline, multiplex, batch, pool guidance | M1 → M2 | Slice | G1, G4 | Pending: ordering and throughput suite |
-| CACHE-006 | P0 | CAS, optimistic transaction, increment, fenced lock | M2 | Slice | G0, G3, G4 | Deterministic plus real-runtime/container tests cover non-ABA revisions, atomic rollback, checked increment/TTL, expiry order, guarded locks, current-term write admission, cross-entry-term token rejection, failover, EPRS replay, and convergence; pending: concurrent history checker, linearizable reads, public surface, and production fault matrix |
+| CACHE-006 | P0 | CAS, optimistic transaction, increment, fenced lock | M2 | Slice | G0, G3, G4 | Deterministic plus real-runtime/container tests cover non-ABA revisions, atomic rollback, checked increment/TTL, expiry order, guarded locks, current-term write admission, cross-entry-term token rejection, failover, EPRS replay, convergence, and regional leader ReadIndex observations; pending: concurrent history checker, stable public surface, follower routing, and production fault matrix |
 | CACHE-007 | P0 | Volatile, replicated-memory, quorum modes | M1 prototype → M2 | Slice | G0, G2, G3, G4 | Standalone volatile Cache remains separate; the internal Cache tablet proves fixed-three-voter majority persistence and all-voter replay without claiming the public quorum mode; pending: placement-aware durability fault matrix and public routing |
 | CACHE-008 | P1 | Snapshot, WAL restore, backup, PITR | M3 | Planned | G2, G5, G7 | Segmented WAL is not a Cache snapshot; pending: snapshot/backup/PITR implementation and restore drill |
 | CACHE-009 | P1 | Explicitly lossy Pub/Sub and patterns | M3 | Planned | G0, G4, G6 | Pending: route and disconnect semantics suite |

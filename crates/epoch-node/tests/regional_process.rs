@@ -531,6 +531,7 @@ async fn wait_for_profile_apply(
                     .bearer_auth(ADMIN_TOKEN)
                     .header("x-epoch-resource-generation", "1")
                     .header("x-epoch-tablet-epoch", "1")
+                    .header("x-epoch-read-consistency", "local_stale")
                     .send()
                     .await;
                 let Ok(response) = response else {
@@ -633,6 +634,7 @@ async fn wait_for_record_count(
                     .bearer_auth(ADMIN_TOKEN)
                     .header("x-epoch-resource-generation", "1")
                     .header("x-epoch-tablet-epoch", "1")
+                    .header("x-epoch-read-consistency", "local_stale")
                     .send()
                     .await;
                 let Ok(response) = response else {
@@ -666,6 +668,36 @@ async fn wait_for_record_count(
     });
 }
 
+async fn assert_linearizable_record_read(client: &Client, node: &NodeProcess, expected: usize) {
+    let response = client
+        .get(format!("{}?offset=0&limit=10", records_url(node)))
+        .bearer_auth(ADMIN_TOKEN)
+        .header("x-epoch-resource-generation", "1")
+        .header("x-epoch-tablet-epoch", "1")
+        .send()
+        .await
+        .expect("linearizable read should receive a response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-epoch-read-consistency")
+            .and_then(|value| value.to_str().ok()),
+        Some("linearizable")
+    );
+    assert!(response.headers().contains_key("x-epoch-read-index"));
+    let body = response
+        .json::<Value>()
+        .await
+        .expect("linearizable records should be JSON");
+    assert_eq!(body["read_consistency"], "linearizable");
+    assert_eq!(body["linearizable_read_barrier"], true);
+    assert!(body["read_barrier_term"].is_string());
+    assert!(body["read_barrier_index"].is_string());
+    assert!(body["read_barrier_applied_index"].is_string());
+    assert_eq!(body["records"].as_array().map(Vec::len), Some(expected));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn regional_processes_fail_over_reopen_and_converge() {
     let mut cluster = ProcessCluster::start();
@@ -682,6 +714,7 @@ async fn regional_processes_fail_over_reopen_and_converge() {
     let (first_leader, first_term) = writable_route(&routes, &all);
     append_record(&client, &cluster.nodes[first_leader], first_term, 1).await;
     wait_for_record_count(&client, &cluster, &all, 1).await;
+    assert_linearizable_record_read(&client, &cluster.nodes[first_leader], 1).await;
 
     cluster.nodes[first_leader].kill();
     let survivors = all

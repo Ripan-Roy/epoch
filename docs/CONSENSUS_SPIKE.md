@@ -29,6 +29,8 @@ The adapter currently supports:
 - group, group-epoch, expected-term, destination, and fixed-voter validation;
 - a bounded, versioned Epoch envelope around opaque peer messages;
 - explicit `Unknown`, `Pending`, and `Committed` proposal lookup;
+- bounded group/epoch/term-fenced safe `ReadIndex` requests that complete only
+  after quorum confirmation and local application through the read index;
 - proposal tracking rebuilt from the retained log after restart or overwrite;
 - apply-time suppression of an exact duplicate proposal and fail-stop handling
   for the same proposal ID with a different payload;
@@ -104,13 +106,14 @@ side-effect claim; see
 
 ```mermaid
 flowchart LR
-    Input["Epoch proposal, tick, or peer frame"] --> Validate["Validate scope, term, member, size, and frame"]
+    Input["Epoch proposal, read barrier, tick, or peer frame"] --> Validate["Validate scope, term, member, size, and frame"]
     Validate --> Raft["raft-rs RawNode"]
     Raft --> Ready["Prevalidate the complete Ready apply batch"]
     Ready --> Store["Persist EPRS generation or update memory test store"]
     Store --> Messages["Release peer messages"]
     Store --> Apply["Apply committed Epoch commands"]
     Apply --> Receipt["Emit commit receipt and update proposal lookup"]
+    Apply --> Barrier["Publish quorum-confirmed read after local profile apply"]
     Ready -->|any failure after Ready is taken| Stop["Fail-stop the adapter"]
 ```
 
@@ -151,7 +154,12 @@ publication. The loopback sockets are bounded test-control channels; this is
 not itself the node HTTP peer transport or a profile replication path. A
 separate node test starts three complete probe runtimes on ephemeral loopback
 listeners, elects a leader over real HTTP, commits an opaque proposal, and
-compares local committed lookup at all voters.
+compares local committed lookup at all voters. Read-barrier tests prove
+deterministic majority-only completion, isolated-leader non-completion,
+follower/stale-term rejection, and cancellation. A real three-runtime HTTP
+test repeats the majority proof through the actor and times out after both peer
+listeners are removed. The regional process campaign verifies barrier evidence
+only after typed profile apply.
 
 This is deterministic in-process evidence, local file reopen evidence, and one
 bounded real-process `SIGKILL`/reopen history. It is not an exhaustive
@@ -183,7 +191,8 @@ This slice does not provide:
 - snapshots, compaction, log purge, or state-machine checkpoint installation;
 - membership changes, learners, joint consensus, or placement;
 - an authoritative catalog epoch transition that can fence an old voter set;
-- a linearizable read barrier;
+- follower-served or cross-group linearizable reads; the implemented safe
+  barrier is leader-only and orders one fixed-voter tablet;
 - mutually authenticated, encrypted, batched production transport;
 - public engine routing, CLI, SDK, or public health integration; the typed
   Stream, Queue, Cache, and Event Bus milestones are confined to the explicitly experimental
@@ -205,8 +214,9 @@ This slice does not provide:
 3. Add a versioned state-machine checkpoint and atomic snapshot installation.
 4. Add joint-consensus membership, catalog-authorized epoch transitions, and
    old-configuration fencing tests.
-5. Add a read barrier, authenticated peer identity, replica progress, and
-   bounded admission/flow control.
+5. Add authenticated peer identity, follower routing/forwarding, replica
+   progress, and broader bounded admission/flow control around the implemented
+   leader read barrier.
 6. Expand the typed milestone beyond one partition/resource, add a full
    acknowledgement/failure matrix, and then design public routing without
    raising the guarantee before every required gate is proven.

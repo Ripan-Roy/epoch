@@ -6,7 +6,7 @@ use std::{
 };
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{DefaultBodyLimit, Path, Query, State, rejection::JsonRejection},
     http::StatusCode,
     routing::{get, post},
@@ -29,9 +29,9 @@ use tokio::sync::{Mutex, broadcast};
 
 use crate::consensus::{CommittedProposalApplier, ConsensusProbeError, ConsensusProbeHandle};
 use crate::tablet_http::{
-    StrictEventEnvelope, TabletApiError, TabletApiResult,
+    StrictEventEnvelope, TabletApiError, TabletApiResult, TabletReadMetadata,
     deserialize_optional_u64_from_number_or_decimal, deserialize_u64_from_number_or_decimal,
-    hex_digest, serialize_optional_u64_as_decimal, serialize_u64_as_decimal,
+    hex_digest, serialize_optional_u64_as_decimal, serialize_u64_as_decimal, tablet_read_metadata,
 };
 
 pub const EXPERIMENTAL_QUEUE_TABLET_STATUS_PATH: &str = "/experimental/v1/tablets/queue/status";
@@ -676,11 +676,11 @@ fn validate_history_limit(limit: usize) -> TabletApiResult<()> {
 
 async fn queue_counts(
     State(state): State<QueueTabletApiState>,
+    read: Option<Extension<TabletReadMetadata>>,
 ) -> TabletApiResult<Json<QueueTabletCountsResponse>> {
     let snapshot = state.service.snapshot()?;
     Ok(Json(QueueTabletCountsResponse {
-        observation_scope: "local",
-        read_consistency: "local_profile_applied_stale_capable",
+        read: tablet_read_metadata(read),
         counts: snapshot.counts,
     }))
 }
@@ -688,11 +688,11 @@ async fn queue_counts(
 async fn dead_letter_history(
     State(state): State<QueueTabletApiState>,
     Query(query): Query<HistoryQuery>,
+    read: Option<Extension<TabletReadMetadata>>,
 ) -> TabletApiResult<Json<QueueTabletDeadLettersResponse>> {
     validate_history_limit(query.limit)?;
     Ok(Json(QueueTabletDeadLettersResponse {
-        observation_scope: "local",
-        read_consistency: "local_profile_applied_stale_capable",
+        read: tablet_read_metadata(read),
         records: state.service.dead_letter_history(query.limit)?,
     }))
 }
@@ -700,26 +700,28 @@ async fn dead_letter_history(
 async fn redrive_history(
     State(state): State<QueueTabletApiState>,
     Query(query): Query<HistoryQuery>,
+    read: Option<Extension<TabletReadMetadata>>,
 ) -> TabletApiResult<Json<QueueTabletRedrivesResponse>> {
     validate_history_limit(query.limit)?;
     Ok(Json(QueueTabletRedrivesResponse {
-        observation_scope: "local",
-        read_consistency: "local_profile_applied_stale_capable",
+        read: tablet_read_metadata(read),
         records: state.service.redrive_history(query.limit)?,
     }))
 }
 
 async fn tablet_status(
     State(state): State<QueueTabletApiState>,
+    read: Option<Extension<TabletReadMetadata>>,
 ) -> TabletApiResult<Json<QueueTabletStatus>> {
     // Sampling the profile first guarantees it cannot appear ahead of the
     // later actor-owned consensus snapshot.
     let profile = state.service.snapshot()?;
     let consensus = state.consensus.status().await?;
-    Ok(Json(QueueTabletStatus::new(
+    Ok(Json(QueueTabletStatus::new_with_read(
         state.service.scope(),
         &consensus,
         profile,
+        tablet_read_metadata(read),
     )?))
 }
 
@@ -762,15 +764,25 @@ struct QueueTabletStatus {
     counts: QueueTabletCounts,
     state_digest: String,
     write_guarantee: &'static str,
-    read_consistency: &'static str,
-    linearizable_read_barrier: bool,
+    #[serde(flatten)]
+    read: TabletReadMetadata,
 }
 
 impl QueueTabletStatus {
+    #[cfg(test)]
     fn new(
         scope: &QueueTabletScope,
         consensus: &ConsensusStatus,
         profile: QueueTabletSnapshot,
+    ) -> Result<Self, String> {
+        Self::new_with_read(scope, consensus, profile, TabletReadMetadata::local_stale())
+    }
+
+    fn new_with_read(
+        scope: &QueueTabletScope,
+        consensus: &ConsensusStatus,
+        profile: QueueTabletSnapshot,
+        read: TabletReadMetadata,
     ) -> Result<Self, String> {
         if profile.last_profile_mutation_index > consensus.applied_index.get() {
             return Err(format!(
@@ -803,30 +815,29 @@ impl QueueTabletStatus {
             counts: profile.counts,
             state_digest: profile.state_digest,
             write_guarantee: "fixed_three_voter_majority_persisted_then_local_profile_applied",
-            read_consistency: "local_profile_applied_stale_capable",
-            linearizable_read_barrier: false,
+            read,
         })
     }
 }
 
 #[derive(Debug, Serialize)]
 struct QueueTabletCountsResponse {
-    observation_scope: &'static str,
-    read_consistency: &'static str,
+    #[serde(flatten)]
+    read: TabletReadMetadata,
     counts: QueueTabletCounts,
 }
 
 #[derive(Debug, Serialize)]
 struct QueueTabletDeadLettersResponse {
-    observation_scope: &'static str,
-    read_consistency: &'static str,
+    #[serde(flatten)]
+    read: TabletReadMetadata,
     records: Vec<QueueTabletDeadLetterHistory>,
 }
 
 #[derive(Debug, Serialize)]
 struct QueueTabletRedrivesResponse {
-    observation_scope: &'static str,
-    read_consistency: &'static str,
+    #[serde(flatten)]
+    read: TabletReadMetadata,
     records: Vec<QueueTabletRedriveHistory>,
 }
 

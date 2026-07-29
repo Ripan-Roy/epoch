@@ -15,7 +15,7 @@ use axum::{
 use epoch_core::{DeploymentMode, ManualClock};
 use epoch_engine::EpochEngine;
 use epoch_node::{
-    regional_router::{RESOURCE_GENERATION_HEADER, TABLET_EPOCH_HEADER},
+    regional_router::{READ_CONSISTENCY_HEADER, RESOURCE_GENERATION_HEADER, TABLET_EPOCH_HEADER},
     router,
 };
 use epoch_storage::FileWal;
@@ -192,7 +192,7 @@ async fn cors_allows_regional_fencing_headers() {
                 .header(
                     ACCESS_CONTROL_REQUEST_HEADERS,
                     format!(
-                        "content-type,{RESOURCE_GENERATION_HEADER},{TABLET_EPOCH_HEADER}"
+                        "content-type,{RESOURCE_GENERATION_HEADER},{TABLET_EPOCH_HEADER},{READ_CONSISTENCY_HEADER}"
                     ),
                 )
                 .body(Body::empty())
@@ -212,6 +212,7 @@ async fn cors_allows_regional_fencing_headers() {
         "content-type",
         RESOURCE_GENERATION_HEADER,
         TABLET_EPOCH_HEADER,
+        READ_CONSISTENCY_HEADER,
     ] {
         assert!(
             allowed_headers

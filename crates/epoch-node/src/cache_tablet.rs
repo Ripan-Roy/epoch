@@ -13,7 +13,7 @@ use std::{
 };
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{
         DefaultBodyLimit, Path, Query, State,
         rejection::{JsonRejection, QueryRejection},
@@ -42,9 +42,9 @@ use tokio::sync::{Mutex, broadcast};
 
 use crate::consensus::{CommittedProposalApplier, ConsensusProbeError, ConsensusProbeHandle};
 use crate::tablet_http::{
-    TabletApiError, TabletApiResult, deserialize_i64_from_number_or_decimal,
+    TabletApiError, TabletApiResult, TabletReadMetadata, deserialize_i64_from_number_or_decimal,
     deserialize_optional_u64_from_number_or_decimal, deserialize_u64_from_number_or_decimal,
-    hex_digest, serialize_optional_u64_as_decimal, serialize_u64_as_decimal,
+    hex_digest, serialize_optional_u64_as_decimal, serialize_u64_as_decimal, tablet_read_metadata,
 };
 
 pub const EXPERIMENTAL_CACHE_TABLET_STATUS_PATH: &str = "/experimental/v1/tablets/cache/status";
@@ -968,6 +968,7 @@ struct CacheObservationQuery {
 async fn observe_key(
     State(state): State<CacheTabletApiState>,
     query: Result<Query<CacheObservationQuery>, QueryRejection>,
+    read: Option<Extension<TabletReadMetadata>>,
 ) -> TabletApiResult<Json<CacheTabletObservationResponse>> {
     let Query(query) = query.map_err(|rejection| TabletApiError::RequestBody {
         status: rejection.status(),
@@ -975,9 +976,7 @@ async fn observe_key(
     })?;
     validate_observation_key(&query.key)?;
     Ok(Json(CacheTabletObservationResponse {
-        observation_scope: "local",
-        read_consistency: "local_profile_applied_stale_capable",
-        linearizable_read_barrier: false,
+        read: tablet_read_metadata(read),
         observation: state.service.observe(&query.key)?,
     }))
 }
@@ -1002,15 +1001,17 @@ fn validate_observation_key(key: &str) -> TabletApiResult<()> {
 
 async fn tablet_status(
     State(state): State<CacheTabletApiState>,
+    read: Option<Extension<TabletReadMetadata>>,
 ) -> TabletApiResult<Json<CacheTabletStatus>> {
     // Profile-first sampling guarantees this document cannot report a profile
     // index ahead of its later actor-owned consensus snapshot.
     let profile = state.service.snapshot()?;
     let consensus = state.consensus.status().await?;
-    Ok(Json(CacheTabletStatus::new(
+    Ok(Json(CacheTabletStatus::new_with_read(
         state.service.scope(),
         &consensus,
         profile,
+        tablet_read_metadata(read),
     )?))
 }
 
@@ -1062,15 +1063,25 @@ struct CacheTabletStatus {
     cache_recovery_state_digest: String,
     state_digest: String,
     write_guarantee: &'static str,
-    read_consistency: &'static str,
-    linearizable_read_barrier: bool,
+    #[serde(flatten)]
+    read: TabletReadMetadata,
 }
 
 impl CacheTabletStatus {
+    #[cfg(test)]
     fn new(
         scope: &CacheTabletScope,
         consensus: &ConsensusStatus,
         profile: CacheTabletSnapshot,
+    ) -> Result<Self, String> {
+        Self::new_with_read(scope, consensus, profile, TabletReadMetadata::local_stale())
+    }
+
+    fn new_with_read(
+        scope: &CacheTabletScope,
+        consensus: &ConsensusStatus,
+        profile: CacheTabletSnapshot,
+        read: TabletReadMetadata,
     ) -> Result<Self, String> {
         if profile.last_profile_mutation_index > consensus.applied_index.get() {
             return Err(format!(
@@ -1106,17 +1117,15 @@ impl CacheTabletStatus {
             cache_recovery_state_digest: profile.cache_recovery_state_digest,
             state_digest: profile.state_digest,
             write_guarantee: "fixed_three_voter_majority_persisted_then_local_profile_applied",
-            read_consistency: "local_profile_applied_stale_capable",
-            linearizable_read_barrier: false,
+            read,
         })
     }
 }
 
 #[derive(Debug, Serialize)]
 struct CacheTabletObservationResponse {
-    observation_scope: &'static str,
-    read_consistency: &'static str,
-    linearizable_read_barrier: bool,
+    #[serde(flatten)]
+    read: TabletReadMetadata,
     observation: CacheTabletObservation,
 }
 

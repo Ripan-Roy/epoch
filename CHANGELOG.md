@@ -30,6 +30,11 @@ notes explicitly list additional verified artifacts.
 - Generated Protobuf and browser-safe status for requested versus achieved
   placement, plus console evidence for verified configured zones and per-node
   group capacity.
+- Safe Raft `ReadIndex` barriers with leader/term fencing, bounded pending
+  requests, cancellation, real-majority tests, and local profile-apply proof.
+- Linearizable-by-default regional reads for all typed GETs and Event Bus query
+  POSTs, with explicit `local_stale` opt-in, exact barrier evidence, bounded
+  timeout configuration, and no silent consistency downgrade.
 
 ### Limitations
 
@@ -43,6 +48,10 @@ notes explicitly list additional verified artifacts.
   general solver, dynamic membership, transactional multi-controller
   reservation, multidimensional capacity model, online transfer, repair, or
   rebalance. Plain HTTP also does not authenticate the Rust server to Go.
+- Linearizable reads are leader-only and limited to the experimental regional
+  surface. Direct profile routes remain stale-capable; follower forwarding,
+  dynamic membership, stable SDK exposure, and cross-tablet read transactions
+  remain unimplemented.
 
 ## [0.1.0-alpha.3] - 2026-07-29
 

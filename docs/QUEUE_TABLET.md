@@ -113,6 +113,12 @@ Reads are local, stale-capable, and never propose maintenance. Status samples
 the profile before asking the actor for consensus status and fails closed if the
 profile could appear ahead of the later consensus snapshot.
 
+Those statements describe the direct internal profile routes. Regional
+resource/shard reads default to a safe leader ReadIndex, wait until the local
+Queue profile applies through that index, and return exact barrier evidence.
+`x-epoch-read-consistency: local_stale` is the explicit opt-in to the direct
+behavior; Epoch never downgrades automatically.
+
 ## Strict command contract
 
 Every mutation carries format version, tablet ID and epoch, resource name,
@@ -301,8 +307,8 @@ This milestone still has no public Queue-tablet route, gRPC service, CLI or SDK
 surface, streaming credit/prefetch, automatic timer proposal, or production
 durability claim. It has one resource, one tablet, partition `0`, static configuration,
 unbounded in-memory idempotency and audit history, no snapshot or compaction,
-no catalog-authorized tablet epoch transition, placement, membership change,
-consumer-group/session coordinator, read barrier, authenticated peer identity,
+no catalog-authorized tablet epoch transition, dynamic placement, membership change,
+consumer-group/session coordinator, follower read routing, authenticated peer identity,
 token authentication, multi-tenant policy, or exhaustive crash/I/O matrix.
 The Docker proof covers selected process faults, not every crash point,
 filesystem failure, or network partition schedule.

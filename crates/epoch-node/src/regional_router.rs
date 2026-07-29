@@ -1,24 +1,26 @@
 //! Resource-aware routing and fencing for materialized regional tablets.
 
-use std::convert::Infallible;
+use std::{convert::Infallible, time::Duration};
 
 use axum::{
     Json, Router,
     body::Body,
     extract::{Path, State},
-    http::{HeaderMap, Method, Request, StatusCode, Uri},
+    http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{any, get},
 };
 use epoch_catalog::ResourceName;
-use epoch_consensus::{ConsensusRole, ConsensusStatus};
+use epoch_consensus::{ConsensusError, ConsensusRole, ConsensusStatus};
 use epoch_core::{ResourceKind, WorkloadProfile};
 use serde::{Deserialize, Serialize};
 use tower::ServiceExt;
 
 use crate::{
-    consensus::ConsensusProbeRole,
-    tablet_http::{serialize_optional_u64_as_decimal, serialize_u64_as_decimal},
+    consensus::{ConsensusProbeError, ConsensusProbeRole},
+    tablet_http::{
+        TabletReadMetadata, serialize_optional_u64_as_decimal, serialize_u64_as_decimal,
+    },
     tablet_materializer::{MaterializedTabletRoute, TabletDirectory, TabletDirectoryError},
 };
 
@@ -26,6 +28,16 @@ pub const REGIONAL_RESOURCE_ROUTE_PATH: &str = "/experimental/v1/regional/resour
 pub const REGIONAL_RESOURCE_DATA_PATH: &str = "/experimental/v1/regional/resources/{organization}/{project}/{environment}/{namespace}/{kind}/{name}/shards/{shard}/data/{*operation}";
 pub const RESOURCE_GENERATION_HEADER: &str = "x-epoch-resource-generation";
 pub const TABLET_EPOCH_HEADER: &str = "x-epoch-tablet-epoch";
+pub const READ_CONSISTENCY_HEADER: &str = "x-epoch-read-consistency";
+pub const READ_INDEX_HEADER: &str = "x-epoch-read-index";
+pub const DEFAULT_REGIONAL_READ_BARRIER_TIMEOUT: Duration = Duration::from_secs(2);
+pub const MAX_REGIONAL_READ_BARRIER_TIMEOUT: Duration = Duration::from_mins(1);
+
+#[derive(Debug, Clone)]
+struct RegionalRouterState {
+    directory: TabletDirectory,
+    read_barrier_timeout: Duration,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 struct RegionalResourcePath {
@@ -230,6 +242,25 @@ impl RegionalRouterError {
             },
         }
     }
+
+    fn read_barrier_timeout(route: &MaterializedTabletRoute, message: impl Into<String>) -> Self {
+        let descriptor = &route.metadata().descriptor;
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            body: RegionalRouteErrorBody {
+                code: "read_barrier_timeout",
+                message: message.into(),
+                retryable: true,
+                current: Some(RegionalRouteFence {
+                    resource_generation: descriptor.resource_generation,
+                    tablet_id: descriptor.tablet_id,
+                    consensus_group_id: descriptor.consensus_group_id,
+                    tablet_epoch: descriptor.tablet_epoch,
+                }),
+                leader_node_id: None,
+            },
+        }
+    }
 }
 
 impl IntoResponse for RegionalRouterError {
@@ -239,17 +270,32 @@ impl IntoResponse for RegionalRouterError {
 }
 
 pub fn regional_tablet_router(directory: TabletDirectory) -> Router {
+    regional_tablet_router_with_read_timeout(directory, DEFAULT_REGIONAL_READ_BARRIER_TIMEOUT)
+}
+
+pub fn regional_tablet_router_with_read_timeout(
+    directory: TabletDirectory,
+    read_barrier_timeout: Duration,
+) -> Router {
+    assert!(
+        !read_barrier_timeout.is_zero()
+            && read_barrier_timeout <= MAX_REGIONAL_READ_BARRIER_TIMEOUT,
+        "regional read barrier timeout must be between 1 ms and 60 seconds"
+    );
     Router::new()
         .route(REGIONAL_RESOURCE_ROUTE_PATH, get(resolve_route))
         .route(REGIONAL_RESOURCE_DATA_PATH, any(dispatch_data))
-        .with_state(directory)
+        .with_state(RegionalRouterState {
+            directory,
+            read_barrier_timeout,
+        })
 }
 
 async fn resolve_route(
-    State(directory): State<TabletDirectory>,
+    State(state): State<RegionalRouterState>,
     Path(path): Path<RegionalResourcePath>,
 ) -> Result<Json<RegionalRouteResponse>, RegionalRouterError> {
-    let (route, _) = resolve_local_route(&directory, &path)?;
+    let (route, _) = resolve_local_route(&state.directory, &path)?;
     let consensus = route
         .consensus()
         .status()
@@ -259,11 +305,11 @@ async fn resolve_route(
 }
 
 async fn dispatch_data(
-    State(directory): State<TabletDirectory>,
+    State(state): State<RegionalRouterState>,
     Path(path): Path<RegionalDataPath>,
     mut request: Request<Body>,
 ) -> Result<Response, RegionalRouterError> {
-    let (route, _) = resolve_local_route(&directory, &path.resource_path())?;
+    let (route, _) = resolve_local_route(&state.directory, &path.resource_path())?;
     validate_fences(&route, request.headers())?;
     if path.operation.trim_matches('/').is_empty() {
         return Err(RegionalRouterError::invalid(
@@ -271,7 +317,13 @@ async fn dispatch_data(
         ));
     }
 
-    if request.method() != Method::GET {
+    let is_read = is_read_operation(
+        request.method(),
+        route.metadata().descriptor.workload_profile,
+        &path.operation,
+    );
+    let requested_consistency = requested_read_consistency(request.headers(), is_read)?;
+    let read_metadata = if requested_consistency == Some(RequestedReadConsistency::Linearizable) {
         let consensus = route
             .consensus()
             .status()
@@ -286,7 +338,33 @@ async fn dispatch_data(
         if consensus.role != ConsensusRole::Leader {
             return Err(RegionalRouterError::not_leader(&route, &consensus));
         }
-    }
+        let completed = route
+            .consensus()
+            .read_barrier(consensus.term.get(), state.read_barrier_timeout)
+            .await
+            .map_err(|error| read_barrier_error(&route, &consensus, &error))?;
+        let metadata = TabletReadMetadata::linearizable(completed);
+        request.extensions_mut().insert(metadata);
+        Some(metadata)
+    } else {
+        if !is_read {
+            let consensus = route
+                .consensus()
+                .status()
+                .await
+                .map_err(|error| RegionalRouterError::unavailable(error.to_string()))?;
+            if consensus.fail_stopped {
+                return Err(RegionalRouterError::unavailable(format!(
+                    "consensus group {} is fail-stopped",
+                    route.metadata().descriptor.consensus_group_id
+                )));
+            }
+            if consensus.role != ConsensusRole::Leader {
+                return Err(RegionalRouterError::not_leader(&route, &consensus));
+            }
+        }
+        None
+    };
 
     let inner_uri = profile_uri(
         route.metadata().descriptor.workload_profile,
@@ -296,8 +374,86 @@ async fn dispatch_data(
     *request.uri_mut() = inner_uri;
     let result: Result<Response, Infallible> = route.router().oneshot(request).await;
     match result {
-        Ok(response) => Ok(response),
+        Ok(mut response) => {
+            if let Some(metadata) = read_metadata {
+                response.headers_mut().insert(
+                    READ_CONSISTENCY_HEADER,
+                    HeaderValue::from_static("linearizable"),
+                );
+                if let Some(read_index) = metadata.barrier_index() {
+                    response.headers_mut().insert(
+                        READ_INDEX_HEADER,
+                        HeaderValue::from_str(&read_index.to_string()).map_err(|error| {
+                            RegionalRouterError::unavailable(format!(
+                                "read index response header could not be encoded: {error}"
+                            ))
+                        })?,
+                    );
+                }
+            }
+            Ok(response)
+        }
         Err(never) => match never {},
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestedReadConsistency {
+    Linearizable,
+    LocalStale,
+}
+
+fn requested_read_consistency(
+    headers: &HeaderMap,
+    is_read: bool,
+) -> Result<Option<RequestedReadConsistency>, RegionalRouterError> {
+    let Some(raw) = headers.get(READ_CONSISTENCY_HEADER) else {
+        return Ok(is_read.then_some(RequestedReadConsistency::Linearizable));
+    };
+    if !is_read {
+        return Err(RegionalRouterError::invalid(format!(
+            "header {READ_CONSISTENCY_HEADER} is valid only for read operations"
+        )));
+    }
+    match raw.to_str().map_err(|_| {
+        RegionalRouterError::invalid(format!(
+            "header {READ_CONSISTENCY_HEADER} is not valid ASCII"
+        ))
+    })? {
+        "linearizable" => Ok(Some(RequestedReadConsistency::Linearizable)),
+        "local_stale" => Ok(Some(RequestedReadConsistency::LocalStale)),
+        _ => Err(RegionalRouterError::invalid(format!(
+            "header {READ_CONSISTENCY_HEADER} must be linearizable or local_stale"
+        ))),
+    }
+}
+
+fn is_read_operation(method: &Method, profile: WorkloadProfile, operation: &str) -> bool {
+    if method == Method::GET {
+        return true;
+    }
+    method == Method::POST
+        && profile == WorkloadProfile::EventBus
+        && matches!(
+            operation.trim_matches('/'),
+            "archive/replay" | "deliveries/query"
+        )
+}
+
+fn read_barrier_error(
+    route: &MaterializedTabletRoute,
+    consensus: &ConsensusStatus,
+    error: &ConsensusProbeError,
+) -> RegionalRouterError {
+    match error {
+        ConsensusProbeError::ReadBarrierTimeout { .. }
+        | ConsensusProbeError::Consensus(ConsensusError::TooManyReadBarriers) => {
+            RegionalRouterError::read_barrier_timeout(route, error.to_string())
+        }
+        ConsensusProbeError::Consensus(
+            ConsensusError::NotLeader { .. } | ConsensusError::StaleTerm { .. },
+        ) => RegionalRouterError::not_leader(route, consensus),
+        _ => RegionalRouterError::unavailable(error.to_string()),
     }
 }
 
@@ -507,6 +663,52 @@ mod tests {
         .expect("response should be JSON")
     }
 
+    #[test]
+    fn read_consistency_is_semantic_and_never_downgrades_implicitly() {
+        assert!(is_read_operation(
+            &Method::GET,
+            WorkloadProfile::StreamLog,
+            "records"
+        ));
+        assert!(is_read_operation(
+            &Method::POST,
+            WorkloadProfile::EventBus,
+            "archive/replay"
+        ));
+        assert!(is_read_operation(
+            &Method::POST,
+            WorkloadProfile::EventBus,
+            "deliveries/query"
+        ));
+        assert!(!is_read_operation(
+            &Method::POST,
+            WorkloadProfile::EventBus,
+            "mutations"
+        ));
+        assert_eq!(
+            requested_read_consistency(&HeaderMap::new(), true).unwrap(),
+            Some(RequestedReadConsistency::Linearizable)
+        );
+
+        let mut stale_headers = HeaderMap::new();
+        stale_headers.insert(
+            READ_CONSISTENCY_HEADER,
+            HeaderValue::from_static("local_stale"),
+        );
+        assert_eq!(
+            requested_read_consistency(&stale_headers, true).unwrap(),
+            Some(RequestedReadConsistency::LocalStale)
+        );
+        assert!(requested_read_consistency(&stale_headers, false).is_err());
+
+        let mut invalid_headers = HeaderMap::new();
+        invalid_headers.insert(
+            READ_CONSISTENCY_HEADER,
+            HeaderValue::from_static("eventual"),
+        );
+        assert!(requested_read_consistency(&invalid_headers, true).is_err());
+    }
+
     #[tokio::test]
     async fn discovery_and_data_routing_are_generation_epoch_and_leader_fenced() {
         let data_directory = TempDir::new().expect("temp directory should be created");
@@ -552,7 +754,7 @@ mod tests {
         assert_eq!(stale["code"], "fenced");
         assert_eq!(stale["current"]["resource_generation"], "5");
 
-        let local_read = router
+        let quorum_read_without_leader = router
             .clone()
             .oneshot(
                 Request::get(data_path("status"))
@@ -563,11 +765,30 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(quorum_read_without_leader.status(), StatusCode::CONFLICT);
+        assert_eq!(json(quorum_read_without_leader).await["code"], "not_leader");
+
+        let local_read = router
+            .clone()
+            .oneshot(
+                Request::get(data_path("status"))
+                    .header(RESOURCE_GENERATION_HEADER, "5")
+                    .header(TABLET_EPOCH_HEADER, "3")
+                    .header(READ_CONSISTENCY_HEADER, "local_stale")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(local_read.status(), StatusCode::OK);
         let local_read = json(local_read).await;
         assert_eq!(local_read["tablet_id"], "7");
         assert_eq!(local_read["tablet_epoch"], "3");
-
+        assert_eq!(
+            local_read["read_consistency"],
+            "local_profile_applied_stale_capable"
+        );
+        assert_eq!(local_read["linearizable_read_barrier"], false);
         let follower_write = router
             .clone()
             .oneshot(

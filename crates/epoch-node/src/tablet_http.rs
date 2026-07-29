@@ -3,11 +3,11 @@
 use std::collections::BTreeMap;
 
 use axum::{
-    Json,
+    Extension, Json,
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use epoch_consensus::ConsensusError;
+use epoch_consensus::{CompletedReadBarrier, ConsensusError};
 use epoch_core::EventEnvelope;
 use epoch_tablet::TabletError;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -16,6 +16,67 @@ use serde_json::Value;
 use crate::consensus::ConsensusProbeError;
 
 pub(crate) type TabletApiResult<T> = Result<T, TabletApiError>;
+
+/// Evidence attached by the regional router after it has completed the
+/// requested read-consistency protocol. Direct profile routes deliberately
+/// fall back to the truthful local, stale-capable contract.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub(crate) struct TabletReadMetadata {
+    pub(crate) observation_scope: &'static str,
+    pub(crate) read_consistency: &'static str,
+    pub(crate) linearizable_read_barrier: bool,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_u64_as_decimal"
+    )]
+    pub(crate) read_barrier_term: Option<u64>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_u64_as_decimal"
+    )]
+    pub(crate) read_barrier_index: Option<u64>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_u64_as_decimal"
+    )]
+    pub(crate) read_barrier_applied_index: Option<u64>,
+}
+
+impl TabletReadMetadata {
+    pub(crate) const fn local_stale() -> Self {
+        Self {
+            observation_scope: "local",
+            read_consistency: "local_profile_applied_stale_capable",
+            linearizable_read_barrier: false,
+            read_barrier_term: None,
+            read_barrier_index: None,
+            read_barrier_applied_index: None,
+        }
+    }
+
+    pub(crate) const fn linearizable(completed: CompletedReadBarrier) -> Self {
+        Self {
+            observation_scope: "local",
+            read_consistency: "linearizable",
+            linearizable_read_barrier: true,
+            read_barrier_term: Some(completed.term.get()),
+            read_barrier_index: Some(completed.read_index.get()),
+            read_barrier_applied_index: Some(completed.applied_index.get()),
+        }
+    }
+
+    pub(crate) const fn barrier_index(self) -> Option<u64> {
+        self.read_barrier_index
+    }
+}
+
+pub(crate) fn tablet_read_metadata(
+    extension: Option<Extension<TabletReadMetadata>>,
+) -> TabletReadMetadata {
+    extension.map_or_else(TabletReadMetadata::local_stale, |Extension(metadata)| {
+        metadata
+    })
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
