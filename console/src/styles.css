@@ -365,6 +365,12 @@ h3 {
   background: var(--mint-soft);
 }
 
+.callout--warning {
+  border-color: #72502f;
+  color: #f8c58d;
+  background: rgb(75 50 29 / 0.5);
+}
+
 .status-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -740,6 +746,7 @@ tbody td {
 }
 
 .profile-token,
+.phase-token,
 .assessment {
   display: inline-flex;
   align-items: center;
@@ -748,6 +755,78 @@ tbody td {
   padding: 0.28rem 0.55rem;
   font-size: 0.69rem;
   font-weight: 760;
+}
+
+.phase-token[data-phase="ready"] {
+  border-color: #326853;
+  color: #9be7c8;
+  background: rgb(20 56 46 / 0.55);
+}
+
+.phase-token[data-phase="pending"],
+.phase-token[data-phase="degraded"] {
+  border-color: #72502f;
+  color: #f8c58d;
+  background: rgb(75 50 29 / 0.5);
+}
+
+.phase-token[data-phase="failed"] {
+  border-color: #713c3d;
+  color: #ffb1ac;
+  background: rgb(65 31 32 / 0.55);
+}
+
+.resource-name,
+.placement-summary {
+  display: block;
+}
+
+.resource-name {
+  margin-bottom: 0.45rem;
+}
+
+.resource-path {
+  display: inline;
+  border: 0;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  font-size: 0.68rem;
+  font-weight: 500;
+}
+
+.resource-generation-detail {
+  display: block;
+  margin-top: 0.32rem;
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.68rem;
+}
+
+.placement-summary {
+  margin-bottom: 0.45rem;
+  color: var(--muted-strong);
+  font-size: 0.76rem;
+}
+
+.tablet-list,
+.risk-list {
+  display: grid;
+  gap: 0.28rem;
+  margin: 0;
+  padding-left: 1rem;
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.tablet-list {
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+.risk-list {
+  min-width: 230px;
+  color: #e6c49e;
 }
 
 .profile-token[data-kind="cache"] {

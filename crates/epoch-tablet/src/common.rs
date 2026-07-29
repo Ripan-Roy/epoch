@@ -36,6 +36,7 @@ pub enum TabletError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamTabletScope {
     pub tablet_id: u64,
+    pub consensus_group_id: u64,
     pub tablet_epoch: u64,
     pub resource: String,
 }
@@ -46,8 +47,18 @@ impl StreamTabletScope {
         tablet_epoch: u64,
         resource: impl Into<String>,
     ) -> TabletResult<Self> {
+        Self::new_with_consensus_group(tablet_id, tablet_id, tablet_epoch, resource)
+    }
+
+    pub fn new_with_consensus_group(
+        tablet_id: u64,
+        consensus_group_id: u64,
+        tablet_epoch: u64,
+        resource: impl Into<String>,
+    ) -> TabletResult<Self> {
         let scope = Self {
             tablet_id,
+            consensus_group_id,
             tablet_epoch,
             resource: resource.into(),
         };
@@ -59,6 +70,11 @@ impl StreamTabletScope {
         if self.tablet_id == 0 {
             return Err(TabletError::InvalidCommand(
                 "tablet_id must be non-zero".into(),
+            ));
+        }
+        if self.consensus_group_id == 0 {
+            return Err(TabletError::InvalidCommand(
+                "consensus_group_id must be non-zero".into(),
             ));
         }
         if self.tablet_epoch == 0 {
@@ -135,9 +151,9 @@ pub(crate) fn validate_committed_command_scope(
     scope: &TabletScope,
     committed: CommittedCommand<'_>,
 ) -> TabletResult<()> {
-    if committed.group_id != scope.tablet_id {
+    if committed.group_id != scope.consensus_group_id {
         return Err(TabletError::GroupMismatch {
-            expected: scope.tablet_id,
+            expected: scope.consensus_group_id,
             observed: committed.group_id,
         });
     }

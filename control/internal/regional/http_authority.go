@@ -1,0 +1,442 @@
+package regional
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"epoch.local/epoch/control/internal/resources"
+)
+
+const maxAuthorityResponseBytes = 1 << 20
+
+// HTTPAuthority adapts the current Rust regional catalog and discovery routes
+// to the Go reconciliation boundary.
+type HTTPAuthority struct {
+	endpoints []*url.URL
+	client    *http.Client
+}
+
+// NewHTTPAuthority validates an explicit regional-node allowlist. Redirects
+// are never followed because a catalog node cannot delegate authority to an
+// unconfigured host.
+func NewHTTPAuthority(endpoints []string, client *http.Client) (*HTTPAuthority, error) {
+	if len(endpoints) == 0 {
+		return nil, fmt.Errorf("regional authority requires at least one endpoint")
+	}
+	parsed := make([]*url.URL, 0, len(endpoints))
+	seen := make(map[string]struct{}, len(endpoints))
+	for _, raw := range endpoints {
+		endpoint, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil {
+			return nil, fmt.Errorf("invalid regional authority endpoint: %w", err)
+		}
+		if !validAuthorityEndpoint(endpoint) {
+			return nil, fmt.Errorf(
+				"regional authority endpoint must contain only an http(s) scheme and authority",
+			)
+		}
+		endpoint.Path = ""
+		canonical := endpoint.String()
+		if _, exists := seen[canonical]; exists {
+			return nil, fmt.Errorf("regional authority endpoints must be unique")
+		}
+		seen[canonical] = struct{}{}
+		parsed = append(parsed, endpoint)
+	}
+	if client == nil {
+		client = &http.Client{Timeout: 5 * time.Second}
+	}
+	safeClient := *client
+	safeClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &HTTPAuthority{endpoints: parsed, client: &safeClient}, nil
+}
+
+func validAuthorityEndpoint(endpoint *url.URL) bool {
+	return (endpoint.Scheme == "http" || endpoint.Scheme == "https") &&
+		endpoint.Host != "" &&
+		endpoint.User == nil &&
+		(endpoint.Path == "" || endpoint.Path == "/") &&
+		endpoint.RawPath == "" &&
+		endpoint.RawQuery == "" &&
+		endpoint.Fragment == ""
+}
+
+type applyAuthorityBody struct {
+	RequestToken       string `json:"request_token"`
+	ExpectedGeneration string `json:"expected_generation"`
+	ShardCount         uint32 `json:"shard_count"`
+	ReplicaCount       uint16 `json:"replica_count"`
+}
+
+type deleteAuthorityBody struct {
+	RequestToken       string `json:"request_token"`
+	ExpectedGeneration string `json:"expected_generation"`
+}
+
+type catalogApplyDocument struct {
+	Mutation struct {
+		Kind     string                  `json:"kind"`
+		Resource catalogResourceDocument `json:"resource"`
+	} `json:"mutation"`
+}
+
+type catalogDeleteDocument struct {
+	Mutation struct {
+		Kind       string        `json:"kind"`
+		Generation decimalUint64 `json:"generation"`
+		Deleted    bool          `json:"deleted"`
+	} `json:"mutation"`
+}
+
+type catalogResourceDocument struct {
+	Generation   decimalUint64           `json:"generation"`
+	ReplicaCount uint16                  `json:"replica_count"`
+	Tablets      []catalogTabletDocument `json:"tablets"`
+}
+
+type catalogTabletDocument struct {
+	TabletID           decimalUint64 `json:"tablet_id"`
+	ConsensusGroupID   decimalUint64 `json:"consensus_group_id"`
+	ShardIndex         uint32        `json:"shard_index"`
+	TabletEpoch        decimalUint64 `json:"tablet_epoch"`
+	ResourceGeneration decimalUint64 `json:"resource_generation"`
+	ReplicaCount       uint16        `json:"replica_count"`
+}
+
+type routeDocument struct {
+	ResourceGeneration decimalUint64  `json:"resource_generation"`
+	TabletID           decimalUint64  `json:"tablet_id"`
+	ConsensusGroupID   decimalUint64  `json:"consensus_group_id"`
+	TabletEpoch        decimalUint64  `json:"tablet_epoch"`
+	LocalNodeID        decimalUint64  `json:"local_node_id"`
+	LeaderNodeID       *decimalUint64 `json:"leader_node_id"`
+	AcceptsWrites      bool           `json:"accepts_writes"`
+}
+
+type decimalUint64 uint64
+
+func (value *decimalUint64) UnmarshalJSON(encoded []byte) error {
+	raw := strings.TrimSpace(string(encoded))
+	if strings.HasPrefix(raw, `"`) {
+		var text string
+		if err := json.Unmarshal(encoded, &text); err != nil {
+			return err
+		}
+		raw = text
+	}
+	parsed, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return fmt.Errorf("expected a decimal u64: %w", err)
+	}
+	*value = decimalUint64(parsed)
+	return nil
+}
+
+// Apply idempotently sends one desired generation to the first available
+// catalog leader, then samples placement from every configured node.
+func (authority *HTTPAuthority) Apply(
+	ctx context.Context,
+	request AuthorityApplyRequest,
+) (AuthorityObservation, error) {
+	body := applyAuthorityBody{
+		RequestToken:       request.RequestToken,
+		ExpectedGeneration: strconv.FormatUint(request.ExpectedGeneration, 10),
+		ShardCount:         request.ShardCount,
+		ReplicaCount:       request.ReplicaCount,
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return AuthorityObservation{}, invalidAuthorityError(err.Error())
+	}
+	response, err := authority.requestAny(
+		ctx,
+		http.MethodPut,
+		catalogResourcePath(request.Key),
+		encoded,
+	)
+	if err != nil {
+		return AuthorityObservation{}, err
+	}
+	var applied catalogApplyDocument
+	if err := decodeAuthorityJSON(response, &applied); err != nil {
+		return AuthorityObservation{}, err
+	}
+	if applied.Mutation.Kind != "applied" {
+		return AuthorityObservation{}, invalidAuthorityError(
+			"regional catalog apply response did not contain an applied resource",
+		)
+	}
+	return authority.observePlacement(ctx, request.Key, applied.Mutation.Resource)
+}
+
+// Observe reads current catalog identity and samples placement without
+// resubmitting an already-observed desired generation.
+func (authority *HTTPAuthority) Observe(
+	ctx context.Context,
+	key resources.ResourceKey,
+) (AuthorityObservation, error) {
+	response, err := authority.requestAny(
+		ctx,
+		http.MethodGet,
+		catalogResourcePath(key),
+		nil,
+	)
+	if err != nil {
+		return AuthorityObservation{}, err
+	}
+	var resource catalogResourceDocument
+	if err := decodeAuthorityJSON(response, &resource); err != nil {
+		return AuthorityObservation{}, err
+	}
+	return authority.observePlacement(ctx, key, resource)
+}
+
+// Delete persists a catalog tombstone through the first available leader.
+func (authority *HTTPAuthority) Delete(
+	ctx context.Context,
+	request AuthorityDeleteRequest,
+) (AuthorityDeleteObservation, error) {
+	encoded, err := json.Marshal(deleteAuthorityBody{
+		RequestToken:       request.RequestToken,
+		ExpectedGeneration: strconv.FormatUint(request.ExpectedGeneration, 10),
+	})
+	if err != nil {
+		return AuthorityDeleteObservation{}, invalidAuthorityError(err.Error())
+	}
+	response, err := authority.requestAny(
+		ctx,
+		http.MethodDelete,
+		catalogResourcePath(request.Key),
+		encoded,
+	)
+	if err != nil {
+		return AuthorityDeleteObservation{}, err
+	}
+	var deleted catalogDeleteDocument
+	if err := decodeAuthorityJSON(response, &deleted); err != nil {
+		return AuthorityDeleteObservation{}, err
+	}
+	if deleted.Mutation.Kind != "deleted" {
+		return AuthorityDeleteObservation{}, invalidAuthorityError(
+			"regional catalog delete response did not contain a tombstone",
+		)
+	}
+	return AuthorityDeleteObservation{
+		Generation: uint64(deleted.Mutation.Generation),
+		Deleted:    deleted.Mutation.Deleted,
+	}, nil
+}
+
+func (authority *HTTPAuthority) observePlacement(
+	ctx context.Context,
+	key resources.ResourceKey,
+	resource catalogResourceDocument,
+) (AuthorityObservation, error) {
+	tablets := make([]resources.TabletStatus, len(resource.Tablets))
+	for index, catalogTablet := range resource.Tablets {
+		tablet := resources.TabletStatus{
+			TabletID:           uint64(catalogTablet.TabletID),
+			ConsensusGroupID:   uint64(catalogTablet.ConsensusGroupID),
+			ShardIndex:         catalogTablet.ShardIndex,
+			TabletEpoch:        uint64(catalogTablet.TabletEpoch),
+			ResourceGeneration: uint64(catalogTablet.ResourceGeneration),
+			DesiredReplicas:    uint32(catalogTablet.ReplicaCount),
+		}
+		leaders := make(map[uint64]struct{})
+		voters := make(map[uint64]struct{})
+		for _, endpoint := range authority.endpoints {
+			route, ok := authority.observeRoute(ctx, endpoint, key, tablet)
+			if !ok {
+				continue
+			}
+			voters[uint64(route.LocalNodeID)] = struct{}{}
+			if route.LeaderNodeID != nil {
+				leaders[uint64(*route.LeaderNodeID)] = struct{}{}
+			}
+		}
+		for voter := range voters {
+			tablet.VoterNodeIDs = append(tablet.VoterNodeIDs, voter)
+		}
+		sort.Slice(tablet.VoterNodeIDs, func(left, right int) bool {
+			return tablet.VoterNodeIDs[left] < tablet.VoterNodeIDs[right]
+		})
+		if len(leaders) == 1 {
+			for leader := range leaders {
+				if _, observed := voters[leader]; observed {
+					tablet.LeaderNodeID = leader
+				}
+			}
+		}
+		tablets[index] = tablet
+	}
+	sort.Slice(tablets, func(left, right int) bool {
+		return tablets[left].ShardIndex < tablets[right].ShardIndex
+	})
+	return AuthorityObservation{
+		Generation: uint64(resource.Generation),
+		Tablets:    tablets,
+	}, nil
+}
+
+func (authority *HTTPAuthority) observeRoute(
+	ctx context.Context,
+	endpoint *url.URL,
+	key resources.ResourceKey,
+	expected resources.TabletStatus,
+) (routeDocument, bool) {
+	response, status, err := authority.requestEndpoint(
+		ctx,
+		endpoint,
+		http.MethodGet,
+		resourceRoutePath(key, expected.ShardIndex),
+		nil,
+	)
+	if err != nil || status != http.StatusOK {
+		return routeDocument{}, false
+	}
+	var route routeDocument
+	if decodeAuthorityJSON(response, &route) != nil {
+		return routeDocument{}, false
+	}
+	if uint64(route.ResourceGeneration) != expected.ResourceGeneration ||
+		uint64(route.TabletID) != expected.TabletID ||
+		uint64(route.ConsensusGroupID) != expected.ConsensusGroupID ||
+		uint64(route.TabletEpoch) != expected.TabletEpoch ||
+		uint64(route.LocalNodeID) == 0 {
+		return routeDocument{}, false
+	}
+	return route, true
+}
+
+func (authority *HTTPAuthority) requestAny(
+	ctx context.Context,
+	method string,
+	path string,
+	body []byte,
+) ([]byte, error) {
+	var failures []string
+	for _, endpoint := range authority.endpoints {
+		response, status, err := authority.requestEndpoint(ctx, endpoint, method, path, body)
+		if err != nil {
+			failures = append(failures, err.Error())
+			continue
+		}
+		switch {
+		case status >= 200 && status < 300:
+			return response, nil
+		case status == http.StatusConflict:
+			return nil, conflictError(authorityErrorMessage(response, status))
+		case status == http.StatusBadRequest || status == http.StatusUnprocessableEntity:
+			return nil, invalidAuthorityError(authorityErrorMessage(response, status))
+		case status == http.StatusNotFound:
+			return nil, invalidAuthorityError(authorityErrorMessage(response, status))
+		case status >= 500 || status == http.StatusTooManyRequests:
+			failures = append(failures, authorityErrorMessage(response, status))
+		default:
+			return nil, invalidAuthorityError(authorityErrorMessage(response, status))
+		}
+	}
+	return nil, availabilityError(
+		"no regional authority endpoint completed the request: " + strings.Join(failures, "; "),
+	)
+}
+
+func (authority *HTTPAuthority) requestEndpoint(
+	ctx context.Context,
+	endpoint *url.URL,
+	method string,
+	path string,
+	body []byte,
+) ([]byte, int, error) {
+	target := *endpoint
+	target.Path = path
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	request, err := http.NewRequestWithContext(ctx, method, target.String(), reader)
+	if err != nil {
+		return nil, 0, err
+	}
+	request.Header.Set("accept", "application/json")
+	if body != nil {
+		request.Header.Set("content-type", "application/json")
+	}
+	response, err := authority.client.Do(request)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer response.Body.Close()
+	limited := io.LimitReader(response.Body, maxAuthorityResponseBytes+1)
+	encoded, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(encoded) > maxAuthorityResponseBytes {
+		return nil, 0, fmt.Errorf("regional authority response exceeded %d bytes", maxAuthorityResponseBytes)
+	}
+	return encoded, response.StatusCode, nil
+}
+
+func decodeAuthorityJSON(encoded []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	if err := decoder.Decode(target); err != nil {
+		return invalidAuthorityError("regional authority returned invalid JSON: " + err.Error())
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return invalidAuthorityError("regional authority returned trailing JSON")
+	}
+	return nil
+}
+
+func authorityErrorMessage(encoded []byte, status int) string {
+	var body struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(encoded, &body) == nil && body.Message != "" {
+		return fmt.Sprintf("regional authority HTTP %d %s: %s", status, body.Code, body.Message)
+	}
+	return fmt.Sprintf("regional authority returned HTTP %d", status)
+}
+
+func catalogResourcePath(key resources.ResourceKey) string {
+	return "/experimental/v1/regional/catalog/resources/" + resourceSegments(key)
+}
+
+func resourceRoutePath(key resources.ResourceKey, shard uint32) string {
+	return "/experimental/v1/regional/resources/" +
+		resourceSegments(key) +
+		"/shards/" +
+		strconv.FormatUint(uint64(shard), 10)
+}
+
+func resourceSegments(key resources.ResourceKey) string {
+	return strings.Join([]string{
+		url.PathEscape(key.Organization),
+		url.PathEscape(key.Project),
+		url.PathEscape(key.Environment),
+		url.PathEscape(key.Namespace),
+		url.PathEscape(authorityKind(key.Kind)),
+		url.PathEscape(key.Name),
+	}, "/")
+}
+
+func authorityKind(kind resources.Kind) string {
+	if kind == resources.KindEventBus {
+		return "event-bus"
+	}
+	return string(kind)
+}

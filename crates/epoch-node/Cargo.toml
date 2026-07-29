@@ -11,6 +11,7 @@ axum.workspace = true
 clap.workspace = true
 epoch-bus = { path = "../epoch-bus" }
 epoch-cache = { path = "../epoch-cache" }
+epoch-catalog = { path = "../epoch-catalog" }
 epoch-core = { path = "../epoch-core" }
 epoch-consensus = { path = "../epoch-consensus" }
 epoch-engine = { path = "../epoch-engine" }
@@ -24,6 +25,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"] }
+tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -32,7 +34,6 @@ url.workspace = true
 [dev-dependencies]
 http-body-util.workspace = true
 tempfile.workspace = true
-tower.workspace = true
 
 [lints]
 workspace = true

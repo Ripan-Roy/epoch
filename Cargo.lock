@@ -359,6 +359,7 @@ dependencies = [
  "epoch-core",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.19",
 ]
 
@@ -421,6 +422,7 @@ dependencies = [
  "clap",
  "epoch-bus",
  "epoch-cache",
+ "epoch-catalog",
  "epoch-consensus",
  "epoch-core",
  "epoch-engine",

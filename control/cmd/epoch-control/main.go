@@ -1,72 +1,209 @@
-// Command epoch-control runs the initial managed control-plane API. Customer
-// data remains owned by regional Rust data nodes; this process stores only
-// provisional in-memory desired resource metadata.
+// Command epoch-control runs the managed control-plane API. Customer data and
+// catalog authority remain owned by regional Rust data nodes.
 package main
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"epoch.local/epoch/control/internal/regional"
 	"epoch.local/epoch/control/internal/resources"
+	epochv1 "epoch.local/epoch/sdk/go/gen/epoch/v1"
+	"google.golang.org/grpc"
 )
 
 const (
-	defaultAddress  = ":8080"
-	shutdownTimeout = 10 * time.Second
+	defaultHTTPAddress       = ":8080"
+	defaultGRPCAddress       = ":8081"
+	defaultRegionalEndpoints = "http://127.0.0.1:7601"
+	defaultAllowedOrigins    = "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:4173,http://localhost:4173"
+	defaultReconcileInterval = time.Second
+	shutdownTimeout          = 10 * time.Second
 )
+
+type controlConfig struct {
+	httpAddress       string
+	grpcAddress       string
+	regionalEndpoints []string
+	allowedOrigins    []string
+	reconcileInterval time.Duration
+}
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	address := os.Getenv("EPOCH_CONTROL_ADDR")
-	if address == "" {
-		address = defaultAddress
+	rootContext, stop := signal.NotifyContext(
+		context.Background(),
+		os.Interrupt,
+		syscall.SIGTERM,
+	)
+	defer stop()
+	if err := run(rootContext, logger); err != nil {
+		logger.Error("epoch control plane stopped", "error", err)
+		os.Exit(1)
 	}
+}
 
+func run(ctx context.Context, logger *slog.Logger) error {
+	config, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	authority, err := regional.NewHTTPAuthority(config.regionalEndpoints, nil)
+	if err != nil {
+		return err
+	}
 	registry := resources.NewRegistry()
-	server := &http.Server{
-		Addr:              address,
-		Handler:           resources.NewHTTPHandler(registry),
+	reconciler := regional.NewReconciler(registry, authority)
+	grpcServer := grpc.NewServer()
+	epochv1.RegisterRegionalAdminServiceServer(
+		grpcServer,
+		regional.NewRegionalAdminServer(registry, reconciler),
+	)
+	httpHandler, err := resources.NewHTTPHandlerWithOrigins(registry, config.allowedOrigins)
+	if err != nil {
+		return fmt.Errorf("configure control HTTP: %w", err)
+	}
+	httpServer := &http.Server{
+		Addr:              config.httpAddress,
+		Handler:           httpHandler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+	httpListener, err := net.Listen("tcp", config.httpAddress)
+	if err != nil {
+		return fmt.Errorf("listen for control HTTP: %w", err)
+	}
+	defer httpListener.Close()
+	grpcListener, err := net.Listen("tcp", config.grpcAddress)
+	if err != nil {
+		return fmt.Errorf("listen for RegionalAdmin gRPC: %w", err)
+	}
+	defer grpcListener.Close()
 
-	rootContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	serverErrors := make(chan error, 1)
+	runContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+	serverErrors := make(chan error, 3)
 	go func() {
-		logger.Info("epoch control plane listening",
-			"address", address,
-			"registry", "in_memory",
-			"data_path_owner", "rust",
-		)
-		serverErrors <- server.ListenAndServe()
+		serverErrors <- normalizeHTTPError(httpServer.Serve(httpListener))
 	}()
+	go func() {
+		serverErrors <- grpcServer.Serve(grpcListener)
+	}()
+	go func() {
+		serverErrors <- reconciler.Run(runContext, config.reconcileInterval)
+	}()
+	logger.Info(
+		"epoch control plane listening",
+		"http_address",
+		config.httpAddress,
+		"grpc_address",
+		config.grpcAddress,
+		"regional_endpoints",
+		config.regionalEndpoints,
+		"allowed_browser_origins",
+		config.allowedOrigins,
+		"registry",
+		"in_memory",
+		"data_path_owner",
+		"rust",
+	)
 
+	var servingError error
 	select {
-	case err := <-serverErrors:
-		if !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("epoch control plane stopped", "error", err)
-			os.Exit(1)
-		}
-	case <-rootContext.Done():
+	case <-ctx.Done():
 		logger.Info("epoch control plane shutting down")
-		shutdownContext, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		if err := server.Shutdown(shutdownContext); err != nil {
-			logger.Error("graceful shutdown failed", "error", err)
-			if closeErr := server.Close(); closeErr != nil {
-				logger.Error("forced shutdown failed", "error", closeErr)
-			}
-			os.Exit(1)
+	case servingError = <-serverErrors:
+		if servingError != nil {
+			logger.Error("control-plane component stopped", "error", servingError)
 		}
 	}
+	cancel()
+	shutdownContext, shutdownCancel := context.WithTimeout(
+		context.Background(),
+		shutdownTimeout,
+	)
+	defer shutdownCancel()
+	httpError := httpServer.Shutdown(shutdownContext)
+	grpcError := stopGRPC(shutdownContext, grpcServer)
+	return errors.Join(servingError, httpError, grpcError)
+}
+
+func normalizeHTTPError(err error) error {
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+func stopGRPC(ctx context.Context, server *grpc.Server) error {
+	stopped := make(chan struct{})
+	go func() {
+		server.GracefulStop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		return nil
+	case <-ctx.Done():
+		server.Stop()
+		<-stopped
+		return fmt.Errorf("gRPC graceful shutdown timed out: %w", ctx.Err())
+	}
+}
+
+func loadConfig() (controlConfig, error) {
+	config := controlConfig{
+		httpAddress: envOrDefault("EPOCH_CONTROL_ADDR", defaultHTTPAddress),
+		grpcAddress: envOrDefault("EPOCH_CONTROL_GRPC_ADDR", defaultGRPCAddress),
+		regionalEndpoints: splitEndpoints(
+			envOrDefault("EPOCH_CONTROL_REGIONAL_ENDPOINTS", defaultRegionalEndpoints),
+		),
+		allowedOrigins: splitEndpoints(
+			envOrDefault("EPOCH_CONTROL_ALLOWED_ORIGINS", defaultAllowedOrigins),
+		),
+		reconcileInterval: defaultReconcileInterval,
+	}
+	if len(config.regionalEndpoints) == 0 {
+		return controlConfig{}, fmt.Errorf(
+			"EPOCH_CONTROL_REGIONAL_ENDPOINTS must contain at least one endpoint",
+		)
+	}
+	if raw := strings.TrimSpace(os.Getenv("EPOCH_CONTROL_RECONCILE_INTERVAL")); raw != "" {
+		interval, err := time.ParseDuration(raw)
+		if err != nil || interval <= 0 {
+			return controlConfig{}, fmt.Errorf(
+				"EPOCH_CONTROL_RECONCILE_INTERVAL must be a positive duration",
+			)
+		}
+		config.reconcileInterval = interval
+	}
+	return config, nil
+}
+
+func envOrDefault(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func splitEndpoints(raw string) []string {
+	var endpoints []string
+	for endpoint := range strings.SplitSeq(raw, ",") {
+		if endpoint = strings.TrimSpace(endpoint); endpoint != "" {
+			endpoints = append(endpoints, endpoint)
+		}
+	}
+	return endpoints
 }

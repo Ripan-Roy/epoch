@@ -43,13 +43,16 @@ func (kind Kind) Valid() bool {
 	}
 }
 
-// ResourceKey is the stable identity of a resource within this regional
-// registry. Organization, project, and environment routing belongs above this
-// initial regional slice.
+// ResourceKey is the stable identity of a resource. Organization, project, and
+// environment are either all present for the regional contract or all absent
+// for the legacy local HTTP slice.
 type ResourceKey struct {
-	Namespace string `json:"namespace"`
-	Kind      Kind   `json:"kind"`
-	Name      string `json:"name"`
+	Organization string `json:"organization,omitempty"`
+	Project      string `json:"project,omitempty"`
+	Environment  string `json:"environment,omitempty"`
+	Namespace    string `json:"namespace"`
+	Kind         Kind   `json:"kind"`
+	Name         string `json:"name"`
 }
 
 // DesiredResource is the declarative input accepted by Apply. Spec is kept as
@@ -66,17 +69,32 @@ type DesiredResource struct {
 type ResourcePhase string
 
 const (
-	PhasePending ResourcePhase = "pending"
-	PhaseReady   ResourcePhase = "ready"
-	PhaseFailed  ResourcePhase = "failed"
+	PhasePending  ResourcePhase = "pending"
+	PhaseReady    ResourcePhase = "ready"
+	PhaseDegraded ResourcePhase = "degraded"
+	PhaseFailed   ResourcePhase = "failed"
 )
+
+// TabletStatus reports achieved regional routing state without inferring that
+// desired replicas exist merely because the catalog requested them.
+type TabletStatus struct {
+	TabletID           uint64   `json:"tablet_id"`
+	ConsensusGroupID   uint64   `json:"consensus_group_id"`
+	ShardIndex         uint32   `json:"shard_index"`
+	TabletEpoch        uint64   `json:"tablet_epoch"`
+	ResourceGeneration uint64   `json:"resource_generation"`
+	DesiredReplicas    uint32   `json:"desired_replicas"`
+	VoterNodeIDs       []uint64 `json:"voter_node_ids"`
+	LeaderNodeID       uint64   `json:"leader_node_id,omitempty"`
+}
 
 // ResourceStatus is intentionally small in the initial slice and never
 // implies that an unconnected data plane has achieved the requested state.
 type ResourceStatus struct {
-	Phase              ResourcePhase `json:"phase"`
-	ObservedGeneration uint64        `json:"observed_generation"`
-	Message            string        `json:"message,omitempty"`
+	Phase              ResourcePhase  `json:"phase"`
+	ObservedGeneration uint64         `json:"observed_generation"`
+	Message            string         `json:"message,omitempty"`
+	Tablets            []TabletStatus `json:"tablets,omitempty"`
 }
 
 // Resource is the registry's immutable response value.
@@ -126,8 +144,11 @@ type DeleteResult struct {
 
 // ListFilter limits a stable, key-sorted list operation.
 type ListFilter struct {
-	Namespace string
-	Kind      Kind
+	Organization string
+	Project      string
+	Environment  string
+	Namespace    string
+	Kind         Kind
 }
 
 // ErrorCode is stable across the Go registry and its HTTP translation.
@@ -222,7 +243,7 @@ func (registry *Registry) Apply(request ApplyRequest) (ApplyResult, error) {
 		if err != nil {
 			return ApplyResult{}, err
 		}
-		resource := materialize(normalized.Resource, generation)
+		resource := materialize(normalized.Resource, generation, ResourceStatus{})
 		registry.resources[key] = resource
 		registry.lastGeneration[key] = generation
 		result = ApplyResult{Resource: cloneResource(resource), Created: true, Changed: true}
@@ -233,7 +254,7 @@ func (registry *Registry) Apply(request ApplyRequest) (ApplyResult, error) {
 		if err != nil {
 			return ApplyResult{}, err
 		}
-		resource := materialize(normalized.Resource, generation)
+		resource := materialize(normalized.Resource, generation, current.Status)
 		registry.resources[key] = resource
 		registry.lastGeneration[key] = generation
 		result = ApplyResult{Resource: cloneResource(resource), Changed: true}
@@ -266,6 +287,9 @@ func (registry *Registry) Get(key ResourceKey) (Resource, error) {
 
 // List returns defensive copies in deterministic namespace/kind/name order.
 func (registry *Registry) List(filter ListFilter) ([]Resource, error) {
+	filter.Organization = strings.TrimSpace(filter.Organization)
+	filter.Project = strings.TrimSpace(filter.Project)
+	filter.Environment = strings.TrimSpace(filter.Environment)
 	filter.Namespace = strings.TrimSpace(filter.Namespace)
 	if filter.Kind != "" && !filter.Kind.Valid() {
 		return nil, invalid(fmt.Sprintf("unknown resource kind %q", filter.Kind))
@@ -274,6 +298,15 @@ func (registry *Registry) List(filter ListFilter) ([]Resource, error) {
 	registry.mu.RLock()
 	resources := make([]Resource, 0, len(registry.resources))
 	for _, resource := range registry.resources {
+		if filter.Organization != "" && resource.Organization != filter.Organization {
+			continue
+		}
+		if filter.Project != "" && resource.Project != filter.Project {
+			continue
+		}
+		if filter.Environment != "" && resource.Environment != filter.Environment {
+			continue
+		}
 		if filter.Namespace != "" && resource.Namespace != filter.Namespace {
 			continue
 		}
@@ -285,6 +318,15 @@ func (registry *Registry) List(filter ListFilter) ([]Resource, error) {
 	registry.mu.RUnlock()
 
 	sort.Slice(resources, func(left, right int) bool {
+		if resources[left].Organization != resources[right].Organization {
+			return resources[left].Organization < resources[right].Organization
+		}
+		if resources[left].Project != resources[right].Project {
+			return resources[left].Project < resources[right].Project
+		}
+		if resources[left].Environment != resources[right].Environment {
+			return resources[left].Environment < resources[right].Environment
+		}
 		if resources[left].Namespace != resources[right].Namespace {
 			return resources[left].Namespace < resources[right].Namespace
 		}
@@ -379,6 +421,40 @@ func (registry *Registry) Count() int {
 	return len(registry.resources)
 }
 
+// UpdateStatus atomically records an observation only while the desired
+// generation still matches. A late reconciler cannot mark a newer desired
+// state ready with evidence gathered for an older generation.
+func (registry *Registry) UpdateStatus(
+	key ResourceKey,
+	desiredGeneration uint64,
+	status ResourceStatus,
+) (Resource, error) {
+	normalized, err := normalizeKey(key)
+	if err != nil {
+		return Resource{}, err
+	}
+
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	current, found := registry.resources[normalized]
+	if !found {
+		return Resource{}, notFound(normalized)
+	}
+	if current.Generation != desiredGeneration {
+		return Resource{}, conflict(
+			fmt.Sprintf("expected generation %d, found %d", desiredGeneration, current.Generation),
+			desiredGeneration,
+			current.Generation,
+		)
+	}
+	if err := validateStatus(status, desiredGeneration); err != nil {
+		return Resource{}, err
+	}
+	current.Status = cloneStatus(status)
+	registry.resources[normalized] = current
+	return cloneResource(current), nil
+}
+
 func normalizeApply(request ApplyRequest) (ApplyRequest, error) {
 	request.RequestToken = strings.TrimSpace(request.RequestToken)
 	if err := validateToken(request.RequestToken); err != nil {
@@ -398,8 +474,35 @@ func normalizeApply(request ApplyRequest) (ApplyRequest, error) {
 }
 
 func normalizeKey(key ResourceKey) (ResourceKey, error) {
+	key.Organization = strings.TrimSpace(key.Organization)
+	key.Project = strings.TrimSpace(key.Project)
+	key.Environment = strings.TrimSpace(key.Environment)
 	key.Namespace = strings.TrimSpace(key.Namespace)
 	key.Name = strings.TrimSpace(key.Name)
+	regionalComponents := []struct {
+		name  string
+		value string
+	}{
+		{name: "organization", value: key.Organization},
+		{name: "project", value: key.Project},
+		{name: "environment", value: key.Environment},
+	}
+	regional := false
+	for _, component := range regionalComponents {
+		regional = regional || component.value != ""
+	}
+	if regional {
+		for _, component := range regionalComponents {
+			if component.value == "" {
+				return ResourceKey{}, invalid(
+					"organization, project, and environment must be provided together",
+				)
+			}
+			if strings.Contains(component.value, "/") {
+				return ResourceKey{}, invalid(component.name + " cannot contain '/'")
+			}
+		}
+	}
 	if key.Namespace == "" {
 		return ResourceKey{}, invalid("namespace is required")
 	}
@@ -416,6 +519,12 @@ func normalizeKey(key ResourceKey) (ResourceKey, error) {
 		return ResourceKey{}, invalid("name cannot contain '/'")
 	}
 	return key, nil
+}
+
+// NormalizeKey validates and canonicalizes a resource identity without
+// mutating registry state.
+func NormalizeKey(key ResourceKey) (ResourceKey, error) {
+	return normalizeKey(key)
 }
 
 func validateToken(token string) error {
@@ -474,16 +583,20 @@ func nextGeneration(current uint64) (uint64, error) {
 	return current + 1, nil
 }
 
-func materialize(desired DesiredResource, generation uint64) Resource {
+func materialize(
+	desired DesiredResource,
+	generation uint64,
+	previousStatus ResourceStatus,
+) Resource {
+	status := cloneStatus(previousStatus)
+	status.Phase = PhasePending
+	status.Message = "accepted by control plane; awaiting regional reconciliation"
 	return Resource{
 		ResourceKey: desired.ResourceKey,
 		Labels:      cloneLabels(desired.Labels),
 		Spec:        cloneJSON(desired.Spec),
 		Generation:  generation,
-		Status: ResourceStatus{
-			Phase:   PhasePending,
-			Message: "accepted by control plane; awaiting regional reconciliation",
-		},
+		Status:      status,
 	}
 }
 
@@ -507,7 +620,77 @@ func cloneApplyResult(result ApplyResult) ApplyResult {
 func cloneResource(resource Resource) Resource {
 	resource.Labels = cloneLabels(resource.Labels)
 	resource.Spec = cloneJSON(resource.Spec)
+	resource.Status = cloneStatus(resource.Status)
 	return resource
+}
+
+func cloneStatus(status ResourceStatus) ResourceStatus {
+	if len(status.Tablets) == 0 {
+		status.Tablets = nil
+		return status
+	}
+	status.Tablets = append([]TabletStatus(nil), status.Tablets...)
+	for index := range status.Tablets {
+		status.Tablets[index].VoterNodeIDs = append(
+			[]uint64(nil),
+			status.Tablets[index].VoterNodeIDs...,
+		)
+	}
+	return status
+}
+
+func validateStatus(status ResourceStatus, desiredGeneration uint64) error {
+	switch status.Phase {
+	case PhasePending, PhaseReady, PhaseDegraded, PhaseFailed:
+	default:
+		return invalid(fmt.Sprintf("unknown resource phase %q", status.Phase))
+	}
+	if status.ObservedGeneration > desiredGeneration {
+		return invalid("observed generation cannot exceed desired generation")
+	}
+	if status.Phase == PhaseReady && status.ObservedGeneration != desiredGeneration {
+		return invalid("ready status must observe the current desired generation")
+	}
+	tabletIDs := make(map[uint64]struct{}, len(status.Tablets))
+	groupIDs := make(map[uint64]struct{}, len(status.Tablets))
+	shards := make(map[uint32]struct{}, len(status.Tablets))
+	for _, tablet := range status.Tablets {
+		if tablet.TabletID == 0 || tablet.ConsensusGroupID == 0 ||
+			tablet.TabletEpoch == 0 || tablet.DesiredReplicas == 0 {
+			return invalid("tablet identity, epoch, group, and desired replicas must be non-zero")
+		}
+		if tablet.ResourceGeneration != status.ObservedGeneration {
+			return invalid("tablet resource generation must match the observed generation")
+		}
+		if _, exists := tabletIDs[tablet.TabletID]; exists {
+			return invalid("tablet IDs must be unique")
+		}
+		if _, exists := groupIDs[tablet.ConsensusGroupID]; exists {
+			return invalid("consensus group IDs must be unique")
+		}
+		if _, exists := shards[tablet.ShardIndex]; exists {
+			return invalid("tablet shard indexes must be unique")
+		}
+		tabletIDs[tablet.TabletID] = struct{}{}
+		groupIDs[tablet.ConsensusGroupID] = struct{}{}
+		shards[tablet.ShardIndex] = struct{}{}
+		voters := make(map[uint64]struct{}, len(tablet.VoterNodeIDs))
+		for _, voter := range tablet.VoterNodeIDs {
+			if voter == 0 {
+				return invalid("voter node IDs must be non-zero")
+			}
+			if _, exists := voters[voter]; exists {
+				return invalid("voter node IDs must be unique per tablet")
+			}
+			voters[voter] = struct{}{}
+		}
+		if tablet.LeaderNodeID != 0 {
+			if _, exists := voters[tablet.LeaderNodeID]; !exists {
+				return invalid("tablet leader must be an observed voter")
+			}
+		}
+	}
+	return nil
 }
 
 func cloneLabels(labels map[string]string) map[string]string {
@@ -530,9 +713,24 @@ func invalid(message string) *RegistryError {
 }
 
 func notFound(key ResourceKey) *RegistryError {
+	scope := ""
+	if key.Organization != "" {
+		scope = fmt.Sprintf(
+			"%s/%s/%s/",
+			key.Organization,
+			key.Project,
+			key.Environment,
+		)
+	}
 	return &RegistryError{
-		Code:    CodeNotFound,
-		Message: fmt.Sprintf("resource %s/%s/%s was not found", key.Namespace, key.Kind, key.Name),
+		Code: CodeNotFound,
+		Message: fmt.Sprintf(
+			"resource %s%s/%s/%s was not found",
+			scope,
+			key.Namespace,
+			key.Kind,
+			key.Name,
+		),
 	}
 }
 

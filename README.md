@@ -19,6 +19,10 @@ checksummed, rotating, single-node journal and replayed on restart. This is not
 replication, a snapshot/compaction system, or protection from total machine
 loss.
 
+An opt-in regional alpha also runs a three-voter catalog plus several
+profile-specific consensus groups in each Rust node. It is fixed-topology
+engineering evidence, not a production or multi-zone guarantee.
+
 ## Design boundaries
 
 | Area | Implementation | Boundary |
@@ -84,9 +88,12 @@ semantic retry/rebinding, ordered offsets, leader replacement, catch-up, and
 all-node `SIGKILL` replay.
 
 `crates/epoch-catalog` supplies deterministic multi-resource generations and
-shard/tablet/group routing identity. The node still mounts one experimental
-consensus group at a time; catalog consensus and runtime group multiplexing are
-the next bounded core slices.
+shard/tablet/group routing identity. The regional runtime commits it through
+dedicated catalog group 1, demultiplexes several groups on one peer listener,
+materializes Cache, Stream, Queue, and Event Bus tablets together, and routes
+by resource/shard with exact generation and tablet-epoch fences. A real Go
+RegionalAdmin reconciler applies desired state through Rust and exposes a
+browser-safe placement BFF; the TypeScript console never contacts storage nodes.
 
 The strict single-partition Queue tablet now runs through that same persistent
 three-node actor boundary. Its internal typed API covers enqueue, acquire,
@@ -117,10 +124,12 @@ state is not a target-delivery claim. See the
 [Queue tablet guide](docs/QUEUE_TABLET.md),
 [Stream tablet guide](docs/STREAM_TABLET.md),
 [Event Bus tablet guide](docs/BUS_TABLET.md),
+[regional runtime guide](docs/REGIONAL_RUNTIME.md),
 [probe guide](docs/CONSENSUS_PROBE.md), [spike report](docs/CONSENSUS_SPIKE.md),
 and proposed [ADR-0003](docs/adr/0003-consensus-adapter.md). An exhaustive crash
 matrix, snapshots, membership/epoch transitions, read barriers, authenticated
-transport, placement, and multi-tablet routing remain open.
+transport, dynamic/zone-aware placement, and stable public multi-tablet routing
+remain open.
 
 ## Quick start
 
@@ -189,6 +198,12 @@ Set the comma-delimited `EPOCH_ALLOWED_ORIGINS` only when the live console is
 served from another trusted HTTP(S) origin. CORS is not authentication; keep
 the unauthenticated alpha node on a trusted network.
 
+Regional console inventory additionally requires `epoch-control` on port 8080.
+Its browser allowlist is `EPOCH_CONTROL_ALLOWED_ORIGINS`, and the console points
+to it with `VITE_EPOCH_CONTROL_BASE_URL`. See the
+[regional runtime guide](docs/REGIONAL_RUNTIME.md) for the exact three-node
+startup and Go-to-Rust verification path.
+
 Static builds are base-path aware for GitHub Pages and other subdirectory
 hosts. For this repository's Pages path, build with:
 
@@ -219,6 +234,12 @@ Run the local verification suite:
 
 ```shell
 make check
+```
+
+Run the disposable Go-to-Rust multi-tablet failure/recovery proof with:
+
+```shell
+make test-regional-runtime
 ```
 
 Build and inspect the development container configuration:

@@ -547,41 +547,47 @@ export function DocsPage({ section }: DocsPageProps) {
               <div className="docs-section__heading">
                 <span>04</span>
                 <div>
-                  <p className="eyebrow">EXPERIMENTAL CLUSTER CORE</p>
+                  <p className="eyebrow">REGIONAL MULTI-TABLET ALPHA</p>
                   <h2 id="cluster-milestone-title">
-                    Stream, Queue, and Cache cross the same persistent consensus boundary.
+                    One catalog materializes four profile-specific groups in every node.
                   </h2>
                   <p>
-                    These mutually exclusive, opt-in engineering profiles run on a separate, unauthenticated
-                    listener. The public SDK quickstart above remains standalone and{" "}
-                    <code>local_durable</code>; no SDK or public quorum contract is implied. Two durable
-                    voters are fixed-topology evidence, not multi-zone placement proof. Cache observations are
-                    explicitly local and stale-capable; there is no linearizable read barrier yet.
+                    Three Rust nodes now run a dedicated catalog group plus simultaneous Cache, Stream, Queue,
+                    and Event Bus tablets behind resource/shard routing. The Go control plane reconciles
+                    desired state through Rust and exposes observed placement to the browser; the console
+                    never contacts a storage node. The public SDK quickstart above remains standalone and{" "}
+                    <code>local_durable</code>. Fixed three-voter evidence is not zone-aware placement, and
+                    these regional routes remain experimental and unauthenticated.
                   </p>
                 </div>
               </div>
               <div className="verification-grid">
                 <article>
                   <span>MAJORITY</span>
-                  <strong>Two of three voters persist before typed success.</strong>
-                  <p>Each typed profile applies the exact committed outcome before returning success.</p>
+                  <strong>Catalog and data groups commit through durable voter majorities.</strong>
+                  <p>Generation and tablet-epoch fences reject stale routes before typed dispatch.</p>
                 </article>
                 <article>
-                  <span>FAILOVER</span>
-                  <strong>A replacement leader preserves ordering and fences stale lease tokens.</strong>
-                  <p>The stopped voter rejoins, catches up, and each profile applies every command once.</p>
+                  <span>OBSERVATION</span>
+                  <strong>The Go BFF reports achieved voters and leaders, not desired replicas.</strong>
+                  <p>
+                    A leader loss becomes degraded two-voter placement; a total outage clears stale topology.
+                  </p>
                 </article>
                 <article>
                   <span>RECOVERY</span>
-                  <strong>All three voters rebuild the same digest.</strong>
+                  <strong>All groups rebuild the same catalog and profile digests.</strong>
                   <p>
-                    A full <code>SIGKILL</code> cycle replays the consensus history without a second WAL.
+                    A full <code>SIGKILL</code> cycle reopens the same EPRS volumes and restores serving
+                    state.
                   </p>
                 </article>
               </div>
               <CodeBlock
-                label="Disposable three-container proofs"
-                value={"make test-stream-tablet\nmake test-queue-tablet\nmake test-cache-tablet"}
+                label="Disposable fixed-group and regional proofs"
+                value={
+                  "make test-stream-tablet\nmake test-queue-tablet\nmake test-cache-tablet\nmake test-bus-tablet\nmake test-regional-runtime"
+                }
               />
             </section>
 
@@ -696,6 +702,12 @@ export function DocsPage({ section }: DocsPageProps) {
                   title="Delivery checklist"
                   description="Table-based program gates, current core work, pull-request requirements, and release readiness."
                   href={`${repositoryDocsUrl}/DELIVERY_CHECKLIST.md`}
+                />
+                <ReferenceCard
+                  eyebrow="REGIONAL RUNTIME"
+                  title="Multi-tablet operations"
+                  description="Catalog authority, Go reconciliation, browser BFF, fenced routes, local startup, recovery campaign, and explicit non-claims."
+                  href={`${repositoryDocsUrl}/REGIONAL_RUNTIME.md`}
                 />
                 <ReferenceCard
                   eyebrow="CLUSTER CORE"

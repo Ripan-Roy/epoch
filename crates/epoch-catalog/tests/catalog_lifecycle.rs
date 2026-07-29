@@ -242,6 +242,10 @@ fn canonical_command_replay_reconstructs_the_same_catalog_snapshot() {
             .unwrap();
     }
     assert_eq!(recovered.snapshot(), live.snapshot());
+    assert_eq!(
+        recovered.state_digest().unwrap(),
+        live.state_digest().unwrap()
+    );
 
     let canonical = stream("pretty", 1).encode().unwrap();
     let pretty = serde_json::to_vec_pretty(

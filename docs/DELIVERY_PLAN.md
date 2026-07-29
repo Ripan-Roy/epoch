@@ -12,6 +12,15 @@ Epoch has 120 catalog requirements: 51 P0, 54 P1, 14 P2, and one explicitly defe
 
 The credible program remains the PRD's 21–26 month route to initial GA for an experienced 12–15 person team. The first 90 days produce a fault-injected vertical slice, not a production broker. Correctness, recovery, and truthful guarantees are schedule gates; protocol and connector breadth are not.
 
+The active M1/M2 boundary is the regional multi-tablet feature. Local evidence
+now covers a consensus-backed catalog, several fixed-voter groups per Rust
+process, simultaneous four-profile materialization and fenced routing, Go
+desired-state reconciliation and browser BFF, leader loss, catch-up, and
+same-volume all-node recovery. It remains a slice until protected-branch CI is
+green. Durable hosted metadata, authenticated APIs, dynamic/zone-aware
+placement, repair/rebalance, and the broader M2 profile/security/performance
+gates remain open.
+
 ## Dependency-driven architecture sequence
 
 ```mermaid

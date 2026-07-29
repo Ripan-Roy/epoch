@@ -2,17 +2,23 @@
 
 pub mod bus_tablet;
 pub mod cache_tablet;
+pub mod catalog_api;
+pub mod catalog_tablet;
 pub mod consensus;
+pub mod consensus_groups;
 pub mod queue_tablet;
+pub mod regional_router;
+pub mod regional_runtime;
 pub mod stream_tablet;
 mod tablet_http;
+pub mod tablet_materializer;
 
 use std::{sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderValue, Method, StatusCode, header::CONTENT_TYPE},
+    http::{HeaderName, HeaderValue, Method, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
@@ -31,56 +37,64 @@ use tower_http::{
 };
 use url::Url;
 
+use crate::regional_router::{RESOURCE_GENERATION_HEADER, TABLET_EPOCH_HEADER};
+
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub engine: Arc<EpochEngine>,
 }
 
 pub fn router(engine: Arc<EpochEngine>, allowed_origins: &[String]) -> EpochResult<Router> {
-    let cors = cors_layer(allowed_origins)?;
     let state = AppState { engine };
-    Ok(Router::new()
-        .route("/healthz", get(health))
-        .route("/readyz", get(health))
-        .route("/v1/resources", get(list_resources))
-        .route("/v1/caches/{name}", post(create_cache))
-        .route(
-            "/v1/caches/{name}/keys/{key}",
-            get(cache_get).put(cache_put).delete(cache_delete),
-        )
-        .route(
-            "/v1/caches/{name}/keys/{key}/increment",
-            post(cache_increment),
-        )
-        .route("/v1/streams/{name}", post(create_stream))
-        .route(
-            "/v1/streams/{name}/records",
-            post(stream_append).get(stream_fetch),
-        )
-        .route(
-            "/v1/streams/{name}/groups/{group}/offsets",
-            put(stream_commit),
-        )
-        .route("/v1/streams/{name}/groups/{group}/lag", get(stream_lag))
-        .route("/v1/queues/{name}", post(create_queue))
-        .route("/v1/queues/{name}/messages", post(queue_enqueue))
-        .route("/v1/queues/{name}/acquire", post(queue_acquire))
-        .route("/v1/queues/{name}/settle", post(queue_settle))
-        .route("/v1/queues/{name}/counts", get(queue_counts))
-        .route(
-            "/v1/queues/{name}/dead-letters/{message_id}/redrive",
-            post(queue_redrive),
-        )
-        .route("/v1/buses/{name}", post(create_bus))
-        .route("/v1/buses/{name}/events", post(bus_publish))
-        .route("/v1/buses/{name}/replay", get(bus_replay))
-        .route(
-            "/v1/buses/{name}/subscriptions/{subscription}",
-            put(bus_upsert_subscription).delete(bus_remove_subscription),
-        )
-        .layer(cors)
-        .layer(TraceLayer::new_for_http())
-        .with_state(state))
+    with_public_http_layers(
+        Router::new()
+            .route("/healthz", get(health))
+            .route("/readyz", get(health))
+            .route("/v1/resources", get(list_resources))
+            .route("/v1/caches/{name}", post(create_cache))
+            .route(
+                "/v1/caches/{name}/keys/{key}",
+                get(cache_get).put(cache_put).delete(cache_delete),
+            )
+            .route(
+                "/v1/caches/{name}/keys/{key}/increment",
+                post(cache_increment),
+            )
+            .route("/v1/streams/{name}", post(create_stream))
+            .route(
+                "/v1/streams/{name}/records",
+                post(stream_append).get(stream_fetch),
+            )
+            .route(
+                "/v1/streams/{name}/groups/{group}/offsets",
+                put(stream_commit),
+            )
+            .route("/v1/streams/{name}/groups/{group}/lag", get(stream_lag))
+            .route("/v1/queues/{name}", post(create_queue))
+            .route("/v1/queues/{name}/messages", post(queue_enqueue))
+            .route("/v1/queues/{name}/acquire", post(queue_acquire))
+            .route("/v1/queues/{name}/settle", post(queue_settle))
+            .route("/v1/queues/{name}/counts", get(queue_counts))
+            .route(
+                "/v1/queues/{name}/dead-letters/{message_id}/redrive",
+                post(queue_redrive),
+            )
+            .route("/v1/buses/{name}", post(create_bus))
+            .route("/v1/buses/{name}/events", post(bus_publish))
+            .route("/v1/buses/{name}/replay", get(bus_replay))
+            .route(
+                "/v1/buses/{name}/subscriptions/{subscription}",
+                put(bus_upsert_subscription).delete(bus_remove_subscription),
+            )
+            .with_state(state),
+        allowed_origins,
+    )
+}
+
+pub fn with_public_http_layers(router: Router, allowed_origins: &[String]) -> EpochResult<Router> {
+    Ok(router
+        .layer(cors_layer(allowed_origins)?)
+        .layer(TraceLayer::new_for_http()))
 }
 
 fn cors_layer(allowed_origins: &[String]) -> EpochResult<CorsLayer> {
@@ -89,7 +103,11 @@ fn cors_layer(allowed_origins: &[String]) -> EpochResult<CorsLayer> {
     Ok(CorsLayer::new()
         .allow_origin(AllowOrigin::list(origins))
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
-        .allow_headers([CONTENT_TYPE]))
+        .allow_headers([
+            CONTENT_TYPE,
+            HeaderName::from_static(RESOURCE_GENERATION_HEADER),
+            HeaderName::from_static(TABLET_EPOCH_HEADER),
+        ]))
 }
 
 pub fn validate_allowed_origins(allowed_origins: &[String]) -> EpochResult<()> {

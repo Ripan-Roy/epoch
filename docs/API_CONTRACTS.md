@@ -145,10 +145,11 @@ client. Profile kind and immutable identity cannot change in place.
 
 An empty voter list or leader ID does not mean the desired placement has been
 achieved. Callers must use the phase and conditions, and data requests must
-carry the resource generation and tablet epoch returned by routing. The initial
-deterministic catalog allocates and replays these identities, but the public
-multi-tablet router remains unavailable until catalog consensus and runtime
-group supervision pass their fault gates. See
+carry the resource generation and tablet epoch returned by routing. The
+experimental regional runtime now allocates, commits, materializes, discovers,
+and generation/epoch-fences these identities across several fixed-voter groups.
+Its `/experimental/v1/regional/*` routes remain an alpha verification surface,
+not the stable authenticated native contract. See
 [ADR-0009](adr/0009-regional-tablet-catalog.md).
 
 ## 4. Native services
@@ -268,6 +269,20 @@ List methods use opaque page tokens bound to query, scope, and a bounded
 snapshot. Watch resumes from an opaque resource version and returns an explicit
 compaction error when that version is no longer available.
 
+The current generated `epoch.v1.RegionalAdminService` is a bounded Go-hosted
+bridge with `ApplyResource`, `GetResource`, `ListResources`, and
+`DeleteResource`. Apply validates a fully qualified data-bearing resource,
+profile/kind agreement, nonzero shard count, and the currently fixed replica
+count of three. It stores desired state, immediately reconciles through the
+Rust authority, and returns pending desired state when the region is
+unavailable. Definitive conflicts fail; exact apply and delete retries return
+their original result without applying the Rust mutation twice. Delete commits
+the Rust tombstone before removing Go desired metadata.
+
+This subset has bounded list pages but no watch, opaque continuation, plan,
+backup, repair, purge, or long-running operation surface. Its Go metadata and
+request-token ledger are in memory and are not a durability claim.
+
 ## 6. Hosted management API
 
 The Go API exposes organization/project/environment lifecycle, entitlements,
@@ -282,6 +297,27 @@ console must distinguish `accepted`, `reconciling`, `ready`, `degraded`, and
 
 Go does not expose or synthesize data-path receipts and never reads Epoch data
 files.
+
+The browser-facing alpha inventory is:
+
+```text
+GET /v1/regional/resources
+```
+
+It returns only fully qualified managed resources. Each row contains canonical
+name, kind/profile, desired and observed generation, reconciliation phase and
+message, desired shard count, and the achieved tablet placement. Resource
+generation, observed generation, tablet/group/epoch/resource-generation IDs,
+voter node IDs, and optional leader node ID are JSON decimal strings so a
+browser cannot lose 64-bit precision. Desired replicas and observed voters are
+separate fields; an authority outage returns `pending` with no current tablet
+placement rather than retaining a stale leader claim.
+
+The TypeScript console calls this Go endpoint only. Browser CORS is granted to
+exact HTTP(S) origins configured by `EPOCH_CONTROL_ALLOWED_ORIGINS`; wildcards,
+paths, query strings, opaque origins, and credentials are rejected. Requests
+without `Origin` remain available to non-browser clients. This is transport
+exposure, not authentication.
 
 ## 7. Typed errors
 
@@ -436,6 +472,36 @@ Fresh segmented activation replaces an invalid-to-old-readers staging marker
 only after the new layout is durable. Mixed histories without that marker are
 rejected; legacy migration is not yet automatic.
 
+When `EPOCH_REGIONAL_RUNTIME_ENABLED=true`, the configured consensus identity
+and peer listener start the catalog and multi-group runtime instead of a
+single-profile probe. `EPOCH_REGIONAL_MAX_GROUPS` bounds the catalog plus data
+groups; catalog group 1 is reserved. The provisional HTTP routes are:
+
+```text
+GET    /experimental/v1/regional/catalog
+GET    /experimental/v1/regional/catalog/resources/{org}/{project}/{environment}/{namespace}/{kind}/{name}
+PUT    /experimental/v1/regional/catalog/resources/{org}/{project}/{environment}/{namespace}/{kind}/{name}
+DELETE /experimental/v1/regional/catalog/resources/{org}/{project}/{environment}/{namespace}/{kind}/{name}
+GET    /experimental/v1/regional/resources/{org}/{project}/{environment}/{namespace}/{kind}/{name}/shards/{shard}
+*      /experimental/v1/regional/resources/{org}/{project}/{environment}/{namespace}/{kind}/{name}/shards/{shard}/data/{operation}
+```
+
+Catalog mutations require a bounded `request_token`, expected generation,
+shard count, and the currently fixed replica count of three. The exact token
+and semantic request replay their committed result; token rebinding conflicts.
+Delete commits a monotonic tombstone, so recreation never reuses prior
+tablet/group identities. Discovery returns the local node/role, observed
+leader, term, resource generation, tablet/group IDs, and tablet epoch. Every
+64-bit JSON value is a decimal string.
+
+Data dispatch is local and never silently forwards. It requires exact
+`x-epoch-resource-generation` and `x-epoch-tablet-epoch` headers, validates the
+materialized profile, and rejects stale fences or a nonleader before invoking
+the typed tablet router. These two headers are included in the node's
+exact-origin CORS allowlist, but the experimental route still has no
+authentication or TLS and must not be exposed as a production management
+surface.
+
 When explicitly enabled, a separate internal listener exposes the experimental
 fixed-voter consensus probe:
 
@@ -574,34 +640,39 @@ route, CLI, or SDK commitment yet, and a dispatcher acknowledgement is not
 proof of an arbitrary external business side effect. See
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
-None of the four typed experimental modes is the final tablet service. Snapshots/compaction,
-retention deletion, dynamic membership, placement, read barriers, authenticated
-transport, public routing, and SDK support remain absent. The standalone engine
-journal remains a separate single-node source of truth and is never used by the
+Neither the earlier single-profile modes nor the regional multi-group mode is
+the final tablet service. Snapshots/compaction, retention deletion, dynamic
+membership, constraint-aware placement, read barriers, authenticated transport,
+stable public routing, and SDK support remain absent. The standalone engine
+journal remains a separate single-node source of truth and is never used by an
 experimental replicated tablet.
 
 Initial `epoch.v1` Protobuf source defines common resource/envelope types and a
 small `RegionalAdminService`; Buf generation is configured for Go. It is an
 early boundary scaffold, not the complete package split or native data API in
-this document. No gRPC server is running, and port 7600 is only reserved.
+this document. `epoch-control` serves the current four-method RegionalAdmin
+subset on gRPC port 8081 and the health/registry/browser BFF on HTTP port 8080.
+Rust port 7600 remains reserved for the future native data gRPC service.
 
 TLS/authentication metadata, typed `google.rpc.Status` details, public native
-mutation-status lookup, streaming credit, a Rust regional administration
-implementation, long-running operations, metrics on the reserved port, protocol
-gateways, full Go/Java/Python generated SDK parity and compatibility negotiation
-remain unimplemented. The experimental Stream, Queue, Cache, and Event Bus tablets expose only
-the local mutation lookup/read surfaces described above. Typed Go, Java, and
-Python clients cover the provisional
+mutation-status lookup, streaming credit, a stable Rust gRPC regional
+administration implementation, long-running operations, metrics on the reserved
+port, protocol gateways, full Go/Java/Python generated SDK parity, and
+compatibility negotiation remain unimplemented. The experimental Stream,
+Queue, Cache, and Event Bus tablets expose only the mutation/read surfaces
+described above. Typed Go, Java, and Python clients cover the provisional
 standalone profile HTTP routes, including explicit local Stream and Queue
-durability; they do not cover the experimental tablet listener. All three use
-injectable transport boundaries and run against the real standalone node;
-the exact quickstarts displayed by the documentation each drive an independent
-seed, forced process crash, restart, and recovery proof in CI. Browser calls are
-accepted only from the exact HTTP(S) origins configured by
-`EPOCH_ALLOWED_ORIGINS`; requests without an `Origin` header remain available
-to native clients. The Go control HTTP registry, browser console, current JSON
-payload structs, and Rust error enum are provisional scaffolding and may be
-migrated before any public compatibility promise.
+durability; they do not cover the regional tablet routes. All three use
+injectable transport boundaries and run against the real standalone node; the
+exact quickstarts displayed by the documentation each drive an independent
+seed, forced process crash, restart, and recovery proof in CI.
+
+Node browser calls use exact origins from `EPOCH_ALLOWED_ORIGINS`; Go BFF calls
+use `EPOCH_CONTROL_ALLOWED_ORIGINS`. Requests without an `Origin` header remain
+available to native clients. The Go control registry is in memory, the console
+has no authentication, and the current HTTP payloads and Rust error enum remain
+provisional scaffolding that may change before any public compatibility
+promise.
 
 The Cache tablet rebuilds by replaying the retained EPRS committed history
 before readiness. It has no profile snapshot/compaction path, and its

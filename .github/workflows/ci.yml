@@ -210,9 +210,20 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: go.sum
       - run: docker compose -f deploy/compose/docker-compose.yml config --quiet
       - run: docker compose -f deploy/compose/docker-compose.consensus-probe.yml config --quiet
+      - run: docker compose -f deploy/compose/docker-compose.regional.yml config --quiet
       - run: docker build --file deploy/docker/Dockerfile.node --tag epoch/node:ci .
+      - name: Prove Go-to-Rust regional BFF, four-profile failover, and all-node recovery
+        env:
+          EPOCH_REGIONAL_ARTIFACT_DIR: ${{ runner.temp }}/epoch-regional-runtime
+          EPOCH_REGIONAL_IMAGE: epoch/node:ci
+          EPOCH_REGIONAL_USE_EXISTING_IMAGE: "1"
+        run: python3 tests/integration/regional-runtime.py
       - name: Prove three-container consensus probe failover and catch-up
         env:
           EPOCH_PROBE_ARTIFACT_DIR: ${{ runner.temp }}/epoch-consensus-probe
@@ -329,5 +340,6 @@ jobs:
             ${{ runner.temp }}/epoch-queue-tablet
             ${{ runner.temp }}/epoch-cache-tablet
             ${{ runner.temp }}/epoch-bus-tablet
+            ${{ runner.temp }}/epoch-regional-runtime
           if-no-files-found: ignore
           retention-days: 7

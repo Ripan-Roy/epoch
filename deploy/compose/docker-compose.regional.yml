@@ -1,0 +1,73 @@
+name: epoch-regional
+
+x-epoch-regional: &epoch-regional
+  image: ${EPOCH_REGIONAL_IMAGE:-epoch/node:regional}
+  pull_policy: never
+  environment: &epoch-regional-environment
+    EPOCH_HTTP_LISTEN: 0.0.0.0:7601
+    EPOCH_REGIONAL_RUNTIME_ENABLED: "true"
+    EPOCH_REGIONAL_MAX_GROUPS: "16"
+    EPOCH_CONSENSUS_GROUP_ID: "1"
+    EPOCH_CONSENSUS_GROUP_EPOCH: "1"
+    EPOCH_CONSENSUS_LISTEN: 0.0.0.0:7701
+    EPOCH_CONSENSUS_PEERS: 1=http://epoch-regional-1:7701,2=http://epoch-regional-2:7701,3=http://epoch-regional-3:7701
+    EPOCH_CONSENSUS_TICK_MS: "100"
+    EPOCH_LOG: ${EPOCH_LOG:-epoch=info,tower_http=info}
+  restart: unless-stopped
+  stop_grace_period: 30s
+  healthcheck:
+    test:
+      - CMD
+      - curl
+      - --fail
+      - --silent
+      - --show-error
+      - http://127.0.0.1:7601/healthz
+    interval: 5s
+    timeout: 3s
+    start_period: 10s
+    retries: 12
+
+services:
+  epoch-regional-1:
+    <<: *epoch-regional
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.node
+      args:
+        RUST_VERSION: 1.97.1
+    environment:
+      <<: *epoch-regional-environment
+      EPOCH_CONSENSUS_NODE_ID: "1"
+    ports:
+      - "127.0.0.1:${EPOCH_REGIONAL_HTTP_PORT_1:-18661}:7601"
+      - "127.0.0.1:${EPOCH_REGIONAL_PEER_PORT_1:-18701}:7701"
+    volumes:
+      - epoch-regional-1-data:/var/lib/epoch
+
+  epoch-regional-2:
+    <<: *epoch-regional
+    environment:
+      <<: *epoch-regional-environment
+      EPOCH_CONSENSUS_NODE_ID: "2"
+    ports:
+      - "127.0.0.1:${EPOCH_REGIONAL_HTTP_PORT_2:-18662}:7601"
+      - "127.0.0.1:${EPOCH_REGIONAL_PEER_PORT_2:-18702}:7701"
+    volumes:
+      - epoch-regional-2-data:/var/lib/epoch
+
+  epoch-regional-3:
+    <<: *epoch-regional
+    environment:
+      <<: *epoch-regional-environment
+      EPOCH_CONSENSUS_NODE_ID: "3"
+    ports:
+      - "127.0.0.1:${EPOCH_REGIONAL_HTTP_PORT_3:-18663}:7601"
+      - "127.0.0.1:${EPOCH_REGIONAL_PEER_PORT_3:-18703}:7701"
+    volumes:
+      - epoch-regional-3-data:/var/lib/epoch
+
+volumes:
+  epoch-regional-1-data:
+  epoch-regional-2-data:
+  epoch-regional-3-data:

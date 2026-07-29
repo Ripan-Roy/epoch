@@ -219,6 +219,94 @@ func TestConcurrentUnconditionalAppliesSerializeGenerations(t *testing.T) {
 	}
 }
 
+func TestUpdateStatusIsGenerationFencedAndDefensivelyCopied(t *testing.T) {
+	registry := NewRegistry()
+	key := ResourceKey{Namespace: "prod", Kind: KindStream, Name: "orders"}
+	created, err := registry.Apply(ApplyRequest{
+		RequestToken: "create-orders",
+		Resource:     desired(key, `{"replicas":3}`),
+	})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	status := ResourceStatus{
+		Phase:              PhaseReady,
+		ObservedGeneration: created.Resource.Generation,
+		Message:            "regional authority converged",
+		Tablets: []TabletStatus{{
+			TabletID:           7,
+			ConsensusGroupID:   17,
+			ShardIndex:         0,
+			TabletEpoch:        3,
+			ResourceGeneration: created.Resource.Generation,
+			DesiredReplicas:    3,
+			VoterNodeIDs:       []uint64{1, 2, 3},
+			LeaderNodeID:       2,
+		}},
+	}
+	updated, err := registry.UpdateStatus(key, created.Resource.Generation, status)
+	if err != nil {
+		t.Fatalf("UpdateStatus() error = %v", err)
+	}
+	status.Tablets[0].VoterNodeIDs[0] = 99
+	status.Tablets[0].TabletID = 99
+	if updated.Status.Tablets[0].TabletID != 7 || updated.Status.Tablets[0].VoterNodeIDs[0] != 1 {
+		t.Fatalf("status was aliased: %+v", updated.Status)
+	}
+
+	changed, err := registry.Apply(ApplyRequest{
+		RequestToken:       "update-orders",
+		ExpectedGeneration: uint64Pointer(created.Resource.Generation),
+		Resource:           desired(key, `{"replicas":5}`),
+	})
+	if err != nil {
+		t.Fatalf("update Apply() error = %v", err)
+	}
+	if changed.Resource.Status.Phase != PhasePending ||
+		changed.Resource.Status.ObservedGeneration != created.Resource.Generation {
+		t.Fatalf("updated status = %+v", changed.Resource.Status)
+	}
+	if _, err := registry.UpdateStatus(key, created.Resource.Generation, status); err == nil {
+		t.Fatal("stale UpdateStatus() succeeded, want conflict")
+	} else {
+		assertCode(t, err, CodeConflict)
+	}
+}
+
+func TestUpdateStatusRejectsImpossibleObservations(t *testing.T) {
+	registry := NewRegistry()
+	key := ResourceKey{Namespace: "prod", Kind: KindQueue, Name: "jobs"}
+	created, err := registry.Apply(ApplyRequest{
+		RequestToken: "create-jobs",
+		Resource:     desired(key, `{}`),
+	})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	tests := []ResourceStatus{
+		{Phase: "unknown", ObservedGeneration: 1},
+		{Phase: PhaseReady, ObservedGeneration: 2},
+		{
+			Phase:              PhaseReady,
+			ObservedGeneration: 1,
+			Tablets: []TabletStatus{{
+				TabletID:           1,
+				ConsensusGroupID:   1,
+				ResourceGeneration: 2,
+				DesiredReplicas:    3,
+			}},
+		},
+	}
+	for _, status := range tests {
+		if _, err := registry.UpdateStatus(key, created.Resource.Generation, status); err == nil {
+			t.Fatalf("UpdateStatus(%+v) succeeded, want invalid_argument", status)
+		} else {
+			assertCode(t, err, CodeInvalidArgument)
+		}
+	}
+}
+
 func TestApplyRejectsMalformedTrailingOrNonObjectSpec(t *testing.T) {
 	registry := NewRegistry()
 	key := ResourceKey{Namespace: "prod", Kind: KindCache, Name: "sessions"}
@@ -227,6 +315,42 @@ func TestApplyRejectsMalformedTrailingOrNonObjectSpec(t *testing.T) {
 			RequestToken: "invalid-" + spec,
 			Resource:     desired(key, spec),
 		})
+		assertCode(t, err, CodeInvalidArgument)
+	}
+}
+
+func TestFullyQualifiedResourceKeysAreDistinctAndPartialScopesFailClosed(t *testing.T) {
+	registry := NewRegistry()
+	base := ResourceKey{
+		Organization: "acme",
+		Project:      "shop",
+		Environment:  "prod",
+		Namespace:    "core",
+		Kind:         KindStream,
+		Name:         "orders",
+	}
+	for index, organization := range []string{"acme", "globex"} {
+		key := base
+		key.Organization = organization
+		if _, err := registry.Apply(ApplyRequest{
+			RequestToken: fmt.Sprintf("create-%d", index),
+			Resource:     desired(key, `{}`),
+		}); err != nil {
+			t.Fatalf("Apply(%s) error = %v", organization, err)
+		}
+	}
+	if registry.Count() != 2 {
+		t.Fatalf("Count() = %d, want 2", registry.Count())
+	}
+
+	partial := base
+	partial.Project = ""
+	if _, err := registry.Apply(ApplyRequest{
+		RequestToken: "partial",
+		Resource:     desired(partial, `{}`),
+	}); err == nil {
+		t.Fatal("partial regional scope succeeded, want invalid_argument")
+	} else {
 		assertCode(t, err, CodeInvalidArgument)
 	}
 }

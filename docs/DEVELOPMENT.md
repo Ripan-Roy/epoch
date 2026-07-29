@@ -214,6 +214,16 @@ The initial standalone development contract is:
 | Data directory in the image | `/var/lib/epoch` |
 | Browser origins | local Vite dev/preview on `127.0.0.1` and `localhost` |
 
+The current managed-control alpha uses:
+
+| Setting | Default |
+| --- | --- |
+| Go HTTP health/registry/browser BFF | `0.0.0.0:8080` |
+| Go RegionalAdmin gRPC | `0.0.0.0:8081` |
+| Rust authority endpoints | `http://127.0.0.1:7601` |
+| Reconcile interval | `1s` |
+| Console managed API | `http://127.0.0.1:8080` |
+
 The first node exposes its implemented native and administrative HTTP routes on
 7601. Port 7600 is reserved for the native gRPC service as contracts land.
 Health endpoints are `/healthz` and `/readyz`; metrics are reserved on 9464 and
@@ -225,6 +235,15 @@ from another HTTP(S) origin; paths, query strings, credentials, opaque origins,
 and wildcards are invalid. Origins are canonicalized before matching. This
 setting does not authenticate native clients and must not be used as a network
 security boundary.
+
+The Go BFF has an independent `EPOCH_CONTROL_ALLOWED_ORIGINS` exact-origin
+allowlist. Configure its comma-delimited Rust authority set with
+`EPOCH_CONTROL_REGIONAL_ENDPOINTS`, its HTTP/gRPC listeners with
+`EPOCH_CONTROL_ADDR` and `EPOCH_CONTROL_GRPC_ADDR`, and its positive interval
+with `EPOCH_CONTROL_RECONCILE_INTERVAL`. The console uses
+`VITE_EPOCH_CONTROL_BASE_URL` and never receives Rust node URLs for regional
+placement. Node and control allowlists reject wildcards, paths, query strings,
+credentials, and non-HTTP(S) origins.
 
 For a fresh data directory, the standalone node stores its active engine
 journal in `$EPOCH_DATA_DIR/engine-wal/`. Files are named `segment-*.wal`; the
@@ -265,9 +284,9 @@ then atomically installs the active marker. Do not modify either marker or mix a
 legacy file with `engine-wal/`; ambiguous histories fail startup instead of
 guessing. A second old or new process is rejected by the shared lock.
 
-This milestone has no snapshots, compaction, retention deletion, object tier,
-replication, or replica repair. Losing the host and its storage can still lose
-all locally durable data.
+The standalone storage mode has no snapshots, compaction, retention deletion,
+object tier, replication, or replica repair. Losing the host and its storage
+can still lose all locally durable data.
 
 ## Containers
 
@@ -319,12 +338,32 @@ none changes the public API or SDK guarantee ceiling. Run
 `make test-stream-tablet`, `make test-queue-tablet`, `make test-cache-tablet`,
 or `make test-bus-tablet` for the disposable three-container proofs.
 
-`epoch-catalog` is the test-first multi-tablet foundation. It owns deterministic
-resource generations, shard/tablet/group identity, canonical lifecycle
-commands, and routing lookup without I/O or Tokio. Run
-`cargo test -p epoch-catalog --all-targets`. Catalog consensus, runtime group
-multiplexing, placement, and public multi-tablet routing remain subsequent
-slices; see [ADR-0009](adr/0009-regional-tablet-catalog.md).
+Validate or run the regional multi-tablet topology:
+
+```shell
+make compose-regional-config
+make compose-regional-up
+EPOCH_CONTROL_REGIONAL_ENDPOINTS=http://127.0.0.1:18661,http://127.0.0.1:18662,http://127.0.0.1:18663 \
+  go run ./control/cmd/epoch-control
+VITE_EPOCH_CONTROL_BASE_URL=http://127.0.0.1:8080 \
+  pnpm --filter @epoch/console dev
+make compose-regional-down
+```
+
+The Compose model enables `EPOCH_REGIONAL_RUNTIME_ENABLED`, reserves consensus
+group 1 for the catalog, shares one peer listener per node, caps the process at
+16 groups, and mounts one independent volume per voter. The default Go process
+connects to only `127.0.0.1:7601`; the example overrides it with all three
+published Compose node URLs. The console points only at the Go HTTP address.
+
+Run `make test-regional-runtime` for the disposable end-to-end campaign. It
+allocates its own ports/project/volumes, builds the Go control binary, creates a
+managed resource through Go, verifies the browser BFF, exercises all four typed
+profiles, kills one and then all Rust nodes, reopens the same volumes, and
+removes only its scoped resources. `epoch-catalog` remains independently
+testable with `cargo test -p epoch-catalog --all-targets`. Dynamic membership,
+zone-aware placement, authentication, snapshots, and read barriers remain
+subsequent slices; see [ADR-0009](adr/0009-regional-tablet-catalog.md).
 
 To discard local data, explicitly add `--volumes` to the Compose down command.
 That is destructive and is intentionally not part of the Make target.

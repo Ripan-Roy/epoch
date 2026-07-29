@@ -232,14 +232,20 @@ an HTTP lookup ever observes a commit without the exact actor-applied receipt,
 the typed service fails closed and does not apply state from the request task.
 The public API guarantee remains unchanged.
 
-The first multi-tablet foundation now lives in `epoch-catalog`. It is an
-I/O-free deterministic regional state machine with fully qualified resource
-keys, monotonic generations, exact request-token replay, canonical commands,
-never-reused tablet and consensus-group identities, stable shard expansion, and
-bidirectional resource/shard/tablet lookup. It deliberately does not claim
-placement or public multi-tablet service: the next runtime steps are catalog
-consensus, group supervision, peer-message demultiplexing, typed tablet
-materialization, and generation/epoch-fenced public routing. See
+The regional multi-tablet alpha composes that adapter with `epoch-catalog`.
+Catalog group 1 commits canonical resource commands through three EPRS-backed
+voters. A bounded group supervisor reserves that identity, demultiplexes peer
+frames by group and epoch on one listener, and hosts several independent
+consensus actors in one node process. Committed catalog state is materialized
+deterministically into Cache, Stream, Queue, and Event Bus tablets with
+never-reused tablet/group identities. Resource/shard discovery reports the
+local role and observed leader; data dispatch requires exact resource-generation
+and tablet-epoch fences and rejects a follower instead of forwarding or
+inventing success.
+
+The current placement is deliberately fixed at three configured voters. It is
+real multi-group execution and recovery, but it is not zone-aware placement,
+dynamic membership, online rebalance, or a stable authenticated public API. See
 [ADR-0009](adr/0009-regional-tablet-catalog.md).
 
 `crates/epoch-tablet` also contains the canonical single-partition Queue tablet
@@ -281,8 +287,9 @@ execution remains explicitly unimplemented: the outbox proves durable intent
 and settlements, not that a target side effect occurred. See
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
-Snapshots, compaction, membership changes, catalog consensus and runtime
-fencing, placement, and read barriers remain disabled. The byte contract is
+Snapshots, compaction, membership changes, constraint-aware placement,
+online transfer/repair, authenticated transport, and read barriers remain
+disabled. The byte contract is
 documented in [EPRS v1 consensus stable
 journal](../spec/formats/consensus-stable-store-v1.md); the complete scope and
 non-claims are recorded in
@@ -520,6 +527,13 @@ abort/rollback where semantics allow it.
 Standalone mode uses the same API and state machines with one member. A
 three-or-more-node cluster enables quorum profiles.
 
+The current alpha implements the first bounded form of this layer: one
+three-voter catalog group, a capped multi-group supervisor, catalog-driven
+four-profile materialization, and experimental HTTP discovery/data dispatch.
+It proves fixed placement, fencing, failover, catch-up, and same-volume reopen;
+it does not yet implement the target placement solver, membership changes,
+repair planner, or stable gRPC administration server in Rust.
+
 ### 11.2 Go managed plane
 
 The Go plane owns:
@@ -542,6 +556,21 @@ cache memory.
 The Kubernetes operator follows the same boundary: custom resources express
 desired state, while the Rust catalog is authoritative for live data-plane
 state.
+
+The current Go alpha runs a real `RegionalAdminService` gRPC server and a
+periodic reconciler. Its multi-endpoint HTTP authority adapter applies desired
+generations to Rust, samples each configured node's route identity, and records
+only matching observed voters and leaders. Availability loss clears the
+placement sample rather than presenting it as current; a later observation is
+generation-fenced so it cannot mark newer desired state ready. The browser
+console reads `GET /v1/regional/resources` from the Go BFF and never contacts a
+Rust storage node. Every 64-bit value in that browser contract is a decimal
+string and CORS is granted only to exact configured HTTP(S) origins.
+
+Go desired metadata and replay records are still process-local memory. This
+slice therefore proves the ownership boundary and reconciliation behavior, not
+durable hosted control, multi-instance consistency, authorization, fleet
+automation, or an operator.
 
 ## 12. API contracts
 
