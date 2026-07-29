@@ -63,9 +63,8 @@ type DesiredResource struct {
 	Spec   json.RawMessage   `json:"spec"`
 }
 
-// ResourcePhase describes reconciliation state. The in-memory registry only
-// accepts desired state, so new generations remain pending until a regional
-// Rust data plane reports an observed generation through a future contract.
+// ResourcePhase describes reconciliation state. New desired generations remain
+// pending until the regional Rust data plane reports an observed generation.
 type ResourcePhase string
 
 const (
@@ -134,7 +133,7 @@ type DeleteRequest struct {
 
 // DeleteResult reports the generation assigned to the delete mutation. The
 // generation is retained as a tombstone counter so recreation remains
-// monotonic for the life of this registry process.
+// monotonic across control-plane restarts when durable storage is configured.
 type DeleteResult struct {
 	Key        ResourceKey `json:"key"`
 	Generation uint64      `json:"generation"`
@@ -167,34 +166,82 @@ type RegistryError struct {
 	Message            string    `json:"message"`
 	ExpectedGeneration uint64    `json:"expected_generation,omitempty"`
 	ActualGeneration   uint64    `json:"actual_generation,omitempty"`
+	cause              error
 }
 
 func (err *RegistryError) Error() string {
 	return err.Message
 }
 
-type tokenRecord struct {
-	operation   string
-	fingerprint string
-	apply       *ApplyResult
-	delete      *DeleteResult
+func (err *RegistryError) Unwrap() error {
+	return err.cause
 }
 
-// Registry is a concurrency-safe, in-memory declarative registry. It is an M1
-// control-plane proving surface, not durable customer metadata storage.
-type Registry struct {
-	mu             sync.RWMutex
+type tokenRecord struct {
+	Operation   string        `json:"operation"`
+	Fingerprint string        `json:"fingerprint"`
+	Apply       *ApplyResult  `json:"apply,omitempty"`
+	Delete      *DeleteResult `json:"delete,omitempty"`
+}
+
+type registryState struct {
 	resources      map[ResourceKey]Resource
 	lastGeneration map[ResourceKey]uint64
 	tokens         map[string]tokenRecord
 }
 
+type registryMutation struct {
+	resourceKey    ResourceKey
+	resource       *Resource
+	deleteResource bool
+	generation     *uint64
+	token          string
+	tokenRecord    *tokenRecord
+}
+
+type registryPersistence interface {
+	Commit(registryMutation) error
+	Close() error
+	Mode() string
+}
+
+// Registry is a concurrency-safe declarative registry. NewRegistry is
+// intentionally memory-only for unit and embedded use; OpenDurableRegistry
+// attaches the same state machine to versioned transactional storage.
+type Registry struct {
+	mu             sync.RWMutex
+	resources      map[ResourceKey]Resource
+	lastGeneration map[ResourceKey]uint64
+	tokens         map[string]tokenRecord
+	persistence    registryPersistence
+	mode           string
+	closed         bool
+}
+
 // NewRegistry creates an empty registry.
 func NewRegistry() *Registry {
-	return &Registry{
+	return newRegistry(emptyRegistryState(), nil)
+}
+
+func emptyRegistryState() registryState {
+	return registryState{
 		resources:      make(map[ResourceKey]Resource),
 		lastGeneration: make(map[ResourceKey]uint64),
 		tokens:         make(map[string]tokenRecord),
+	}
+}
+
+func newRegistry(state registryState, persistence registryPersistence) *Registry {
+	mode := "memory"
+	if persistence != nil {
+		mode = persistence.Mode()
+	}
+	return &Registry{
+		resources:      state.resources,
+		lastGeneration: state.lastGeneration,
+		tokens:         state.tokens,
+		persistence:    persistence,
+		mode:           mode,
 	}
 }
 
@@ -212,12 +259,15 @@ func (registry *Registry) Apply(request ApplyRequest) (ApplyResult, error) {
 
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
+	if registry.closed {
+		return ApplyResult{}, internal("control metadata registry is closed", nil)
+	}
 
 	if prior, found := registry.tokens[normalized.RequestToken]; found {
-		if prior.operation != "apply" || prior.fingerprint != fingerprint {
+		if prior.Operation != "apply" || prior.Fingerprint != fingerprint {
 			return ApplyResult{}, conflict("request token was already used for a different operation", 0, 0)
 		}
-		result := cloneApplyResult(*prior.apply)
+		result := cloneApplyResult(*prior.Apply)
 		result.Replayed = true
 		return result, nil
 	}
@@ -236,7 +286,11 @@ func (registry *Registry) Apply(request ApplyRequest) (ApplyResult, error) {
 		)
 	}
 
-	result := ApplyResult{}
+	var (
+		result              ApplyResult
+		nextResource        *Resource
+		persistedGeneration *uint64
+	)
 	switch {
 	case !exists:
 		generation, err := nextGeneration(registry.lastGeneration[key])
@@ -244,9 +298,9 @@ func (registry *Registry) Apply(request ApplyRequest) (ApplyResult, error) {
 			return ApplyResult{}, err
 		}
 		resource := materialize(normalized.Resource, generation, ResourceStatus{})
-		registry.resources[key] = resource
-		registry.lastGeneration[key] = generation
 		result = ApplyResult{Resource: cloneResource(resource), Created: true, Changed: true}
+		nextResource = &resource
+		persistedGeneration = &generation
 	case desiredEqual(current, normalized.Resource):
 		result = ApplyResult{Resource: cloneResource(current)}
 	default:
@@ -255,17 +309,33 @@ func (registry *Registry) Apply(request ApplyRequest) (ApplyResult, error) {
 			return ApplyResult{}, err
 		}
 		resource := materialize(normalized.Resource, generation, current.Status)
-		registry.resources[key] = resource
-		registry.lastGeneration[key] = generation
 		result = ApplyResult{Resource: cloneResource(resource), Changed: true}
+		nextResource = &resource
+		persistedGeneration = &generation
 	}
 
 	stored := cloneApplyResult(result)
-	registry.tokens[normalized.RequestToken] = tokenRecord{
-		operation:   "apply",
-		fingerprint: fingerprint,
-		apply:       &stored,
+	record := tokenRecord{
+		Operation:   "apply",
+		Fingerprint: fingerprint,
+		Apply:       &stored,
 	}
+	if err := registry.commitLocked(registryMutation{
+		resourceKey: key,
+		resource:    nextResource,
+		generation:  persistedGeneration,
+		token:       normalized.RequestToken,
+		tokenRecord: &record,
+	}); err != nil {
+		return ApplyResult{}, err
+	}
+	if nextResource != nil {
+		registry.resources[key] = cloneResource(*nextResource)
+	}
+	if persistedGeneration != nil {
+		registry.lastGeneration[key] = *persistedGeneration
+	}
+	registry.tokens[normalized.RequestToken] = cloneTokenRecord(record)
 	return result, nil
 }
 
@@ -358,12 +428,15 @@ func (registry *Registry) Delete(request DeleteRequest) (DeleteResult, error) {
 
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
+	if registry.closed {
+		return DeleteResult{}, internal("control metadata registry is closed", nil)
+	}
 
 	if prior, found := registry.tokens[request.RequestToken]; found {
-		if prior.operation != "delete" || prior.fingerprint != fingerprint {
+		if prior.Operation != "delete" || prior.Fingerprint != fingerprint {
 			return DeleteResult{}, conflict("request token was already used for a different operation", 0, 0)
 		}
-		result := *prior.delete
+		result := *prior.Delete
 		result.Replayed = true
 		return result, nil
 	}
@@ -382,11 +455,18 @@ func (registry *Registry) Delete(request DeleteRequest) (DeleteResult, error) {
 			Generation: registry.lastGeneration[request.Key],
 		}
 		stored := result
-		registry.tokens[request.RequestToken] = tokenRecord{
-			operation:   "delete",
-			fingerprint: fingerprint,
-			delete:      &stored,
+		record := tokenRecord{
+			Operation:   "delete",
+			Fingerprint: fingerprint,
+			Delete:      &stored,
 		}
+		if err := registry.commitLocked(registryMutation{
+			token:       request.RequestToken,
+			tokenRecord: &record,
+		}); err != nil {
+			return DeleteResult{}, err
+		}
+		registry.tokens[request.RequestToken] = cloneTokenRecord(record)
 		return result, nil
 	}
 
@@ -402,15 +482,25 @@ func (registry *Registry) Delete(request DeleteRequest) (DeleteResult, error) {
 	if err != nil {
 		return DeleteResult{}, err
 	}
-	delete(registry.resources, request.Key)
-	registry.lastGeneration[request.Key] = deleteGeneration
 	result := DeleteResult{Key: request.Key, Generation: deleteGeneration, Deleted: true}
 	stored := result
-	registry.tokens[request.RequestToken] = tokenRecord{
-		operation:   "delete",
-		fingerprint: fingerprint,
-		delete:      &stored,
+	record := tokenRecord{
+		Operation:   "delete",
+		Fingerprint: fingerprint,
+		Delete:      &stored,
 	}
+	if err := registry.commitLocked(registryMutation{
+		resourceKey:    request.Key,
+		deleteResource: true,
+		generation:     &deleteGeneration,
+		token:          request.RequestToken,
+		tokenRecord:    &record,
+	}); err != nil {
+		return DeleteResult{}, err
+	}
+	delete(registry.resources, request.Key)
+	registry.lastGeneration[request.Key] = deleteGeneration
+	registry.tokens[request.RequestToken] = cloneTokenRecord(record)
 	return result, nil
 }
 
@@ -436,6 +526,9 @@ func (registry *Registry) UpdateStatus(
 
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
+	if registry.closed {
+		return Resource{}, internal("control metadata registry is closed", nil)
+	}
 	current, found := registry.resources[normalized]
 	if !found {
 		return Resource{}, notFound(normalized)
@@ -450,9 +543,53 @@ func (registry *Registry) UpdateStatus(
 	if err := validateStatus(status, desiredGeneration); err != nil {
 		return Resource{}, err
 	}
-	current.Status = cloneStatus(status)
-	registry.resources[normalized] = current
-	return cloneResource(current), nil
+	next := cloneResource(current)
+	next.Status = cloneStatus(status)
+	if statusEqual(current.Status, next.Status) {
+		return cloneResource(current), nil
+	}
+	if err := registry.commitLocked(registryMutation{
+		resourceKey: normalized,
+		resource:    &next,
+	}); err != nil {
+		return Resource{}, err
+	}
+	registry.resources[normalized] = cloneResource(next)
+	return cloneResource(next), nil
+}
+
+// Mode reports the configured metadata storage implementation.
+func (registry *Registry) Mode() string {
+	registry.mu.RLock()
+	defer registry.mu.RUnlock()
+	return registry.mode
+}
+
+// Close releases durable registry ownership. It is safe to call more than once.
+func (registry *Registry) Close() error {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if registry.closed {
+		return nil
+	}
+	registry.closed = true
+	if registry.persistence == nil {
+		return nil
+	}
+	return registry.persistence.Close()
+}
+
+func (registry *Registry) commitLocked(mutation registryMutation) error {
+	if registry.closed {
+		return internal("control metadata registry is closed", nil)
+	}
+	if registry.persistence == nil {
+		return nil
+	}
+	if err := registry.persistence.Commit(mutation); err != nil {
+		return internal("control metadata commit failed", err)
+	}
+	return nil
 }
 
 func normalizeApply(request ApplyRequest) (ApplyRequest, error) {
@@ -617,6 +754,18 @@ func cloneApplyResult(result ApplyResult) ApplyResult {
 	return result
 }
 
+func cloneTokenRecord(record tokenRecord) tokenRecord {
+	if record.Apply != nil {
+		apply := cloneApplyResult(*record.Apply)
+		record.Apply = &apply
+	}
+	if record.Delete != nil {
+		deleted := *record.Delete
+		record.Delete = &deleted
+	}
+	return record
+}
+
 func cloneResource(resource Resource) Resource {
 	resource.Labels = cloneLabels(resource.Labels)
 	resource.Spec = cloneJSON(resource.Spec)
@@ -637,6 +786,35 @@ func cloneStatus(status ResourceStatus) ResourceStatus {
 		)
 	}
 	return status
+}
+
+func statusEqual(left, right ResourceStatus) bool {
+	if left.Phase != right.Phase ||
+		left.ObservedGeneration != right.ObservedGeneration ||
+		left.Message != right.Message ||
+		len(left.Tablets) != len(right.Tablets) {
+		return false
+	}
+	for index := range left.Tablets {
+		leftTablet := left.Tablets[index]
+		rightTablet := right.Tablets[index]
+		if leftTablet.TabletID != rightTablet.TabletID ||
+			leftTablet.ConsensusGroupID != rightTablet.ConsensusGroupID ||
+			leftTablet.ShardIndex != rightTablet.ShardIndex ||
+			leftTablet.TabletEpoch != rightTablet.TabletEpoch ||
+			leftTablet.ResourceGeneration != rightTablet.ResourceGeneration ||
+			leftTablet.DesiredReplicas != rightTablet.DesiredReplicas ||
+			leftTablet.LeaderNodeID != rightTablet.LeaderNodeID ||
+			len(leftTablet.VoterNodeIDs) != len(rightTablet.VoterNodeIDs) {
+			return false
+		}
+		for voter := range leftTablet.VoterNodeIDs {
+			if leftTablet.VoterNodeIDs[voter] != rightTablet.VoterNodeIDs[voter] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func validateStatus(status ResourceStatus, desiredGeneration uint64) error {
@@ -740,5 +918,13 @@ func conflict(message string, expected, actual uint64) *RegistryError {
 		Message:            message,
 		ExpectedGeneration: expected,
 		ActualGeneration:   actual,
+	}
+}
+
+func internal(message string, cause error) *RegistryError {
+	return &RegistryError{
+		Code:    CodeInternal,
+		Message: message,
+		cause:   cause,
 	}
 }

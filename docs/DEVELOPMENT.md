@@ -222,6 +222,7 @@ The current managed-control alpha uses:
 | Go RegionalAdmin gRPC | `0.0.0.0:8081` |
 | Rust authority endpoints | `http://127.0.0.1:7601` |
 | Reconcile interval | `1s` |
+| Go metadata database | `data/control/registry.db` |
 | Console managed API | `http://127.0.0.1:8080` |
 
 The first node exposes its implemented native and administrative HTTP routes on
@@ -240,10 +241,13 @@ The Go BFF has an independent `EPOCH_CONTROL_ALLOWED_ORIGINS` exact-origin
 allowlist. Configure its comma-delimited Rust authority set with
 `EPOCH_CONTROL_REGIONAL_ENDPOINTS`, its HTTP/gRPC listeners with
 `EPOCH_CONTROL_ADDR` and `EPOCH_CONTROL_GRPC_ADDR`, and its positive interval
-with `EPOCH_CONTROL_RECONCILE_INTERVAL`. The console uses
-`VITE_EPOCH_CONTROL_BASE_URL` and never receives Rust node URLs for regional
-placement. Node and control allowlists reject wildcards, paths, query strings,
-credentials, and non-HTTP(S) origins.
+with `EPOCH_CONTROL_RECONCILE_INTERVAL`. Set `EPOCH_CONTROL_STATE_PATH` to the
+single-owner bbolt metadata file. Desired resources, observed status, request
+outcomes, and generation tombstones commit there before acknowledgement;
+startup fails rather than discarding corrupt, unknown-version, or concurrently
+owned state. The console uses `VITE_EPOCH_CONTROL_BASE_URL` and never receives
+Rust node URLs for regional placement. Node and control allowlists reject
+wildcards, paths, query strings, credentials, and non-HTTP(S) origins.
 
 For a fresh data directory, the standalone node stores its active engine
 journal in `$EPOCH_DATA_DIR/engine-wal/`. Files are named `segment-*.wal`; the
@@ -344,6 +348,7 @@ Validate or run the regional multi-tablet topology:
 make compose-regional-config
 make compose-regional-up
 EPOCH_CONTROL_REGIONAL_ENDPOINTS=http://127.0.0.1:18661,http://127.0.0.1:18662,http://127.0.0.1:18663 \
+EPOCH_CONTROL_STATE_PATH=.epoch/control/registry.db \
   go run ./control/cmd/epoch-control
 VITE_EPOCH_CONTROL_BASE_URL=http://127.0.0.1:8080 \
   pnpm --filter @epoch/console dev
@@ -358,12 +363,15 @@ published Compose node URLs. The console points only at the Go HTTP address.
 
 Run `make test-regional-runtime` for the disposable end-to-end campaign. It
 allocates its own ports/project/volumes, builds the Go control binary, creates a
-managed resource through Go, verifies the browser BFF, exercises all four typed
-profiles, kills one and then all Rust nodes, reopens the same volumes, and
-removes only its scoped resources. `epoch-catalog` remains independently
-testable with `cargo test -p epoch-catalog --all-targets`. Dynamic membership,
-zone-aware placement, authentication, snapshots, and read barriers remain
-subsequent slices; see [ADR-0009](adr/0009-regional-tablet-catalog.md).
+managed resource through Go, verifies the browser BFF, kills and reopens the Go
+process against the same metadata file, proves exact request replay, exercises
+all four typed profiles, kills one and then all Rust nodes, reopens the same
+volumes, and removes only its scoped resources. `epoch-catalog` remains
+independently testable with `cargo test -p epoch-catalog --all-targets`. Dynamic
+membership, zone-aware placement, authentication, snapshots, and read barriers
+remain subsequent slices; see
+[ADR-0009](adr/0009-regional-tablet-catalog.md) and
+[ADR-0010](adr/0010-durable-managed-metadata.md).
 
 To discard local data, explicitly add `--volumes` to the Compose down command.
 That is destructive and is intentionally not part of the Make target.

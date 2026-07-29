@@ -119,6 +119,9 @@ class RegionalCluster:
             prefix="epoch-regional-control-"
         )
         self.control_binary = Path(self.temporary_directory.name) / "epoch-control"
+        self.control_state_path = (
+            Path(self.temporary_directory.name) / "control-registry.db"
+        )
         self.control_log = (
             Path(self.temporary_directory.name) / "epoch-control.log"
         ).open("w+", encoding="utf-8")
@@ -179,19 +182,22 @@ class RegionalCluster:
         self.compose("start")
 
     def start_control(self) -> None:
-        subprocess.run(
-            [
-                "go",
-                "build",
-                "-o",
-                str(self.control_binary),
-                "./control/cmd/epoch-control",
-            ],
-            cwd=REPO_ROOT,
-            env=self.environment,
-            check=True,
-            text=True,
-        )
+        if self.control_process is not None:
+            raise AssertionError("epoch-control is already running")
+        if not self.control_binary.exists():
+            subprocess.run(
+                [
+                    "go",
+                    "build",
+                    "-o",
+                    str(self.control_binary),
+                    "./control/cmd/epoch-control",
+                ],
+                cwd=REPO_ROOT,
+                env=self.environment,
+                check=True,
+                text=True,
+            )
         environment = self.environment.copy()
         environment.update(
             {
@@ -202,6 +208,7 @@ class RegionalCluster:
                 ),
                 "EPOCH_CONTROL_ALLOWED_ORIGINS": "https://console.example.test",
                 "EPOCH_CONTROL_RECONCILE_INTERVAL": "100ms",
+                "EPOCH_CONTROL_STATE_PATH": str(self.control_state_path),
             }
         )
         self.control_process = subprocess.Popen(
@@ -224,6 +231,16 @@ class RegionalCluster:
             return self.control_request("GET", "/healthz").status == 200
 
         wait_until("Go control plane to become healthy", healthy)
+        health = self.control_request("GET", "/healthz")
+        assert health.document.get("registry") == "bbolt_v1", health
+        assert health.document.get("registry_durable") is True, health
+
+    def crash_control(self) -> None:
+        if self.control_process is None or self.control_process.poll() is not None:
+            raise AssertionError("epoch-control is not running")
+        self.control_process.kill()
+        self.control_process.wait(timeout=5)
+        self.control_process = None
 
     def stop_control(self) -> None:
         if self.control_process is None:
@@ -374,28 +391,40 @@ def create_resource(cluster: RegionalCluster, resource: Resource) -> None:
     wait_until(f"catalog creation of {resource.kind}/{resource.name}", created)
 
 
-def create_managed_resource(cluster: RegionalCluster, resource: Resource) -> None:
-    response = cluster.control_request(
-        "PUT",
-        "/v1/resources",
-        {
-            "request_token": f"managed-create-{resource.kind}-{resource.name}-v1",
-            "expected_generation": 0,
-            "resource": {
-                "organization": "acme",
-                "project": "shop",
-                "environment": "dev",
-                "namespace": "core",
-                "kind": resource.kind,
-                "name": resource.name,
-                "spec": {
-                    "shard_count": 1,
-                    "replica_count": 3,
-                },
+def managed_resource_request(resource: Resource) -> dict[str, Any]:
+    return {
+        "request_token": f"managed-create-{resource.kind}-{resource.name}-v1",
+        "expected_generation": 0,
+        "resource": {
+            "organization": "acme",
+            "project": "shop",
+            "environment": "dev",
+            "namespace": "core",
+            "kind": resource.kind,
+            "name": resource.name,
+            "spec": {
+                "shard_count": 1,
+                "replica_count": 3,
             },
         },
+    }
+
+
+def create_managed_resource(cluster: RegionalCluster, resource: Resource) -> None:
+    response = cluster.control_request(
+        "PUT", "/v1/resources", managed_resource_request(resource)
     )
     assert response.status == 201, response
+
+
+def replay_managed_resource(cluster: RegionalCluster, resource: Resource) -> None:
+    response = cluster.control_request(
+        "PUT", "/v1/resources", managed_resource_request(resource)
+    )
+    assert response.status == 200, response
+    assert response.document.get("replayed") is True, response
+    stored = response.document.get("resource")
+    assert isinstance(stored, dict) and stored.get("generation") == 1, response
 
 
 def wait_for_managed_placement(
@@ -637,6 +666,11 @@ def run_campaign(cluster: RegionalCluster) -> None:
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
     write_profile(cluster, MANAGED_RESOURCE, 1)
     wait_for_profile_apply(cluster, MANAGED_RESOURCE, 1)
+    cluster.crash_control()
+    cluster.start_control()
+    replay_managed_resource(cluster, MANAGED_RESOURCE)
+    wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
+    wait_for_profile_apply(cluster, MANAGED_RESOURCE, 1)
     for resource in RESOURCES:
         create_resource(cluster, resource)
         write_profile(cluster, resource, 1)
@@ -686,7 +720,7 @@ def main() -> int:
     if not failed:
         print(
             "Epoch Go-to-Rust regional catalog/BFF/four-profile/failover/"
-            "all-node recovery container campaign passed."
+            "control-SIGKILL/all-node recovery container campaign passed."
         )
     return 0
 

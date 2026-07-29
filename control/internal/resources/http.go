@@ -61,12 +61,13 @@ func (handler *httpHandler) health(writer http.ResponseWriter, request *http.Req
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"status":          "ok",
-		"component":       "epoch-control",
-		"role":            "managed_control_plane",
-		"data_path_owner": "rust",
-		"registry":        "in_memory",
-		"resource_count":  handler.registry.Count(),
+		"status":           "ok",
+		"component":        "epoch-control",
+		"role":             "managed_control_plane",
+		"data_path_owner":  "rust",
+		"registry":         handler.registry.Mode(),
+		"registry_durable": handler.registry.Mode() != "memory",
+		"resource_count":   handler.registry.Count(),
 	})
 }
 

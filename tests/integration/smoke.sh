@@ -123,6 +123,7 @@ start_node
 assert_second_node_rejected
 
 EPOCH_CONTROL_ADDR="$epoch_control_addr" \
+EPOCH_CONTROL_STATE_PATH="$epoch_smoke_tmp/control-registry.db" \
   "$epoch_smoke_tmp/epoch-control" >"$epoch_smoke_tmp/control.log" 2>&1 &
 epoch_control_pid=$!
 

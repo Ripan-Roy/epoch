@@ -320,14 +320,17 @@ volumes and dynamic loopback ports, then builds and launches the real
 `epoch-control` process against those nodes. One resource is accepted through
 Go desired state and reconciled into the Rust catalog; the browser BFF must
 return exact-origin CORS, decimal-string 64-bit IDs, one leader, and three
-actually observed voters. The campaign also creates Cache, Stream, Queue, and
-Event Bus resources directly through the Rust catalog and commits one typed
-operation per profile. It kills the managed Stream leader, waits for the Go BFF
-to report degraded two-voter placement, commits through the replacement,
-restarts and catches up the old voter, kills every node, verifies Go clears
-stale placement while authority is unavailable, and reopens the same volumes
-before comparing catalog/profile digests. CI captures control logs, container
-logs, port assignments, and scoped state evidence on failure.
+actually observed voters. It then sends `SIGKILL` to the Go process, reopens
+the same bbolt metadata file, proves the original apply token replays without a
+second Rust mutation, and waits for placement to reconcile ready again. The
+campaign also creates Cache, Stream, Queue, and Event Bus resources directly
+through the Rust catalog and commits one typed operation per profile. It kills
+the managed Stream leader, waits for the Go BFF to report degraded two-voter
+placement, commits through the replacement, restarts and catches up the old
+voter, kills every node, verifies Go clears stale placement while authority is
+unavailable, and reopens the same volumes before comparing catalog/profile
+digests. CI captures control logs, container logs, port assignments, and scoped
+state evidence on failure.
 
 `tests/integration/docs-quickstarts.sh` separately executes the exact Go, Java,
 and Python source imported into the documentation page. Each language gets a

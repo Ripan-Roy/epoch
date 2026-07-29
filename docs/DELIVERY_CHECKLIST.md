@@ -1,8 +1,8 @@
 # Epoch Delivery Checklist
 
-**Last reviewed:** 27 July 2026  
+**Last reviewed:** 29 July 2026
 **Current release:** `v0.1.0-alpha.2`  
-**Current core target:** regional catalog consensus and multi-tablet runtime
+**Current core target:** durable Go control metadata on the regional runtime
 
 This is the operational checklist for turning PRD scope into verified,
 releasable increments. [PRD.md](PRD.md) owns product scope,
@@ -36,7 +36,7 @@ protected-branch evidence agree.
 | G5 | Trust and observability | ⬜ | Identity, authorization, TLS/mTLS, encryption, audit, telemetry, quotas, explain | Security boundary is documented; production controls and fault evidence remain open |
 | G6 | Compatibility gateways | ⬜ | Named protocol/client matrix, differential tests, fuzzing, malformed frames, migration evidence | Native APIs only; RESP3, Kafka, AMQP, MQTT compatibility is not claimed |
 | G7 | Data services and integrations | 🟡 | Schemas, pipes, connectors, target execution, checkpoints, transaction boundaries | Bus intent/outbox passes; external target executors, schemas, and connectors remain open |
-| G8 | Managed operations | 🟡 | Durable Go reconciliation, operator, autoscaling, backup, metering, billing, private networking | Go RegionalAdmin reconciliation, Rust HTTP authority adapter, truthful placement status, exact-origin browser BFF, and real Go-to-Rust recovery pass locally; desired metadata remains in memory and operator/autoscaling/backup/metering/billing/private networking remain open |
+| G8 | Managed operations | 🟡 | Durable Go reconciliation, operator, autoscaling, backup, metering, billing, private networking | Single-owner bbolt desired/status/token/tombstone transactions, Go `SIGKILL` recovery, RegionalAdmin reconciliation, Rust HTTP authority adapter, truthful placement status, exact-origin browser BFF, and real Go-to-Rust recovery pass locally; replicated multi-instance metadata and operator/autoscaling/backup/metering/billing/private networking remain open |
 | G9 | Geo | ⬜ | Replication, RPO/RTO, promotion, failback, residency, split-brain drills | Not implemented |
 | G10 | Release readiness | 🟡 | Synchronized versions, CI, Pages, notes, verified tag provenance, artifacts, security and compatibility statements | `v0.1.0-alpha.2` passes the source-prerelease workflow; packaged artifacts and GA evidence remain open |
 
@@ -65,15 +65,15 @@ complete.
 | MT-03 | Stable shard-to-tablet/group allocation and expansion | Rust catalog | MT-01 | ✅ | Multi-resource collision and expansion tests |
 | MT-04 | Canonical, versioned, idempotent catalog commands | Rust catalog | MT-01 | ✅ | Codec, replay, unknown-version, and token-rebinding tests |
 | MT-05 | Tablet descriptor in the versioned Rust/Go contract | Protobuf | MT-01 | ✅ | Buf lint and generated-binding freshness |
-| MT-06 | Persist catalog commands through a dedicated consensus group | Rust regional control | G2, G3, MT-04 | 🟡 | Dedicated group 1 commits canonical catalog commands through three EPRS voters; minority, replay, restart, catch-up, and corruption gates pass locally. Awaiting protected-branch CI; dynamic membership remains open |
+| MT-06 | Persist catalog commands through a dedicated consensus group | Rust regional control | G2, G3, MT-04 | 🟡 | Dedicated group 1 commits canonical catalog commands through three EPRS voters; minority, replay, restart, catch-up, corruption, and protected `main` CI gates pass. Dynamic membership remains open |
 | MT-07 | Demultiplex peer frames by group and epoch | Rust node transport | MT-06 | 🟡 | Shared listener rejects unknown group/epoch, keeps groups isolated, and uses bounded ordered peer queues; broader load/backpressure benchmarks remain open |
 | MT-08 | Supervise several consensus groups in one node process | Rust node runtime | MT-07 | 🟡 | One supervisor reserves catalog group 1, enforces a group cap, runs catalog plus several profile groups, and reopens them after `SIGKILL`; dynamic membership and production resource accounting remain open |
 | MT-09 | Materialize typed profile tablets from committed catalog state | Rust regional control | MT-06, MT-08 | 🟡 | Catalog apply/delete/reconcile tests and real process/container runs create Cache, Stream, Queue, and Bus tablets together and recover them from committed state; online shard transfer remains open |
 | MT-10 | Route public requests by resource, shard, leader, generation, and epoch | Rust gateway | MT-09 | 🟡 | Experimental resource/shard discovery and data dispatch reject stale generation, stale tablet epoch, nonleaders, missing routes, and profile mismatches; stable authenticated native routing and read barriers remain open |
-| MT-11 | Reconcile hosted desired state through the Rust authority | Go control plane | MT-06, MT-10 | 🟡 | Real gRPC lifecycle, apply/delete replay, conflict/disconnect/reconnect, generation-fenced status, multi-endpoint authority sampling, and Go-to-Rust container reconciliation pass; durable Go metadata and authorization remain open |
+| MT-11 | Reconcile hosted desired state through the Rust authority | Go control plane | MT-06, MT-10 | 🟡 | Real gRPC lifecycle, transactional bbolt desired/status/token/tombstone state, exact replay and generation continuity across restart, corruption/version/exclusive-owner rejection, conflict/disconnect/reconnect, generation-fenced status, multi-endpoint authority sampling, and Go-to-Rust container reconciliation pass locally; multi-instance consistency and authorization remain open |
 | MT-12 | Show achieved placement and risk without overclaiming | TypeScript console | MT-10, MT-11 | 🟡 | The console reads only the Go BFF, preserves decimal 64-bit IDs, distinguishes pending/ready/degraded/failed, and lists observed voters/leaders plus topology non-claims; browser visual/accessibility automation remains open |
-| MT-13 | Real-process and container fault campaign | Test infrastructure | MT-06–MT-12 | 🟡 | Three real processes and three containers cover catalog plus five resources/four profiles, Go-to-Rust apply/BFF, leader `SIGKILL`, two-voter degradation, catch-up, all-node `SIGKILL`, same-volume reopen, and digest convergence; protected-branch CI and broader crash/I/O faults remain |
-| MT-14 | Documentation, traceability, changelog, and release notes | Cross-cutting | MT-13 | 🟡 | Architecture, APIs, testing, development, traceability, checklist, and `Unreleased` notes describe the bounded feature and non-claims; final version notes and release follow merge and green `main` |
+| MT-13 | Real-process and container fault campaign | Test infrastructure | MT-06–MT-12 | 🟡 | Three real processes and three containers cover catalog plus five resources/four profiles, Go-to-Rust apply/BFF, Go control `SIGKILL`/same-file reopen/exact replay, leader `SIGKILL`, two-voter degradation, catch-up, all-node `SIGKILL`, same-volume reopen, and digest convergence locally; this increment's protected-branch CI and broader crash/I/O faults remain |
+| MT-14 | Documentation, traceability, changelog, and release notes | Cross-cutting | MT-13 | 🟡 | ADR-0010, architecture, APIs, testing, development, traceability, checklist, published docs content, and `Unreleased` notes describe durable single-owner control metadata and its non-claims; final version notes and release follow merge and green `main` |
 
 ## Pull request checklist
 

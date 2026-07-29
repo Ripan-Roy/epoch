@@ -1,7 +1,7 @@
 # Epoch Architecture
 
 **Status:** Initial architecture baseline  
-**Date:** 22 July 2026  
+**Date:** 29 July 2026
 **Source of product requirements:** [PRD.md](PRD.md)  
 **Requirement coverage:** [REQUIREMENTS_TRACEABILITY.md](REQUIREMENTS_TRACEABILITY.md)
 
@@ -567,10 +567,17 @@ console reads `GET /v1/regional/resources` from the Go BFF and never contacts a
 Rust storage node. Every 64-bit value in that browser contract is a decimal
 string and CORS is granted only to exact configured HTTP(S) origins.
 
-Go desired metadata and replay records are still process-local memory. This
-slice therefore proves the ownership boundary and reconciliation behavior, not
-durable hosted control, multi-instance consistency, authorization, fleet
-automation, or an operator.
+The same alpha now commits management-only desired resources, observed status,
+generation tombstones, and request-token outcomes to one versioned bbolt
+database before acknowledging or publishing a mutation in memory. Startup
+recovers that state and fails closed for corrupt records, unknown schemas, or a
+second file owner. Health exposes the `bbolt_v1` mode, and the regional campaign
+kills and reopens the real Go process against the same database before proving
+exact replay and reconciliation.
+
+This is durable single-process hosted metadata, not a replicated management
+database. Multi-instance linearizability, management leader election, backups,
+authorization, fleet automation, and an operator remain open.
 
 ## 12. API contracts
 
@@ -760,3 +767,4 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0007: Provisional Repository and Toolchains](adr/0007-repository-and-toolchains.md)
 - [ADR-0008: Segmented Standalone WAL](adr/0008-segmented-standalone-wal.md)
 - [ADR-0009: Deterministic Regional Tablet Catalog](adr/0009-regional-tablet-catalog.md)
+- [ADR-0010: Durable Single-Owner Go Control Metadata](adr/0010-durable-managed-metadata.md)
