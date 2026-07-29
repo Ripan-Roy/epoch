@@ -51,7 +51,7 @@ class UrllibTransport:
             if filtered:
                 url = f"{url}?{urlencode(filtered)}"
         data = None if body is None else json.dumps(body, separators=(",", ":")).encode()
-        headers = {"accept": "application/json", "user-agent": "epoch-python/0.1.0a2"}
+        headers = {"accept": "application/json", "user-agent": "epoch-python/0.1.0a3"}
         if data is not None:
             headers["content-type"] = "application/json"
         request = Request(url, data=data, headers=headers, method=method.upper())

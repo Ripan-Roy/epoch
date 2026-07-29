@@ -1,8 +1,8 @@
 # Epoch Delivery Checklist
 
 **Last reviewed:** 29 July 2026
-**Current release:** `v0.1.0-alpha.2`  
-**Current core target:** durable Go control metadata on the regional runtime
+**Current release:** `v0.1.0-alpha.3`
+**Current core target:** select the next dependency-critical M2 feature
 
 This is the operational checklist for turning PRD scope into verified,
 releasable increments. [PRD.md](PRD.md) owns product scope,
@@ -38,7 +38,7 @@ protected-branch evidence agree.
 | G7 | Data services and integrations | 🟡 | Schemas, pipes, connectors, target execution, checkpoints, transaction boundaries | Bus intent/outbox passes; external target executors, schemas, and connectors remain open |
 | G8 | Managed operations | 🟡 | Durable Go reconciliation, operator, autoscaling, backup, metering, billing, private networking | Single-owner bbolt desired/status/token/tombstone transactions, Go `SIGKILL` recovery, RegionalAdmin reconciliation, Rust HTTP authority adapter, truthful placement status, exact-origin browser BFF, and real Go-to-Rust recovery pass locally; replicated multi-instance metadata and operator/autoscaling/backup/metering/billing/private networking remain open |
 | G9 | Geo | ⬜ | Replication, RPO/RTO, promotion, failback, residency, split-brain drills | Not implemented |
-| G10 | Release readiness | 🟡 | Synchronized versions, CI, Pages, notes, verified tag provenance, artifacts, security and compatibility statements | `v0.1.0-alpha.2` passes the source-prerelease workflow; packaged artifacts and GA evidence remain open |
+| G10 | Release readiness | 🟡 | Synchronized versions, CI, Pages, notes, verified tag provenance, artifacts, security and compatibility statements | `v0.1.0-alpha.3` passes the source-prerelease workflow; packaged artifacts and GA evidence remain open |
 
 ## Milestone readiness
 
@@ -108,7 +108,7 @@ complete.
 | 10 | Verify downloads and package claims | Only artifacts named in the notes are present | ⬜ |
 | 11 | Start the next `Unreleased` section | Changelog prepared for continued delivery | ✅ |
 
-`v0.1.0-alpha.2` completed this sequence as a source-only prerelease. The table
+`v0.1.0-alpha.3` completed this sequence as a source-only prerelease. The table
 above intentionally resets for the next release.
 
 ## Feature delivery template

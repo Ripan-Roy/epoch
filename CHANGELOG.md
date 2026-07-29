@@ -6,6 +6,16 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+No changes yet.
+
+## [0.1.0-alpha.3] - 2026-07-29
+
+This source prerelease adds the regional multi-tablet runtime, durable
+single-owner Go control metadata, truthful browser placement, and complete
+Go-to-Rust/Rust-process recovery evidence.
+
+See the complete [v0.1.0-alpha.3 release notes](docs/releases/v0.1.0-alpha.3.md).
+
 ### Added
 
 - Deterministic Rust regional catalog state machine for fully qualified
@@ -71,5 +81,6 @@ standalone profiles, local durable Stream and Queue storage, repository-local
 Go/Java/Python SDKs, deterministic testkit, fixed-voter consensus probe, CI,
 development containers, and main-only documentation deployment.
 
+[0.1.0-alpha.3]: https://github.com/Ripan-Roy/epoch/compare/v0.1.0-alpha.2...v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/Ripan-Roy/epoch/compare/v0.1.0-alpha.1...v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/Ripan-Roy/epoch/releases/tag/v0.1.0-alpha.1
