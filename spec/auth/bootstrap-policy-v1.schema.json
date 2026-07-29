@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://epoch.dev/spec/auth/bootstrap-policy-v1.schema.json",
+  "title": "Epoch bootstrap authorization policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format_version", "policy_id", "principals"],
+  "properties": {
+    "format_version": {
+      "const": 1
+    },
+    "policy_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "principals": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/principal"
+      }
+    }
+  },
+  "$defs": {
+    "principal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "token_sha256", "actions", "scope"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$"
+        },
+        "token_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "actions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "catalog.apply",
+              "catalog.delete",
+              "catalog.read",
+              "data.read",
+              "data.write",
+              "resource.apply",
+              "resource.delete",
+              "resource.read",
+              "route.read"
+            ]
+          }
+        },
+        "scope": {
+          "$ref": "#/$defs/scope"
+        }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["organization", "project", "environment", "namespace"],
+      "properties": {
+        "organization": {
+          "$ref": "#/$defs/scopeValue"
+        },
+        "project": {
+          "$ref": "#/$defs/scopeValue"
+        },
+        "environment": {
+          "$ref": "#/$defs/scopeValue"
+        },
+        "namespace": {
+          "$ref": "#/$defs/scopeValue"
+        }
+      }
+    },
+    "scopeValue": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^(\\*|[A-Za-z0-9][A-Za-z0-9._-]*)$"
+    }
+  }
+}

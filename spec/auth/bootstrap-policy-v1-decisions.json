@@ -1,0 +1,89 @@
+{
+  "format_version": 1,
+  "cases": [
+    {
+      "name": "admin may apply any regional resource",
+      "token": "epoch-dev-admin-v1",
+      "action": "resource.apply",
+      "scope": {
+        "organization": "acme",
+        "project": "payments",
+        "environment": "production",
+        "namespace": "orders"
+      },
+      "allowed": true
+    },
+    {
+      "name": "reader may read its exact namespace",
+      "token": "epoch-dev-reader-v1",
+      "action": "resource.read",
+      "scope": {
+        "organization": "acme",
+        "project": "payments",
+        "environment": "production",
+        "namespace": "orders"
+      },
+      "allowed": true
+    },
+    {
+      "name": "reader may not write",
+      "token": "epoch-dev-reader-v1",
+      "action": "resource.apply",
+      "scope": {
+        "organization": "acme",
+        "project": "payments",
+        "environment": "production",
+        "namespace": "orders"
+      },
+      "allowed": false
+    },
+    {
+      "name": "reader may not cross namespace",
+      "token": "epoch-dev-reader-v1",
+      "action": "resource.read",
+      "scope": {
+        "organization": "acme",
+        "project": "payments",
+        "environment": "production",
+        "namespace": "billing"
+      },
+      "allowed": false
+    },
+    {
+      "name": "control service may reconcile catalog",
+      "token": "epoch-dev-control-v1",
+      "action": "catalog.apply",
+      "scope": {
+        "organization": "acme",
+        "project": "payments",
+        "environment": "production",
+        "namespace": "orders"
+      },
+      "allowed": true
+    },
+    {
+      "name": "control service may not mutate data",
+      "token": "epoch-dev-control-v1",
+      "action": "data.write",
+      "scope": {
+        "organization": "acme",
+        "project": "payments",
+        "environment": "production",
+        "namespace": "orders"
+      },
+      "allowed": false
+    },
+    {
+      "name": "other tenant may not read acme",
+      "token": "epoch-dev-outsider-v1",
+      "action": "resource.read",
+      "scope": {
+        "organization": "acme",
+        "project": "payments",
+        "environment": "production",
+        "namespace": "orders"
+      },
+      "allowed": false
+    }
+  ]
+}

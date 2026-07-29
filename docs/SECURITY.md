@@ -1,7 +1,7 @@
 # Epoch Security Architecture
 
-**Status:** Target controls; not yet implemented or certified  
-**Date:** 22 July 2026
+**Status:** Target controls with a bounded bootstrap baseline; not certified
+**Date:** 29 July 2026
 
 This document defines Epoch's trust, identity, encryption, audit, egress, and
 tenant-isolation boundaries. It refines the security requirements in
@@ -94,6 +94,13 @@ Passwords, API keys, and long-lived shared secrets are compatibility or bootstra
 mechanisms, not the preferred native identity. Stored credentials are salted,
 slow-hashed where password verification requires it, scoped, rotatable, and
 never retrievable after creation.
+
+The current alpha implements only the bootstrap case. A strict version-one
+policy stores SHA-256 token fingerprints, explicit actions, and
+organization/project/environment/namespace scopes. Go managed HTTP/gRPC and
+Rust regional HTTP callers present a bearer credential; both implementations
+evaluate the same decision corpus. This is a migration baseline, not the OIDC,
+short-lived credential, or workload-certificate target described below.
 
 TLS 1.3 is preferred. TLS 1.2 is the minimum only where ecosystem compatibility
 requires it. Plaintext protocols are disabled in managed deployments and
@@ -423,12 +430,39 @@ threat models and security tests before public exposure.
 
 ## 15. What is implemented now
 
-The current scaffold does not implement the security architecture above. It has
-basic input validation, an unsafe-Rust prohibition, provisional HTTP/health
-configuration, and Rust type boundaries, but no production authentication,
-authorization, TLS/mTLS identity, regional policy store, envelope encryption,
-KMS integration, immutable audit pipeline, tenant scheduler, secret manager,
-webhook sender, SSRF enforcement, connector sandbox, or support workflow.
+The current alpha implements a bounded authentication/authorization/audit
+baseline at the managed and regional public boundaries:
+
+- `spec/auth/bootstrap-policy-v1.schema.json` defines a strict, bounded policy
+  containing only token fingerprints, principal IDs, explicit actions, and
+  exact-or-`*` tenant scopes. Go and Rust reject unknown or ambiguous policy
+  input and pass the same checked-in decision corpus.
+- `epoch-control` requires `EPOCH_AUTH_POLICY_PATH`. Its `/v1` HTTP endpoints
+  and RegionalAdmin gRPC methods require strict bearer authentication, enforce
+  action and parsed-resource scope before mutation or lookup, and filter list
+  results so unauthorized tenant resources are not disclosed.
+- `epoch-control` uses the distinct credential supplied by
+  `EPOCH_CONTROL_REGIONAL_TOKEN` for every Rust catalog or route request.
+  Regional `epoch-node` processes independently authenticate and authorize
+  catalog apply/delete/read, route read, and typed data read/write actions.
+- Authentication failures and authorization decisions produce bounded
+  structured events with request/principal/policy/action/decision/reason/scope
+  fields and no credential or payload field. The console keeps an interactively
+  entered token only in browser session storage; no token is compiled into
+  Pages.
+
+Health and CORS preflight remain public. The stable standalone local-emulator
+HTTP API also remains unauthenticated and must stay on a trusted interface.
+Consensus peer port 7701 is still plaintext and unauthenticated.
+
+This is not the complete security architecture above. There is still no OIDC,
+credential expiry/revocation service, TLS/mTLS identity, signed forwarded
+context, replicated or hot-reloaded regional policy, envelope encryption, KMS
+integration, immutable audit pipeline/export, tenant scheduler, secret manager,
+webhook sender, SSRF enforcement, connector sandbox, quota system, or support
+workflow. The example policy tokens are public development fixtures, and
+environment-variable injection of the Go-to-Rust token is not a production
+secret-delivery design.
 
 The current Bus prototype accepts HTTP-shaped target URLs but does not make
 network deliveries and must not be interpreted as safe webhook validation. The
@@ -454,11 +488,12 @@ configured authority cannot reroute frames through the host environment or a
 plaintext/unauthenticated weakness is one reason the probe cannot support a
 product quorum claim.
 
-CORS is only a browser boundary, not authentication. Requests without an
-`Origin` header remain available to native SDKs, CLI tools, and any network
-peer that can reach the endpoint. Because the HTTP API still has no TLS or
-authentication, it must not be exposed to an untrusted network or used for
-untrusted/multi-tenant data.
+CORS is only a browser boundary, not authentication. Managed and regional
+requests without an `Origin` still require bearer authentication, while the
+standalone API remains available to native SDKs, CLI tools, and any network
+peer that can reach it. Because every current HTTP listener still lacks TLS and
+the peer/standalone paths remain unauthenticated, none may be exposed to an
+untrusted network or used for untrusted production traffic.
 
 No deployment is secure for untrusted or multi-tenant production traffic until
 the applicable rows in [REQUIREMENTS_TRACEABILITY.md](REQUIREMENTS_TRACEABILITY.md)

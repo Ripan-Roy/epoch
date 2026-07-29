@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"time"
 
+	controlauth "epoch.local/epoch/control/internal/auth"
 	"epoch.local/epoch/control/internal/resources"
 	epochv1 "epoch.local/epoch/sdk/go/gen/epoch/v1"
 	"google.golang.org/grpc/codes"
@@ -25,6 +27,8 @@ type RegionalAdminServer struct {
 	epochv1.UnimplementedRegionalAdminServiceServer
 	registry   *resources.Registry
 	reconciler *Reconciler
+	policy     *controlauth.Policy
+	audit      controlauth.AuditSink
 }
 
 // NewRegionalAdminServer constructs the gRPC lifecycle service.
@@ -41,6 +45,26 @@ func NewRegionalAdminServer(
 	return &RegionalAdminServer{registry: registry, reconciler: reconciler}
 }
 
+// NewAuthenticatedRegionalAdminServer constructs the public lifecycle service
+// with explicit per-action and per-tenant authorization.
+func NewAuthenticatedRegionalAdminServer(
+	registry *resources.Registry,
+	reconciler *Reconciler,
+	policy *controlauth.Policy,
+	audit controlauth.AuditSink,
+) *RegionalAdminServer {
+	server := NewRegionalAdminServer(registry, reconciler)
+	if policy == nil {
+		panic("regional: nil auth policy")
+	}
+	if audit == nil {
+		panic("regional: nil auth audit sink")
+	}
+	server.policy = policy
+	server.audit = audit
+	return server
+}
+
 // ApplyResource accepts desired metadata idempotently and performs an
 // immediate reconciliation attempt. Regional disconnection returns a pending
 // resource rather than discarding accepted desired state.
@@ -51,6 +75,13 @@ func (server *RegionalAdminServer) ApplyResource(
 	key, desired, err := desiredFromProto(request)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if err := server.authorize(
+		ctx,
+		controlauth.ActionResourceApply,
+		authScopeFromKey(key),
+	); err != nil {
+		return nil, err
 	}
 	applied, err := server.registry.Apply(resources.ApplyRequest{
 		RequestToken:       request.GetRequestToken(),
@@ -78,12 +109,19 @@ func (server *RegionalAdminServer) ApplyResource(
 
 // GetResource returns desired and achieved state from the Go registry.
 func (server *RegionalAdminServer) GetResource(
-	_ context.Context,
+	ctx context.Context,
 	request *epochv1.GetResourceRequest,
 ) (*epochv1.GetResourceResponse, error) {
 	key, err := keyFromProto(request.GetName())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if err := server.authorize(
+		ctx,
+		controlauth.ActionResourceRead,
+		authScopeFromKey(key),
+	); err != nil {
+		return nil, err
 	}
 	resource, err := server.registry.Get(key)
 	if err != nil {
@@ -99,7 +137,7 @@ func (server *RegionalAdminServer) GetResource(
 // ListResources returns one bounded deterministic page. The first slice has no
 // continuation token because the in-memory registry is bounded and local.
 func (server *RegionalAdminServer) ListResources(
-	_ context.Context,
+	ctx context.Context,
 	request *epochv1.ListResourcesRequest,
 ) (*epochv1.ListResourcesResponse, error) {
 	if request.GetPageToken() != "" {
@@ -116,6 +154,10 @@ func (server *RegionalAdminServer) ListResources(
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	principal, err := server.authorizeCollection(ctx, controlauth.ActionResourceRead)
+	if err != nil {
+		return nil, err
+	}
 	listed, err := server.registry.List(resources.ListFilter{
 		Organization: request.GetOrganization(),
 		Project:      request.GetProject(),
@@ -125,6 +167,18 @@ func (server *RegionalAdminServer) ListResources(
 	})
 	if err != nil {
 		return nil, registryStatus(err)
+	}
+	if server.policy != nil {
+		authorized := listed[:0]
+		for _, resource := range listed {
+			if principal.Allows(
+				controlauth.ActionResourceRead,
+				authScopeFromKey(resource.ResourceKey),
+			) {
+				authorized = append(authorized, resource)
+			}
+		}
+		listed = authorized
 	}
 	if len(listed) > int(pageSize) {
 		listed = listed[:pageSize]
@@ -151,6 +205,13 @@ func (server *RegionalAdminServer) DeleteResource(
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	if err := server.authorize(
+		ctx,
+		controlauth.ActionResourceDelete,
+		authScopeFromKey(key),
+	); err != nil {
+		return nil, err
+	}
 	deleted, err := server.reconciler.Delete(ctx, resources.DeleteRequest{
 		RequestToken:       request.GetRequestToken(),
 		ExpectedGeneration: request.ExpectedGeneration,
@@ -168,6 +229,94 @@ func (server *RegionalAdminServer) DeleteResource(
 		Deleted:    deleted.Deleted,
 		Replayed:   deleted.Replayed,
 	}, nil
+}
+
+func (server *RegionalAdminServer) authorize(
+	ctx context.Context,
+	action controlauth.Action,
+	scope controlauth.Scope,
+) error {
+	if server.policy == nil {
+		return nil
+	}
+	principal, ok := controlauth.PrincipalFromContext(ctx)
+	if !ok {
+		return status.Error(codes.Unauthenticated, "authentication required")
+	}
+	allowed := principal.Allows(action, scope)
+	server.recordAuthorization(ctx, principal, action, scope, allowed)
+	if !allowed {
+		return status.Error(
+			codes.PermissionDenied,
+			"principal is not authorized for this resource action",
+		)
+	}
+	return nil
+}
+
+func (server *RegionalAdminServer) authorizeCollection(
+	ctx context.Context,
+	action controlauth.Action,
+) (controlauth.Principal, error) {
+	if server.policy == nil {
+		return controlauth.Principal{}, nil
+	}
+	principal, ok := controlauth.PrincipalFromContext(ctx)
+	if !ok {
+		return controlauth.Principal{}, status.Error(
+			codes.Unauthenticated,
+			"authentication required",
+		)
+	}
+	allowed := principal.HasAction(action)
+	server.recordAuthorization(ctx, principal, action, principal.Scope(), allowed)
+	if !allowed {
+		return controlauth.Principal{}, status.Error(
+			codes.PermissionDenied,
+			"principal is not authorized for this resource action",
+		)
+	}
+	return principal, nil
+}
+
+func (server *RegionalAdminServer) recordAuthorization(
+	ctx context.Context,
+	principal controlauth.Principal,
+	action controlauth.Action,
+	scope controlauth.Scope,
+	allowed bool,
+) {
+	decision := controlauth.DecisionDeny
+	reason := controlauth.ReasonActionNotGranted
+	if allowed {
+		decision = controlauth.DecisionAllow
+		reason = controlauth.ReasonPolicyGrant
+	} else if principal.HasAction(action) {
+		reason = controlauth.ReasonScopeMismatch
+	}
+	requestID, ok := controlauth.RequestIDFromContext(ctx)
+	if !ok {
+		requestID = "internal-request"
+	}
+	server.audit.Record(ctx, controlauth.DecisionEvent{
+		Timestamp:   time.Now().UTC(),
+		RequestID:   requestID,
+		PrincipalID: principal.ID(),
+		PolicyID:    principal.PolicyID(),
+		Action:      action,
+		Decision:    decision,
+		Reason:      reason,
+		Scope:       scope,
+	})
+}
+
+func authScopeFromKey(key resources.ResourceKey) controlauth.Scope {
+	return controlauth.Scope{
+		Organization: key.Organization,
+		Project:      key.Project,
+		Environment:  key.Environment,
+		Namespace:    key.Namespace,
+	}
 }
 
 func desiredFromProto(

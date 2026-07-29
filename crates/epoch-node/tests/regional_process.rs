@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs::{File, read_to_string},
     net::{SocketAddr, TcpListener as StdTcpListener},
     path::PathBuf,
@@ -12,6 +13,7 @@ use tempfile::TempDir;
 
 const NODE_COUNT: usize = 3;
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+const ADMIN_TOKEN: &str = "epoch-dev-admin-v1";
 
 struct NodeProcess {
     node_id: u64,
@@ -51,6 +53,11 @@ impl NodeProcess {
                 "--log",
                 "warn",
             ])
+            .env(
+                "EPOCH_AUTH_POLICY_PATH",
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../spec/auth/bootstrap-policy-v1.example.json"),
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
@@ -86,8 +93,7 @@ struct ProcessCluster {
 impl ProcessCluster {
     fn start() -> Self {
         let root = TempDir::new().expect("temp directory should be created");
-        let http_addresses = reserve_addresses(NODE_COUNT);
-        let peer_addresses = reserve_addresses(NODE_COUNT);
+        let (http_addresses, peer_addresses) = reserve_cluster_addresses();
         let peer_spec = peer_addresses
             .iter()
             .enumerate()
@@ -155,16 +161,34 @@ impl Drop for ProcessCluster {
     }
 }
 
-fn reserve_addresses(count: usize) -> Vec<SocketAddr> {
-    let listeners = (0..count)
+fn reserve_cluster_addresses() -> (Vec<SocketAddr>, Vec<SocketAddr>) {
+    // Keep every reservation open until both address sets are known. Reserving
+    // the HTTP and peer sets separately allows Linux to immediately recycle an
+    // HTTP port into the peer set, making two listeners in the same cluster
+    // compete for one address.
+    let listeners = (0..NODE_COUNT * 2)
         .map(|_| StdTcpListener::bind("127.0.0.1:0").expect("port should reserve"))
         .collect::<Vec<_>>();
-    let addresses = listeners
+    let mut addresses = listeners
         .iter()
         .map(|listener| listener.local_addr().expect("listener should have address"))
-        .collect();
+        .collect::<Vec<_>>();
+    let peer_addresses = addresses.split_off(NODE_COUNT);
     drop(listeners);
-    addresses
+    (addresses, peer_addresses)
+}
+
+#[test]
+fn cluster_address_reservations_do_not_overlap() {
+    for _ in 0..32 {
+        let (http_addresses, peer_addresses) = reserve_cluster_addresses();
+        let unique = http_addresses
+            .iter()
+            .chain(&peer_addresses)
+            .copied()
+            .collect::<HashSet<_>>();
+        assert_eq!(unique.len(), NODE_COUNT * 2);
+    }
 }
 
 fn route_url(node: &NodeProcess, kind: &str, name: &str) -> String {
@@ -227,6 +251,7 @@ async fn create_resource(client: &Client, cluster: &ProcessCluster, kind: &str, 
             for node in &cluster.nodes {
                 let response = client
                     .put(catalog_resource_url(node, kind, name))
+                    .bearer_auth(ADMIN_TOKEN)
                     .json(&json!({
                         "request_token": request_token,
                         "expected_generation": "0",
@@ -264,6 +289,7 @@ async fn wait_for_routes(
             for &index in indexes {
                 let response = client
                     .get(route_url(&cluster.nodes[index], kind, name))
+                    .bearer_auth(ADMIN_TOKEN)
                     .send()
                     .await;
                 let Ok(response) = response else {
@@ -323,6 +349,7 @@ fn writable_route(routes: &[Value], indexes: &[usize]) -> (usize, u64) {
 async fn append_record(client: &Client, node: &NodeProcess, term: u64, id: u64) {
     let response = client
         .post(records_url(node))
+        .bearer_auth(ADMIN_TOKEN)
         .header("x-epoch-resource-generation", "1")
         .header("x-epoch-tablet-epoch", "1")
         .json(&json!({
@@ -425,6 +452,7 @@ async fn write_profile(
             let (operation, body) = profile_write(kind, term);
             let response = client
                 .post(data_url(&cluster.nodes[leader], kind, name, operation))
+                .bearer_auth(ADMIN_TOKEN)
                 .header("x-epoch-resource-generation", "1")
                 .header("x-epoch-tablet-epoch", "1")
                 .json(&body)
@@ -500,6 +528,7 @@ async fn wait_for_profile_apply(
             for &index in indexes {
                 let response = client
                     .get(data_url(&cluster.nodes[index], kind, name, "status"))
+                    .bearer_auth(ADMIN_TOKEN)
                     .header("x-epoch-resource-generation", "1")
                     .header("x-epoch-tablet-epoch", "1")
                     .send()
@@ -544,7 +573,11 @@ async fn wait_for_catalog_counts(client: &Client, cluster: &ProcessCluster, expe
         loop {
             let mut digests = Vec::new();
             for node in &cluster.nodes {
-                let response = client.get(catalog_url(node)).send().await;
+                let response = client
+                    .get(catalog_url(node))
+                    .bearer_auth(ADMIN_TOKEN)
+                    .send()
+                    .await;
                 let Ok(response) = response else {
                     digests.clear();
                     break;
@@ -597,6 +630,7 @@ async fn wait_for_record_count(
                         "{}?offset=0&limit=10",
                         records_url(&cluster.nodes[index])
                     ))
+                    .bearer_auth(ADMIN_TOKEN)
                     .header("x-epoch-resource-generation", "1")
                     .header("x-epoch-tablet-epoch", "1")
                     .send()

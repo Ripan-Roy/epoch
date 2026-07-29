@@ -3,6 +3,7 @@ use std::{
 };
 
 use clap::Parser;
+use epoch_auth::BootstrapPolicy;
 use epoch_bus::BusConfig;
 use epoch_cache::CacheConfig;
 use epoch_core::{DeploymentMode, SystemClock};
@@ -14,6 +15,7 @@ use epoch_node::{
         CommittedProposalApplier, ConsensusProbeConfig, ConsensusProbeError, ConsensusProbeRuntime,
     },
     queue_tablet::{self, DEFAULT_COMMIT_WAIT as QUEUE_DEFAULT_COMMIT_WAIT, QueueTabletService},
+    regional_auth::with_regional_auth,
     regional_runtime::{RegionalNodeRuntime, RegionalRuntimeConfig},
     router, spawn_maintenance,
     stream_tablet::{self, DEFAULT_COMMIT_WAIT as STREAM_DEFAULT_COMMIT_WAIT, StreamTabletService},
@@ -62,6 +64,8 @@ struct Args {
     consensus_probe_enabled: bool,
     #[arg(long, env = "EPOCH_REGIONAL_RUNTIME_ENABLED")]
     regional_runtime_enabled: bool,
+    #[arg(long, env = "EPOCH_AUTH_POLICY_PATH")]
+    auth_policy_path: Option<PathBuf>,
     #[arg(
         long,
         env = "EPOCH_REGIONAL_MAX_GROUPS",
@@ -157,6 +161,7 @@ struct RegionalRuntimeLaunch {
     config: ConsensusProbeConfig,
     listen: SocketAddr,
     data_dir: PathBuf,
+    auth_policy_path: PathBuf,
     max_groups: usize,
 }
 
@@ -254,6 +259,8 @@ async fn serve_regional_mode(
     clock: Arc<SystemClock>,
     allowed_origins: &[String],
 ) -> Result<(), Box<dyn Error>> {
+    let policy = Arc::new(BootstrapPolicy::load(&launch.auth_policy_path)?);
+    let auth_policy_id = policy.id().to_owned();
     let peer_listener = TcpListener::bind(launch.listen).await?;
     let node_id = launch.config.node_id();
     let catalog_group_id = launch.config.group_id();
@@ -266,7 +273,10 @@ async fn serve_regional_mode(
         clock,
     ))
     .await?;
-    let regional_public = with_public_http_layers(runtime.public_router(), allowed_origins)?;
+    let regional_public = with_public_http_layers(
+        with_regional_auth(runtime.public_router(), policy),
+        allowed_origins,
+    )?;
     let public_app = public_app.merge(regional_public);
     info!(
         address = %launch.listen,
@@ -277,6 +287,8 @@ async fn serve_regional_mode(
         max_groups = launch.max_groups,
         data_dir = %launch.data_dir.display(),
         profile_guarantee_ceiling = "experimental_fixed_voter_majority",
+        regional_http_authentication = "bootstrap_bearer",
+        auth_policy_id,
         peer_authentication = "none",
         "experimental regional multi-tablet runtime is listening"
     );
@@ -478,10 +490,16 @@ fn regional_runtime_launch(
         peer_spec,
         Duration::from_millis(args.consensus_tick_ms),
     )?;
+    let auth_policy_path = args.auth_policy_path.clone().ok_or_else(|| {
+        ConsensusProbeError::InvalidConfiguration(
+            "EPOCH_AUTH_POLICY_PATH is required for the regional runtime".into(),
+        )
+    })?;
     Ok(Some(RegionalRuntimeLaunch {
         config,
         listen: args.consensus_listen,
         data_dir: args.data_dir.clone(),
+        auth_policy_path,
         max_groups: args.regional_max_groups,
     }))
 }
@@ -902,6 +920,8 @@ mod tests {
             "250",
             "--regional-max-groups",
             "64",
+            "--auth-policy-path",
+            "/etc/epoch/bootstrap-policy.json",
         ])
         .unwrap();
         let launch = regional_runtime_launch(&args).unwrap().unwrap();
@@ -912,6 +932,10 @@ mod tests {
         assert_eq!(launch.config.tick_interval(), Duration::from_millis(250));
         assert_eq!(launch.listen, "127.0.0.1:7702".parse().unwrap());
         assert_eq!(launch.data_dir, PathBuf::from("/tmp/epoch-regional-test"));
+        assert_eq!(
+            launch.auth_policy_path,
+            PathBuf::from("/etc/epoch/bootstrap-policy.json")
+        );
         assert_eq!(launch.max_groups, 64);
     }
 
@@ -950,6 +974,22 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("EPOCH_CONSENSUS_NODE_ID")
+        );
+
+        let missing_auth = Args::try_parse_from([
+            "epoch-node",
+            "--regional-runtime-enabled",
+            "--consensus-node-id",
+            "1",
+            "--consensus-peers",
+            "1=http://127.0.0.1:7701,2=http://127.0.0.1:7702,3=http://127.0.0.1:7703",
+        ])
+        .unwrap();
+        assert!(
+            regional_runtime_launch(&missing_auth)
+                .unwrap_err()
+                .to_string()
+                .contains("EPOCH_AUTH_POLICY_PATH")
         );
     }
 

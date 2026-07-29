@@ -320,8 +320,46 @@ placement rather than retaining a stale leader claim.
 The TypeScript console calls this Go endpoint only. Browser CORS is granted to
 exact HTTP(S) origins configured by `EPOCH_CONTROL_ALLOWED_ORIGINS`; wildcards,
 paths, query strings, opaque origins, and credentials are rejected. Requests
-without `Origin` remain available to non-browser clients. This is transport
-exposure, not authentication.
+without `Origin` remain available to non-browser clients, but every `/v1`
+request still requires bootstrap bearer authentication.
+
+### 6.8 Bootstrap authentication and authorization
+
+The current managed and regional alpha uses the strict policy defined by
+`spec/auth/bootstrap-policy-v1.schema.json`. HTTP callers send
+`Authorization: Bearer <token>`; gRPC callers send the same value in
+`authorization` metadata. A caller may also send one printable
+`X-Request-ID`/`x-request-id` of at most 128 bytes. The server generates a safe
+identifier otherwise and returns it in the response.
+
+Health endpoints and CORS `OPTIONS` are public. Missing, malformed, repeated, or
+invalid credentials fail before a managed or regional handler runs. HTTP
+returns `401 {"code":"unauthenticated",...}` and gRPC returns
+`UNAUTHENTICATED`. An authenticated principal without the action or tenant
+scope receives HTTP `403 {"code":"permission_denied",...}` or gRPC
+`PERMISSION_DENIED`.
+
+The implemented action mapping is:
+
+| Boundary | Operation | Required action |
+|---|---|---|
+| Go HTTP/gRPC | Apply resource | `resource.apply` |
+| Go HTTP/gRPC | Delete resource | `resource.delete` |
+| Go HTTP/gRPC | Get/List/inventory | `resource.read` |
+| Rust regional | Catalog PUT | `catalog.apply` |
+| Rust regional | Catalog DELETE | `catalog.delete` |
+| Rust regional | Catalog GET | `catalog.read` |
+| Rust regional | Shard route GET | `route.read` |
+| Rust regional | Typed data GET | `data.read` |
+| Rust regional | Typed data mutation | `data.write` |
+
+Single-resource operations authorize the fully qualified
+organization/project/environment/namespace before lookup or mutation.
+Collections require the read action and filter each returned record by scope;
+an unauthorized tenant record is not disclosed. `epoch-control` uses the
+separate workload credential from `EPOCH_CONTROL_REGIONAL_TOKEN` for every Rust
+authority request. Authorization decisions never place that credential in
+errors or audit fields.
 
 ## 7. Typed errors
 
@@ -646,10 +684,10 @@ proof of an arbitrary external business side effect. See
 
 Neither the earlier single-profile modes nor the regional multi-group mode is
 the final tablet service. Snapshots/compaction, retention deletion, dynamic
-membership, constraint-aware placement, read barriers, authenticated transport,
-stable public routing, and SDK support remain absent. The standalone engine
-journal remains a separate single-node source of truth and is never used by an
-experimental replicated tablet.
+membership, constraint-aware placement, read barriers, TLS/mTLS transport,
+production identity, stable public routing, and SDK support remain absent. The
+standalone engine journal remains a separate single-node source of truth and is
+never used by an experimental replicated tablet.
 
 Initial `epoch.v1` Protobuf source defines common resource/envelope types and a
 small `RegionalAdminService`; Buf generation is configured for Go. It is an
@@ -658,7 +696,7 @@ this document. `epoch-control` serves the current four-method RegionalAdmin
 subset on gRPC port 8081 and the health/registry/browser BFF on HTTP port 8080.
 Rust port 7600 remains reserved for the future native data gRPC service.
 
-TLS/authentication metadata, typed `google.rpc.Status` details, public native
+TLS/mTLS, OIDC authentication metadata, typed `google.rpc.Status` details, public native
 mutation-status lookup, streaming credit, a stable Rust gRPC regional
 administration implementation, long-running operations, metrics on the reserved
 port, protocol gateways, full Go/Java/Python generated SDK parity, and
@@ -676,9 +714,10 @@ use `EPOCH_CONTROL_ALLOWED_ORIGINS`. Requests without an `Origin` header remain
 available to native clients. The Go control registry uses a versioned,
 single-owner bbolt database selected by `EPOCH_CONTROL_STATE_PATH`; its health
 response names `bbolt_v1` and reports durable registry state. The console has no
-authentication, and the current HTTP payloads, storage schema, and Rust error
-enum remain provisional scaffolding that may change before any public
-compatibility promise.
+compile-time credential: its operator enters a bootstrap token that is kept
+only in browser session storage. The current bootstrap policy, HTTP payloads,
+storage schema, and Rust error enum remain provisional scaffolding that may
+change before any public compatibility promise.
 
 The Cache tablet rebuilds by replaying the retained EPRS committed history
 before readiness. It has no profile snapshot/compaction path, and its

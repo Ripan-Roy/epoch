@@ -7,6 +7,7 @@ pub mod catalog_tablet;
 pub mod consensus;
 pub mod consensus_groups;
 pub mod queue_tablet;
+pub mod regional_auth;
 pub mod regional_router;
 pub mod regional_runtime;
 pub mod stream_tablet;
@@ -18,7 +19,10 @@ use std::{sync::Arc, time::Duration};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderName, HeaderValue, Method, StatusCode, header::CONTENT_TYPE},
+    http::{
+        HeaderName, HeaderValue, Method, StatusCode,
+        header::{AUTHORIZATION, CONTENT_TYPE},
+    },
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
@@ -104,7 +108,9 @@ fn cors_layer(allowed_origins: &[String]) -> EpochResult<CorsLayer> {
         .allow_origin(AllowOrigin::list(origins))
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
         .allow_headers([
+            AUTHORIZATION,
             CONTENT_TYPE,
+            HeaderName::from_static("x-request-id"),
             HeaderName::from_static(RESOURCE_GENERATION_HEADER),
             HeaderName::from_static(TABLET_EPOCH_HEADER),
         ]))

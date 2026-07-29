@@ -200,8 +200,13 @@ the unauthenticated alpha node on a trusted network.
 
 Regional console inventory additionally requires `epoch-control` on port 8080.
 Its browser allowlist is `EPOCH_CONTROL_ALLOWED_ORIGINS`, and the console points
-to it with `VITE_EPOCH_CONTROL_BASE_URL`. Management metadata is transactionally
-stored at `data/control/registry.db` by default; set
+to it with `VITE_EPOCH_CONTROL_BASE_URL`. Managed `/v1` and RegionalAdmin gRPC
+calls require a bearer principal from `EPOCH_AUTH_POLICY_PATH`; the console
+accepts this credential interactively and stores it only for the browser
+session. `epoch-control` authenticates to regional Rust nodes with
+`EPOCH_CONTROL_REGIONAL_TOKEN`. The checked-in example values are public
+development fixtures, not production secrets. Management metadata is
+transactionally stored at `data/control/registry.db` by default; set
 `EPOCH_CONTROL_STATE_PATH` to choose another single-owner file. See the
 [regional runtime guide](docs/REGIONAL_RUNTIME.md) for the exact three-node
 startup and Go-to-Rust verification path.

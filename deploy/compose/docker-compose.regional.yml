@@ -6,6 +6,7 @@ x-epoch-regional: &epoch-regional
   environment: &epoch-regional-environment
     EPOCH_HTTP_LISTEN: 0.0.0.0:7601
     EPOCH_REGIONAL_RUNTIME_ENABLED: "true"
+    EPOCH_AUTH_POLICY_PATH: /etc/epoch/bootstrap-policy.json
     EPOCH_REGIONAL_MAX_GROUPS: "16"
     EPOCH_CONSENSUS_GROUP_ID: "1"
     EPOCH_CONSENSUS_GROUP_EPOCH: "1"
@@ -44,6 +45,7 @@ services:
       - "127.0.0.1:${EPOCH_REGIONAL_PEER_PORT_1:-18701}:7701"
     volumes:
       - epoch-regional-1-data:/var/lib/epoch
+      - ../../spec/auth/bootstrap-policy-v1.example.json:/etc/epoch/bootstrap-policy.json:ro
 
   epoch-regional-2:
     <<: *epoch-regional
@@ -55,6 +57,7 @@ services:
       - "127.0.0.1:${EPOCH_REGIONAL_PEER_PORT_2:-18702}:7701"
     volumes:
       - epoch-regional-2-data:/var/lib/epoch
+      - ../../spec/auth/bootstrap-policy-v1.example.json:/etc/epoch/bootstrap-policy.json:ro
 
   epoch-regional-3:
     <<: *epoch-regional
@@ -66,6 +69,7 @@ services:
       - "127.0.0.1:${EPOCH_REGIONAL_PEER_PORT_3:-18703}:7701"
     volumes:
       - epoch-regional-3-data:/var/lib/epoch
+      - ../../spec/auth/bootstrap-policy-v1.example.json:/etc/epoch/bootstrap-policy.json:ro
 
 volumes:
   epoch-regional-1-data:

@@ -124,6 +124,8 @@ assert_second_node_rejected
 
 EPOCH_CONTROL_ADDR="$epoch_control_addr" \
 EPOCH_CONTROL_STATE_PATH="$epoch_smoke_tmp/control-registry.db" \
+EPOCH_AUTH_POLICY_PATH="$epoch_repo_root/spec/auth/bootstrap-policy-v1.example.json" \
+EPOCH_CONTROL_REGIONAL_TOKEN="epoch-dev-control-v1" \
   "$epoch_smoke_tmp/epoch-control" >"$epoch_smoke_tmp/control.log" 2>&1 &
 epoch_control_pid=$!
 
@@ -237,7 +239,10 @@ def apply_control_resource() -> tuple[int, dict]:
         control_url,
         data=body,
         method="PUT",
-        headers={"content-type": "application/json"},
+        headers={
+            "authorization": "Bearer epoch-dev-admin-v1",
+            "content-type": "application/json",
+        },
     )
     with urlopen(request, timeout=5) as response:
         return response.status, json.load(response)

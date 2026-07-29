@@ -13,11 +13,11 @@ placement.
 ```text
 TypeScript console
         |
-        | GET /v1/regional/resources
+        | session bearer + GET /v1/regional/resources
         v
 Go epoch-control (durable desired state + observed status)
         |
-        | apply/observe/delete against every configured Rust endpoint
+        | workload bearer + apply/observe/delete against configured Rust nodes
         v
 Rust catalog group 1 (three EPRS-backed voters)
         |
@@ -38,7 +38,8 @@ never connects directly to a Rust node.
 ## Start a local region
 
 The regional Compose model publishes nodes on ports 18661–18663 and gives every
-voter an independent named volume:
+voter an independent named volume. It mounts the checked-in development policy
+read-only at `/etc/epoch/bootstrap-policy.json`:
 
 ```shell
 make compose-regional-config
@@ -51,6 +52,8 @@ Start the Go bridge against all three Rust endpoints:
 EPOCH_CONTROL_REGIONAL_ENDPOINTS=http://127.0.0.1:18661,http://127.0.0.1:18662,http://127.0.0.1:18663 \
 EPOCH_CONTROL_ALLOWED_ORIGINS=http://127.0.0.1:5173 \
 EPOCH_CONTROL_STATE_PATH=.epoch/control/registry.db \
+EPOCH_AUTH_POLICY_PATH=spec/auth/bootstrap-policy-v1.example.json \
+EPOCH_CONTROL_REGIONAL_TOKEN=epoch-dev-control-v1 \
 go run ./control/cmd/epoch-control
 ```
 
@@ -68,7 +71,15 @@ pnpm --filter @epoch/console dev
 ```
 
 The first URL is used only for the standalone node overview/forms. Regional
-inventory always comes from Go at the second URL.
+inventory always comes from Go at the second URL. In the regional placement
+panel, enter `epoch-dev-admin-v1` as the managed-control credential. The
+console retains it only in that tab's `sessionStorage`; the static bundle and
+GitHub Pages contain no credential.
+
+These named values are public development fixtures whose SHA-256 fingerprints
+appear in the example policy. Replace the policy and credentials for any
+non-disposable environment. This baseline still lacks TLS, expiry/revocation,
+OIDC, mTLS, and production secret delivery.
 
 ## Apply one managed resource
 
@@ -78,6 +89,7 @@ desired registry reconciled by the RegionalAdmin gRPC service:
 ```shell
 curl --fail-with-body \
   -X PUT http://127.0.0.1:8080/v1/resources \
+  -H 'authorization: Bearer epoch-dev-admin-v1' \
   -H 'content-type: application/json' \
   --data '{
     "request_token": "docs-create-orders-v1",
@@ -102,7 +114,9 @@ then samples the route on every configured Rust node. Poll the browser-safe
 projection:
 
 ```shell
-curl --fail-with-body http://127.0.0.1:8080/v1/regional/resources
+curl --fail-with-body \
+  -H 'authorization: Bearer epoch-dev-admin-v1' \
+  http://127.0.0.1:8080/v1/regional/resources
 ```
 
 A ready tablet has three distinct `voter_node_ids` and a `leader_node_id` that
@@ -117,6 +131,7 @@ Discover a shard independently on each node:
 
 ```shell
 curl --fail-with-body \
+  -H 'authorization: Bearer epoch-dev-admin-v1' \
   http://127.0.0.1:18661/experimental/v1/regional/resources/acme/shop/dev/core/stream/orders/shards/0
 ```
 
@@ -151,6 +166,10 @@ typed mutation handling. The router does not silently proxy a write.
 - Delete commits a Rust catalog tombstone before Go removes desired metadata.
   Recreating the name receives new tablet/group identities and a later
   generation.
+- Missing/invalid credentials fail with `unauthenticated`; an authenticated
+  principal missing the action or tenant scope fails with `permission_denied`.
+  Collection reads filter cross-tenant records, and both Go and Rust emit a
+  bounded credential-free authorization decision with a request ID.
 
 Run the complete disposable proof:
 
@@ -169,8 +188,10 @@ digests, and deletes only its scoped containers/network/volumes.
 - Placement is exactly three configured voters, not a zone/rack-aware solver.
 - Membership changes, online rebalance, repair, split/merge, snapshots,
   compaction, retention deletion, and read barriers are absent.
-- Rust regional HTTP, Go management, and the console are unauthenticated alpha
-  surfaces without TLS.
+- Rust regional HTTP and Go management enforce the bootstrap policy, and the
+  console supplies a session-only credential. They still have no TLS/OIDC/mTLS,
+  token expiry/revocation, rate limiting, replicated policy, or immutable audit
+  export. Peer port 7701 and the standalone local API remain unauthenticated.
 - Go management metadata is durable for one process and one bbolt file. It is
   not replicated, multi-instance linearizable, backed up automatically, or
   protected by management leader election.

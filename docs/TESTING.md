@@ -318,9 +318,11 @@ to report that target dispatch and a durable target outbox are not implemented.
 `test-regional-runtime` starts three regional containers with independent EPRS
 volumes and dynamic loopback ports, then builds and launches the real
 `epoch-control` process against those nodes. One resource is accepted through
-Go desired state and reconciled into the Rust catalog; the browser BFF must
-return exact-origin CORS, decimal-string 64-bit IDs, one leader, and three
-actually observed voters. It then sends `SIGKILL` to the Go process, reopens
+authenticated Go desired state and reconciled into the Rust catalog with a
+separate control-workload credential; the browser BFF must return exact-origin
+CORS, decimal-string 64-bit IDs, one leader, and three actually observed
+voters. Every direct regional catalog/route/data request also authenticates.
+It then sends `SIGKILL` to the Go process, reopens
 the same bbolt metadata file, proves the original apply token replays without a
 second Rust mutation, and waits for placement to reconcile ready again. The
 campaign also creates Cache, Stream, Queue, and Event Bus resources directly
@@ -458,6 +460,28 @@ Security suites cover authorization across every protocol, tenant isolation,
 policy-cache expiry, key rotation, audit integrity, payload redaction, webhook
 SSRF, connector egress allowlists, decompression/schema bombs, credential
 replay, resource exhaustion, and object-tier tampering.
+
+The implemented bootstrap slice currently contributes:
+
+- one Go/Rust decision corpus proving identical action/scope results;
+- strict policy parsing, token-fingerprint uniqueness, bounded input, and
+  credential-free debug/error tests in `control/internal/auth` and
+  `epoch-auth`;
+- Go HTTP and gRPC tests for missing/invalid authentication, action denial,
+  mutation-before-authorization prevention, tenant-filtered collections,
+  request IDs, exact-origin `Authorization` preflight, and bounded audit
+  events;
+- Rust regional route tests for catalog/route/data action separation, exact and
+  cross-tenant scope, unauthenticated/forbidden responses, and a resource name
+  that cannot confuse route versus data authorization;
+- real Rust multiprocess and Go-to-Rust container recovery campaigns in which
+  every regional request is authenticated; and
+- console tests proving the managed credential stays session-scoped and that
+  empty, whitespace-bearing, or oversized values are rejected.
+
+This is not yet the cross-protocol production security suite: OIDC, expiry and
+revocation, mTLS/peer identity, TLS, policy replication/cache expiry, immutable
+audit export, quotas, encryption/KMS, and abuse/load campaigns remain open.
 
 Dependency and release gates include Cargo advisory/license policy, Go and
 Python vulnerability scanning, JavaScript dependency scanning, secret scanning,
