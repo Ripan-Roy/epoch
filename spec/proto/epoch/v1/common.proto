@@ -142,6 +142,15 @@ message ResourceName {
   string name = 6;
 }
 
+// PlacementPolicy declares the failure-domain constraints that must be
+// satisfied before regional catalog mutation. The fixed-voter alpha runtime
+// validates these fields but does not yet perform membership changes.
+message PlacementPolicy {
+  repeated string allowed_regions = 1;
+  uint32 minimum_zones = 2;
+  string required_node_class = 3;
+}
+
 // ResourceSpec contains shared guarantees and a typed-by-kind configuration
 // object. Profile-specific messages may replace configuration as contracts
 // stabilize without changing ResourceName or ResourceStatus.
@@ -153,6 +162,7 @@ message ResourceSpec {
   uint32 replicas = 5;
   map<string, string> labels = 6;
   google.protobuf.Struct configuration = 7;
+  PlacementPolicy placement = 8;
 }
 
 // Condition is an observable reconciliation or guarantee condition.
@@ -181,6 +191,28 @@ message TabletDescriptor {
   TabletPhase phase = 10;
 }
 
+// RegionalNodeObservation is one policy-protected configured-endpoint topology
+// and capacity sample. Transport-level server identity is separate.
+message RegionalNodeObservation {
+  uint64 node_id = 1;
+  string region = 2;
+  string zone = 3;
+  string node_class = 4;
+  repeated uint64 consensus_voter_node_ids = 5;
+  uint32 max_consensus_groups = 6;
+  uint32 used_consensus_groups = 7;
+  uint32 available_consensus_groups = 8;
+}
+
+// PlacementStatus separates the requested constraints from achieved topology.
+message PlacementStatus {
+  repeated string allowed_regions = 1;
+  uint32 minimum_zones = 2;
+  string required_node_class = 3;
+  uint32 achieved_zones = 4;
+  repeated RegionalNodeObservation nodes = 5;
+}
+
 // ResourceStatus reports achieved state separately from desired state.
 message ResourceStatus {
   ResourcePhase phase = 1;
@@ -190,6 +222,7 @@ message ResourceStatus {
   uint64 resource_epoch = 5;
   repeated Condition conditions = 6;
   repeated TabletDescriptor tablets = 7;
+  PlacementStatus placement = 8;
 }
 
 // Resource combines desired state, monotonic generation, and observed state.

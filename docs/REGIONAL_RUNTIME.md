@@ -1,11 +1,13 @@
 # Regional Multi-Tablet Runtime
 
-**Status:** Experimental fixed-three-voter alpha  
-**Authority:** Rust catalog and tablet consensus groups  
+**Status:** Experimental topology-validated fixed-three-voter alpha
+
+**Authority:** Rust catalog and tablet consensus groups
+
 **Hosted bridge:** Go desired-state reconciler and browser BFF
 
 This guide describes only the implementation that exists now. It does not
-upgrade the stable standalone SDK contract or claim zone-aware production
+upgrade the stable standalone SDK contract or claim dynamic production
 placement.
 
 ## Ownership and data flow
@@ -17,7 +19,7 @@ TypeScript console
         v
 Go epoch-control (durable desired state + observed status)
         |
-        | workload bearer + apply/observe/delete against configured Rust nodes
+        | workload bearer + inventory/admit/apply/observe/delete
         v
 Rust catalog group 1 (three EPRS-backed voters)
         |
@@ -38,8 +40,10 @@ never connects directly to a Rust node.
 ## Start a local region
 
 The regional Compose model publishes nodes on ports 18661–18663 and gives every
-voter an independent named volume. It mounts the checked-in development policy
-read-only at `/etc/epoch/bootstrap-policy.json`:
+voter an independent named volume. Nodes are labeled `ap-south-1a`,
+`ap-south-1b`, and `ap-south-1c` in region `ap-south`, with class
+`general-purpose`. It mounts the checked-in development policy read-only at
+`/etc/epoch/bootstrap-policy.json`:
 
 ```shell
 make compose-regional-config
@@ -103,15 +107,23 @@ curl --fail-with-body \
       "name": "orders",
       "spec": {
         "shard_count": 1,
-        "replica_count": 3
+        "replica_count": 3,
+        "placement": {
+          "allowed_regions": ["ap-south"],
+          "minimum_zones": 3,
+          "required_node_class": "general-purpose"
+        }
       }
     }
   }'
 ```
 
-The Go reconciler applies the desired generation to the Rust catalog leader and
-then samples the route on every configured Rust node. Poll the browser-safe
-projection:
+Before catalog mutation, Go authenticates to every configured Rust node and
+collects `/experimental/v1/regional/topology`. It requires one complete,
+consistent sample for each fixed voter, validates the placement policy, and
+checks every node has enough live group capacity for newly added shards. It
+then applies the desired generation to the Rust catalog leader and samples the
+route on every configured node. Poll the browser-safe projection:
 
 ```shell
 curl --fail-with-body \
@@ -123,7 +135,22 @@ A ready tablet has three distinct `voter_node_ids` and a `leader_node_id` that
 belongs to that observed voter set. Desired replicas never count as observed
 voters. Resource generations, observed generations, tablet/group IDs, epochs,
 voter IDs, and leader IDs are decimal JSON strings so JavaScript cannot round
-them.
+them. `placement` reports requested constraints, achieved zones, and per-node
+capacity separately from the tablet routes.
+
+Inspect one node directly:
+
+```shell
+curl --fail-with-body \
+  -H 'authorization: Bearer epoch-dev-admin-v1' \
+  http://127.0.0.1:18661/experimental/v1/regional/topology
+```
+
+`used_consensus_groups` includes catalog group 1 plus one group for each
+materialized tablet. A capacity rejection uses the stable
+`consensus_group_capacity` reason and names the limiting node; Rust catalog
+`Apply` is not called. This counter does not claim CPU, memory, disk, network,
+or workload-specific sizing.
 
 ## Route and fence a data operation
 
@@ -153,7 +180,8 @@ typed mutation handling. The router does not silently proxy a write.
 ## Failure and recovery behavior
 
 - One voter loss leaves a majority able to elect and commit. Go reports only
-  the two routes it can currently validate and marks placement degraded.
+  the two routes it can currently validate and marks placement degraded. The
+  generation-fenced admission record can still explain the intended zones.
 - When every authority endpoint is unavailable, Go retains the last observed
   generation for reconciliation but clears voter/leader placement so the
   browser cannot present stale topology as current.
@@ -177,15 +205,19 @@ Run the complete disposable proof:
 make test-regional-runtime
 ```
 
-It builds the real Go control binary, creates a resource through Go, verifies
-the BFF/CORS/placement contract, kills and reopens Go against the same metadata
+It builds the real Go control binary, verifies the three node-local topology
+and live capacity responses, creates a three-zone resource through Go, proves
+an over-capacity request never reaches the catalog, verifies the
+BFF/CORS/placement contract, kills and reopens Go against the same metadata
 file, proves exact replay, creates and mutates all four profiles, kills a
 leader, catches it up, kills all nodes, reopens the same volumes, compares
 digests, and deletes only its scoped containers/network/volumes.
 
 ## Current boundaries
 
-- Placement is exactly three configured voters, not a zone/rack-aware solver.
+- Placement is exactly three configured voters. Region, zone count, and node
+  class are validated, but there is no general voter-selection or rack-aware
+  solver.
 - Membership changes, online rebalance, repair, split/merge, snapshots,
   compaction, retention deletion, and read barriers are absent.
 - Rust regional HTTP and Go management enforce the bootstrap policy, and the
@@ -197,7 +229,9 @@ digests, and deletes only its scoped containers/network/volumes.
   protected by management leader election.
 - There is no public regional SDK contract. Go, Java, and Python SDKs currently
   cover the standalone HTTP profiles documented on the published docs page.
-- The BFF reports node identity only; zone/rack/failure-domain separation is
+- The BFF reports policy-protected configured-endpoint region/zone/class and
+  group-capacity evidence. Plain HTTP still lacks Rust server identity.
+  Rack separation, dynamic membership, and online rebalancing remain
   explicitly unverified.
 
 Stop the development topology with:

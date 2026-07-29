@@ -297,6 +297,19 @@ func TestUpdateStatusRejectsImpossibleObservations(t *testing.T) {
 				DesiredReplicas:    3,
 			}},
 		},
+		{
+			Phase:              PhaseReady,
+			ObservedGeneration: 1,
+			Placement: &PlacementStatus{
+				MinimumZones:  3,
+				AchievedZones: 3,
+				Nodes: []RegionalNodeStatus{{
+					NodeID: 1, Region: "local", Zone: "local-a", NodeClass: "general",
+					ConsensusVoterNodeIDs: []uint64{1, 2, 3},
+					MaxConsensusGroups:    16, UsedConsensusGroups: 17,
+				}},
+			},
+		},
 	}
 	for _, status := range tests {
 		if _, err := registry.UpdateStatus(key, created.Resource.Generation, status); err == nil {

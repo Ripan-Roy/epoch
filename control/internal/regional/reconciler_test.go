@@ -4,19 +4,36 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"epoch.local/epoch/control/internal/resources"
 )
 
 type fakeAuthority struct {
-	mu           sync.Mutex
-	applyCalls   []AuthorityApplyRequest
-	observeCalls []resources.ResourceKey
-	apply        func(AuthorityApplyRequest) (AuthorityObservation, error)
-	observe      func(resources.ResourceKey) (AuthorityObservation, error)
-	delete       func(AuthorityDeleteRequest) (AuthorityDeleteObservation, error)
+	mu             sync.Mutex
+	applyCalls     []AuthorityApplyRequest
+	observeCalls   []resources.ResourceKey
+	inventoryCalls int
+	inventory      func() (NodeInventory, error)
+	apply          func(AuthorityApplyRequest) (AuthorityObservation, error)
+	observe        func(resources.ResourceKey) (AuthorityObservation, error)
+	delete         func(AuthorityDeleteRequest) (AuthorityDeleteObservation, error)
+}
+
+func (authority *fakeAuthority) Inventory(
+	_ context.Context,
+) (NodeInventory, error) {
+	authority.mu.Lock()
+	authority.inventoryCalls++
+	inventory := authority.inventory
+	authority.mu.Unlock()
+	if inventory == nil {
+		return threeZoneInventory(8), nil
+	}
+	return inventory()
 }
 
 func (authority *fakeAuthority) Apply(
@@ -83,6 +100,99 @@ func TestReconcilerAppliesThenObservesCurrentRegionalState(t *testing.T) {
 	assertReady(t, again, 2)
 	if len(authority.applyCalls) != 1 || len(authority.observeCalls) != 1 {
 		t.Fatalf("calls = apply %d, observe %d", len(authority.applyCalls), len(authority.observeCalls))
+	}
+}
+
+func TestReconcilerRejectsCapacityBeforeCatalogApply(t *testing.T) {
+	registry := resources.NewRegistry()
+	resource := applyDesired(
+		t,
+		registry,
+		"create-over-capacity",
+		regionalKey(resources.KindStream, "over-capacity"),
+		2,
+		3,
+	)
+	authority := &fakeAuthority{
+		inventory: func() (NodeInventory, error) {
+			return threeZoneInventory(1), nil
+		},
+		apply: func(AuthorityApplyRequest) (AuthorityObservation, error) {
+			panic("catalog Apply must not run after admission rejection")
+		},
+	}
+	reconciler := NewReconciler(registry, authority)
+
+	_, err := reconciler.Reconcile(t.Context(), resource.ResourceKey)
+	if err == nil || IsRetryable(err) {
+		t.Fatalf("Reconcile() error = %v, want definitive admission failure", err)
+	}
+	if len(authority.applyCalls) != 0 || authority.inventoryCalls != 1 {
+		t.Fatalf(
+			"calls = inventory %d, apply %d",
+			authority.inventoryCalls,
+			len(authority.applyCalls),
+		)
+	}
+	failed, getErr := registry.Get(resource.ResourceKey)
+	if getErr != nil {
+		t.Fatalf("Get() error = %v", getErr)
+	}
+	if failed.Status.Phase != resources.PhaseFailed ||
+		!strings.Contains(failed.Status.Message, string(AdmissionConsensusGroupCapacity)) {
+		t.Fatalf("failed status = %+v", failed.Status)
+	}
+}
+
+func TestReconcilerSerializesAdmissionAndCatalogMutationInOneControlProcess(t *testing.T) {
+	registry := resources.NewRegistry()
+	first := applyDesired(
+		t,
+		registry,
+		"create-serialized-one",
+		regionalKey(resources.KindStream, "serialized-one"),
+		1,
+		3,
+	)
+	second := applyDesired(
+		t,
+		registry,
+		"create-serialized-two",
+		regionalKey(resources.KindStream, "serialized-two"),
+		1,
+		3,
+	)
+	entered := make(chan string, 2)
+	release := make(chan struct{})
+	authority := &fakeAuthority{
+		apply: func(request AuthorityApplyRequest) (AuthorityObservation, error) {
+			entered <- request.Key.Name
+			<-release
+			return servingObservation(1, 1, 3), nil
+		},
+	}
+	reconciler := NewReconciler(registry, authority)
+	results := make(chan error, 2)
+	go func() {
+		_, err := reconciler.Reconcile(t.Context(), first.ResourceKey)
+		results <- err
+	}()
+	<-entered
+	go func() {
+		_, err := reconciler.Reconcile(t.Context(), second.ResourceKey)
+		results <- err
+	}()
+
+	select {
+	case name := <-entered:
+		t.Fatalf("second catalog mutation %q entered before the first completed", name)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatalf("Reconcile() error = %v", err)
+		}
 	}
 }
 
@@ -158,6 +268,53 @@ func TestReconcilerDoesNotPresentStalePlacementDuringAuthorityDisconnect(t *test
 		pending.Status.ObservedGeneration != resource.Generation ||
 		len(pending.Status.Tablets) != 0 {
 		t.Fatalf("disconnected status presents stale placement: %+v", pending.Status)
+	}
+}
+
+func TestReconcilerUsesAdmittedTopologyButCurrentRoutesDuringPartialOutage(t *testing.T) {
+	registry := resources.NewRegistry()
+	resource := applyDesired(
+		t,
+		registry,
+		"create-zone-aware-orders",
+		regionalKey(resources.KindStream, "zone-aware-orders"),
+		1,
+		3,
+	)
+	inventoryAvailable := true
+	authority := &fakeAuthority{
+		inventory: func() (NodeInventory, error) {
+			if !inventoryAvailable {
+				return NodeInventory{}, availabilityError("one topology endpoint is unavailable")
+			}
+			return threeZoneInventory(8), nil
+		},
+		apply: func(AuthorityApplyRequest) (AuthorityObservation, error) {
+			return servingObservation(resource.Generation, 1, 3), nil
+		},
+		observe: func(resources.ResourceKey) (AuthorityObservation, error) {
+			observation := servingObservation(resource.Generation, 1, 3)
+			observation.Tablets[0].VoterNodeIDs = []uint64{1, 2}
+			observation.Tablets[0].LeaderNodeID = 2
+			return observation, nil
+		},
+	}
+	reconciler := NewReconciler(registry, authority)
+	ready, err := reconciler.Reconcile(t.Context(), resource.ResourceKey)
+	if err != nil || ready.Status.Phase != resources.PhaseReady {
+		t.Fatalf("initial Reconcile() = %+v, %v", ready, err)
+	}
+
+	inventoryAvailable = false
+	degraded, err := reconciler.Reconcile(t.Context(), resource.ResourceKey)
+	if err != nil {
+		t.Fatalf("partial-outage Reconcile() error = %v", err)
+	}
+	if degraded.Status.Phase != resources.PhaseDegraded ||
+		len(degraded.Status.Tablets[0].VoterNodeIDs) != 2 ||
+		degraded.Status.Placement == nil ||
+		degraded.Status.Placement.AchievedZones != 3 {
+		t.Fatalf("partial-outage status = %+v", degraded.Status)
 	}
 }
 

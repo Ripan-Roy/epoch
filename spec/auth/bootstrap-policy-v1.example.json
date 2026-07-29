@@ -14,7 +14,8 @@
         "resource.apply",
         "resource.delete",
         "resource.read",
-        "route.read"
+        "route.read",
+        "topology.read"
       ],
       "scope": {
         "organization": "*",
@@ -37,7 +38,7 @@
     {
       "id": "epoch-control",
       "token_sha256": "ec11cd10d83454a7791fb28a7dedbcfb5df752d2807b4db121449c8136ddcfd3",
-      "actions": ["catalog.apply", "catalog.delete", "catalog.read", "route.read"],
+      "actions": ["catalog.apply", "catalog.delete", "catalog.read", "route.read", "topology.read"],
       "scope": {
         "organization": "*",
         "project": "*",

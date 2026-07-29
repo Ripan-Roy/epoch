@@ -17,6 +17,7 @@ use epoch_node::{
     queue_tablet::{self, DEFAULT_COMMIT_WAIT as QUEUE_DEFAULT_COMMIT_WAIT, QueueTabletService},
     regional_auth::with_regional_auth,
     regional_runtime::{RegionalNodeRuntime, RegionalRuntimeConfig},
+    regional_topology::NodeTopology,
     router, spawn_maintenance,
     stream_tablet::{self, DEFAULT_COMMIT_WAIT as STREAM_DEFAULT_COMMIT_WAIT, StreamTabletService},
     validate_allowed_origins, with_public_http_layers,
@@ -72,6 +73,16 @@ struct Args {
         default_value_t = DEFAULT_REGIONAL_MAX_GROUPS
     )]
     regional_max_groups: usize,
+    #[arg(long, env = "EPOCH_REGIONAL_REGION", default_value = "local")]
+    regional_region: String,
+    #[arg(long, env = "EPOCH_REGIONAL_ZONE", default_value = "local")]
+    regional_zone: String,
+    #[arg(
+        long,
+        env = "EPOCH_REGIONAL_NODE_CLASS",
+        default_value = "general-purpose"
+    )]
+    regional_node_class: String,
     #[command(flatten)]
     experimental_tablet: ExperimentalTabletArgs,
     #[arg(long, env = "EPOCH_CONSENSUS_NODE_ID")]
@@ -163,6 +174,7 @@ struct RegionalRuntimeLaunch {
     data_dir: PathBuf,
     auth_policy_path: PathBuf,
     max_groups: usize,
+    topology: NodeTopology,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,12 +278,10 @@ async fn serve_regional_mode(
     let catalog_group_id = launch.config.group_id();
     let catalog_group_epoch = launch.config.group_epoch();
     let tick_interval = launch.config.tick_interval();
-    let mut runtime = RegionalNodeRuntime::start(RegionalRuntimeConfig::new(
-        launch.config,
-        &launch.data_dir,
-        launch.max_groups,
-        clock,
-    ))
+    let mut runtime = RegionalNodeRuntime::start(
+        RegionalRuntimeConfig::new(launch.config, &launch.data_dir, launch.max_groups, clock)
+            .with_topology(launch.topology.clone()),
+    )
     .await?;
     let regional_public = with_public_http_layers(
         with_regional_auth(runtime.public_router(), policy),
@@ -285,6 +295,9 @@ async fn serve_regional_mode(
         %catalog_group_epoch,
         tick_ms = tick_interval.as_millis(),
         max_groups = launch.max_groups,
+        region = launch.topology.region(),
+        zone = launch.topology.zone(),
+        node_class = launch.topology.node_class(),
         data_dir = %launch.data_dir.display(),
         profile_guarantee_ceiling = "experimental_fixed_voter_majority",
         regional_http_authentication = "bootstrap_bearer",
@@ -495,12 +508,22 @@ fn regional_runtime_launch(
             "EPOCH_AUTH_POLICY_PATH is required for the regional runtime".into(),
         )
     })?;
+    let topology = NodeTopology::new(
+        node_id,
+        args.regional_region.clone(),
+        args.regional_zone.clone(),
+        args.regional_node_class.clone(),
+        config.voters().map(epoch_consensus::NodeId::get),
+        args.regional_max_groups,
+    )
+    .map_err(|error| ConsensusProbeError::InvalidConfiguration(error.to_string()))?;
     Ok(Some(RegionalRuntimeLaunch {
         config,
         listen: args.consensus_listen,
         data_dir: args.data_dir.clone(),
         auth_policy_path,
         max_groups: args.regional_max_groups,
+        topology,
     }))
 }
 
@@ -920,6 +943,12 @@ mod tests {
             "250",
             "--regional-max-groups",
             "64",
+            "--regional-region",
+            "ap-south",
+            "--regional-zone",
+            "ap-south-1b",
+            "--regional-node-class",
+            "general-purpose",
             "--auth-policy-path",
             "/etc/epoch/bootstrap-policy.json",
         ])
@@ -937,6 +966,11 @@ mod tests {
             PathBuf::from("/etc/epoch/bootstrap-policy.json")
         );
         assert_eq!(launch.max_groups, 64);
+        assert_eq!(launch.topology.node_id(), 2);
+        assert_eq!(launch.topology.region(), "ap-south");
+        assert_eq!(launch.topology.zone(), "ap-south-1b");
+        assert_eq!(launch.topology.node_class(), "general-purpose");
+        assert_eq!(launch.topology.consensus_voter_node_ids(), [1, 2, 3]);
     }
 
     #[test]
@@ -990,6 +1024,26 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("EPOCH_AUTH_POLICY_PATH")
+        );
+
+        let invalid_topology = Args::try_parse_from([
+            "epoch-node",
+            "--regional-runtime-enabled",
+            "--consensus-node-id",
+            "1",
+            "--consensus-peers",
+            "1=http://127.0.0.1:7701,2=http://127.0.0.1:7702,3=http://127.0.0.1:7703",
+            "--auth-policy-path",
+            "/etc/epoch/bootstrap-policy.json",
+            "--regional-zone",
+            "not a zone",
+        ])
+        .unwrap();
+        assert!(
+            regional_runtime_launch(&invalid_topology)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid regional topology")
         );
     }
 

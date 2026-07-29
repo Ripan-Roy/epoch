@@ -28,6 +28,7 @@ use crate::{
         shared_internal_peer_router,
     },
     regional_router::regional_tablet_router,
+    regional_topology::{NodeTopology, regional_topology_router},
     tablet_materializer::{RegionalTabletMaterializer, TabletMaterializerError},
 };
 
@@ -38,6 +39,7 @@ pub struct RegionalRuntimeConfig {
     pub catalog_group: ConsensusProbeConfig,
     pub data_dir: PathBuf,
     pub max_groups: usize,
+    pub topology: NodeTopology,
     pub clock: Arc<dyn Clock>,
     pub catalog_commit_wait: Duration,
     pub profile_commit_wait: Duration,
@@ -50,6 +52,7 @@ impl fmt::Debug for RegionalRuntimeConfig {
             .field("catalog_group", &self.catalog_group)
             .field("data_dir", &self.data_dir)
             .field("max_groups", &self.max_groups)
+            .field("topology", &self.topology)
             .field("catalog_commit_wait", &self.catalog_commit_wait)
             .field("profile_commit_wait", &self.profile_commit_wait)
             .finish_non_exhaustive()
@@ -63,14 +66,30 @@ impl RegionalRuntimeConfig {
         max_groups: usize,
         clock: Arc<dyn Clock>,
     ) -> Self {
+        let topology = NodeTopology::new(
+            catalog_group.node_id().get(),
+            "local",
+            "local",
+            "general-purpose",
+            catalog_group.voters().map(epoch_consensus::NodeId::get),
+            max_groups,
+        )
+        .expect("validated consensus config produces valid local topology");
         Self {
             catalog_group,
             data_dir: data_dir.into(),
             max_groups,
+            topology,
             clock,
             catalog_commit_wait: DEFAULT_CATALOG_COMMIT_WAIT,
             profile_commit_wait: DEFAULT_PROFILE_COMMIT_WAIT,
         }
+    }
+
+    #[must_use]
+    pub fn with_topology(mut self, topology: NodeTopology) -> Self {
+        self.topology = topology;
+        self
     }
 }
 
@@ -174,8 +193,9 @@ impl RegionalNodeRuntime {
         let catalog_commits = catalog_state.subscribe_commits();
         catalog_state.reconcile_latest().await?;
 
-        let public_router =
-            regional_catalog_router(catalog_state.clone()).merge(regional_tablet_router(directory));
+        let public_router = regional_catalog_router(catalog_state.clone())
+            .merge(regional_tablet_router(directory.clone()))
+            .merge(regional_topology_router(config.topology, directory));
         let (stop, failure, background) =
             spawn_background(catalog_state.clone(), catalog_commits, group_failures);
 

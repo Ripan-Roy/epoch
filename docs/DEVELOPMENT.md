@@ -377,23 +377,30 @@ make compose-regional-down
 
 The Compose model enables `EPOCH_REGIONAL_RUNTIME_ENABLED`, reserves consensus
 group 1 for the catalog, shares one peer listener per node, caps the process at
-16 groups, and mounts one independent volume per voter. The default Go process
+16 groups, configures three `ap-south` zones, and mounts one independent volume
+per voter. `EPOCH_REGIONAL_REGION`, `EPOCH_REGIONAL_ZONE`, and
+`EPOCH_REGIONAL_NODE_CLASS` configure bounded node-local placement identity.
+The default Go process
 connects to only `127.0.0.1:7601`; the example overrides it with all three
 published Compose node URLs. The console points only at the Go HTTP address;
 enter `epoch-dev-admin-v1` in its managed-control credential panel.
 
 Run `make test-regional-runtime` for the disposable end-to-end campaign. It
-allocates its own ports/project/volumes, builds the Go control binary, creates a
-managed resource through Go, verifies the browser BFF, kills and reopens the Go
-process against the same metadata file, proves exact request replay, exercises
+allocates its own ports/project/volumes, builds the Go control binary, verifies
+authorization-protected topology/group capacity, creates a three-zone managed resource
+through Go, proves an over-capacity request does not mutate Rust, verifies the
+browser BFF, kills and reopens the Go process against the same metadata file,
+proves exact request replay, exercises
 all four typed profiles, kills one and then all Rust nodes, reopens the same
 volumes, and removes only its scoped resources. `epoch-catalog` remains
 independently testable with `cargo test -p epoch-catalog --all-targets`. Dynamic
-membership, zone-aware placement, production identity/TLS, snapshots, and read
+membership, general voter selection, rack placement, production peer
+identity/TLS, snapshots, and read
 barriers remain subsequent slices; see
 [ADR-0009](adr/0009-regional-tablet-catalog.md) and
-[ADR-0010](adr/0010-durable-managed-metadata.md), plus the bootstrap security
-boundary in [ADR-0011](adr/0011-bootstrap-authz-audit-baseline.md).
+[ADR-0010](adr/0010-durable-managed-metadata.md), the bootstrap security
+boundary in [ADR-0011](adr/0011-bootstrap-authz-audit-baseline.md), and
+topology admission in [ADR-0012](adr/0012-topology-aware-admission.md).
 
 To discard local data, explicitly add `--volumes` to the Compose down command.
 That is destructive and is intentionally not part of the Make target.

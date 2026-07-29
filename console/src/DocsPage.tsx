@@ -556,11 +556,13 @@ export function DocsPage({ section }: DocsPageProps) {
                     and Event Bus tablets behind resource/shard routing. The Go control plane reconciles
                     desired state through Rust, transactionally persists management metadata, and exposes
                     observed placement to the browser; the console never contacts a storage node. The public
-                    SDK quickstart above remains standalone and <code>local_durable</code>. Fixed three-voter
-                    evidence is not zone-aware placement, the Go metadata database has one process owner, and
-                    these regional routes remain experimental. Managed HTTP/gRPC and regional HTTP now require
-                    a shared deny-by-default bootstrap bearer policy, but that is not OIDC, TLS/mTLS,
-                    credential expiry/revocation, or immutable audit export.
+                    SDK quickstart above remains standalone and <code>local_durable</code>. The fixed voters
+                    now report configured region, zone, class, and live group capacity; Go validates requested
+                    regions, minimum zones, class, and incremental capacity before touching the catalog. That
+                    is not dynamic membership, rack placement, or online rebalance. The Go metadata database
+                    still has one process owner and these regional routes remain experimental. Managed
+                    HTTP/gRPC and regional HTTP require a shared deny-by-default bootstrap bearer policy, but
+                    that is not OIDC, TLS/mTLS, credential expiry/revocation, or immutable audit export.
                   </p>
                 </div>
               </div>
@@ -571,10 +573,13 @@ export function DocsPage({ section }: DocsPageProps) {
                   <p>Generation and tablet-epoch fences reject stale routes before typed dispatch.</p>
                 </article>
                 <article>
-                  <span>OBSERVATION</span>
-                  <strong>The Go BFF reports achieved voters and leaders, not desired replicas.</strong>
+                  <span>ADMISSION + OBSERVATION</span>
+                  <strong>
+                    Go checks fixed-voter zones and capacity, then reports actual serving routes.
+                  </strong>
                   <p>
-                    A leader loss becomes degraded two-voter placement; a total outage clears stale topology.
+                    A limiting node rejects before catalog apply; leader loss becomes degraded two-voter
+                    placement.
                   </p>
                 </article>
                 <article>
@@ -717,7 +722,7 @@ export function DocsPage({ section }: DocsPageProps) {
                 <ReferenceCard
                   eyebrow="REGIONAL RUNTIME"
                   title="Multi-tablet operations"
-                  description="Catalog authority, Go reconciliation, browser BFF, fenced routes, local startup, recovery campaign, and explicit non-claims."
+                  description="Catalog authority, topology and capacity admission, Go reconciliation, browser BFF, fenced routes, recovery campaign, and explicit non-claims."
                   href={`${repositoryDocsUrl}/REGIONAL_RUNTIME.md`}
                 />
                 <ReferenceCard

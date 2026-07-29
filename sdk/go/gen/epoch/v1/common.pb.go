@@ -903,6 +903,69 @@ func (x *ResourceName) GetName() string {
 	return ""
 }
 
+// PlacementPolicy declares the failure-domain constraints that must be
+// satisfied before regional catalog mutation. The fixed-voter alpha runtime
+// validates these fields but does not yet perform membership changes.
+type PlacementPolicy struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	AllowedRegions    []string               `protobuf:"bytes,1,rep,name=allowed_regions,json=allowedRegions,proto3" json:"allowed_regions,omitempty"`
+	MinimumZones      uint32                 `protobuf:"varint,2,opt,name=minimum_zones,json=minimumZones,proto3" json:"minimum_zones,omitempty"`
+	RequiredNodeClass string                 `protobuf:"bytes,3,opt,name=required_node_class,json=requiredNodeClass,proto3" json:"required_node_class,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *PlacementPolicy) Reset() {
+	*x = PlacementPolicy{}
+	mi := &file_epoch_v1_common_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PlacementPolicy) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PlacementPolicy) ProtoMessage() {}
+
+func (x *PlacementPolicy) ProtoReflect() protoreflect.Message {
+	mi := &file_epoch_v1_common_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PlacementPolicy.ProtoReflect.Descriptor instead.
+func (*PlacementPolicy) Descriptor() ([]byte, []int) {
+	return file_epoch_v1_common_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *PlacementPolicy) GetAllowedRegions() []string {
+	if x != nil {
+		return x.AllowedRegions
+	}
+	return nil
+}
+
+func (x *PlacementPolicy) GetMinimumZones() uint32 {
+	if x != nil {
+		return x.MinimumZones
+	}
+	return 0
+}
+
+func (x *PlacementPolicy) GetRequiredNodeClass() string {
+	if x != nil {
+		return x.RequiredNodeClass
+	}
+	return ""
+}
+
 // ResourceSpec contains shared guarantees and a typed-by-kind configuration
 // object. Profile-specific messages may replace configuration as contracts
 // stabilize without changing ResourceName or ResourceStatus.
@@ -915,13 +978,14 @@ type ResourceSpec struct {
 	Replicas        uint32                 `protobuf:"varint,5,opt,name=replicas,proto3" json:"replicas,omitempty"`
 	Labels          map[string]string      `protobuf:"bytes,6,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	Configuration   *structpb.Struct       `protobuf:"bytes,7,opt,name=configuration,proto3" json:"configuration,omitempty"`
+	Placement       *PlacementPolicy       `protobuf:"bytes,8,opt,name=placement,proto3" json:"placement,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ResourceSpec) Reset() {
 	*x = ResourceSpec{}
-	mi := &file_epoch_v1_common_proto_msgTypes[3]
+	mi := &file_epoch_v1_common_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -933,7 +997,7 @@ func (x *ResourceSpec) String() string {
 func (*ResourceSpec) ProtoMessage() {}
 
 func (x *ResourceSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_epoch_v1_common_proto_msgTypes[3]
+	mi := &file_epoch_v1_common_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -946,7 +1010,7 @@ func (x *ResourceSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceSpec.ProtoReflect.Descriptor instead.
 func (*ResourceSpec) Descriptor() ([]byte, []int) {
-	return file_epoch_v1_common_proto_rawDescGZIP(), []int{3}
+	return file_epoch_v1_common_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ResourceSpec) GetWorkloadProfile() WorkloadProfile {
@@ -998,6 +1062,13 @@ func (x *ResourceSpec) GetConfiguration() *structpb.Struct {
 	return nil
 }
 
+func (x *ResourceSpec) GetPlacement() *PlacementPolicy {
+	if x != nil {
+		return x.Placement
+	}
+	return nil
+}
+
 // Condition is an observable reconciliation or guarantee condition.
 type Condition struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
@@ -1013,7 +1084,7 @@ type Condition struct {
 
 func (x *Condition) Reset() {
 	*x = Condition{}
-	mi := &file_epoch_v1_common_proto_msgTypes[4]
+	mi := &file_epoch_v1_common_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1025,7 +1096,7 @@ func (x *Condition) String() string {
 func (*Condition) ProtoMessage() {}
 
 func (x *Condition) ProtoReflect() protoreflect.Message {
-	mi := &file_epoch_v1_common_proto_msgTypes[4]
+	mi := &file_epoch_v1_common_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1038,7 +1109,7 @@ func (x *Condition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Condition.ProtoReflect.Descriptor instead.
 func (*Condition) Descriptor() ([]byte, []int) {
-	return file_epoch_v1_common_proto_rawDescGZIP(), []int{4}
+	return file_epoch_v1_common_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Condition) GetType() string {
@@ -1104,7 +1175,7 @@ type TabletDescriptor struct {
 
 func (x *TabletDescriptor) Reset() {
 	*x = TabletDescriptor{}
-	mi := &file_epoch_v1_common_proto_msgTypes[5]
+	mi := &file_epoch_v1_common_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1116,7 +1187,7 @@ func (x *TabletDescriptor) String() string {
 func (*TabletDescriptor) ProtoMessage() {}
 
 func (x *TabletDescriptor) ProtoReflect() protoreflect.Message {
-	mi := &file_epoch_v1_common_proto_msgTypes[5]
+	mi := &file_epoch_v1_common_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1129,7 +1200,7 @@ func (x *TabletDescriptor) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TabletDescriptor.ProtoReflect.Descriptor instead.
 func (*TabletDescriptor) Descriptor() ([]byte, []int) {
-	return file_epoch_v1_common_proto_rawDescGZIP(), []int{5}
+	return file_epoch_v1_common_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *TabletDescriptor) GetTabletId() uint64 {
@@ -1202,6 +1273,185 @@ func (x *TabletDescriptor) GetPhase() TabletPhase {
 	return TabletPhase_TABLET_PHASE_UNSPECIFIED
 }
 
+// RegionalNodeObservation is one policy-protected configured-endpoint topology
+// and capacity sample. Transport-level server identity is separate.
+type RegionalNodeObservation struct {
+	state                    protoimpl.MessageState `protogen:"open.v1"`
+	NodeId                   uint64                 `protobuf:"varint,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Region                   string                 `protobuf:"bytes,2,opt,name=region,proto3" json:"region,omitempty"`
+	Zone                     string                 `protobuf:"bytes,3,opt,name=zone,proto3" json:"zone,omitempty"`
+	NodeClass                string                 `protobuf:"bytes,4,opt,name=node_class,json=nodeClass,proto3" json:"node_class,omitempty"`
+	ConsensusVoterNodeIds    []uint64               `protobuf:"varint,5,rep,packed,name=consensus_voter_node_ids,json=consensusVoterNodeIds,proto3" json:"consensus_voter_node_ids,omitempty"`
+	MaxConsensusGroups       uint32                 `protobuf:"varint,6,opt,name=max_consensus_groups,json=maxConsensusGroups,proto3" json:"max_consensus_groups,omitempty"`
+	UsedConsensusGroups      uint32                 `protobuf:"varint,7,opt,name=used_consensus_groups,json=usedConsensusGroups,proto3" json:"used_consensus_groups,omitempty"`
+	AvailableConsensusGroups uint32                 `protobuf:"varint,8,opt,name=available_consensus_groups,json=availableConsensusGroups,proto3" json:"available_consensus_groups,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
+}
+
+func (x *RegionalNodeObservation) Reset() {
+	*x = RegionalNodeObservation{}
+	mi := &file_epoch_v1_common_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegionalNodeObservation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegionalNodeObservation) ProtoMessage() {}
+
+func (x *RegionalNodeObservation) ProtoReflect() protoreflect.Message {
+	mi := &file_epoch_v1_common_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegionalNodeObservation.ProtoReflect.Descriptor instead.
+func (*RegionalNodeObservation) Descriptor() ([]byte, []int) {
+	return file_epoch_v1_common_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *RegionalNodeObservation) GetNodeId() uint64 {
+	if x != nil {
+		return x.NodeId
+	}
+	return 0
+}
+
+func (x *RegionalNodeObservation) GetRegion() string {
+	if x != nil {
+		return x.Region
+	}
+	return ""
+}
+
+func (x *RegionalNodeObservation) GetZone() string {
+	if x != nil {
+		return x.Zone
+	}
+	return ""
+}
+
+func (x *RegionalNodeObservation) GetNodeClass() string {
+	if x != nil {
+		return x.NodeClass
+	}
+	return ""
+}
+
+func (x *RegionalNodeObservation) GetConsensusVoterNodeIds() []uint64 {
+	if x != nil {
+		return x.ConsensusVoterNodeIds
+	}
+	return nil
+}
+
+func (x *RegionalNodeObservation) GetMaxConsensusGroups() uint32 {
+	if x != nil {
+		return x.MaxConsensusGroups
+	}
+	return 0
+}
+
+func (x *RegionalNodeObservation) GetUsedConsensusGroups() uint32 {
+	if x != nil {
+		return x.UsedConsensusGroups
+	}
+	return 0
+}
+
+func (x *RegionalNodeObservation) GetAvailableConsensusGroups() uint32 {
+	if x != nil {
+		return x.AvailableConsensusGroups
+	}
+	return 0
+}
+
+// PlacementStatus separates the requested constraints from achieved topology.
+type PlacementStatus struct {
+	state             protoimpl.MessageState     `protogen:"open.v1"`
+	AllowedRegions    []string                   `protobuf:"bytes,1,rep,name=allowed_regions,json=allowedRegions,proto3" json:"allowed_regions,omitempty"`
+	MinimumZones      uint32                     `protobuf:"varint,2,opt,name=minimum_zones,json=minimumZones,proto3" json:"minimum_zones,omitempty"`
+	RequiredNodeClass string                     `protobuf:"bytes,3,opt,name=required_node_class,json=requiredNodeClass,proto3" json:"required_node_class,omitempty"`
+	AchievedZones     uint32                     `protobuf:"varint,4,opt,name=achieved_zones,json=achievedZones,proto3" json:"achieved_zones,omitempty"`
+	Nodes             []*RegionalNodeObservation `protobuf:"bytes,5,rep,name=nodes,proto3" json:"nodes,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *PlacementStatus) Reset() {
+	*x = PlacementStatus{}
+	mi := &file_epoch_v1_common_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PlacementStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PlacementStatus) ProtoMessage() {}
+
+func (x *PlacementStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_epoch_v1_common_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PlacementStatus.ProtoReflect.Descriptor instead.
+func (*PlacementStatus) Descriptor() ([]byte, []int) {
+	return file_epoch_v1_common_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *PlacementStatus) GetAllowedRegions() []string {
+	if x != nil {
+		return x.AllowedRegions
+	}
+	return nil
+}
+
+func (x *PlacementStatus) GetMinimumZones() uint32 {
+	if x != nil {
+		return x.MinimumZones
+	}
+	return 0
+}
+
+func (x *PlacementStatus) GetRequiredNodeClass() string {
+	if x != nil {
+		return x.RequiredNodeClass
+	}
+	return ""
+}
+
+func (x *PlacementStatus) GetAchievedZones() uint32 {
+	if x != nil {
+		return x.AchievedZones
+	}
+	return 0
+}
+
+func (x *PlacementStatus) GetNodes() []*RegionalNodeObservation {
+	if x != nil {
+		return x.Nodes
+	}
+	return nil
+}
+
 // ResourceStatus reports achieved state separately from desired state.
 type ResourceStatus struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
@@ -1212,13 +1462,14 @@ type ResourceStatus struct {
 	ResourceEpoch      uint64                 `protobuf:"varint,5,opt,name=resource_epoch,json=resourceEpoch,proto3" json:"resource_epoch,omitempty"`
 	Conditions         []*Condition           `protobuf:"bytes,6,rep,name=conditions,proto3" json:"conditions,omitempty"`
 	Tablets            []*TabletDescriptor    `protobuf:"bytes,7,rep,name=tablets,proto3" json:"tablets,omitempty"`
+	Placement          *PlacementStatus       `protobuf:"bytes,8,opt,name=placement,proto3" json:"placement,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
 
 func (x *ResourceStatus) Reset() {
 	*x = ResourceStatus{}
-	mi := &file_epoch_v1_common_proto_msgTypes[6]
+	mi := &file_epoch_v1_common_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1230,7 +1481,7 @@ func (x *ResourceStatus) String() string {
 func (*ResourceStatus) ProtoMessage() {}
 
 func (x *ResourceStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_epoch_v1_common_proto_msgTypes[6]
+	mi := &file_epoch_v1_common_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1243,7 +1494,7 @@ func (x *ResourceStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceStatus.ProtoReflect.Descriptor instead.
 func (*ResourceStatus) Descriptor() ([]byte, []int) {
-	return file_epoch_v1_common_proto_rawDescGZIP(), []int{6}
+	return file_epoch_v1_common_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ResourceStatus) GetPhase() ResourcePhase {
@@ -1295,6 +1546,13 @@ func (x *ResourceStatus) GetTablets() []*TabletDescriptor {
 	return nil
 }
 
+func (x *ResourceStatus) GetPlacement() *PlacementStatus {
+	if x != nil {
+		return x.Placement
+	}
+	return nil
+}
+
 // Resource combines desired state, monotonic generation, and observed state.
 type Resource struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1310,7 +1568,7 @@ type Resource struct {
 
 func (x *Resource) Reset() {
 	*x = Resource{}
-	mi := &file_epoch_v1_common_proto_msgTypes[7]
+	mi := &file_epoch_v1_common_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1322,7 +1580,7 @@ func (x *Resource) String() string {
 func (*Resource) ProtoMessage() {}
 
 func (x *Resource) ProtoReflect() protoreflect.Message {
-	mi := &file_epoch_v1_common_proto_msgTypes[7]
+	mi := &file_epoch_v1_common_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1335,7 +1593,7 @@ func (x *Resource) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Resource.ProtoReflect.Descriptor instead.
 func (*Resource) Descriptor() ([]byte, []int) {
-	return file_epoch_v1_common_proto_rawDescGZIP(), []int{7}
+	return file_epoch_v1_common_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Resource) GetName() *ResourceName {
@@ -1428,7 +1686,11 @@ const file_epoch_v1_common_proto_rawDesc = "" +
 	"\venvironment\x18\x03 \x01(\tR\venvironment\x12\x1c\n" +
 	"\tnamespace\x18\x04 \x01(\tR\tnamespace\x12*\n" +
 	"\x04kind\x18\x05 \x01(\x0e2\x16.epoch.v1.ResourceKindR\x04kind\x12\x12\n" +
-	"\x04name\x18\x06 \x01(\tR\x04name\"\xd1\x03\n" +
+	"\x04name\x18\x06 \x01(\tR\x04name\"\x8f\x01\n" +
+	"\x0fPlacementPolicy\x12'\n" +
+	"\x0fallowed_regions\x18\x01 \x03(\tR\x0eallowedRegions\x12#\n" +
+	"\rminimum_zones\x18\x02 \x01(\rR\fminimumZones\x12.\n" +
+	"\x13required_node_class\x18\x03 \x01(\tR\x11requiredNodeClass\"\x8a\x04\n" +
 	"\fResourceSpec\x12D\n" +
 	"\x10workload_profile\x18\x01 \x01(\x0e2\x19.epoch.v1.WorkloadProfileR\x0fworkloadProfile\x12;\n" +
 	"\n" +
@@ -1438,7 +1700,8 @@ const file_epoch_v1_common_proto_rawDesc = "" +
 	"\bordering\x18\x04 \x01(\x0e2\x17.epoch.v1.OrderingScopeR\bordering\x12\x1a\n" +
 	"\breplicas\x18\x05 \x01(\rR\breplicas\x12:\n" +
 	"\x06labels\x18\x06 \x03(\v2\".epoch.v1.ResourceSpec.LabelsEntryR\x06labels\x12=\n" +
-	"\rconfiguration\x18\a \x01(\v2\x17.google.protobuf.StructR\rconfiguration\x1a9\n" +
+	"\rconfiguration\x18\a \x01(\v2\x17.google.protobuf.StructR\rconfiguration\x127\n" +
+	"\tplacement\x18\b \x01(\v2\x19.epoch.v1.PlacementPolicyR\tplacement\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x80\x02\n" +
@@ -1461,7 +1724,23 @@ const file_epoch_v1_common_proto_rawDesc = "" +
 	"\x0evoter_node_ids\x18\b \x03(\x04R\fvoterNodeIds\x12$\n" +
 	"\x0eleader_node_id\x18\t \x01(\x04R\fleaderNodeId\x12+\n" +
 	"\x05phase\x18\n" +
-	" \x01(\x0e2\x15.epoch.v1.TabletPhaseR\x05phase\"\x93\x03\n" +
+	" \x01(\x0e2\x15.epoch.v1.TabletPhaseR\x05phase\"\xda\x02\n" +
+	"\x17RegionalNodeObservation\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\x04R\x06nodeId\x12\x16\n" +
+	"\x06region\x18\x02 \x01(\tR\x06region\x12\x12\n" +
+	"\x04zone\x18\x03 \x01(\tR\x04zone\x12\x1d\n" +
+	"\n" +
+	"node_class\x18\x04 \x01(\tR\tnodeClass\x127\n" +
+	"\x18consensus_voter_node_ids\x18\x05 \x03(\x04R\x15consensusVoterNodeIds\x120\n" +
+	"\x14max_consensus_groups\x18\x06 \x01(\rR\x12maxConsensusGroups\x122\n" +
+	"\x15used_consensus_groups\x18\a \x01(\rR\x13usedConsensusGroups\x12<\n" +
+	"\x1aavailable_consensus_groups\x18\b \x01(\rR\x18availableConsensusGroups\"\xef\x01\n" +
+	"\x0fPlacementStatus\x12'\n" +
+	"\x0fallowed_regions\x18\x01 \x03(\tR\x0eallowedRegions\x12#\n" +
+	"\rminimum_zones\x18\x02 \x01(\rR\fminimumZones\x12.\n" +
+	"\x13required_node_class\x18\x03 \x01(\tR\x11requiredNodeClass\x12%\n" +
+	"\x0eachieved_zones\x18\x04 \x01(\rR\rachievedZones\x127\n" +
+	"\x05nodes\x18\x05 \x03(\v2!.epoch.v1.RegionalNodeObservationR\x05nodes\"\xcc\x03\n" +
 	"\x0eResourceStatus\x12-\n" +
 	"\x05phase\x18\x01 \x01(\x0e2\x17.epoch.v1.ResourcePhaseR\x05phase\x12/\n" +
 	"\x13observed_generation\x18\x02 \x01(\x04R\x12observedGeneration\x12A\n" +
@@ -1471,7 +1750,8 @@ const file_epoch_v1_common_proto_rawDesc = "" +
 	"\n" +
 	"conditions\x18\x06 \x03(\v2\x13.epoch.v1.ConditionR\n" +
 	"conditions\x124\n" +
-	"\atablets\x18\a \x03(\v2\x1a.epoch.v1.TabletDescriptorR\atablets\"\xae\x02\n" +
+	"\atablets\x18\a \x03(\v2\x1a.epoch.v1.TabletDescriptorR\atablets\x127\n" +
+	"\tplacement\x18\b \x01(\v2\x19.epoch.v1.PlacementStatusR\tplacement\"\xae\x02\n" +
 	"\bResource\x12*\n" +
 	"\x04name\x18\x01 \x01(\v2\x16.epoch.v1.ResourceNameR\x04name\x12\x1e\n" +
 	"\n" +
@@ -1563,65 +1843,71 @@ func file_epoch_v1_common_proto_rawDescGZIP() []byte {
 }
 
 var file_epoch_v1_common_proto_enumTypes = make([]protoimpl.EnumInfo, 9)
-var file_epoch_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_epoch_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_epoch_v1_common_proto_goTypes = []any{
-	(WorkloadProfile)(0),          // 0: epoch.v1.WorkloadProfile
-	(ResourceKind)(0),             // 1: epoch.v1.ResourceKind
-	(DurabilityProfile)(0),        // 2: epoch.v1.DurabilityProfile
-	(DeliverySemantics)(0),        // 3: epoch.v1.DeliverySemantics
-	(OrderingScope)(0),            // 4: epoch.v1.OrderingScope
-	(DeploymentMode)(0),           // 5: epoch.v1.DeploymentMode
-	(ResourcePhase)(0),            // 6: epoch.v1.ResourcePhase
-	(ConditionState)(0),           // 7: epoch.v1.ConditionState
-	(TabletPhase)(0),              // 8: epoch.v1.TabletPhase
-	(*Envelope)(nil),              // 9: epoch.v1.Envelope
-	(*WriteReceipt)(nil),          // 10: epoch.v1.WriteReceipt
-	(*ResourceName)(nil),          // 11: epoch.v1.ResourceName
-	(*ResourceSpec)(nil),          // 12: epoch.v1.ResourceSpec
-	(*Condition)(nil),             // 13: epoch.v1.Condition
-	(*TabletDescriptor)(nil),      // 14: epoch.v1.TabletDescriptor
-	(*ResourceStatus)(nil),        // 15: epoch.v1.ResourceStatus
-	(*Resource)(nil),              // 16: epoch.v1.Resource
-	nil,                           // 17: epoch.v1.Envelope.HeadersEntry
-	nil,                           // 18: epoch.v1.Envelope.ExtensionsEntry
-	nil,                           // 19: epoch.v1.ResourceSpec.LabelsEntry
-	(*timestamppb.Timestamp)(nil), // 20: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),   // 21: google.protobuf.Duration
-	(*structpb.Struct)(nil),       // 22: google.protobuf.Struct
+	(WorkloadProfile)(0),            // 0: epoch.v1.WorkloadProfile
+	(ResourceKind)(0),               // 1: epoch.v1.ResourceKind
+	(DurabilityProfile)(0),          // 2: epoch.v1.DurabilityProfile
+	(DeliverySemantics)(0),          // 3: epoch.v1.DeliverySemantics
+	(OrderingScope)(0),              // 4: epoch.v1.OrderingScope
+	(DeploymentMode)(0),             // 5: epoch.v1.DeploymentMode
+	(ResourcePhase)(0),              // 6: epoch.v1.ResourcePhase
+	(ConditionState)(0),             // 7: epoch.v1.ConditionState
+	(TabletPhase)(0),                // 8: epoch.v1.TabletPhase
+	(*Envelope)(nil),                // 9: epoch.v1.Envelope
+	(*WriteReceipt)(nil),            // 10: epoch.v1.WriteReceipt
+	(*ResourceName)(nil),            // 11: epoch.v1.ResourceName
+	(*PlacementPolicy)(nil),         // 12: epoch.v1.PlacementPolicy
+	(*ResourceSpec)(nil),            // 13: epoch.v1.ResourceSpec
+	(*Condition)(nil),               // 14: epoch.v1.Condition
+	(*TabletDescriptor)(nil),        // 15: epoch.v1.TabletDescriptor
+	(*RegionalNodeObservation)(nil), // 16: epoch.v1.RegionalNodeObservation
+	(*PlacementStatus)(nil),         // 17: epoch.v1.PlacementStatus
+	(*ResourceStatus)(nil),          // 18: epoch.v1.ResourceStatus
+	(*Resource)(nil),                // 19: epoch.v1.Resource
+	nil,                             // 20: epoch.v1.Envelope.HeadersEntry
+	nil,                             // 21: epoch.v1.Envelope.ExtensionsEntry
+	nil,                             // 22: epoch.v1.ResourceSpec.LabelsEntry
+	(*timestamppb.Timestamp)(nil),   // 23: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),     // 24: google.protobuf.Duration
+	(*structpb.Struct)(nil),         // 25: google.protobuf.Struct
 }
 var file_epoch_v1_common_proto_depIdxs = []int32{
-	20, // 0: epoch.v1.Envelope.time:type_name -> google.protobuf.Timestamp
-	17, // 1: epoch.v1.Envelope.headers:type_name -> epoch.v1.Envelope.HeadersEntry
-	20, // 2: epoch.v1.Envelope.deliver_at:type_name -> google.protobuf.Timestamp
-	21, // 3: epoch.v1.Envelope.ttl:type_name -> google.protobuf.Duration
-	18, // 4: epoch.v1.Envelope.extensions:type_name -> epoch.v1.Envelope.ExtensionsEntry
+	23, // 0: epoch.v1.Envelope.time:type_name -> google.protobuf.Timestamp
+	20, // 1: epoch.v1.Envelope.headers:type_name -> epoch.v1.Envelope.HeadersEntry
+	23, // 2: epoch.v1.Envelope.deliver_at:type_name -> google.protobuf.Timestamp
+	24, // 3: epoch.v1.Envelope.ttl:type_name -> google.protobuf.Duration
+	21, // 4: epoch.v1.Envelope.extensions:type_name -> epoch.v1.Envelope.ExtensionsEntry
 	2,  // 5: epoch.v1.WriteReceipt.achieved_durability:type_name -> epoch.v1.DurabilityProfile
 	1,  // 6: epoch.v1.ResourceName.kind:type_name -> epoch.v1.ResourceKind
 	0,  // 7: epoch.v1.ResourceSpec.workload_profile:type_name -> epoch.v1.WorkloadProfile
 	2,  // 8: epoch.v1.ResourceSpec.durability:type_name -> epoch.v1.DurabilityProfile
 	3,  // 9: epoch.v1.ResourceSpec.delivery:type_name -> epoch.v1.DeliverySemantics
 	4,  // 10: epoch.v1.ResourceSpec.ordering:type_name -> epoch.v1.OrderingScope
-	19, // 11: epoch.v1.ResourceSpec.labels:type_name -> epoch.v1.ResourceSpec.LabelsEntry
-	22, // 12: epoch.v1.ResourceSpec.configuration:type_name -> google.protobuf.Struct
-	7,  // 13: epoch.v1.Condition.state:type_name -> epoch.v1.ConditionState
-	20, // 14: epoch.v1.Condition.last_transition_time:type_name -> google.protobuf.Timestamp
-	0,  // 15: epoch.v1.TabletDescriptor.workload_profile:type_name -> epoch.v1.WorkloadProfile
-	8,  // 16: epoch.v1.TabletDescriptor.phase:type_name -> epoch.v1.TabletPhase
-	6,  // 17: epoch.v1.ResourceStatus.phase:type_name -> epoch.v1.ResourcePhase
-	5,  // 18: epoch.v1.ResourceStatus.deployment_mode:type_name -> epoch.v1.DeploymentMode
-	2,  // 19: epoch.v1.ResourceStatus.achieved_durability:type_name -> epoch.v1.DurabilityProfile
-	13, // 20: epoch.v1.ResourceStatus.conditions:type_name -> epoch.v1.Condition
-	14, // 21: epoch.v1.ResourceStatus.tablets:type_name -> epoch.v1.TabletDescriptor
-	11, // 22: epoch.v1.Resource.name:type_name -> epoch.v1.ResourceName
-	12, // 23: epoch.v1.Resource.spec:type_name -> epoch.v1.ResourceSpec
-	15, // 24: epoch.v1.Resource.status:type_name -> epoch.v1.ResourceStatus
-	20, // 25: epoch.v1.Resource.create_time:type_name -> google.protobuf.Timestamp
-	20, // 26: epoch.v1.Resource.update_time:type_name -> google.protobuf.Timestamp
-	27, // [27:27] is the sub-list for method output_type
-	27, // [27:27] is the sub-list for method input_type
-	27, // [27:27] is the sub-list for extension type_name
-	27, // [27:27] is the sub-list for extension extendee
-	0,  // [0:27] is the sub-list for field type_name
+	22, // 11: epoch.v1.ResourceSpec.labels:type_name -> epoch.v1.ResourceSpec.LabelsEntry
+	25, // 12: epoch.v1.ResourceSpec.configuration:type_name -> google.protobuf.Struct
+	12, // 13: epoch.v1.ResourceSpec.placement:type_name -> epoch.v1.PlacementPolicy
+	7,  // 14: epoch.v1.Condition.state:type_name -> epoch.v1.ConditionState
+	23, // 15: epoch.v1.Condition.last_transition_time:type_name -> google.protobuf.Timestamp
+	0,  // 16: epoch.v1.TabletDescriptor.workload_profile:type_name -> epoch.v1.WorkloadProfile
+	8,  // 17: epoch.v1.TabletDescriptor.phase:type_name -> epoch.v1.TabletPhase
+	16, // 18: epoch.v1.PlacementStatus.nodes:type_name -> epoch.v1.RegionalNodeObservation
+	6,  // 19: epoch.v1.ResourceStatus.phase:type_name -> epoch.v1.ResourcePhase
+	5,  // 20: epoch.v1.ResourceStatus.deployment_mode:type_name -> epoch.v1.DeploymentMode
+	2,  // 21: epoch.v1.ResourceStatus.achieved_durability:type_name -> epoch.v1.DurabilityProfile
+	14, // 22: epoch.v1.ResourceStatus.conditions:type_name -> epoch.v1.Condition
+	15, // 23: epoch.v1.ResourceStatus.tablets:type_name -> epoch.v1.TabletDescriptor
+	17, // 24: epoch.v1.ResourceStatus.placement:type_name -> epoch.v1.PlacementStatus
+	11, // 25: epoch.v1.Resource.name:type_name -> epoch.v1.ResourceName
+	13, // 26: epoch.v1.Resource.spec:type_name -> epoch.v1.ResourceSpec
+	18, // 27: epoch.v1.Resource.status:type_name -> epoch.v1.ResourceStatus
+	23, // 28: epoch.v1.Resource.create_time:type_name -> google.protobuf.Timestamp
+	23, // 29: epoch.v1.Resource.update_time:type_name -> google.protobuf.Timestamp
+	30, // [30:30] is the sub-list for method output_type
+	30, // [30:30] is the sub-list for method input_type
+	30, // [30:30] is the sub-list for extension type_name
+	30, // [30:30] is the sub-list for extension extendee
+	0,  // [0:30] is the sub-list for field type_name
 }
 
 func init() { file_epoch_v1_common_proto_init() }
@@ -1635,7 +1921,7 @@ func file_epoch_v1_common_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_epoch_v1_common_proto_rawDesc), len(file_epoch_v1_common_proto_rawDesc)),
 			NumEnums:      9,
-			NumMessages:   11,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

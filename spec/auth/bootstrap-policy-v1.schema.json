@@ -55,7 +55,8 @@
               "resource.apply",
               "resource.delete",
               "resource.read",
-              "route.read"
+              "route.read",
+              "topology.read"
             ]
           }
         },

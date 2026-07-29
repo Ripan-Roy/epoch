@@ -45,6 +45,8 @@ pub enum Action {
     ResourceRead,
     #[serde(rename = "route.read")]
     RouteRead,
+    #[serde(rename = "topology.read")]
+    TopologyRead,
 }
 
 impl Action {
@@ -60,6 +62,7 @@ impl Action {
             Self::ResourceDelete => "resource.delete",
             Self::ResourceRead => "resource.read",
             Self::RouteRead => "route.read",
+            Self::TopologyRead => "topology.read",
         }
     }
 }

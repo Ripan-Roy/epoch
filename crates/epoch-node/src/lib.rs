@@ -10,6 +10,7 @@ pub mod queue_tablet;
 pub mod regional_auth;
 pub mod regional_router;
 pub mod regional_runtime;
+pub mod regional_topology;
 pub mod stream_tablet;
 mod tablet_http;
 pub mod tablet_materializer;

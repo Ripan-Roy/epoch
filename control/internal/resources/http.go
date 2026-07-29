@@ -225,20 +225,21 @@ type regionalInventoryResponse struct {
 }
 
 type regionalResourceView struct {
-	CanonicalName      string               `json:"canonical_name"`
-	Organization       string               `json:"organization"`
-	Project            string               `json:"project"`
-	Environment        string               `json:"environment"`
-	Namespace          string               `json:"namespace"`
-	Kind               Kind                 `json:"kind"`
-	Name               string               `json:"name"`
-	Generation         string               `json:"generation"`
-	ObservedGeneration string               `json:"observed_generation"`
-	WorkloadProfile    string               `json:"workload_profile"`
-	ShardCount         uint32               `json:"shard_count"`
-	Phase              ResourcePhase        `json:"phase"`
-	Message            string               `json:"message,omitempty"`
-	Tablets            []regionalTabletView `json:"tablets"`
+	CanonicalName      string                 `json:"canonical_name"`
+	Organization       string                 `json:"organization"`
+	Project            string                 `json:"project"`
+	Environment        string                 `json:"environment"`
+	Namespace          string                 `json:"namespace"`
+	Kind               Kind                   `json:"kind"`
+	Name               string                 `json:"name"`
+	Generation         string                 `json:"generation"`
+	ObservedGeneration string                 `json:"observed_generation"`
+	WorkloadProfile    string                 `json:"workload_profile"`
+	ShardCount         uint32                 `json:"shard_count"`
+	Phase              ResourcePhase          `json:"phase"`
+	Message            string                 `json:"message,omitempty"`
+	Tablets            []regionalTabletView   `json:"tablets"`
+	Placement          *regionalPlacementView `json:"placement,omitempty"`
 }
 
 type regionalTabletView struct {
@@ -250,6 +251,25 @@ type regionalTabletView struct {
 	DesiredReplicas    uint32   `json:"desired_replicas"`
 	VoterNodeIDs       []string `json:"voter_node_ids"`
 	LeaderNodeID       *string  `json:"leader_node_id"`
+}
+
+type regionalPlacementView struct {
+	AllowedRegions    []string           `json:"allowed_regions"`
+	MinimumZones      uint32             `json:"minimum_zones"`
+	RequiredNodeClass string             `json:"required_node_class,omitempty"`
+	AchievedZones     uint32             `json:"achieved_zones"`
+	Nodes             []regionalNodeView `json:"nodes"`
+}
+
+type regionalNodeView struct {
+	NodeID                   string   `json:"node_id"`
+	Region                   string   `json:"region"`
+	Zone                     string   `json:"zone"`
+	NodeClass                string   `json:"node_class"`
+	ConsensusVoterNodeIDs    []string `json:"consensus_voter_node_ids"`
+	MaxConsensusGroups       uint32   `json:"max_consensus_groups"`
+	UsedConsensusGroups      uint32   `json:"used_consensus_groups"`
+	AvailableConsensusGroups uint32   `json:"available_consensus_groups"`
 }
 
 func (handler *httpHandler) regionalInventory(writer http.ResponseWriter, request *http.Request) {
@@ -335,6 +355,37 @@ func regionalResourceForBrowser(resource Resource) regionalResourceView {
 		Phase:              resource.Status.Phase,
 		Message:            resource.Status.Message,
 		Tablets:            tablets,
+		Placement:          regionalPlacementForBrowser(resource.Status.Placement),
+	}
+}
+
+func regionalPlacementForBrowser(status *PlacementStatus) *regionalPlacementView {
+	if status == nil {
+		return nil
+	}
+	nodes := make([]regionalNodeView, 0, len(status.Nodes))
+	for _, node := range status.Nodes {
+		voters := make([]string, 0, len(node.ConsensusVoterNodeIDs))
+		for _, voter := range node.ConsensusVoterNodeIDs {
+			voters = append(voters, strconv.FormatUint(voter, 10))
+		}
+		nodes = append(nodes, regionalNodeView{
+			NodeID:                   strconv.FormatUint(node.NodeID, 10),
+			Region:                   node.Region,
+			Zone:                     node.Zone,
+			NodeClass:                node.NodeClass,
+			ConsensusVoterNodeIDs:    voters,
+			MaxConsensusGroups:       node.MaxConsensusGroups,
+			UsedConsensusGroups:      node.UsedConsensusGroups,
+			AvailableConsensusGroups: node.AvailableConsensusGroups,
+		})
+	}
+	return &regionalPlacementView{
+		AllowedRegions:    append([]string(nil), status.AllowedRegions...),
+		MinimumZones:      status.MinimumZones,
+		RequiredNodeClass: status.RequiredNodeClass,
+		AchievedZones:     status.AchievedZones,
+		Nodes:             nodes,
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -87,13 +88,37 @@ type TabletStatus struct {
 	LeaderNodeID       uint64   `json:"leader_node_id,omitempty"`
 }
 
+// RegionalNodeStatus is one policy-protected configured-endpoint topology and
+// capacity observation used to explain an admission decision.
+type RegionalNodeStatus struct {
+	NodeID                   uint64   `json:"node_id"`
+	Region                   string   `json:"region"`
+	Zone                     string   `json:"zone"`
+	NodeClass                string   `json:"node_class"`
+	ConsensusVoterNodeIDs    []uint64 `json:"consensus_voter_node_ids"`
+	MaxConsensusGroups       uint32   `json:"max_consensus_groups"`
+	UsedConsensusGroups      uint32   `json:"used_consensus_groups"`
+	AvailableConsensusGroups uint32   `json:"available_consensus_groups"`
+}
+
+// PlacementStatus reports requested and achieved failure-domain constraints.
+type PlacementStatus struct {
+	AllowedRegions    []string             `json:"allowed_regions,omitempty"`
+	MinimumZones      uint32               `json:"minimum_zones"`
+	RequiredNodeClass string               `json:"required_node_class,omitempty"`
+	AchievedZones     uint32               `json:"achieved_zones"`
+	Nodes             []RegionalNodeStatus `json:"nodes"`
+}
+
 // ResourceStatus is intentionally small in the initial slice and never
 // implies that an unconnected data plane has achieved the requested state.
 type ResourceStatus struct {
-	Phase              ResourcePhase  `json:"phase"`
-	ObservedGeneration uint64         `json:"observed_generation"`
-	Message            string         `json:"message,omitempty"`
-	Tablets            []TabletStatus `json:"tablets,omitempty"`
+	Phase              ResourcePhase    `json:"phase"`
+	ObservedGeneration uint64           `json:"observed_generation"`
+	ObservedShardCount uint32           `json:"observed_shard_count,omitempty"`
+	Message            string           `json:"message,omitempty"`
+	Tablets            []TabletStatus   `json:"tablets,omitempty"`
+	Placement          *PlacementStatus `json:"placement,omitempty"`
 }
 
 // Resource is the registry's immutable response value.
@@ -776,14 +801,26 @@ func cloneResource(resource Resource) Resource {
 func cloneStatus(status ResourceStatus) ResourceStatus {
 	if len(status.Tablets) == 0 {
 		status.Tablets = nil
-		return status
+	} else {
+		status.Tablets = append([]TabletStatus(nil), status.Tablets...)
+		for index := range status.Tablets {
+			status.Tablets[index].VoterNodeIDs = append(
+				[]uint64(nil),
+				status.Tablets[index].VoterNodeIDs...,
+			)
+		}
 	}
-	status.Tablets = append([]TabletStatus(nil), status.Tablets...)
-	for index := range status.Tablets {
-		status.Tablets[index].VoterNodeIDs = append(
-			[]uint64(nil),
-			status.Tablets[index].VoterNodeIDs...,
-		)
+	if status.Placement != nil {
+		placement := *status.Placement
+		placement.AllowedRegions = append([]string(nil), placement.AllowedRegions...)
+		placement.Nodes = append([]RegionalNodeStatus(nil), placement.Nodes...)
+		for index := range placement.Nodes {
+			placement.Nodes[index].ConsensusVoterNodeIDs = append(
+				[]uint64(nil),
+				placement.Nodes[index].ConsensusVoterNodeIDs...,
+			)
+		}
+		status.Placement = &placement
 	}
 	return status
 }
@@ -791,7 +828,9 @@ func cloneStatus(status ResourceStatus) ResourceStatus {
 func statusEqual(left, right ResourceStatus) bool {
 	if left.Phase != right.Phase ||
 		left.ObservedGeneration != right.ObservedGeneration ||
+		left.ObservedShardCount != right.ObservedShardCount ||
 		left.Message != right.Message ||
+		!placementStatusEqual(left.Placement, right.Placement) ||
 		len(left.Tablets) != len(right.Tablets) {
 		return false
 	}
@@ -817,6 +856,39 @@ func statusEqual(left, right ResourceStatus) bool {
 	return true
 }
 
+func placementStatusEqual(left, right *PlacementStatus) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	if left.MinimumZones != right.MinimumZones ||
+		left.RequiredNodeClass != right.RequiredNodeClass ||
+		left.AchievedZones != right.AchievedZones ||
+		len(left.AllowedRegions) != len(right.AllowedRegions) ||
+		len(left.Nodes) != len(right.Nodes) {
+		return false
+	}
+	for index := range left.AllowedRegions {
+		if left.AllowedRegions[index] != right.AllowedRegions[index] {
+			return false
+		}
+	}
+	for index := range left.Nodes {
+		leftNode := left.Nodes[index]
+		rightNode := right.Nodes[index]
+		if leftNode.NodeID != rightNode.NodeID ||
+			leftNode.Region != rightNode.Region ||
+			leftNode.Zone != rightNode.Zone ||
+			leftNode.NodeClass != rightNode.NodeClass ||
+			leftNode.MaxConsensusGroups != rightNode.MaxConsensusGroups ||
+			leftNode.UsedConsensusGroups != rightNode.UsedConsensusGroups ||
+			leftNode.AvailableConsensusGroups != rightNode.AvailableConsensusGroups ||
+			!slices.Equal(leftNode.ConsensusVoterNodeIDs, rightNode.ConsensusVoterNodeIDs) {
+			return false
+		}
+	}
+	return true
+}
+
 func validateStatus(status ResourceStatus, desiredGeneration uint64) error {
 	switch status.Phase {
 	case PhasePending, PhaseReady, PhaseDegraded, PhaseFailed:
@@ -828,6 +900,15 @@ func validateStatus(status ResourceStatus, desiredGeneration uint64) error {
 	}
 	if status.Phase == PhaseReady && status.ObservedGeneration != desiredGeneration {
 		return invalid("ready status must observe the current desired generation")
+	}
+	if status.ObservedShardCount != 0 &&
+		status.ObservedShardCount < uint32(len(status.Tablets)) {
+		return invalid("observed shard count cannot be smaller than the reported tablet set")
+	}
+	if status.Placement != nil {
+		if err := validatePlacementStatus(*status.Placement); err != nil {
+			return err
+		}
 	}
 	tabletIDs := make(map[uint64]struct{}, len(status.Tablets))
 	groupIDs := make(map[uint64]struct{}, len(status.Tablets))
@@ -869,6 +950,80 @@ func validateStatus(status ResourceStatus, desiredGeneration uint64) error {
 		}
 	}
 	return nil
+}
+
+func validatePlacementStatus(status PlacementStatus) error {
+	if status.MinimumZones == 0 ||
+		status.AchievedZones < status.MinimumZones ||
+		len(status.Nodes) == 0 {
+		return invalid("placement status must contain satisfied zone and node evidence")
+	}
+	if status.RequiredNodeClass != "" && !validPlacementLabel(status.RequiredNodeClass) {
+		return invalid("placement status contains an invalid required node class")
+	}
+	regions := make(map[string]struct{}, len(status.AllowedRegions))
+	for _, region := range status.AllowedRegions {
+		if !validPlacementLabel(region) {
+			return invalid("placement status contains an invalid allowed region")
+		}
+		if _, duplicate := regions[region]; duplicate {
+			return invalid("placement status allowed regions must be unique")
+		}
+		regions[region] = struct{}{}
+	}
+	nodes := make(map[uint64]struct{}, len(status.Nodes))
+	zones := make(map[string]struct{}, len(status.Nodes))
+	for _, node := range status.Nodes {
+		if node.NodeID == 0 {
+			return invalid("placement node IDs must be non-zero")
+		}
+		if _, duplicate := nodes[node.NodeID]; duplicate {
+			return invalid("placement node IDs must be unique")
+		}
+		nodes[node.NodeID] = struct{}{}
+		if !validPlacementLabel(node.Region) ||
+			!validPlacementLabel(node.Zone) ||
+			!validPlacementLabel(node.NodeClass) {
+			return invalid("placement node contains an invalid topology label")
+		}
+		if node.MaxConsensusGroups == 0 ||
+			node.UsedConsensusGroups > node.MaxConsensusGroups ||
+			node.AvailableConsensusGroups != node.MaxConsensusGroups-node.UsedConsensusGroups {
+			return invalid("placement node contains inconsistent group capacity")
+		}
+		voters := make(map[uint64]struct{}, len(node.ConsensusVoterNodeIDs))
+		for _, voter := range node.ConsensusVoterNodeIDs {
+			if voter == 0 {
+				return invalid("placement voter IDs must be non-zero")
+			}
+			if _, duplicate := voters[voter]; duplicate {
+				return invalid("placement voter IDs must be unique")
+			}
+			voters[voter] = struct{}{}
+		}
+		zones[node.Zone] = struct{}{}
+	}
+	if status.AchievedZones != uint32(len(zones)) {
+		return invalid("placement achieved zones must match distinct node zones")
+	}
+	return nil
+}
+
+func validPlacementLabel(value string) bool {
+	if value == "" || len(value) > 63 {
+		return false
+	}
+	for index := range len(value) {
+		character := value[index]
+		if (character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') ||
+			(index > 0 && (character == '.' || character == '_' || character == '-')) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func cloneLabels(labels map[string]string) map[string]string {

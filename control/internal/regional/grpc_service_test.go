@@ -233,6 +233,11 @@ func applyProtoRequest(
 			Replicas:        3,
 			Labels:          map[string]string{"owner": "integration"},
 			Configuration:   configuration,
+			Placement: &epochv1.PlacementPolicy{
+				AllowedRegions:    []string{"ap-south"},
+				MinimumZones:      3,
+				RequiredNodeClass: "general-purpose",
+			},
 		},
 		ExpectedGeneration: uint64Pointer(0),
 	}
@@ -249,6 +254,12 @@ func assertProtoReady(t *testing.T, resource *epochv1.Resource, tablets int) {
 	tablet := resource.GetStatus().GetTablets()[0]
 	if len(tablet.GetVoterNodeIds()) != 3 || tablet.GetLeaderNodeId() == 0 {
 		t.Fatalf("tablet placement = %+v", tablet)
+	}
+	placement := resource.GetStatus().GetPlacement()
+	if placement.GetMinimumZones() != 3 ||
+		placement.GetAchievedZones() != 3 ||
+		len(placement.GetNodes()) != 3 {
+		t.Fatalf("achieved topology = %+v", placement)
 	}
 }
 

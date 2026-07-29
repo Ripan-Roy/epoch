@@ -46,6 +46,7 @@ const (
 	ActionResourceDelete Action = "resource.delete"
 	ActionResourceRead   Action = "resource.read"
 	ActionRouteRead      Action = "route.read"
+	ActionTopologyRead   Action = "topology.read"
 )
 
 var validActions = map[Action]struct{}{
@@ -58,6 +59,7 @@ var validActions = map[Action]struct{}{
 	ActionResourceDelete: {},
 	ActionResourceRead:   {},
 	ActionRouteRead:      {},
+	ActionTopologyRead:   {},
 }
 
 // Scope identifies the tenant hierarchy evaluated by one authorization
