@@ -335,6 +335,8 @@ func (authority *HTTPAuthority) requestAny(
 		switch {
 		case status >= 200 && status < 300:
 			return response, nil
+		case status == http.StatusConflict && authorityErrorCode(response) == "not_leader":
+			failures = append(failures, authorityErrorMessage(response, status))
 		case status == http.StatusConflict:
 			return nil, conflictError(authorityErrorMessage(response, status))
 		case status == http.StatusBadRequest || status == http.StatusUnprocessableEntity:
@@ -350,6 +352,16 @@ func (authority *HTTPAuthority) requestAny(
 	return nil, availabilityError(
 		"no regional authority endpoint completed the request: " + strings.Join(failures, "; "),
 	)
+}
+
+func authorityErrorCode(encoded []byte) string {
+	var body struct {
+		Code string `json:"code"`
+	}
+	if json.Unmarshal(encoded, &body) != nil {
+		return ""
+	}
+	return body.Code
 }
 
 func (authority *HTTPAuthority) requestEndpoint(

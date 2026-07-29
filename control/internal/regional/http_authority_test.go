@@ -23,7 +23,7 @@ func TestHTTPAuthorityAppliesThroughAvailableNodeAndObservesPlacement(t *testing
 			switch {
 			case request.Method == http.MethodPut:
 				if node == 1 {
-					writeAuthorityJSON(writer, http.StatusServiceUnavailable, map[string]any{
+					writeAuthorityJSON(writer, http.StatusConflict, map[string]any{
 						"code": "not_leader", "message": "retry another node",
 					})
 					return
@@ -76,6 +76,33 @@ func TestHTTPAuthorityAppliesThroughAvailableNodeAndObservesPlacement(t *testing
 		if !slices.Equal(tablet.VoterNodeIDs, []uint64{1, 2, 3}) || tablet.LeaderNodeID != 2 {
 			t.Fatalf("tablet placement = %+v", tablet)
 		}
+	}
+}
+
+func TestHTTPAuthorityClassifiesFollowerResponsesAsRetryable(t *testing.T) {
+	servers := make([]*httptest.Server, 0, 2)
+	for range 2 {
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			writeAuthorityJSON(writer, http.StatusConflict, map[string]any{
+				"code": "not_leader", "message": "leader election is in progress",
+			})
+		}))
+		servers = append(servers, server)
+		t.Cleanup(server.Close)
+	}
+	authority, err := NewHTTPAuthority(serverURLs(servers), nil)
+	if err != nil {
+		t.Fatalf("NewHTTPAuthority() error = %v", err)
+	}
+
+	_, err = authority.Apply(t.Context(), AuthorityApplyRequest{
+		RequestToken: "apply-during-election",
+		Key:          regionalKey(resources.KindStream, "orders"),
+		ShardCount:   1,
+		ReplicaCount: 3,
+	})
+	if err == nil || !IsRetryable(err) {
+		t.Fatalf("Apply() error = %v, want retryable follower response", err)
 	}
 }
 

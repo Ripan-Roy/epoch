@@ -32,6 +32,13 @@ notes explicitly list additional verified artifacts.
 - A table-based delivery checklist covering program gates, milestone readiness,
   the active multi-tablet slice, pull-request quality gates, and releases.
 
+### Fixed
+
+- Go regional reconciliation now retries a catalog mutation against the other
+  configured nodes when a follower returns `409 not_leader`, while preserving
+  definitive generation conflicts. Regional container failures also retain the
+  last browser inventory response for actionable CI evidence.
+
 ### Limitations
 
 - Regional placement is fixed to three configured voters; zone/rack constraints,

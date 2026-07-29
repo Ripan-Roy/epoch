@@ -405,13 +405,20 @@ def wait_for_managed_placement(
     expected_voters: int,
 ) -> dict[str, Any]:
     canonical_name = f"acme/shop/dev/core/{resource.kind}/{resource.name}"
+    last_inventory: dict[str, Any] | None = None
 
     def observed() -> dict[str, Any] | None:
+        nonlocal last_inventory
         response = cluster.control_request(
             "GET",
             "/v1/regional/resources",
             headers={"origin": "https://console.example.test"},
         )
+        last_inventory = {
+            "status": response.status,
+            "cors_origin": response.headers.get("Access-Control-Allow-Origin"),
+            "document": response.document,
+        }
         if (
             response.status != 200
             or response.headers.get("Access-Control-Allow-Origin")
@@ -467,10 +474,14 @@ def wait_for_managed_placement(
             return None
         return managed
 
-    return wait_until(
-        f"Go BFF to report {phase} placement for {resource.kind}/{resource.name}",
-        observed,
-    )
+    try:
+        return wait_until(
+            f"Go BFF to report {phase} placement for {resource.kind}/{resource.name}",
+            observed,
+        )
+    except AssertionError as error:
+        inventory = json.dumps(last_inventory, sort_keys=True, separators=(",", ":"))
+        raise AssertionError(f"{error}; last_inventory={inventory}") from error
 
 
 def wait_for_routes(
