@@ -249,6 +249,24 @@ owned state. The console uses `VITE_EPOCH_CONTROL_BASE_URL` and never receives
 Rust node URLs for regional placement. Node and control allowlists reject
 wildcards, paths, query strings, credentials, and non-HTTP(S) origins.
 
+Managed and regional alpha processes also require the shared bootstrap policy:
+
+- `EPOCH_AUTH_POLICY_PATH` points to a strict version-one JSON policy for both
+  `epoch-control` and a regional `epoch-node`.
+- `EPOCH_CONTROL_REGIONAL_TOKEN` supplies the Go service's raw regional
+  workload credential. Never print it, pass it on a command line, or commit a
+  non-fixture value.
+- HTTP uses `Authorization: Bearer ...`; RegionalAdmin gRPC uses the
+  `authorization` metadata key. Health and CORS preflight remain public.
+- The console obtains a token interactively and stores it only in
+  `sessionStorage`. There is intentionally no `VITE_*` token setting because
+  Vite values are compiled into the static bundle.
+
+The example policy and decision corpus under `spec/auth/` contain public
+development tokens. They are safe only for disposable loopback/Compose tests.
+Production OIDC, mTLS, secret injection, policy distribution, and immutable
+audit export remain open.
+
 For a fresh data directory, the standalone node stores its active engine
 journal in `$EPOCH_DATA_DIR/engine-wal/`. Files are named `segment-*.wal`; the
 default development paths therefore begin at `.epoch/engine-wal/` locally and
@@ -349,6 +367,8 @@ make compose-regional-config
 make compose-regional-up
 EPOCH_CONTROL_REGIONAL_ENDPOINTS=http://127.0.0.1:18661,http://127.0.0.1:18662,http://127.0.0.1:18663 \
 EPOCH_CONTROL_STATE_PATH=.epoch/control/registry.db \
+EPOCH_AUTH_POLICY_PATH=spec/auth/bootstrap-policy-v1.example.json \
+EPOCH_CONTROL_REGIONAL_TOKEN=epoch-dev-control-v1 \
   go run ./control/cmd/epoch-control
 VITE_EPOCH_CONTROL_BASE_URL=http://127.0.0.1:8080 \
   pnpm --filter @epoch/console dev
@@ -359,7 +379,8 @@ The Compose model enables `EPOCH_REGIONAL_RUNTIME_ENABLED`, reserves consensus
 group 1 for the catalog, shares one peer listener per node, caps the process at
 16 groups, and mounts one independent volume per voter. The default Go process
 connects to only `127.0.0.1:7601`; the example overrides it with all three
-published Compose node URLs. The console points only at the Go HTTP address.
+published Compose node URLs. The console points only at the Go HTTP address;
+enter `epoch-dev-admin-v1` in its managed-control credential panel.
 
 Run `make test-regional-runtime` for the disposable end-to-end campaign. It
 allocates its own ports/project/volumes, builds the Go control binary, creates a
@@ -368,10 +389,11 @@ process against the same metadata file, proves exact request replay, exercises
 all four typed profiles, kills one and then all Rust nodes, reopens the same
 volumes, and removes only its scoped resources. `epoch-catalog` remains
 independently testable with `cargo test -p epoch-catalog --all-targets`. Dynamic
-membership, zone-aware placement, authentication, snapshots, and read barriers
-remain subsequent slices; see
+membership, zone-aware placement, production identity/TLS, snapshots, and read
+barriers remain subsequent slices; see
 [ADR-0009](adr/0009-regional-tablet-catalog.md) and
-[ADR-0010](adr/0010-durable-managed-metadata.md).
+[ADR-0010](adr/0010-durable-managed-metadata.md), plus the bootstrap security
+boundary in [ADR-0011](adr/0011-bootstrap-authz-audit-baseline.md).
 
 To discard local data, explicitly add `--volumes` to the Compose down command.
 That is destructive and is intentionally not part of the Make target.

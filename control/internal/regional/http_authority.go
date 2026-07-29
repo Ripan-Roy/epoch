@@ -16,19 +16,45 @@ import (
 	"epoch.local/epoch/control/internal/resources"
 )
 
-const maxAuthorityResponseBytes = 1 << 20
+const (
+	maxAuthorityResponseBytes = 1 << 20
+	maxAuthorityBearerBytes   = 4 << 10
+)
 
 // HTTPAuthority adapts the current Rust regional catalog and discovery routes
 // to the Go reconciliation boundary.
 type HTTPAuthority struct {
-	endpoints []*url.URL
-	client    *http.Client
+	endpoints   []*url.URL
+	client      *http.Client
+	bearerToken string
 }
 
 // NewHTTPAuthority validates an explicit regional-node allowlist. Redirects
 // are never followed because a catalog node cannot delegate authority to an
 // unconfigured host.
 func NewHTTPAuthority(endpoints []string, client *http.Client) (*HTTPAuthority, error) {
+	return newHTTPAuthority(endpoints, client, "")
+}
+
+// NewAuthenticatedHTTPAuthority constructs the managed-control adapter with a
+// bootstrap workload credential. The raw credential is held only in memory
+// and is never included in errors or response diagnostics.
+func NewAuthenticatedHTTPAuthority(
+	endpoints []string,
+	client *http.Client,
+	bearerToken string,
+) (*HTTPAuthority, error) {
+	if !validAuthorityBearer(bearerToken) {
+		return nil, fmt.Errorf("regional authority bearer token is invalid")
+	}
+	return newHTTPAuthority(endpoints, client, bearerToken)
+}
+
+func newHTTPAuthority(
+	endpoints []string,
+	client *http.Client,
+	bearerToken string,
+) (*HTTPAuthority, error) {
 	if len(endpoints) == 0 {
 		return nil, fmt.Errorf("regional authority requires at least one endpoint")
 	}
@@ -59,7 +85,23 @@ func NewHTTPAuthority(endpoints []string, client *http.Client) (*HTTPAuthority, 
 	safeClient.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
-	return &HTTPAuthority{endpoints: parsed, client: &safeClient}, nil
+	return &HTTPAuthority{
+		endpoints:   parsed,
+		client:      &safeClient,
+		bearerToken: bearerToken,
+	}, nil
+}
+
+func validAuthorityBearer(token string) bool {
+	if token == "" || len(token) > maxAuthorityBearerBytes {
+		return false
+	}
+	for _, character := range token {
+		if character < 0x21 || character > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 func validAuthorityEndpoint(endpoint *url.URL) bool {
@@ -382,6 +424,9 @@ func (authority *HTTPAuthority) requestEndpoint(
 		return nil, 0, err
 	}
 	request.Header.Set("accept", "application/json")
+	if authority.bearerToken != "" {
+		request.Header.Set("authorization", "Bearer "+authority.bearerToken)
+	}
 	if body != nil {
 		request.Header.Set("content-type", "application/json")
 	}

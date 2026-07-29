@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	controlauth "epoch.local/epoch/control/internal/auth"
 	"epoch.local/epoch/control/internal/regional"
 	"epoch.local/epoch/control/internal/resources"
 	epochv1 "epoch.local/epoch/sdk/go/gen/epoch/v1"
@@ -37,7 +38,20 @@ type controlConfig struct {
 	regionalEndpoints []string
 	allowedOrigins    []string
 	statePath         string
+	authPolicyPath    string
+	regionalToken     secret
 	reconcileInterval time.Duration
+}
+
+// secret prevents accidental credential disclosure through config formatting.
+type secret string
+
+func (secret) String() string {
+	return "[redacted]"
+}
+
+func (secret) GoString() string {
+	return "[redacted]"
 }
 
 func main() {
@@ -59,7 +73,16 @@ func run(ctx context.Context, logger *slog.Logger) (runError error) {
 	if err != nil {
 		return err
 	}
-	authority, err := regional.NewHTTPAuthority(config.regionalEndpoints, nil)
+	policy, err := controlauth.LoadPolicy(config.authPolicyPath)
+	if err != nil {
+		return fmt.Errorf("load bootstrap auth policy: %w", err)
+	}
+	audit := controlauth.NewSlogAuditSink(logger)
+	authority, err := regional.NewAuthenticatedHTTPAuthority(
+		config.regionalEndpoints,
+		nil,
+		string(config.regionalToken),
+	)
 	if err != nil {
 		return err
 	}
@@ -71,12 +94,24 @@ func run(ctx context.Context, logger *slog.Logger) (runError error) {
 		runError = errors.Join(runError, registry.Close())
 	}()
 	reconciler := regional.NewReconciler(registry, authority)
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(
+		controlauth.NewUnaryServerInterceptor(policy, audit),
+	))
 	epochv1.RegisterRegionalAdminServiceServer(
 		grpcServer,
-		regional.NewRegionalAdminServer(registry, reconciler),
+		regional.NewAuthenticatedRegionalAdminServer(
+			registry,
+			reconciler,
+			policy,
+			audit,
+		),
 	)
-	httpHandler, err := resources.NewHTTPHandlerWithOrigins(registry, config.allowedOrigins)
+	httpHandler, err := resources.NewAuthenticatedHTTPHandler(
+		registry,
+		config.allowedOrigins,
+		policy,
+		audit,
+	)
 	if err != nil {
 		return fmt.Errorf("configure control HTTP: %w", err)
 	}
@@ -123,6 +158,8 @@ func run(ctx context.Context, logger *slog.Logger) (runError error) {
 		config.allowedOrigins,
 		"registry",
 		registry.Mode(),
+		"auth_policy_id",
+		policy.ID(),
 		"data_path_owner",
 		"rust",
 	)
@@ -181,12 +218,20 @@ func loadConfig() (controlConfig, error) {
 			envOrDefault("EPOCH_CONTROL_ALLOWED_ORIGINS", defaultAllowedOrigins),
 		),
 		statePath:         envOrDefault("EPOCH_CONTROL_STATE_PATH", defaultStatePath),
+		authPolicyPath:    strings.TrimSpace(os.Getenv("EPOCH_AUTH_POLICY_PATH")),
+		regionalToken:     secret(os.Getenv("EPOCH_CONTROL_REGIONAL_TOKEN")),
 		reconcileInterval: defaultReconcileInterval,
 	}
 	if len(config.regionalEndpoints) == 0 {
 		return controlConfig{}, fmt.Errorf(
 			"EPOCH_CONTROL_REGIONAL_ENDPOINTS must contain at least one endpoint",
 		)
+	}
+	if config.authPolicyPath == "" {
+		return controlConfig{}, fmt.Errorf("EPOCH_AUTH_POLICY_PATH is required")
+	}
+	if strings.TrimSpace(string(config.regionalToken)) == "" {
+		return controlConfig{}, fmt.Errorf("EPOCH_CONTROL_REGIONAL_TOKEN is required")
 	}
 	if raw := strings.TrimSpace(os.Getenv("EPOCH_CONTROL_RECONCILE_INTERVAL")); raw != "" {
 		interval, err := time.ParseDuration(raw)

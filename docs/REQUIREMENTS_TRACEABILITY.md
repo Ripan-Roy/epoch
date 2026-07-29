@@ -54,6 +54,15 @@ partial G10 evidence only: licensing, signed binaries, SBOM/provenance,
 registry packages, installation matrices, migration support, and production
 support limits remain open.
 
+The bootstrap trust slice supplies partial G5 evidence. Go and Rust parse the
+same bounded fingerprint-only policy and decision corpus; managed HTTP/gRPC and
+regional catalog/route/data boundaries fail closed, authorize explicit
+action/scope, filter cross-tenant collections, and emit credential-free
+structured decisions. This is not G5 completion: OIDC, credential
+expiry/revocation, TLS/mTLS and peer identity, replicated policy, encryption,
+immutable audit export, telemetry, quotas, and production security operations
+remain open.
+
 The segmented standalone WAL supplies partial G2 evidence: configured physical
 rotation, checksummed v1 frames, single-writer ownership, global sequence
 validation, manifest-bounded active-suffix repair, restart replay, durable
@@ -195,10 +204,10 @@ durability.
 | MGD-005 | P1 | Geo DR, switch, promotion, failback | M4 → M5 | Planned | G3, G8, G9 | Pending: RPO/RTO and split-brain drill |
 | MGD-006 | P1 | Backup, validation, semantic PITR | M3 | Planned | G2, G5, G7, G8 | Pending: scheduled restore evidence |
 | MGD-007 | P1 | Guarded rolling upgrades | M5 | Planned | G3, G5, G6, G8, G10 | Pending: mixed-version stop/rollback drill |
-| MGD-008 | P0 | Unified workload identity and authorization | M4 | Planned | G0, G5, G6 | Pending: authorization differential matrix |
+| MGD-008 | P0 | Unified workload identity and authorization | M2 baseline → M4 | Slice | G0, G5, G6 | A shared strict fingerprint-only bootstrap policy authenticates Go HTTP/gRPC, Go-to-Rust workload calls, and Rust regional HTTP; explicit actions plus organization/project/environment/namespace scopes fail closed and one Go/Rust corpus prevents evaluator drift. Pending: OIDC, short-lived/revocable credentials, mTLS/peer identity, replicated policy/ACLs, compatibility-protocol mapping, and the full authorization differential matrix |
 | MGD-009 | P1 | Private ingress and controlled egress | M4 | Planned | G5, G8 | Pending: cloud connectivity/isolation report |
 | MGD-010 | P0 | Transit/at-rest encryption and managed keys | M4 | Planned | G2, G5, G8 | Pending: TLS/storage/rotation report |
-| MGD-011 | P0 | Immutable audit and history export | M1 basics → M4 | Slice | G2, G5, G8 | Pending: required-event/export reconciliation |
+| MGD-011 | P0 | Immutable audit and history export | M1 basics → M4 | Slice | G2, G5, G8 | Go and Rust emit bounded structured authentication/authorization decisions with request/principal/policy/action/decision/reason/scope fields and no credential/payload field; pending: durable append-only storage, required-event completeness, tenant access history, integrity/retention, export, and delivery-failure reconciliation |
 | MGD-012 | P0 | Telemetry, dashboards, alerts, OTel | M1 basics → M2 | Slice | G1, G5 | Pending: golden-signal and alert fault suite |
 | MGD-013 | P1 | Metering, budget, quotas, anomaly alerts | M4 → M5 | Planned | G5, G8 | Pending: raw-usage/billing reconciliation |
 | MGD-014 | P0 | CLI, core SDKs, emulator, operator | M1 core → M2 | Slice | G1, G5, G10 | Pending: artifact/lifecycle/e2e matrix |
@@ -210,7 +219,7 @@ durability.
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
-| CTRL-001 | P0 | Idempotent declarative resource API | M1 → M2 | Slice | G0, G1, G3 | Generated RegionalAdmin gRPC Apply/Get/List/Delete, transactionally persisted apply/delete outcomes, exact replay across Go `SIGKILL`, token-rebinding rejection, Rust catalog replay, disconnect/reconnect, conflict mapping, and real Go-to-Rust apply pass; pending: authorization, long-running operation lookup, multi-instance ownership, and an advertised unknown-outcome/token-retention report |
+| CTRL-001 | P0 | Idempotent declarative resource API | M1 → M2 | Slice | G0, G1, G3 | Generated RegionalAdmin gRPC Apply/Get/List/Delete, scoped bootstrap authorization, transactionally persisted apply/delete outcomes, exact replay across Go `SIGKILL`, token-rebinding rejection, Rust catalog replay, disconnect/reconnect, conflict mapping, and authenticated real Go-to-Rust apply pass; pending: long-running operation lookup, multi-instance ownership, and an advertised unknown-outcome/token-retention report |
 | CTRL-002 | P0 | Strong versioned metadata and OCC | M1 prototype → M2 | Slice | G0, G2, G3 | Monotonic Rust and Go generations, expected-generation conflicts, durable Go/Rust tombstones, generation-fenced status, browser-safe desired/observed generations, version/corruption fail-closed tests, and single-owner metadata recovery pass; pending: multi-instance linearizability, management leader election, watch/resume, migration/backup policy, and broader metadata recovery report |
 | CTRL-003 | P0 | Placement/residency/tenancy constraints | M2 | Planned | G0, G3, G5 | Pending: solver/admission corpus |
 | CTRL-004 | P0 | Safe topology and repair operations | M1 prototype → M2 | Slice | G2, G3, G5 | In-memory caught-up leader-transfer history; pending: membership, split/merge, repair/rebalance, persistent transition, and chaos evidence |
@@ -240,9 +249,9 @@ durability.
 | DX-001 | P0 | Official Go, Java, and Python SDKs | M1 one SDK → M2 | Slice | G0, G1, G4, G10 | Go/Java/Python HTTP unit + independent exact-source crash/restart quickstarts, including selectable local Stream/Queue durability, and Go generated bindings; pending: native streaming contract/version matrix for all three |
 | DX-002 | P0 | Generated guarantee-aware API docs | M1 → M2 | Slice | G0, G1, G10 | Hand-authored guarantee/error guidance and exact executable Go/Java/Python examples are built as a docs-only Pages artifact; pending: generated API reference and full doc lint |
 | DX-003 | P0 | Deterministic single-binary emulator | M1 → M2 | Slice | G1, G2, G4, G10 | Seeded scheduler, virtual clocks/fault plan/transport, golden EPTR history, fixed-voter consensus, real-process EPRS/SIGKILL, and typed Stream/Queue/Cache/Bus runtimes; pending: executable replay bundle and runnable emulator controls |
-| DX-004 | P0 | Test containers and ephemeral namespaces | M1 → M2 | Slice | G1, G5, G10 | A unique three-node Compose project uses independent ephemeral volumes and dynamic loopback ports, builds a real Go control binary, proves Go `SIGKILL`/metadata reopen/exact replay plus Go-to-Rust apply/BFF and simultaneous four-profile failover/catch-up/all-node recovery, captures scoped failure evidence, and cleans only its own resources; pending: parallel campaigns, broader lifecycle/isolation, and injected disk/network matrices |
+| DX-004 | P0 | Test containers and ephemeral namespaces | M1 → M2 | Slice | G1, G5, G10 | A unique three-node Compose project uses independent ephemeral volumes, dynamic loopback ports, and mounted bootstrap policy; it builds a real Go control binary and proves authenticated Go `SIGKILL`/metadata reopen/exact replay plus service-authenticated Go-to-Rust apply/BFF and simultaneous four-profile failover/catch-up/all-node recovery, captures scoped failure evidence, and cleans only its own resources; pending: parallel campaigns, broader lifecycle/isolation, and injected disk/network matrices |
 | DX-005 | P1 | Audited/redacted console message browser | M3 → M4 | Planned | G5, G7, G8 | Pending: access/redaction/action audit matrix |
-| DX-006 | P0 | Explain live guarantees and cost drivers | M1 basic → M2 | Slice | G0, G3, G5 | The TypeScript console consumes only the Go BFF and displays desired versus observed generation, pending/ready/degraded/failed phase, per-shard observed voters/leader, missing placement, and explicit unverified zone/rack risk; pending: achieved durability/cost inputs, authenticated access, browser accessibility evidence, and historical topology context |
+| DX-006 | P0 | Explain live guarantees and cost drivers | M1 basic → M2 | Slice | G0, G3, G5 | The TypeScript console consumes only the Go BFF with an interactively entered session-only bearer, displays desired versus observed generation, pending/ready/degraded/failed phase, per-shard observed voters/leader, missing placement, and explicit unverified zone/rack risk; pending: OIDC/session exchange, achieved durability/cost inputs, browser accessibility evidence, and historical topology context |
 | DX-007 | P1 | Compatibility usage scanner | M3 | Planned | G0, G6 | Pending: unsupported-feature fixture corpus |
 | DX-008 | P1 | End-to-end event trace | M4 | Planned | G1, G4, G5, G7 | Pending: trace/history reconciliation |
 | DX-009 | P1 | TypeScript, Rust, .NET SDKs | M3 | Planned | G0, G1, G6, G10 | Pending: multi-language client matrix |

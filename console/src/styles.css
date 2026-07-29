@@ -371,6 +371,50 @@ h3 {
   background: rgb(75 50 29 / 0.5);
 }
 
+.credential-panel {
+  display: grid;
+  grid-template-columns: minmax(15rem, 1fr) minmax(14rem, 22rem) auto auto;
+  align-items: center;
+  gap: 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  margin-bottom: 1rem;
+  padding: 0.9rem 1rem;
+  background: var(--surface);
+}
+
+.credential-panel strong,
+.credential-panel span {
+  display: block;
+}
+
+.credential-panel span {
+  margin-top: 0.2rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.credential-field input {
+  width: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 0.7rem 0.8rem;
+  color: var(--ink);
+  background: var(--canvas);
+}
+
+.credential-field input:focus {
+  border-color: var(--mint);
+  outline: 2px solid rgb(105 214 172 / 0.16);
+  outline-offset: 1px;
+}
+
+.credential-panel__error {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
 .status-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -899,6 +943,10 @@ footer {
 }
 
 @media (max-width: 960px) {
+  .credential-panel {
+    grid-template-columns: 1fr minmax(12rem, 1fr) auto auto;
+  }
+
   .status-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -956,6 +1004,11 @@ footer {
   .callout {
     grid-template-columns: 1fr;
     align-items: start;
+  }
+
+  .credential-panel {
+    grid-template-columns: 1fr;
+    align-items: stretch;
   }
 
   .status-grid {

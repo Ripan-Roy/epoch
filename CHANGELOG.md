@@ -6,7 +6,30 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
-No changes yet.
+### Added
+
+- A strict version-one bootstrap identity policy shared by Go and Rust, with
+  SHA-256 token fingerprints, explicit actions, hierarchical tenant scopes, a
+  JSON Schema, and a cross-language decision corpus.
+- Deny-by-default bearer authentication and scoped authorization for the Go
+  managed HTTP/gRPC APIs, the Go-to-Rust authority path, and Rust regional
+  catalog/route/data endpoints. Collection reads filter unauthorized tenant
+  records.
+- Bounded structured authorization decisions with request, principal, policy,
+  action, decision, reason, and scope fields but no credential or payload
+  field.
+- A session-only managed-control credential flow in the console, authenticated
+  real-process/container recovery tests, ADR-0011, and end-to-end operator
+  documentation.
+
+### Limitations
+
+- The bootstrap policy uses public long-lived development fixtures in the
+  checked-in examples. OIDC, expiry/revocation, TLS/mTLS and peer identity,
+  replicated/hot-reloaded policy, encryption, immutable audit export, quotas,
+  and production secret delivery remain unimplemented.
+- The standalone local-emulator API and consensus peer listener remain
+  unauthenticated.
 
 ## [0.1.0-alpha.3] - 2026-07-29
 

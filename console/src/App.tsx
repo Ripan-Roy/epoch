@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 
 import {
   apiBaseUrl,
@@ -8,6 +8,11 @@ import {
   listRegionalResources,
   listResources,
 } from "./api/client";
+import {
+  clearBrowserManagedToken,
+  loadBrowserManagedToken,
+  saveBrowserManagedToken,
+} from "./api/managedAuth";
 import type {
   CreateResourceInput,
   DurabilityProfile,
@@ -93,6 +98,11 @@ function EpochApp() {
   const [regionalError, setRegionalError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [lastChecked, setLastChecked] = useState<Date | null>(null);
+  const [managedTokenDraft, setManagedTokenDraft] = useState("");
+  const [managedCredentialConfigured, setManagedCredentialConfigured] = useState(
+    () => loadBrowserManagedToken() !== null,
+  );
+  const [managedCredentialError, setManagedCredentialError] = useState<string | null>(null);
 
   const loadOverview = useCallback(async (quiet = false) => {
     if (!quiet) {
@@ -173,6 +183,29 @@ function EpochApp() {
       `${profileLabel(input.profile)} “${created.name}” created at resource epoch ${created.resource_epoch}.`,
     );
     await loadOverview(true);
+  }
+
+  async function handleManagedCredential(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    try {
+      saveBrowserManagedToken(managedTokenDraft);
+      setManagedTokenDraft("");
+      setManagedCredentialConfigured(true);
+      setManagedCredentialError(null);
+      await loadOverview();
+    } catch (error) {
+      setManagedCredentialError(
+        error instanceof Error ? error.message : "The managed credential could not be stored.",
+      );
+    }
+  }
+
+  function handleClearManagedCredential() {
+    clearBrowserManagedToken();
+    setManagedCredentialConfigured(false);
+    setManagedCredentialError(null);
+    setRegionalResources([]);
+    setRegionalError("A managed-control bearer token is required.");
   }
 
   const connectionLabel = health ? formatEnum(health.status) : loading ? "Checking" : "Unavailable";
@@ -285,6 +318,41 @@ function EpochApp() {
                   never count as observed voters.
                 </p>
               </div>
+
+              <form className="credential-panel" onSubmit={(event) => void handleManagedCredential(event)}>
+                <div>
+                  <strong>Managed-control credential</strong>
+                  <span>
+                    Stored only in this browser tab session; it is never compiled into the console bundle.
+                  </span>
+                </div>
+                <label className="credential-field">
+                  <span className="sr-only">Managed-control bearer token</span>
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={managedTokenDraft}
+                    placeholder={managedCredentialConfigured ? "Replace session token" : "Bearer token"}
+                    onChange={(event) => {
+                      setManagedTokenDraft(event.target.value);
+                      setManagedCredentialError(null);
+                    }}
+                  />
+                </label>
+                <button className="button button--secondary" type="submit" disabled={!managedTokenDraft}>
+                  {managedCredentialConfigured ? "Replace" : "Connect"}
+                </button>
+                {managedCredentialConfigured ? (
+                  <button className="text-button" type="button" onClick={handleClearManagedCredential}>
+                    Clear
+                  </button>
+                ) : null}
+                {managedCredentialError ? (
+                  <span className="form-error credential-panel__error" role="alert">
+                    {managedCredentialError}
+                  </span>
+                ) : null}
+              </form>
 
               {regionalError ? (
                 <div className="callout callout--warning" role="status">

@@ -558,7 +558,9 @@ export function DocsPage({ section }: DocsPageProps) {
                     observed placement to the browser; the console never contacts a storage node. The public
                     SDK quickstart above remains standalone and <code>local_durable</code>. Fixed three-voter
                     evidence is not zone-aware placement, the Go metadata database has one process owner, and
-                    these regional routes remain experimental and unauthenticated.
+                    these regional routes remain experimental. Managed HTTP/gRPC and regional HTTP now require
+                    a shared deny-by-default bootstrap bearer policy, but that is not OIDC, TLS/mTLS,
+                    credential expiry/revocation, or immutable audit export.
                   </p>
                 </div>
               </div>
@@ -581,6 +583,14 @@ export function DocsPage({ section }: DocsPageProps) {
                   <p>
                     Control restart preserves exact retries; a full data-plane <code>SIGKILL</code> cycle
                     reopens the same EPRS volumes and profile digests.
+                  </p>
+                </article>
+                <article>
+                  <span>TRUST BASELINE</span>
+                  <strong>Go and Rust authorize the action at the parsed tenant scope.</strong>
+                  <p>
+                    Cross-tenant lists are filtered, Go uses a distinct Rust workload credential, and bounded
+                    decision logs contain no bearer value or payload.
                   </p>
                 </article>
               </div>

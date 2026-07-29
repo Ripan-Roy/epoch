@@ -575,9 +575,19 @@ second file owner. Health exposes the `bbolt_v1` mode, and the regional campaign
 kills and reopens the real Go process against the same database before proving
 exact replay and reconciliation.
 
+The managed HTTP/gRPC boundary and Rust regional HTTP boundary now share a
+strict bootstrap identity policy. Go authenticates browser/native management
+callers, authorizes the parsed tenant action before registry access, filters
+collection results, and presents a distinct service credential to Rust. Rust
+reauthenticates catalog, route, and typed data actions at the requested tenant
+scope. Both implementations emit bounded credential-free authorization
+decisions and pass one cross-language corpus. See
+[ADR-0011](adr/0011-bootstrap-authz-audit-baseline.md).
+
 This is durable single-process hosted metadata, not a replicated management
 database. Multi-instance linearizability, management leader election, backups,
-authorization, fleet automation, and an operator remain open.
+OIDC/mTLS identity, replicated policy, immutable audit export, fleet
+automation, and an operator remain open.
 
 ## 12. API contracts
 
@@ -705,7 +715,8 @@ The architecture is delivered through evidence-producing vertical slices:
 3. three-node catalog and replicated tablet with quorum/fencing;
 4. queue leases, acknowledgement, retry, scheduling, and DLQ;
 5. independent volatile cache path, then replicated and durable modes;
-6. regional operations, operator, auth, audit, backup, and migration;
+6. regional operations, operator, production identity, immutable audit export,
+   backup, and migration;
 7. named Kafka, RESP3, and AMQP compatibility subsets, schemas, compaction, and
    tiering;
 8. Event Bus, webhooks, MQTT, transforms, and connectors;

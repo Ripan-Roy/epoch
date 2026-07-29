@@ -1,0 +1,60 @@
+{
+  "format_version": 1,
+  "policy_id": "epoch-development-v1",
+  "principals": [
+    {
+      "id": "development-admin",
+      "token_sha256": "dae2068ce258900bd0cc8e0ae8f157c6b0980d562479f65bfb469ea433d7bc45",
+      "actions": [
+        "catalog.apply",
+        "catalog.delete",
+        "catalog.read",
+        "data.read",
+        "data.write",
+        "resource.apply",
+        "resource.delete",
+        "resource.read",
+        "route.read"
+      ],
+      "scope": {
+        "organization": "*",
+        "project": "*",
+        "environment": "*",
+        "namespace": "*"
+      }
+    },
+    {
+      "id": "development-reader",
+      "token_sha256": "c58211bf20aa73b352854e8ec5ae1f8b51c94930c541019c5c70f3361ad20a3e",
+      "actions": ["catalog.read", "data.read", "resource.read", "route.read"],
+      "scope": {
+        "organization": "acme",
+        "project": "payments",
+        "environment": "production",
+        "namespace": "orders"
+      }
+    },
+    {
+      "id": "epoch-control",
+      "token_sha256": "ec11cd10d83454a7791fb28a7dedbcfb5df752d2807b4db121449c8136ddcfd3",
+      "actions": ["catalog.apply", "catalog.delete", "catalog.read", "route.read"],
+      "scope": {
+        "organization": "*",
+        "project": "*",
+        "environment": "*",
+        "namespace": "*"
+      }
+    },
+    {
+      "id": "other-tenant-reader",
+      "token_sha256": "22e29b57b40833231d38abf3272109aaeb6a9037317d1d05a1c90de8454228e7",
+      "actions": ["resource.read"],
+      "scope": {
+        "organization": "otherco",
+        "project": "*",
+        "environment": "*",
+        "namespace": "*"
+      }
+    }
+  ]
+}

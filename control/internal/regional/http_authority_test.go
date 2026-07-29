@@ -208,6 +208,56 @@ func TestHTTPAuthorityDeletesWithGenerationFence(t *testing.T) {
 	}
 }
 
+func TestAuthenticatedHTTPAuthoritySendsBearerToEveryRegionalRequest(t *testing.T) {
+	const token = "regional-control-test-token"
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests++
+		if got := request.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Errorf("Authorization = %q", got)
+			writeAuthorityJSON(writer, http.StatusUnauthorized, map[string]any{
+				"code": "unauthenticated", "message": "bearer credential required",
+			})
+			return
+		}
+		if request.URL.Path == catalogResourcePath(regionalKey(resources.KindQueue, "jobs")) {
+			writeAuthorityJSON(writer, http.StatusOK, resourceDocument(1, 3))
+			return
+		}
+		writeAuthorityJSON(
+			writer,
+			http.StatusOK,
+			routeResponseDocument(1, 1, 1, request.URL.Path),
+		)
+	}))
+	t.Cleanup(server.Close)
+	authority, err := NewAuthenticatedHTTPAuthority([]string{server.URL}, nil, token)
+	if err != nil {
+		t.Fatalf("NewAuthenticatedHTTPAuthority() error = %v", err)
+	}
+	if _, err := authority.Observe(
+		t.Context(),
+		regionalKey(resources.KindQueue, "jobs"),
+	); err != nil {
+		t.Fatalf("Observe() error = %v", err)
+	}
+	if requests != 3 {
+		t.Fatalf("regional requests = %d, want catalog plus two routes", requests)
+	}
+}
+
+func TestAuthenticatedHTTPAuthorityRejectsUnsafeBearerTokens(t *testing.T) {
+	for _, token := range []string{"", " ", "contains whitespace", "contains\nnewline"} {
+		if _, err := NewAuthenticatedHTTPAuthority(
+			[]string{"http://127.0.0.1:7601"},
+			nil,
+			token,
+		); err == nil {
+			t.Fatalf("NewAuthenticatedHTTPAuthority(token=%q) succeeded", token)
+		}
+	}
+}
+
 func TestHTTPAuthorityRejectsUnsafeOrEmptyEndpoints(t *testing.T) {
 	for _, endpoints := range [][]string{
 		nil,

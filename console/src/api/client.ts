@@ -1,4 +1,5 @@
 import { mapRegionalInventory } from "../regionalPlacement";
+import { loadBrowserManagedToken } from "./managedAuth";
 import type {
   CreateResourceInput,
   EngineHealth,
@@ -120,9 +121,13 @@ export async function listRegionalResources(): Promise<RegionalResource[]> {
 
 async function requestControl<T>(path: string): Promise<T> {
   let response: Response;
+  const token = loadBrowserManagedToken();
   try {
     response = await fetch(`${controlBaseUrl}${path}`, {
-      headers: { Accept: "application/json" },
+      headers: {
+        Accept: "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
     });
   } catch (error) {
     const detail = error instanceof Error ? error.message : "connection failed";

@@ -25,6 +25,9 @@ FENCE_HEADERS = {
     "x-epoch-tablet-epoch": "1",
 }
 TIMEOUT_SECONDS = 30.0
+ADMIN_TOKEN = "epoch-dev-admin-v1"
+CONTROL_TOKEN = "epoch-dev-control-v1"
+AUTH_POLICY_PATH = REPO_ROOT / "spec/auth/bootstrap-policy-v1.example.json"
 
 
 @dataclass(frozen=True)
@@ -209,6 +212,8 @@ class RegionalCluster:
                 "EPOCH_CONTROL_ALLOWED_ORIGINS": "https://console.example.test",
                 "EPOCH_CONTROL_RECONCILE_INTERVAL": "100ms",
                 "EPOCH_CONTROL_STATE_PATH": str(self.control_state_path),
+                "EPOCH_AUTH_POLICY_PATH": str(AUTH_POLICY_PATH),
+                "EPOCH_CONTROL_REGIONAL_TOKEN": CONTROL_TOKEN,
             }
         )
         self.control_process = subprocess.Popen(
@@ -301,6 +306,8 @@ class RegionalCluster:
         headers: dict[str, str] | None = None,
     ) -> HttpResponse:
         request_headers = dict(headers or {})
+        if path.startswith("/experimental/v1/regional/"):
+            request_headers.setdefault("authorization", f"Bearer {ADMIN_TOKEN}")
         payload = None
         if body is not None:
             request_headers["content-type"] = "application/json"
@@ -336,6 +343,8 @@ class RegionalCluster:
         headers: dict[str, str] | None = None,
     ) -> HttpResponse:
         request_headers = dict(headers or {})
+        if path.startswith("/v1/"):
+            request_headers.setdefault("authorization", f"Bearer {ADMIN_TOKEN}")
         payload = None
         if body is not None:
             request_headers["content-type"] = "application/json"

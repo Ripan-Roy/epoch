@@ -12,6 +12,7 @@ use tempfile::TempDir;
 
 const NODE_COUNT: usize = 3;
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+const ADMIN_TOKEN: &str = "epoch-dev-admin-v1";
 
 struct NodeProcess {
     node_id: u64,
@@ -51,6 +52,11 @@ impl NodeProcess {
                 "--log",
                 "warn",
             ])
+            .env(
+                "EPOCH_AUTH_POLICY_PATH",
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../spec/auth/bootstrap-policy-v1.example.json"),
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
@@ -227,6 +233,7 @@ async fn create_resource(client: &Client, cluster: &ProcessCluster, kind: &str, 
             for node in &cluster.nodes {
                 let response = client
                     .put(catalog_resource_url(node, kind, name))
+                    .bearer_auth(ADMIN_TOKEN)
                     .json(&json!({
                         "request_token": request_token,
                         "expected_generation": "0",
@@ -264,6 +271,7 @@ async fn wait_for_routes(
             for &index in indexes {
                 let response = client
                     .get(route_url(&cluster.nodes[index], kind, name))
+                    .bearer_auth(ADMIN_TOKEN)
                     .send()
                     .await;
                 let Ok(response) = response else {
@@ -323,6 +331,7 @@ fn writable_route(routes: &[Value], indexes: &[usize]) -> (usize, u64) {
 async fn append_record(client: &Client, node: &NodeProcess, term: u64, id: u64) {
     let response = client
         .post(records_url(node))
+        .bearer_auth(ADMIN_TOKEN)
         .header("x-epoch-resource-generation", "1")
         .header("x-epoch-tablet-epoch", "1")
         .json(&json!({
@@ -425,6 +434,7 @@ async fn write_profile(
             let (operation, body) = profile_write(kind, term);
             let response = client
                 .post(data_url(&cluster.nodes[leader], kind, name, operation))
+                .bearer_auth(ADMIN_TOKEN)
                 .header("x-epoch-resource-generation", "1")
                 .header("x-epoch-tablet-epoch", "1")
                 .json(&body)
@@ -500,6 +510,7 @@ async fn wait_for_profile_apply(
             for &index in indexes {
                 let response = client
                     .get(data_url(&cluster.nodes[index], kind, name, "status"))
+                    .bearer_auth(ADMIN_TOKEN)
                     .header("x-epoch-resource-generation", "1")
                     .header("x-epoch-tablet-epoch", "1")
                     .send()
@@ -544,7 +555,11 @@ async fn wait_for_catalog_counts(client: &Client, cluster: &ProcessCluster, expe
         loop {
             let mut digests = Vec::new();
             for node in &cluster.nodes {
-                let response = client.get(catalog_url(node)).send().await;
+                let response = client
+                    .get(catalog_url(node))
+                    .bearer_auth(ADMIN_TOKEN)
+                    .send()
+                    .await;
                 let Ok(response) = response else {
                     digests.clear();
                     break;
@@ -597,6 +612,7 @@ async fn wait_for_record_count(
                         "{}?offset=0&limit=10",
                         records_url(&cluster.nodes[index])
                     ))
+                    .bearer_auth(ADMIN_TOKEN)
                     .header("x-epoch-resource-generation", "1")
                     .header("x-epoch-tablet-epoch", "1")
                     .send()
