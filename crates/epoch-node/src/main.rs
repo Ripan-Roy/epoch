@@ -34,6 +34,7 @@ const DEFAULT_ALLOWED_ORIGINS: &str =
 const DEFAULT_CONSENSUS_LISTEN: &str = "127.0.0.1:7701";
 const DEFAULT_CONSENSUS_TICK_MS: u64 = 100;
 const DEFAULT_REGIONAL_MAX_GROUPS: usize = 4_096;
+const DEFAULT_REGIONAL_READ_BARRIER_TIMEOUT_MS: u64 = 2_000;
 const SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
@@ -73,6 +74,13 @@ struct Args {
         default_value_t = DEFAULT_REGIONAL_MAX_GROUPS
     )]
     regional_max_groups: usize,
+    #[arg(
+        long,
+        env = "EPOCH_REGIONAL_READ_BARRIER_TIMEOUT_MS",
+        default_value_t = DEFAULT_REGIONAL_READ_BARRIER_TIMEOUT_MS,
+        value_parser = clap::value_parser!(u64).range(1..=60_000)
+    )]
+    regional_read_barrier_timeout_ms: u64,
     #[arg(long, env = "EPOCH_REGIONAL_REGION", default_value = "local")]
     regional_region: String,
     #[arg(long, env = "EPOCH_REGIONAL_ZONE", default_value = "local")]
@@ -174,6 +182,7 @@ struct RegionalRuntimeLaunch {
     data_dir: PathBuf,
     auth_policy_path: PathBuf,
     max_groups: usize,
+    read_barrier_timeout: Duration,
     topology: NodeTopology,
 }
 
@@ -280,7 +289,8 @@ async fn serve_regional_mode(
     let tick_interval = launch.config.tick_interval();
     let mut runtime = RegionalNodeRuntime::start(
         RegionalRuntimeConfig::new(launch.config, &launch.data_dir, launch.max_groups, clock)
-            .with_topology(launch.topology.clone()),
+            .with_topology(launch.topology.clone())
+            .with_read_barrier_timeout(launch.read_barrier_timeout),
     )
     .await?;
     let regional_public = with_public_http_layers(
@@ -295,6 +305,7 @@ async fn serve_regional_mode(
         %catalog_group_epoch,
         tick_ms = tick_interval.as_millis(),
         max_groups = launch.max_groups,
+        read_barrier_timeout_ms = launch.read_barrier_timeout.as_millis(),
         region = launch.topology.region(),
         zone = launch.topology.zone(),
         node_class = launch.topology.node_class(),
@@ -523,6 +534,7 @@ fn regional_runtime_launch(
         data_dir: args.data_dir.clone(),
         auth_policy_path,
         max_groups: args.regional_max_groups,
+        read_barrier_timeout: Duration::from_millis(args.regional_read_barrier_timeout_ms),
         topology,
     }))
 }
@@ -943,6 +955,8 @@ mod tests {
             "250",
             "--regional-max-groups",
             "64",
+            "--regional-read-barrier-timeout-ms",
+            "750",
             "--regional-region",
             "ap-south",
             "--regional-zone",
@@ -966,6 +980,7 @@ mod tests {
             PathBuf::from("/etc/epoch/bootstrap-policy.json")
         );
         assert_eq!(launch.max_groups, 64);
+        assert_eq!(launch.read_barrier_timeout, Duration::from_millis(750));
         assert_eq!(launch.topology.node_id(), 2);
         assert_eq!(launch.topology.region(), "ap-south");
         assert_eq!(launch.topology.zone(), "ap-south-1b");

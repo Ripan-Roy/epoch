@@ -462,9 +462,7 @@ fn observation_and_mutation_metadata_are_browser_safe_and_local() {
         .apply(&set_counter("set-1", i64::MAX, 10, 4))
         .unwrap();
     let response = CacheTabletObservationResponse {
-        observation_scope: "local",
-        read_consistency: "local_profile_applied_stale_capable",
-        linearizable_read_barrier: false,
+        read: TabletReadMetadata::local_stale(),
         observation: service.observe("visits").unwrap(),
     };
     let observation = serde_json::to_value(response).unwrap();

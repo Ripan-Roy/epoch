@@ -129,8 +129,12 @@ Leader-local committed reads use:
 GET /experimental/v1/tablets/stream/records?offset=0&limit=100
 ```
 
-They are explicitly `local_profile_applied_stale_capable`; no linearizable read
-barrier exists yet. Status exposes `last_profile_mutation_index`, the Raft index
+Direct profile reads are explicitly
+`local_profile_applied_stale_capable`. The regional
+`.../shards/{shard}/data/records` boundary now defaults to a safe leader
+ReadIndex barrier and reports exact term/read/applied evidence; an explicit
+`x-epoch-read-consistency: local_stale` request preserves this direct local
+contract. Status exposes `last_profile_mutation_index`, the Raft index
 of the latest unique typed command reflected in the Stream. It is not a Raft
 applied watermark: election no-ops can make `consensus_applied_index` advance
 without changing it.
@@ -145,7 +149,7 @@ voter, so this is not durable-majority proof under a hostile network. Do not
 expose it to an untrusted network.
 
 It also has static membership, one group/resource, one partition, no snapshots,
-log compaction, retention deletion, read barrier, catalog-authorized epoch
+log compaction, retention deletion, follower read routing, catalog-authorized epoch
 transition, placement, authenticated peer identity, bounded idempotency
 retention, replica-progress/ISR contract, or exhaustive crash/I/O matrix.
 The three local voters are not placement or zone evidence, so the typed receipt

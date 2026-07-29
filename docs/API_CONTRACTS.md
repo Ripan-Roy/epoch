@@ -374,6 +374,7 @@ The implemented action mapping is:
 | Rust regional | Catalog GET | `catalog.read` |
 | Rust regional | Shard route GET | `route.read` |
 | Rust regional | Typed data GET | `data.read` |
+| Rust regional | Event Bus archive replay/delivery query POST | `data.read` |
 | Rust regional | Typed data mutation | `data.write` |
 
 Single-resource operations authorize the fully qualified
@@ -561,11 +562,34 @@ leader, term, resource generation, tablet/group IDs, and tablet epoch. Every
 
 Data dispatch is local and never silently forwards. It requires exact
 `x-epoch-resource-generation` and `x-epoch-tablet-epoch` headers, validates the
-materialized profile, and rejects stale fences or a nonleader before invoking
-the typed tablet router. These two headers are included in the node's
-exact-origin CORS allowlist, but the experimental route still has no
-authentication or TLS and must not be exposed as a production management
-surface.
+materialized profile, and rejects stale fences before invoking the typed tablet
+router. Mutations require the current leader. Reads default to a safe
+quorum-confirmed Raft `ReadIndex` on the current leader and complete only after
+the local typed profile applies through that index. Event Bus archive replay
+and delivery-query POSTs are semantic reads and require `data.read`.
+
+A caller may explicitly send
+`x-epoch-read-consistency: local_stale` to bypass the barrier and read the local
+profile. Epoch never silently downgrades the default. Successful linearizable
+responses return:
+
+```text
+x-epoch-read-consistency: linearizable
+x-epoch-read-index: <decimal Raft index>
+```
+
+The JSON body also reports `read_consistency`, `linearizable_read_barrier`,
+`read_barrier_term`, `read_barrier_index`, and
+`read_barrier_applied_index`. A bounded wait defaults to 2,000 ms and is set by
+`EPOCH_REGIONAL_READ_BARRIER_TIMEOUT_MS` from 1 through 60,000 ms; quorum timeout is retryable HTTP 503
+`read_barrier_timeout`. A follower or term race returns the existing retryable
+leader-routing conflict. Direct profile routes remain explicitly
+`local_profile_applied_stale_capable`.
+
+The fence and consistency headers are included in the node's exact-origin CORS
+allowlist. Regional HTTP is bootstrap-authenticated and action-authorized, but
+still lacks TLS/OIDC/mTLS server and peer identity; it must not be exposed as a
+production management or data surface.
 
 When explicitly enabled, a separate internal listener exposes the experimental
 fixed-voter consensus probe:
@@ -669,8 +693,10 @@ strings and serializes every signed or unsigned 64-bit output as a decimal
 string. It rejects unknown fields and duplicate collection members/keys before
 proposal, records deterministic business rejections as committed outcomes,
 replays exact semantic retries, and assigns committed-order effective time on
-the server. There is no linearizable read barrier, public gRPC route, or SDK
-commitment. See [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
+the server. This direct internal route has no linearizable read barrier, public
+gRPC route, or SDK commitment. The regional wrapper described above supplies
+the leader barrier. See
+[Experimental Replicated Cache Tablet](CACHE_TABLET.md).
 
 The mutually exclusive Event Bus mode mounts a canonical single-partition
 ingress/outbox tablet on the internal listener:

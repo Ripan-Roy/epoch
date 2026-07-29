@@ -433,8 +433,11 @@ revision, non-repeating item versions, staged same-shard transactions,
 deterministic expiry, committed-order effective time, and composite fenced locks
 rebuild from EPRS before readiness. Writes require expected-current-term
 admission and majority persistence before the local profile receipt is returned.
-Reads remain explicitly local and stale-capable. This does not make the
-standalone Cache durable or establish placement-aware public quorum durability.
+Direct profile reads remain explicitly local and stale-capable. The regional
+resource/shard boundary now implements the general rule above: reads default to
+a safe leader ReadIndex and expose barrier term/read/applied evidence, while an
+explicit `local_stale` request preserves the direct behavior. This does not
+make the standalone Cache durable or establish placement-aware public quorum durability.
 See [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
 
 The Event Bus profile mounts the same committed-command boundary for canonical

@@ -27,10 +27,11 @@ use axum::{
     routing::{get, post},
 };
 use epoch_consensus::{
-    CommitReceipt, CommittedProposal, ConsensusAdapter, ConsensusError, ConsensusOutput,
-    ConsensusRole, ConsensusStatus, GroupEpoch, GroupId, MAX_PEER_MESSAGE_WIRE_BYTES,
-    MAX_PROPOSAL_PAYLOAD_BYTES, NodeId, PeerMessage, PersistentOpenResult, PersistentRaftAdapter,
-    PersistentRecovery, Proposal, ProposalId, ProposalLookup, Term,
+    CommitReceipt, CommittedProposal, CompletedReadBarrier, ConsensusAdapter, ConsensusError,
+    ConsensusOutput, ConsensusRole, ConsensusStatus, GroupEpoch, GroupId,
+    MAX_PEER_MESSAGE_WIRE_BYTES, MAX_PROPOSAL_PAYLOAD_BYTES, NodeId, PeerMessage,
+    PersistentOpenResult, PersistentRaftAdapter, PersistentRecovery, Proposal, ProposalId,
+    ProposalLookup, ReadBarrierId, ReadBarrierRequest, Term,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -49,6 +50,7 @@ pub const EXPERIMENTAL_PROPOSAL_LOOKUP_PATH: &str =
 const DEFAULT_COMMAND_QUEUE_CAPACITY: usize = 256;
 const DEFAULT_OUTBOUND_QUEUE_CAPACITY: usize = 128;
 const COMMIT_NOTIFICATION_CAPACITY: usize = 256;
+const READ_BARRIER_NOTIFICATION_CAPACITY: usize = 1_024;
 const MAX_QUEUE_CAPACITY: usize = 65_536;
 const MIN_TICK_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_TICK_INTERVAL: Duration = Duration::from_mins(1);
@@ -86,6 +88,13 @@ pub enum ConsensusProbeError {
     UnsupportedPeerContentType,
     #[error("committed profile command could not be applied: {0}")]
     ProfileApplication(String),
+    #[error("read barrier {request_id} timed out after {timeout_ms} ms")]
+    ReadBarrierTimeout {
+        request_id: ReadBarrierId,
+        timeout_ms: u128,
+    },
+    #[error("read barrier request identifiers are exhausted")]
+    ReadBarrierIdExhausted,
 }
 
 /// Applies consensus-decoded commands to a profile state machine.
@@ -434,6 +443,13 @@ enum ActorCommand {
         proposal: Proposal,
         reply: ActorReply<ProposalLookup>,
     },
+    ReadBarrier {
+        request: ReadBarrierRequest,
+        reply: ActorReply<ConsensusStatus>,
+    },
+    CancelReadBarrier {
+        request_id: ReadBarrierId,
+    },
     Receive {
         message: PeerMessage,
         reply: ActorReply<ConsensusStatus>,
@@ -463,6 +479,8 @@ pub struct ConsensusProbeHandle {
     group_epoch: GroupEpoch,
     commands: mpsc::Sender<ActorCommand>,
     commits: broadcast::Sender<CommittedProposal>,
+    read_barriers: broadcast::Sender<CompletedReadBarrier>,
+    next_read_barrier_id: Arc<AtomicU64>,
     outbound_health: OutboundHealthRegistry,
 }
 
@@ -515,6 +533,61 @@ impl ConsensusProbeHandle {
         );
         self.request(|reply| ActorCommand::Propose { proposal, reply })
             .await
+    }
+
+    /// Waits for a quorum-confirmed read index and for the local profile state
+    /// machine to apply through that index.
+    pub async fn read_barrier(
+        &self,
+        expected_term: u64,
+        timeout: Duration,
+    ) -> ConsensusProbeResult<CompletedReadBarrier> {
+        if timeout.is_zero() {
+            return Err(ConsensusProbeError::InvalidConfiguration(
+                "read barrier timeout must be greater than zero".into(),
+            ));
+        }
+        let raw_request_id = self
+            .next_read_barrier_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| ConsensusProbeError::ReadBarrierIdExhausted)?;
+        let request_id = ReadBarrierId::new(raw_request_id)?;
+        let request = ReadBarrierRequest::new(
+            self.group_id,
+            self.group_epoch,
+            Term::new(expected_term),
+            request_id,
+        );
+        let mut completions = self.read_barriers.subscribe();
+        self.request(|reply| ActorCommand::ReadBarrier { request, reply })
+            .await?;
+
+        let completed = tokio::time::timeout(timeout, async {
+            loop {
+                match completions.recv().await {
+                    Ok(completed) if completed.request_id == request_id => break Ok(completed),
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        break Err(ConsensusProbeError::ActorUnavailable);
+                    }
+                }
+            }
+        })
+        .await;
+        if let Ok(result) = completed {
+            result
+        } else {
+            let _ = self
+                .commands
+                .send(ActorCommand::CancelReadBarrier { request_id })
+                .await;
+            Err(ConsensusProbeError::ReadBarrierTimeout {
+                request_id,
+                timeout_ms: timeout.as_millis(),
+            })
+        }
     }
 
     pub async fn receive_wire(&self, frame: &[u8]) -> ConsensusProbeResult<ConsensusStatus> {
@@ -721,9 +794,11 @@ impl ConsensusProbeRuntime {
             spawn_outbound_workers(&config, &client)?;
         let (commands, command_receiver) = mpsc::channel(config.command_queue_capacity);
         let (commits, _) = broadcast::channel(COMMIT_NOTIFICATION_CAPACITY);
+        let (read_barriers, _) = broadcast::channel(READ_BARRIER_NOTIFICATION_CAPACITY);
         let (actor_failure, actor_failure_receiver) = watch::channel(None);
         let (initialized, initialization) = oneshot::channel();
         let actor_commits = commits.clone();
+        let actor_read_barriers = read_barriers.clone();
         let actor_config = config.clone();
         let actor_applier = applier.clone();
         let actor_thread = match thread::Builder::new()
@@ -733,8 +808,11 @@ impl ConsensusProbeRuntime {
                     run_persistent_actor(
                         stable_path,
                         &actor_config,
-                        &outbound,
-                        &actor_commits,
+                        &ActorChannels {
+                            outbound: &outbound,
+                            commits: &actor_commits,
+                            read_barriers: &actor_read_barriers,
+                        },
                         actor_applier.as_deref(),
                         command_receiver,
                         initialized,
@@ -777,6 +855,8 @@ impl ConsensusProbeRuntime {
             group_epoch: config.group_epoch,
             commands,
             commits,
+            read_barriers,
+            next_read_barrier_id: Arc::new(AtomicU64::new(1)),
             outbound_health,
         };
         let tick_task = spawn_periodic_ticks(handle.clone(), config.tick_interval)?;
@@ -889,11 +969,16 @@ impl Drop for ConsensusProbeRuntime {
     }
 }
 
+struct ActorChannels<'a> {
+    outbound: &'a OutboundSenders,
+    commits: &'a broadcast::Sender<CommittedProposal>,
+    read_barriers: &'a broadcast::Sender<CompletedReadBarrier>,
+}
+
 fn run_persistent_actor(
     stable_path: PathBuf,
     config: &ConsensusProbeConfig,
-    outbound: &OutboundSenders,
-    commits: &broadcast::Sender<CommittedProposal>,
+    channels: &ActorChannels<'_>,
     applier: Option<&dyn CommittedProposalApplier>,
     mut commands: mpsc::Receiver<ActorCommand>,
     initialized: oneshot::Sender<ConsensusProbeResult<PersistentRecovery>>,
@@ -927,7 +1012,13 @@ fn run_persistent_actor(
     // `applied_proposals`, so replay above is authoritative. Publish only its
     // peer work/notifications here to avoid treating recovery output as a new
     // profile transition.
-    if let Err(error) = publish_output(output, outbound, commits, None) {
+    if let Err(error) = publish_output(
+        output,
+        channels.outbound,
+        channels.commits,
+        channels.read_barriers,
+        None,
+    ) {
         let _ = initialized.send(Err(error.clone()));
         return Err(error);
     }
@@ -936,8 +1027,14 @@ fn run_persistent_actor(
     }
 
     while let Some(command) = commands.blocking_recv() {
-        if handle_actor_command(&mut adapter, outbound, commits, applier, command)?
-            == ActorDirective::Shutdown
+        if handle_actor_command(
+            &mut adapter,
+            channels.outbound,
+            channels.commits,
+            channels.read_barriers,
+            applier,
+            command,
+        )? == ActorDirective::Shutdown
         {
             return Ok(());
         }
@@ -955,6 +1052,7 @@ fn handle_actor_command(
     adapter: &mut PersistentRaftAdapter,
     outbound: &OutboundSenders,
     commits: &broadcast::Sender<CommittedProposal>,
+    read_barriers: &broadcast::Sender<CompletedReadBarrier>,
     applier: Option<&dyn CommittedProposalApplier>,
     command: ActorCommand,
 ) -> ConsensusProbeResult<ActorDirective> {
@@ -963,17 +1061,15 @@ fn handle_actor_command(
             let _ = reply.send(Ok(adapter.status()));
         }
         ActorCommand::Campaign { reply } => {
-            let result = adapter
-                .campaign()
-                .map_err(Into::into)
-                .and_then(|output| publish_output(output, outbound, commits, applier));
+            let result = adapter.campaign().map_err(Into::into).and_then(|output| {
+                publish_output(output, outbound, commits, read_barriers, applier)
+            });
             deliver_actor_result(adapter, reply, result)?;
         }
         ActorCommand::Tick { reply } => {
-            let result = adapter
-                .tick()
-                .map_err(Into::into)
-                .and_then(|output| publish_output(output, outbound, commits, applier));
+            let result = adapter.tick().map_err(Into::into).and_then(|output| {
+                publish_output(output, outbound, commits, read_barriers, applier)
+            });
             deliver_actor_result(adapter, reply, result)?;
         }
         ActorCommand::Propose { proposal, reply } => {
@@ -981,15 +1077,31 @@ fn handle_actor_command(
             let result = adapter
                 .propose(proposal)
                 .map_err(Into::into)
-                .and_then(|output| publish_output(output, outbound, commits, applier))
+                .and_then(|output| {
+                    publish_output(output, outbound, commits, read_barriers, applier)
+                })
                 .map(|_| adapter.lookup_proposal(proposal_id));
             deliver_actor_result(adapter, reply, result)?;
+        }
+        ActorCommand::ReadBarrier { request, reply } => {
+            let result = adapter
+                .read_barrier(request)
+                .map_err(Into::into)
+                .and_then(|output| {
+                    publish_output(output, outbound, commits, read_barriers, applier)
+                });
+            deliver_actor_result(adapter, reply, result)?;
+        }
+        ActorCommand::CancelReadBarrier { request_id } => {
+            adapter.cancel_read_barrier(request_id)?;
         }
         ActorCommand::Receive { message, reply } => {
             let result = adapter
                 .receive(message)
                 .map_err(Into::into)
-                .and_then(|output| publish_output(output, outbound, commits, applier));
+                .and_then(|output| {
+                    publish_output(output, outbound, commits, read_barriers, applier)
+                });
             deliver_actor_result(adapter, reply, result)?;
         }
         ActorCommand::Lookup { proposal_id, reply } => {
@@ -1024,9 +1136,16 @@ fn publish_output(
     output: ConsensusOutput,
     outbound: &OutboundSenders,
     commits: &broadcast::Sender<CommittedProposal>,
+    read_barriers: &broadcast::Sender<CompletedReadBarrier>,
     applier: Option<&dyn CommittedProposalApplier>,
 ) -> ConsensusProbeResult<ConsensusStatus> {
-    for message in output.messages {
+    let ConsensusOutput {
+        messages,
+        commits: output_commits,
+        read_barriers: completed_read_barriers,
+        status,
+    } = output;
+    for message in messages {
         let destination = message.to();
         let frame = message.to_wire()?;
         let peer = outbound
@@ -1061,7 +1180,7 @@ fn publish_output(
             }
         }
     }
-    for commit in output.commits {
+    for commit in output_commits {
         if let Some(applier) = applier {
             applier
                 .apply(&commit)
@@ -1072,7 +1191,10 @@ fn publish_output(
         // `applied_proposals` or `lookup`.
         let _ = commits.send(commit);
     }
-    Ok(output.status)
+    for completed in completed_read_barriers {
+        let _ = read_barriers.send(completed);
+    }
+    Ok(status)
 }
 
 fn fatal_actor_failure<T>(
@@ -1524,8 +1646,15 @@ impl IntoResponse for ConsensusProbeApiError {
                 | ConsensusError::FencedEpoch { .. }
                 | ConsensusError::StaleTerm { .. }
                 | ConsensusError::DuplicateProposal(_)
-                | ConsensusError::ConflictingProposal(_),
+                | ConsensusError::ConflictingProposal(_)
+                | ConsensusError::DuplicateReadBarrier(_),
             ) => (StatusCode::CONFLICT, "proposal_conflict", None),
+            ConsensusProbeError::ReadBarrierTimeout { .. }
+            | ConsensusProbeError::Consensus(ConsensusError::TooManyReadBarriers) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "read_barrier_unavailable",
+                None,
+            ),
             ConsensusProbeError::ActorUnavailable
             | ConsensusProbeError::OutboundUnavailable(_)
             | ConsensusProbeError::ProfileApplication(_)
@@ -1540,6 +1669,7 @@ impl IntoResponse for ConsensusProbeApiError {
             | ConsensusProbeError::ActorPanicked
             | ConsensusProbeError::TaskJoin(_)
             | ConsensusProbeError::RuntimeShutdown(_)
+            | ConsensusProbeError::ReadBarrierIdExhausted
             | ConsensusProbeError::Consensus(
                 ConsensusError::InvalidState(_)
                 | ConsensusError::Library(_)
@@ -1666,8 +1796,9 @@ mod tests {
             ),
         ]);
         let (commits, _) = broadcast::channel(1);
+        let (read_barriers, _) = broadcast::channel(1);
 
-        let status = publish_output(output, &outbound, &commits, None)
+        let status = publish_output(output, &outbound, &commits, &read_barriers, None)
             .expect("initial output should be dispatched before initialization");
 
         assert_eq!(status.node_id, voters[0]);
@@ -2380,6 +2511,47 @@ mod tests {
             };
             assert_eq!(committed.payload, payload);
         }
+        cluster.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn read_barrier_requires_a_live_majority_over_real_http() {
+        let mut cluster = TestProbeCluster::start().await;
+        let handles = cluster.handles();
+        let (leader_index, leader_status) = wait_for_leader(&handles).await;
+
+        let completed = handles[leader_index]
+            .read_barrier(leader_status.term.get(), Duration::from_secs(2))
+            .await
+            .expect("leader should complete a quorum read barrier");
+        assert_eq!(completed.term, leader_status.term);
+        assert!(completed.applied_index >= completed.read_index);
+
+        let follower_index = (0..handles.len())
+            .find(|index| *index != leader_index)
+            .expect("cluster should contain a follower");
+        let follower_status = handles[follower_index].status().await.unwrap();
+        assert!(matches!(
+            handles[follower_index]
+                .read_barrier(follower_status.term.get(), Duration::from_millis(100))
+                .await,
+            Err(ConsensusProbeError::Consensus(
+                ConsensusError::NotLeader { .. }
+            ))
+        ));
+
+        for index in 0..handles.len() {
+            if index != leader_index {
+                cluster.stop_peer_listener(index).await;
+            }
+        }
+        assert!(matches!(
+            handles[leader_index]
+                .read_barrier(leader_status.term.get(), Duration::from_millis(100))
+                .await,
+            Err(ConsensusProbeError::ReadBarrierTimeout { .. })
+        ));
+
         cluster.shutdown().await;
     }
 

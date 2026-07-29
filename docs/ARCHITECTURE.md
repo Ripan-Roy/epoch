@@ -240,8 +240,11 @@ consensus actors in one node process. Committed catalog state is materialized
 deterministically into Cache, Stream, Queue, and Event Bus tablets with
 never-reused tablet/group identities. Resource/shard discovery reports the
 local role and observed leader; data dispatch requires exact resource-generation
-and tablet-epoch fences and rejects a follower instead of forwarding or
-inventing success.
+and tablet-epoch fences. Mutations reject a follower instead of forwarding or
+inventing success. Regional reads default to safe Raft `ReadIndex`: the current
+leader confirms a majority and the actor applies the local typed profile
+through the returned index before dispatch. An explicit `local_stale` request
+keeps the direct stale-capable behavior; there is no silent downgrade.
 
 The current placement remains fixed at three configured voters, but it is now
 topology-aware at admission. Every Rust node reports its authenticated
@@ -250,8 +253,9 @@ Go requires a complete consistent inventory before catalog mutation, validates
 allowed regions, minimum zones, and node class, and charges only newly added
 shards. This is real constraint validation and capacity rejection, not dynamic
 membership, voter selection, online rebalance, rack placement, or a stable
-public API. See [ADR-0009](adr/0009-regional-tablet-catalog.md) and
-[ADR-0012](adr/0012-topology-aware-admission.md).
+public API. See [ADR-0009](adr/0009-regional-tablet-catalog.md),
+[ADR-0012](adr/0012-topology-aware-admission.md), and
+[ADR-0013](adr/0013-quorum-read-barriers.md).
 
 `crates/epoch-tablet` also contains the canonical single-partition Queue tablet
 state machine. `epoch-node` attaches it as the only selected profile for one
@@ -293,8 +297,9 @@ and settlements, not that a target side effect occurred. See
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 Snapshots, compaction, membership changes, general placement solving,
-online transfer/repair/rebalance, authenticated peer transport, and read
-barriers remain disabled. The byte contract is
+online transfer/repair/rebalance, authenticated peer transport, follower
+linearizable routing, and cross-tablet read transactions remain disabled. The
+leader-only regional read barrier is experimental. The byte contract is
 documented in [EPRS v1 consensus stable
 journal](../spec/formats/consensus-stable-store-v1.md); the complete scope and
 non-claims are recorded in
@@ -792,3 +797,6 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0008: Segmented Standalone WAL](adr/0008-segmented-standalone-wal.md)
 - [ADR-0009: Deterministic Regional Tablet Catalog](adr/0009-regional-tablet-catalog.md)
 - [ADR-0010: Durable Single-Owner Go Control Metadata](adr/0010-durable-managed-metadata.md)
+- [ADR-0011: Bootstrap Authorization and Audit Baseline](adr/0011-bootstrap-authz-audit-baseline.md)
+- [ADR-0012: Topology-Aware Fixed-Voter Admission](adr/0012-topology-aware-admission.md)
+- [ADR-0013: Quorum-Confirmed Regional Read Barriers](adr/0013-quorum-read-barriers.md)

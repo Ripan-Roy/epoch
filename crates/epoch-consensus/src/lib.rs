@@ -38,6 +38,8 @@ const HEARTBEAT_TICK: usize = 2;
 const ELECTION_TICK: usize = 10;
 const MAX_UNCOMMITTED_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_COMMITTED_BYTES_PER_READY: u64 = 8 * 1024 * 1024;
+const MAX_PENDING_READ_BARRIERS: usize = 1_024;
+const READ_BARRIER_CONTEXT_BYTES: usize = 8;
 
 /// Maximum accepted size of a complete canonical Epoch peer-message frame.
 pub const MAX_PEER_MESSAGE_WIRE_BYTES: usize = 1024 * 1024;
@@ -78,6 +80,7 @@ nonzero_id!(NodeId, "node ID must be non-zero");
 nonzero_id!(GroupId, "group ID must be non-zero");
 nonzero_id!(GroupEpoch, "group epoch must be non-zero");
 nonzero_id!(ProposalId, "proposal ID must be non-zero");
+nonzero_id!(ReadBarrierId, "read barrier ID must be non-zero");
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Term(u64);
@@ -154,6 +157,43 @@ impl Proposal {
             payload: payload.into(),
         }
     }
+}
+
+/// One leader- and term-fenced request for a quorum-confirmed read index.
+///
+/// The request is ephemeral and is never written into the replicated log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadBarrierRequest {
+    pub group_id: GroupId,
+    pub group_epoch: GroupEpoch,
+    pub expected_term: Term,
+    pub request_id: ReadBarrierId,
+}
+
+impl ReadBarrierRequest {
+    pub const fn new(
+        group_id: GroupId,
+        group_epoch: GroupEpoch,
+        expected_term: Term,
+        request_id: ReadBarrierId,
+    ) -> Self {
+        Self {
+            group_id,
+            group_epoch,
+            expected_term,
+            request_id,
+        }
+    }
+}
+
+/// Proof that a quorum confirmed the request and the local consensus state
+/// machine applied through the confirmed index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompletedReadBarrier {
+    pub request_id: ReadBarrierId,
+    pub term: Term,
+    pub read_index: LogIndex,
+    pub applied_index: LogIndex,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -334,12 +374,13 @@ impl fmt::Debug for PeerMessage {
 pub struct ConsensusOutput {
     pub messages: Vec<PeerMessage>,
     pub commits: Vec<CommittedProposal>,
+    pub read_barriers: Vec<CompletedReadBarrier>,
     pub status: ConsensusStatus,
 }
 
 impl ConsensusOutput {
     pub fn is_idle(&self) -> bool {
-        self.messages.is_empty() && self.commits.is_empty()
+        self.messages.is_empty() && self.commits.is_empty() && self.read_barriers.is_empty()
     }
 }
 
@@ -351,6 +392,10 @@ pub trait ConsensusAdapter {
     fn tick(&mut self) -> ConsensusResult<ConsensusOutput>;
 
     fn propose(&mut self, proposal: Proposal) -> ConsensusResult<ConsensusOutput>;
+
+    fn read_barrier(&mut self, request: ReadBarrierRequest) -> ConsensusResult<ConsensusOutput>;
+
+    fn cancel_read_barrier(&mut self, request_id: ReadBarrierId) -> ConsensusResult<()>;
 
     fn receive(&mut self, message: PeerMessage) -> ConsensusResult<ConsensusOutput>;
 
@@ -379,6 +424,8 @@ pub enum ConsensusError {
     },
     DuplicateProposal(ProposalId),
     ConflictingProposal(ProposalId),
+    DuplicateReadBarrier(ReadBarrierId),
+    TooManyReadBarriers,
     Poisoned(String),
     InvalidMessage(String),
     Storage(String),
@@ -433,6 +480,13 @@ impl Display for ConsensusError {
                     "proposal {proposal_id} reuses an idempotency key with a different payload"
                 )
             }
+            Self::DuplicateReadBarrier(request_id) => {
+                write!(formatter, "read barrier {request_id} is already pending")
+            }
+            Self::TooManyReadBarriers => write!(
+                formatter,
+                "pending read barriers reached the limit of {MAX_PENDING_READ_BARRIERS}"
+            ),
         }
     }
 }
@@ -486,6 +540,13 @@ enum TrackedProposal {
     Committed(CommittedProposal),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingReadBarrier {
+    term: Term,
+    submitted: bool,
+    read_index: Option<LogIndex>,
+}
+
 #[derive(Debug)]
 struct PlannedEntry {
     log_index: LogIndex,
@@ -504,6 +565,7 @@ pub struct InMemoryRaftAdapter {
     applied: Vec<CommittedProposal>,
     state_digest: StateDigest,
     proposals: BTreeMap<ProposalId, TrackedProposal>,
+    pending_read_barriers: BTreeMap<ReadBarrierId, PendingReadBarrier>,
     stable_generation: u64,
     disk_store: Option<DiskStableStore>,
     poisoned: Option<String>,
@@ -519,6 +581,7 @@ impl fmt::Debug for InMemoryRaftAdapter {
             .field("applied_count", &self.applied.len())
             .field("state_digest", &DigestDebug(&self.state_digest))
             .field("proposals", &self.proposals)
+            .field("pending_read_barriers", &self.pending_read_barriers.len())
             .field("stable_generation", &self.stable_generation)
             .field("disk_backed", &self.disk_store.is_some())
             .field("poisoned", &self.poisoned)
@@ -624,6 +687,7 @@ impl InMemoryRaftAdapter {
             applied: stable.applied,
             state_digest: stable.state_digest,
             proposals,
+            pending_read_barriers: BTreeMap::new(),
             stable_generation: stable.stable_generation,
             disk_store,
             poisoned: None,
@@ -691,6 +755,148 @@ impl InMemoryRaftAdapter {
         }
     }
 
+    fn validate_read_barrier(&self, request: &ReadBarrierRequest) -> ConsensusResult<()> {
+        self.ensure_healthy()?;
+        if request.group_id != self.group_id {
+            return Err(ConsensusError::GroupMismatch {
+                expected: self.group_id,
+                observed: request.group_id,
+            });
+        }
+        if request.group_epoch != self.group_epoch {
+            return Err(ConsensusError::FencedEpoch {
+                expected: self.group_epoch,
+                observed: request.group_epoch,
+            });
+        }
+        let status = self.status();
+        if request.expected_term != status.term {
+            return Err(ConsensusError::StaleTerm {
+                current: status.term,
+                observed: request.expected_term,
+            });
+        }
+        if status.role != ConsensusRole::Leader {
+            return Err(ConsensusError::NotLeader {
+                leader_hint: status.leader_id,
+            });
+        }
+        if self.pending_read_barriers.len() >= MAX_PENDING_READ_BARRIERS {
+            return Err(ConsensusError::TooManyReadBarriers);
+        }
+        if self.pending_read_barriers.contains_key(&request.request_id) {
+            return Err(ConsensusError::DuplicateReadBarrier(request.request_id));
+        }
+        Ok(())
+    }
+
+    fn observe_read_states(
+        &mut self,
+        states: impl IntoIterator<Item = raft::ReadState>,
+    ) -> ConsensusResult<()> {
+        for state in states {
+            let request_id = decode_read_barrier_context(&state.request_ctx)?;
+            let Some(pending) = self.pending_read_barriers.get_mut(&request_id) else {
+                // A caller may cancel or time out after raft-rs accepted the
+                // request. The late quorum response is safe to discard.
+                continue;
+            };
+            let read_index = LogIndex::new(state.index);
+            if let Some(observed) = pending.read_index
+                && observed != read_index
+            {
+                return Err(ConsensusError::InvalidState(format!(
+                    "read barrier {request_id} changed index from {observed} to {read_index}"
+                )));
+            }
+            pending.read_index = Some(read_index);
+        }
+        Ok(())
+    }
+
+    fn submit_pending_read_barriers(&mut self) -> ConsensusResult<()> {
+        let status = self.status();
+        if status.role != ConsensusRole::Leader || status.commit_index == LogIndex::ZERO {
+            return Ok(());
+        }
+        let committed_term = self
+            .raw_node
+            .store()
+            .term(status.commit_index.get())
+            .map_err(|error| ConsensusError::Storage(error.to_string()))?;
+        if committed_term != status.term.get() {
+            // raft-rs drops ReadIndex requests until this leader has committed
+            // an entry in its own term. Keep the Epoch request pending and
+            // submit it after the election no-op becomes durable and applied.
+            return Ok(());
+        }
+        let request_ids = self
+            .pending_read_barriers
+            .iter()
+            .filter_map(|(request_id, pending)| {
+                (!pending.submitted && pending.term == status.term).then_some(*request_id)
+            })
+            .collect::<Vec<_>>();
+        for request_id in request_ids {
+            self.raw_node
+                .read_index(encode_read_barrier_context(request_id).to_vec());
+            if let Some(pending) = self.pending_read_barriers.get_mut(&request_id) {
+                pending.submitted = true;
+            }
+        }
+        Ok(())
+    }
+
+    fn take_completed_read_barriers(&mut self) -> ConsensusResult<Vec<CompletedReadBarrier>> {
+        let status = self.status();
+        if status.role != ConsensusRole::Leader {
+            self.pending_read_barriers.clear();
+            return Ok(Vec::new());
+        }
+        self.pending_read_barriers
+            .retain(|_, pending| pending.term == status.term);
+
+        let completed_ids = self
+            .pending_read_barriers
+            .iter()
+            .filter_map(|(request_id, pending)| {
+                pending
+                    .read_index
+                    .filter(|read_index| *read_index <= status.applied_index)
+                    .map(|_| *request_id)
+            })
+            .collect::<Vec<_>>();
+        let mut completed = Vec::with_capacity(completed_ids.len());
+        for request_id in completed_ids {
+            let pending = self
+                .pending_read_barriers
+                .remove(&request_id)
+                .ok_or_else(|| {
+                    ConsensusError::InvalidState(format!(
+                        "completed read barrier {request_id} disappeared"
+                    ))
+                })?;
+            let read_index = pending.read_index.ok_or_else(|| {
+                ConsensusError::InvalidState(format!(
+                    "completed read barrier {request_id} has no read index"
+                ))
+            })?;
+            if read_index > status.commit_index {
+                return Err(ConsensusError::InvalidState(format!(
+                    "read barrier {request_id} index {read_index} exceeds commit index {}",
+                    status.commit_index
+                )));
+            }
+            completed.push(CompletedReadBarrier {
+                request_id,
+                term: pending.term,
+                read_index,
+                applied_index: status.applied_index,
+            });
+        }
+        Ok(completed)
+    }
+
     #[cfg(test)]
     fn expire_leader_lease(&mut self) {
         while !self.raw_node.raft.pass_election_timeout() {
@@ -721,6 +927,7 @@ impl InMemoryRaftAdapter {
         let mut outbound = Vec::new();
         let mut commits = Vec::new();
         let mut iterations = 0_u16;
+        self.submit_pending_read_barriers()?;
 
         while self.raw_node.has_ready() {
             iterations = iterations.checked_add(1).ok_or_else(|| {
@@ -734,6 +941,7 @@ impl InMemoryRaftAdapter {
 
             let mut ready = self.raw_node.ready();
             reject_snapshot(ready.snapshot(), "Ready")?;
+            let ready_read_states = ready.take_read_states();
             let immediate_messages = self.wrap_messages(ready.take_messages(), None)?;
             let persisted_messages_raw = ready.take_persisted_messages();
             let ready_committed = ready.take_committed_entries();
@@ -750,6 +958,7 @@ impl InMemoryRaftAdapter {
             outbound.extend(immediate_messages);
             outbound.extend(persisted_messages);
             self.apply_prevalidated_batch(ready_plan, ready_checkpoint, &mut commits);
+            self.observe_read_states(ready_read_states)?;
 
             let mut light_ready = self.raw_node.advance(ready);
             let light_messages_raw = light_ready.take_messages();
@@ -765,6 +974,7 @@ impl InMemoryRaftAdapter {
             outbound.extend(light_messages);
             self.apply_prevalidated_batch(light_plan, light_checkpoint, &mut commits);
             self.raw_node.advance_apply();
+            self.submit_pending_read_barriers()?;
         }
 
         self.proposals = validate_persisted_state(PersistedStateView {
@@ -777,10 +987,12 @@ impl InMemoryRaftAdapter {
             applied: &self.applied,
             state_digest: self.state_digest,
         })?;
+        let read_barriers = self.take_completed_read_barriers()?;
 
         Ok(ConsensusOutput {
             messages: outbound,
             commits,
+            read_barriers,
             status: self.status(),
         })
     }
@@ -1153,6 +1365,26 @@ impl ConsensusAdapter for InMemoryRaftAdapter {
         self.process_ready()
     }
 
+    fn read_barrier(&mut self, request: ReadBarrierRequest) -> ConsensusResult<ConsensusOutput> {
+        self.validate_read_barrier(&request)?;
+        self.pending_read_barriers.insert(
+            request.request_id,
+            PendingReadBarrier {
+                term: request.expected_term,
+                submitted: false,
+                read_index: None,
+            },
+        );
+        self.submit_pending_read_barriers()?;
+        self.process_ready()
+    }
+
+    fn cancel_read_barrier(&mut self, request_id: ReadBarrierId) -> ConsensusResult<()> {
+        self.ensure_healthy()?;
+        self.pending_read_barriers.remove(&request_id);
+        Ok(())
+    }
+
     fn receive(&mut self, message: PeerMessage) -> ConsensusResult<ConsensusOutput> {
         self.ensure_healthy()?;
         if message.group_id != self.group_id {
@@ -1277,6 +1509,14 @@ impl ConsensusAdapter for PersistentRaftAdapter {
 
     fn propose(&mut self, proposal: Proposal) -> ConsensusResult<ConsensusOutput> {
         self.inner.propose(proposal)
+    }
+
+    fn read_barrier(&mut self, request: ReadBarrierRequest) -> ConsensusResult<ConsensusOutput> {
+        self.inner.read_barrier(request)
+    }
+
+    fn cancel_read_barrier(&mut self, request_id: ReadBarrierId) -> ConsensusResult<()> {
+        self.inner.cancel_read_barrier(request_id)
     }
 
     fn receive(&mut self, message: PeerMessage) -> ConsensusResult<ConsensusOutput> {
@@ -1439,6 +1679,22 @@ fn encode_command(proposal: &Proposal) -> ConsensusResult<Vec<u8>> {
     encoded.extend_from_slice(&payload_len.to_be_bytes());
     encoded.extend_from_slice(&proposal.payload);
     Ok(encoded)
+}
+
+fn encode_read_barrier_context(request_id: ReadBarrierId) -> [u8; READ_BARRIER_CONTEXT_BYTES] {
+    request_id.get().to_be_bytes()
+}
+
+fn decode_read_barrier_context(encoded: &[u8]) -> ConsensusResult<ReadBarrierId> {
+    if encoded.len() != READ_BARRIER_CONTEXT_BYTES {
+        return Err(ConsensusError::InvalidMessage(format!(
+            "read barrier context is {} bytes; expected {READ_BARRIER_CONTEXT_BYTES}",
+            encoded.len()
+        )));
+    }
+    ReadBarrierId::new(u64::from_be_bytes(encoded.try_into().map_err(|_| {
+        ConsensusError::InvalidMessage("invalid read barrier context".into())
+    })?))
 }
 
 fn decode_command(encoded: &[u8]) -> ConsensusResult<EncodedCommand> {

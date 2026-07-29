@@ -177,6 +177,37 @@ profile-specific tablet router. A stale generation/epoch, wrong profile,
 missing resource/shard, unavailable group, or nonleader is rejected before
 typed mutation handling. The router does not silently proxy a write.
 
+Regional reads are linearizable by default and therefore must target the
+current leader. Epoch submits a safe Raft `ReadIndex`, waits for majority
+confirmation, applies locally through the returned index, and only then reads
+the typed profile:
+
+```shell
+curl --fail-with-body \
+  -H 'authorization: Bearer epoch-dev-admin-v1' \
+  -H 'x-epoch-resource-generation: 1' \
+  -H 'x-epoch-tablet-epoch: 1' \
+  'http://127.0.0.1:18661/experimental/v1/regional/resources/acme/shop/dev/core/stream/orders/shards/0/data/records?offset=0&limit=100'
+```
+
+A successful response reports `read_consistency: "linearizable"`,
+`linearizable_read_barrier: true`, and exact decimal barrier term/read/applied
+indexes. The same evidence is available in `x-epoch-read-consistency` and
+`x-epoch-read-index` response headers. `EPOCH_REGIONAL_READ_BARRIER_TIMEOUT_MS`
+sets the 1–60,000 ms wait and defaults to 2,000 ms. A minority cannot satisfy it
+and receives retryable `503 read_barrier_timeout`.
+
+Callers that deliberately accept a local stale observation must opt in:
+
+```text
+x-epoch-read-consistency: local_stale
+```
+
+That response remains `local_profile_applied_stale_capable` with
+`linearizable_read_barrier: false`. There is no automatic downgrade. Event Bus
+archive replay and delivery-query POSTs are classified as reads and follow the
+same consistency and `data.read` authorization contract.
+
 ## Failure and recovery behavior
 
 - One voter loss leaves a majority able to elect and commit. Go reports only
@@ -219,7 +250,9 @@ digests, and deletes only its scoped containers/network/volumes.
   class are validated, but there is no general voter-selection or rack-aware
   solver.
 - Membership changes, online rebalance, repair, split/merge, snapshots,
-  compaction, retention deletion, and read barriers are absent.
+  compaction, and retention deletion are absent. Read barriers are leader-only
+  and regional-only; follower forwarding and stable public SDK exposure remain
+  absent.
 - Rust regional HTTP and Go management enforce the bootstrap policy, and the
   console supplies a session-only credential. They still have no TLS/OIDC/mTLS,
   token expiry/revocation, rate limiting, replicated policy, or immutable audit

@@ -94,6 +94,9 @@ materializes Cache, Stream, Queue, and Event Bus tablets together, and routes
 by resource/shard with exact generation and tablet-epoch fences. A real Go
 RegionalAdmin reconciler applies desired state through Rust and exposes a
 browser-safe placement BFF; the TypeScript console never contacts storage nodes.
+Regional reads now default to a safe leader ReadIndex barrier, complete only
+after majority confirmation and local typed-profile apply, and expose exact
+barrier evidence. Callers must explicitly select `local_stale` to bypass it.
 
 The strict single-partition Queue tablet now runs through that same persistent
 three-node actor boundary. Its internal typed API covers enqueue, acquire,
@@ -127,9 +130,9 @@ state is not a target-delivery claim. See the
 [regional runtime guide](docs/REGIONAL_RUNTIME.md),
 [probe guide](docs/CONSENSUS_PROBE.md), [spike report](docs/CONSENSUS_SPIKE.md),
 and proposed [ADR-0003](docs/adr/0003-consensus-adapter.md). An exhaustive crash
-matrix, snapshots, membership/epoch transitions, read barriers, authenticated
-transport, dynamic/zone-aware placement, and stable public multi-tablet routing
-remain open.
+matrix, snapshots, membership/epoch transitions, follower read routing,
+authenticated transport, dynamic/zone-aware placement, and stable public
+multi-tablet routing remain open.
 
 ## Quick start
 

@@ -70,9 +70,13 @@ cannot prove that another leader did not commit the deterministic proposal ID.
 The HTTP boundary accepts signed and unsigned 64-bit values as JSON numbers or
 decimal strings and emits them as decimal strings. It rejects unknown fields,
 duplicate set members, duplicate map/sorted-set keys, oversized bodies, and
-invalid values before proposal. Observations are local and stale-capable and
-report `linearizable_read_barrier: false`; a status lookup is not a read barrier.
-The listener is unauthenticated and has no SDK compatibility commitment.
+invalid values before proposal. Direct observations are local and stale-capable
+and report `linearizable_read_barrier: false`; a direct status lookup is not a
+read barrier. Through the regional resource/shard route, reads default to a
+safe leader ReadIndex and report exact barrier term/read/applied indexes.
+Callers must explicitly request
+`x-epoch-read-consistency: local_stale` to retain the direct behavior. The
+internal listener is unauthenticated and has no SDK compatibility commitment.
 
 ## Command operations
 
@@ -224,7 +228,8 @@ it rejects an impossible profile index ahead of the reported consensus-applied
 index. Cache observations never advance time or reclaim storage. Expired values
 are logically absent, while `retained_entry_count` includes their physical
 storage until a committed `Maintain` command reclaims them. There is no
-background expiry loop or linearizable `ReadIndex` path in this slice.
+background expiry loop. The regional wrapper provides leader ReadIndex
+ordering, but the direct profile route remains stale-capable.
 
 ## Verification scope
 
@@ -263,7 +268,7 @@ cargo clippy --locked -p epoch-cache -p epoch-tablet -p epoch-node --all-targets
 
 This advances CACHE-006 and CACHE-007 to a tested internal fixed-voter slice. It
 does not complete either requirement: a concurrent history checker,
-linearizable reads, multi-shard routing, profile snapshots/compaction,
+follower-served linearizable reads, multi-shard routing, profile snapshots/compaction,
 authenticated transport, public APIs/SDKs, placement, and the exhaustive fault
 matrix remain required. The in-memory exact-replay map also retains one complete
 receipt per unique proposal without a retention window; large overwritten

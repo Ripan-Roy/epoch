@@ -53,6 +53,7 @@ struct TestCluster {
     sends: Vec<ObservedSend>,
     deliveries: Vec<ObservedDelivery>,
     commits: Vec<(NodeId, CommittedProposal)>,
+    read_barriers: Vec<(NodeId, CompletedReadBarrier)>,
 }
 
 impl TestCluster {
@@ -74,6 +75,7 @@ impl TestCluster {
             sends: Vec::new(),
             deliveries: Vec::new(),
             commits: Vec::new(),
+            read_barriers: Vec::new(),
         };
         cluster.assert_invariants();
         cluster
@@ -99,6 +101,27 @@ impl TestCluster {
             .propose(proposal)
             .unwrap();
         self.capture(node_id, output);
+    }
+
+    fn read_barrier_without_drain(
+        &mut self,
+        node_id: NodeId,
+        request_id: u64,
+    ) -> ConsensusResult<()> {
+        let status = self.nodes[&node_id].status();
+        let request = ReadBarrierRequest::new(
+            group_id(),
+            group_epoch(),
+            status.term,
+            read_barrier(request_id),
+        );
+        let output = self
+            .nodes
+            .get_mut(&node_id)
+            .unwrap()
+            .read_barrier(request)?;
+        self.capture(node_id, output);
+        Ok(())
     }
 
     fn raw_propose_without_drain(
@@ -231,6 +254,12 @@ impl TestCluster {
         assert_eq!(output.status.node_id, node_id);
         self.commits
             .extend(output.commits.into_iter().map(|commit| (node_id, commit)));
+        self.read_barriers.extend(
+            output
+                .read_barriers
+                .into_iter()
+                .map(|barrier| (node_id, barrier)),
+        );
         for message in output.messages {
             assert_eq!(message.from(), node_id);
             let from = message.from();
@@ -544,6 +573,85 @@ fn leadership_transfer_is_deterministic_when_target_is_caught_up() {
     cluster.propose(node(2), 2, b"after-transfer");
     cluster.tick_repeatedly(node(2), HEARTBEAT_TICK);
     assert_eq!(cluster.all_digests(), vec![cluster.all_digests()[0]; 3]);
+}
+
+#[test]
+fn read_barrier_completes_only_after_majority_confirmation_and_local_apply() {
+    let mut cluster = TestCluster::new(91);
+    cluster.campaign(node(1));
+    cluster.propose(node(1), 1, b"visible-before-read");
+    let status = cluster.nodes[&node(1)].status();
+
+    cluster
+        .read_barrier_without_drain(node(1), 1)
+        .expect("leader should issue a read barrier");
+    assert!(
+        cluster.read_barriers.is_empty(),
+        "a local request cannot satisfy a quorum read barrier"
+    );
+
+    cluster.drain();
+
+    assert_eq!(cluster.read_barriers.len(), 1);
+    let (node_id, barrier) = &cluster.read_barriers[0];
+    assert_eq!(*node_id, node(1));
+    assert_eq!(barrier.request_id, read_barrier(1));
+    assert_eq!(barrier.term, status.term);
+    assert!(barrier.read_index >= status.commit_index);
+    assert!(barrier.applied_index >= barrier.read_index);
+    assert_eq!(
+        cluster.applied_history(node(1)),
+        vec![(proposal(1), b"visible-before-read".to_vec())]
+    );
+}
+
+#[test]
+fn isolated_leader_never_completes_a_read_barrier_without_quorum() {
+    let mut cluster = TestCluster::new(92);
+    cluster.campaign(node(1));
+    cluster.isolate(node(1));
+
+    cluster
+        .read_barrier_without_drain(node(1), 2)
+        .expect("leader should issue a read barrier");
+    cluster.drain();
+
+    assert!(cluster.read_barriers.is_empty());
+    cluster
+        .nodes
+        .get_mut(&node(1))
+        .unwrap()
+        .cancel_read_barrier(read_barrier(2))
+        .expect("timed-out read barrier should be cancellable");
+}
+
+#[test]
+fn follower_and_stale_term_read_barriers_are_rejected_before_raft() {
+    let mut cluster = TestCluster::new(93);
+    cluster.campaign(node(1));
+    let leader_term = cluster.nodes[&node(1)].status().term;
+
+    let follower = ReadBarrierRequest::new(group_id(), group_epoch(), leader_term, read_barrier(3));
+    assert_eq!(
+        cluster
+            .nodes
+            .get_mut(&node(2))
+            .unwrap()
+            .read_barrier(follower),
+        Err(ConsensusError::NotLeader {
+            leader_hint: Some(node(1)),
+        })
+    );
+
+    let stale = ReadBarrierRequest::new(group_id(), group_epoch(), Term::ZERO, read_barrier(4));
+    assert_eq!(
+        cluster.nodes.get_mut(&node(1)).unwrap().read_barrier(stale),
+        Err(ConsensusError::StaleTerm {
+            current: leader_term,
+            observed: Term::ZERO,
+        })
+    );
+    assert!(cluster.read_barriers.is_empty());
 }
 
 #[test]
@@ -1027,6 +1135,10 @@ fn peer(node_id: NodeId) -> PeerId {
 
 fn proposal(value: u64) -> ProposalId {
     ProposalId::new(value).unwrap()
+}
+
+fn read_barrier(value: u64) -> ReadBarrierId {
+    ReadBarrierId::new(value).unwrap()
 }
 
 fn voters() -> [NodeId; 3] {

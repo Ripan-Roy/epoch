@@ -2,7 +2,7 @@
 
 **Last reviewed:** 29 July 2026
 **Current release:** `v0.1.0-alpha.3`
-**Current core target:** topology-aware fixed-voter placement and capacity admission
+**Current core target:** quorum-confirmed regional read barriers
 
 This is the operational checklist for turning PRD scope into verified,
 releasable increments. [PRD.md](PRD.md) owns product scope,
@@ -31,7 +31,7 @@ protected-branch evidence agree.
 | G0 | Semantic contracts | 🟡 | Versioned envelope, errors, durability, ordering, delivery, time, fencing, and transaction limits | [Semantics](SEMANTICS.md), [API contracts](API_CONTRACTS.md); transaction limits remain open |
 | G1 | Repository and deterministic foundation | 🟡 | Reproducible toolchains, generated contracts, deterministic clock/fault harness, cross-language build | [Development](DEVELOPMENT.md), [Testing](TESTING.md), CI; broader fuzz/formal harness remains open |
 | G2 | Storage and recovery | 🟡 | Checksummed formats, crash recovery, corruption policy, snapshots, compaction, retention, tiering | Segmented WAL and EPRS pass; snapshots, compaction, tiering, and restore campaigns remain open |
-| G3 | Consensus, catalog, and placement | 🟡 | Quorum safety, persistent catalog, multi-group supervision, membership, placement, repair, read barriers | Dedicated catalog consensus, shared multi-group supervision, deterministic materialization, authenticated fixed-voter region/zone/class validation, limiting group-capacity admission, fenced routing, leader replacement, and same-volume recovery pass locally; dynamic membership/voter selection, rack placement, transfer/repair, and read barriers remain open |
+| G3 | Consensus, catalog, and placement | 🟡 | Quorum safety, persistent catalog, multi-group supervision, membership, placement, repair, read barriers | Dedicated catalog consensus, shared multi-group supervision, deterministic materialization, authenticated fixed-voter region/zone/class validation, limiting group-capacity admission, fenced routing, safe leader ReadIndex barriers, leader replacement, and same-volume recovery pass locally; dynamic membership/voter selection, rack placement, transfer/repair, follower reads, and broader model evidence remain open |
 | G4 | Native profile cores | 🟡 | Cache, Stream, Queue, and Bus P0 semantics with truthful public routing and fault evidence | All four typed tablet cores run simultaneously behind resource/shard routing and pass process/container recovery; stable authenticated native APIs and remaining P0 breadth are open |
 | G5 | Trust and observability | 🟡 | Identity, authorization, TLS/mTLS, encryption, audit, telemetry, quotas, explain | Shared Go/Rust bootstrap authentication, scoped action authorization, collection isolation, session-only console credential, and credential-free decision logs pass protected `main` CI; OIDC, expiry/revocation, TLS/mTLS/peer identity, encryption, replicated policy, immutable audit export, telemetry, and quotas remain open |
 | G6 | Compatibility gateways | ⬜ | Named protocol/client matrix, differential tests, fuzzing, malformed frames, migration evidence | Native APIs only; RESP3, Kafka, AMQP, MQTT compatibility is not claimed |
@@ -69,7 +69,7 @@ complete.
 | MT-07 | Demultiplex peer frames by group and epoch | Rust node transport | MT-06 | 🟡 | Shared listener rejects unknown group/epoch, keeps groups isolated, and uses bounded ordered peer queues; broader load/backpressure benchmarks remain open |
 | MT-08 | Supervise several consensus groups in one node process | Rust node runtime | MT-07 | 🟡 | One supervisor reserves catalog group 1, enforces a group cap, runs catalog plus several profile groups, and reopens them after `SIGKILL`; dynamic membership and production resource accounting remain open |
 | MT-09 | Materialize typed profile tablets from committed catalog state | Rust regional control | MT-06, MT-08 | 🟡 | Catalog apply/delete/reconcile tests and real process/container runs create Cache, Stream, Queue, and Bus tablets together and recover them from committed state; online shard transfer remains open |
-| MT-10 | Route public requests by resource, shard, leader, generation, and epoch | Rust gateway | MT-09 | 🟡 | Experimental resource/shard discovery and data dispatch reject stale generation, stale tablet epoch, nonleaders, missing routes, profile mismatches, missing credentials, action denial, and cross-tenant scope; stable native routing, production identity/TLS, and read barriers remain open |
+| MT-10 | Route public requests by resource, shard, leader, generation, and epoch | Rust gateway | MT-09 | 🟡 | Experimental resource/shard discovery and data dispatch reject stale generation, stale tablet epoch, nonleaders, missing routes, profile mismatches, missing credentials, action denial, and cross-tenant scope; regional reads default to safe leader ReadIndex with explicit stale opt-in; stable native routing, production identity/TLS, and follower routing remain open |
 | MT-11 | Reconcile hosted desired state through the Rust authority | Go control plane | MT-06, MT-10 | 🟡 | Real authenticated gRPC lifecycle, transactional bbolt desired/status/token/tombstone state, exact replay and generation continuity across restart, corruption/version/exclusive-owner rejection, complete topology inventory, incremental capacity admission, generation-fenced status, and Go-to-Rust container reconciliation pass locally; multi-instance consistency, transactional reservations, OIDC/mTLS, and replicated policy remain open |
 | MT-12 | Show achieved placement and risk without overclaiming | TypeScript console | MT-10, MT-11 | 🟡 | The console reads only the Go BFF with a session-only interactive credential, preserves decimal 64-bit IDs, distinguishes pending/ready/degraded/failed, and lists observed voters/leaders plus consistent configured zone/class/group-capacity evidence and remaining server-identity/rack/dynamic-membership non-claims; OIDC exchange and browser visual/accessibility automation remain open |
 | MT-13 | Real-process and container fault campaign | Test infrastructure | MT-06–MT-12 | 🟡 | Three policy-protected regional containers cover node-local topology/group capacity, pre-catalog rejection, catalog plus five resources/four profiles, service-authenticated Go-to-Rust apply/BFF, Go control `SIGKILL`/same-file reopen/exact replay, leader `SIGKILL`, two-voter degradation, catch-up, all-node `SIGKILL`, same-volume reopen, and digest convergence locally; this increment's protected-branch CI and broader crash/I/O/auth-abuse faults remain |
@@ -79,15 +79,30 @@ complete.
 
 | ID | Checklist item | Boundary | State | Evidence / acceptance |
 |---|---|---|---:|---|
-| PL-01 | Report immutable node topology from validated runtime config | Rust node | 🟡 | Bounded region/zone/class plus peer-derived voter IDs reject invalid or ambiguous startup identity |
-| PL-02 | Report live consensus-group capacity | Rust node | 🟡 | Authenticated topology route counts catalog plus materialized tablets and returns maximum/used/available groups |
-| PL-03 | Collect a complete consistent inventory | Go authority | 🟡 | Every configured endpoint must respond; duplicate IDs, malformed labels, mismatched voters, and inconsistent capacity fail closed |
-| PL-04 | Validate requested placement before catalog mutation | Go reconciler | 🟡 | Allowed regions, minimum zones, and node class are checked against the exact immutable voter set |
-| PL-05 | Reject the limiting resource without over-reserving retries | Go reconciler | 🟡 | New resources charge all shards; expansion charges only added observed shards; observation retries charge zero; capacity failure names the limiting node |
-| PL-06 | Publish requested versus achieved topology | Protobuf + Go BFF | 🟡 | Generated contract and browser-safe projection include policy, achieved zones, nodes, fixed voters, and capacity with decimal 64-bit IDs |
-| PL-07 | Explain evidence and non-claims | TypeScript console | 🟡 | Console verifies zone evidence and per-node capacity while naming rack placement, membership changes, and rebalance as absent |
-| PL-08 | Prove the vertical path in containers | Integration | 🟡 | Campaign checks three topology endpoints, accepts a three-zone resource, rejects 15 shards before catalog apply, then repeats failover/recovery |
-| PL-09 | Pass protected pull-request evidence | GitHub | ⬜ | Full required CI and Pages checks must be green before this bounded increment is verified on `main` |
+| PL-01 | Report immutable node topology from validated runtime config | Rust node | ✅ | Bounded region/zone/class plus peer-derived voter IDs reject invalid or ambiguous startup identity |
+| PL-02 | Report live consensus-group capacity | Rust node | ✅ | Authenticated topology route counts catalog plus materialized tablets and returns maximum/used/available groups |
+| PL-03 | Collect a complete consistent inventory | Go authority | ✅ | Every configured endpoint must respond; duplicate IDs, malformed labels, mismatched voters, and inconsistent capacity fail closed |
+| PL-04 | Validate requested placement before catalog mutation | Go reconciler | ✅ | Allowed regions, minimum zones, and node class are checked against the exact immutable voter set |
+| PL-05 | Reject the limiting resource without over-reserving retries | Go reconciler | ✅ | New resources charge all shards; expansion charges only added observed shards; observation retries charge zero; capacity failure names the limiting node |
+| PL-06 | Publish requested versus achieved topology | Protobuf + Go BFF | ✅ | Generated contract and browser-safe projection include policy, achieved zones, nodes, fixed voters, and capacity with decimal 64-bit IDs |
+| PL-07 | Explain evidence and non-claims | TypeScript console | ✅ | Console verifies zone evidence and per-node capacity while naming rack placement, membership changes, and rebalance as absent |
+| PL-08 | Prove the vertical path in containers | Integration | ✅ | Campaign checks three topology endpoints, accepts a three-zone resource, rejects 15 shards before catalog apply, then repeats failover/recovery |
+| PL-09 | Pass protected pull-request evidence | GitHub | ✅ | PR #41 was squash-merged as `038b8c09`; exact-main CI `30477768038` and Pages `30477767094` passed |
+
+## Current read delivery: quorum-confirmed regional reads
+
+| ID | Checklist item | Boundary | State | Evidence / acceptance |
+|---|---|---|---:|---|
+| RB-01 | Keep Raft implementation types behind Epoch-owned contracts | Rust consensus | 🟡 | Typed request/completion IDs carry group, epoch, and expected term without exporting `raft-rs` types |
+| RB-02 | Complete only after majority confirmation and local apply | Rust consensus | 🟡 | Safe ReadIndex completion requires quorum `ReadState` plus `applied_index >= read_index`; new-leader requests wait for a current-term commit |
+| RB-03 | Bound, cancel, and fence pending reads | Rust consensus + actor | 🟡 | 1,024-request cap, unique IDs, caller timeout cancellation, and role/term invalidation are locally tested |
+| RB-04 | Apply typed profile state before releasing read proof | Rust node actor | 🟡 | Commit application precedes barrier notification; a real three-runtime test proves success with a majority and timeout without one |
+| RB-05 | Make regional reads linearizable by default without silent downgrade | Rust gateway | 🟡 | Typed GETs and Event Bus query POSTs use leader barriers; explicit `local_stale` alone bypasses them |
+| RB-06 | Return machine-readable consistency evidence and errors | HTTP contract | 🟡 | Response headers/JSON carry achieved consistency and exact term/read/applied indexes; timeout is retryable 503 |
+| RB-07 | Preserve authorization semantics | Rust auth | 🟡 | Event Bus query POSTs require `data.read`; mutation POSTs still require `data.write` |
+| RB-08 | Prove the full process path | Integration | 🟡 | Regional process test performs a linearizable leader read, validates evidence, and retains explicit stale convergence reads |
+| RB-09 | Document design and non-claims | Documentation | 🟡 | ADR-0013 and API/runtime/consensus/profile/testing/traceability docs distinguish regional barriers from direct stale routes |
+| RB-10 | Pass protected pull-request evidence | GitHub | ⬜ | Required CI and Pages must pass before this increment is verified on `main` |
 
 ## Current security delivery: bootstrap trust baseline
 
