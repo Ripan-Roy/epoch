@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs::{File, read_to_string},
     net::{SocketAddr, TcpListener as StdTcpListener},
     path::PathBuf,
@@ -92,8 +93,7 @@ struct ProcessCluster {
 impl ProcessCluster {
     fn start() -> Self {
         let root = TempDir::new().expect("temp directory should be created");
-        let http_addresses = reserve_addresses(NODE_COUNT);
-        let peer_addresses = reserve_addresses(NODE_COUNT);
+        let (http_addresses, peer_addresses) = reserve_cluster_addresses();
         let peer_spec = peer_addresses
             .iter()
             .enumerate()
@@ -161,16 +161,34 @@ impl Drop for ProcessCluster {
     }
 }
 
-fn reserve_addresses(count: usize) -> Vec<SocketAddr> {
-    let listeners = (0..count)
+fn reserve_cluster_addresses() -> (Vec<SocketAddr>, Vec<SocketAddr>) {
+    // Keep every reservation open until both address sets are known. Reserving
+    // the HTTP and peer sets separately allows Linux to immediately recycle an
+    // HTTP port into the peer set, making two listeners in the same cluster
+    // compete for one address.
+    let listeners = (0..NODE_COUNT * 2)
         .map(|_| StdTcpListener::bind("127.0.0.1:0").expect("port should reserve"))
         .collect::<Vec<_>>();
-    let addresses = listeners
+    let mut addresses = listeners
         .iter()
         .map(|listener| listener.local_addr().expect("listener should have address"))
-        .collect();
+        .collect::<Vec<_>>();
+    let peer_addresses = addresses.split_off(NODE_COUNT);
     drop(listeners);
-    addresses
+    (addresses, peer_addresses)
+}
+
+#[test]
+fn cluster_address_reservations_do_not_overlap() {
+    for _ in 0..32 {
+        let (http_addresses, peer_addresses) = reserve_cluster_addresses();
+        let unique = http_addresses
+            .iter()
+            .chain(&peer_addresses)
+            .copied()
+            .collect::<HashSet<_>>();
+        assert_eq!(unique.len(), NODE_COUNT * 2);
+    }
 }
 
 fn route_url(node: &NodeProcess, kind: &str, name: &str) -> String {
