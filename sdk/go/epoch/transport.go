@@ -19,10 +19,11 @@ const (
 
 // Request is the transport-neutral representation of one Epoch call.
 type Request struct {
-	Method string
-	Path   string
-	Query  url.Values
-	Body   any
+	Method  string
+	Path    string
+	Query   url.Values
+	Body    any
+	Headers map[string]string
 }
 
 // Transport is the narrow dependency consumed by Client.
@@ -90,6 +91,12 @@ func (transport *HTTPTransport) Do(ctx context.Context, request Request, result 
 	httpRequest.Header.Set("User-Agent", userAgent)
 	if request.Body != nil {
 		httpRequest.Header.Set("Content-Type", "application/json")
+	}
+	for name, value := range request.Headers {
+		if strings.EqualFold(name, "host") || strings.EqualFold(name, "content-length") {
+			return fmt.Errorf("epoch: request header %s is managed by the HTTP transport", name)
+		}
+		httpRequest.Header.Set(name, value)
 	}
 
 	response, err := transport.client.Do(httpRequest)

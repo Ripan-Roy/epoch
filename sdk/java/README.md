@@ -26,8 +26,19 @@ client.appendStream(
 `LOCAL_DURABLE` currently means fsync and recovery on one node; it does not
 provide replication or protection from losing that host and its storage. Queue
 messages and transitions use the same boundary; Cache and Event Bus remain
-volatile in the runnable slice. The SDK does not yet provide native gRPC
-streaming, automatic retries, or a stable compatibility promise.
+volatile in the runnable slice. Standalone calls perform no hidden retries.
+
+`RegionalStreamClient` is the explicit replicated alternative. It accepts
+every Rust node endpoint plus a `RegionalScope` and bearer token, discovers the
+current leader before each call, carries generation/tablet fences, reuses the
+caller's append/checkpoint idempotency key across one bounded rediscovery, and
+requests linearizable fetch/lag reads. See the
+[complete regional example](../../console/src/quickstarts/regional/RegionalQuickstart.java)
+and [contract guide](../../docs/REGIONAL_STREAM_SDK.md).
+
+The SDK does not yet provide native gRPC streaming, coordinated consumer
+sessions, generated response types, package publication, or a stable complete
+compatibility promise.
 
 Run its complete format, compiler-lint, Checkstyle, unit, transport, and package
 gate with the checksum-pinned Maven wrapper:

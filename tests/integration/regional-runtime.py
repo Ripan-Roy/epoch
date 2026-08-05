@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import importlib
 import os
 import socket
 import subprocess
@@ -761,6 +762,58 @@ def wait_for_catalog(cluster: RegionalCluster, expected: int) -> str:
     return wait_until(f"catalog convergence for {expected} resources", converged)
 
 
+def prove_python_sdk_native_stream_after_failover(
+    cluster: RegionalCluster,
+    resource: Resource,
+) -> None:
+    sdk_source = str(REPO_ROOT / "sdk/python/src")
+    if sdk_source not in sys.path:
+        sys.path.insert(0, sdk_source)
+    epoch_sdk = importlib.import_module("epoch_sdk")
+    client = epoch_sdk.RegionalStreamClient(
+        [f"http://127.0.0.1:{cluster.http_ports[node]}" for node in NODES],
+        token=ADMIN_TOKEN,
+        scope=epoch_sdk.RegionalScope("acme", "shop", "dev", "core"),
+        timeout=2.0,
+    )
+    event = epoch_sdk.EventEnvelope(
+        id="managed-orders-2",
+        source="python-regional-sdk",
+        event_type="order.created",
+        payload={"id": 2},
+        time_ms=2,
+    )
+    committed = client.append(resource.name, 0, "python-sdk-append-2", event)
+    assert committed.get("state") == "committed", committed
+
+    replayed = client.append(resource.name, 0, "python-sdk-append-2", event)
+    assert replayed.get("state") == "committed", replayed
+    receipt = replayed.get("receipt")
+    assert isinstance(receipt, dict) and receipt.get("disposition") == "replayed", replayed
+
+    fetched = client.fetch(resource.name, 0, 0, limit=10)
+    records = fetched.get("records")
+    assert isinstance(records, list) and [
+        record.get("envelope", {}).get("id") for record in records
+    ] == ["order-1", "managed-orders-2"], fetched
+
+    checkpoint = client.commit_offset(
+        resource.name,
+        0,
+        "billing",
+        "python-worker",
+        1,
+        2,
+        idempotency_key="python-sdk-checkpoint-2",
+    )
+    assert checkpoint.get("state") == "committed", checkpoint
+    lag = client.lag(resource.name, 0, "billing")
+    observation = lag.get("checkpoint")
+    assert isinstance(observation, dict), lag
+    assert observation.get("committed_offset") == "2", lag
+    assert observation.get("lag") == "0", lag
+
+
 def run_campaign(cluster: RegionalCluster) -> None:
     cluster.start()
     wait_for_nodes(cluster)
@@ -789,14 +842,15 @@ def run_campaign(cluster: RegionalCluster) -> None:
     cluster.stop_node(old_leader)
     survivors = tuple(node for node in NODES if node != old_leader)
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "degraded", 2)
-    new_leader, new_term = write_profile(cluster, stream, 2, survivors)
+    new_leader, new_term = wait_for_routes(cluster, stream, survivors)
     assert new_leader != old_leader
     assert new_term > old_term
-    wait_for_profile_apply(cluster, stream, 2, survivors)
+    prove_python_sdk_native_stream_after_failover(cluster, stream)
+    wait_for_profile_apply(cluster, stream, 3, survivors)
 
     cluster.start_node(old_leader)
     wait_for_nodes(cluster)
-    wait_for_profile_apply(cluster, stream, 2)
+    wait_for_profile_apply(cluster, stream, 3)
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
     for resource in RESOURCES:
         wait_for_profile_apply(cluster, resource, 1)
@@ -807,7 +861,7 @@ def run_campaign(cluster: RegionalCluster) -> None:
     wait_for_nodes(cluster)
     assert wait_for_catalog(cluster, expected_resources) == initial_catalog_digest
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
-    wait_for_profile_apply(cluster, stream, 2)
+    wait_for_profile_apply(cluster, stream, 3)
     for resource in RESOURCES:
         wait_for_profile_apply(cluster, resource, 1)
 

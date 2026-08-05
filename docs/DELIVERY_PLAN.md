@@ -164,7 +164,7 @@ tests, every-codec real-runtime commits, EPRS reopen, and a Python-produced gzip
 container frame are executable. This advances STREAM-006 but does not complete
 stable bidirectional Produce, automatic producer batching/negotiation,
 multi-partition routing, non-atomic partial results, fuzz/load evidence, or SDK
-support. See [ADR-0015](adr/0015-stream-batch-compression.md) and
+batch support. See [ADR-0015](adr/0015-stream-batch-compression.md) and
 [Experimental Stream Tablet](STREAM_TABLET.md).
 
 The same Stream tablet now accepts a version-three consumer-group checkpoint
@@ -173,9 +173,17 @@ caller-supplied generations fence an old or conflicting member. Typed
 committed rejections, exact retry, lag/replay observations, real-three-runtime
 convergence, and container `SIGKILL` rebuild are executable. This advances
 STREAM-003 without claiming automatic group membership, heartbeat, assignment,
-rebalance, multi-partition ownership, transactional offsets, or stable SDK
-support. See
-[ADR-0016](adr/0016-stream-consumer-group-checkpoints.md).
+rebalance, multi-partition ownership, or transactional offsets. A fully
+qualified authenticated regional Stream v1 route now maps to that same tablet.
+Repository-local Go, Java, and Python clients discover a current leader before
+each operation, copy generation/tablet fences, preserve caller idempotency
+across bounded rediscovery, and request linearizable fetch/lag reads. All three
+have contract tests and exact compiled Pages examples; Python additionally
+runs after leader loss in the container recovery campaign. Generated response
+types, coordinated sessions, all-language live-cluster execution, package
+publication, and production scale/fault evidence remain open. See
+[ADR-0016](adr/0016-stream-consumer-group-checkpoints.md) and
+[ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md).
 
 The Queue application core now runs behind the same profile-neutral persistent
 actor boundary. It deterministically applies strict single-partition commands,

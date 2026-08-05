@@ -230,7 +230,8 @@ the dedicated experimental API; it does not claim zone placement. A profile
 application error on the actor drains both listeners and exits the process. If
 an HTTP lookup ever observes a commit without the exact actor-applied receipt,
 the typed service fails closed and does not apply state from the request task.
-The public API guarantee remains unchanged.
+The standalone public API guarantee remains unchanged; the regional Stream v1
+surface described below is an explicit, separate contract.
 
 That tablet now has an additive command-v2 batch boundary. Canonical record
 arrays carry unique client sequences inside none, gzip, LZ4-frame,
@@ -249,8 +250,9 @@ produce typed applied or committed-rejected receipts. Lag and replay reads are
 pure observations of actor-applied state, so regional routing can place the
 normal ReadIndex barrier in front of them. This is intentionally a checkpoint
 primitive rather than a full coordinator: join, heartbeat, assignment,
-rebalance, multi-partition ownership, transactions, and stable SDK exposure
-remain separate layers. See
+rebalance, multi-partition ownership, and transactions remain separate layers.
+Go, Java, and Python now expose this primitive through the regional Stream v1
+client without claiming those coordinator behaviors. See
 [ADR-0016](adr/0016-stream-consumer-group-checkpoints.md).
 
 The regional multi-tablet alpha composes that adapter with `epoch-catalog`.
@@ -267,14 +269,24 @@ leader confirms a majority and the actor applies the local typed profile
 through the returned index before dispatch. An explicit `local_stale` request
 keeps the direct stale-capable behavior; there is no silent downgrade.
 
+The application-facing Stream adapter is fully qualified beneath
+`/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/streams/{name}/shards/{shard}`.
+It delegates to the same materialized tablet and never proxies through Go.
+Go, Java, and Python clients discover a current leader before every call,
+authenticate, copy resource-generation/tablet-epoch fences, preserve an
+explicit mutation idempotency key across one bounded rediscovery, and request
+linearizable fetch/lag reads. The generic regional and direct tablet routes
+remain internal verification surfaces. See
+[ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md).
+
 The current placement remains fixed at three configured voters, but it is now
 topology-aware at admission. Every Rust node reports its authenticated
 region/zone/class, exact fixed voter set, and live consensus-group capacity.
 Go requires a complete consistent inventory before catalog mutation, validates
 allowed regions, minimum zones, and node class, and charges only newly added
 shards. This is real constraint validation and capacity rejection, not dynamic
-membership, voter selection, online rebalance, rack placement, or a stable
-public API. See [ADR-0009](adr/0009-regional-tablet-catalog.md),
+membership, voter selection, online rebalance, rack placement, or a production
+placement API. See [ADR-0009](adr/0009-regional-tablet-catalog.md),
 [ADR-0012](adr/0012-topology-aware-admission.md), and
 [ADR-0013](adr/0013-quorum-read-barriers.md).
 

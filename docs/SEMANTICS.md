@@ -500,16 +500,22 @@ means replicated ingress and durable delivery intent, never by itself a
 webhook/Queue/Stream/HTTP side effect. See
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
-Epoch does **not** yet provide a public clustered durability contract, regional
-catalog/placement, distributed membership fencing, persisted profile snapshots,
-consumer-group coordination, bounded transactions, object tier, geo replication,
-native Protobuf services, compatibility gateways, durable webhook delivery,
-connector execution, or the security controls in [SECURITY.md](SECURITY.md).
+Epoch does **not** yet provide a production clustered durability contract,
+dynamic regional placement/membership, persisted profile snapshots,
+consumer-group coordination, bounded transactions, object tier, geo
+replication, native Protobuf data services, compatibility gateways, durable
+webhook delivery, connector execution, or the production security controls in
+[SECURITY.md](SECURITY.md).
 The direct experimental Stream, Queue, Cache, and Event Bus profile routes also
 lack a read barrier, authenticated transport, multiple partitions/tablets, and
 bounded idempotency retention. The regional resource/shard wrapper supplies a
-leader ReadIndex by default; it does not change the direct-route contract. See
-[STREAM_TABLET.md](STREAM_TABLET.md) and [QUEUE_TABLET.md](QUEUE_TABLET.md).
+leader ReadIndex by default; it does not change the direct-route contract. The
+regional Stream v1 SDK makes that explicit wrapper callable from Go, Java, and
+Python but does not turn fixed-voter evidence into a production durability
+claim or add consumer coordination. See
+[REGIONAL_STREAM_SDK.md](REGIONAL_STREAM_SDK.md),
+[STREAM_TABLET.md](STREAM_TABLET.md), and
+[QUEUE_TABLET.md](QUEUE_TABLET.md).
 The Cache tablet additionally lacks profile
 snapshots/compaction, background active expiry, and bounded
 idempotency-receipt retention; see [CACHE_TABLET.md](CACHE_TABLET.md). The Bus

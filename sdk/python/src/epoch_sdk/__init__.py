@@ -10,6 +10,7 @@ from .models import (
     Subscription,
     SubscriptionTarget,
 )
+from .regional import RegionalScope, RegionalStreamClient
 from .transport import Transport, UrllibTransport
 
 __all__ = [
@@ -19,6 +20,8 @@ __all__ = [
     "EventEnvelope",
     "EventFilter",
     "EventTransform",
+    "RegionalScope",
+    "RegionalStreamClient",
     "Subscription",
     "SubscriptionTarget",
     "Transport",

@@ -55,6 +55,24 @@ notes explicitly list additional verified artifacts.
 - Strict direct/regional consumer-group mutation, lag, and checkpoint-replay
   routes with browser-safe observations, real-three-runtime convergence/EPRS
   rebuild, and container failover plus all-voter `SIGKILL` recovery evidence.
+- A fully qualified regional Stream v1 route with strict tenant-scoped
+  authentication, route/data authorization, generation/tablet fencing,
+  leader-only mutation admission, and linearizable fetch/lag reads over the
+  existing replicated tablet.
+- Separate Go, Java, and Python `RegionalStreamClient` implementations for
+  leader discovery, single-record append, bounded fetch, checkpoint
+  commit/reset, lag, and checkpoint replay. All preserve caller idempotency
+  across bounded rediscovery and have exact compilable Pages examples.
+- ADR-0017 and an end-to-end regional SDK guide embedded in the public docs;
+  the container campaign runs the Python SDK after leader loss and through
+  subsequent all-voter recovery.
+
+### Fixed
+
+- Regional dispatch now clears cached outer-router path parameters before
+  invoking the profile router. Without that request boundary, parameterized
+  Stream group routes could fail immediately with HTTP 500 even though
+  authentication, leadership, and replication were healthy.
 
 ### Limitations
 
@@ -70,8 +88,8 @@ notes explicitly list additional verified artifacts.
   rebalance. Plain HTTP also does not authenticate the Rust server to Go.
 - Linearizable reads are leader-only and limited to the experimental regional
   surface. Direct profile routes remain stale-capable; follower forwarding,
-  dynamic membership, stable SDK exposure, and cross-tablet read transactions
-  remain unimplemented.
+  dynamic membership, regional SDK coverage for the other profiles, and
+  cross-tablet read transactions remain unimplemented.
 - Queue credit is currently an experimental HTTP request/response slice. Native
   bidirectional receive, connection-scoped credit, automatic prefetch,
   cross-consumer fairness, indexed backlog-scale counting, and stable SDK
@@ -85,9 +103,13 @@ notes explicitly list additional verified artifacts.
   caller-supplied generation fence only. Join, heartbeat, assignment, revoke,
   dead-member detection, automatic generation allocation, rebalance,
   multi-partition ownership, transactional offset commits, retention
-  interaction, scale/fairness evidence, and stable native/SDK exposure remain
-  unimplemented. Existing Go, Java, and Python offset helpers still target the
-  standalone API.
+  interaction, scale/fairness evidence, generated coordinated-session types,
+  and production fault coverage remain unimplemented. The regional clients
+  expose only the explicit partition-0 checkpoint primitive; standalone offset
+  helpers keep their local contract.
+- The regional SDKs remain repository-local alpha source. Package publication,
+  generated response models, batch/compression helpers, TLS/OIDC/mTLS, dynamic
+  membership, and live-cluster execution for every language remain open.
 
 ## [0.1.0-alpha.3] - 2026-07-29
 
