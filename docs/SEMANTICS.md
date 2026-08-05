@@ -207,6 +207,18 @@ are independent durable state unless they participate in an Epoch transaction.
 Rebalancing changes group ownership epochs; a member from an older generation
 cannot commit offsets.
 
+The experimental single-partition tablet implements the checkpoint subset of
+that contract. Its first caller-supplied generation is 1; the current member
+may commit again at the same generation, while a new member must use exactly
+the next generation. Lower generations, skipped generations, and another
+member reusing the current generation are committed fenced rejections. A
+normal commit is monotonic. Only an explicit reset may rewind, and either
+operation must remain between the earliest retained and end offsets. Rejected
+business outcomes do not change ownership/checkpoint state but remain in the
+replicated history and digest. Automatic join, heartbeat, assignment, revoke,
+generation allocation, and rebalance remain future `ConsumerSession` work; see
+[ADR-0016](adr/0016-stream-consumer-group-checkpoints.md).
+
 Read-committed consumers skip prepared and aborted transactional entries. They
 may wait behind an unresolved transaction up to a documented bound.
 

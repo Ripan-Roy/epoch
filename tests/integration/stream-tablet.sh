@@ -10,6 +10,9 @@ epoch_use_existing_image="${EPOCH_TABLET_USE_EXISTING_IMAGE:-0}"
 epoch_status_path=/experimental/v1/tablets/stream/status
 epoch_records_path=/experimental/v1/tablets/stream/records
 epoch_batches_path=/experimental/v1/tablets/stream/records/batches
+epoch_group_offsets_path=/experimental/v1/tablets/stream/groups/billing/offsets
+epoch_group_lag_path=/experimental/v1/tablets/stream/groups/billing/lag
+epoch_group_records_path=/experimental/v1/tablets/stream/groups/billing/records
 epoch_opaque_status_path=/experimental/v1/consensus/status
 epoch_internal_peer_message_path=/internal/v1/consensus/messages
 epoch_response_file=
@@ -111,6 +114,18 @@ tablet_records() {
     "http://127.0.0.1:${epoch_peer_ports[node_id - 1]}${epoch_records_path}?offset=0&limit=100"
 }
 
+tablet_group_lag() {
+  local node_id=$1
+  curl --fail --silent --show-error \
+    "http://127.0.0.1:${epoch_peer_ports[node_id - 1]}${epoch_group_lag_path}"
+}
+
+tablet_group_records() {
+  local node_id=$1
+  curl --fail --silent --show-error \
+    "http://127.0.0.1:${epoch_peer_ports[node_id - 1]}${epoch_group_records_path}?limit=2"
+}
+
 assert_listener_boundaries() {
   local node_id=$1
   local public_port="${epoch_http_ports[node_id - 1]}"
@@ -125,7 +140,10 @@ assert_listener_boundaries() {
     "$epoch_internal_peer_message_path" \
     "$epoch_status_path" \
     "$epoch_records_path" \
-    "$epoch_batches_path"; do
+    "$epoch_batches_path" \
+    "$epoch_group_offsets_path" \
+    "$epoch_group_lag_path" \
+    "$epoch_group_records_path"; do
     status_code="$(curl --silent --output /dev/null --write-out '%{http_code}' \
       "http://127.0.0.1:${public_port}${path}")"
     if [[ "$status_code" != 404 ]]; then
@@ -260,6 +278,27 @@ print(json.dumps({
     "http://127.0.0.1:${port}${epoch_batches_path}"
 }
 
+update_group_offset() {
+  local node_id=$1
+  local expected_term=$2
+  local idempotency_key=$3
+  local member_id=$4
+  local generation=$5
+  local next_offset=$6
+  local mode=$7
+  local output_file=$8
+  local port="${epoch_peer_ports[node_id - 1]}"
+  curl --silent --show-error \
+    --connect-timeout 2 \
+    --max-time 8 \
+    --request PUT \
+    --output "$output_file" \
+    --write-out '%{http_code}' \
+    --header 'content-type: application/json' \
+    --data "{\"idempotency_key\":\"${idempotency_key}\",\"expected_term\":\"${expected_term}\",\"member_id\":\"${member_id}\",\"group_generation\":\"${generation}\",\"partition\":0,\"next_offset\":\"${next_offset}\",\"mode\":\"${mode}\"}" \
+    "http://127.0.0.1:${port}${epoch_group_offsets_path}"
+}
+
 assert_unresolved() {
   local document=$1
   python3 -c '
@@ -330,6 +369,39 @@ assert all(item["disposition"] == "new" for item in batch["records"]), document
 ' "$document" "$expected_first_offset" "$expected_disposition" "$expected_first_sequence"
 }
 
+assert_group_receipt() {
+  local document=$1
+  local expected_outcome=$2
+  local expected_offset=$3
+  local expected_disposition=$4
+  local expected_rejection=${5:-}
+  python3 -c '
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+receipt = document["receipt"]
+assert document["state"] == "committed", document
+assert receipt["group"] == "billing", document
+assert receipt["outcome"] == sys.argv[2], document
+assert receipt["committed_offset"] == sys.argv[3], document
+assert receipt["disposition"] == sys.argv[4], document
+assert receipt["write_evidence"] == "fixed_voter_majority_persisted", document
+assert receipt["durable_voter_acks"] == 2, document
+expected_rejection = sys.argv[5]
+if expected_rejection:
+    assert receipt["rejection"] == expected_rejection, document
+else:
+    assert "rejection" not in receipt, document
+for field in (
+    "proposal_id", "tablet_id", "tablet_epoch", "term", "commit_index",
+    "group_generation", "requested_next_offset", "previous_offset",
+    "committed_offset", "end_offset", "lag", "applied_at_ms",
+):
+    assert isinstance(receipt[field], str), (field, document)
+' "$document" "$expected_outcome" "$expected_offset" "$expected_disposition" "$expected_rejection"
+}
+
 assert_error() {
   local document=$1
   local expected_code=$2
@@ -383,6 +455,35 @@ raise SystemExit(0 if len(json.loads(sys.argv[1])["records"]) == int(sys.argv[2]
   return 1
 }
 
+wait_for_group_offset() {
+  local expected=$1
+  shift
+  local nodes=("$@")
+  local node_id
+  local observation
+  local observed
+  for _ in {1..300}; do
+    observed=0
+    for node_id in "${nodes[@]}"; do
+      observation="$(tablet_group_lag "$node_id" 2>/dev/null || true)"
+      if [[ -n "$observation" ]] && python3 -c '
+import json
+import sys
+checkpoint = json.loads(sys.argv[1])["checkpoint"]
+raise SystemExit(0 if checkpoint["committed_offset"] == sys.argv[2] else 1)
+' "$observation" "$expected"; then
+        observed=$((observed + 1))
+      fi
+    done
+    if ((observed == ${#nodes[@]})); then
+      return 0
+    fi
+    sleep 0.1
+  done
+  printf 'expected group offset %s on nodes %s\n' "$expected" "${nodes[*]}" >&2
+  return 1
+}
+
 cd "$epoch_repo_root"
 if [[ "$epoch_use_existing_image" == 1 ]]; then
   "${epoch_compose[@]}" up --no-build --detach
@@ -417,6 +518,11 @@ assert status["supported_batch_compressions"] == ["none", "gzip", "lz4", "snappy
 assert status["max_batch_records"] == 1000, status
 assert status["max_batch_compressed_bytes"] == 360 * 1024, status
 assert status["max_batch_uncompressed_bytes"] == 4 * 1024 * 1024, status
+assert status["consumer_group_checkpoints"] == "replicated_commit_reset_lag_and_replay", status
+assert status["consumer_group_ownership_fencing"] == "caller_supplied_monotonic_generation", status
+assert status["max_consumer_groups"] == 10000, status
+assert status["max_consumer_group_bytes"] == 256, status
+assert status["max_consumer_member_bytes"] == 256, status
 ' "$epoch_status"
 done
 
@@ -523,12 +629,47 @@ epoch_status_code="$(append_batch \
 assert_error "$(<"$epoch_response_file")" idempotency_conflict unknown
 wait_for_record_count 4 1 2 3
 
+# Consumer checkpoints are commands in the same replicated history as records.
+# Generation fencing makes a caller-supplied ownership change explicit, while
+# reset is the only operation allowed to rewind the durable next offset.
+read -r epoch_group_leader epoch_group_term < <(wait_for_leader)
+epoch_status_code="$(update_group_offset \
+  "$epoch_group_leader" "$epoch_group_term" group-commit worker-a 1 3 commit "$epoch_response_file")"
+[[ "$epoch_status_code" == 201 ]]
+assert_group_receipt "$(<"$epoch_response_file")" applied 3 new
+wait_for_group_offset 3 1 2 3
+
+epoch_status_code="$(update_group_offset \
+  "$epoch_group_leader" "$epoch_group_term" group-commit worker-a 1 3 commit "$epoch_response_file")"
+[[ "$epoch_status_code" == 200 ]]
+assert_group_receipt "$(<"$epoch_response_file")" applied 3 replayed
+
+epoch_status_code="$(update_group_offset \
+  "$epoch_group_leader" "$epoch_group_term" group-wrong-owner worker-b 1 4 commit "$epoch_response_file")"
+[[ "$epoch_status_code" == 201 ]]
+assert_group_receipt "$(<"$epoch_response_file")" rejected 3 new owner_mismatch
+
+epoch_status_code="$(update_group_offset \
+  "$epoch_group_leader" "$epoch_group_term" group-reset worker-b 2 1 reset "$epoch_response_file")"
+[[ "$epoch_status_code" == 201 ]]
+assert_group_receipt "$(<"$epoch_response_file")" applied 1 new
+
+epoch_status_code="$(update_group_offset \
+  "$epoch_group_leader" "$epoch_group_term" group-stale worker-a 1 4 commit "$epoch_response_file")"
+[[ "$epoch_status_code" == 201 ]]
+assert_group_receipt "$(<"$epoch_response_file")" rejected 1 new stale_generation
+wait_for_group_offset 1 1 2 3
+
 # Capture the complete typed state before the crash so deterministic but wrong
 # replay on every voter cannot satisfy only a post-restart cross-node check.
 epoch_pre_kill_records="$(tablet_records 1)"
+epoch_pre_kill_group_lag="$(tablet_group_lag 1)"
+epoch_pre_kill_group_records="$(tablet_group_records 1)"
 epoch_pre_kill_digest="$(json_field "$(tablet_status 1)" state_digest)"
 for epoch_node_id in 1 2 3; do
   assert_json_equal "$(tablet_records "$epoch_node_id")" "$epoch_pre_kill_records"
+  assert_json_equal "$(tablet_group_lag "$epoch_node_id")" "$epoch_pre_kill_group_lag"
+  assert_json_equal "$(tablet_group_records "$epoch_node_id")" "$epoch_pre_kill_group_records"
   [[ "$(json_field "$(tablet_status "$epoch_node_id")" state_digest)" == \
     "$epoch_pre_kill_digest" ]]
 done
@@ -540,14 +681,17 @@ done
 "${epoch_compose[@]}" start >/dev/null
 wait_for_nodes
 wait_for_record_count 4 1 2 3
+wait_for_group_offset 1 1 2 3
 
 epoch_reference_digest=
 for epoch_node_id in 1 2 3; do
   epoch_status="$(tablet_status "$epoch_node_id")"
-  [[ "$(json_field "$epoch_status" applied_command_count)" == 3 ]]
+  [[ "$(json_field "$epoch_status" applied_command_count)" == 7 ]]
   epoch_digest="$(json_field "$epoch_status" state_digest)"
   [[ "$epoch_digest" == "$epoch_pre_kill_digest" ]]
   assert_json_equal "$(tablet_records "$epoch_node_id")" "$epoch_pre_kill_records"
+  assert_json_equal "$(tablet_group_lag "$epoch_node_id")" "$epoch_pre_kill_group_lag"
+  assert_json_equal "$(tablet_group_records "$epoch_node_id")" "$epoch_pre_kill_group_records"
   if [[ -z "$epoch_reference_digest" ]]; then
     epoch_reference_digest=$epoch_digest
   else
@@ -563,4 +707,4 @@ wait_for_record_count 4 1 2 3
 
 rm -f -- "$epoch_response_file"
 epoch_response_file=
-printf 'Epoch typed Stream fixed-voter/minority/failover/SIGKILL replay smoke passed.\n'
+printf 'Epoch typed Stream batch/group fixed-voter/minority/failover/SIGKILL replay smoke passed.\n'

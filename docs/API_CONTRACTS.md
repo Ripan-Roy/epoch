@@ -620,7 +620,13 @@ not mounted on that group. The listener instead exposes:
   partition-0 batch carrying canonical record JSON in a declared `none`, gzip,
   LZ4-frame, Snappy-framed, or Zstd-frame base64 payload;
 - `GET /experimental/v1/tablets/stream/records` for explicitly stale-capable
-  local committed reads; and
+  local committed reads;
+- `PUT /experimental/v1/tablets/stream/groups/{group}/offsets` for a
+  generation-fenced checkpoint commit or explicit reset;
+- `GET /experimental/v1/tablets/stream/groups/{group}/lag` for owner,
+  generation, retained range, next offset, end offset, and lag;
+- `GET /experimental/v1/tablets/stream/groups/{group}/records` for bounded
+  replay beginning at the durable next offset; and
 - `GET /experimental/v1/tablets/stream/mutations/{proposal_id}` for unknown,
   pending, or committed outcome resolution.
 
@@ -652,6 +658,19 @@ the codec/sizes/count and one decimal offset/disposition per client sequence.
 The entire cloned transition becomes visible together. This is the
 experimental atomic tablet contract, not yet the stable non-atomic
 bidirectional `Produce` API or an SDK promise.
+A consumer-group mutation supplies `member_id`, `group_generation`, partition
+zero, `next_offset`, and `commit` or `reset`. The first owner uses generation
+one. The active member may repeat its generation, exactly the next generation
+may replace the owner, and stale, skipped, or same-generation/different-member
+requests are typed committed rejections. Commit is monotonic; reset alone may
+rewind within the retained range. Group/member identifiers are at most 256
+bytes and a tablet retains at most 10,000 groups. Receipt and read positions
+are decimal strings. Command v3 applies and recovers this state from the same
+EPRS history as v1/v2 records without changing their golden bytes or digest
+transitions. The generic regional router maps these operations under
+`data/groups/{group}/...`; regional reads use the normal safe ReadIndex default.
+This is durable checkpoint/fencing evidence, not coordinated join, heartbeat,
+assignment, revoke, rebalance, transactional offsets, or a stable SDK promise.
 A bounded unresolved wait returns `202`, preserving local `unknown` versus
 `pending` state while keeping outcome certainty unknown. Exact retries return
 the original offset; changed input under the same key is a conflict, and every
@@ -661,7 +680,8 @@ unknown global outcome certainty. Startup replays the full committed proposal
 history before the typed status route becomes ready. A live deterministic apply
 failure drains both listeners and exits the process. See
 [Experimental Stream Tablet](STREAM_TABLET.md) and
-[ADR-0015](adr/0015-stream-batch-compression.md).
+[ADR-0015](adr/0015-stream-batch-compression.md), plus consumer checkpoints in
+[ADR-0016](adr/0016-stream-consumer-group-checkpoints.md).
 
 When `EPOCH_EXPERIMENTAL_QUEUE_TABLET_ENABLED=true`, the same internal listener
 instead mounts a Queue profile and does not mount opaque or Stream routes:

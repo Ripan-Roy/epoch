@@ -105,7 +105,11 @@ exact retry, convergence, and all-container `SIGKILL`/reopen. Public product
 profiles remain standalone. The Stream mode additionally carries canonical
 atomic batches through none/gzip/LZ4/Snappy/Zstd command frames with hard
 decompression limits, correlated offsets, every-codec real-runtime reopen, and
-an independent Python-gzip container proof while preserving command v1. The
+an independent Python-gzip container proof while preserving command v1. Its
+additive command v3 also replicates consumer-group next offsets, explicit
+reset, caller-generation ownership fencing, committed business rejections,
+lag/replay reads, three-runtime convergence, and container `SIGKILL` recovery
+without changing v1/v2 evidence. The
 regional boundary now adds safe leader
 ReadIndex requests that require majority confirmation and local typed-profile
 application; default regional reads expose exact barrier evidence, explicit
@@ -116,6 +120,7 @@ authenticated transport, dynamic placement/repair, model and chaos reports,
 density, and performance. See [Consensus Feasibility Spike](CONSENSUS_SPIKE.md),
 [ADR-0013](adr/0013-quorum-read-barriers.md),
 [ADR-0015](adr/0015-stream-batch-compression.md),
+[ADR-0016](adr/0016-stream-consumer-group-checkpoints.md),
 [Experimental Stream Tablet](STREAM_TABLET.md), and
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md), and
 [Experimental Replicated Cache Tablet](CACHE_TABLET.md), and
@@ -149,7 +154,7 @@ durability.
 |---|---:|---|---|---|---|---|
 | STREAM-001 | P0 | Partitioned append log and key routing | M1 prototype → M2 | Slice | G0, G1, G2, G4 | Standalone segmented-WAL suites plus typed partition-0 Raft command, identical three-voter apply history/digest, catch-up, and all-voter EPRS replay; pending: multi-partition tablet routing/recovery |
 | STREAM-002 | P0 | Time/size/combined retention | M1 basic → M2 | Slice | G0, G2, G4 | Physical byte-threshold rotation verified; this is not retention; pending: time/size/combined deletion semantics |
-| STREAM-003 | P0 | Consumer groups, offsets, lag, reset/replay | M2 | Slice | G0, G2, G3, G4, G5 | Local offset restart/lag suite; pending: coordinated group history |
+| STREAM-003 | P0 | Consumer groups, offsets, lag, reset/replay | M2 | Slice | G0, G2, G3, G4, G5 | Canonical command v3 replicates a partition-0 next offset, explicit reset, caller-generation owner fencing, typed committed rejection, exact retry, lag and checkpoint replay; deterministic history/digest tests, real three-runtime HTTP commit/reset/fence/reopen, and the container failover/all-voter `SIGKILL` campaign prove recovery while preserving v1/v2; pending: join/heartbeat/assignment/revoke/rebalance, multi-partition ownership, retention interaction, transactions, authorization/audit specificity, stable native/SDK contract, scale/fairness, and production fault matrix |
 | STREAM-004 | P0 | Partition order and acknowledgement policy | M1 prototype → M2 | Slice | G0, G2, G3, G4 | Local fsync-before-apply plus experimental fixed-voter majority-before-local-profile-apply receipts (`durable_voter_acks=2`), minority non-commit, ordered offsets, semantic retry/rebinding, and conflict tests; pending: placement-aware public/multi-policy durable ack matrix |
 | STREAM-005 | P0 | Zone replication, election, ISR visibility | M1 prototype → M2 | Slice | G2, G3, G5 | Fixed-voter deterministic histories plus typed real-runtime/container leader replacement, old-voter catch-up, and all-voter `SIGKILL` replay; pending: placement domains and authenticated replica/ISR visibility |
 | STREAM-006 | P0 | Batching and required compression paths | M2 | Slice | G2, G4, G6 | Canonical command v2 carries bounded atomic batches through `none`, gzip, LZ4 frame, Snappy framed, and Zstd frame paths; strict unit/golden/malformed/bomb tests, real three-runtime HTTP commit/retry/rebuild, and a Python-generated gzip container campaign prove the replicated slice while preserving v1 bytes/digests; pending: stable bidirectional Produce/SDK surface, producer auto-batching and negotiation, multi-partition routing, non-atomic partial results, fuzz corpus, and matched compression benchmarks |

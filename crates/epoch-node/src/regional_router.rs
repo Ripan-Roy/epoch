@@ -687,6 +687,22 @@ mod tests {
                 .path(),
             "/experimental/v1/tablets/stream/records/batches"
         );
+        assert_eq!(
+            profile_uri(WorkloadProfile::StreamLog, "groups/billing/lag", None)
+                .unwrap()
+                .path(),
+            "/experimental/v1/tablets/stream/groups/billing/lag"
+        );
+        assert!(is_read_operation(
+            &Method::GET,
+            WorkloadProfile::StreamLog,
+            "groups/billing/records"
+        ));
+        assert!(!is_read_operation(
+            &Method::PUT,
+            WorkloadProfile::StreamLog,
+            "groups/billing/offsets"
+        ));
         assert!(!is_read_operation(
             &Method::POST,
             WorkloadProfile::StreamLog,
