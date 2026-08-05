@@ -9,7 +9,7 @@ API or SDKs.
 ## What is implemented
 
 ```text
-typed append request
+typed single or compressed-batch append request
   -> canonical versioned tablet command
   -> persistent Raft proposal
   -> durable fixed-voter-majority commit
@@ -32,17 +32,24 @@ typed append request
   notification is revalidated against the waiting request, so an overwritten
   old-leader proposal cannot satisfy a waiter for different input.
 
-The v1 command accepts only partition `0`, rejects unknown fields and versions,
-is limited to the consensus proposal ceiling, and must match its canonical JSON
-encoding exactly. The proposal ID is currently a scope-separated 64-bit prefix
-of SHA-256; the complete key remains in the command, so a collision fails as a
-conflict instead of returning another operation's result. This is an
-experimental boundary, not the final identifier format. JSON responses encode
-all 64-bit identity, position, and envelope-time metadata as exact decimal
-strings so browser clients do not lose precision. The append endpoint accepts
-`expected_term`, `time_ms`, `deliver_at_ms`, and `ttl_ms` as either unsigned JSON
-numbers or decimal strings; browser callers should use the string form shown
-below.
+The historical single append remains canonical command v1 byte-for-byte. A
+batch alone emits v2. Both accept only partition `0`, reject unknown fields and
+version/kind mismatches, are limited to the consensus proposal ceiling, and
+must match canonical JSON exactly. A batch contains 1–1,000 unique client
+sequences in canonical record JSON, transported as standard base64 with
+`none`, gzip, LZ4 frame, Snappy framed, or Zstd frame compression. Its frame is
+limited to 360 KiB and decompressed output to 4 MiB; Zstd's window is capped at
+8 MiB. Exact counts and sizes are checked before proposal and again on every
+voter.
+
+The proposal ID is currently a scope-separated 64-bit prefix of SHA-256; the
+complete key remains in the command, so a collision fails as a conflict instead
+of returning another operation's result. This is an experimental boundary, not
+the final identifier format. JSON responses encode all 64-bit identity,
+position, and envelope-time metadata as exact decimal strings so browser
+clients do not lose precision. Append endpoints accept `expected_term` and
+single-event `time_ms`, `deliver_at_ms`, and `ttl_ms` as either unsigned JSON
+numbers or decimal strings; browser callers should use strings.
 
 ## Run the disposable proof
 
@@ -59,14 +66,23 @@ EPRS volumes. It verifies:
 3. an isolated leader never returns committed success;
 4. the leader returns success only after majority persistence and local profile
    application;
-5. the receipt reports `fixed_voter_majority_persisted`, two durable voter
+5. all five batch modes round-trip through a real three-runtime cluster with
+   per-client-sequence offsets, exact retry, changed-input conflict, and EPRS
+   reopen;
+6. the container client independently builds an RFC 1952 gzip frame in Python,
+   commits it after leader replacement, and recovers both records after an
+   all-voter `SIGKILL`;
+7. malformed base64/frames, false metadata, duplicate sequences,
+   non-canonical JSON, oversized expansion, and an excessive Zstd window fail
+   before profile mutation;
+8. the receipt reports `fixed_voter_majority_persisted`, two durable voter
    acknowledgements, Raft commit position, and Stream offset without claiming
    zone-aware quorum durability;
-6. an exact retry returns the original offset while changed input conflicts;
-7. a replacement leader safely rebinds an overwritten minority-only proposal,
+9. an exact retry returns the original offset while changed input conflicts;
+10. a replacement leader safely rebinds an overwritten minority-only proposal,
    while the original semantic input conflicts instead of receiving its result;
-8. the restarted voter catches up once; and
-9. after all three containers receive `SIGKILL`, their existing EPRS volumes
+11. the restarted voter catches up once; and
+12. after all three containers receive `SIGKILL`, their existing EPRS volumes
    rebuild the exact pre-crash record document and state digest before
    readiness, and an exact retry still resolves to the original offset.
 
@@ -123,6 +139,68 @@ proposal ID decimal string through:
 GET /experimental/v1/tablets/stream/mutations/{proposal_id}
 ```
 
+### Submit a compressed batch end to end
+
+The batch endpoint accepts the frame produced by another runtime; it does not
+require Rust's encoder. This Python example creates the exact canonical record
+array, compresses it with the standard-library gzip implementation, and sends
+the declared bytes to the current leader:
+
+```shell
+export EPOCH_STREAM_PORT=17701
+export EPOCH_STREAM_TERM=1
+
+python3 - <<'PYTHON' > /tmp/epoch-stream-batch.json
+import base64
+import gzip
+import json
+import os
+
+records = []
+for sequence in (10, 11):
+    records.append({
+        "client_sequence": sequence,
+        "envelope": {
+            "id": f"order-{sequence}",
+            "source": "python-example",
+            "type": "order.created",
+            "time_ms": 1000,
+            "headers": {},
+            "content_type": "application/json",
+            "payload": {"order_id": sequence},
+            "priority": 0,
+            "extensions": {},
+        },
+    })
+
+plain = json.dumps(records, separators=(",", ":")).encode()
+compressed = gzip.compress(plain, mtime=0)
+print(json.dumps({
+    "idempotency_key": "order-batch-1",
+    "expected_term": os.environ["EPOCH_STREAM_TERM"],
+    "partition": 0,
+    "compression": "gzip",
+    "record_count": len(records),
+    "uncompressed_bytes": len(plain),
+    "compressed_bytes": len(compressed),
+    "payload_base64": base64.b64encode(compressed).decode(),
+}, separators=(",", ":")))
+PYTHON
+
+curl --fail --silent --show-error \
+  --header 'content-type: application/json' \
+  --data-binary @/tmp/epoch-stream-batch.json \
+  "http://127.0.0.1:${EPOCH_STREAM_PORT}/experimental/v1/tablets/stream/records/batches"
+```
+
+The receipt's top-level `offset` is the first result for compatibility. Its
+`batch.records` array carries the unique `client_sequence`, partition, exact
+decimal offset, and disposition for each input. Re-run the same bytes and key
+to resolve an unknown outcome; changing the frame or metadata under that key is
+an idempotency conflict. The regional path is the same operation at
+`.../shards/{shard}/data/records/batches` with the normal authorization,
+generation, tablet-epoch, and leader fences.
+
 Leader-local committed reads use:
 
 ```text
@@ -152,6 +230,10 @@ It also has static membership, one group/resource, one partition, no snapshots,
 log compaction, retention deletion, follower read routing, catalog-authorized epoch
 transition, placement, authenticated peer identity, bounded idempotency
 retention, replica-progress/ISR contract, or exhaustive crash/I/O matrix.
+The batch route is whole-command atomic and client-framed; it does not provide
+the future bidirectional Produce stream, connection credit, automatic producer
+batching, codec negotiation, non-atomic per-record rejection, compression
+dictionary management, a stable SDK, or matched throughput/latency evidence.
 The three local voters are not placement or zone evidence, so the typed receipt
 uses `write_evidence: fixed_voter_majority_persisted` and
 `durable_voter_acks: 2`; it deliberately does not report the PRD's

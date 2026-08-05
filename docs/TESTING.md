@@ -148,10 +148,15 @@ until drops and exhausted retries are observed, and proves eight subsequent
 proposals still commit on the healthy majority.
 
 The typed Stream-tablet layer adds bounded durable fixed-voter-majority and
-deterministic profile-application evidence for one fixed group and partition. It
-does not add snapshot, membership-transition, authoritative epoch-fencing,
-public product acknowledgement, or complete G3 evidence. Those scenarios remain
-required before G3 or the emulator is complete; see
+deterministic profile-application evidence for one fixed group and partition.
+Its batch corpus pins legacy v1 plus additive v2 golden commands, all required
+codec round trips, strict base64/JSON/count/size/sequence validation, bounded
+decompression, an 8 MiB Zstd window, atomic cloned apply, correlated offsets,
+exact retry, and unchanged v1 digests. The real-runtime test commits and reopens
+every codec through three EPRS-backed voters. It does not add snapshot,
+membership-transition, authoritative epoch-fencing, public product
+acknowledgement, stable streaming Produce, or complete G3 evidence. Those
+scenarios remain required before G3 or the emulator is complete; see
 [Consensus Feasibility Spike](CONSENSUS_SPIKE.md).
 
 The Queue-tablet layers check strict canonical commands, three-instance
@@ -293,15 +298,19 @@ voters, ordered Stream offsets, exact retry, and changed-input conflict
 behavior. It isolates an old leader and proves no committed response, then
 commits different input under the same deterministic ID on a higher-term
 majority and proves the original input conflicts rather than receiving that
-receipt. It verifies old-voter catch-up, sends `SIGKILL` to all three
+receipt. After failover it submits a Python-standard-library gzip frame through
+the v2 batch route, verifies exact per-sequence offsets, retry and conflict, and
+checks the advertised codec/limit status. It verifies old-voter catch-up, sends
+`SIGKILL` to all three
 containers, reopens the same EPRS volumes, compares every record and profile
 digest with the pre-crash state across every voter, and proves a retry still
 resolves to the original offset. On failure, CI retains the scoped logs, port
 map, and state volumes as an artifact. The process still starts its empty
 standalone engine for the separate public API,
 but typed commands are never appended to that engine journal. Unit/runtime
-tests additionally prove strict command/request decoding, browser-safe 64-bit
-identity/position/time encoding,
+tests additionally prove strict command/request decoding, every none/gzip/LZ4/
+Snappy/Zstd path, decompression-bomb rejection, atomic batch visibility,
+browser-safe 64-bit identity/position/time encoding,
 actor-only application, and process supervision after an injected live profile
 apply failure.
 

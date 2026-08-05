@@ -2,7 +2,7 @@
 
 This register turns the prioritized catalog in [PRD.md](./PRD.md) into a delivery and verification index. It is intentionally terse: the PRD remains the source of semantic detail, while this document owns milestone, dependency, status, and evidence tracking.
 
-Last synchronized with PRD version 0.3 on 29 July 2026.
+Last synchronized with PRD version 0.3 on 5 August 2026.
 
 ## How to use this register
 
@@ -102,7 +102,11 @@ independent delivery intent and attempt state but explicitly excludes a built-in
 target executor or external-delivery claim. The executable gates
 cover minority non-commit, leader rebinding, typed profile semantics, catch-up,
 exact retry, convergence, and all-container `SIGKILL`/reopen. Public product
-profiles remain standalone. The regional boundary now adds safe leader
+profiles remain standalone. The Stream mode additionally carries canonical
+atomic batches through none/gzip/LZ4/Snappy/Zstd command frames with hard
+decompression limits, correlated offsets, every-codec real-runtime reopen, and
+an independent Python-gzip container proof while preserving command v1. The
+regional boundary now adds safe leader
 ReadIndex requests that require majority confirmation and local typed-profile
 application; default regional reads expose exact barrier evidence, explicit
 `local_stale` reads remain available, and a minority times out without
@@ -111,6 +115,7 @@ membership and authoritative epoch transitions, follower read routing,
 authenticated transport, dynamic placement/repair, model and chaos reports,
 density, and performance. See [Consensus Feasibility Spike](CONSENSUS_SPIKE.md),
 [ADR-0013](adr/0013-quorum-read-barriers.md),
+[ADR-0015](adr/0015-stream-batch-compression.md),
 [Experimental Stream Tablet](STREAM_TABLET.md), and
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md), and
 [Experimental Replicated Cache Tablet](CACHE_TABLET.md), and
@@ -147,7 +152,7 @@ durability.
 | STREAM-003 | P0 | Consumer groups, offsets, lag, reset/replay | M2 | Slice | G0, G2, G3, G4, G5 | Local offset restart/lag suite; pending: coordinated group history |
 | STREAM-004 | P0 | Partition order and acknowledgement policy | M1 prototype → M2 | Slice | G0, G2, G3, G4 | Local fsync-before-apply plus experimental fixed-voter majority-before-local-profile-apply receipts (`durable_voter_acks=2`), minority non-commit, ordered offsets, semantic retry/rebinding, and conflict tests; pending: placement-aware public/multi-policy durable ack matrix |
 | STREAM-005 | P0 | Zone replication, election, ISR visibility | M1 prototype → M2 | Slice | G2, G3, G5 | Fixed-voter deterministic histories plus typed real-runtime/container leader replacement, old-voter catch-up, and all-voter `SIGKILL` replay; pending: placement domains and authenticated replica/ISR visibility |
-| STREAM-006 | P0 | Batching and required compression paths | M2 | Planned | G2, G4, G6 | Pending: round-trip corpus and compression benchmark |
+| STREAM-006 | P0 | Batching and required compression paths | M2 | Slice | G2, G4, G6 | Canonical command v2 carries bounded atomic batches through `none`, gzip, LZ4 frame, Snappy framed, and Zstd frame paths; strict unit/golden/malformed/bomb tests, real three-runtime HTTP commit/retry/rebuild, and a Python-generated gzip container campaign prove the replicated slice while preserving v1 bytes/digests; pending: stable bidirectional Produce/SDK surface, producer auto-batching and negotiation, multi-partition routing, non-atomic partial results, fuzz corpus, and matched compression benchmarks |
 | STREAM-007 | P1 | Idempotent producer sequencing | M5 | Planned | G2, G3, G7 | Pending: duplicate/recovery history |
 | STREAM-008 | P1 | Transactions, atomic offsets, read-committed | M5 | Planned | G0, G2, G3, G7 | Pending: transaction model/history report |
 | STREAM-009 | P1 | Key compaction and tombstones | M3 | Planned | G2, G4, G7 | Pending: compaction/recovery corpus |

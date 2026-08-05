@@ -178,6 +178,24 @@ Retention removes replay availability; it does not change whether an earlier
 write was committed. A fetch before the earliest retained offset returns an
 explicit out-of-range result containing the earliest available position.
 
+### Batches and compression
+
+The experimental replicated tablet treats one submitted batch as one atomic
+single-partition command. Its records remain ordered by array position, while
+each result is correlated by the caller's unique `client_sequence`. Validation
+or decompression failure is a definite pre-proposal rejection; after admission,
+the ordinary unknown-outcome and exact-idempotent-retry rules apply to the whole
+command. A successful exact retry returns the original per-record offsets.
+
+`none`, gzip, LZ4 frame, Snappy framed, and Zstd frame are transport encodings
+of the same canonical record array. Compression does not change record
+identity, partition ordering, visibility, acknowledgement evidence, or fetch
+format. The replicated command's codec, exact frame bytes, counts, and sizes
+are semantic input for its idempotency key. This bounded tablet behavior is not
+the eventual non-atomic native Produce contract: that surface must be able to
+report a bad record independently without making successful sibling results
+ambiguous. See [ADR-0015](adr/0015-stream-batch-compression.md).
+
 ### Producers and consumers
 
 An idempotent producer has a producer ID, epoch, and monotonic sequence per

@@ -13,6 +13,7 @@ mod bus;
 mod cache;
 mod common;
 mod queue;
+mod stream_batch;
 
 use std::collections::BTreeMap;
 
@@ -33,8 +34,10 @@ pub use common::{
     TabletWriteEvidence,
 };
 pub use queue::*;
+pub use stream_batch::*;
 
 pub const STREAM_TABLET_COMMAND_FORMAT_VERSION: u16 = 1;
+pub const STREAM_TABLET_BATCH_COMMAND_FORMAT_VERSION: u16 = 2;
 // Kept equal to the current consensus proposal ceiling. The state-machine
 // boundary repeats the check so a command can never validate here and then be
 // rejected only after it reaches Raft.
@@ -54,8 +57,13 @@ pub struct StreamTabletCommand {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing the historical v1 Append variant would break the public source contract"
+)]
 pub enum StreamTabletOperation {
     Append(StreamAppendCommand),
+    AppendBatch(StreamAppendBatchCommand),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -63,6 +71,13 @@ pub enum StreamTabletOperation {
 pub struct StreamAppendCommand {
     pub partition: u32,
     pub envelope: EventEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamAppendBatchCommand {
+    pub partition: u32,
+    pub payload: StreamBatchPayload,
 }
 
 impl StreamTabletCommand {
@@ -82,6 +97,39 @@ impl StreamTabletCommand {
             operation: StreamTabletOperation::Append(StreamAppendCommand {
                 partition: 0,
                 envelope,
+            }),
+        };
+        command.validate(scope)?;
+        Ok(command)
+    }
+
+    pub fn append_batch(
+        scope: &StreamTabletScope,
+        idempotency_key: impl Into<String>,
+        compression: StreamCompression,
+        records: &[StreamBatchRecord],
+        applied_at_ms: u64,
+    ) -> TabletResult<Self> {
+        let payload = encode_stream_batch_payload(records, compression)?;
+        Self::append_compressed_batch(scope, idempotency_key, payload, applied_at_ms)
+    }
+
+    pub fn append_compressed_batch(
+        scope: &StreamTabletScope,
+        idempotency_key: impl Into<String>,
+        payload: StreamBatchPayload,
+        applied_at_ms: u64,
+    ) -> TabletResult<Self> {
+        let command = Self {
+            format_version: STREAM_TABLET_BATCH_COMMAND_FORMAT_VERSION,
+            tablet_id: scope.tablet_id,
+            tablet_epoch: scope.tablet_epoch,
+            resource: scope.resource.clone(),
+            idempotency_key: idempotency_key.into(),
+            applied_at_ms,
+            operation: StreamTabletOperation::AppendBatch(StreamAppendBatchCommand {
+                partition: 0,
+                payload,
             }),
         };
         command.validate(scope)?;
@@ -114,9 +162,10 @@ impl StreamTabletCommand {
         let canonical = serde_json::to_vec(&command)
             .map_err(|error| TabletError::Encoding(error.to_string()))?;
         if canonical != payload {
-            return Err(TabletError::Decoding(
-                "command bytes are not in canonical v1 encoding".into(),
-            ));
+            return Err(TabletError::Decoding(format!(
+                "command bytes are not in canonical v{} encoding",
+                command.format_version
+            )));
         }
         Ok(command)
     }
@@ -126,14 +175,19 @@ impl StreamTabletCommand {
         proposal_id_for(scope, &self.idempotency_key)
     }
 
+    pub fn decode_batch_records(&self) -> TabletResult<Vec<StreamBatchRecord>> {
+        match &self.operation {
+            StreamTabletOperation::AppendBatch(batch) => {
+                decode_stream_batch_payload(&batch.payload)
+            }
+            StreamTabletOperation::Append(_) => Err(TabletError::InvalidCommand(
+                "single-record append has no batch payload".into(),
+            )),
+        }
+    }
+
     fn validate(&self, scope: &StreamTabletScope) -> TabletResult<()> {
         scope.validate()?;
-        if self.format_version != STREAM_TABLET_COMMAND_FORMAT_VERSION {
-            return Err(TabletError::InvalidCommand(format!(
-                "unsupported format_version {}",
-                self.format_version
-            )));
-        }
         if self.tablet_id != scope.tablet_id {
             return Err(TabletError::GroupMismatch {
                 expected: scope.tablet_id,
@@ -155,12 +209,32 @@ impl StreamTabletCommand {
         validate_idempotency_key(&self.idempotency_key)?;
         match &self.operation {
             StreamTabletOperation::Append(append) => {
+                if self.format_version != STREAM_TABLET_COMMAND_FORMAT_VERSION {
+                    return Err(TabletError::InvalidCommand(format!(
+                        "single-record append requires format_version {STREAM_TABLET_COMMAND_FORMAT_VERSION}; observed {}",
+                        self.format_version
+                    )));
+                }
                 if append.partition != 0 {
                     return Err(TabletError::InvalidCommand(
                         "the first Stream tablet slice supports only partition 0".into(),
                     ));
                 }
                 append.envelope.validate()?;
+            }
+            StreamTabletOperation::AppendBatch(batch) => {
+                if self.format_version != STREAM_TABLET_BATCH_COMMAND_FORMAT_VERSION {
+                    return Err(TabletError::InvalidCommand(format!(
+                        "batch append requires format_version {STREAM_TABLET_BATCH_COMMAND_FORMAT_VERSION}; observed {}",
+                        self.format_version
+                    )));
+                }
+                if batch.partition != 0 {
+                    return Err(TabletError::InvalidCommand(
+                        "the first Stream tablet slice supports only partition 0".into(),
+                    ));
+                }
+                decode_stream_batch_payload(&batch.payload)?;
             }
         }
         Ok(())
@@ -194,6 +268,26 @@ pub struct StreamTabletAppendReceipt {
     pub applied_at_ms: u64,
     pub write_evidence: StreamTabletWriteEvidence,
     pub durable_voter_acks: u16,
+    pub disposition: StreamTabletAppendDisposition,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch: Option<StreamTabletBatchReceipt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StreamTabletBatchReceipt {
+    pub compression: StreamCompression,
+    pub record_count: u16,
+    pub compressed_bytes: u32,
+    pub uncompressed_bytes: u32,
+    pub records: Vec<StreamTabletBatchRecordReceipt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StreamTabletBatchRecordReceipt {
+    pub client_sequence: u32,
+    pub partition: u32,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    pub offset: u64,
     pub disposition: StreamTabletAppendDisposition,
 }
 
@@ -270,12 +364,56 @@ impl StreamTablet {
             )));
         }
 
-        let StreamTabletOperation::Append(append) = command.operation;
-        let appended = self.stream.append(
-            append.envelope,
-            Some(append.partition),
-            command.applied_at_ms,
-        )?;
+        let applied_at_ms = command.applied_at_ms;
+        let (appended, batch_receipt) = match command.operation {
+            StreamTabletOperation::Append(append) => (
+                self.stream
+                    .append(append.envelope, Some(append.partition), applied_at_ms)?,
+                None,
+            ),
+            StreamTabletOperation::AppendBatch(batch) => {
+                let records = decode_stream_batch_payload(&batch.payload)?;
+                // Apply against a clone so a future profile-level validation
+                // error cannot leave a prefix of the batch visible.
+                let mut next_stream = self.stream.clone();
+                let mut results = Vec::with_capacity(records.len());
+                let mut first = None;
+                for record in records {
+                    let appended = next_stream.append(
+                        record.envelope,
+                        Some(batch.partition),
+                        applied_at_ms,
+                    )?;
+                    first.get_or_insert_with(|| appended.clone());
+                    results.push(StreamTabletBatchRecordReceipt {
+                        client_sequence: record.client_sequence,
+                        partition: appended.partition,
+                        offset: appended.offset,
+                        disposition: if appended.acknowledgement.duplicate {
+                            StreamTabletAppendDisposition::ProfileDeduplicated
+                        } else {
+                            StreamTabletAppendDisposition::New
+                        },
+                    });
+                }
+                let first = first.ok_or_else(|| {
+                    TabletError::InvalidCommand("Stream batch contains no records".into())
+                })?;
+                self.stream = next_stream;
+                (
+                    first,
+                    Some(StreamTabletBatchReceipt {
+                        compression: batch.payload.compression,
+                        record_count: batch.payload.record_count,
+                        compressed_bytes: batch.payload.compressed_bytes,
+                        uncompressed_bytes: batch.payload.uncompressed_bytes,
+                        records: results,
+                    }),
+                )
+            }
+        };
+        let profile_deduplicated =
+            is_profile_deduplicated(appended.acknowledgement.duplicate, batch_receipt.as_ref());
         let receipt = StreamTabletAppendReceipt {
             proposal_id: committed.proposal_id,
             tablet_id: self.scope.tablet_id,
@@ -284,14 +422,15 @@ impl StreamTablet {
             commit_index: committed.log_index,
             partition: appended.partition,
             offset: appended.offset,
-            applied_at_ms: command.applied_at_ms,
+            applied_at_ms,
             write_evidence: StreamTabletWriteEvidence::FixedVoterMajorityPersisted,
             durable_voter_acks: 2,
-            disposition: if appended.acknowledgement.duplicate {
+            disposition: if profile_deduplicated {
                 StreamTabletAppendDisposition::ProfileDeduplicated
             } else {
                 StreamTabletAppendDisposition::New
             },
+            batch: batch_receipt,
         };
         self.advance_digest(committed, metadata.payload_digest, &receipt);
         self.last_applied_command_index = committed.log_index;
@@ -362,8 +501,36 @@ impl StreamTablet {
         hasher.update(payload_digest);
         hasher.update(receipt.partition.to_be_bytes());
         hasher.update(receipt.offset.to_be_bytes());
+        if let Some(batch) = &receipt.batch {
+            hasher.update(b"epoch/stream-tablet/batch-receipt/v2\0");
+            hasher.update(batch.record_count.to_be_bytes());
+            hasher.update(batch.compressed_bytes.to_be_bytes());
+            hasher.update(batch.uncompressed_bytes.to_be_bytes());
+            for result in &batch.records {
+                hasher.update(result.client_sequence.to_be_bytes());
+                hasher.update(result.partition.to_be_bytes());
+                hasher.update(result.offset.to_be_bytes());
+                hasher.update([match result.disposition {
+                    StreamTabletAppendDisposition::New => 0,
+                    StreamTabletAppendDisposition::Replayed => 1,
+                    StreamTabletAppendDisposition::ProfileDeduplicated => 2,
+                }]);
+            }
+        }
         self.state_digest = hasher.finalize().into();
     }
+}
+
+fn is_profile_deduplicated(
+    first_record_is_duplicate: bool,
+    batch: Option<&StreamTabletBatchReceipt>,
+) -> bool {
+    batch.map_or(first_record_is_duplicate, |batch| {
+        batch
+            .records
+            .iter()
+            .all(|result| result.disposition == StreamTabletAppendDisposition::ProfileDeduplicated)
+    })
 }
 
 #[cfg(test)]

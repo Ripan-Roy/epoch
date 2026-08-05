@@ -616,6 +616,9 @@ not mounted on that group. The listener instead exposes:
 - `POST /experimental/v1/tablets/stream/records` for a typed partition-0 append
   with `idempotency_key` and `expected_term`; unknown top-level or nested
   envelope fields are rejected;
+- `POST /experimental/v1/tablets/stream/records/batches` for one atomic
+  partition-0 batch carrying canonical record JSON in a declared `none`, gzip,
+  LZ4-frame, Snappy-framed, or Zstd-frame base64 payload;
 - `GET /experimental/v1/tablets/stream/records` for explicitly stale-capable
   local committed reads; and
 - `GET /experimental/v1/tablets/stream/mutations/{proposal_id}` for unknown,
@@ -637,6 +640,18 @@ All 64-bit identities, positions, and envelope timestamps are exact decimal
 strings in typed JSON. The append endpoint accepts decimal strings for
 `expected_term`, `time_ms`, `deliver_at_ms`, and `ttl_ms`. Proposal IDs use the
 same representation in the mutation-status URL.
+A batch request supplies `compression`, `record_count`,
+`uncompressed_bytes`, `compressed_bytes`, and `payload_base64`. The expanded
+document is a canonical JSON array of strict
+`{"client_sequence":u32,"envelope":EventEnvelope}` records with unique
+sequences. The hard limits are 1–1,000 records, 360 KiB compressed, and 4 MiB
+expanded; Zstd's window is capped at 8 MiB. Canonical base64/JSON, exact
+declared metadata, every envelope, and all bounds are validated before
+proposal and on voter decode. A successful receipt adds `batch` evidence with
+the codec/sizes/count and one decimal offset/disposition per client sequence.
+The entire cloned transition becomes visible together. This is the
+experimental atomic tablet contract, not yet the stable non-atomic
+bidirectional `Produce` API or an SDK promise.
 A bounded unresolved wait returns `202`, preserving local `unknown` versus
 `pending` state while keeping outcome certainty unknown. Exact retries return
 the original offset; changed input under the same key is a conflict, and every
@@ -645,7 +660,8 @@ returned. `not_leader`, `stale_term`, and idempotency-conflict errors have
 unknown global outcome certainty. Startup replays the full committed proposal
 history before the typed status route becomes ready. A live deterministic apply
 failure drains both listeners and exits the process. See
-[Experimental Stream Tablet](STREAM_TABLET.md).
+[Experimental Stream Tablet](STREAM_TABLET.md) and
+[ADR-0015](adr/0015-stream-batch-compression.md).
 
 When `EPOCH_EXPERIMENTAL_QUEUE_TABLET_ENABLED=true`, the same internal listener
 instead mounts a Queue profile and does not mount opaque or Stream routes:

@@ -681,6 +681,17 @@ mod tests {
                 .path(),
             "/experimental/v1/tablets/queue/consumers/worker-a/flow"
         );
+        assert_eq!(
+            profile_uri(WorkloadProfile::StreamLog, "records/batches", None)
+                .unwrap()
+                .path(),
+            "/experimental/v1/tablets/stream/records/batches"
+        );
+        assert!(!is_read_operation(
+            &Method::POST,
+            WorkloadProfile::StreamLog,
+            "records/batches"
+        ));
         assert!(is_read_operation(
             &Method::POST,
             WorkloadProfile::EventBus,

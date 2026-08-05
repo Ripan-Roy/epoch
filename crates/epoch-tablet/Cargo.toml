@@ -7,15 +7,20 @@ rust-version.workspace = true
 authors.workspace = true
 
 [dependencies]
+base64.workspace = true
 epoch-bus = { path = "../epoch-bus" }
 epoch-cache = { path = "../epoch-cache" }
 epoch-core = { path = "../epoch-core" }
 epoch-queue = { path = "../epoch-queue" }
 epoch-stream = { path = "../epoch-stream" }
+flate2.workspace = true
+lz4_flex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+snap.workspace = true
 thiserror.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
