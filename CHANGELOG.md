@@ -48,6 +48,13 @@ notes explicitly list additional verified artifacts.
 - Strict direct/regional Stream batch routes, advertised codec/size limits,
   all-codec real-three-runtime recovery tests, and a container failover/restart
   campaign using an independently generated Python gzip frame.
+- Additive Stream command format v3 for replicated partition-0 consumer-group
+  next offsets, monotonic commit, explicit reset, caller-generation ownership
+  fencing, and typed committed business rejections without changing v1/v2
+  bytes or digest evidence.
+- Strict direct/regional consumer-group mutation, lag, and checkpoint-replay
+  routes with browser-safe observations, real-three-runtime convergence/EPRS
+  rebuild, and container failover plus all-voter `SIGKILL` recovery evidence.
 
 ### Limitations
 
@@ -74,6 +81,13 @@ notes explicitly list additional verified artifacts.
   automatic producer batching and codec negotiation, non-atomic partial
   results, compression dictionaries, fuzz/load benchmarks, and SDK exposure
   remain unimplemented.
+- Replicated Stream consumer groups currently provide checkpoint storage and a
+  caller-supplied generation fence only. Join, heartbeat, assignment, revoke,
+  dead-member detection, automatic generation allocation, rebalance,
+  multi-partition ownership, transactional offset commits, retention
+  interaction, scale/fairness evidence, and stable native/SDK exposure remain
+  unimplemented. Existing Go, Java, and Python offset helpers still target the
+  standalone API.
 
 ## [0.1.0-alpha.3] - 2026-07-29
 

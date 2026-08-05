@@ -18,10 +18,12 @@ use epoch_core::{Clock, EventEnvelope};
 use epoch_stream::StreamRecord;
 use epoch_tablet::{
     CommittedCommand, MAX_STREAM_BATCH_COMPRESSED_BYTES, MAX_STREAM_BATCH_RECORDS,
-    MAX_STREAM_BATCH_UNCOMPRESSED_BYTES, MAX_STREAM_TABLET_COMMAND_BYTES, StreamBatchPayload,
-    StreamCompression, StreamTablet, StreamTabletAppendDisposition, StreamTabletAppendReceipt,
-    StreamTabletCommand, StreamTabletOperation, StreamTabletScope, TabletError,
-    decode_stream_batch_payload, proposal_id_for,
+    MAX_STREAM_BATCH_UNCOMPRESSED_BYTES, MAX_STREAM_CONSUMER_GROUP_BYTES,
+    MAX_STREAM_CONSUMER_GROUPS, MAX_STREAM_CONSUMER_MEMBER_BYTES, MAX_STREAM_TABLET_COMMAND_BYTES,
+    StreamBatchPayload, StreamCompression, StreamGroupOffsetMode, StreamTablet,
+    StreamTabletCommand, StreamTabletGroupObservation, StreamTabletMutationReceipt,
+    StreamTabletOperation, StreamTabletScope, TabletError, decode_stream_batch_payload,
+    proposal_id_for, validate_stream_consumer_group,
 };
 #[cfg(test)]
 use epoch_tablet::{StreamBatchRecord, encode_stream_batch_payload};
@@ -41,6 +43,12 @@ pub const EXPERIMENTAL_STREAM_TABLET_BATCHES_PATH: &str =
     "/experimental/v1/tablets/stream/records/batches";
 pub const EXPERIMENTAL_STREAM_TABLET_MUTATION_PATH: &str =
     "/experimental/v1/tablets/stream/mutations/{proposal_id}";
+pub const EXPERIMENTAL_STREAM_TABLET_GROUP_OFFSETS_PATH: &str =
+    "/experimental/v1/tablets/stream/groups/{group}/offsets";
+pub const EXPERIMENTAL_STREAM_TABLET_GROUP_LAG_PATH: &str =
+    "/experimental/v1/tablets/stream/groups/{group}/lag";
+pub const EXPERIMENTAL_STREAM_TABLET_GROUP_RECORDS_PATH: &str =
+    "/experimental/v1/tablets/stream/groups/{group}/records";
 pub const DEFAULT_COMMIT_WAIT: Duration = Duration::from_secs(5);
 const MAX_FETCH_RECORDS: usize = 1_000;
 const TABLET_REQUEST_BODY_BYTES: usize = MAX_STREAM_TABLET_COMMAND_BYTES + 16 * 1024;
@@ -99,7 +107,7 @@ impl StreamTabletService {
     fn apply_one(
         &self,
         committed: &CommittedProposal,
-    ) -> Result<StreamTabletAppendReceipt, String> {
+    ) -> Result<StreamTabletMutationReceipt, String> {
         self.ensure_healthy()?;
         let command = CommittedCommand {
             group_id: committed.receipt.group_id.get(),
@@ -113,7 +121,7 @@ impl StreamTabletService {
             .tablet
             .write()
             .map_err(|_| "Stream tablet write lock was poisoned".to_owned())?
-            .apply(command)
+            .apply_mutation(command)
             .map_err(|error| error.to_string());
         result.map_err(|error| self.fail(error))
     }
@@ -121,7 +129,7 @@ impl StreamTabletService {
     fn committed_receipt(
         &self,
         committed: &CommittedProposal,
-    ) -> Result<StreamTabletAppendReceipt, String> {
+    ) -> Result<StreamTabletMutationReceipt, String> {
         self.ensure_healthy()?;
         let command = CommittedCommand {
             group_id: committed.receipt.group_id.get(),
@@ -135,7 +143,7 @@ impl StreamTabletService {
             .tablet
             .read()
             .map_err(|_| self.fail("Stream tablet read lock was poisoned"))?
-            .receipt_for_committed(command);
+            .mutation_receipt_for_committed(command);
         match result {
             Ok(Some(receipt)) => Ok(receipt),
             Ok(None) => Err(self.fail(format!(
@@ -152,6 +160,24 @@ impl StreamTabletService {
             .read()
             .map_err(|_| "Stream tablet read lock was poisoned".to_owned())?
             .fetch(offset, limit)
+            .map_err(|error| error.to_string())
+    }
+
+    fn fetch_for_group(&self, group: &str, limit: usize) -> Result<Vec<StreamRecord>, String> {
+        self.ensure_healthy()?;
+        self.tablet
+            .read()
+            .map_err(|_| "Stream tablet read lock was poisoned".to_owned())?
+            .fetch_for_group(group, limit)
+            .map_err(|error| error.to_string())
+    }
+
+    fn group_observation(&self, group: &str) -> Result<StreamTabletGroupObservation, String> {
+        self.ensure_healthy()?;
+        self.tablet
+            .read()
+            .map_err(|_| "Stream tablet read lock was poisoned".to_owned())?
+            .group_observation(group)
             .map_err(|error| error.to_string())
     }
 
@@ -177,7 +203,7 @@ impl CommittedProposalApplier for StreamTabletService {
             StreamTablet::new(self.scope.clone()).map_err(|error| error.to_string())?;
         for proposal in &history {
             rebuilt
-                .apply(CommittedCommand {
+                .apply_mutation(CommittedCommand {
                     group_id: proposal.receipt.group_id.get(),
                     group_epoch: proposal.receipt.group_epoch.get(),
                     proposal_id: proposal.receipt.proposal_id.get(),
@@ -235,6 +261,15 @@ pub fn router(
             EXPERIMENTAL_STREAM_TABLET_MUTATION_PATH,
             get(lookup_mutation),
         )
+        .route(
+            EXPERIMENTAL_STREAM_TABLET_GROUP_OFFSETS_PATH,
+            axum::routing::put(update_group_offset),
+        )
+        .route(EXPERIMENTAL_STREAM_TABLET_GROUP_LAG_PATH, get(group_lag))
+        .route(
+            EXPERIMENTAL_STREAM_TABLET_GROUP_RECORDS_PATH,
+            get(fetch_group_records),
+        )
         .layer(DefaultBodyLimit::max(TABLET_REQUEST_BODY_BYTES))
         .with_state(state)
 }
@@ -278,10 +313,38 @@ impl AppendBatchRequest {
     }
 }
 
-trait StreamAppendSemantics: Sync {
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroupOffsetRequestBody {
+    idempotency_key: String,
+    #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+    expected_term: u64,
+    member_id: String,
+    #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+    group_generation: u64,
+    #[serde(default)]
+    partition: u32,
+    #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+    next_offset: u64,
+    mode: StreamGroupOffsetMode,
+}
+
+#[derive(Debug)]
+struct GroupOffsetRequest {
+    group: String,
+    body: GroupOffsetRequestBody,
+}
+
+impl GroupOffsetRequest {
+    const fn new(group: String, body: GroupOffsetRequestBody) -> Self {
+        Self { group, body }
+    }
+}
+
+trait StreamMutationSemantics: Sync {
     fn idempotency_key(&self) -> &str;
     fn expected_term(&self) -> u64;
-    fn validate(&self) -> TabletApiResult<()>;
+    fn validate(&self, scope: &StreamTabletScope) -> TabletApiResult<()>;
     fn command(
         &self,
         scope: &StreamTabletScope,
@@ -290,7 +353,7 @@ trait StreamAppendSemantics: Sync {
     fn matches_command(&self, command: &StreamTabletCommand) -> bool;
 }
 
-impl StreamAppendSemantics for AppendRequest {
+impl StreamMutationSemantics for AppendRequest {
     fn idempotency_key(&self) -> &str {
         &self.idempotency_key
     }
@@ -299,7 +362,7 @@ impl StreamAppendSemantics for AppendRequest {
         self.expected_term
     }
 
-    fn validate(&self) -> TabletApiResult<()> {
+    fn validate(&self, _scope: &StreamTabletScope) -> TabletApiResult<()> {
         validate_partition(self.partition)?;
         self.envelope
             .validate()
@@ -330,7 +393,7 @@ impl StreamAppendSemantics for AppendRequest {
     }
 }
 
-impl StreamAppendSemantics for AppendBatchRequest {
+impl StreamMutationSemantics for AppendBatchRequest {
     fn idempotency_key(&self) -> &str {
         &self.idempotency_key
     }
@@ -339,7 +402,7 @@ impl StreamAppendSemantics for AppendBatchRequest {
         self.expected_term
     }
 
-    fn validate(&self) -> TabletApiResult<()> {
+    fn validate(&self, _scope: &StreamTabletScope) -> TabletApiResult<()> {
         validate_partition(self.partition)?;
         decode_stream_batch_payload(&self.payload())?;
         Ok(())
@@ -369,6 +432,52 @@ impl StreamAppendSemantics for AppendBatchRequest {
     }
 }
 
+impl StreamMutationSemantics for GroupOffsetRequest {
+    fn idempotency_key(&self) -> &str {
+        &self.body.idempotency_key
+    }
+
+    fn expected_term(&self) -> u64 {
+        self.body.expected_term
+    }
+
+    fn validate(&self, scope: &StreamTabletScope) -> TabletApiResult<()> {
+        self.command(scope, 0).map(|_| ()).map_err(Into::into)
+    }
+
+    fn command(
+        &self,
+        scope: &StreamTabletScope,
+        applied_at_ms: u64,
+    ) -> Result<StreamTabletCommand, TabletError> {
+        StreamTabletCommand::group_offset(
+            scope,
+            self.body.idempotency_key.clone(),
+            self.group.clone(),
+            self.body.member_id.clone(),
+            self.body.group_generation,
+            self.body.partition,
+            self.body.next_offset,
+            self.body.mode,
+            applied_at_ms,
+        )
+    }
+
+    fn matches_command(&self, command: &StreamTabletCommand) -> bool {
+        matches!(
+            &command.operation,
+            StreamTabletOperation::GroupOffset(group)
+                if command.idempotency_key == self.body.idempotency_key
+                    && group.group == self.group
+                    && group.member_id == self.body.member_id
+                    && group.group_generation == self.body.group_generation
+                    && group.partition == self.body.partition
+                    && group.next_offset == self.body.next_offset
+                    && group.mode == self.body.mode
+        )
+    }
+}
+
 fn validate_partition(partition: u32) -> TabletApiResult<()> {
     if partition != 0 {
         return Err(StreamTabletApiError::InvalidRequest(
@@ -386,7 +495,7 @@ async fn append_record(
         status: rejection.status(),
         message: rejection.body_text(),
     })?;
-    submit_append(state, request).await
+    submit_mutation(state, request).await
 }
 
 async fn append_batch(
@@ -397,10 +506,22 @@ async fn append_batch(
         status: rejection.status(),
         message: rejection.body_text(),
     })?;
-    submit_append(state, request).await
+    submit_mutation(state, request).await
 }
 
-async fn submit_append<R: StreamAppendSemantics>(
+async fn update_group_offset(
+    State(state): State<StreamTabletApiState>,
+    Path(group): Path<String>,
+    request: Result<Json<GroupOffsetRequestBody>, JsonRejection>,
+) -> TabletApiResult<(StatusCode, Json<StreamTabletMutationResponse>)> {
+    let Json(request) = request.map_err(|rejection| StreamTabletApiError::RequestBody {
+        status: rejection.status(),
+        message: rejection.body_text(),
+    })?;
+    submit_mutation(state, GroupOffsetRequest::new(group, request)).await
+}
+
+async fn submit_mutation<R: StreamMutationSemantics>(
     state: StreamTabletApiState,
     request: R,
 ) -> TabletApiResult<(StatusCode, Json<StreamTabletMutationResponse>)> {
@@ -408,7 +529,7 @@ async fn submit_append<R: StreamAppendSemantics>(
         .service
         .ensure_healthy()
         .map_err(StreamTabletApiError::Profile)?;
-    request.validate()?;
+    request.validate(state.service.scope())?;
     let proposal_id = proposal_id_for(state.service.scope(), request.idempotency_key())?;
     let _write_guard = state.write_serial.lock().await;
     let commits = state.consensus.subscribe_commits();
@@ -448,7 +569,7 @@ async fn wait_for_committed_response(
     state: &StreamTabletApiState,
     mut commits: broadcast::Receiver<CommittedProposal>,
     proposal_id: u64,
-    request: &impl StreamAppendSemantics,
+    request: &impl StreamMutationSemantics,
     replayed: bool,
 ) -> TabletApiResult<(StatusCode, Json<StreamTabletMutationResponse>)> {
     let deadline = tokio::time::Instant::now() + state.commit_wait;
@@ -511,7 +632,7 @@ const fn committed_http_status(replayed: bool) -> StatusCode {
 fn validate_existing_request(
     lookup: &ProposalLookup,
     scope: &StreamTabletScope,
-    request: &impl StreamAppendSemantics,
+    request: &impl StreamMutationSemantics,
 ) -> TabletApiResult<()> {
     let payload = match lookup {
         ProposalLookup::Unknown => return Ok(()),
@@ -532,7 +653,7 @@ fn validate_existing_request(
 fn committed_response(
     service: &StreamTabletService,
     lookup: &ProposalLookup,
-    request: &impl StreamAppendSemantics,
+    request: &impl StreamMutationSemantics,
     replayed: bool,
 ) -> TabletApiResult<Option<StreamTabletMutationResponse>> {
     validate_existing_request(lookup, service.scope(), request)?;
@@ -548,11 +669,11 @@ fn committed_response(
 }
 
 fn receipt_for_response(
-    mut receipt: StreamTabletAppendReceipt,
+    mut receipt: StreamTabletMutationReceipt,
     replayed: bool,
-) -> StreamTabletAppendReceipt {
+) -> StreamTabletMutationReceipt {
     if replayed {
-        receipt.disposition = StreamTabletAppendDisposition::Replayed;
+        receipt.mark_replayed();
     }
     receipt
 }
@@ -582,6 +703,22 @@ struct FetchQuery {
     limit: usize,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroupReadQuery {
+    #[serde(default)]
+    partition: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroupFetchQuery {
+    #[serde(default)]
+    partition: u32,
+    #[serde(default = "default_fetch_limit")]
+    limit: usize,
+}
+
 const fn default_fetch_limit() -> usize {
     100
 }
@@ -605,6 +742,52 @@ async fn fetch_records(
             .map(StreamTabletRecordResponse::from)
             .collect(),
     }))
+}
+
+async fn group_lag(
+    State(state): State<StreamTabletApiState>,
+    Path(group): Path<String>,
+    Query(query): Query<GroupReadQuery>,
+    read: Option<Extension<TabletReadMetadata>>,
+) -> TabletApiResult<Json<StreamTabletGroupObservationResponse>> {
+    validate_partition(query.partition)?;
+    validate_stream_consumer_group(&group)?;
+    Ok(Json(StreamTabletGroupObservationResponse {
+        read: tablet_read_metadata(read),
+        checkpoint: state.service.group_observation(&group)?,
+    }))
+}
+
+async fn fetch_group_records(
+    State(state): State<StreamTabletApiState>,
+    Path(group): Path<String>,
+    Query(query): Query<GroupFetchQuery>,
+    read: Option<Extension<TabletReadMetadata>>,
+) -> TabletApiResult<Json<StreamTabletGroupFetchResponse>> {
+    validate_partition(query.partition)?;
+    validate_fetch_limit(query.limit)?;
+    validate_stream_consumer_group(&group)?;
+    let checkpoint = state.service.group_observation(&group)?;
+    let records = state
+        .service
+        .fetch_for_group(&group, query.limit)?
+        .into_iter()
+        .map(StreamTabletRecordResponse::from)
+        .collect();
+    Ok(Json(StreamTabletGroupFetchResponse {
+        read: tablet_read_metadata(read),
+        checkpoint,
+        records,
+    }))
+}
+
+fn validate_fetch_limit(limit: usize) -> TabletApiResult<()> {
+    if limit == 0 || limit > MAX_FETCH_RECORDS {
+        return Err(StreamTabletApiError::InvalidRequest(format!(
+            "limit must be between 1 and {MAX_FETCH_RECORDS}"
+        )));
+    }
+    Ok(())
 }
 
 async fn tablet_status(
@@ -641,6 +824,11 @@ struct StreamTabletStatus {
     max_batch_records: u16,
     max_batch_compressed_bytes: usize,
     max_batch_uncompressed_bytes: usize,
+    consumer_group_checkpoints: &'static str,
+    consumer_group_ownership_fencing: &'static str,
+    max_consumer_groups: usize,
+    max_consumer_group_bytes: usize,
+    max_consumer_member_bytes: usize,
     #[serde(serialize_with = "serialize_u64_as_decimal")]
     tablet_id: u64,
     #[serde(serialize_with = "serialize_u64_as_decimal")]
@@ -704,6 +892,11 @@ impl StreamTabletStatus {
             max_batch_records: MAX_STREAM_BATCH_RECORDS,
             max_batch_compressed_bytes: MAX_STREAM_BATCH_COMPRESSED_BYTES,
             max_batch_uncompressed_bytes: MAX_STREAM_BATCH_UNCOMPRESSED_BYTES,
+            consumer_group_checkpoints: "replicated_commit_reset_lag_and_replay",
+            consumer_group_ownership_fencing: "caller_supplied_monotonic_generation",
+            max_consumer_groups: MAX_STREAM_CONSUMER_GROUPS,
+            max_consumer_group_bytes: MAX_STREAM_CONSUMER_GROUP_BYTES,
+            max_consumer_member_bytes: MAX_STREAM_CONSUMER_MEMBER_BYTES,
             tablet_id: scope.tablet_id,
             tablet_epoch: scope.tablet_epoch,
             resource: scope.resource.clone(),
@@ -731,6 +924,21 @@ impl StreamTabletStatus {
 struct StreamTabletFetchResponse {
     #[serde(flatten)]
     read: TabletReadMetadata,
+    records: Vec<StreamTabletRecordResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamTabletGroupObservationResponse {
+    #[serde(flatten)]
+    read: TabletReadMetadata,
+    checkpoint: StreamTabletGroupObservation,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamTabletGroupFetchResponse {
+    #[serde(flatten)]
+    read: TabletReadMetadata,
+    checkpoint: StreamTabletGroupObservation,
     records: Vec<StreamTabletRecordResponse>,
 }
 
@@ -778,7 +986,7 @@ struct StreamTabletMutationResponse {
     outcome_certainty: OutcomeCertainty,
     observation_scope: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    receipt: Option<StreamTabletAppendReceipt>,
+    receipt: Option<StreamTabletMutationReceipt>,
 }
 
 impl StreamTabletMutationResponse {
@@ -802,9 +1010,9 @@ impl StreamTabletMutationResponse {
         }
     }
 
-    fn committed(receipt: StreamTabletAppendReceipt) -> Self {
+    fn committed(receipt: StreamTabletMutationReceipt) -> Self {
         Self {
-            proposal_id: receipt.proposal_id,
+            proposal_id: receipt.proposal_id(),
             state: MutationState::Committed,
             outcome_certainty: OutcomeCertainty::Committed,
             observation_scope: "local",
@@ -952,6 +1160,15 @@ mod tests {
             document["max_batch_uncompressed_bytes"],
             MAX_STREAM_BATCH_UNCOMPRESSED_BYTES
         );
+        assert_eq!(
+            document["consumer_group_checkpoints"],
+            "replicated_commit_reset_lag_and_replay"
+        );
+        assert_eq!(
+            document["consumer_group_ownership_fencing"],
+            "caller_supplied_monotonic_generation"
+        );
+        assert_eq!(document["max_consumer_groups"], MAX_STREAM_CONSUMER_GROUPS);
     }
 
     #[test]
@@ -1046,6 +1263,48 @@ mod tests {
         let mut unknown = document;
         unknown["paylod_base64"] = unknown["payload_base64"].clone();
         assert!(serde_json::from_value::<AppendBatchRequest>(unknown).is_err());
+    }
+
+    #[test]
+    fn group_offset_request_is_strict_and_browser_safe() {
+        let document = json!({
+            "idempotency_key": "billing-commit-1",
+            "expected_term": u64::MAX.to_string(),
+            "member_id": "worker-a",
+            "group_generation": u64::MAX.to_string(),
+            "partition": 0,
+            "next_offset": u64::MAX.to_string(),
+            "mode": "commit"
+        });
+        let request: GroupOffsetRequestBody = serde_json::from_value(document.clone()).unwrap();
+        assert_eq!(request.expected_term, u64::MAX);
+        assert_eq!(request.group_generation, u64::MAX);
+        assert_eq!(request.next_offset, u64::MAX);
+
+        let mut unknown = document;
+        unknown["generation"] = json!(1);
+        assert!(serde_json::from_value::<GroupOffsetRequestBody>(unknown).is_err());
+    }
+
+    #[test]
+    fn group_offset_retry_semantics_compare_every_client_controlled_field() {
+        let body: GroupOffsetRequestBody = serde_json::from_value(json!({
+            "idempotency_key": "billing-commit-1",
+            "expected_term": "2",
+            "member_id": "worker-a",
+            "group_generation": "1",
+            "partition": 0,
+            "next_offset": "1",
+            "mode": "commit"
+        }))
+        .unwrap();
+        let request = GroupOffsetRequest::new("billing".into(), body);
+        let command = request.command(&scope(), 10).unwrap();
+        assert!(request.matches_command(&command));
+
+        let mut conflicting = request;
+        conflicting.body.next_offset = 0;
+        assert!(!conflicting.matches_command(&command));
     }
 
     #[tokio::test]
@@ -1297,11 +1556,14 @@ mod tests {
         assert_follower_rejects_write(&cluster, &client).await;
         append_retry_conflict_and_second_record(&cluster, &client).await;
         append_compressed_batches(&cluster, &client).await;
+        commit_reset_and_fence_consumer_group(&cluster, &client).await;
         assert_all_records(&cluster, &client, 12).await;
+        assert_group_checkpoint_on_every_voter(&cluster, &client).await;
         cluster.shutdown().await;
 
         let reopened = RunningTabletCluster::start(&paths).await;
-        assert_rebuilt_records(&reopened, &client, 12, 7).await;
+        assert_rebuilt_records(&reopened, &client, 12, 11).await;
+        assert_group_checkpoint_on_every_voter(&reopened, &client).await;
         reopened.shutdown().await;
     }
 
@@ -1482,6 +1744,87 @@ mod tests {
         assert_eq!(document["error"]["code"], "idempotency_conflict");
     }
 
+    async fn commit_reset_and_fence_consumer_group(
+        cluster: &RunningTabletCluster,
+        client: &reqwest::Client,
+    ) {
+        let commit = group_body("group-commit", "worker-a", 1, 4, "commit");
+        let (status, receipt) = put_group_to_current_leader(cluster, client, &commit).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(receipt["receipt"]["outcome"], "applied");
+        assert_eq!(receipt["receipt"]["committed_offset"], "4");
+        assert_eq!(receipt["receipt"]["lag"], "8");
+
+        let (retry_status, retry) = put_group_to_current_leader(cluster, client, &commit).await;
+        assert_eq!(retry_status, StatusCode::OK);
+        assert_eq!(retry["receipt"]["disposition"], "replayed");
+
+        let wrong_owner = group_body("group-wrong-owner", "worker-b", 1, 6, "commit");
+        let (status, rejected) = put_group_to_current_leader(cluster, client, &wrong_owner).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(rejected["receipt"]["outcome"], "rejected");
+        assert_eq!(rejected["receipt"]["rejection"], "owner_mismatch");
+        assert_eq!(rejected["receipt"]["committed_offset"], "4");
+
+        let reset = group_body("group-reset", "worker-b", 2, 2, "reset");
+        let (status, reset_receipt) = put_group_to_current_leader(cluster, client, &reset).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(reset_receipt["receipt"]["outcome"], "applied");
+        assert_eq!(reset_receipt["receipt"]["previous_offset"], "4");
+        assert_eq!(reset_receipt["receipt"]["committed_offset"], "2");
+
+        let stale = group_body("group-stale", "worker-a", 1, 7, "commit");
+        let (status, stale_receipt) = put_group_to_current_leader(cluster, client, &stale).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(stale_receipt["receipt"]["outcome"], "rejected");
+        assert_eq!(stale_receipt["receipt"]["rejection"], "stale_generation");
+    }
+
+    async fn assert_group_checkpoint_on_every_voter(
+        cluster: &RunningTabletCluster,
+        client: &reqwest::Client,
+    ) {
+        for node in &cluster.nodes {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let lag: Value = client
+                        .get(group_lag_url_for(node))
+                        .send()
+                        .await
+                        .unwrap()
+                        .json()
+                        .await
+                        .unwrap();
+                    if lag["checkpoint"]["committed_offset"] == "2"
+                        && lag["checkpoint"]["group_generation"] == "2"
+                    {
+                        assert_eq!(lag["checkpoint"]["member_id"], "worker-b");
+                        assert_eq!(lag["checkpoint"]["end_offset"], "12");
+                        assert_eq!(lag["checkpoint"]["lag"], "10");
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("every voter should apply the consumer-group checkpoint");
+
+            let replay: Value = client
+                .get(group_records_url_for(node))
+                .query(&[("limit", 2)])
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(replay["checkpoint"]["committed_offset"], "2");
+            assert_eq!(replay["records"].as_array().unwrap().len(), 2);
+            assert_eq!(replay["records"][0]["offset"], "2");
+            assert_eq!(replay["records"][1]["offset"], "3");
+        }
+    }
+
     async fn post_to_current_leader(
         cluster: &RunningTabletCluster,
         client: &reqwest::Client,
@@ -1539,6 +1882,35 @@ mod tests {
         })
         .await
         .expect("an exact idempotent batch should resolve under stable leadership")
+    }
+
+    async fn put_group_to_current_leader(
+        cluster: &RunningTabletCluster,
+        client: &reqwest::Client,
+        request: &Value,
+    ) -> (StatusCode, Value) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let (leader, term) = cluster.leader().await;
+                let mut attempt = request.clone();
+                attempt["expected_term"] = json!(term);
+                let response = client
+                    .put(group_offsets_url_for(&cluster.nodes[leader]))
+                    .json(&attempt)
+                    .send()
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let document: Value = response.json().await.unwrap();
+                if is_retryable_leadership_response(status, &document) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    continue;
+                }
+                return (status, document);
+            }
+        })
+        .await
+        .expect("an exact group mutation should resolve under stable leadership")
     }
 
     fn is_retryable_leadership_response(status: StatusCode, document: &Value) -> bool {
@@ -1647,6 +2019,42 @@ mod tests {
         node.base_url
             .join(EXPERIMENTAL_STREAM_TABLET_BATCHES_PATH.trim_start_matches('/'))
             .unwrap()
+    }
+
+    fn group_offsets_url_for(node: &RunningTabletNode) -> Url {
+        node.base_url
+            .join("experimental/v1/tablets/stream/groups/billing/offsets")
+            .unwrap()
+    }
+
+    fn group_lag_url_for(node: &RunningTabletNode) -> Url {
+        node.base_url
+            .join("experimental/v1/tablets/stream/groups/billing/lag")
+            .unwrap()
+    }
+
+    fn group_records_url_for(node: &RunningTabletNode) -> Url {
+        node.base_url
+            .join("experimental/v1/tablets/stream/groups/billing/records")
+            .unwrap()
+    }
+
+    fn group_body(
+        idempotency_key: &str,
+        member_id: &str,
+        group_generation: u64,
+        next_offset: u64,
+        mode: &str,
+    ) -> Value {
+        json!({
+            "idempotency_key": idempotency_key,
+            "expected_term": "0",
+            "member_id": member_id,
+            "group_generation": group_generation.to_string(),
+            "partition": 0,
+            "next_offset": next_offset.to_string(),
+            "mode": mode,
+        })
     }
 
     fn batch_body(idempotency_key: &str, compression: StreamCompression, sequence: u32) -> Value {

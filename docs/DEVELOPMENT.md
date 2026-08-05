@@ -344,7 +344,8 @@ separate local diagnostic listeners replicate opaque probe bytes; see
 [Experimental Consensus Probe](CONSENSUS_PROBE.md). Setting
 `EPOCH_EXPERIMENTAL_STREAM_TABLET_ENABLED=true` replaces those opaque proposal
 routes with the bounded typed Stream milestone described in
-[Experimental Stream Tablet](STREAM_TABLET.md).
+[Experimental Stream Tablet](STREAM_TABLET.md), including compressed atomic
+batches plus generation-fenced consumer-group commit/reset/lag/replay routes.
 `EPOCH_EXPERIMENTAL_QUEUE_TABLET_ENABLED=true` instead mounts the typed Queue
 mutation/status/history routes described in
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).

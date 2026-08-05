@@ -159,6 +159,14 @@ acknowledgement, stable streaming Produce, or complete G3 evidence. Those
 scenarios remain required before G3 or the emulator is complete; see
 [Consensus Feasibility Spike](CONSENSUS_SPIKE.md).
 
+The Stream consumer-group corpus adds canonical command v3, next-offset
+commit/reset, exact replay, generation gaps, wrong/stale owner fencing, rewind
+and end-offset rejection, lag/replay reads, state/digest reconstruction, and
+unchanged v1/v2 compatibility. The real-runtime test applies accepted and
+rejected outcomes across three voters and reopens every EPRS history. This
+proves replicated checkpoints, not automatic join/heartbeat/assignment or a
+complete group-coordinator fault matrix.
+
 The Queue-tablet layers check strict canonical commands, three-instance
 convergence, leader/consumer/token fencing, exact renewed-token replay,
 monotonic committed-order time including descending leader assignments,
@@ -302,15 +310,20 @@ receipt. After failover it submits a Python-standard-library gzip frame through
 the v2 batch route, verifies exact per-sequence offsets, retry and conflict, and
 checks the advertised codec/limit status. It verifies old-voter catch-up, sends
 `SIGKILL` to all three
-containers, reopens the same EPRS volumes, compares every record and profile
-digest with the pre-crash state across every voter, and proves a retry still
-resolves to the original offset. On failure, CI retains the scoped logs, port
-map, and state volumes as an artifact. The process still starts its empty
+containers. The same campaign commits a consumer checkpoint, retries it,
+commits wrong-owner and stale-generation rejections, advances ownership,
+explicitly resets, and compares lag plus checkpoint-based replay at every
+voter. It then reopens the same EPRS volumes, compares every record,
+checkpoint/lag/replay observation, and profile digest with the pre-crash state
+across every voter, and proves a retry still resolves to the original offset.
+On failure, CI retains the scoped logs, port map, and state volumes as an
+artifact. The process still starts its empty
 standalone engine for the separate public API,
 but typed commands are never appended to that engine journal. Unit/runtime
 tests additionally prove strict command/request decoding, every none/gzip/LZ4/
 Snappy/Zstd path, decompression-bomb rejection, atomic batch visibility,
-browser-safe 64-bit identity/position/time encoding,
+browser-safe 64-bit identity/position/time encoding, generation fencing,
+commit/reset range rules, and committed business rejection,
 actor-only application, and process supervision after an injected live profile
 apply failure.
 

@@ -83,8 +83,9 @@ The traceability register marks the following as **Slice**. A Slice entry can be
 
 - Cache: CACHE-001–CACHE-005 and CACHE-007. CACHE-008 snapshots remain M3;
   the M1 segmented WAL is only a prerequisite and is not Cache restore evidence.
-- Stream: STREAM-001, STREAM-002 basic retention, STREAM-004, STREAM-005, and
-  the replicated bounded batch/compression slice of STREAM-006.
+- Stream: STREAM-001, STREAM-002 basic retention, the replicated checkpoint
+  slice of STREAM-003, STREAM-004, STREAM-005, and the replicated bounded
+  batch/compression slice of STREAM-006.
 - Queue: QUEUE-001–QUEUE-006 and native credit flow for QUEUE-011.
 - Bus: bounded deterministic direct/fan-out routing for BUS-001,
   filter/archive/transform sub-slices for BUS-002/BUS-006/BUS-007, and the
@@ -102,7 +103,7 @@ The traceability register marks the following as **Slice**. A Slice entry can be
 | Deterministic runtime | Rust | Injectable monotonic/wall clocks, seeded scheduling, crash points, fault transport | Same seed reproduces the same history |
 | Segmented WAL | Rust | Configured rotation, checksummed v1 frames, durable identity/manifest, global sequence, exclusive writer, bounded active-suffix repair, safe legacy fallback | Rotation/restart/metadata/corruption/lock/activation/legacy unit and real-process suites |
 | Metadata and replication prototype | Rust | Three-node metadata/log group, epochs, quorum commit, fencing, leader transfer | Model check plus node/network/disk chaos report |
-| Stream slice | Rust | Key routing, committed offsets, fetch, retention baseline, visible ack policy, and bounded atomic batch frames for none/gzip/LZ4/Snappy/Zstd | Ordered recovery, no-early-ack history, strict codec corpus, correlated receipts, and compressed EPRS replay |
+| Stream slice | Rust | Key routing, generation-fenced committed offsets/reset/lag/replay, fetch, retention baseline, visible ack policy, and bounded atomic batch frames for none/gzip/LZ4/Snappy/Zstd | Ordered recovery, stale-owner fencing, no-early-ack history, strict codec corpus, correlated receipts, and record/checkpoint EPRS replay |
 | Queue slice | Rust | Ready/scheduled/leased/acked/DLQ state, renewal, retry, redrive | Crash-at-every-transition history check |
 | Cache slice | Rust | One volatile memory shard, core types, TTL, eviction, atomic batch, pipeline | Linearizability, expiry, and eviction tests; snapshot/restore remains M3 |
 | Route slice | Rust | Bounded envelope-normalized direct/fan-out plan and independent delivery ledger with canonical replicated commands | Route/filter truth table, atomic outbox capacity, fenced acquire/ack/fail, retry/DLQ isolation, exact replay, and real-runtime/EPRS/container convergence; built-in target execution remains open |
@@ -165,6 +166,16 @@ stable bidirectional Produce, automatic producer batching/negotiation,
 multi-partition routing, non-atomic partial results, fuzz/load evidence, or SDK
 support. See [ADR-0015](adr/0015-stream-batch-compression.md) and
 [Experimental Stream Tablet](STREAM_TABLET.md).
+
+The same Stream tablet now accepts a version-three consumer-group checkpoint
+command. Commit advances a durable next offset; reset is the only rewind;
+caller-supplied generations fence an old or conflicting member. Typed
+committed rejections, exact retry, lag/replay observations, real-three-runtime
+convergence, and container `SIGKILL` rebuild are executable. This advances
+STREAM-003 without claiming automatic group membership, heartbeat, assignment,
+rebalance, multi-partition ownership, transactional offsets, or stable SDK
+support. See
+[ADR-0016](adr/0016-stream-consumer-group-checkpoints.md).
 
 The Queue application core now runs behind the same profile-neutral persistent
 actor boundary. It deterministically applies strict single-partition commands,

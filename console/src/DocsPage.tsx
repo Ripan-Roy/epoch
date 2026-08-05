@@ -568,11 +568,15 @@ export function DocsPage({ section }: DocsPageProps) {
                     returns exact saturation and remaining-capacity evidence, and settlement replenishes the
                     window. Stream append can now carry 1–1,000 correlated records through none, gzip, LZ4,
                     Snappy, or Zstd frames with hard compressed and expanded limits; the complete batch
-                    becomes visible atomically and exact retries retain every sequence-to-offset result. These
-                    are experimental HTTP/tablet slices, not yet native bidirectional streaming, automatic
-                    client batching, compression negotiation, or stable SDK support. Managed HTTP/gRPC and
-                    regional HTTP require a shared deny-by-default bootstrap bearer policy, but that is not
-                    OIDC, TLS/mTLS, credential expiry/revocation, or immutable audit export.
+                    becomes visible atomically and exact retries retain every sequence-to-offset result. A
+                    Stream consumer group can now replicate its next offset, commit forward, reset explicitly,
+                    observe lag, and replay from that checkpoint; caller-supplied generations fence an old or
+                    conflicting member across failover and EPRS rebuild. These are experimental HTTP/tablet
+                    slices, not yet coordinated join, heartbeat, assignment, rebalance, native bidirectional
+                    streaming, automatic client batching, compression negotiation, or stable SDK support.
+                    Managed HTTP/gRPC and regional HTTP require a shared deny-by-default bootstrap bearer
+                    policy, but that is not OIDC, TLS/mTLS, credential expiry/revocation, or immutable audit
+                    export.
                   </p>
                 </div>
               </div>
@@ -599,6 +603,14 @@ export function DocsPage({ section }: DocsPageProps) {
                   <p>
                     Five codec modes return exact per-sequence offsets; real-runtime and Python-gzip container
                     tests prove retry, failover, and EPRS recovery without changing v1 append bytes.
+                  </p>
+                </article>
+                <article>
+                  <span>STREAM GROUP</span>
+                  <strong>Checkpoint progress and ownership fences survive leader and process loss.</strong>
+                  <p>
+                    Commit, reset, lag, and replay converge on every voter; stale or wrong generations are
+                    durable rejected outcomes without moving the next offset.
                   </p>
                 </article>
                 <article>
@@ -708,7 +720,9 @@ export function DocsPage({ section }: DocsPageProps) {
                   <strong>The server owns semantic validation.</strong>
                   <p>
                     Client-side checks improve feedback but do not replace server validation. Go also accepts
-                    a context for per-call cancellation and deadlines.
+                    a context for per-call cancellation and deadlines. The listed Stream offset helpers target
+                    standalone mode; experimental replicated groups additionally require member and generation
+                    fencing and intentionally have no SDK shortcut yet.
                   </p>
                 </article>
               </div>
@@ -771,6 +785,12 @@ export function DocsPage({ section }: DocsPageProps) {
                   title="Batch compression decision"
                   description="Canonical framing, all required codecs, atomicity, decompression limits, compatibility rules, and explicit native/SDK non-claims."
                   href={`${repositoryDocsUrl}/adr/0015-stream-batch-compression.md`}
+                />
+                <ReferenceCard
+                  eyebrow="CONSUMER GROUPS"
+                  title="Replicated checkpoint decision"
+                  description="Next-offset commit/reset, caller-generation owner fencing, committed rejection, lag/replay routes, recovery evidence, and coordinator/SDK non-claims."
+                  href={`${repositoryDocsUrl}/adr/0016-stream-consumer-group-checkpoints.md`}
                 />
                 <ReferenceCard
                   eyebrow="QUEUE TABLET"

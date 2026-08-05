@@ -2,7 +2,7 @@
 
 **Last reviewed:** 5 August 2026
 **Current release:** `v0.1.0-alpha.3`
-**Current core target:** Stream batch append and bounded compression
+**Current core target:** Stream consumer-group checkpoints and fencing
 
 This is the operational checklist for turning PRD scope into verified,
 releasable increments. [PRD.md](PRD.md) owns product scope,
@@ -130,6 +130,19 @@ complete.
 | SF-07 | Exercise an independent client frame in containers | Compose integration | 🟡 | The Stream campaign generates gzip with Python, commits after leader replacement, retries/conflicts, then proves all-voter convergence and `SIGKILL` replay |
 | SF-08 | Keep product claims and documentation aligned | Documentation + console | 🟡 | Stream/API/semantics/architecture/testing/plan/traceability/user docs and Pages content name the bounded slice and remaining work |
 | SF-09 | Pass protected pull-request evidence | GitHub | ⬜ | Required CI and Pages must pass before this increment is verified on `main` |
+
+## Current Stream delivery: consumer-group checkpoints and fencing
+
+| ID | Checklist item | Boundary | State | Evidence / acceptance |
+|---|---|---|---:|---|
+| CG-01 | Freeze next-offset, ownership, reset, and non-claim semantics | Semantics + ADR | 🟡 | ADR-0016 defines first/next generation, owner fencing, monotonic commit, explicit retained-range reset, committed rejection, and coordinator/SDK non-claims |
+| CG-02 | Preserve append and batch compatibility | Rust tablet contract | 🟡 | `GroupOffset` alone emits canonical v3; public tests retain exact v1 command/digest and v2 batch goldens |
+| CG-03 | Apply checkpoints and fences deterministically | Rust Stream/tablet | 🟡 | Cloned transitions replicate owner plus next offset; wrong/stale/skipped generations, rewind/range, and capacity races return typed committed rejection without business-state mutation |
+| CG-04 | Expose strict mutation, lag, and replay routes | Rust HTTP + regional router | 🟡 | Direct `groups/{group}/{offsets|lag|records}` routes use browser-safe positions; regional mapping inherits authorization, generation/tablet fences, leader admission, and safe read barriers |
+| CG-05 | Prove exact retry, convergence, and rebuild | Rust tests | 🟡 | Canonical/state tests plus a real three-runtime HTTP cluster prove commit, replay, handoff/reset, owner fencing, lag/replay convergence, and EPRS reopen |
+| CG-06 | Exercise process failover and crash recovery | Compose integration | 🟡 | Stream container campaign commits applied and rejected group outcomes after leader replacement, compares all voters, then verifies checkpoint/lag/replay plus digest after all-node `SIGKILL` |
+| CG-07 | Keep SDK and product claims honest | Documentation + console | 🟡 | Stream/API/architecture/semantics/testing/plan/traceability/changelog/Pages content distinguish standalone Go/Java/Python offset helpers from the experimental replicated route and list coordinator work |
+| CG-08 | Pass protected pull-request evidence | GitHub | ⬜ | Required CI and Pages must pass before this increment is verified on `main` |
 
 ## Current security delivery: bootstrap trust baseline
 

@@ -242,6 +242,17 @@ append bytes and digests remain unchanged. This is compressed consensus/replay
 evidence, not the stable streaming Produce API or a compression throughput
 claim; see [ADR-0015](adr/0015-stream-batch-compression.md).
 
+An additive command-v3 boundary now places consumer-group ownership and the
+durable next offset in that same replicated state machine. Caller-supplied
+monotonic generations fence previous owners; forward commit and explicit reset
+produce typed applied or committed-rejected receipts. Lag and replay reads are
+pure observations of actor-applied state, so regional routing can place the
+normal ReadIndex barrier in front of them. This is intentionally a checkpoint
+primitive rather than a full coordinator: join, heartbeat, assignment,
+rebalance, multi-partition ownership, transactions, and stable SDK exposure
+remain separate layers. See
+[ADR-0016](adr/0016-stream-consumer-group-checkpoints.md).
+
 The regional multi-tablet alpha composes that adapter with `epoch-catalog`.
 Catalog group 1 commits canonical resource commands through three EPRS-backed
 voters. A bounded group supervisor reserves that identity, demultiplexes peer
@@ -830,3 +841,4 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0013: Quorum-Confirmed Regional Read Barriers](adr/0013-quorum-read-barriers.md)
 - [ADR-0014: Queue Consumer Credit and In-Flight Windows](adr/0014-queue-consumer-credit.md)
 - [ADR-0015: Replicated Stream Batch Compression](adr/0015-stream-batch-compression.md)
+- [ADR-0016: Replicated Stream Consumer-Group Checkpoints](adr/0016-stream-consumer-group-checkpoints.md)

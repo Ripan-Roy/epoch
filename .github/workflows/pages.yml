@@ -63,6 +63,7 @@ jobs:
           grep -Rq 'Experimental replicated Event Bus' console/dist/assets
           grep -Rq 'per-subscription outbox leases' console/dist/assets
           grep -Rq 'One catalog materializes four profile-specific groups' console/dist/assets
+          grep -Rq 'Checkpoint progress and ownership fences survive leader and process loss' console/dist/assets
           grep -Rq 'Multi-tablet operations' console/dist/assets
           release_version="$(cat VERSION)"
           grep -RFq "v${release_version} release notes" console/dist/assets

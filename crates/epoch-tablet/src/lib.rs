@@ -14,6 +14,7 @@ mod cache;
 mod common;
 mod queue;
 mod stream_batch;
+mod stream_group;
 
 use std::collections::BTreeMap;
 
@@ -22,7 +23,7 @@ use common::{
     validate_committed_command_scope, validate_idempotency_key,
 };
 use epoch_core::{DurabilityProfile, EventEnvelope};
-use epoch_stream::{Stream, StreamConfig, StreamRecord};
+use epoch_stream::{AppendReceipt, Stream, StreamConfig, StreamRecord};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -35,6 +36,7 @@ pub use common::{
 };
 pub use queue::*;
 pub use stream_batch::*;
+pub use stream_group::*;
 
 pub const STREAM_TABLET_COMMAND_FORMAT_VERSION: u16 = 1;
 pub const STREAM_TABLET_BATCH_COMMAND_FORMAT_VERSION: u16 = 2;
@@ -64,6 +66,7 @@ pub struct StreamTabletCommand {
 pub enum StreamTabletOperation {
     Append(StreamAppendCommand),
     AppendBatch(StreamAppendBatchCommand),
+    GroupOffset(StreamGroupOffsetCommand),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -136,6 +139,38 @@ impl StreamTabletCommand {
         Ok(command)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn group_offset(
+        scope: &StreamTabletScope,
+        idempotency_key: impl Into<String>,
+        group: impl Into<String>,
+        member_id: impl Into<String>,
+        group_generation: u64,
+        partition: u32,
+        next_offset: u64,
+        mode: StreamGroupOffsetMode,
+        applied_at_ms: u64,
+    ) -> TabletResult<Self> {
+        let command = Self {
+            format_version: STREAM_TABLET_GROUP_COMMAND_FORMAT_VERSION,
+            tablet_id: scope.tablet_id,
+            tablet_epoch: scope.tablet_epoch,
+            resource: scope.resource.clone(),
+            idempotency_key: idempotency_key.into(),
+            applied_at_ms,
+            operation: StreamTabletOperation::GroupOffset(StreamGroupOffsetCommand {
+                group: group.into(),
+                member_id: member_id.into(),
+                group_generation,
+                partition,
+                next_offset,
+                mode,
+            }),
+        };
+        command.validate(scope)?;
+        Ok(command)
+    }
+
     pub fn encode(&self, scope: &StreamTabletScope) -> TabletResult<Vec<u8>> {
         self.validate(scope)?;
         let encoded =
@@ -182,6 +217,9 @@ impl StreamTabletCommand {
             }
             StreamTabletOperation::Append(_) => Err(TabletError::InvalidCommand(
                 "single-record append has no batch payload".into(),
+            )),
+            StreamTabletOperation::GroupOffset(_) => Err(TabletError::InvalidCommand(
+                "consumer-group offset command has no batch payload".into(),
             )),
         }
     }
@@ -235,6 +273,15 @@ impl StreamTabletCommand {
                     ));
                 }
                 decode_stream_batch_payload(&batch.payload)?;
+            }
+            StreamTabletOperation::GroupOffset(group) => {
+                if self.format_version != STREAM_TABLET_GROUP_COMMAND_FORMAT_VERSION {
+                    return Err(TabletError::InvalidCommand(format!(
+                        "consumer-group offset mutation requires format_version {STREAM_TABLET_GROUP_COMMAND_FORMAT_VERSION}; observed {}",
+                        self.format_version
+                    )));
+                }
+                validate_group_offset_command(group)?;
             }
         }
         Ok(())
@@ -299,11 +346,39 @@ pub enum StreamTabletAppendDisposition {
     ProfileDeduplicated,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum StreamTabletMutationReceipt {
+    Append(StreamTabletAppendReceipt),
+    Group(StreamTabletGroupReceipt),
+}
+
+impl StreamTabletMutationReceipt {
+    pub const fn proposal_id(&self) -> u64 {
+        match self {
+            Self::Append(receipt) => receipt.proposal_id,
+            Self::Group(receipt) => receipt.proposal_id,
+        }
+    }
+
+    pub fn mark_replayed(&mut self) {
+        match self {
+            Self::Append(receipt) => {
+                receipt.disposition = StreamTabletAppendDisposition::Replayed;
+            }
+            Self::Group(receipt) => {
+                receipt.disposition = StreamTabletGroupDisposition::Replayed;
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct StreamTablet {
     scope: StreamTabletScope,
     stream: Stream,
-    applied: BTreeMap<u64, AppliedCommand<StreamTabletAppendReceipt>>,
+    consumer_groups: BTreeMap<String, StreamConsumerGroupOwner>,
+    applied: BTreeMap<u64, AppliedCommand<StreamTabletMutationReceipt>>,
     last_applied_command_index: u64,
     state_digest: [u8; 32],
 }
@@ -328,6 +403,7 @@ impl StreamTablet {
         Ok(Self {
             scope,
             stream,
+            consumer_groups: BTreeMap::new(),
             applied: BTreeMap::new(),
             last_applied_command_index: 0,
             state_digest,
@@ -342,10 +418,26 @@ impl StreamTablet {
         &mut self,
         committed: CommittedCommand<'_>,
     ) -> TabletResult<StreamTabletAppendReceipt> {
+        let command = StreamTabletCommand::decode(committed.payload, &self.scope)?;
+        if matches!(command.operation, StreamTabletOperation::GroupOffset(_)) {
+            return Err(TabletError::InvalidCommand(
+                "consumer-group commands require apply_mutation".into(),
+            ));
+        }
+        match self.apply_mutation(committed)? {
+            StreamTabletMutationReceipt::Append(receipt) => Ok(receipt),
+            StreamTabletMutationReceipt::Group(_) => unreachable!("operation checked above"),
+        }
+    }
+
+    pub fn apply_mutation(
+        &mut self,
+        committed: CommittedCommand<'_>,
+    ) -> TabletResult<StreamTabletMutationReceipt> {
         self.validate_commit_scope(committed)?;
         let metadata = AppliedCommandMetadata::from_committed(committed);
-        if let Some(mut receipt) = self.receipt_for_committed(committed)? {
-            receipt.disposition = StreamTabletAppendDisposition::Replayed;
+        if let Some(mut receipt) = self.mutation_receipt_for_committed(committed)? {
+            receipt.mark_replayed();
             return Ok(receipt);
         }
         if committed.log_index <= self.last_applied_command_index {
@@ -364,75 +456,27 @@ impl StreamTablet {
             )));
         }
 
-        let applied_at_ms = command.applied_at_ms;
-        let (appended, batch_receipt) = match command.operation {
-            StreamTabletOperation::Append(append) => (
-                self.stream
-                    .append(append.envelope, Some(append.partition), applied_at_ms)?,
-                None,
+        let receipt = match command.operation {
+            StreamTabletOperation::Append(append) => StreamTabletMutationReceipt::Append(
+                self.apply_append(committed, command.applied_at_ms, append, None)?,
             ),
             StreamTabletOperation::AppendBatch(batch) => {
-                let records = decode_stream_batch_payload(&batch.payload)?;
-                // Apply against a clone so a future profile-level validation
-                // error cannot leave a prefix of the batch visible.
-                let mut next_stream = self.stream.clone();
-                let mut results = Vec::with_capacity(records.len());
-                let mut first = None;
-                for record in records {
-                    let appended = next_stream.append(
-                        record.envelope,
-                        Some(batch.partition),
-                        applied_at_ms,
-                    )?;
-                    first.get_or_insert_with(|| appended.clone());
-                    results.push(StreamTabletBatchRecordReceipt {
-                        client_sequence: record.client_sequence,
-                        partition: appended.partition,
-                        offset: appended.offset,
-                        disposition: if appended.acknowledgement.duplicate {
-                            StreamTabletAppendDisposition::ProfileDeduplicated
-                        } else {
-                            StreamTabletAppendDisposition::New
-                        },
-                    });
-                }
-                let first = first.ok_or_else(|| {
-                    TabletError::InvalidCommand("Stream batch contains no records".into())
-                })?;
-                self.stream = next_stream;
-                (
-                    first,
-                    Some(StreamTabletBatchReceipt {
-                        compression: batch.payload.compression,
-                        record_count: batch.payload.record_count,
-                        compressed_bytes: batch.payload.compressed_bytes,
-                        uncompressed_bytes: batch.payload.uncompressed_bytes,
-                        records: results,
-                    }),
-                )
+                let receipt = self.apply_batch(committed, command.applied_at_ms, &batch)?;
+                StreamTabletMutationReceipt::Append(receipt)
+            }
+            StreamTabletOperation::GroupOffset(group) => {
+                let receipt = self.apply_group_offset(committed, command.applied_at_ms, group)?;
+                StreamTabletMutationReceipt::Group(receipt)
             }
         };
-        let profile_deduplicated =
-            is_profile_deduplicated(appended.acknowledgement.duplicate, batch_receipt.as_ref());
-        let receipt = StreamTabletAppendReceipt {
-            proposal_id: committed.proposal_id,
-            tablet_id: self.scope.tablet_id,
-            tablet_epoch: self.scope.tablet_epoch,
-            term: committed.term,
-            commit_index: committed.log_index,
-            partition: appended.partition,
-            offset: appended.offset,
-            applied_at_ms,
-            write_evidence: StreamTabletWriteEvidence::FixedVoterMajorityPersisted,
-            durable_voter_acks: 2,
-            disposition: if profile_deduplicated {
-                StreamTabletAppendDisposition::ProfileDeduplicated
-            } else {
-                StreamTabletAppendDisposition::New
-            },
-            batch: batch_receipt,
-        };
-        self.advance_digest(committed, metadata.payload_digest, &receipt);
+        match &receipt {
+            StreamTabletMutationReceipt::Append(receipt) => {
+                self.advance_digest(committed, metadata.payload_digest, receipt);
+            }
+            StreamTabletMutationReceipt::Group(receipt) => {
+                self.advance_group_digest(committed, metadata.payload_digest, receipt);
+            }
+        }
         self.last_applied_command_index = committed.log_index;
         self.applied.insert(
             committed.proposal_id,
@@ -447,7 +491,10 @@ impl StreamTablet {
     pub fn lookup(&self, proposal_id: u64) -> Option<StreamTabletAppendReceipt> {
         self.applied
             .get(&proposal_id)
-            .map(|applied| applied.receipt.clone())
+            .and_then(|applied| match &applied.receipt {
+                StreamTabletMutationReceipt::Append(receipt) => Some(receipt.clone()),
+                StreamTabletMutationReceipt::Group(_) => None,
+            })
     }
 
     /// Returns the actor-applied receipt only when the consensus commit exactly
@@ -456,6 +503,16 @@ impl StreamTablet {
         &self,
         committed: CommittedCommand<'_>,
     ) -> TabletResult<Option<StreamTabletAppendReceipt>> {
+        Ok(match self.mutation_receipt_for_committed(committed)? {
+            Some(StreamTabletMutationReceipt::Append(receipt)) => Some(receipt),
+            Some(StreamTabletMutationReceipt::Group(_)) | None => None,
+        })
+    }
+
+    pub fn mutation_receipt_for_committed(
+        &self,
+        committed: CommittedCommand<'_>,
+    ) -> TabletResult<Option<StreamTabletMutationReceipt>> {
         self.validate_commit_scope(committed)?;
         let Some(previous) = self.applied.get(&committed.proposal_id) else {
             return Ok(None);
@@ -466,6 +523,29 @@ impl StreamTablet {
 
     pub fn fetch(&self, offset: u64, limit: usize) -> TabletResult<Vec<StreamRecord>> {
         Ok(self.stream.fetch(0, offset, limit)?)
+    }
+
+    pub fn fetch_for_group(&self, group: &str, limit: usize) -> TabletResult<Vec<StreamRecord>> {
+        let observation = self.group_observation(group)?;
+        self.fetch(observation.committed_offset, limit)
+    }
+
+    pub fn group_observation(&self, group: &str) -> TabletResult<StreamTabletGroupObservation> {
+        validate_stream_consumer_group(group)?;
+        let (base_offset, end_offset) = self.stream.offsets(0)?;
+        let lag = self.stream.lag(group, 0)?;
+        let owner = self.consumer_groups.get(group);
+        Ok(StreamTabletGroupObservation {
+            exists: owner.is_some(),
+            group: group.to_owned(),
+            member_id: owner.map(|owner| owner.member_id.clone()),
+            group_generation: owner.map(|owner| owner.generation),
+            partition: 0,
+            base_offset,
+            committed_offset: lag.committed_offset,
+            end_offset,
+            lag: lag.lag,
+        })
     }
 
     /// Latest consensus index containing a unique command applied to this
@@ -480,6 +560,154 @@ impl StreamTablet {
 
     pub fn state_digest(&self) -> [u8; 32] {
         self.state_digest
+    }
+
+    fn apply_append(
+        &mut self,
+        committed: CommittedCommand<'_>,
+        applied_at_ms: u64,
+        append: StreamAppendCommand,
+        batch: Option<StreamTabletBatchReceipt>,
+    ) -> TabletResult<StreamTabletAppendReceipt> {
+        let appended =
+            self.stream
+                .append(append.envelope, Some(append.partition), applied_at_ms)?;
+        Ok(self.append_receipt(committed, applied_at_ms, &appended, batch))
+    }
+
+    fn apply_batch(
+        &mut self,
+        committed: CommittedCommand<'_>,
+        applied_at_ms: u64,
+        batch: &StreamAppendBatchCommand,
+    ) -> TabletResult<StreamTabletAppendReceipt> {
+        let records = decode_stream_batch_payload(&batch.payload)?;
+        // A cloned profile makes the whole batch visible atomically.
+        let mut next_stream = self.stream.clone();
+        let mut results = Vec::with_capacity(records.len());
+        let mut first = None;
+        for record in records {
+            let appended =
+                next_stream.append(record.envelope, Some(batch.partition), applied_at_ms)?;
+            first.get_or_insert_with(|| appended.clone());
+            results.push(StreamTabletBatchRecordReceipt {
+                client_sequence: record.client_sequence,
+                partition: appended.partition,
+                offset: appended.offset,
+                disposition: append_disposition(appended.acknowledgement.duplicate),
+            });
+        }
+        let first = first.ok_or_else(|| {
+            TabletError::InvalidCommand("Stream batch contains no records".into())
+        })?;
+        self.stream = next_stream;
+        let batch_receipt = StreamTabletBatchReceipt {
+            compression: batch.payload.compression,
+            record_count: batch.payload.record_count,
+            compressed_bytes: batch.payload.compressed_bytes,
+            uncompressed_bytes: batch.payload.uncompressed_bytes,
+            records: results,
+        };
+        Ok(self.append_receipt(committed, applied_at_ms, &first, Some(batch_receipt)))
+    }
+
+    fn append_receipt(
+        &self,
+        committed: CommittedCommand<'_>,
+        applied_at_ms: u64,
+        appended: &AppendReceipt,
+        batch: Option<StreamTabletBatchReceipt>,
+    ) -> StreamTabletAppendReceipt {
+        let profile_deduplicated =
+            is_profile_deduplicated(appended.acknowledgement.duplicate, batch.as_ref());
+        StreamTabletAppendReceipt {
+            proposal_id: committed.proposal_id,
+            tablet_id: self.scope.tablet_id,
+            tablet_epoch: self.scope.tablet_epoch,
+            term: committed.term,
+            commit_index: committed.log_index,
+            partition: appended.partition,
+            offset: appended.offset,
+            applied_at_ms,
+            write_evidence: StreamTabletWriteEvidence::FixedVoterMajorityPersisted,
+            durable_voter_acks: 2,
+            disposition: append_disposition(profile_deduplicated),
+            batch,
+        }
+    }
+
+    fn apply_group_offset(
+        &mut self,
+        committed: CommittedCommand<'_>,
+        applied_at_ms: u64,
+        command: StreamGroupOffsetCommand,
+    ) -> TabletResult<StreamTabletGroupReceipt> {
+        let (base_offset, end_offset) = self.stream.offsets(command.partition)?;
+        let previous_offset = self
+            .stream
+            .lag(&command.group, command.partition)?
+            .committed_offset;
+        let rejection = group_rejection(
+            &command,
+            self.consumer_groups.get(&command.group),
+            self.consumer_groups.len(),
+            base_offset,
+            previous_offset,
+            end_offset,
+        );
+
+        if rejection.is_none() {
+            let mut next_stream = self.stream.clone();
+            match command.mode {
+                StreamGroupOffsetMode::Commit => next_stream.commit_offset(
+                    command.group.clone(),
+                    command.partition,
+                    command.next_offset,
+                )?,
+                StreamGroupOffsetMode::Reset => next_stream.reset_offset(
+                    command.group.clone(),
+                    command.partition,
+                    command.next_offset,
+                )?,
+            }
+            self.consumer_groups.insert(
+                command.group.clone(),
+                StreamConsumerGroupOwner {
+                    member_id: command.member_id.clone(),
+                    generation: command.group_generation,
+                },
+            );
+            self.stream = next_stream;
+        }
+
+        let lag = self.stream.lag(&command.group, command.partition)?;
+        Ok(StreamTabletGroupReceipt {
+            proposal_id: committed.proposal_id,
+            tablet_id: self.scope.tablet_id,
+            tablet_epoch: self.scope.tablet_epoch,
+            term: committed.term,
+            commit_index: committed.log_index,
+            group: command.group,
+            member_id: command.member_id,
+            group_generation: command.group_generation,
+            partition: command.partition,
+            mode: command.mode,
+            requested_next_offset: command.next_offset,
+            previous_offset,
+            committed_offset: lag.committed_offset,
+            end_offset: lag.end_offset,
+            lag: lag.lag,
+            applied_at_ms,
+            outcome: if rejection.is_some() {
+                StreamTabletGroupOutcome::Rejected
+            } else {
+                StreamTabletGroupOutcome::Applied
+            },
+            rejection,
+            write_evidence: StreamTabletWriteEvidence::FixedVoterMajorityPersisted,
+            durable_voter_acks: 2,
+            disposition: StreamTabletGroupDisposition::New,
+        })
     }
 
     fn validate_commit_scope(&self, committed: CommittedCommand<'_>) -> TabletResult<()> {
@@ -518,6 +746,96 @@ impl StreamTablet {
             }
         }
         self.state_digest = hasher.finalize().into();
+    }
+
+    fn advance_group_digest(
+        &mut self,
+        committed: CommittedCommand<'_>,
+        payload_digest: [u8; 32],
+        receipt: &StreamTabletGroupReceipt,
+    ) {
+        let mut hasher = Sha256::new();
+        hasher.update(b"epoch/stream-tablet/state-transition/group-offset/v3\0");
+        hasher.update(self.state_digest);
+        hasher.update(committed.proposal_id.to_be_bytes());
+        hasher.update(committed.term.to_be_bytes());
+        hasher.update(committed.log_index.to_be_bytes());
+        hasher.update(payload_digest);
+        hash_length_prefixed(&mut hasher, receipt.group.as_bytes());
+        hash_length_prefixed(&mut hasher, receipt.member_id.as_bytes());
+        hasher.update(receipt.group_generation.to_be_bytes());
+        hasher.update(receipt.partition.to_be_bytes());
+        hasher.update(receipt.committed_offset.to_be_bytes());
+        hasher.update(receipt.end_offset.to_be_bytes());
+        hasher.update([group_outcome_code(receipt)]);
+        self.state_digest = hasher.finalize().into();
+    }
+}
+
+fn append_disposition(profile_deduplicated: bool) -> StreamTabletAppendDisposition {
+    if profile_deduplicated {
+        StreamTabletAppendDisposition::ProfileDeduplicated
+    } else {
+        StreamTabletAppendDisposition::New
+    }
+}
+
+fn group_rejection(
+    command: &StreamGroupOffsetCommand,
+    owner: Option<&StreamConsumerGroupOwner>,
+    group_count: usize,
+    base_offset: u64,
+    previous_offset: u64,
+    end_offset: u64,
+) -> Option<StreamTabletGroupRejection> {
+    if let Some(rejection) = generation_rejection(command, owner) {
+        return Some(rejection);
+    }
+    if owner.is_none() && group_count >= MAX_STREAM_CONSUMER_GROUPS {
+        return Some(StreamTabletGroupRejection::GroupCapacityReached);
+    }
+    if command.next_offset < base_offset {
+        return Some(StreamTabletGroupRejection::OffsetBeforeRetained);
+    }
+    if command.next_offset > end_offset {
+        return Some(StreamTabletGroupRejection::OffsetBeyondEnd);
+    }
+    if command.mode == StreamGroupOffsetMode::Commit && command.next_offset < previous_offset {
+        return Some(StreamTabletGroupRejection::CommitRewind);
+    }
+    None
+}
+
+fn generation_rejection(
+    command: &StreamGroupOffsetCommand,
+    owner: Option<&StreamConsumerGroupOwner>,
+) -> Option<StreamTabletGroupRejection> {
+    let Some(owner) = owner else {
+        return (command.group_generation != 1)
+            .then_some(StreamTabletGroupRejection::GenerationGap);
+    };
+    if command.group_generation < owner.generation {
+        return Some(StreamTabletGroupRejection::StaleGeneration);
+    }
+    if command.group_generation == owner.generation && command.member_id != owner.member_id {
+        return Some(StreamTabletGroupRejection::OwnerMismatch);
+    }
+    if command.group_generation > owner.generation.saturating_add(1) {
+        return Some(StreamTabletGroupRejection::GenerationGap);
+    }
+    None
+}
+
+fn group_outcome_code(receipt: &StreamTabletGroupReceipt) -> u8 {
+    match receipt.rejection {
+        None => 0,
+        Some(StreamTabletGroupRejection::OwnerMismatch) => 1,
+        Some(StreamTabletGroupRejection::StaleGeneration) => 2,
+        Some(StreamTabletGroupRejection::GenerationGap) => 3,
+        Some(StreamTabletGroupRejection::CommitRewind) => 4,
+        Some(StreamTabletGroupRejection::OffsetBeforeRetained) => 5,
+        Some(StreamTabletGroupRejection::OffsetBeyondEnd) => 6,
+        Some(StreamTabletGroupRejection::GroupCapacityReached) => 7,
     }
 }
 
@@ -763,5 +1081,35 @@ mod tests {
             StreamTabletCommand::decode(&pretty, &scope),
             Err(TabletError::Decoding(_))
         ));
+    }
+
+    #[test]
+    fn consumer_group_capacity_rejects_only_a_new_group() {
+        let command = StreamGroupOffsetCommand {
+            group: "billing".into(),
+            member_id: "worker-a".into(),
+            group_generation: 1,
+            partition: 0,
+            next_offset: 0,
+            mode: StreamGroupOffsetMode::Commit,
+        };
+        assert_eq!(
+            group_rejection(&command, None, MAX_STREAM_CONSUMER_GROUPS, 0, 0, 0,),
+            Some(StreamTabletGroupRejection::GroupCapacityReached)
+        );
+        assert_eq!(
+            group_rejection(
+                &command,
+                Some(&StreamConsumerGroupOwner {
+                    member_id: "worker-a".into(),
+                    generation: 1,
+                }),
+                MAX_STREAM_CONSUMER_GROUPS,
+                0,
+                0,
+                0,
+            ),
+            None
+        );
     }
 }

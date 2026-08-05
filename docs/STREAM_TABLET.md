@@ -9,7 +9,7 @@ API or SDKs.
 ## What is implemented
 
 ```text
-typed single or compressed-batch append request
+typed append, compressed batch, or consumer-checkpoint request
   -> canonical versioned tablet command
   -> persistent Raft proposal
   -> durable fixed-voter-majority commit
@@ -33,7 +33,8 @@ typed single or compressed-batch append request
   old-leader proposal cannot satisfy a waiter for different input.
 
 The historical single append remains canonical command v1 byte-for-byte. A
-batch alone emits v2. Both accept only partition `0`, reject unknown fields and
+batch alone emits v2 and a consumer-group offset mutation alone emits v3. All
+accept only partition `0`, reject unknown fields and
 version/kind mismatches, are limited to the consensus proposal ceiling, and
 must match canonical JSON exactly. A batch contains 1–1,000 unique client
 sequences in canonical record JSON, transported as standard base64 with
@@ -41,6 +42,15 @@ sequences in canonical record JSON, transported as standard base64 with
 limited to 360 KiB and decompressed output to 4 MiB; Zstd's window is capped at
 8 MiB. Exact counts and sizes are checked before proposal and again on every
 voter.
+
+Command v3 replicates a group's next offset and caller-supplied ownership
+generation in the same history as records. The first owner uses generation 1;
+the same member may continue in that generation, exactly the next generation
+may establish a new owner, and old, skipped, or same-generation/different-member
+requests are committed as typed fenced rejections. `commit` moves only forward;
+`reset` is the explicit retained-range rewind. A group/member is limited to 256
+bytes and one tablet retains at most 10,000 groups. These are checkpoint and
+fencing semantics, not automatic membership or rebalancing.
 
 The proposal ID is currently a scope-separated 64-bit prefix of SHA-256; the
 complete key remains in the command, so a collision fails as a conflict instead
@@ -72,19 +82,23 @@ EPRS volumes. It verifies:
 6. the container client independently builds an RFC 1952 gzip frame in Python,
    commits it after leader replacement, and recovers both records after an
    all-voter `SIGKILL`;
-7. malformed base64/frames, false metadata, duplicate sequences,
+7. commit, exact retry, wrong-owner rejection, generation handoff, explicit
+   reset, stale-owner rejection, lag, and replay converge on three real voters
+   and rebuild from EPRS;
+8. malformed base64/frames, false metadata, duplicate sequences,
    non-canonical JSON, oversized expansion, and an excessive Zstd window fail
    before profile mutation;
-8. the receipt reports `fixed_voter_majority_persisted`, two durable voter
+9. the receipt reports `fixed_voter_majority_persisted`, two durable voter
    acknowledgements, Raft commit position, and Stream offset without claiming
    zone-aware quorum durability;
-9. an exact retry returns the original offset while changed input conflicts;
-10. a replacement leader safely rebinds an overwritten minority-only proposal,
+10. an exact retry returns the original offset while changed input conflicts;
+11. a replacement leader safely rebinds an overwritten minority-only proposal,
    while the original semantic input conflicts instead of receiving its result;
-11. the restarted voter catches up once; and
-12. after all three containers receive `SIGKILL`, their existing EPRS volumes
-   rebuild the exact pre-crash record document and state digest before
-   readiness, and an exact retry still resolves to the original offset.
+12. the restarted voter catches up once; and
+13. after all three containers receive `SIGKILL`, their existing EPRS volumes
+   rebuild the exact pre-crash record document, checkpoint/lag/replay view, and
+   state digest before readiness, and an exact retry still resolves to the
+   original offset.
 
 The script allocates loopback ports dynamically, uses a unique Compose project,
 and removes only its own containers, network, and volumes. CI uploads its logs,
@@ -201,6 +215,67 @@ an idempotency conflict. The regional path is the same operation at
 `.../shards/{shard}/data/records/batches` with the normal authorization,
 generation, tablet-epoch, and leader fences.
 
+### Commit, reset, and replay a consumer-group checkpoint
+
+Use the observed leader port and term. An offset is the next record the group
+will fetch:
+
+```shell
+curl --fail --silent --show-error \
+  --request PUT \
+  --header 'content-type: application/json' \
+  --data '{
+    "idempotency_key":"billing-checkpoint-1",
+    "expected_term":"1",
+    "member_id":"worker-a",
+    "group_generation":"1",
+    "partition":0,
+    "next_offset":"2",
+    "mode":"commit"
+  }' \
+  http://127.0.0.1:17701/experimental/v1/tablets/stream/groups/billing/offsets
+```
+
+`outcome: applied` means the checkpoint and owner were changed by the committed
+command. `outcome: rejected` plus `owner_mismatch`, `stale_generation`,
+`generation_gap`, `commit_rewind`, `offset_before_retained`,
+`offset_beyond_end`, or `group_capacity_reached` is also a definite committed
+business outcome. Reusing the exact idempotency key returns the original
+receipt as `replayed`; changing any client-controlled field conflicts.
+
+Only `reset` may rewind. A new owner must advance the generation by exactly one:
+
+```shell
+curl --fail --silent --show-error \
+  --request PUT \
+  --header 'content-type: application/json' \
+  --data '{
+    "idempotency_key":"billing-reset-1",
+    "expected_term":"1",
+    "member_id":"worker-b",
+    "group_generation":"2",
+    "partition":0,
+    "next_offset":"0",
+    "mode":"reset"
+  }' \
+  http://127.0.0.1:17701/experimental/v1/tablets/stream/groups/billing/offsets
+```
+
+Observe lag and fetch replay records beginning at the durable next offset:
+
+```text
+GET /experimental/v1/tablets/stream/groups/billing/lag?partition=0
+GET /experimental/v1/tablets/stream/groups/billing/records?partition=0&limit=100
+```
+
+The regional equivalents are
+`.../shards/{shard}/data/groups/billing/{lag|records}` and
+`.../shards/{shard}/data/groups/billing/offsets`. Regional reads retain the
+normal safe ReadIndex default; direct reads remain local and stale-capable.
+The repository Go, Java, and Python SDK offset helpers currently use the
+standalone API. They do not silently opt into these experimental replicated
+generation semantics.
+
 Leader-local committed reads use:
 
 ```text
@@ -230,6 +305,9 @@ It also has static membership, one group/resource, one partition, no snapshots,
 log compaction, retention deletion, follower read routing, catalog-authorized epoch
 transition, placement, authenticated peer identity, bounded idempotency
 retention, replica-progress/ISR contract, or exhaustive crash/I/O matrix.
+Consumer groups add no join, heartbeat, assignment, revoke, session timeout,
+automatic generation allocation, dead-member detection, rebalance strategy,
+multi-partition ownership, transactional offset commit, or stable SDK surface.
 The batch route is whole-command atomic and client-framed; it does not provide
 the future bidirectional Produce stream, connection credit, automatic producer
 batching, codec negotiation, non-atomic per-record rejection, compression
@@ -248,3 +326,5 @@ partial evidence into a production claim.
 See [Architecture](ARCHITECTURE.md), [Semantics](SEMANTICS.md),
 [API contracts](API_CONTRACTS.md), and the
 [Consensus feasibility spike](CONSENSUS_SPIKE.md) for the surrounding contract.
+Checkpoint details are recorded in
+[ADR-0016](adr/0016-stream-consumer-group-checkpoints.md).
