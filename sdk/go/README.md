@@ -40,9 +40,19 @@ volatile in the runnable slice.
 
 The client uses an injectable `Transport`, preserves structured and non-JSON
 HTTP error bodies through `APIError`, bounds response bodies, does not follow
-redirects, and performs no hidden retries. The provisional module path is not a
-publishable compatibility promise. Native gRPC streaming and the stable
-Go/Java/Python contract matrix remain future work.
+redirects, and performs no hidden retries for standalone operations.
+
+`RegionalStreamClient` is the explicit replicated alternative. It accepts every
+Rust node endpoint plus a `RegionalScope` and bearer token, discovers the
+current leader before each call, carries generation/tablet fences, reuses the
+caller's append/checkpoint idempotency key across one bounded rediscovery, and
+requests linearizable fetch/lag reads. See the
+[complete regional example](../../console/src/quickstarts/regional/quickstart.go)
+and [contract guide](../../docs/REGIONAL_STREAM_SDK.md).
+
+The provisional module path is not a publishable compatibility promise. Native
+gRPC streaming, coordinated consumer sessions, generated response types, and
+the complete Go/Java/Python contract matrix remain future work.
 
 Run the package gate from the repository root:
 

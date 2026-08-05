@@ -167,6 +167,13 @@ rejected outcomes across three voters and reopens every EPRS history. This
 proves replicated checkpoints, not automatic join/heartbeat/assignment or a
 complete group-coordinator fault matrix.
 
+Regional adapter tests cover the fully qualified Stream v1 route and its strict
+authorization actions/scope. A handler-level regression sends a group lag read
+through both router layers: it first reproduced a real HTTP 500 caused by
+cached outer path parameters contaminating the inner `Path<String>` extractor,
+then proves the adapter clears that routing metadata while preserving the
+intentional read-barrier extension.
+
 The Queue-tablet layers check strict canonical commands, three-instance
 convergence, leader/consumer/token fencing, exact renewed-token replay,
 monotonic committed-order time including descending leader assignments,
@@ -367,10 +374,13 @@ campaign also creates Cache, Stream, Queue, and Event Bus resources directly
 through the Rust catalog and commits one typed operation per profile. It kills
 the managed Stream leader, waits for the Go BFF to report degraded two-voter
 placement, commits through the replacement, restarts and catches up the old
-voter, kills every node, verifies Go clears stale placement while authority is
+voter. After leader loss, the real Python `RegionalStreamClient` uses all three
+endpoints to append, repeat the exact idempotency key, perform a linearizable
+fetch, commit a generation-fenced checkpoint, and verify lag. The campaign then
+kills every node, verifies Go clears stale placement while authority is
 unavailable, and reopens the same volumes before comparing catalog/profile
-digests. CI captures control logs, container logs, port assignments, and scoped
-state evidence on failure.
+digests and the increased applied-command index. CI captures control logs,
+container logs, port assignments, and scoped state evidence on failure.
 
 `tests/integration/docs-quickstarts.sh` separately executes the exact Go, Java,
 and Python source imported into the documentation page. Each language gets a
@@ -378,8 +388,11 @@ fresh data directory, creates a local-durable Stream and Queue, acknowledges
 only `job-1001`, kills the node with `SIGKILL`, restarts from the same bytes,
 and proves that the Stream record, acknowledgement count, and only `job-1002`
 survived. The GitHub Pages deploy job depends on this lifecycle test as well as
-the documentation-only frontend build. Pull-request runs execute both gates but
-cannot upload or deploy Pages; publication is restricted to `main`.
+the documentation-only frontend build. The same script compiles the exact
+displayed regional Go and Java programs and Python bytecode against the current
+repository-local SDKs; the real regional Python execution remains in
+`test-regional-runtime`. Pull-request runs execute both gates but cannot upload
+or deploy Pages; publication is restricted to `main`.
 
 Manifest recovery tests distinguish a safe uncommitted suffix from committed
 data damage. Only bytes beyond the manifest's committed length in the active

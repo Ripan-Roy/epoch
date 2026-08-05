@@ -113,7 +113,12 @@ mkdir -p "$epoch_java_classes"
 javac --release 25 -Xlint:all -Werror \
   -cp "sdk/java/target/classes:$epoch_java_runtime_classpath" \
   -d "$epoch_java_classes" \
-  console/src/quickstarts/Quickstart.java
+  console/src/quickstarts/Quickstart.java \
+  console/src/quickstarts/regional/RegionalQuickstart.java
+
+go test ./console/src/quickstarts/regional
+"$epoch_docs_tmp/python/bin/python" -m py_compile \
+  console/src/quickstarts/regional/quickstart.py
 
 for epoch_language in go java python; do
   printf 'Executing displayed %s SDK lifecycle\n' "$epoch_language"
@@ -125,4 +130,4 @@ for epoch_language in go java python; do
   stop_node
 done
 
-printf 'All displayed SDK quickstarts survived forced restart.\n'
+printf 'All displayed standalone SDK quickstarts survived forced restart; regional sources compile.\n'

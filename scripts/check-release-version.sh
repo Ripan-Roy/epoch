@@ -35,7 +35,7 @@ expect_line sdk/java/src/main/java/io/epoch/sdk/HttpTransport.java \
   "  private static final String USER_AGENT = \"epoch-java/$release_version\";"
 expect_line sdk/python/pyproject.toml "version = \"$python_version\""
 expect_line sdk/python/src/epoch_sdk/transport.py \
-  "        headers = {\"accept\": \"application/json\", \"user-agent\": \"epoch-python/$python_version\"}"
+  "        request_headers = {\"accept\": \"application/json\", \"user-agent\": \"epoch-python/$python_version\"}"
 expect_line sdk/go/epoch/transport.go \
   "	userAgent        = \"epoch-go/$release_version\""
 expect_line sdk/go/epoch/transport_test.go \

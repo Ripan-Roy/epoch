@@ -53,10 +53,11 @@ implemented.
    `data/groups/{group}/...`, with its existing authorization, generation,
    tablet-epoch, leader, and read-barrier rules.
 9. The existing Go, Java, and Python SDK offset helpers continue to target the
-   standalone API. The replicated routes are deliberately experimental and do
-   not silently replace that stable-local contract. A future native
-   `ConsumerSession`, `CommitOffsets`, `FetchOffsets`, and `ResetOffsets`
-   surface will add coordinated membership and package compatibility.
+   standalone API and do not silently replace that stable-local contract.
+   [ADR-0017](0017-regional-stream-v1-and-sdk-routing.md) subsequently adds a
+   separate regional client for this explicit checkpoint primitive. A future
+   native `ConsumerSession` surface must still add coordinated membership,
+   assignment, rebalance, and package compatibility.
 
 ## Consequences
 
@@ -76,7 +77,7 @@ implemented.
   transaction semantics.
 - STREAM-003 advances from a local prototype to a replicated slice. It remains
   incomplete pending coordinated sessions, multi-partition assignment,
-  retention interaction, authorization/audit specificity, stable native/SDK
+  retention interaction, authorization/audit specificity, generated session
   contracts, scale/fairness evidence, and the production fault matrix.
 
 ## Rejected alternatives

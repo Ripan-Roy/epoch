@@ -3,6 +3,9 @@ import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import goSource from "./quickstarts/quickstart.go?raw";
 import javaSource from "./quickstarts/Quickstart.java?raw";
 import pythonSource from "./quickstarts/quickstart.py?raw";
+import regionalGoSource from "./quickstarts/regional/quickstart.go?raw";
+import regionalJavaSource from "./quickstarts/regional/RegionalQuickstart.java?raw";
+import regionalPythonSource from "./quickstarts/regional/quickstart.py?raw";
 
 const repositoryUrl = "https://github.com/Ripan-Roy/epoch";
 const repositoryDocsUrl = `${repositoryUrl}/blob/main/docs`;
@@ -28,6 +31,33 @@ cargo run -p epoch-node -- --data-dir .epoch`;
 
 const nodeRestart = `# In the node terminal, press Ctrl-C, then restart with the same data directory:
 cargo run -p epoch-node -- --data-dir .epoch`;
+
+const regionalNodes = `# Terminal A · build and start three fixed voters
+make compose-regional-up`;
+
+const regionalControl = `# Terminal B · keep the managed bridge running
+EPOCH_CONTROL_REGIONAL_ENDPOINTS=http://127.0.0.1:18661,http://127.0.0.1:18662,http://127.0.0.1:18663 \
+EPOCH_CONTROL_STATE_PATH=.epoch/control/registry.db \
+EPOCH_AUTH_POLICY_PATH=spec/auth/bootstrap-policy-v1.example.json \
+EPOCH_CONTROL_REGIONAL_TOKEN=epoch-dev-control-v1 \
+go run ./control/cmd/epoch-control`;
+
+const regionalResource = `# Terminal C · create one replicated Stream
+curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
+  --header 'authorization: Bearer epoch-dev-admin-v1' \
+  --header 'content-type: application/json' \
+  --data '{
+    "request_token":"docs-create-orders-v1",
+    "expected_generation":0,
+    "resource":{
+      "organization":"acme","project":"shop","environment":"dev","namespace":"core",
+      "kind":"stream","name":"orders",
+      "spec":{"shard_count":1,"replica_count":3,"placement":{
+        "allowed_regions":["ap-south"],"minimum_zones":3,
+        "required_node_class":"general-purpose"
+      }}
+    }
+  }'`;
 
 const languageGuides: LanguageGuide[] = [
   {
@@ -86,6 +116,38 @@ python quickstart.py verify`,
   },
 ];
 
+const regionalLanguageGuides: Record<
+  LanguageId,
+  { filename: string; source: string; setup: string; run: string }
+> = {
+  go: {
+    filename: "quickstart.go",
+    source: regionalGoSource,
+    setup: "# Uses the repository-local Go module; no separate install is required.",
+    run: "go run ./console/src/quickstarts/regional/quickstart.go",
+  },
+  java: {
+    filename: "RegionalQuickstart.java",
+    source: regionalJavaSource,
+    setup: `cd sdk/java
+./mvnw -q -DskipTests package dependency:build-classpath \
+  -Dmdep.outputFile=target/runtime-classpath.txt
+export EPOCH_JAVA_CP="target/classes:$(cat target/runtime-classpath.txt)"
+javac -cp "$EPOCH_JAVA_CP" ../../console/src/quickstarts/regional/RegionalQuickstart.java \
+  -d target/regional-docs-classes`,
+    run: `cd sdk/java
+java -cp "target/regional-docs-classes:$EPOCH_JAVA_CP" RegionalQuickstart`,
+  },
+  python: {
+    filename: "quickstart.py",
+    source: regionalPythonSource,
+    setup: `python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ./sdk/python`,
+    run: "python console/src/quickstarts/regional/quickstart.py",
+  },
+};
+
 const sdkSurface = [
   {
     area: "Connection",
@@ -112,6 +174,12 @@ const sdkSurface = [
     python: "create_stream · append_stream · fetch_stream · commit_stream_offset · stream_lag",
   },
   {
+    area: "Regional Stream",
+    go: "RegionalStreamClient · Append · Fetch · CommitOffset · Lag · FetchGroup",
+    java: "RegionalStreamClient · append · fetch · commitOffset · lag · fetchGroup",
+    python: "RegionalStreamClient · append · fetch · commit_offset · lag · fetch_group",
+  },
+  {
     area: "Queue",
     go: "CreateQueue · Send · Receive · Acknowledge · Release · Reject · ExtendLease · QueueCounts · Redrive",
     java: "createQueue · send · receive · acknowledge · release · reject · extendLease · queueCounts · redrive",
@@ -131,7 +199,13 @@ interface DocsPageProps {
 }
 
 type DocsSectionId =
-  "quickstart" | "restart" | "guarantees" | "cluster-milestone" | "sdk-reference" | "reference";
+  | "quickstart"
+  | "restart"
+  | "guarantees"
+  | "cluster-milestone"
+  | "regional-stream"
+  | "sdk-reference"
+  | "reference";
 
 interface DocsNavigationGroup {
   label: string;
@@ -159,6 +233,7 @@ const docsNavigation: ReadonlyArray<DocsNavigationGroup> = [
   {
     label: "SDKs & reference",
     items: [
+      { id: "regional-stream", label: "Regional Stream SDK" },
       { id: "sdk-reference", label: "SDK reference" },
       { id: "reference", label: "Design reference" },
     ],
@@ -175,6 +250,7 @@ export function DocsPage({ section }: DocsPageProps) {
   const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
   const mobileNavigationButton = useRef<HTMLButtonElement>(null);
   const guide = languageGuides.find((candidate) => candidate.id === language) ?? languageGuides[0];
+  const regionalGuide = regionalLanguageGuides[language];
 
   useEffect(() => {
     navigateToSection(section);
@@ -573,10 +649,12 @@ export function DocsPage({ section }: DocsPageProps) {
                     observe lag, and replay from that checkpoint; caller-supplied generations fence an old or
                     conflicting member across failover and EPRS rebuild. These are experimental HTTP/tablet
                     slices, not yet coordinated join, heartbeat, assignment, rebalance, native bidirectional
-                    streaming, automatic client batching, compression negotiation, or stable SDK support.
-                    Managed HTTP/gRPC and regional HTTP require a shared deny-by-default bootstrap bearer
-                    policy, but that is not OIDC, TLS/mTLS, credential expiry/revocation, or immutable audit
-                    export.
+                    streaming, automatic client batching, or compression negotiation. The separate regional
+                    Stream v1 client below now exposes single append, fetch, checkpoint, lag, and replay with
+                    leader/fence-aware Go, Java, and Python routing; it is not a coordinated streaming
+                    session. Managed HTTP/gRPC and regional HTTP require a shared deny-by-default bootstrap
+                    bearer policy, but that is not OIDC, TLS/mTLS, credential expiry/revocation, or immutable
+                    audit export.
                   </p>
                 </div>
               </div>
@@ -649,20 +727,130 @@ export function DocsPage({ section }: DocsPageProps) {
             </section>
 
             <section
+              id="regional-stream"
+              className="docs-section"
+              aria-labelledby="regional-stream-title"
+              tabIndex={-1}
+            >
+              <div className="docs-section__heading">
+                <span>05</span>
+                <div>
+                  <p className="eyebrow">VERSIONED REGIONAL STREAM V1</p>
+                  <h2 id="regional-stream-title">Run one authenticated client across three voters.</h2>
+                  <p>
+                    This path is separate from the standalone quickstart. It uses a fully qualified tenant
+                    scope, discovers the current leader before every operation, carries the observed resource
+                    generation and tablet epoch, and keeps the caller&apos;s idempotency key unchanged across
+                    a bounded rediscovery retry.
+                  </p>
+                </div>
+              </div>
+
+              <div className="guide-intro">
+                <span className="step-badge">A</span>
+                <div>
+                  <h3>Start the voters and provision the Stream</h3>
+                  <p>
+                    The credentials below are public development fixtures. Use them only with this disposable
+                    local topology. The Go bridge is needed to create the resource; once materialized, the SDK
+                    data path remains available if that bridge stops.
+                  </p>
+                </div>
+              </div>
+              <CodeBlock label="Terminal A · regional nodes" value={regionalNodes} />
+              <CodeBlock label="Terminal B · managed bridge" value={regionalControl} />
+              <CodeBlock label="Terminal C · provision" value={regionalResource} />
+
+              <div className="language-picker">
+                <div>
+                  <p className="eyebrow">CHOOSE YOUR REGIONAL SDK</p>
+                  <h3>One route and recovery contract in three ecosystems.</h3>
+                </div>
+                <div className="language-tabs" role="tablist" aria-label="Regional Stream language">
+                  {languageGuides.map((candidate) => (
+                    <button
+                      key={candidate.id}
+                      id={`regional-language-tab-${candidate.id}`}
+                      type="button"
+                      role="tab"
+                      aria-selected={language === candidate.id}
+                      aria-controls={`regional-language-panel-${candidate.id}`}
+                      tabIndex={language === candidate.id ? 0 : -1}
+                      onClick={() => setLanguage(candidate.id)}
+                      onKeyDown={(event) => handleLanguageKey(event, candidate.id)}
+                    >
+                      <span>{candidate.label}</span>
+                      <small>{candidate.version}</small>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div
+                id={`regional-language-panel-${language}`}
+                className="language-panel"
+                role="tabpanel"
+                aria-labelledby={`regional-language-tab-${language}`}
+              >
+                <CodeBlock label={`${guide.label} · setup`} value={regionalGuide.setup} />
+                <CodeBlock label={regionalGuide.filename} value={regionalGuide.source} tall />
+                <CodeBlock label="Terminal C · run" value={regionalGuide.run} />
+              </div>
+
+              <div className="sdk-notes" aria-label="Regional SDK guarantees">
+                <article>
+                  <span>ROUTING</span>
+                  <strong>Discovery is part of every call.</strong>
+                  <p>
+                    Configure every node endpoint. The client selects only a response with{" "}
+                    <code>accepts_writes: true</code> and sends the observed term and fences to that node.
+                  </p>
+                </article>
+                <article>
+                  <span>UNKNOWN OUTCOME</span>
+                  <strong>Mutation identity stays with the caller.</strong>
+                  <p>
+                    Append and checkpoint calls require an idempotency key. A routing retry reuses that exact
+                    key; changing the key or request creates a different mutation or a conflict.
+                  </p>
+                </article>
+                <article>
+                  <span>CONSISTENCY</span>
+                  <strong>Reads require a leader barrier.</strong>
+                  <p>
+                    Fetch, group fetch, and lag explicitly request <code>linearizable</code>. They never fall
+                    back to a local stale read. A minority returns a retryable unavailability error.
+                  </p>
+                </article>
+              </div>
+
+              <aside className="docs-access-note">
+                <strong>Current boundary</strong>
+                <span>
+                  Regional v1 covers single-record append, bounded fetch, checkpoint commit/reset, lag, and
+                  checkpoint replay for partition 0. The caller still supplies member generations. Join,
+                  heartbeat, assignment, rebalance, multi-partition ownership, transactional offsets,
+                  automatic batching/compression, and public package-registry releases remain open.
+                </span>
+              </aside>
+            </section>
+
+            <section
               id="sdk-reference"
               className="docs-section"
               aria-labelledby="sdk-reference-title"
               tabIndex={-1}
             >
               <div className="docs-section__heading">
-                <span>05</span>
+                <span>06</span>
                 <div>
                   <p className="eyebrow">STANDALONE ALPHA SURFACE</p>
                   <h2 id="sdk-reference-title">The same operation, native to each ecosystem.</h2>
                   <p>
                     All implemented standalone profile operations have Go, Java, and Python entry points. The
-                    experimental tablet routes above intentionally have no SDK contract. Responses are still
-                    dynamic documents in this alpha; mutation calls never perform hidden retries.
+                    versioned regional Stream client above is intentionally separate because it adds
+                    authentication, route discovery, fencing, and bounded idempotent rediscovery. Responses
+                    remain dynamic documents in this alpha.
                   </p>
                 </div>
               </div>
@@ -720,9 +908,8 @@ export function DocsPage({ section }: DocsPageProps) {
                   <strong>The server owns semantic validation.</strong>
                   <p>
                     Client-side checks improve feedback but do not replace server validation. Go also accepts
-                    a context for per-call cancellation and deadlines. The listed Stream offset helpers target
-                    standalone mode; experimental replicated groups additionally require member and generation
-                    fencing and intentionally have no SDK shortcut yet.
+                    a context for per-call cancellation and deadlines. Standalone Stream helpers keep their
+                    local contract; <code>RegionalStreamClient</code> is the explicit replicated alternative.
                   </p>
                 </article>
               </div>
@@ -730,7 +917,7 @@ export function DocsPage({ section }: DocsPageProps) {
 
             <section id="reference" className="docs-section" aria-labelledby="reference-title" tabIndex={-1}>
               <div className="docs-section__heading">
-                <span>06</span>
+                <span>07</span>
                 <div>
                   <p className="eyebrow">SOURCE OF TRUTH</p>
                   <h2 id="reference-title">Go deeper without losing the boundary.</h2>
@@ -761,6 +948,12 @@ export function DocsPage({ section }: DocsPageProps) {
                   title="Delivery checklist"
                   description="Table-based program gates, current core work, pull-request requirements, and release readiness."
                   href={`${repositoryDocsUrl}/DELIVERY_CHECKLIST.md`}
+                />
+                <ReferenceCard
+                  eyebrow="SDK CONTRACT"
+                  title="Regional Stream SDK"
+                  description="Fully qualified v1 routes, leader discovery, generation/tablet fencing, idempotent retry, linearizable reads, and three-language examples."
+                  href={`${repositoryDocsUrl}/REGIONAL_STREAM_SDK.md`}
                 />
                 <ReferenceCard
                   eyebrow="REGIONAL RUNTIME"

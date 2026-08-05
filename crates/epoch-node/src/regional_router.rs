@@ -26,6 +26,8 @@ use crate::{
 
 pub const REGIONAL_RESOURCE_ROUTE_PATH: &str = "/experimental/v1/regional/resources/{organization}/{project}/{environment}/{namespace}/{kind}/{name}/shards/{shard}";
 pub const REGIONAL_RESOURCE_DATA_PATH: &str = "/experimental/v1/regional/resources/{organization}/{project}/{environment}/{namespace}/{kind}/{name}/shards/{shard}/data/{*operation}";
+pub const REGIONAL_STREAM_ROUTE_PATH: &str = "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/streams/{name}/shards/{shard}";
+pub const REGIONAL_STREAM_DATA_PATH: &str = "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/streams/{name}/shards/{shard}/{*operation}";
 pub const RESOURCE_GENERATION_HEADER: &str = "x-epoch-resource-generation";
 pub const TABLET_EPOCH_HEADER: &str = "x-epoch-tablet-epoch";
 pub const READ_CONSISTENCY_HEADER: &str = "x-epoch-read-consistency";
@@ -60,6 +62,56 @@ struct RegionalDataPath {
     name: String,
     shard: String,
     operation: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RegionalStreamPath {
+    organization: String,
+    project: String,
+    environment: String,
+    namespace: String,
+    name: String,
+    shard: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RegionalStreamDataPath {
+    organization: String,
+    project: String,
+    environment: String,
+    namespace: String,
+    name: String,
+    shard: String,
+    operation: String,
+}
+
+impl RegionalStreamPath {
+    fn regional_path(&self) -> RegionalResourcePath {
+        RegionalResourcePath {
+            organization: self.organization.clone(),
+            project: self.project.clone(),
+            environment: self.environment.clone(),
+            namespace: self.namespace.clone(),
+            kind: "stream".into(),
+            name: self.name.clone(),
+            shard: self.shard.clone(),
+        }
+    }
+}
+
+impl RegionalStreamDataPath {
+    fn regional_path(&self) -> RegionalDataPath {
+        RegionalDataPath {
+            organization: self.organization.clone(),
+            project: self.project.clone(),
+            environment: self.environment.clone(),
+            namespace: self.namespace.clone(),
+            kind: "stream".into(),
+            name: self.name.clone(),
+            shard: self.shard.clone(),
+            operation: self.operation.clone(),
+        }
+    }
 }
 
 impl RegionalDataPath {
@@ -285,6 +337,8 @@ pub fn regional_tablet_router_with_read_timeout(
     Router::new()
         .route(REGIONAL_RESOURCE_ROUTE_PATH, get(resolve_route))
         .route(REGIONAL_RESOURCE_DATA_PATH, any(dispatch_data))
+        .route(REGIONAL_STREAM_ROUTE_PATH, get(resolve_stream_route))
+        .route(REGIONAL_STREAM_DATA_PATH, any(dispatch_stream_data))
         .with_state(RegionalRouterState {
             directory,
             read_barrier_timeout,
@@ -304,9 +358,32 @@ async fn resolve_route(
     Ok(Json(RegionalRouteResponse::new(&route, &consensus)))
 }
 
+async fn resolve_stream_route(
+    State(state): State<RegionalRouterState>,
+    Path(path): Path<RegionalStreamPath>,
+) -> Result<Json<RegionalRouteResponse>, RegionalRouterError> {
+    resolve_route(State(state), Path(path.regional_path())).await
+}
+
 async fn dispatch_data(
     State(state): State<RegionalRouterState>,
     Path(path): Path<RegionalDataPath>,
+    request: Request<Body>,
+) -> Result<Response, RegionalRouterError> {
+    dispatch_data_request(&state, &path, request).await
+}
+
+async fn dispatch_stream_data(
+    State(state): State<RegionalRouterState>,
+    Path(path): Path<RegionalStreamDataPath>,
+    request: Request<Body>,
+) -> Result<Response, RegionalRouterError> {
+    dispatch_data_request(&state, &path.regional_path(), request).await
+}
+
+async fn dispatch_data_request(
+    state: &RegionalRouterState,
+    path: &RegionalDataPath,
     mut request: Request<Body>,
 ) -> Result<Response, RegionalRouterError> {
     let (route, _) = resolve_local_route(&state.directory, &path.resource_path())?;
@@ -372,6 +449,17 @@ async fn dispatch_data(
         request.uri().query(),
     )?;
     *request.uri_mut() = inner_uri;
+
+    // The outer router caches its decoded path parameters in request extensions.
+    // Forwarding those parameters into the profile router makes an inner extractor
+    // such as `Path<String>` observe both the regional and profile parameters. Axum
+    // rejects that incompatible shape with a 500 before the profile handler runs.
+    // Treat the profile dispatch as a request boundary and carry across only the
+    // extension that is part of the tablet API contract.
+    request.extensions_mut().clear();
+    if let Some(metadata) = read_metadata {
+        request.extensions_mut().insert(metadata);
+    }
     let result: Result<Response, Infallible> = route.router().oneshot(request).await;
     match result {
         Ok(mut response) => {
@@ -651,6 +739,14 @@ mod tests {
         format!("{}/data/{operation}", route_path())
     }
 
+    fn native_stream_route_path() -> &'static str {
+        "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/streams/orders/shards/0"
+    }
+
+    fn native_stream_data_path(operation: &str) -> String {
+        format!("{}/{operation}", native_stream_route_path())
+    }
+
     async fn json(response: Response) -> Value {
         serde_json::from_slice(
             &response
@@ -853,6 +949,99 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+        materializer.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_stream_v1_is_an_exact_fenced_adapter_over_the_regional_tablet() {
+        assert_eq!(
+            REGIONAL_STREAM_ROUTE_PATH,
+            "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/streams/{name}/shards/{shard}"
+        );
+        assert_eq!(
+            REGIONAL_STREAM_DATA_PATH,
+            "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/streams/{name}/shards/{shard}/{*operation}"
+        );
+
+        let data_directory = TempDir::new().expect("temp directory should be created");
+        let (mut materializer, router, _resource) = routed_stream(&data_directory).await;
+
+        let discovery = router
+            .clone()
+            .oneshot(
+                Request::get(native_stream_route_path())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(discovery.status(), StatusCode::OK);
+        let discovery = json(discovery).await;
+        assert_eq!(discovery["resource_generation"], "5");
+        assert_eq!(discovery["tablet_epoch"], "3");
+        assert_eq!(discovery["workload_profile"], "stream_log");
+
+        let missing_fence = router
+            .clone()
+            .oneshot(
+                Request::get(native_stream_data_path("records"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_fence.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json(missing_fence).await["code"], "invalid_route");
+
+        let local_read = router
+            .clone()
+            .oneshot(
+                Request::get(native_stream_data_path("records?offset=0&limit=1"))
+                    .header(RESOURCE_GENERATION_HEADER, "5")
+                    .header(TABLET_EPOCH_HEADER, "3")
+                    .header(READ_CONSISTENCY_HEADER, "local_stale")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(local_read.status(), StatusCode::OK);
+        let local_read = json(local_read).await;
+        assert_eq!(
+            local_read["read_consistency"],
+            "local_profile_applied_stale_capable"
+        );
+        assert_eq!(local_read["records"], serde_json::json!([]));
+
+        let group_read = router
+            .clone()
+            .oneshot(
+                Request::get(native_stream_data_path("groups/billing/lag?partition=0"))
+                    .header(RESOURCE_GENERATION_HEADER, "5")
+                    .header(TABLET_EPOCH_HEADER, "3")
+                    .header(READ_CONSISTENCY_HEADER, "local_stale")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(group_read.status(), StatusCode::OK);
+        let group_read = json(group_read).await;
+        assert_eq!(group_read["checkpoint"]["group"], "billing");
+        assert_eq!(group_read["checkpoint"]["exists"], false);
+
+        let wrong_profile = router
+            .oneshot(
+                Request::get(
+                    "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/streams/missing/shards/0",
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_profile.status(), StatusCode::NOT_FOUND);
+
         materializer.shutdown().await.unwrap();
     }
 }

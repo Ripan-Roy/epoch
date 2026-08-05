@@ -15,12 +15,19 @@ const CATALOG_RESOURCE: &str = "/experimental/v1/regional/catalog/resources/{org
 const RESOURCE_ROUTE: &str = "/experimental/v1/regional/resources/{organization}/{project}/{environment}/{namespace}/{kind}/{name}/shards/{shard}";
 const DATA_ROUTE: &str = "/experimental/v1/regional/resources/{organization}/{project}/{environment}/{namespace}/{kind}/{name}/shards/{shard}/data/{*operation}";
 const TOPOLOGY_ROUTE: &str = "/experimental/v1/regional/topology";
+const NATIVE_STREAM_ROUTE: &str = "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/streams/{name}/shards/{shard}";
+const NATIVE_STREAM_DATA: &str = "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/streams/{name}/shards/{shard}/{*operation}";
 
 fn protected_router() -> Router {
     let router = Router::new()
         .route(CATALOG_RESOURCE, any(|| async { StatusCode::NO_CONTENT }))
         .route(RESOURCE_ROUTE, any(|| async { StatusCode::NO_CONTENT }))
         .route(DATA_ROUTE, any(|| async { StatusCode::NO_CONTENT }))
+        .route(
+            NATIVE_STREAM_ROUTE,
+            any(|| async { StatusCode::NO_CONTENT }),
+        )
+        .route(NATIVE_STREAM_DATA, any(|| async { StatusCode::NO_CONTENT }))
         .route(TOPOLOGY_ROUTE, any(|| async { StatusCode::NO_CONTENT }));
     let policy = BootstrapPolicy::from_json(POLICY).unwrap();
     with_regional_auth(router, Arc::new(policy))
@@ -123,6 +130,68 @@ async fn regional_control_workload_can_reconcile_catalog_but_not_data() {
     )
     .await;
     assert_eq!(data.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn native_stream_v1_uses_the_same_fail_closed_scope_and_data_actions() {
+    let router = protected_router();
+    let route = "/v1/organizations/acme/projects/payments/environments/production/namespaces/orders/streams/events/shards/0";
+
+    let missing = call(router.clone(), Method::GET, route, None).await;
+    assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+    let discovery = call(
+        router.clone(),
+        Method::GET,
+        route,
+        Some("epoch-dev-reader-v1"),
+    )
+    .await;
+    assert_eq!(discovery.status(), StatusCode::NO_CONTENT);
+
+    let read = call(
+        router.clone(),
+        Method::GET,
+        &format!("{route}/records"),
+        Some("epoch-dev-reader-v1"),
+    )
+    .await;
+    assert_eq!(read.status(), StatusCode::NO_CONTENT);
+
+    let denied_write = call(
+        router.clone(),
+        Method::POST,
+        &format!("{route}/records"),
+        Some("epoch-dev-reader-v1"),
+    )
+    .await;
+    assert_eq!(denied_write.status(), StatusCode::FORBIDDEN);
+
+    let cross_tenant = call(
+        router.clone(),
+        Method::GET,
+        "/v1/organizations/otherco/projects/payments/environments/production/namespaces/orders/streams/events/shards/0/records",
+        Some("epoch-dev-reader-v1"),
+    )
+    .await;
+    assert_eq!(cross_tenant.status(), StatusCode::FORBIDDEN);
+
+    let control_discovery = call(
+        router.clone(),
+        Method::GET,
+        route,
+        Some("epoch-dev-control-v1"),
+    )
+    .await;
+    assert_eq!(control_discovery.status(), StatusCode::NO_CONTENT);
+    let control_data = call(
+        router,
+        Method::GET,
+        &format!("{route}/records"),
+        Some("epoch-dev-control-v1"),
+    )
+    .await;
+    assert_eq!(control_data.status(), StatusCode::FORBIDDEN);
 }
 
 async fn call(

@@ -31,6 +31,7 @@ const CATALOG_ROOT: &str = "/experimental/v1/regional/catalog";
 const CATALOG_RESOURCE_PREFIX: &str = "/experimental/v1/regional/catalog/resources/";
 const RESOURCE_PREFIX: &str = "/experimental/v1/regional/resources/";
 const TOPOLOGY_PATH: &str = "/experimental/v1/regional/topology";
+const NATIVE_STREAM_PREFIX: &str = "/v1/organizations/";
 const MAX_REQUEST_ID_BYTES: usize = 128;
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
@@ -165,6 +166,17 @@ fn action_for_request(method: &Method, path: &str) -> Action {
             _ => Action::CatalogRead,
         };
     }
+    if let Ok(Some(native)) = native_stream_request(path) {
+        return if native.data_operation {
+            if *method == Method::GET {
+                Action::DataRead
+            } else {
+                Action::DataWrite
+            }
+        } else {
+            Action::RouteRead
+        };
+    }
     let data_segments = path
         .strip_prefix(RESOURCE_PREFIX)
         .map(|remainder| remainder.split('/').collect::<Vec<_>>())
@@ -190,6 +202,9 @@ fn scope_for_path(path: &str) -> Result<ResourceScope, ()> {
     if path == CATALOG_ROOT || path == TOPOLOGY_PATH {
         return Ok(ResourceScope::new("", "", "", ""));
     }
+    if let Some(native) = native_stream_request(path)? {
+        return Ok(native.scope);
+    }
     let remainder = path
         .strip_prefix(CATALOG_RESOURCE_PREFIX)
         .or_else(|| path.strip_prefix(RESOURCE_PREFIX))
@@ -204,6 +219,50 @@ fn scope_for_path(path: &str) -> Result<ResourceScope, ()> {
         decode_segment(segments[2])?,
         decode_segment(segments[3])?,
     ))
+}
+
+#[derive(Debug)]
+struct NativeStreamRequest {
+    scope: ResourceScope,
+    data_operation: bool,
+}
+
+fn native_stream_request(path: &str) -> Result<Option<NativeStreamRequest>, ()> {
+    let Some(remainder) = path.strip_prefix(NATIVE_STREAM_PREFIX) else {
+        return Ok(None);
+    };
+    let segments: Vec<_> = remainder.split('/').collect();
+    if segments.len() < 11
+        || segments[1] != "projects"
+        || segments[3] != "environments"
+        || segments[5] != "namespaces"
+        || segments[7] != "streams"
+        || segments[9] != "shards"
+        || segments[10].parse::<u32>().is_err()
+        || (segments.len() > 11 && segments[11..].iter().any(|segment| segment.is_empty()))
+    {
+        return Err(());
+    }
+    for segment in [
+        segments[0],
+        segments[2],
+        segments[4],
+        segments[6],
+        segments[8],
+    ] {
+        if decode_segment(segment)?.is_empty() {
+            return Err(());
+        }
+    }
+    Ok(Some(NativeStreamRequest {
+        scope: ResourceScope::new(
+            decode_segment(segments[0])?,
+            decode_segment(segments[2])?,
+            decode_segment(segments[4])?,
+            decode_segment(segments[6])?,
+        ),
+        data_operation: segments.len() > 11,
+    }))
 }
 
 fn decode_segment(segment: &str) -> Result<String, ()> {
@@ -290,4 +349,53 @@ fn record_decision(
         namespace = event.scope().namespace,
         "authorization decision"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const STREAM_ROUTE: &str = "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/streams/orders/shards/0";
+
+    #[test]
+    fn native_stream_routes_use_data_actions_only_after_the_shard_boundary() {
+        assert_eq!(
+            action_for_request(&Method::GET, STREAM_ROUTE),
+            Action::RouteRead
+        );
+        assert_eq!(
+            action_for_request(&Method::GET, &format!("{STREAM_ROUTE}/records")),
+            Action::DataRead
+        );
+        assert_eq!(
+            action_for_request(&Method::POST, &format!("{STREAM_ROUTE}/records")),
+            Action::DataWrite
+        );
+        assert_eq!(
+            action_for_request(
+                &Method::PUT,
+                &format!("{STREAM_ROUTE}/groups/billing/offsets")
+            ),
+            Action::DataWrite
+        );
+    }
+
+    #[test]
+    fn native_stream_scope_is_fully_qualified_and_strict() {
+        assert_eq!(
+            scope_for_path(STREAM_ROUTE).unwrap(),
+            ResourceScope::new("acme", "shop", "dev", "core")
+        );
+        assert_eq!(
+            scope_for_path(&format!("{STREAM_ROUTE}/groups/billing/lag")).unwrap(),
+            ResourceScope::new("acme", "shop", "dev", "core")
+        );
+        assert!(scope_for_path("/v1/organizations/acme/projects/shop").is_err());
+        assert!(
+            scope_for_path(
+                "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/queues/jobs/shards/0"
+            )
+            .is_err()
+        );
+    }
 }

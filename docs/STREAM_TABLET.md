@@ -268,13 +268,16 @@ GET /experimental/v1/tablets/stream/groups/billing/lag?partition=0
 GET /experimental/v1/tablets/stream/groups/billing/records?partition=0&limit=100
 ```
 
-The regional equivalents are
+The generic regional equivalents are
 `.../shards/{shard}/data/groups/billing/{lag|records}` and
-`.../shards/{shard}/data/groups/billing/offsets`. Regional reads retain the
-normal safe ReadIndex default; direct reads remain local and stale-capable.
-The repository Go, Java, and Python SDK offset helpers currently use the
-standalone API. They do not silently opt into these experimental replicated
-generation semantics.
+`.../shards/{shard}/data/groups/billing/offsets`. The application-facing v1
+equivalents remove the generic `data` segment beneath the fully qualified
+`/v1/organizations/.../namespaces/.../streams/.../shards/{shard}` base.
+Regional reads retain the normal safe ReadIndex default; direct reads remain
+local and stale-capable. The repository's standalone offset helpers keep their
+local contract. The separate Go, Java, and Python `RegionalStreamClient`
+explicitly opts into replicated member/generation fencing and linearizable
+reads.
 
 Leader-local committed reads use:
 
@@ -307,7 +310,10 @@ transition, placement, authenticated peer identity, bounded idempotency
 retention, replica-progress/ISR contract, or exhaustive crash/I/O matrix.
 Consumer groups add no join, heartbeat, assignment, revoke, session timeout,
 automatic generation allocation, dead-member detection, rebalance strategy,
-multi-partition ownership, transactional offset commit, or stable SDK surface.
+multi-partition ownership, transactional offset commit, or coordinated consumer
+session surface.
+The regional Stream v1 SDK exposes the current checkpoint primitive, but it
+does not turn that primitive into a coordinated consumer session.
 The batch route is whole-command atomic and client-framed; it does not provide
 the future bidirectional Produce stream, connection credit, automatic producer
 batching, codec negotiation, non-atomic per-record rejection, compression
@@ -327,4 +333,6 @@ See [Architecture](ARCHITECTURE.md), [Semantics](SEMANTICS.md),
 [API contracts](API_CONTRACTS.md), and the
 [Consensus feasibility spike](CONSENSUS_SPIKE.md) for the surrounding contract.
 Checkpoint details are recorded in
-[ADR-0016](adr/0016-stream-consumer-group-checkpoints.md).
+[ADR-0016](adr/0016-stream-consumer-group-checkpoints.md); versioned route and
+SDK behavior are recorded in
+[ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md).

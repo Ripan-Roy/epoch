@@ -102,6 +102,14 @@ Rust regional HTTP callers present a bearer credential; both implementations
 evaluate the same decision corpus. This is a migration baseline, not the OIDC,
 short-lived credential, or workload-certificate target described below.
 
+The regional Stream v1 route parses organization, project, environment, and
+namespace from the fully qualified URL before authorization. Shard discovery
+requires `route.read`, Stream GETs require `data.read`, and mutations require
+`data.write`. Go, Java, and Python regional clients send the supplied bearer
+directly to Rust and do not route customer data or credentials through the Go
+management service. Their in-memory token configuration is not a credential
+store, rotation protocol, or secret-delivery mechanism.
+
 TLS 1.3 is preferred. TLS 1.2 is the minimum only where ecosystem compatibility
 requires it. Plaintext protocols are disabled in managed deployments and
 require an explicit loopback/development opt-in in standalone mode.

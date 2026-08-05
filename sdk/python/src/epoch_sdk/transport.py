@@ -21,6 +21,7 @@ class Transport(Protocol):
         *,
         body: Any = None,
         query: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> Any:
         """Send one request and return its decoded response."""
 
@@ -44,6 +45,7 @@ class UrllibTransport:
         *,
         body: Any = None,
         query: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> Any:
         url = f"{self._base_url}/{path.lstrip('/')}"
         if query:
@@ -51,10 +53,16 @@ class UrllibTransport:
             if filtered:
                 url = f"{url}?{urlencode(filtered)}"
         data = None if body is None else json.dumps(body, separators=(",", ":")).encode()
-        headers = {"accept": "application/json", "user-agent": "epoch-python/0.1.0a3"}
+        request_headers = {"accept": "application/json", "user-agent": "epoch-python/0.1.0a3"}
         if data is not None:
-            headers["content-type"] = "application/json"
-        request = Request(url, data=data, headers=headers, method=method.upper())
+            request_headers["content-type"] = "application/json"
+        for name, value in (headers or {}).items():
+            if name.lower() in {"host", "content-length"}:
+                raise ValueError(f"request header {name} is managed by the HTTP transport")
+            if "\r" in name or "\n" in name or "\r" in value or "\n" in value:
+                raise ValueError("request headers must fit one HTTP header line")
+            request_headers[name] = value
+        request = Request(url, data=data, headers=request_headers, method=method.upper())
         try:
             with urlopen(request, timeout=self._timeout) as response:
                 payload = response.read()

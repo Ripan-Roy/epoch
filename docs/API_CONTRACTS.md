@@ -149,8 +149,10 @@ carry the resource generation and tablet epoch returned by routing. The
 experimental regional runtime now allocates, commits, materializes, discovers,
 and generation/epoch-fences these identities across several fixed-voter groups.
 Its `/experimental/v1/regional/*` routes remain an alpha verification surface,
-not the stable authenticated native contract. See
-[ADR-0009](adr/0009-regional-tablet-catalog.md).
+not the versioned application contract. The separate fully qualified regional
+Stream v1 route is the first authenticated native adapter over those same
+identities. See [ADR-0009](adr/0009-regional-tablet-catalog.md) and
+[ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md).
 
 ## 4. Native services
 
@@ -552,6 +554,19 @@ GET    /experimental/v1/regional/resources/{org}/{project}/{environment}/{namesp
 *      /experimental/v1/regional/resources/{org}/{project}/{environment}/{namespace}/{kind}/{name}/shards/{shard}/data/{operation}
 ```
 
+The versioned regional Stream application route is:
+
+```text
+GET /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/streams/{name}/shards/{shard}
+*   /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/streams/{name}/shards/{shard}/{operation}
+```
+
+`GET` on the shard base performs discovery. The current Go, Java, and Python
+SDK contract maps `records` and
+`groups/{group}/{offsets|lag|records}` to the same replicated partition-0
+Stream tablet. The stable adapter removes the generic `kind` and `data`
+segments but does not introduce another log or state store.
+
 Catalog mutations require a bounded `request_token`, expected generation,
 shard count, and the currently fixed replica count of three. The exact token
 and semantic request replay their committed result; token rebinding conflicts.
@@ -585,6 +600,15 @@ The JSON body also reports `read_consistency`, `linearizable_read_barrier`,
 `read_barrier_timeout`. A follower or term race returns the existing retryable
 leader-routing conflict. Direct profile routes remain explicitly
 `local_profile_applied_stale_capable`.
+
+Regional SDKs configure one or more Rust endpoints and discover a complete
+`accepts_writes: true` route before every operation. They copy the exact
+generation/tablet epoch, use the discovered term for mutations, and request
+`linearizable` for fetch, group fetch, and lag. Append and checkpoint calls
+require a caller-owned idempotency key. Retryable transport, leader, fence,
+route, or barrier outcomes permit at most one rediscovery, always with the same
+key; definitive validation, authorization, idempotency, or committed business
+outcomes return immediately.
 
 The fence and consistency headers are included in the node's exact-origin CORS
 allowlist. Regional HTTP is bootstrap-authenticated and action-authorized, but
@@ -778,10 +802,13 @@ proof of an arbitrary external business side effect. See
 
 Neither the earlier single-profile modes nor the regional multi-group mode is
 the final tablet service. Snapshots/compaction, retention deletion, dynamic
-membership, constraint-aware placement, read barriers, TLS/mTLS transport,
-production identity, stable public routing, and SDK support remain absent. The
-standalone engine journal remains a separate single-node source of truth and is
-never used by an experimental replicated tablet.
+membership, dynamic constraint-aware placement, follower read routing,
+TLS/mTLS transport, and production identity remain absent. The regional Stream
+v1 route and Go/Java/Python clients are the first versioned application slice;
+stable Cache/Queue/Event-Bus routing, native data gRPC, coordinated streaming,
+and generated response types remain absent. The standalone engine journal
+remains a separate single-node source of truth and is never used by a
+replicated tablet.
 
 Initial `epoch.v1` Protobuf source defines common resource/envelope types and a
 small `RegionalAdminService`; Buf generation is configured for Go. It is an

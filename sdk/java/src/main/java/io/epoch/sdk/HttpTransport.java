@@ -52,6 +52,13 @@ public final class HttpTransport implements Transport {
   @Override
   public JsonNode request(String method, String path, JsonNode body, Map<String, ?> query)
       throws IOException, InterruptedException {
+    return request(method, path, body, query, Map.of());
+  }
+
+  @Override
+  public JsonNode request(
+      String method, String path, JsonNode body, Map<String, ?> query, Map<String, String> headers)
+      throws IOException, InterruptedException {
     URI uri = URI.create(baseUrl + normalizePath(path) + encodeQuery(query));
     HttpRequest.Builder builder =
         HttpRequest.newBuilder(uri)
@@ -65,6 +72,16 @@ public final class HttpTransport implements Transport {
       builder.method(
           method.toUpperCase(Locale.ROOT),
           HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(body)));
+    }
+    if (headers != null) {
+      headers.forEach(
+          (name, value) -> {
+            if ("host".equalsIgnoreCase(name) || "content-length".equalsIgnoreCase(name)) {
+              throw new IllegalArgumentException(
+                  "request header " + name + " is managed by the HTTP transport");
+            }
+            builder.header(name, value);
+          });
     }
 
     HttpResponse<String> response;

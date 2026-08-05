@@ -69,8 +69,10 @@ Not every target directory exists yet. New components should be introduced only
 with a defined responsibility, dependency boundary, and acceptance test.
 
 Go, Java, and Python are the P0 SDK ecosystems. Typed HTTP clients are under
-`sdk/go`, `sdk/java`, and `sdk/python`; generated native streaming parity across
-all three remains tracked by DX-001.
+`sdk/go`, `sdk/java`, and `sdk/python`. Each ecosystem has the standalone
+profile client plus a separate authenticated, leader- and fence-aware regional
+Stream v1 client. Generated response types, coordinated streaming sessions, and
+full native streaming parity remain tracked by DX-001.
 
 `crates/epoch-testkit` is the no-sleep correctness harness for the replicated
 foundation: seeded scheduling, independent wall/monotonic time, scripted fault
@@ -92,7 +94,7 @@ three-runtime tests exercise every codec; the container campaign sends an
 independently generated Python gzip frame after failover and recovers it after
 all-node `SIGKILL`. Single append remains canonical v1. Stable streaming
 Produce, automatic batching/negotiation, benchmarks, multi-partition routing,
-and SDK support remain open.
+and regional SDK batch helpers remain open.
 
 `crates/epoch-catalog` supplies deterministic multi-resource generations and
 shard/tablet/group routing identity. The regional runtime commits it through
@@ -104,6 +106,12 @@ browser-safe placement BFF; the TypeScript console never contacts storage nodes.
 Regional reads now default to a safe leader ReadIndex barrier, complete only
 after majority confirmation and local typed-profile apply, and expose exact
 barrier evidence. Callers must explicitly select `local_stale` to bypass it.
+The fully qualified
+`/v1/organizations/.../namespaces/.../streams/.../shards/...` surface maps to
+that same replicated tablet. Go, Java, and Python regional clients discover the
+current leader before every operation, carry generation/tablet fences, preserve
+caller idempotency keys across bounded rediscovery, and request linearizable
+fetch/lag reads without routing application data through Go.
 
 The strict single-partition Queue tablet now runs through that same persistent
 three-node actor boundary. Its internal typed API covers enqueue, acquire,
@@ -139,11 +147,12 @@ state is not a target-delivery claim. See the
 [Stream tablet guide](docs/STREAM_TABLET.md),
 [Event Bus tablet guide](docs/BUS_TABLET.md),
 [regional runtime guide](docs/REGIONAL_RUNTIME.md),
+[regional Stream SDK guide](docs/REGIONAL_STREAM_SDK.md),
 [probe guide](docs/CONSENSUS_PROBE.md), [spike report](docs/CONSENSUS_SPIKE.md),
 and proposed [ADR-0003](docs/adr/0003-consensus-adapter.md). An exhaustive crash
 matrix, snapshots, membership/epoch transitions, follower read routing,
 authenticated transport, dynamic/zone-aware placement, and stable public
-multi-tablet routing remain open.
+Cache/Queue/Event-Bus routing remain open.
 
 ## Quick start
 
@@ -236,12 +245,14 @@ VITE_BASE_PATH=/epoch/ VITE_DEFAULT_PAGE=docs VITE_DOCS_ONLY=true \
 The Pages artifact contains documentation only—no localhost console client.
 Its configured deployment target is
 [`https://ripan-roy.github.io/epoch/`](https://ripan-roy.github.io/epoch/).
-The workflow executes every displayed Go, Java, and Python seed → forced crash
-→ restart → verification example before deployment. Pull requests build and
-verify the same artifact but never publish it; deployment is permitted only
-from `main` (including a manual dispatch that targets `main`). The public site
-is live with enforced HTTPS. The SDKs remain repository-local pre-alpha packages
-and are not presented as registry releases.
+The workflow executes every displayed standalone Go, Java, and Python seed →
+forced crash → restart → verification example and compiles the three displayed
+regional sources before deployment. The regional container gate additionally
+runs the Python SDK after leader loss and through all-voter recovery. Pull
+requests build and verify the same artifact but never publish it; deployment is
+permitted only from `main` (including a manual dispatch that targets `main`).
+The public site is live with enforced HTTPS. The SDKs remain repository-local
+pre-alpha packages and are not presented as registry releases.
 
 Verified milestones are published as
 [GitHub prereleases](https://github.com/Ripan-Roy/epoch/releases) from tagged
