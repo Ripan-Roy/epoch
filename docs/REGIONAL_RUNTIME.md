@@ -185,6 +185,16 @@ and live-lease count through the read-consistency rules below. This is the
 experimental bounded HTTP slice; it is not the future native bidirectional
 receive stream.
 
+For a Stream resource, `POST .../data/records/batches` delegates to the
+replicated batch handler after the same authorization, generation, epoch, and
+leader checks. The request carries one canonical record array as `none`, gzip,
+LZ4-frame, Snappy-framed, or Zstd-frame base64 plus exact count and byte
+metadata. The handler enforces 1–1,000 records, 360 KiB compressed, 4 MiB
+expanded, and an 8 MiB Zstd window before proposal; its receipt maps each unique
+client sequence to an exact decimal offset. The whole batch is one atomic
+single-partition transition. Stable streaming Produce, automatic client
+batching/negotiation, partial non-atomic results, and SDK support remain open.
+
 Regional reads are linearizable by default and therefore must target the
 current leader. Epoch submits a safe Raft `ReadIndex`, waits for majority
 confirmation, applies locally through the returned index, and only then reads

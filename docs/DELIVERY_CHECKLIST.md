@@ -1,8 +1,8 @@
 # Epoch Delivery Checklist
 
-**Last reviewed:** 30 July 2026
+**Last reviewed:** 5 August 2026
 **Current release:** `v0.1.0-alpha.3`
-**Current core target:** Queue consumer credit and in-flight concurrency
+**Current core target:** Stream batch append and bounded compression
 
 This is the operational checklist for turning PRD scope into verified,
 releasable increments. [PRD.md](PRD.md) owns product scope,
@@ -108,14 +108,28 @@ complete.
 
 | ID | Checklist item | Boundary | State | Evidence / acceptance |
 |---|---|---|---:|---|
-| QF-01 | Freeze bounded credit/window semantics and non-claims | Semantics + ADR | 🟡 | ADR-0014 defines the atomic grant formula, cross-epoch identity scope, explicit maintenance, and native-streaming/fairness non-claims |
-| QF-02 | Preserve historical command compatibility | Rust tablet contract | 🟡 | Existing operations remain canonical v1; only `AcquireWithCredit` emits v2; public golden tests pin both encodings |
-| QF-03 | Enforce the consumer window atomically | Rust Queue/tablet | 🟡 | Actor-serialized cloned transition counts authoritative live leases and fails bounds before live mutation |
-| QF-04 | Return exact flow evidence and a pure observation | Rust HTTP | 🟡 | Acquire receipts expose requested/window/before/after/remaining values; consumer-flow GET exposes applied epoch/count without sampling time |
-| QF-05 | Prove saturation and replenishment through real consensus | Rust tests | 🟡 | Deterministic tests plus a real three-runtime HTTP cluster prove independent windows, cross-epoch accounting, saturation, and Ack replenishment |
-| QF-06 | Exercise the container boundary | Compose integration | 🟡 | Queue campaign uses v2 credit, checks exact evidence and consumer-flow read, then retains failover and all-node recovery coverage |
-| QF-07 | Keep product claims and traceability aligned | Documentation + console | 🟡 | Queue/API/semantics/architecture/testing/plan/traceability/user docs name the bounded slice and remaining work |
-| QF-08 | Pass protected pull-request evidence | GitHub | ⬜ | Required CI and Pages must pass before this increment is verified on `main` |
+| QF-01 | Freeze bounded credit/window semantics and non-claims | Semantics + ADR | ✅ | ADR-0014 defines the atomic grant formula, cross-epoch identity scope, explicit maintenance, and native-streaming/fairness non-claims |
+| QF-02 | Preserve historical command compatibility | Rust tablet contract | ✅ | Existing operations remain canonical v1; only `AcquireWithCredit` emits v2; public golden tests pin both encodings |
+| QF-03 | Enforce the consumer window atomically | Rust Queue/tablet | ✅ | Actor-serialized cloned transition counts authoritative live leases and fails bounds before live mutation |
+| QF-04 | Return exact flow evidence and a pure observation | Rust HTTP | ✅ | Acquire receipts expose requested/window/before/after/remaining values; consumer-flow GET exposes applied epoch/count without sampling time |
+| QF-05 | Prove saturation and replenishment through real consensus | Rust tests | ✅ | Deterministic tests plus a real three-runtime HTTP cluster prove independent windows, cross-epoch accounting, saturation, and Ack replenishment |
+| QF-06 | Exercise the container boundary | Compose integration | ✅ | Queue campaign uses v2 credit, checks exact evidence and consumer-flow read, then retains failover and all-node recovery coverage |
+| QF-07 | Keep product claims and traceability aligned | Documentation + console | ✅ | Queue/API/semantics/architecture/testing/plan/traceability/user docs name the bounded slice and remaining work |
+| QF-08 | Pass protected pull-request evidence | GitHub | ✅ | PR #43 was squash-merged as `8de7234a`; exact-main CI `30485896425` and Pages `30485900141` passed |
+
+## Current Stream delivery: batch append and bounded compression
+
+| ID | Checklist item | Boundary | State | Evidence / acceptance |
+|---|---|---|---:|---|
+| SF-01 | Freeze framing, atomicity, limits, and non-claims | Semantics + ADR | 🟡 | ADR-0015 specifies canonical records, codec frames, exact idempotent input, whole-batch visibility, ceilings, and stable-native non-claims |
+| SF-02 | Preserve historical command and digest compatibility | Rust tablet contract | 🟡 | Single `Append` remains canonical v1; only `AppendBatch` emits v2; public golden tests pin both command forms and the original digest |
+| SF-03 | Bound and validate every decompression path | Rust codec boundary | 🟡 | `none`, gzip, LZ4 frame, Snappy framed, and Zstd frame validate canonical base64/JSON, exact sizes/count, unique sequences, 4 MiB output, and an 8 MiB Zstd window before mutation |
+| SF-04 | Apply a correlated batch atomically | Rust Stream/tablet | 🟡 | A cloned state transition exposes no prefix; receipts return codec/size/count evidence and one exact decimal offset/disposition per client sequence |
+| SF-05 | Expose strict direct and regional routes | Rust HTTP | 🟡 | `records/batches` validates client-supplied frames, advertises limits/codecs in status, inherits regional fencing/auth/leader checks, and preserves exact retry/conflict semantics |
+| SF-06 | Prove all codecs through real consensus and recovery | Rust tests | 🟡 | Unit corpus plus a real three-runtime HTTP cluster commit/retry every codec, compare correlated offsets, and rebuild all batches from EPRS |
+| SF-07 | Exercise an independent client frame in containers | Compose integration | 🟡 | The Stream campaign generates gzip with Python, commits after leader replacement, retries/conflicts, then proves all-voter convergence and `SIGKILL` replay |
+| SF-08 | Keep product claims and documentation aligned | Documentation + console | 🟡 | Stream/API/semantics/architecture/testing/plan/traceability/user docs and Pages content name the bounded slice and remaining work |
+| SF-09 | Pass protected pull-request evidence | GitHub | ⬜ | Required CI and Pages must pass before this increment is verified on `main` |
 
 ## Current security delivery: bootstrap trust baseline
 

@@ -451,6 +451,12 @@ baseline at the managed and regional public boundaries:
   fields and no credential or payload field. The console keeps an interactively
   entered token only in browser session storage; no token is compiled into
   Pages.
+- The experimental Stream batch boundary validates canonical base64 and JSON,
+  exact compressed/expanded sizes and record count, unique sequences, a
+  360 KiB frame ceiling, a 4 MiB output ceiling, and an 8 MiB Zstd window before
+  proposal and again on voter decode. Unit tests cover corrupt metadata,
+  unknown fields, and oversized expansion; corpus fuzzing and sustained
+  adversarial compression-ratio testing remain open.
 
 Health and CORS preflight remain public. The stable standalone local-emulator
 HTTP API also remains unauthenticated and must stay on a trusted interface.

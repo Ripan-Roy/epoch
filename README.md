@@ -85,7 +85,14 @@ through the real three-node runtime and rebuilds from the consensus log. Unit,
 real-runtime, and three-container gates prove typed leader errors, minority
 non-commit, majority-before-success, bounded two-durable-voter evidence,
 semantic retry/rebinding, ordered offsets, leader replacement, catch-up, and
-all-node `SIGKILL` replay.
+all-node `SIGKILL` replay. An additive v2 command now carries atomic batches
+through none, gzip, LZ4-frame, Snappy-framed, and Zstd-frame paths with hard
+compressed/expanded limits and one exact offset per client sequence. Real
+three-runtime tests exercise every codec; the container campaign sends an
+independently generated Python gzip frame after failover and recovers it after
+all-node `SIGKILL`. Single append remains canonical v1. Stable streaming
+Produce, automatic batching/negotiation, benchmarks, multi-partition routing,
+and SDK support remain open.
 
 `crates/epoch-catalog` supplies deterministic multi-resource generations and
 shard/tablet/group routing identity. The regional runtime commits it through

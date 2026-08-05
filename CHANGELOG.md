@@ -41,6 +41,13 @@ notes explicitly list additional verified artifacts.
 - Additive Queue command format v2 for flow-controlled acquire while every
   legacy operation remains canonical v1, plus deterministic, real-three-node,
   and container coverage for saturation and settlement replenishment.
+- Additive Stream command format v2 for atomic 1–1,000-record batches through
+  none, gzip, LZ4-frame, Snappy-framed, and Zstd-frame payloads, with canonical
+  input, bounded decompression, per-client-sequence offsets, exact retry, and
+  unchanged v1 command/digest evidence.
+- Strict direct/regional Stream batch routes, advertised codec/size limits,
+  all-codec real-three-runtime recovery tests, and a container failover/restart
+  campaign using an independently generated Python gzip frame.
 
 ### Limitations
 
@@ -62,6 +69,11 @@ notes explicitly list additional verified artifacts.
   bidirectional receive, connection-scoped credit, automatic prefetch,
   cross-consumer fairness, indexed backlog-scale counting, and stable SDK
   exposure remain unimplemented.
+- Stream batching/compression is currently an experimental single-partition,
+  whole-command-atomic HTTP/tablet slice. Stable bidirectional Produce,
+  automatic producer batching and codec negotiation, non-atomic partial
+  results, compression dictionaries, fuzz/load benchmarks, and SDK exposure
+  remain unimplemented.
 
 ## [0.1.0-alpha.3] - 2026-07-29
 

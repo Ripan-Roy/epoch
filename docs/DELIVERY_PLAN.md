@@ -83,7 +83,8 @@ The traceability register marks the following as **Slice**. A Slice entry can be
 
 - Cache: CACHE-001–CACHE-005 and CACHE-007. CACHE-008 snapshots remain M3;
   the M1 segmented WAL is only a prerequisite and is not Cache restore evidence.
-- Stream: STREAM-001, STREAM-002 basic retention, STREAM-004, and STREAM-005.
+- Stream: STREAM-001, STREAM-002 basic retention, STREAM-004, STREAM-005, and
+  the replicated bounded batch/compression slice of STREAM-006.
 - Queue: QUEUE-001–QUEUE-006 and native credit flow for QUEUE-011.
 - Bus: bounded deterministic direct/fan-out routing for BUS-001,
   filter/archive/transform sub-slices for BUS-002/BUS-006/BUS-007, and the
@@ -101,7 +102,7 @@ The traceability register marks the following as **Slice**. A Slice entry can be
 | Deterministic runtime | Rust | Injectable monotonic/wall clocks, seeded scheduling, crash points, fault transport | Same seed reproduces the same history |
 | Segmented WAL | Rust | Configured rotation, checksummed v1 frames, durable identity/manifest, global sequence, exclusive writer, bounded active-suffix repair, safe legacy fallback | Rotation/restart/metadata/corruption/lock/activation/legacy unit and real-process suites |
 | Metadata and replication prototype | Rust | Three-node metadata/log group, epochs, quorum commit, fencing, leader transfer | Model check plus node/network/disk chaos report |
-| Stream slice | Rust | Key routing, committed offsets, fetch, retention baseline, visible ack policy | Ordered recovery and no-early-ack history |
+| Stream slice | Rust | Key routing, committed offsets, fetch, retention baseline, visible ack policy, and bounded atomic batch frames for none/gzip/LZ4/Snappy/Zstd | Ordered recovery, no-early-ack history, strict codec corpus, correlated receipts, and compressed EPRS replay |
 | Queue slice | Rust | Ready/scheduled/leased/acked/DLQ state, renewal, retry, redrive | Crash-at-every-transition history check |
 | Cache slice | Rust | One volatile memory shard, core types, TTL, eviction, atomic batch, pipeline | Linearizability, expiry, and eviction tests; snapshot/restore remains M3 |
 | Route slice | Rust | Bounded envelope-normalized direct/fan-out plan and independent delivery ledger with canonical replicated commands | Route/filter truth table, atomic outbox capacity, fenced acquire/ack/fail, retry/DLQ isolation, exact replay, and real-runtime/EPRS/container convergence; built-in target execution remains open |
@@ -150,6 +151,20 @@ required for the metadata/replication work package and G3. See
 [Quorum Read Barriers](adr/0013-quorum-read-barriers.md),
 [Experimental Stream Tablet](STREAM_TABLET.md), and
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
+
+The Stream application core now accepts a version-two atomic batch command
+without changing the canonical version-one single append. A batch carries
+1–1,000 unique client sequences as canonical JSON inside none, gzip, LZ4-frame,
+Snappy-framed, or Zstd-frame encoding. Exact compressed/uncompressed sizes, a
+360 KiB frame ceiling, a 4 MiB output ceiling, and an 8 MiB Zstd window are
+validated before proposal and voter application. The cloned transition returns
+one exact offset per sequence and cannot expose a prefix. Unit/golden/bomb
+tests, every-codec real-runtime commits, EPRS reopen, and a Python-produced gzip
+container frame are executable. This advances STREAM-006 but does not complete
+stable bidirectional Produce, automatic producer batching/negotiation,
+multi-partition routing, non-atomic partial results, fuzz/load evidence, or SDK
+support. See [ADR-0015](adr/0015-stream-batch-compression.md) and
+[Experimental Stream Tablet](STREAM_TABLET.md).
 
 The Queue application core now runs behind the same profile-neutral persistent
 actor boundary. It deterministically applies strict single-partition commands,

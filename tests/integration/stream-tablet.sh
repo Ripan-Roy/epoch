@@ -9,6 +9,7 @@ epoch_artifact_dir="${EPOCH_TABLET_ARTIFACT_DIR:-}"
 epoch_use_existing_image="${EPOCH_TABLET_USE_EXISTING_IMAGE:-0}"
 epoch_status_path=/experimental/v1/tablets/stream/status
 epoch_records_path=/experimental/v1/tablets/stream/records
+epoch_batches_path=/experimental/v1/tablets/stream/records/batches
 epoch_opaque_status_path=/experimental/v1/consensus/status
 epoch_internal_peer_message_path=/internal/v1/consensus/messages
 epoch_response_file=
@@ -120,7 +121,11 @@ assert_listener_boundaries() {
 
   health="$(curl --fail --silent --show-error "http://127.0.0.1:${public_port}/healthz")"
   [[ "$(json_field "$health" guarantee_ceiling)" == local_durable ]]
-  for path in "$epoch_internal_peer_message_path" "$epoch_status_path" "$epoch_records_path"; do
+  for path in \
+    "$epoch_internal_peer_message_path" \
+    "$epoch_status_path" \
+    "$epoch_records_path" \
+    "$epoch_batches_path"; do
     status_code="$(curl --silent --output /dev/null --write-out '%{http_code}' \
       "http://127.0.0.1:${public_port}${path}")"
     if [[ "$status_code" != 404 ]]; then
@@ -199,6 +204,62 @@ append_record() {
     "http://127.0.0.1:${port}${epoch_records_path}"
 }
 
+append_batch() {
+  local node_id=$1
+  local expected_term=$2
+  local idempotency_key=$3
+  local first_sequence=$4
+  local output_file=$5
+  local port="${epoch_peer_ports[node_id - 1]}"
+  local request
+  request="$(python3 -c '
+import base64
+import gzip
+import json
+import sys
+
+key = sys.argv[1]
+term = sys.argv[2]
+first = int(sys.argv[3])
+records = []
+for sequence in (first, first + 1):
+    records.append({
+        "client_sequence": sequence,
+        "envelope": {
+            "id": f"batch-order-{sequence}",
+            "source": "integration",
+            "type": "order.created",
+            "time_ms": 1000,
+            "headers": {},
+            "content_type": "application/json",
+            "payload": {"id": sequence, "padding": "epoch-epoch-epoch"},
+            "priority": 0,
+            "extensions": {},
+        },
+    })
+plain = json.dumps(records, separators=(",", ":")).encode()
+compressed = gzip.compress(plain, mtime=0)
+print(json.dumps({
+    "idempotency_key": key,
+    "expected_term": term,
+    "partition": 0,
+    "compression": "gzip",
+    "record_count": len(records),
+    "uncompressed_bytes": len(plain),
+    "compressed_bytes": len(compressed),
+    "payload_base64": base64.b64encode(compressed).decode(),
+}, separators=(",", ":")))
+' "$idempotency_key" "$expected_term" "$first_sequence")"
+  curl --silent --show-error \
+    --connect-timeout 2 \
+    --max-time 8 \
+    --output "$output_file" \
+    --write-out '%{http_code}' \
+    --header 'content-type: application/json' \
+    --data "$request" \
+    "http://127.0.0.1:${port}${epoch_batches_path}"
+}
+
 assert_unresolved() {
   local document=$1
   python3 -c '
@@ -235,6 +296,38 @@ for field in ("tablet_id", "tablet_epoch", "term", "commit_index", "offset", "ap
     assert isinstance(receipt[field], str), (field, document)
 assert receipt["disposition"] == sys.argv[3], document
 ' "$document" "$expected_offset" "$expected_disposition"
+}
+
+assert_batch_receipt() {
+  local document=$1
+  local expected_first_offset=$2
+  local expected_disposition=$3
+  local expected_first_sequence=$4
+  python3 -c '
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+receipt = document["receipt"]
+batch = receipt["batch"]
+first_offset = int(sys.argv[2])
+first_sequence = int(sys.argv[4])
+assert document["state"] == "committed", document
+assert receipt["offset"] == str(first_offset), document
+assert receipt["disposition"] == sys.argv[3], document
+assert receipt["write_evidence"] == "fixed_voter_majority_persisted", document
+assert batch["compression"] == "gzip", document
+assert batch["record_count"] == 2, document
+assert batch["compressed_bytes"] > 0, document
+assert batch["uncompressed_bytes"] > batch["compressed_bytes"], document
+assert [item["client_sequence"] for item in batch["records"]] == [
+    first_sequence, first_sequence + 1
+], document
+assert [item["offset"] for item in batch["records"]] == [
+    str(first_offset), str(first_offset + 1)
+], document
+assert all(item["disposition"] == "new" for item in batch["records"]), document
+' "$document" "$expected_first_offset" "$expected_disposition" "$expected_first_sequence"
 }
 
 assert_error() {
@@ -319,6 +412,11 @@ for field in (
 ):
     assert isinstance(status[field], str), (field, status)
 assert status["leader_id"] is None or isinstance(status["leader_id"], str), status
+assert status["batch_append_atomicity"] == "whole_batch_before_visibility", status
+assert status["supported_batch_compressions"] == ["none", "gzip", "lz4", "snappy", "zstd"], status
+assert status["max_batch_records"] == 1000, status
+assert status["max_batch_compressed_bytes"] == 360 * 1024, status
+assert status["max_batch_uncompressed_bytes"] == 4 * 1024 * 1024, status
 ' "$epoch_status"
 done
 
@@ -404,6 +502,27 @@ wait_for_record_count 2 "${epoch_survivors[@]}"
 wait_for_nodes
 wait_for_record_count 2 1 2 3
 
+# Submit an actual gzip frame through the batch protocol after failover. The
+# frame is decompressed and canonicalized on every voter before an atomic
+# two-record apply; exact retries retain the original correlated offsets.
+read -r epoch_batch_leader epoch_batch_term < <(wait_for_leader)
+epoch_status_code="$(append_batch \
+  "$epoch_batch_leader" "$epoch_batch_term" request-batch 10 "$epoch_response_file")"
+[[ "$epoch_status_code" == 201 ]]
+assert_batch_receipt "$(<"$epoch_response_file")" 2 new 10
+wait_for_record_count 4 1 2 3
+
+epoch_status_code="$(append_batch \
+  "$epoch_batch_leader" "$epoch_batch_term" request-batch 10 "$epoch_response_file")"
+[[ "$epoch_status_code" == 200 ]]
+assert_batch_receipt "$(<"$epoch_response_file")" 2 replayed 10
+
+epoch_status_code="$(append_batch \
+  "$epoch_batch_leader" "$epoch_batch_term" request-batch 20 "$epoch_response_file")"
+[[ "$epoch_status_code" == 409 ]]
+assert_error "$(<"$epoch_response_file")" idempotency_conflict unknown
+wait_for_record_count 4 1 2 3
+
 # Capture the complete typed state before the crash so deterministic but wrong
 # replay on every voter cannot satisfy only a post-restart cross-node check.
 epoch_pre_kill_records="$(tablet_records 1)"
@@ -420,12 +539,12 @@ done
 "${epoch_compose[@]}" kill --signal SIGKILL >/dev/null
 "${epoch_compose[@]}" start >/dev/null
 wait_for_nodes
-wait_for_record_count 2 1 2 3
+wait_for_record_count 4 1 2 3
 
 epoch_reference_digest=
 for epoch_node_id in 1 2 3; do
   epoch_status="$(tablet_status "$epoch_node_id")"
-  [[ "$(json_field "$epoch_status" applied_command_count)" == 2 ]]
+  [[ "$(json_field "$epoch_status" applied_command_count)" == 3 ]]
   epoch_digest="$(json_field "$epoch_status" state_digest)"
   [[ "$epoch_digest" == "$epoch_pre_kill_digest" ]]
   assert_json_equal "$(tablet_records "$epoch_node_id")" "$epoch_pre_kill_records"
@@ -440,7 +559,7 @@ read -r epoch_reopened_leader epoch_reopened_term < <(wait_for_leader)
 epoch_status_code="$(append_record "$epoch_reopened_leader" "$epoch_reopened_term" request-1 order-1 1 "$epoch_response_file")"
 [[ "$epoch_status_code" == 200 ]]
 assert_committed_receipt "$(<"$epoch_response_file")" 0 replayed
-wait_for_record_count 2 1 2 3
+wait_for_record_count 4 1 2 3
 
 rm -f -- "$epoch_response_file"
 epoch_response_file=

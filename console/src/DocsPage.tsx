@@ -566,10 +566,13 @@ export function DocsPage({ section }: DocsPageProps) {
                     <code>local_stale</code> to bypass that barrier. Queue acquire can now declare request
                     credit and a per-consumer <code>max_in_flight</code> window; the replicated transition
                     returns exact saturation and remaining-capacity evidence, and settlement replenishes the
-                    window. This is the experimental HTTP slice, not yet native bidirectional streaming or
-                    stable SDK support. Managed HTTP/gRPC and regional HTTP require a shared deny-by-default
-                    bootstrap bearer policy, but that is not OIDC, TLS/mTLS, credential expiry/revocation, or
-                    immutable audit export.
+                    window. Stream append can now carry 1–1,000 correlated records through none, gzip, LZ4,
+                    Snappy, or Zstd frames with hard compressed and expanded limits; the complete batch
+                    becomes visible atomically and exact retries retain every sequence-to-offset result. These
+                    are experimental HTTP/tablet slices, not yet native bidirectional streaming, automatic
+                    client batching, compression negotiation, or stable SDK support. Managed HTTP/gRPC and
+                    regional HTTP require a shared deny-by-default bootstrap bearer policy, but that is not
+                    OIDC, TLS/mTLS, credential expiry/revocation, or immutable audit export.
                   </p>
                 </div>
               </div>
@@ -588,6 +591,14 @@ export function DocsPage({ section }: DocsPageProps) {
                   <p>
                     Repeated receive saturates at zero; Ack, Nack, Release, Reject, or expiry processing
                     replenishes capacity from replicated state.
+                  </p>
+                </article>
+                <article>
+                  <span>STREAM BATCH</span>
+                  <strong>Every compressed frame is bounded before one atomic replicated apply.</strong>
+                  <p>
+                    Five codec modes return exact per-sequence offsets; real-runtime and Python-gzip container
+                    tests prove retry, failover, and EPRS recovery without changing v1 append bytes.
                   </p>
                 </article>
                 <article>
@@ -752,8 +763,14 @@ export function DocsPage({ section }: DocsPageProps) {
                 <ReferenceCard
                   eyebrow="CLUSTER CORE"
                   title="Experimental Stream tablet"
-                  description="Typed command, fixed-voter majority, failover, idempotency, and all-voter recovery boundary."
+                  description="Typed single and bounded compressed-batch commands, fixed-voter majority, correlated offsets, failover, idempotency, and all-voter recovery."
                   href={`${repositoryDocsUrl}/STREAM_TABLET.md`}
+                />
+                <ReferenceCard
+                  eyebrow="STREAM DESIGN"
+                  title="Batch compression decision"
+                  description="Canonical framing, all required codecs, atomicity, decompression limits, compatibility rules, and explicit native/SDK non-claims."
+                  href={`${repositoryDocsUrl}/adr/0015-stream-batch-compression.md`}
                 />
                 <ReferenceCard
                   eyebrow="QUEUE TABLET"

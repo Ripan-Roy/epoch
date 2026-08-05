@@ -232,6 +232,16 @@ an HTTP lookup ever observes a commit without the exact actor-applied receipt,
 the typed service fails closed and does not apply state from the request task.
 The public API guarantee remains unchanged.
 
+That tablet now has an additive command-v2 batch boundary. Canonical record
+arrays carry unique client sequences inside none, gzip, LZ4-frame,
+Snappy-framed, or Zstd-frame payloads. Exact metadata and hard compressed,
+expanded, record-count, and Zstd-window limits are checked before proposal and
+again on every voter. A cloned profile transition publishes the complete batch
+or nothing and returns one exact offset per client sequence. Version-one single
+append bytes and digests remain unchanged. This is compressed consensus/replay
+evidence, not the stable streaming Produce API or a compression throughput
+claim; see [ADR-0015](adr/0015-stream-batch-compression.md).
+
 The regional multi-tablet alpha composes that adapter with `epoch-catalog`.
 Catalog group 1 commits canonical resource commands through three EPRS-backed
 voters. A bounded group supervisor reserves that identity, demultiplexes peer
@@ -390,6 +400,15 @@ Producer sequence state supports idempotence. Consumer offsets and group
 coordination live in sharded system tablets. Read-committed fetch hides prepared
 and aborted transaction records. Partition order is the only default ordering
 claim.
+
+The current single-partition tablet batch is one atomic command: every record
+is validated and appended to a cloned state before the clone becomes visible.
+Its correlated receipt does not imply that the eventual native Produce stream
+will make every batch atomic. That future non-atomic mode must return an
+independent result for each client sequence and preserve partial retry
+semantics. Compression is an input/storage transport choice; fetched records
+are ordinary decompressed envelopes and their logical offsets do not depend on
+codec ratio.
 
 ### 8.2 Work Queue
 
@@ -809,3 +828,5 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0011: Bootstrap Authorization and Audit Baseline](adr/0011-bootstrap-authz-audit-baseline.md)
 - [ADR-0012: Topology-Aware Fixed-Voter Admission](adr/0012-topology-aware-admission.md)
 - [ADR-0013: Quorum-Confirmed Regional Read Barriers](adr/0013-quorum-read-barriers.md)
+- [ADR-0014: Queue Consumer Credit and In-Flight Windows](adr/0014-queue-consumer-credit.md)
+- [ADR-0015: Replicated Stream Batch Compression](adr/0015-stream-batch-compression.md)

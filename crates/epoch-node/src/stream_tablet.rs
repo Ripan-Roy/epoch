@@ -17,10 +17,14 @@ use epoch_consensus::{
 use epoch_core::{Clock, EventEnvelope};
 use epoch_stream::StreamRecord;
 use epoch_tablet::{
-    CommittedCommand, MAX_STREAM_TABLET_COMMAND_BYTES, StreamTablet, StreamTabletAppendDisposition,
-    StreamTabletAppendReceipt, StreamTabletCommand, StreamTabletOperation, StreamTabletScope,
-    TabletError, proposal_id_for,
+    CommittedCommand, MAX_STREAM_BATCH_COMPRESSED_BYTES, MAX_STREAM_BATCH_RECORDS,
+    MAX_STREAM_BATCH_UNCOMPRESSED_BYTES, MAX_STREAM_TABLET_COMMAND_BYTES, StreamBatchPayload,
+    StreamCompression, StreamTablet, StreamTabletAppendDisposition, StreamTabletAppendReceipt,
+    StreamTabletCommand, StreamTabletOperation, StreamTabletScope, TabletError,
+    decode_stream_batch_payload, proposal_id_for,
 };
+#[cfg(test)]
+use epoch_tablet::{StreamBatchRecord, encode_stream_batch_payload};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 
@@ -33,6 +37,8 @@ use crate::tablet_http::{
 
 pub const EXPERIMENTAL_STREAM_TABLET_STATUS_PATH: &str = "/experimental/v1/tablets/stream/status";
 pub const EXPERIMENTAL_STREAM_TABLET_RECORDS_PATH: &str = "/experimental/v1/tablets/stream/records";
+pub const EXPERIMENTAL_STREAM_TABLET_BATCHES_PATH: &str =
+    "/experimental/v1/tablets/stream/records/batches";
 pub const EXPERIMENTAL_STREAM_TABLET_MUTATION_PATH: &str =
     "/experimental/v1/tablets/stream/mutations/{proposal_id}";
 pub const DEFAULT_COMMIT_WAIT: Duration = Duration::from_secs(5);
@@ -222,6 +228,10 @@ pub fn router(
             get(fetch_records).post(append_record),
         )
         .route(
+            EXPERIMENTAL_STREAM_TABLET_BATCHES_PATH,
+            axum::routing::post(append_batch),
+        )
+        .route(
             EXPERIMENTAL_STREAM_TABLET_MUTATION_PATH,
             get(lookup_mutation),
         )
@@ -241,6 +251,133 @@ struct AppendRequest {
     envelope: EventEnvelope,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AppendBatchRequest {
+    idempotency_key: String,
+    #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+    expected_term: u64,
+    #[serde(default)]
+    partition: u32,
+    compression: StreamCompression,
+    record_count: u16,
+    uncompressed_bytes: u32,
+    compressed_bytes: u32,
+    payload_base64: String,
+}
+
+impl AppendBatchRequest {
+    fn payload(&self) -> StreamBatchPayload {
+        StreamBatchPayload {
+            compression: self.compression,
+            record_count: self.record_count,
+            uncompressed_bytes: self.uncompressed_bytes,
+            compressed_bytes: self.compressed_bytes,
+            payload_base64: self.payload_base64.clone(),
+        }
+    }
+}
+
+trait StreamAppendSemantics: Sync {
+    fn idempotency_key(&self) -> &str;
+    fn expected_term(&self) -> u64;
+    fn validate(&self) -> TabletApiResult<()>;
+    fn command(
+        &self,
+        scope: &StreamTabletScope,
+        applied_at_ms: u64,
+    ) -> Result<StreamTabletCommand, TabletError>;
+    fn matches_command(&self, command: &StreamTabletCommand) -> bool;
+}
+
+impl StreamAppendSemantics for AppendRequest {
+    fn idempotency_key(&self) -> &str {
+        &self.idempotency_key
+    }
+
+    fn expected_term(&self) -> u64 {
+        self.expected_term
+    }
+
+    fn validate(&self) -> TabletApiResult<()> {
+        validate_partition(self.partition)?;
+        self.envelope
+            .validate()
+            .map_err(|error| StreamTabletApiError::InvalidRequest(error.to_string()))
+    }
+
+    fn command(
+        &self,
+        scope: &StreamTabletScope,
+        applied_at_ms: u64,
+    ) -> Result<StreamTabletCommand, TabletError> {
+        StreamTabletCommand::append(
+            scope,
+            self.idempotency_key.clone(),
+            self.envelope.clone(),
+            applied_at_ms,
+        )
+    }
+
+    fn matches_command(&self, command: &StreamTabletCommand) -> bool {
+        matches!(
+            &command.operation,
+            StreamTabletOperation::Append(append)
+                if command.idempotency_key == self.idempotency_key
+                    && append.partition == self.partition
+                    && append.envelope == self.envelope
+        )
+    }
+}
+
+impl StreamAppendSemantics for AppendBatchRequest {
+    fn idempotency_key(&self) -> &str {
+        &self.idempotency_key
+    }
+
+    fn expected_term(&self) -> u64 {
+        self.expected_term
+    }
+
+    fn validate(&self) -> TabletApiResult<()> {
+        validate_partition(self.partition)?;
+        decode_stream_batch_payload(&self.payload())?;
+        Ok(())
+    }
+
+    fn command(
+        &self,
+        scope: &StreamTabletScope,
+        applied_at_ms: u64,
+    ) -> Result<StreamTabletCommand, TabletError> {
+        StreamTabletCommand::append_compressed_batch(
+            scope,
+            self.idempotency_key.clone(),
+            self.payload(),
+            applied_at_ms,
+        )
+    }
+
+    fn matches_command(&self, command: &StreamTabletCommand) -> bool {
+        matches!(
+            &command.operation,
+            StreamTabletOperation::AppendBatch(batch)
+                if command.idempotency_key == self.idempotency_key
+                    && batch.partition == self.partition
+                    && batch.payload == self.payload()
+        )
+    }
+}
+
+fn validate_partition(partition: u32) -> TabletApiResult<()> {
+    if partition != 0 {
+        return Err(StreamTabletApiError::InvalidRequest(
+            "the first Stream tablet slice supports only partition 0".into(),
+        ));
+    }
+    Ok(())
+}
+
 async fn append_record(
     State(state): State<StreamTabletApiState>,
     request: Result<Json<AppendRequest>, JsonRejection>,
@@ -249,36 +386,41 @@ async fn append_record(
         status: rejection.status(),
         message: rejection.body_text(),
     })?;
+    submit_append(state, request).await
+}
+
+async fn append_batch(
+    State(state): State<StreamTabletApiState>,
+    request: Result<Json<AppendBatchRequest>, JsonRejection>,
+) -> TabletApiResult<(StatusCode, Json<StreamTabletMutationResponse>)> {
+    let Json(request) = request.map_err(|rejection| StreamTabletApiError::RequestBody {
+        status: rejection.status(),
+        message: rejection.body_text(),
+    })?;
+    submit_append(state, request).await
+}
+
+async fn submit_append<R: StreamAppendSemantics>(
+    state: StreamTabletApiState,
+    request: R,
+) -> TabletApiResult<(StatusCode, Json<StreamTabletMutationResponse>)> {
     state
         .service
         .ensure_healthy()
         .map_err(StreamTabletApiError::Profile)?;
-    if request.partition != 0 {
-        return Err(StreamTabletApiError::InvalidRequest(
-            "the first Stream tablet slice supports only partition 0".into(),
-        ));
-    }
-    request
-        .envelope
-        .validate()
-        .map_err(|error| StreamTabletApiError::InvalidRequest(error.to_string()))?;
-    let proposal_id = proposal_id_for(state.service.scope(), &request.idempotency_key)?;
+    request.validate()?;
+    let proposal_id = proposal_id_for(state.service.scope(), request.idempotency_key())?;
     let _write_guard = state.write_serial.lock().await;
     let commits = state.consensus.subscribe_commits();
 
     let initial = state.consensus.lookup(proposal_id).await?;
     let (lookup, replayed) = match initial {
         ProposalLookup::Unknown => {
-            let command = StreamTabletCommand::append(
-                state.service.scope(),
-                request.idempotency_key.clone(),
-                request.envelope.clone(),
-                state.clock.wall_time_ms(),
-            )?;
+            let command = request.command(state.service.scope(), state.clock.wall_time_ms())?;
             let payload = command.encode(state.service.scope())?;
             let (lookup, replayed) = match state
                 .consensus
-                .propose(proposal_id, request.expected_term, payload)
+                .propose(proposal_id, request.expected_term(), payload)
                 .await
             {
                 Ok(lookup) => (lookup, false),
@@ -306,7 +448,7 @@ async fn wait_for_committed_response(
     state: &StreamTabletApiState,
     mut commits: broadcast::Receiver<CommittedProposal>,
     proposal_id: u64,
-    request: &AppendRequest,
+    request: &impl StreamAppendSemantics,
     replayed: bool,
 ) -> TabletApiResult<(StatusCode, Json<StreamTabletMutationResponse>)> {
     let deadline = tokio::time::Instant::now() + state.commit_wait;
@@ -369,7 +511,7 @@ const fn committed_http_status(replayed: bool) -> StatusCode {
 fn validate_existing_request(
     lookup: &ProposalLookup,
     scope: &StreamTabletScope,
-    request: &AppendRequest,
+    request: &impl StreamAppendSemantics,
 ) -> TabletApiResult<()> {
     let payload = match lookup {
         ProposalLookup::Unknown => return Ok(()),
@@ -381,11 +523,7 @@ fn validate_existing_request(
             "tracked consensus command is not a valid Stream tablet command: {error}"
         ))
     })?;
-    let StreamTabletOperation::Append(append) = command.operation;
-    if command.idempotency_key != request.idempotency_key
-        || append.partition != request.partition
-        || append.envelope != request.envelope
-    {
+    if !request.matches_command(&command) {
         return Err(StreamTabletApiError::IdempotencyConflict);
     }
     Ok(())
@@ -394,7 +532,7 @@ fn validate_existing_request(
 fn committed_response(
     service: &StreamTabletService,
     lookup: &ProposalLookup,
-    request: &AppendRequest,
+    request: &impl StreamAppendSemantics,
     replayed: bool,
 ) -> TabletApiResult<Option<StreamTabletMutationResponse>> {
     validate_existing_request(lookup, service.scope(), request)?;
@@ -498,6 +636,11 @@ struct StreamTabletStatus {
     capability: &'static str,
     stability: &'static str,
     production_readiness: &'static str,
+    batch_append_atomicity: &'static str,
+    supported_batch_compressions: [StreamCompression; 5],
+    max_batch_records: u16,
+    max_batch_compressed_bytes: usize,
+    max_batch_uncompressed_bytes: usize,
     #[serde(serialize_with = "serialize_u64_as_decimal")]
     tablet_id: u64,
     #[serde(serialize_with = "serialize_u64_as_decimal")]
@@ -550,6 +693,17 @@ impl StreamTabletStatus {
             capability: "single_partition_stream_tablet",
             stability: "experimental",
             production_readiness: "not_production_ready",
+            batch_append_atomicity: "whole_batch_before_visibility",
+            supported_batch_compressions: [
+                StreamCompression::None,
+                StreamCompression::Gzip,
+                StreamCompression::Lz4,
+                StreamCompression::Snappy,
+                StreamCompression::Zstd,
+            ],
+            max_batch_records: MAX_STREAM_BATCH_RECORDS,
+            max_batch_compressed_bytes: MAX_STREAM_BATCH_COMPRESSED_BYTES,
+            max_batch_uncompressed_bytes: MAX_STREAM_BATCH_UNCOMPRESSED_BYTES,
             tablet_id: scope.tablet_id,
             tablet_epoch: scope.tablet_epoch,
             resource: scope.resource.clone(),
@@ -789,6 +943,15 @@ mod tests {
         }
         assert_eq!(document["node_id"], u64::MAX.to_string());
         assert_eq!(document["term"], u64::MAX.to_string());
+        assert_eq!(
+            document["supported_batch_compressions"],
+            json!(["none", "gzip", "lz4", "snappy", "zstd"])
+        );
+        assert_eq!(document["max_batch_records"], MAX_STREAM_BATCH_RECORDS);
+        assert_eq!(
+            document["max_batch_uncompressed_bytes"],
+            MAX_STREAM_BATCH_UNCOMPRESSED_BYTES
+        );
     }
 
     #[test]
@@ -871,6 +1034,18 @@ mod tests {
         assert_eq!(request.envelope.time_ms, u64::MAX);
         assert_eq!(request.envelope.deliver_at_ms, Some(u64::MAX - 1));
         assert_eq!(request.envelope.ttl_ms, Some(u64::MAX - 2));
+    }
+
+    #[test]
+    fn batch_request_is_strict_and_accepts_an_exact_compressed_payload() {
+        let document = batch_body("batch-1", StreamCompression::Gzip, 10);
+        let request: AppendBatchRequest = serde_json::from_value(document.clone()).unwrap();
+        assert_eq!(request.payload().compression, StreamCompression::Gzip);
+        assert_eq!(request.payload().record_count, 2);
+
+        let mut unknown = document;
+        unknown["paylod_base64"] = unknown["payload_base64"].clone();
+        assert!(serde_json::from_value::<AppendBatchRequest>(unknown).is_err());
     }
 
     #[tokio::test]
@@ -1121,11 +1296,12 @@ mod tests {
         assert_json_rejection_uses_the_typed_error_contract(&cluster, &client).await;
         assert_follower_rejects_write(&cluster, &client).await;
         append_retry_conflict_and_second_record(&cluster, &client).await;
-        assert_all_records(&cluster, &client).await;
+        append_compressed_batches(&cluster, &client).await;
+        assert_all_records(&cluster, &client, 12).await;
         cluster.shutdown().await;
 
         let reopened = RunningTabletCluster::start(&paths).await;
-        assert_rebuilt_records(&reopened, &client).await;
+        assert_rebuilt_records(&reopened, &client, 12, 7).await;
         reopened.shutdown().await;
     }
 
@@ -1262,6 +1438,50 @@ mod tests {
         );
     }
 
+    async fn append_compressed_batches(cluster: &RunningTabletCluster, client: &reqwest::Client) {
+        for (index, compression) in [
+            StreamCompression::None,
+            StreamCompression::Gzip,
+            StreamCompression::Lz4,
+            StreamCompression::Snappy,
+            StreamCompression::Zstd,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let sequence = u32::try_from(index).unwrap() * 10;
+            let body = batch_body(&format!("batch-{compression:?}"), compression, sequence);
+            let (status, committed) = post_batch_to_current_leader(cluster, client, &body).await;
+            assert_eq!(status, StatusCode::CREATED);
+            assert_eq!(committed["state"], "committed");
+            assert_eq!(
+                committed["receipt"]["batch"]["compression"],
+                compression_name(compression)
+            );
+            assert_eq!(committed["receipt"]["batch"]["record_count"], 2);
+            assert_eq!(
+                committed["receipt"]["batch"]["records"][0]["client_sequence"],
+                sequence
+            );
+            assert_eq!(
+                committed["receipt"]["batch"]["records"][1]["client_sequence"],
+                sequence + 1
+            );
+            assert!(committed["receipt"]["batch"]["records"][0]["offset"].is_string());
+
+            let (retry_status, replayed) =
+                post_batch_to_current_leader(cluster, client, &body).await;
+            assert_eq!(retry_status, StatusCode::OK);
+            assert_eq!(replayed["receipt"]["disposition"], "replayed");
+            assert_eq!(replayed["receipt"]["batch"], committed["receipt"]["batch"]);
+        }
+
+        let changed = batch_body("batch-Gzip", StreamCompression::Gzip, 200);
+        let (status, document) = post_batch_to_current_leader(cluster, client, &changed).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(document["error"]["code"], "idempotency_conflict");
+    }
+
     async fn post_to_current_leader(
         cluster: &RunningTabletCluster,
         client: &reqwest::Client,
@@ -1292,6 +1512,35 @@ mod tests {
         .expect("an exact idempotent request should resolve under stable leadership")
     }
 
+    async fn post_batch_to_current_leader(
+        cluster: &RunningTabletCluster,
+        client: &reqwest::Client,
+        request: &Value,
+    ) -> (StatusCode, Value) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let (leader, term) = cluster.leader().await;
+                let mut attempt = request.clone();
+                attempt["expected_term"] = json!(term);
+                let response = client
+                    .post(batch_url_for(&cluster.nodes[leader]))
+                    .json(&attempt)
+                    .send()
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let document: Value = response.json().await.unwrap();
+                if is_retryable_leadership_response(status, &document) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    continue;
+                }
+                return (status, document);
+            }
+        })
+        .await
+        .expect("an exact idempotent batch should resolve under stable leadership")
+    }
+
     fn is_retryable_leadership_response(status: StatusCode, document: &Value) -> bool {
         (status == StatusCode::SERVICE_UNAVAILABLE
             && document["error"]["code"] == "not_leader"
@@ -1308,7 +1557,11 @@ mod tests {
             && document["error"]["outcome_certainty"] == "unknown"
     }
 
-    async fn assert_all_records(cluster: &RunningTabletCluster, client: &reqwest::Client) {
+    async fn assert_all_records(
+        cluster: &RunningTabletCluster,
+        client: &reqwest::Client,
+        expected: usize,
+    ) {
         for node in &cluster.nodes {
             let fetch_url = append_url_for(node);
             tokio::time::timeout(Duration::from_secs(5), async {
@@ -1317,10 +1570,13 @@ mod tests {
                     let document: Value = response.json().await.unwrap();
                     if document["records"]
                         .as_array()
-                        .is_some_and(|records| records.len() == 2)
+                        .is_some_and(|records| records.len() == expected)
                     {
                         assert_eq!(document["records"][0]["offset"], "0");
-                        assert_eq!(document["records"][1]["offset"], "1");
+                        assert_eq!(
+                            document["records"][expected - 1]["offset"],
+                            (expected - 1).to_string()
+                        );
                         assert_eq!(document["records"][0]["envelope"]["time_ms"], "1000");
                         assert_eq!(document["records"][0]["envelope"]["deliver_at_ms"], "1001");
                         assert_eq!(document["records"][0]["envelope"]["ttl_ms"], "1002");
@@ -1334,7 +1590,12 @@ mod tests {
         }
     }
 
-    async fn assert_rebuilt_records(cluster: &RunningTabletCluster, client: &reqwest::Client) {
+    async fn assert_rebuilt_records(
+        cluster: &RunningTabletCluster,
+        client: &reqwest::Client,
+        expected_records: usize,
+        expected_commands: usize,
+    ) {
         for node in &cluster.nodes {
             let status_url = node
                 .base_url
@@ -1348,7 +1609,7 @@ mod tests {
                 .json()
                 .await
                 .unwrap();
-            assert_eq!(status["applied_command_count"], 2);
+            assert_eq!(status["applied_command_count"], expected_commands);
             assert!(
                 status["last_profile_mutation_index"]
                     .as_str()
@@ -1367,7 +1628,10 @@ mod tests {
                 .json()
                 .await
                 .unwrap();
-            assert_eq!(records["records"].as_array().unwrap().len(), 2);
+            assert_eq!(
+                records["records"].as_array().unwrap().len(),
+                expected_records
+            );
             assert_eq!(records["records"][0]["envelope"]["id"], "order-1");
             assert_eq!(records["records"][1]["envelope"]["id"], "order-2");
         }
@@ -1377,5 +1641,51 @@ mod tests {
         node.base_url
             .join(EXPERIMENTAL_STREAM_TABLET_RECORDS_PATH.trim_start_matches('/'))
             .unwrap()
+    }
+
+    fn batch_url_for(node: &RunningTabletNode) -> Url {
+        node.base_url
+            .join(EXPERIMENTAL_STREAM_TABLET_BATCHES_PATH.trim_start_matches('/'))
+            .unwrap()
+    }
+
+    fn batch_body(idempotency_key: &str, compression: StreamCompression, sequence: u32) -> Value {
+        let records = [sequence, sequence + 1]
+            .into_iter()
+            .map(|client_sequence| {
+                let mut envelope = EventEnvelope::new(
+                    "batch-tests",
+                    "order.created",
+                    json!({"sequence": client_sequence, "padding": "epoch-epoch-epoch"}),
+                    1_000,
+                );
+                envelope.id = format!("batch-record-{client_sequence}");
+                StreamBatchRecord {
+                    client_sequence,
+                    envelope,
+                }
+            })
+            .collect::<Vec<_>>();
+        let payload = encode_stream_batch_payload(&records, compression).unwrap();
+        json!({
+            "idempotency_key": idempotency_key,
+            "expected_term": "0",
+            "partition": 0,
+            "compression": payload.compression,
+            "record_count": payload.record_count,
+            "uncompressed_bytes": payload.uncompressed_bytes,
+            "compressed_bytes": payload.compressed_bytes,
+            "payload_base64": payload.payload_base64,
+        })
+    }
+
+    const fn compression_name(compression: StreamCompression) -> &'static str {
+        match compression {
+            StreamCompression::None => "none",
+            StreamCompression::Gzip => "gzip",
+            StreamCompression::Lz4 => "lz4",
+            StreamCompression::Snappy => "snappy",
+            StreamCompression::Zstd => "zstd",
+        }
     }
 }
