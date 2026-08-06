@@ -584,6 +584,23 @@ lease extension, release, Nack, Reject, redrive, and maintenance for partition
 linearizable SDK reads. This adapter delegates to the same replicated Queue
 tablet and owns no queue state or request translation.
 
+The versioned regional Cache application route uses the same discovery and
+fencing boundary:
+
+```text
+GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}
+POST /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}/mutations
+GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}/mutations/{proposal_id}
+GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}/observations?key={key}
+GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}/status
+```
+
+The strict mutation union covers set, conditional delete, version or
+missing-at-revision CAS, signed increment, bounded atomic transaction, lock
+acquire/renew/release, and explicit maintenance for shard `0`. Observation,
+mutation lookup, and status are linearizable SDK reads. The adapter delegates
+to the replicated Cache tablet without translating values or owning state.
+
 Catalog mutations require a bounded `request_token`, expected generation,
 shard count, and the currently fixed replica count of three. The exact token
 and semantic request replay their committed result; token rebinding conflicts.
@@ -618,19 +635,22 @@ The JSON body also reports `read_consistency`, `linearizable_read_barrier`,
 leader-routing conflict. Direct profile routes remain explicitly
 `local_profile_applied_stale_capable`.
 
-Regional Stream and Queue SDKs configure one or more Rust endpoints and discover a complete
+Regional Stream, Queue, and Cache SDKs configure one or more Rust endpoints and discover a complete
 `accepts_writes: true` route before every operation. They copy the exact
 generation/tablet epoch, use the discovered term for mutations, and request
-`linearizable` for profile reads. Stream append/checkpoint and every Queue
-mutation require a caller-owned idempotency key. Retryable transport, leader, fence,
+`linearizable` for profile reads. Stream append/checkpoint, every Queue
+mutation, and every Cache mutation require a caller-owned idempotency key.
+Retryable transport, leader, fence,
 route, or barrier outcomes permit at most one rediscovery, always with the same
 key; definitive validation, authorization, idempotency, or committed business
 outcomes return immediately.
 
 See [ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md),
 [ADR-0018](adr/0018-regional-queue-v1-and-sdk-routing.md),
+[ADR-0019](adr/0019-regional-cache-v1-and-sdk-routing.md),
 [Regional Stream SDK](REGIONAL_STREAM_SDK.md), and
-[Regional Queue SDK](REGIONAL_QUEUE_SDK.md).
+[Regional Queue SDK](REGIONAL_QUEUE_SDK.md), and
+[Regional Cache SDK](REGIONAL_CACHE_SDK.md).
 
 The fence and consistency headers are included in the node's exact-origin CORS
 allowlist. Regional HTTP is bootstrap-authenticated and action-authorized, but
@@ -784,9 +804,9 @@ strings and serializes every signed or unsigned 64-bit output as a decimal
 string. It rejects unknown fields and duplicate collection members/keys before
 proposal, records deterministic business rejections as committed outcomes,
 replays exact semantic retries, and assigns committed-order effective time on
-the server. This direct internal route has no linearizable read barrier, public
-gRPC route, or SDK commitment. The regional wrapper described above supplies
-the leader barrier. See
+the server. This direct internal route has no linearizable read barrier or
+public gRPC commitment. The versioned regional wrapper described above supplies
+the leader barrier, scoped authorization, and repository-local SDK contract. See
 [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
 
 The mutually exclusive Event Bus mode mounts a canonical single-partition

@@ -4,9 +4,10 @@ The consensus probe is an opt-in process/runtime integration for Epoch's
 fixed-three-voter persistent Raft adapter. Its default mode replicates opaque
 diagnostic payloads. Mutually exclusive opt-in modes can instead attach one
 typed, single-partition Stream, Queue, or Event Bus ingress/outbox tablet,
-or one single-shard Cache tablet. Public Cache, Stream, Queue, and Event Bus
-APIs remain independent standalone engines with a `local_durable` guarantee
-ceiling.
+or one single-shard Cache tablet. Those direct single-group modes remain
+internal. Separate catalog-materialized regional Stream, Queue, and Cache alpha
+routes delegate to the same typed state machines; standalone durability remains
+an independent `local_durable` ceiling.
 
 This surface exists to exercise process lifecycle, real HTTP peer delivery,
 EPRS recovery, election, and proposal lookup without claiming that product

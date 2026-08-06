@@ -102,7 +102,7 @@ Rust regional HTTP callers present a bearer credential; both implementations
 evaluate the same decision corpus. This is a migration baseline, not the OIDC,
 short-lived credential, or workload-certificate target described below.
 
-The regional Stream and Queue v1 routes parse organization, project, environment, and
+The regional Stream, Queue, and Cache v1 routes parse organization, project, environment, and
 namespace from the fully qualified URL before authorization. Shard discovery
 requires `route.read`, profile GETs require `data.read`, and mutations require
 `data.write`. Go, Java, and Python regional clients send the supplied bearer
@@ -113,6 +113,11 @@ store, rotation protocol, or secret-delivery mechanism.
 Queue lease tokens remain opaque application values. The clients pass only the
 current token into renewal or settlement and never log, decode, or store it as
 authentication material. The token is a lease fence, not a bearer credential.
+
+Cache lease tokens follow the same rule. A guarded mutation passes the exact
+latest opaque token, while downstream services compare the returned
+`(tablet_epoch, acquisition_index)` fencing token. Neither value is an
+authentication credential, and SDKs do not decode it.
 
 TLS 1.3 is preferred. TLS 1.2 is the minimum only where ecosystem compatibility
 requires it. Plaintext protocols are disabled in managed deployments and

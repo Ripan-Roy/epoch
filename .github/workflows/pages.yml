@@ -70,6 +70,9 @@ jobs:
           grep -Rq 'Regional Queue SDK' console/dist/assets
           grep -Rq 'Lease, retry, dead-letter, redrive, and settle' console/dist/assets
           grep -Rq 'docs-python-redrive-v1' console/dist/assets
+          grep -Rq 'Regional Cache SDK' console/dist/assets
+          grep -Rq 'CAS, transaction, fencing, expiry, and recovery' console/dist/assets
+          grep -Rq 'docs-python-cache-maintain-v1' console/dist/assets
           grep -Rq 'Multi-tablet operations' console/dist/assets
           release_version="$(cat VERSION)"
           grep -RFq "v${release_version} release notes" console/dist/assets

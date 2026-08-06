@@ -43,6 +43,12 @@ unsigned 64-bit wire range. See the
 [complete Queue example](../../console/src/quickstarts/regional_queue/RegionalQueueQuickstart.java)
 and [Queue contract guide](../../docs/REGIONAL_QUEUE_SDK.md).
 
+`RegionalCacheClient` exposes all strict Cache values and the complete current
+mutation/read lifecycle over the same regional core. Unsigned fields use
+`BigInteger`; counters remain signed `long`. See the
+[complete Cache example](../../console/src/quickstarts/regional_cache/RegionalCacheQuickstart.java)
+and [Cache contract guide](../../docs/REGIONAL_CACHE_SDK.md).
+
 The SDK does not yet provide native gRPC streaming, coordinated consumer
 sessions, generated response types, package publication, or a stable complete
 compatibility promise.

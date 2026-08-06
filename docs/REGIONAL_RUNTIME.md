@@ -1,13 +1,13 @@
 # Regional Multi-Tablet Runtime
 
-**Status:** Topology-validated fixed-three-voter alpha with regional Stream and Queue v1
+**Status:** Topology-validated fixed-three-voter alpha with regional Stream, Queue, and Cache v1
 
 **Authority:** Rust catalog and tablet consensus groups
 
 **Hosted bridge:** Go desired-state reconciler and browser BFF
 
 This guide describes only the implementation that exists now. The standalone
-SDK contract remains separate. Versioned regional Stream and Queue v1 clients
+SDK contract remains separate. Versioned regional Stream, Queue, and Cache v1 clients
 now exist for Go, Java, and Python; they do not claim dynamic production
 placement.
 
@@ -35,9 +35,10 @@ bounded multi-group supervisor
 
 Go / Java / Python application
         |
-        | bearer + fully qualified regional Stream/Queue v1 + route fences
+        | bearer + fully qualified regional Stream/Queue/Cache v1 + route fences
         +----------------------------------------------> Stream tablet leader
-        `----------------------------------------------> Queue tablet leader
+        +----------------------------------------------> Queue tablet leader
+        `----------------------------------------------> Cache tablet leader
 ```
 
 Rust owns catalog correctness, tablet state, consensus, routing, and every data
@@ -249,6 +250,26 @@ documentation page. This is a single-partition alpha surface; it is not a claim
 of streaming receive, automatic session coordination, package publication, or
 production placement.
 
+## Use the regional Cache v1 SDK
+
+The Cache client uses the fully qualified versioned shard route:
+
+```text
+/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/caches/sessions/shards/0
+```
+
+Go, Java, and Python expose `RegionalCacheClient` over the same authenticated
+discovery, fencing, linearizable-read, and one-rediscovery core. The typed value
+surface covers string, blob, signed counter, hash, list, unique set, and
+finite-score sorted set. Mutations cover set, delete, CAS, increment, atomic
+transaction, lock acquire/renew/release, and explicit expiry maintenance.
+Reads cover mutation lookup, key observation, and tablet status.
+
+The exact compiled examples, value/transaction/lock guidance, and retry
+semantics are in [Regional Cache SDK](REGIONAL_CACHE_SDK.md) and embedded on the
+published docs page. The real campaign kills the Cache leader before running
+the Python client, then catches up the old voter and reopens every EPRS volume.
+
 Regional reads are linearizable by default and therefore must target the
 current leader. Epoch submits a safe Raft `ReadIndex`, waits for majority
 confirmation, applies locally through the returned index, and only then reads
@@ -323,8 +344,8 @@ digests, and deletes only its scoped containers/network/volumes.
   solver.
 - Membership changes, online rebalance, repair, split/merge, snapshots,
   compaction, and retention deletion are absent. Read barriers are leader-only
-  and regional-only; follower forwarding and stable Cache/Event-Bus SDK
-  exposure remain absent.
+  and regional-only; follower forwarding and stable Event-Bus SDK exposure
+  remain absent.
 - Rust regional HTTP and Go management enforce the bootstrap policy, and the
   console supplies a session-only credential. They still have no TLS/OIDC/mTLS,
   token expiry/revocation, rate limiting, replicated policy, or immutable audit
@@ -332,7 +353,7 @@ digests, and deletes only its scoped containers/network/volumes.
 - Go management metadata is durable for one process and one bbolt file. It is
   not replicated, multi-instance linearizable, backed up automatically, or
   protected by management leader election.
-- Go, Java, and Python now share the regional Stream and Queue v1
+- Go, Java, and Python now share the regional Stream, Queue, and Cache v1
   route/retry/fence contract. They remain repository-local alpha source and
   cover only the partition-0 methods documented above; package publication,
   generated models, coordinated membership/sessions, multi-partition routing,

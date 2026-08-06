@@ -106,8 +106,8 @@ browser-safe placement BFF; the TypeScript console never contacts storage nodes.
 Regional reads now default to a safe leader ReadIndex barrier, complete only
 after majority confirmation and local typed-profile apply, and expose exact
 barrier evidence. Callers must explicitly select `local_stale` to bypass it.
-The fully qualified Stream and Queue
-`/v1/organizations/.../namespaces/.../{streams|queues}/.../shards/...` surfaces map to
+The fully qualified Stream, Queue, and Cache
+`/v1/organizations/.../namespaces/.../{streams|queues|caches}/.../shards/...` surfaces map to
 those same replicated tablets. Go, Java, and Python regional clients discover the
 current leader before every operation, carry generation/tablet fences, preserve
 caller idempotency keys across bounded rediscovery, and request linearizable
@@ -130,11 +130,13 @@ open; this does not raise the standalone
 `local_durable` ceiling.
 
 The deterministic single-shard Cache tablet now runs through the same opt-in
-fixed-voter actor and rebuilds from EPRS before serving. Its internal typed API
-covers pure local observations, checked revisions, CAS, atomic transactions,
-increment, explicit expiry maintenance, advisory fenced locks, status, and
-mutation lookup. It remains experimental, stale-read capable, single-shard,
-unauthenticated, and outside the public SDK contract.
+fixed-voter actor and rebuilds from EPRS before serving. Its typed API covers
+pure observations, checked revisions, CAS, atomic transactions, increment,
+explicit expiry maintenance, advisory fenced locks, status, and mutation
+lookup. The versioned regional Cache v1 route is authenticated and defaults
+reads to a leader ReadIndex; repository-local Go, Java, and Python clients expose
+the complete implemented lifecycle and survive active-leader loss. The direct
+tablet listener remains experimental, stale-read capable, and unauthenticated.
 
 The Event Bus ingress/outbox tablet is the fourth opt-in typed profile. It
 replicates subscription changes and publish ingress, atomically creates one
@@ -153,11 +155,12 @@ state is not a target-delivery claim. See the
 [regional runtime guide](docs/REGIONAL_RUNTIME.md),
 [regional Stream SDK guide](docs/REGIONAL_STREAM_SDK.md),
 [regional Queue SDK guide](docs/REGIONAL_QUEUE_SDK.md),
+[regional Cache SDK guide](docs/REGIONAL_CACHE_SDK.md),
 [probe guide](docs/CONSENSUS_PROBE.md), [spike report](docs/CONSENSUS_SPIKE.md),
 and proposed [ADR-0003](docs/adr/0003-consensus-adapter.md). An exhaustive crash
 matrix, snapshots, membership/epoch transitions, follower read routing,
 authenticated peer transport, dynamic/zone-aware placement, and stable public
-Cache/Event-Bus routing remain open.
+Event-Bus routing remain open.
 
 ## Quick start
 
@@ -251,9 +254,10 @@ The Pages artifact contains documentation only—no localhost console client.
 Its configured deployment target is
 [`https://ripan-roy.github.io/epoch/`](https://ripan-roy.github.io/epoch/).
 The workflow executes every displayed standalone Go, Java, and Python seed →
-forced crash → restart → verification example and compiles the three displayed
-regional sources before deployment. The regional container gate additionally
-runs the Python SDK after leader loss and through all-voter recovery. Pull
+forced crash → restart → verification example and compiles the displayed
+regional Stream, Queue, and Cache sources in all three languages before
+deployment. The regional container gate additionally runs each Python regional
+client after its profile leader is lost and through all-voter recovery. Pull
 requests build and verify the same artifact but never publish it; deployment is
 permitted only from `main` (including a manual dispatch that targets `main`).
 The public site is live with enforced HTTPS. The SDKs remain repository-local
