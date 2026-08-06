@@ -399,12 +399,16 @@ enqueue/exact retry, credit acquisition, lease extension, settlement,
 dead-letter inspection, redrive, and final acknowledgement. Finally it kills
 the Cache leader and runs typed values, exact retry, CAS, increment, atomic
 transaction, fenced lock renewal/guarded delete, and explicit expiry through the
-Python Cache client. Finally it kills every Rust node, reopens the same volumes, and removes only its scoped
+Python Cache client. It then kills the Event Bus leader and runs exact publish,
+archive, delivery failure/retry/settlement, query, subscription removal, and
+status through the Python Event Bus client. Finally it kills every Rust node,
+reopens the same volumes, and removes only its scoped
 resources. The displayed Go, Java, and Python regional sources are compiled by
 `tests/integration/docs-quickstarts.sh`; see
 [Regional Stream SDK](REGIONAL_STREAM_SDK.md) and
 [Regional Queue SDK](REGIONAL_QUEUE_SDK.md), and
-[Regional Cache SDK](REGIONAL_CACHE_SDK.md). `epoch-catalog` remains
+[Regional Cache SDK](REGIONAL_CACHE_SDK.md), and
+[Regional Event Bus SDK](REGIONAL_EVENT_BUS_SDK.md). `epoch-catalog` remains
 independently testable with `cargo test -p epoch-catalog --all-targets`. Dynamic
 membership, general voter selection, rack placement, production peer
 identity/TLS, snapshots, follower read routing, and coordinated consumer
@@ -416,7 +420,8 @@ topology admission in [ADR-0012](adr/0012-topology-aware-admission.md).
 Regional route/SDK behavior is frozen in
 [ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md) and
 [ADR-0018](adr/0018-regional-queue-v1-and-sdk-routing.md), and
-[ADR-0019](adr/0019-regional-cache-v1-and-sdk-routing.md).
+[ADR-0019](adr/0019-regional-cache-v1-and-sdk-routing.md), and
+[ADR-0020](adr/0020-regional-event-bus-v1-and-sdk-routing.md).
 
 To discard local data, explicitly add `--volumes` to the Compose down command.
 That is destructive and is intentionally not part of the Make target.

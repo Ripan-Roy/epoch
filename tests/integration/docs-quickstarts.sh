@@ -116,15 +116,18 @@ javac --release 25 -Xlint:all -Werror \
   console/src/quickstarts/Quickstart.java \
   console/src/quickstarts/regional/RegionalQuickstart.java \
   console/src/quickstarts/regional_queue/RegionalQueueQuickstart.java \
-  console/src/quickstarts/regional_cache/RegionalCacheQuickstart.java
+  console/src/quickstarts/regional_cache/RegionalCacheQuickstart.java \
+  console/src/quickstarts/regional_bus/RegionalBusQuickstart.java
 
 go test ./console/src/quickstarts/regional
 go test ./console/src/quickstarts/regional_queue
 go test ./console/src/quickstarts/regional_cache
+go test ./console/src/quickstarts/regional_bus
 "$epoch_docs_tmp/python/bin/python" -m py_compile \
   console/src/quickstarts/regional/quickstart.py \
   console/src/quickstarts/regional_queue/quickstart.py \
-  console/src/quickstarts/regional_cache/quickstart.py
+  console/src/quickstarts/regional_cache/quickstart.py \
+  console/src/quickstarts/regional_bus/quickstart.py
 
 for epoch_language in go java python; do
   printf 'Executing displayed %s SDK lifecycle\n' "$epoch_language"
@@ -136,4 +139,4 @@ for epoch_language in go java python; do
   stop_node
 done
 
-printf 'All displayed standalone SDK quickstarts survived forced restart; regional Stream, Queue, and Cache sources compile.\n'
+printf 'All displayed standalone SDK quickstarts survived forced restart; regional Stream, Queue, Cache, and Event Bus sources compile.\n'

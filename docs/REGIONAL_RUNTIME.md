@@ -1,13 +1,13 @@
 # Regional Multi-Tablet Runtime
 
-**Status:** Topology-validated fixed-three-voter alpha with regional Stream, Queue, and Cache v1
+**Status:** Topology-validated fixed-three-voter alpha with regional Stream, Queue, Cache, and Event Bus v1
 
 **Authority:** Rust catalog and tablet consensus groups
 
 **Hosted bridge:** Go desired-state reconciler and browser BFF
 
 This guide describes only the implementation that exists now. The standalone
-SDK contract remains separate. Versioned regional Stream, Queue, and Cache v1 clients
+SDK contract remains separate. Versioned regional Stream, Queue, Cache, and Event Bus v1 clients
 now exist for Go, Java, and Python; they do not claim dynamic production
 placement.
 
@@ -35,10 +35,11 @@ bounded multi-group supervisor
 
 Go / Java / Python application
         |
-        | bearer + fully qualified regional Stream/Queue/Cache v1 + route fences
+        | bearer + fully qualified regional Stream/Queue/Cache/Event Bus v1 + route fences
         +----------------------------------------------> Stream tablet leader
         +----------------------------------------------> Queue tablet leader
-        `----------------------------------------------> Cache tablet leader
+        +----------------------------------------------> Cache tablet leader
+        `----------------------------------------------> Event Bus tablet leader
 ```
 
 Rust owns catalog correctness, tablet state, consensus, routing, and every data
@@ -270,6 +271,29 @@ semantics are in [Regional Cache SDK](REGIONAL_CACHE_SDK.md) and embedded on the
 published docs page. The real campaign kills the Cache leader before running
 the Python client, then catches up the old voter and reopens every EPRS volume.
 
+## Use the regional Event Bus v1 SDK
+
+The Event Bus client uses the fully qualified versioned shard route:
+
+```text
+/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/buses/events/shards/0
+```
+
+Go, Java, and Python expose `RegionalBusClient` over the same authenticated
+discovery, fencing, linearizable-read, and one-rediscovery core. Mutations cover
+subscription upsert/removal, publish, delivery acquire/ack/fail/maintenance;
+reads cover mutation lookup, archive replay, delivery query, and status.
+Subscriptions carry bounded timeout, concurrency, attempts, backoff, jitter,
+and age policy. Settlement requires the opaque lease token returned by acquire.
+
+The exact compiled examples, delivery-worker guidance, retry semantics, and
+external-executor non-claims are in
+[Regional Event Bus SDK](REGIONAL_EVENT_BUS_SDK.md) and embedded on the
+published docs page. The real campaign kills the Event Bus leader before
+running the Python client, then catches up the old voter and reopens every EPRS
+volume. The SDK manipulates durable intent; it does not execute a webhook or
+claim an arbitrary external side effect.
+
 Regional reads are linearizable by default and therefore must target the
 current leader. Epoch submits a safe Raft `ReadIndex`, waits for majority
 confirmation, applies locally through the returned index, and only then reads
@@ -344,8 +368,7 @@ digests, and deletes only its scoped containers/network/volumes.
   solver.
 - Membership changes, online rebalance, repair, split/merge, snapshots,
   compaction, and retention deletion are absent. Read barriers are leader-only
-  and regional-only; follower forwarding and stable Event-Bus SDK exposure
-  remain absent.
+  and regional-only; follower forwarding remains absent.
 - Rust regional HTTP and Go management enforce the bootstrap policy, and the
   console supplies a session-only credential. They still have no TLS/OIDC/mTLS,
   token expiry/revocation, rate limiting, replicated policy, or immutable audit
@@ -353,7 +376,7 @@ digests, and deletes only its scoped containers/network/volumes.
 - Go management metadata is durable for one process and one bbolt file. It is
   not replicated, multi-instance linearizable, backed up automatically, or
   protected by management leader election.
-- Go, Java, and Python now share the regional Stream, Queue, and Cache v1
+- Go, Java, and Python now share the regional Stream, Queue, Cache, and Event Bus v1
   route/retry/fence contract. They remain repository-local alpha source and
   cover only the partition-0 methods documented above; package publication,
   generated models, coordinated membership/sessions, multi-partition routing,

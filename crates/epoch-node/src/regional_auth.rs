@@ -168,7 +168,7 @@ fn action_for_request(method: &Method, path: &str) -> Action {
     }
     if let Ok(Some(native)) = native_resource_request(path) {
         return if native.data_operation {
-            if *method == Method::GET {
+            if *method == Method::GET || (*method == Method::POST && native.query_post) {
                 Action::DataRead
             } else {
                 Action::DataWrite
@@ -225,6 +225,7 @@ fn scope_for_path(path: &str) -> Result<ResourceScope, ()> {
 struct NativeResourceRequest {
     scope: ResourceScope,
     data_operation: bool,
+    query_post: bool,
 }
 
 fn native_resource_request(path: &str) -> Result<Option<NativeResourceRequest>, ()> {
@@ -236,7 +237,7 @@ fn native_resource_request(path: &str) -> Result<Option<NativeResourceRequest>, 
         || segments[1] != "projects"
         || segments[3] != "environments"
         || segments[5] != "namespaces"
-        || !matches!(segments[7], "streams" | "queues" | "caches")
+        || !matches!(segments[7], "streams" | "queues" | "caches" | "buses")
         || segments[9] != "shards"
         || segments[10].parse::<u32>().is_err()
         || (segments.len() > 11 && segments[11..].iter().any(|segment| segment.is_empty()))
@@ -262,6 +263,11 @@ fn native_resource_request(path: &str) -> Result<Option<NativeResourceRequest>, 
             decode_segment(segments[6])?,
         ),
         data_operation: segments.len() > 11,
+        query_post: segments[7] == "buses"
+            && matches!(
+                segments.get(11..),
+                Some(["archive", "replay"] | ["deliveries", "query"])
+            ),
     }))
 }
 
@@ -358,6 +364,7 @@ mod tests {
     const STREAM_ROUTE: &str = "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/streams/orders/shards/0";
     const QUEUE_ROUTE: &str = "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/queues/jobs/shards/0";
     const CACHE_ROUTE: &str = "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/caches/sessions/shards/0";
+    const BUS_ROUTE: &str = "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/buses/events/shards/0";
 
     #[test]
     fn native_stream_routes_use_data_actions_only_after_the_shard_boundary() {
@@ -437,6 +444,30 @@ mod tests {
         );
         assert_eq!(
             scope_for_path(&format!("{CACHE_ROUTE}/observations")).unwrap(),
+            ResourceScope::new("acme", "shop", "dev", "core")
+        );
+    }
+
+    #[test]
+    fn native_bus_routes_keep_query_posts_read_only() {
+        assert_eq!(
+            action_for_request(&Method::GET, BUS_ROUTE),
+            Action::RouteRead
+        );
+        assert_eq!(
+            action_for_request(&Method::POST, &format!("{BUS_ROUTE}/archive/replay")),
+            Action::DataRead
+        );
+        assert_eq!(
+            action_for_request(&Method::POST, &format!("{BUS_ROUTE}/deliveries/query")),
+            Action::DataRead
+        );
+        assert_eq!(
+            action_for_request(&Method::POST, &format!("{BUS_ROUTE}/mutations")),
+            Action::DataWrite
+        );
+        assert_eq!(
+            scope_for_path(&format!("{BUS_ROUTE}/deliveries/query")).unwrap(),
             ResourceScope::new("acme", "shop", "dev", "core")
         );
     }

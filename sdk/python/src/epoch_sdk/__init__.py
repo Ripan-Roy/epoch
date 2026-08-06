@@ -3,6 +3,8 @@
 from .client import EpochClient
 from .errors import EpochAPIError
 from .models import (
+    DeliveryPolicy,
+    DeliveryRetryPolicy,
     DurabilityProfile,
     EventEnvelope,
     EventFilter,
@@ -11,6 +13,7 @@ from .models import (
     SubscriptionTarget,
 )
 from .regional import RegionalScope, RegionalStreamClient
+from .regional_bus import RegionalBusClient
 from .regional_cache import (
     RegionalCacheClient,
     RegionalCacheExpectation,
@@ -22,12 +25,15 @@ from .regional_queue import RegionalQueueClient
 from .transport import Transport, UrllibTransport
 
 __all__ = [
+    "DeliveryPolicy",
+    "DeliveryRetryPolicy",
     "DurabilityProfile",
     "EpochAPIError",
     "EpochClient",
     "EventEnvelope",
     "EventFilter",
     "EventTransform",
+    "RegionalBusClient",
     "RegionalCacheClient",
     "RegionalCacheExpectation",
     "RegionalCacheLockGuard",

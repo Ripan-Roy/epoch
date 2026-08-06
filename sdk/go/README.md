@@ -64,6 +64,13 @@ same regional core. See the
 [complete Cache example](../../console/src/quickstarts/regional_cache/quickstart.go)
 and [Cache contract guide](../../docs/REGIONAL_CACHE_SDK.md).
 
+`RegionalBusClient` exposes subscription delivery policy, publish, delivery
+acquire/ack/fail/maintenance, mutation lookup, archive replay, delivery query,
+and status over the same regional core. Mutations keep exact caller-owned keys;
+delivery settlement also preserves the opaque lease token. See the
+[complete Event Bus example](../../console/src/quickstarts/regional_bus/quickstart.go)
+and [Event Bus contract guide](../../docs/REGIONAL_EVENT_BUS_SDK.md).
+
 The provisional module path is not a publishable compatibility promise. Native
 gRPC streaming, coordinated consumer sessions, generated response types, and
 package publication remain future work.

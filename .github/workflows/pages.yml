@@ -73,6 +73,9 @@ jobs:
           grep -Rq 'Regional Cache SDK' console/dist/assets
           grep -Rq 'CAS, transaction, fencing, expiry, and recovery' console/dist/assets
           grep -Rq 'docs-python-cache-maintain-v1' console/dist/assets
+          grep -Rq 'Regional Event Bus SDK' console/dist/assets
+          grep -Rq 'Route, archive, lease, settle, and recover' console/dist/assets
+          grep -Rq 'docs-python-bus-ack-v1' console/dist/assets
           grep -Rq 'Multi-tablet operations' console/dist/assets
           release_version="$(cat VERSION)"
           grep -RFq "v${release_version} release notes" console/dist/assets

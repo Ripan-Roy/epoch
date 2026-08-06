@@ -16,11 +16,11 @@ The active M1/M2 boundary is the regional multi-tablet feature. Protected
 `main` evidence now covers the consensus-backed catalog, durable hosted control,
 bootstrap authorization, topology admission, quorum-confirmed leader ReadIndex
 barriers, Queue credit flow, Stream batches and consumer checkpoints, and the
-regional Stream and Queue v1 SDKs. The current feature exposes the existing
-replicated Cache tablet through the same authenticated, fenced regional route
-and shared Go, Java, and Python discovery/retry contract. Local evidence
-includes a real Python Cache lifecycle after leader loss and same-volume
-all-node recovery.
+regional Stream, Queue, and Cache v1 SDKs. The current feature exposes the
+existing replicated Event Bus tablet through the same authenticated, fenced
+regional route and shared Go, Java, and Python discovery/retry contract. Local
+evidence includes a real Python Event Bus ingress/archive/delivery lifecycle
+after leader loss and same-volume all-node recovery.
 Replicated multi-instance hosted metadata, production identity, follower
 routing, dynamic membership/voter selection, repair/rebalance, and the broader
 M2 profile/security/performance gates remain open.
@@ -235,9 +235,17 @@ with captured timeout/max-in-flight/retry policy and immutable attempt history.
 Real-runtime and container gates prove majority-before-success, target-isolated
 retry/DLQ state, semantic retry/conflict, follower rejection, leader
 replacement, catch-up, digest/archive/outbox convergence, and all-node EPRS
-recovery. This advances BUS-001, BUS-003, BUS-004, and BUS-006, but target
-executors, rate limiting, redrive/retention, public routing/SDKs,
-authentication, snapshots, and production placement remain open. See
+recovery. A fully qualified authenticated regional Event Bus v1 route maps to
+that same tablet. Repository-local Go, Java, and Python clients cover
+subscription policy/removal, publish, acquire/ack/fail/maintenance, mutation
+lookup, archive replay, delivery query, and status with exact same-key retry and
+linearizable observations. Contract tests, exact compiled Pages examples, and
+a real Python lifecycle after Event Bus leader loss are executable. This
+advances BUS-001, BUS-003, BUS-004, BUS-006, and DX-001, but target executors,
+rate limiting, redrive/retention, generated models, package publication,
+snapshots, and production placement remain open. See
+[Regional Event Bus SDK](REGIONAL_EVENT_BUS_SDK.md),
+[ADR-0020](adr/0020-regional-event-bus-v1-and-sdk-routing.md), and
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 The segmented-WAL work package is implemented as the single-node storage

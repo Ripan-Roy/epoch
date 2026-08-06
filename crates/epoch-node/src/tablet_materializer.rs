@@ -9,6 +9,7 @@ use std::{
 };
 
 use axum::Router;
+use epoch_bus::BusConfig;
 use epoch_catalog::{ResourceName, ResourceRecord, TabletDescriptor};
 use epoch_core::{Clock, WorkloadProfile};
 use epoch_tablet::{
@@ -382,9 +383,13 @@ impl RegionalTabletMaterializer {
             WorkloadProfile::WorkQueue => PendingTabletService::Queue(
                 QueueTabletService::with_default_config(QueueTabletScope::clone(&scope))?,
             ),
-            WorkloadProfile::EventBus => PendingTabletService::Bus(
-                BusTabletService::with_default_config(BusTabletScope::clone(&scope))?,
-            ),
+            WorkloadProfile::EventBus => PendingTabletService::Bus(BusTabletService::new(
+                BusTabletScope::clone(&scope),
+                BusConfig {
+                    delivery_outbox: true,
+                    ..BusConfig::default()
+                },
+            )?),
         };
         let config = self
             .group_template
