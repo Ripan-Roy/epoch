@@ -70,9 +70,10 @@ with a defined responsibility, dependency boundary, and acceptance test.
 
 Go, Java, and Python are the P0 SDK ecosystems. Typed HTTP clients are under
 `sdk/go`, `sdk/java`, and `sdk/python`. Each ecosystem has the standalone
-profile client plus a separate authenticated, leader- and fence-aware regional
-Stream v1 client. Generated response types, coordinated streaming sessions, and
-full native streaming parity remain tracked by DX-001.
+profile client plus separate authenticated, leader- and fence-aware regional
+Stream, Queue, Cache, and Event Bus v1 clients. Generated response types,
+coordinated streaming sessions, and full native streaming parity remain tracked
+by DX-001.
 
 `crates/epoch-testkit` is the no-sleep correctness harness for the replicated
 foundation: seeded scheduling, independent wall/monotonic time, scripted fault
@@ -106,12 +107,13 @@ browser-safe placement BFF; the TypeScript console never contacts storage nodes.
 Regional reads now default to a safe leader ReadIndex barrier, complete only
 after majority confirmation and local typed-profile apply, and expose exact
 barrier evidence. Callers must explicitly select `local_stale` to bypass it.
-The fully qualified Stream, Queue, and Cache
-`/v1/organizations/.../namespaces/.../{streams|queues|caches}/.../shards/...` surfaces map to
-those same replicated tablets. Go, Java, and Python regional clients discover the
-current leader before every operation, carry generation/tablet fences, preserve
-caller idempotency keys across bounded rediscovery, and request linearizable
-reads without routing application data through Go.
+The fully qualified Stream, Queue, Cache, and Event Bus
+`/v1/organizations/.../namespaces/.../{streams|queues|caches|buses}/.../shards/...`
+surfaces map to those same replicated tablets. Go, Java, and Python regional
+clients discover the current leader before every operation, carry
+generation/tablet fences, preserve caller idempotency keys across bounded
+rediscovery, and request linearizable reads without routing application data
+through Go.
 
 The strict single-partition Queue tablet now runs through that same persistent
 three-node actor boundary. Its internal typed API covers enqueue, acquire,
@@ -147,7 +149,11 @@ bounded timeout maintenance; a bounded local query exposes the ledger.
 Real-runtime and container gates prove retry/conflict behavior, target
 isolation, leader failover, convergence, and all-node recovery. No built-in
 Queue, Stream, webhook, HTTP, or network pull executor exists yet, so outbox
-state is not a target-delivery claim. See the
+state is not a target-delivery claim. The regional Event Bus v1 adapter and
+repository-local Go, Java, and Python clients expose subscription policy,
+publish, archive replay, delivery acquire/ack/fail/maintenance, delivery query,
+mutation lookup, and status through the same authenticated discovery, fencing,
+exact-retry, and linearizable-read contract as the other profiles. See the
 [Cache tablet guide](docs/CACHE_TABLET.md),
 [Queue tablet guide](docs/QUEUE_TABLET.md),
 [Stream tablet guide](docs/STREAM_TABLET.md),
@@ -156,11 +162,12 @@ state is not a target-delivery claim. See the
 [regional Stream SDK guide](docs/REGIONAL_STREAM_SDK.md),
 [regional Queue SDK guide](docs/REGIONAL_QUEUE_SDK.md),
 [regional Cache SDK guide](docs/REGIONAL_CACHE_SDK.md),
+[regional Event Bus SDK guide](docs/REGIONAL_EVENT_BUS_SDK.md),
 [probe guide](docs/CONSENSUS_PROBE.md), [spike report](docs/CONSENSUS_SPIKE.md),
 and proposed [ADR-0003](docs/adr/0003-consensus-adapter.md). An exhaustive crash
 matrix, snapshots, membership/epoch transitions, follower read routing,
-authenticated peer transport, dynamic/zone-aware placement, and stable public
-Event-Bus routing remain open.
+authenticated peer transport, dynamic/zone-aware placement, and external Event
+Bus target execution remain open.
 
 ## Quick start
 
@@ -255,9 +262,9 @@ Its configured deployment target is
 [`https://ripan-roy.github.io/epoch/`](https://ripan-roy.github.io/epoch/).
 The workflow executes every displayed standalone Go, Java, and Python seed →
 forced crash → restart → verification example and compiles the displayed
-regional Stream, Queue, and Cache sources in all three languages before
-deployment. The regional container gate additionally runs each Python regional
-client after its profile leader is lost and through all-voter recovery. Pull
+regional Stream, Queue, Cache, and Event Bus sources in all three languages
+before deployment. The regional container gate additionally runs each Python
+regional client after its profile leader is lost and through all-voter recovery. Pull
 requests build and verify the same artifact but never publish it; deployment is
 permitted only from `main` (including a manual dispatch that targets `main`).
 The public site is live with enforced HTTPS. The SDKs remain repository-local

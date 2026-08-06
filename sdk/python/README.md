@@ -45,5 +45,12 @@ core. See the
 [complete Cache example](../../console/src/quickstarts/regional_cache/quickstart.py)
 and [Cache contract guide](../../docs/REGIONAL_CACHE_SDK.md).
 
+`RegionalBusClient` exposes subscription delivery policy, publish, delivery
+acquire/ack/fail/maintenance, mutation lookup, archive replay, delivery query,
+and status through the shared regional core. Exact mutation keys and opaque
+lease tokens survive one bounded leader rediscovery. See the
+[complete Event Bus example](../../console/src/quickstarts/regional_bus/quickstart.py)
+and [Event Bus contract guide](../../docs/REGIONAL_EVENT_BUS_SDK.md).
+
 Native gRPC streaming, coordinated consumer sessions, generated response
 models, and package publication remain future work.

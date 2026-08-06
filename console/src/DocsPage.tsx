@@ -12,6 +12,9 @@ import regionalQueuePythonSource from "./quickstarts/regional_queue/quickstart.p
 import regionalCacheGoSource from "./quickstarts/regional_cache/quickstart.go?raw";
 import regionalCacheJavaSource from "./quickstarts/regional_cache/RegionalCacheQuickstart.java?raw";
 import regionalCachePythonSource from "./quickstarts/regional_cache/quickstart.py?raw";
+import regionalBusGoSource from "./quickstarts/regional_bus/quickstart.go?raw";
+import regionalBusJavaSource from "./quickstarts/regional_bus/RegionalBusQuickstart.java?raw";
+import regionalBusPythonSource from "./quickstarts/regional_bus/quickstart.py?raw";
 
 const repositoryUrl = "https://github.com/Ripan-Roy/epoch";
 const repositoryDocsUrl = `${repositoryUrl}/blob/main/docs`;
@@ -92,6 +95,23 @@ curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
     "resource":{
       "organization":"acme","project":"shop","environment":"dev","namespace":"core",
       "kind":"cache","name":"sessions",
+      "spec":{"shard_count":1,"replica_count":3,"placement":{
+        "allowed_regions":["ap-south"],"minimum_zones":3,
+        "required_node_class":"general-purpose"
+      }}
+    }
+  }'`;
+
+const regionalBusResource = `# Terminal C · create one replicated Event Bus
+curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
+  --header 'authorization: Bearer epoch-dev-admin-v1' \
+  --header 'content-type: application/json' \
+  --data '{
+    "request_token":"docs-create-events-v1",
+    "expected_generation":0,
+    "resource":{
+      "organization":"acme","project":"shop","environment":"dev","namespace":"core",
+      "kind":"event-bus","name":"events",
       "spec":{"shard_count":1,"replica_count":3,"placement":{
         "allowed_regions":["ap-south"],"minimum_zones":3,
         "required_node_class":"general-purpose"
@@ -246,6 +266,35 @@ python -m pip install -e ./sdk/python`,
   },
 };
 
+const regionalBusLanguageGuides: typeof regionalLanguageGuides = {
+  go: {
+    filename: "quickstart.go",
+    source: regionalBusGoSource,
+    setup: "# Uses the repository-local Go module; no separate install is required.",
+    run: "go run ./console/src/quickstarts/regional_bus/quickstart.go",
+  },
+  java: {
+    filename: "RegionalBusQuickstart.java",
+    source: regionalBusJavaSource,
+    setup: `cd sdk/java
+./mvnw -q -DskipTests package dependency:build-classpath \
+  -Dmdep.outputFile=target/runtime-classpath.txt
+export EPOCH_JAVA_CP="target/classes:$(cat target/runtime-classpath.txt)"
+javac -cp "$EPOCH_JAVA_CP" ../../console/src/quickstarts/regional_bus/RegionalBusQuickstart.java \
+  -d target/regional-bus-docs-classes`,
+    run: `cd sdk/java
+java -cp "target/regional-bus-docs-classes:$EPOCH_JAVA_CP" RegionalBusQuickstart`,
+  },
+  python: {
+    filename: "quickstart.py",
+    source: regionalBusPythonSource,
+    setup: `python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ./sdk/python`,
+    run: "python console/src/quickstarts/regional_bus/quickstart.py",
+  },
+};
+
 const sdkSurface = [
   {
     area: "Connection",
@@ -292,6 +341,13 @@ const sdkSurface = [
       "RegionalCacheClient · set · delete · compare_and_set · increment · transaction · acquire_lock · renew_lock · release_lock · maintain · observe",
   },
   {
+    area: "Regional Event Bus",
+    go: "RegionalBusClient · UpsertSubscription · RemoveSubscription · Publish · AcquireDeliveries · AcknowledgeDelivery · FailDelivery · MaintainDeliveries · Mutation · ReplayArchive · QueryDeliveries · Status",
+    java: "RegionalBusClient · upsertSubscription · removeSubscription · publish · acquireDeliveries · acknowledgeDelivery · failDelivery · maintainDeliveries · mutation · replayArchive · queryDeliveries · status",
+    python:
+      "RegionalBusClient · upsert_subscription · remove_subscription · publish · acquire_deliveries · acknowledge_delivery · fail_delivery · maintain_deliveries · mutation · replay_archive · query_deliveries · status",
+  },
+  {
     area: "Queue",
     go: "CreateQueue · Send · Receive · Acknowledge · Release · Reject · ExtendLease · QueueCounts · Redrive",
     java: "createQueue · send · receive · acknowledge · release · reject · extendLease · queueCounts · redrive",
@@ -318,6 +374,7 @@ type DocsSectionId =
   | "regional-stream"
   | "regional-queue"
   | "regional-cache"
+  | "regional-bus"
   | "sdk-reference"
   | "reference";
 
@@ -350,6 +407,7 @@ const docsNavigation: ReadonlyArray<DocsNavigationGroup> = [
       { id: "regional-stream", label: "Regional Stream SDK" },
       { id: "regional-queue", label: "Regional Queue SDK" },
       { id: "regional-cache", label: "Regional Cache SDK" },
+      { id: "regional-bus", label: "Regional Event Bus SDK" },
       { id: "sdk-reference", label: "SDK reference" },
       { id: "reference", label: "Design reference" },
     ],
@@ -369,6 +427,7 @@ export function DocsPage({ section }: DocsPageProps) {
   const regionalGuide = regionalLanguageGuides[language];
   const regionalQueueGuide = regionalQueueLanguageGuides[language];
   const regionalCacheGuide = regionalCacheLanguageGuides[language];
+  const regionalBusGuide = regionalBusLanguageGuides[language];
 
   useEffect(() => {
     navigateToSection(section);
@@ -772,12 +831,12 @@ export function DocsPage({ section }: DocsPageProps) {
                     conflicting member across failover and EPRS rebuild. These are experimental HTTP/tablet
                     slices, not yet coordinated join, heartbeat, assignment, rebalance, native bidirectional
                     streaming, automatic client batching, or compression negotiation. The separate regional
-                    Stream, Queue, and Cache v1 clients below expose the implemented partition-0/shard-0
-                    operations with leader/fence-aware Go, Java, and Python routing. Stream remains
-                    uncoordinated; Queue receive is request/response rather than a managed streaming session;
-                    Cache expiry is explicit and single-shard. Managed HTTP/gRPC and regional HTTP require a
-                    shared deny-by-default bootstrap bearer policy, but that is not OIDC, TLS/mTLS, credential
-                    expiry/revocation, or immutable audit export.
+                    Stream, Queue, Cache, and Event Bus v1 clients below expose the implemented
+                    partition-0/shard-0 operations with leader/fence-aware Go, Java, and Python routing.
+                    Stream remains uncoordinated; Queue and Event Bus delivery are request/response rather
+                    than managed streaming sessions; Cache expiry is explicit and single-shard. Managed
+                    HTTP/gRPC and regional HTTP require a shared deny-by-default bootstrap bearer policy, but
+                    that is not OIDC, TLS/mTLS, credential expiry/revocation, or immutable audit export.
                   </p>
                 </div>
               </div>
@@ -813,6 +872,17 @@ export function DocsPage({ section }: DocsPageProps) {
                   <p>
                     The Python client executes the complete shard-0 lifecycle after Cache leadership changes,
                     then the old voter catches up and all three reopen the same committed state.
+                  </p>
+                </article>
+                <article>
+                  <span>EVENT BUS SDK RECOVERY</span>
+                  <strong>
+                    Ingress, delivery leases, retry, archive, and settlement survive leader loss.
+                  </strong>
+                  <p>
+                    The Python client preserves exact publish and settlement identities while the same Docker
+                    campaign replaces the Event Bus leader, catches up the old voter, and reopens every
+                    volume.
                   </p>
                 </article>
                 <article>
@@ -1198,20 +1268,132 @@ export function DocsPage({ section }: DocsPageProps) {
             </section>
 
             <section
+              id="regional-bus"
+              className="docs-section"
+              aria-labelledby="regional-bus-title"
+              tabIndex={-1}
+            >
+              <div className="docs-section__heading">
+                <span>08</span>
+                <div>
+                  <p className="eyebrow">VERSIONED REGIONAL EVENT BUS V1</p>
+                  <h2 id="regional-bus-title">Route, archive, lease, settle, and recover.</h2>
+                  <p>
+                    Regional Event Bus SDK calls target the replicated Event Bus tablet directly. Discovery
+                    selects the writable Rust leader; every request carries generation and tablet-epoch
+                    fences, every mutation preserves caller-owned identity, and archive, delivery, and status
+                    reads wait for a quorum-backed leader barrier.
+                  </p>
+                </div>
+              </div>
+
+              <div className="guide-intro">
+                <span className="step-badge">A</span>
+                <div>
+                  <h3>Start the voters and provision the Event Bus</h3>
+                  <p>
+                    Reuse the disposable three-zone topology and development credentials. The Go bridge
+                    provisions <code>events</code>; application traffic then goes directly to the discovered
+                    Rust Event Bus leader.
+                  </p>
+                </div>
+              </div>
+              <CodeBlock label="Terminal A · regional nodes" value={regionalNodes} />
+              <CodeBlock label="Terminal B · managed bridge" value={regionalControl} />
+              <CodeBlock label="Terminal C · provision" value={regionalBusResource} />
+
+              <div className="language-picker">
+                <div>
+                  <p className="eyebrow">CHOOSE YOUR REGIONAL EVENT BUS SDK</p>
+                  <h3>One delivery and recovery contract in three ecosystems.</h3>
+                </div>
+                <div className="language-tabs" role="tablist" aria-label="Regional Event Bus language">
+                  {languageGuides.map((candidate) => (
+                    <button
+                      key={candidate.id}
+                      id={`regional-bus-language-tab-${candidate.id}`}
+                      type="button"
+                      role="tab"
+                      aria-selected={language === candidate.id}
+                      aria-controls={`regional-bus-language-panel-${candidate.id}`}
+                      tabIndex={language === candidate.id ? 0 : -1}
+                      onClick={() => setLanguage(candidate.id)}
+                      onKeyDown={(event) =>
+                        handleLanguageKey(event, candidate.id, "regional-bus-language-tab")
+                      }
+                    >
+                      <span>{candidate.label}</span>
+                      <small>{candidate.version}</small>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div
+                id={`regional-bus-language-panel-${language}`}
+                className="language-panel"
+                role="tabpanel"
+                aria-labelledby={`regional-bus-language-tab-${language}`}
+              >
+                <CodeBlock label={`${guide.label} · setup`} value={regionalBusGuide.setup} />
+                <CodeBlock label={regionalBusGuide.filename} value={regionalBusGuide.source} tall />
+                <CodeBlock label="Terminal C · run" value={regionalBusGuide.run} />
+              </div>
+
+              <div className="sdk-notes" aria-label="Regional Event Bus SDK guarantees">
+                <article>
+                  <span>ROUTING &amp; RETRY</span>
+                  <strong>Discovery preserves the exact caller-owned mutation.</strong>
+                  <p>
+                    Publish, subscription, delivery, maintenance, and settlement calls retain the same
+                    idempotency key and body across one bounded leader rediscovery. A changed body is a
+                    conflict, not a second event.
+                  </p>
+                </article>
+                <article>
+                  <span>DELIVERY FENCING</span>
+                  <strong>Policy is replicated; settlement requires the opaque lease token.</strong>
+                  <p>
+                    Pull subscriptions bound timeout, concurrency, attempts, backoff, jitter, and age. Acquire
+                    returns a fenced delivery intent; acknowledge and fail cannot settle a stale lease.
+                  </p>
+                </article>
+                <article>
+                  <span>LINEARIZABLE OBSERVATION</span>
+                  <strong>Query-shaped POST reads still require a leader barrier.</strong>
+                  <p>
+                    Archive replay, delivery query, mutation lookup, and status explicitly request
+                    <code>linearizable</code>. Maintenance advances retry or dead-letter state through a
+                    replicated command.
+                  </p>
+                </article>
+              </div>
+
+              <aside className="docs-access-note">
+                <strong>Current boundary</strong>
+                <span>
+                  Regional Event Bus v1 is a repository-local, single-shard pull-delivery alpha. External
+                  webhook execution, request signing, managed push workers, automatic polling, cross-shard
+                  ordering, generated response models, and public package-registry releases remain open.
+                </span>
+              </aside>
+            </section>
+
+            <section
               id="sdk-reference"
               className="docs-section"
               aria-labelledby="sdk-reference-title"
               tabIndex={-1}
             >
               <div className="docs-section__heading">
-                <span>08</span>
+                <span>09</span>
                 <div>
                   <p className="eyebrow">STANDALONE ALPHA SURFACE</p>
                   <h2 id="sdk-reference-title">The same operation, native to each ecosystem.</h2>
                   <p>
                     All implemented standalone profile operations have Go, Java, and Python entry points. The
-                    versioned regional Stream, Queue, and Cache clients above are intentionally separate
-                    because they add authentication, route discovery, fencing, and bounded idempotent
+                    versioned regional Stream, Queue, Cache, and Event Bus clients above are intentionally
+                    separate because they add authentication, route discovery, fencing, and bounded idempotent
                     rediscovery. Responses remain dynamic documents in this alpha.
                   </p>
                 </div>
@@ -1280,7 +1462,7 @@ export function DocsPage({ section }: DocsPageProps) {
 
             <section id="reference" className="docs-section" aria-labelledby="reference-title" tabIndex={-1}>
               <div className="docs-section__heading">
-                <span>09</span>
+                <span>10</span>
                 <div>
                   <p className="eyebrow">SOURCE OF TRUTH</p>
                   <h2 id="reference-title">Go deeper without losing the boundary.</h2>
@@ -1329,6 +1511,12 @@ export function DocsPage({ section }: DocsPageProps) {
                   title="Regional Cache SDK"
                   description="Strict values, CAS, atomic transaction, fenced locks, explicit expiry, leader discovery, exact retry, and three-language examples."
                   href={`${repositoryDocsUrl}/REGIONAL_CACHE_SDK.md`}
+                />
+                <ReferenceCard
+                  eyebrow="SDK CONTRACT"
+                  title="Regional Event Bus SDK"
+                  description="Subscription policy, replicated ingress, delivery leases, retry and dead-letter transitions, archive replay, exact retry, and three-language examples."
+                  href={`${repositoryDocsUrl}/REGIONAL_EVENT_BUS_SDK.md`}
                 />
                 <ReferenceCard
                   eyebrow="REGIONAL RUNTIME"
@@ -1383,6 +1571,12 @@ export function DocsPage({ section }: DocsPageProps) {
                   title="Regional Cache routing decision"
                   description="Native v1 route shape, strict values and mutations, CAS/transaction/expiry/lock semantics, shared retry contract, and alpha boundaries."
                   href={`${repositoryDocsUrl}/adr/0019-regional-cache-v1-and-sdk-routing.md`}
+                />
+                <ReferenceCard
+                  eyebrow="EVENT BUS DESIGN"
+                  title="Regional Event Bus routing decision"
+                  description="Native v1 route shape, complete pull-delivery lifecycle, subscription policy, shared retry contract, recovery evidence, and executor non-claims."
+                  href={`${repositoryDocsUrl}/adr/0020-regional-event-bus-v1-and-sdk-routing.md`}
                 />
                 <ReferenceCard
                   eyebrow="CACHE TABLET"

@@ -601,6 +601,22 @@ acquire/renew/release, and explicit maintenance for shard `0`. Observation,
 mutation lookup, and status are linearizable SDK reads. The adapter delegates
 to the replicated Cache tablet without translating values or owning state.
 
+The versioned regional Event Bus application route uses the same discovery and
+fencing boundary:
+
+```text
+GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/buses/{name}/shards/{shard}
+*    /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/buses/{name}/shards/{shard}/{operation}
+```
+
+The adapter exposes subscription upsert/removal, publish, delivery
+acquire/ack/fail/maintenance, mutation lookup, archive replay, delivery query,
+and status for shard `0`. Archive replay and delivery query are query-shaped
+POST reads: they require `data.read` and a linearizable barrier, not
+`data.write`. Regional materialization enables the durable delivery outbox;
+the adapter delegates to the replicated Event Bus tablet and owns no bus state
+or target executor.
+
 Catalog mutations require a bounded `request_token`, expected generation,
 shard count, and the currently fixed replica count of three. The exact token
 and semantic request replay their committed result; token rebinding conflicts.
@@ -635,11 +651,12 @@ The JSON body also reports `read_consistency`, `linearizable_read_barrier`,
 leader-routing conflict. Direct profile routes remain explicitly
 `local_profile_applied_stale_capable`.
 
-Regional Stream, Queue, and Cache SDKs configure one or more Rust endpoints and discover a complete
+Regional Stream, Queue, Cache, and Event Bus SDKs configure one or more Rust endpoints and discover a complete
 `accepts_writes: true` route before every operation. They copy the exact
 generation/tablet epoch, use the discovered term for mutations, and request
-`linearizable` for profile reads. Stream append/checkpoint, every Queue
-mutation, and every Cache mutation require a caller-owned idempotency key.
+`linearizable` for profile reads. Stream append/checkpoint and every Queue,
+Cache, and Event Bus mutation require a caller-owned idempotency key. Event Bus
+settlement also carries the exact opaque lease token returned by acquisition.
 Retryable transport, leader, fence,
 route, or barrier outcomes permit at most one rediscovery, always with the same
 key; definitive validation, authorization, idempotency, or committed business
@@ -648,9 +665,11 @@ outcomes return immediately.
 See [ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md),
 [ADR-0018](adr/0018-regional-queue-v1-and-sdk-routing.md),
 [ADR-0019](adr/0019-regional-cache-v1-and-sdk-routing.md),
+[ADR-0020](adr/0020-regional-event-bus-v1-and-sdk-routing.md),
 [Regional Stream SDK](REGIONAL_STREAM_SDK.md), and
 [Regional Queue SDK](REGIONAL_QUEUE_SDK.md), and
-[Regional Cache SDK](REGIONAL_CACHE_SDK.md).
+[Regional Cache SDK](REGIONAL_CACHE_SDK.md), and
+[Regional Event Bus SDK](REGIONAL_EVENT_BUS_SDK.md).
 
 The fence and consistency headers are included in the node's exact-origin CORS
 allowlist. Regional HTTP is bootstrap-authenticated and action-authorized, but
@@ -837,18 +856,19 @@ captured timeout/max-in-flight/retry policy. Acquires are fenced by leader term
 and dispatcher epoch; ack, failure, retry, timeout maintenance, and dead-letter
 state are replicated and recovered. Status therefore reports
 `target_dispatch: external_executor_not_implemented` and
-`durable_target_outbox: true`. There is no built-in target transport, public
-route, CLI, or SDK commitment yet, and a dispatcher acknowledgement is not
-proof of an arbitrary external business side effect. See
+`durable_target_outbox: true`. The regional v1 route and repository-local SDKs
+expose that storage lifecycle, but there is no built-in target transport or
+CLI commitment, and a dispatcher acknowledgement is not proof of an arbitrary
+external business side effect. See
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 Neither the earlier single-profile modes nor the regional multi-group mode is
 the final tablet service. Snapshots/compaction, retention deletion, dynamic
 membership, dynamic constraint-aware placement, follower read routing,
-TLS/mTLS transport, and production identity remain absent. The regional Stream
-v1 route and Go/Java/Python clients are the first versioned application slice;
-stable Cache/Queue/Event-Bus routing, native data gRPC, coordinated streaming,
-and generated response types remain absent. The standalone engine journal
+TLS/mTLS transport, and production identity remain absent. Regional Stream,
+Queue, Cache, and Event Bus v1 routes and repository-local Go/Java/Python
+clients are versioned application slices; stable native data gRPC, coordinated
+streaming, generated response types, and package releases remain absent. The standalone engine journal
 remains a separate single-node source of truth and is never used by a
 replicated tablet.
 

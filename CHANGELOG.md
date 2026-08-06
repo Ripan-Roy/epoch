@@ -74,7 +74,7 @@ notes explicitly list additional verified artifacts.
   lifecycle surfaces for enqueue, credit acquire, acknowledgement, renewal,
   release, Nack, Reject, maintenance, dead-letter/redrive history, redrive,
   mutation lookup, counts, consumer flow, and status. Shared private regional
-  cores keep Stream, Queue, and Cache discovery/retry rules identical.
+  cores keep Stream, Queue, Cache, and Event Bus discovery/retry rules identical.
 - ADR-0018, an end-to-end regional Queue SDK guide, exact three-language Pages
   examples, and a real post-leader-loss Python Queue lifecycle followed by
   survivor convergence, voter catch-up, and all-voter recovery.
@@ -91,6 +91,19 @@ notes explicitly list additional verified artifacts.
   examples, and a real post-leader-loss Python Cache lifecycle covering all
   value kinds, CAS, transaction, fenced locks, expiry, survivor convergence,
   voter catch-up, and all-voter recovery.
+- A fully qualified regional Event Bus v1 route over the existing replicated
+  tablet, with strict scoped route/data authorization, generation/tablet
+  fencing, leader-only mutation admission, linearizable archive, delivery,
+  mutation, and status reads, and delivery outbox materialization enabled.
+- Complete repository-local Go, Java, and Python `RegionalBusClient` lifecycle
+  surfaces for subscription policy and removal, publish, delivery
+  acquire/ack/fail/maintenance, mutation lookup, archive replay, delivery query,
+  and status. Bounded rediscovery preserves exact caller-owned identities and
+  opaque lease tokens.
+- ADR-0020, an end-to-end regional Event Bus SDK guide, exact three-language
+  Pages examples, and a real post-leader-loss Python lifecycle covering exact
+  publish, archive, retry, settlement, query, survivor convergence, voter
+  catch-up, and all-voter recovery.
 
 ### Fixed
 
@@ -113,8 +126,7 @@ notes explicitly list additional verified artifacts.
   rebalance. Plain HTTP also does not authenticate the Rust server to Go.
 - Linearizable reads are leader-only and limited to the experimental regional
   surface. Direct profile routes remain stale-capable; follower forwarding,
-  dynamic membership, regional SDK coverage for Event Bus, and
-  cross-tablet read transactions remain unimplemented.
+  dynamic membership, and cross-tablet read transactions remain unimplemented.
 - Queue receive is currently an alpha HTTP request/response slice, even though
   the full implemented tablet lifecycle now has a versioned regional route and
   repository-local SDK coverage. Native
@@ -135,10 +147,10 @@ notes explicitly list additional verified artifacts.
   expose only the explicit partition-0 checkpoint primitive; standalone offset
   helpers keep their local contract.
 - The regional SDKs remain repository-local alpha source. Package publication,
-  generated response models, Stream batch/compression helpers, Event-Bus
-  regional clients, Cache background expiry/eviction/multi-shard routing,
-  TLS/OIDC/mTLS, dynamic
-  membership, and live-cluster execution for every language remain open.
+  generated response models, Stream batch/compression helpers, Event Bus
+  external webhook/HTTP/push execution and signing, Cache background
+  expiry/eviction/multi-shard routing, TLS/OIDC/mTLS, dynamic membership, and
+  live-cluster execution for every language remain open.
 
 ## [0.1.0-alpha.3] - 2026-07-29
 

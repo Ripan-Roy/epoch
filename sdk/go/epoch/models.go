@@ -143,6 +143,46 @@ type EventTransform struct {
 	PayloadProjection map[string]string `json:"payload_projection"`
 }
 
+// DeliveryBackoffStrategy controls deterministic Event Bus retry scheduling.
+type DeliveryBackoffStrategy string
+
+const (
+	ExponentialDeliveryBackoff DeliveryBackoffStrategy = "exponential"
+	FixedDeliveryBackoff       DeliveryBackoffStrategy = "fixed"
+)
+
+// DeliveryRetryPolicy bounds Event Bus delivery attempts.
+type DeliveryRetryPolicy struct {
+	Strategy       DeliveryBackoffStrategy `json:"strategy"`
+	InitialDelayMS uint64                  `json:"initial_delay_ms"`
+	MaxDelayMS     uint64                  `json:"max_delay_ms"`
+	JitterPercent  uint8                   `json:"jitter_percent"`
+	MaxAttempts    uint32                  `json:"max_attempts"`
+	MaxAgeMS       *uint64                 `json:"max_age_ms"`
+}
+
+// DeliveryPolicy controls one subscription's replicated delivery ledger.
+type DeliveryPolicy struct {
+	TimeoutMS   uint64              `json:"timeout_ms"`
+	MaxInFlight uint16              `json:"max_in_flight"`
+	Retry       DeliveryRetryPolicy `json:"retry"`
+}
+
+// DefaultDeliveryPolicy returns the replicated Event Bus delivery defaults.
+func DefaultDeliveryPolicy() DeliveryPolicy {
+	return DeliveryPolicy{
+		TimeoutMS:   30_000,
+		MaxInFlight: 16,
+		Retry: DeliveryRetryPolicy{
+			Strategy:       ExponentialDeliveryBackoff,
+			InitialDelayMS: 1_000,
+			MaxDelayMS:     60_000,
+			JitterPercent:  10,
+			MaxAttempts:    8,
+		},
+	}
+}
+
 // TargetKind identifies an Event Bus delivery target.
 type TargetKind string
 
@@ -188,10 +228,11 @@ func HTTPTarget(targetURL string) SubscriptionTarget {
 
 // Subscription is a typed Event Bus routing resource.
 type Subscription struct {
-	Name      string             `json:"name"`
-	Filter    EventFilter        `json:"filter"`
-	Target    SubscriptionTarget `json:"target"`
-	Transform EventTransform     `json:"transform"`
+	Name           string             `json:"name"`
+	Filter         EventFilter        `json:"filter"`
+	Target         SubscriptionTarget `json:"target"`
+	Transform      EventTransform     `json:"transform"`
+	DeliveryPolicy *DeliveryPolicy    `json:"delivery_policy,omitempty"`
 }
 
 // Uint32 returns a pointer suitable for an optional uint32 field.
@@ -265,6 +306,13 @@ func (subscription Subscription) normalized() (Subscription, error) {
 	if err := subscription.Target.validate(); err != nil {
 		return Subscription{}, err
 	}
+	if subscription.DeliveryPolicy != nil {
+		policy := *subscription.DeliveryPolicy
+		if err := policy.validate(); err != nil {
+			return Subscription{}, err
+		}
+		subscription.DeliveryPolicy = &policy
+	}
 	if subscription.Filter.EventTypePatterns == nil {
 		subscription.Filter.EventTypePatterns = []string{}
 	}
@@ -287,4 +335,33 @@ func (subscription Subscription) normalized() (Subscription, error) {
 		subscription.Transform.PayloadProjection = map[string]string{}
 	}
 	return subscription, nil
+}
+
+func (policy DeliveryPolicy) validate() error {
+	const maxTimeoutMS = uint64(7 * 24 * 60 * 60 * 1_000)
+	if policy.TimeoutMS == 0 || policy.TimeoutMS > maxTimeoutMS {
+		return fmt.Errorf("epoch: delivery timeout must be between 1 and %d milliseconds", maxTimeoutMS)
+	}
+	if policy.MaxInFlight == 0 || policy.MaxInFlight > 1_000 {
+		return fmt.Errorf("epoch: delivery max in flight must be between 1 and 1000")
+	}
+	if policy.Retry.Strategy != ExponentialDeliveryBackoff && policy.Retry.Strategy != FixedDeliveryBackoff {
+		return fmt.Errorf("epoch: unsupported delivery backoff strategy %q", policy.Retry.Strategy)
+	}
+	if policy.Retry.MaxAttempts == 0 || policy.Retry.MaxAttempts > 100 {
+		return fmt.Errorf("epoch: delivery retry attempts must be between 1 and 100")
+	}
+	if policy.Retry.InitialDelayMS > policy.Retry.MaxDelayMS {
+		return fmt.Errorf("epoch: delivery retry initial delay must not exceed max delay")
+	}
+	if policy.Retry.MaxDelayMS > maxTimeoutMS {
+		return fmt.Errorf("epoch: delivery retry max delay must not exceed %d milliseconds", maxTimeoutMS)
+	}
+	if policy.Retry.JitterPercent > 100 {
+		return fmt.Errorf("epoch: delivery retry jitter percent cannot exceed 100")
+	}
+	if policy.Retry.MaxAgeMS != nil && *policy.Retry.MaxAgeMS == 0 {
+		return fmt.Errorf("epoch: delivery retry max age must be non-zero when provided")
+	}
+	return nil
 }

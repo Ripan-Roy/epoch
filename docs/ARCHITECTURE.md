@@ -269,8 +269,8 @@ leader confirms a majority and the actor applies the local typed profile
 through the returned index before dispatch. An explicit `local_stale` request
 keeps the direct stale-capable behavior; there is no silent downgrade.
 
-The application-facing Stream, Queue, and Cache adapters are fully qualified beneath
-`/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/{streams|queues|caches}/{name}/shards/{shard}`.
+The application-facing Stream, Queue, Cache, and Event Bus adapters are fully qualified beneath
+`/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/{streams|queues|caches|buses}/{name}/shards/{shard}`.
 They delegate to the same materialized tablets and never proxy through Go.
 Go, Java, and Python clients share a private leader-discovery/fencing core,
 authenticate, copy resource-generation/tablet-epoch fences, preserve explicit
@@ -280,10 +280,15 @@ credit acquire, all lease dispositions, maintenance, histories, redrive,
 counts, flow, mutation lookup, and status. Cache exposes every strict value
 kind, set/delete/CAS/increment, atomic transactions, fenced locks, explicit
 expiry, observation, mutation lookup, and status. The generic regional and direct
-tablet routes remain internal verification surfaces. See
+tablet routes remain internal verification surfaces. Event Bus exposes
+subscription upsert/removal, publish, delivery acquire/ack/fail/maintenance,
+mutation lookup, archive replay, delivery query, and status. Its regional
+materialization enables the durable delivery outbox but still delegates target
+execution to an external component. See
 [ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md),
 [ADR-0018](adr/0018-regional-queue-v1-and-sdk-routing.md), and
-[ADR-0019](adr/0019-regional-cache-v1-and-sdk-routing.md).
+[ADR-0019](adr/0019-regional-cache-v1-and-sdk-routing.md), and
+[ADR-0020](adr/0020-regional-event-bus-v1-and-sdk-routing.md).
 
 The current placement remains fixed at three configured voters, but it is now
 topology-aware at admission. Every Rust node reports its authenticated
@@ -330,7 +335,8 @@ atomic capacity rejection, deterministic delivery-plan evidence, and a v2
 digest over route, archive, independent delivery, dispatcher-epoch, and attempt
 state. `epoch-node` mounts it as a fourth mutually exclusive typed profile,
 rebuilds it from EPRS before readiness, and exposes strict
-mutation/status/archive/delivery-query routes on the internal listener.
+mutation/status/archive/delivery-query routes on the internal listener and the
+authenticated, fully qualified regional Event Bus v1 adapter.
 Real-runtime and container tests prove fixed-voter convergence, target
 isolation, leader replacement, catch-up, and all-node recovery. Built-in target
 execution remains explicitly unimplemented: the outbox proves durable intent
@@ -516,6 +522,13 @@ not mean a webhook or external target completed.
 Filters compile into a bounded, deterministic representation. Network
 enrichment and connectors run outside the storage role with explicit timeout,
 memory, secret, and egress policy.
+
+The regional Event Bus v1 adapter delegates directly to this tablet. Go, Java,
+and Python clients discover the leader, carry resource-generation/tablet-epoch
+and term fences, preserve every caller-owned mutation key across one bounded
+rediscovery, and request linearizable barriers for archive, delivery, mutation,
+and status reads. Settlement passes through the opaque lease token returned by
+acquire. These clients do not execute webhooks or claim an external side effect.
 
 The current core slice evaluates immutable in-memory route plans rather than a
 compiled filter bytecode. It bounds a resource to 100,000 subscriptions, each

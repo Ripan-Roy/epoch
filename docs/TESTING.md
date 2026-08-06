@@ -349,7 +349,7 @@ exact retry and changed-input conflict, compares route/archive counters and
 state digests on all voters, performs browser-safe filtered archive replay,
 kills the leader, commits through its replacement, catches the old voter up,
 then kills and reopens all voters from their EPRS volumes. Status must continue
-to report that target dispatch and a durable target outbox are not implemented.
+to report a durable target outbox and that external target dispatch is not implemented.
 
 `test-regional-runtime` starts three regional containers with independent EPRS
 volumes and dynamic loopback ports, then builds and launches the real
@@ -381,7 +381,13 @@ kills the active Queue leader and runs the real Python `RegionalQueueClient`
 through enqueue/exact replay, credit acquire, lease extension, acknowledge,
 release/reacquire, terminal reject, immutable dead-letter observation, redrive,
 final settlement, and linearizable counts/flow/redrive reads. It waits for 11
-Queue commands to converge on the survivors and catches up the old voter. The campaign then
+Queue commands to converge on the survivors and catches up the old voter. It
+repeats the leader-loss proof with the real Python `RegionalCacheClient` across
+strict values, CAS, transaction, fenced locks, expiry maintenance, mutation
+lookup, observation, and status. Finally, the real Python `RegionalBusClient`
+proves exact publish, archive replay, acquire/fail/maintenance/reacquire/ack,
+acknowledged-delivery query, subscription removal, and linearizable status
+after Event Bus leader loss. Each old voter catches up before the campaign then
 kills every node, verifies Go clears stale placement while authority is
 unavailable, and reopens the same volumes before comparing catalog/profile
 digests and the increased applied-command index. CI captures control logs,
@@ -394,7 +400,7 @@ only `job-1001`, kills the node with `SIGKILL`, restarts from the same bytes,
 and proves that the Stream record, acknowledgement count, and only `job-1002`
 survived. The GitHub Pages deploy job depends on this lifecycle test as well as
 the documentation-only frontend build. The same script compiles the exact
-displayed regional Stream, Queue, and Cache Go and Java programs and Python bytecode
+displayed regional Stream, Queue, Cache, and Event Bus Go and Java programs and Python bytecode
 against the current repository-local SDKs; the real regional Python executions remain in
 `test-regional-runtime`. Pull-request runs execute both gates but cannot upload
 or deploy Pages; publication is restricted to `main`.

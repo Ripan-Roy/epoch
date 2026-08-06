@@ -836,6 +836,170 @@ def cache_result(document: dict[str, Any], expected_kind: str) -> dict[str, Any]
     return result
 
 
+def bus_result(document: dict[str, Any], expected_kind: str) -> dict[str, Any]:
+    receipt = document.get("receipt")
+    assert isinstance(receipt, dict), document
+    outcome = receipt.get("outcome")
+    assert isinstance(outcome, dict) and outcome.get("status") == "applied", document
+    result = outcome.get("result")
+    assert isinstance(result, dict) and result.get("kind") == expected_kind, document
+    return result
+
+
+def prove_python_sdk_native_bus_after_failover(
+    cluster: RegionalCluster,
+    resource: Resource,
+) -> None:
+    sdk_source = str(REPO_ROOT / "sdk/python/src")
+    if sdk_source not in sys.path:
+        sys.path.insert(0, sdk_source)
+    epoch_sdk = importlib.import_module("epoch_sdk")
+    client = epoch_sdk.RegionalBusClient(
+        [f"http://127.0.0.1:{cluster.http_ports[node]}" for node in NODES],
+        token=ADMIN_TOKEN,
+        scope=epoch_sdk.RegionalScope("acme", "shop", "dev", "core"),
+        timeout=2.0,
+    )
+    subscription = epoch_sdk.Subscription(
+        "orders",
+        epoch_sdk.SubscriptionTarget.pull(),
+        filter=epoch_sdk.EventFilter(event_type_patterns=["order.*"]),
+        delivery_policy=epoch_sdk.DeliveryPolicy(
+            timeout_ms=60_000,
+            max_in_flight=2,
+            retry=epoch_sdk.DeliveryRetryPolicy(
+                strategy="fixed",
+                initial_delay_ms=0,
+                max_delay_ms=0,
+                jitter_percent=0,
+                max_attempts=2,
+            ),
+        ),
+    )
+    bus_result(
+        client.upsert_subscription(
+            resource.name, 0, "python-bus-upsert-orders", subscription
+        ),
+        "subscription_upserted",
+    )
+    event = epoch_sdk.EventEnvelope(
+        id="events-2",
+        source="python-regional-sdk",
+        event_type="order.created",
+        payload={"id": 2},
+        time_ms=2,
+    )
+    published = client.publish(resource.name, 0, "python-bus-publish-order-2", event)
+    assert bus_result(published, "published").get("delivery_count") == 1, published
+    replayed = client.publish(resource.name, 0, "python-bus-publish-order-2", event)
+    assert replayed.get("receipt", {}).get("disposition") == "replayed", replayed
+
+    archive = client.replay_archive(
+        resource.name,
+        0,
+        from_ms=0,
+        to_ms=(1 << 64) - 1,
+        limit=10,
+        filter=epoch_sdk.EventFilter(event_type_patterns=["order.*"]),
+    )
+    records = archive.get("records")
+    assert isinstance(records, list) and [
+        record.get("envelope", {}).get("id") for record in records
+    ] == ["events-1", "events-2"], archive
+
+    acquired = bus_result(
+        client.acquire_deliveries(
+            resource.name,
+            0,
+            "python-bus-acquire-order-2",
+            subscription="orders",
+            dispatcher="python-dispatcher",
+            dispatcher_epoch=1,
+            max_deliveries=1,
+        ),
+        "deliveries_acquired",
+    )
+    deliveries = acquired.get("deliveries")
+    assert isinstance(deliveries, list) and len(deliveries) == 1, acquired
+    first = deliveries[0]
+    delivery_id = first.get("delivery_id")
+    first_token = first.get("lease_token")
+    assert isinstance(delivery_id, str) and isinstance(first_token, str), first
+
+    failed = bus_result(
+        client.fail_delivery(
+            resource.name,
+            0,
+            "python-bus-fail-order-2",
+            delivery_id,
+            "python-dispatcher",
+            1,
+            first_token,
+            "retry once",
+        ),
+        "delivery_failed",
+    )
+    assert failed.get("state") == "pending", failed
+    bus_result(
+        client.maintain_deliveries(
+            resource.name,
+            0,
+            "python-bus-maintain-order-2",
+            max_deliveries=100,
+        ),
+        "deliveries_maintained",
+    )
+    reacquired = bus_result(
+        client.acquire_deliveries(
+            resource.name,
+            0,
+            "python-bus-reacquire-order-2",
+            subscription="orders",
+            dispatcher="python-dispatcher",
+            dispatcher_epoch=1,
+            max_deliveries=1,
+        ),
+        "deliveries_acquired",
+    )["deliveries"][0]
+    assert reacquired.get("delivery_id") == delivery_id, reacquired
+    assert reacquired.get("attempt") == 2, reacquired
+    bus_result(
+        client.acknowledge_delivery(
+            resource.name,
+            0,
+            "python-bus-ack-order-2",
+            delivery_id,
+            "python-dispatcher",
+            1,
+            reacquired["lease_token"],
+        ),
+        "delivery_acknowledged",
+    )
+    deliveries = client.query_deliveries(
+        resource.name,
+        0,
+        subscription="orders",
+        state="acknowledged",
+        limit=10,
+    ).get("records")
+    assert isinstance(deliveries, list) and len(deliveries) == 1, deliveries
+    assert deliveries[0].get("delivery_id") == delivery_id, deliveries
+    assert len(deliveries[0].get("attempts", [])) == 2, deliveries
+
+    bus_result(
+        client.remove_subscription(
+            resource.name, 0, "python-bus-remove-orders", "orders"
+        ),
+        "subscription_removed",
+    )
+    status = client.status(resource.name, 0)
+    assert status.get("read_consistency") == "linearizable", status
+    assert status.get("subscription_count") == "0", status
+    assert status.get("acknowledged_delivery_count") == "1", status
+    assert status.get("pending_delivery_count") == "0", status
+    assert status.get("in_flight_delivery_count") == "0", status
+
+
 def prove_python_sdk_native_cache_after_failover(
     cluster: RegionalCluster,
     resource: Resource,
@@ -1244,9 +1408,7 @@ def run_campaign(cluster: RegionalCluster) -> None:
     cache_old_leader, cache_old_term = wait_for_routes(cluster, cache)
     cluster.stop_node(cache_old_leader)
     cache_survivors = tuple(node for node in NODES if node != cache_old_leader)
-    cache_new_leader, cache_new_term = wait_for_routes(
-        cluster, cache, cache_survivors
-    )
+    cache_new_leader, cache_new_term = wait_for_routes(cluster, cache, cache_survivors)
     assert cache_new_leader != cache_old_leader
     assert cache_new_term > cache_old_term
     prove_python_sdk_native_cache_after_failover(cluster, cache)
@@ -1254,6 +1416,19 @@ def run_campaign(cluster: RegionalCluster) -> None:
     cluster.start_node(cache_old_leader)
     wait_for_nodes(cluster)
     wait_for_profile_apply(cluster, cache, 12)
+
+    bus = next(resource for resource in RESOURCES if resource.kind == "event-bus")
+    bus_old_leader, bus_old_term = wait_for_routes(cluster, bus)
+    cluster.stop_node(bus_old_leader)
+    bus_survivors = tuple(node for node in NODES if node != bus_old_leader)
+    bus_new_leader, bus_new_term = wait_for_routes(cluster, bus, bus_survivors)
+    assert bus_new_leader != bus_old_leader
+    assert bus_new_term > bus_old_term
+    prove_python_sdk_native_bus_after_failover(cluster, bus)
+    wait_for_profile_apply(cluster, bus, 9, bus_survivors)
+    cluster.start_node(bus_old_leader)
+    wait_for_nodes(cluster)
+    wait_for_profile_apply(cluster, bus, 9)
 
     cluster.crash_all()
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "pending", 0)
@@ -1263,7 +1438,15 @@ def run_campaign(cluster: RegionalCluster) -> None:
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
     wait_for_profile_apply(cluster, stream, 3)
     for resource in RESOURCES:
-        expected = 11 if resource == queue else 12 if resource == cache else 1
+        expected = (
+            11
+            if resource == queue
+            else 12
+            if resource == cache
+            else 9
+            if resource == bus
+            else 1
+        )
         wait_for_profile_apply(cluster, resource, expected)
 
 
@@ -1281,7 +1464,7 @@ def main() -> int:
     if not failed:
         print(
             "Epoch Go-to-Rust regional catalog/BFF/four-profile/failover/"
-            "Stream-Queue-and-Cache-SDK/control-SIGKILL/all-node recovery container campaign passed."
+            "Stream-Queue-Cache-and-Bus-SDK/control-SIGKILL/all-node recovery container campaign passed."
         )
     return 0
 

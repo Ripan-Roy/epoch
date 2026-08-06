@@ -98,6 +98,79 @@ class EventFilter:
 
 
 TargetKind = Literal["pull", "queue", "stream", "webhook", "http"]
+DeliveryBackoffStrategy = Literal["exponential", "fixed"]
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryRetryPolicy:
+    """Bounded deterministic Event Bus delivery retry policy."""
+
+    strategy: DeliveryBackoffStrategy = "exponential"
+    initial_delay_ms: int = 1_000
+    max_delay_ms: int = 60_000
+    jitter_percent: int = 10
+    max_attempts: int = 8
+    max_age_ms: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.strategy not in {"exponential", "fixed"}:
+            raise ValueError(f"unsupported delivery backoff strategy: {self.strategy}")
+        for label, value in (
+            ("initial delay", self.initial_delay_ms),
+            ("max delay", self.max_delay_ms),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 0 <= value <= 604_800_000
+            ):
+                raise ValueError(f"delivery retry {label} must be between 0 and 604800000")
+        if self.initial_delay_ms > self.max_delay_ms:
+            raise ValueError("delivery retry initial delay must not exceed max delay")
+        if isinstance(self.jitter_percent, bool) or not 0 <= self.jitter_percent <= 100:
+            raise ValueError("delivery retry jitter percent must be between 0 and 100")
+        if isinstance(self.max_attempts, bool) or not 1 <= self.max_attempts <= 100:
+            raise ValueError("delivery retry max attempts must be between 1 and 100")
+        if self.max_age_ms is not None and (
+            isinstance(self.max_age_ms, bool)
+            or not isinstance(self.max_age_ms, int)
+            or self.max_age_ms <= 0
+        ):
+            raise ValueError("delivery retry max age must be positive when provided")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "strategy": self.strategy,
+            "initial_delay_ms": self.initial_delay_ms,
+            "max_delay_ms": self.max_delay_ms,
+            "jitter_percent": self.jitter_percent,
+            "max_attempts": self.max_attempts,
+            "max_age_ms": self.max_age_ms,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryPolicy:
+    """One subscription's timeout, concurrency, and retry bounds."""
+
+    timeout_ms: int = 30_000
+    max_in_flight: int = 16
+    retry: DeliveryRetryPolicy = field(default_factory=DeliveryRetryPolicy)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.timeout_ms, bool) or not 1 <= self.timeout_ms <= 604_800_000:
+            raise ValueError("delivery timeout must be between 1 and 604800000")
+        if isinstance(self.max_in_flight, bool) or not 1 <= self.max_in_flight <= 1_000:
+            raise ValueError("delivery max in flight must be between 1 and 1000")
+        if not isinstance(self.retry, DeliveryRetryPolicy):
+            raise TypeError("delivery retry must be DeliveryRetryPolicy")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "timeout_ms": self.timeout_ms,
+            "max_in_flight": self.max_in_flight,
+            "retry": self.retry.to_dict(),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +245,7 @@ class Subscription:
     target: SubscriptionTarget
     filter: EventFilter = field(default_factory=EventFilter)
     transform: EventTransform = field(default_factory=EventTransform)
+    delivery_policy: DeliveryPolicy = field(default_factory=DeliveryPolicy)
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -183,4 +257,5 @@ class Subscription:
             "filter": self.filter.to_dict(),
             "target": self.target.to_dict(),
             "transform": self.transform.to_dict(),
+            "delivery_policy": self.delivery_policy.to_dict(),
         }

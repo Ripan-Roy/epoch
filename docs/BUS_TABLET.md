@@ -1,8 +1,8 @@
 # Experimental Replicated Event Bus Tablet
 
 **Status:** Working bounded fixed-three-voter ingress and per-subscription
-delivery-ledger profile, mounted only on the experimental internal listener;
-not a public target-execution claim
+delivery-ledger profile with an authenticated regional v1 adapter; not a public
+target-execution claim
 
 `epoch-bus` and `epoch-tablet` implement a canonical Event Bus ingress and
 delivery-ledger boundary. The standalone engine owns validated subscriptions,
@@ -13,9 +13,9 @@ policy, independent lease/attempt history, retry eligibility, acknowledgement,
 and terminal dead-letter state. `BusTablet` applies strict commands only after
 consensus commit, records exact retry receipts, and chains every committed
 outcome into a deterministic state digest. `epoch-node` mounts that state
-machine as the one typed profile for a fixed consensus group, rebuilds it from
-EPRS before exposing the internal API, and fail-stops if committed application
-diverges.
+machine as the one typed profile for a fixed consensus group and as one
+catalog-materialized regional group, rebuilds it from EPRS before exposing its
+APIs, and fail-stops if committed application diverges.
 
 ## Boundary
 
@@ -50,8 +50,8 @@ durability.
 Set `EPOCH_CONSENSUS_PROBE_ENABLED=true` and
 `EPOCH_EXPERIMENTAL_BUS_TABLET_ENABLED=true`; optionally set
 `EPOCH_EXPERIMENTAL_BUS_TABLET_NAME`. Bus, Cache, Queue, Stream, and opaque
-proposal modes are mutually exclusive for one group. The typed routes exist
-only on the separate internal consensus listener:
+proposal modes are mutually exclusive for one group. The direct typed routes
+exist on the separate internal consensus listener:
 
 | Route | Contract |
 | --- | --- |
@@ -74,6 +74,20 @@ the captured deterministic route plan, archive state, and durable delivery
 intent. An acknowledgement proves only that an internal dispatcher committed
 the target result it observed. No built-in Queue, Stream, webhook, HTTP, or
 network pull executor runs in this milestone.
+
+The regional runtime additionally maps the fully qualified authenticated v1
+route below to that same tablet without a second store or Go data proxy:
+
+```text
+/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/buses/{name}/shards/{shard}
+```
+
+Go, Java, and Python `RegionalBusClient` implementations cover every command
+and read above with resource-generation, tablet-epoch, and leader-term fences.
+Archive replay, delivery query, mutation lookup, and status require a
+linearizable ReadIndex barrier; archive/query retain POST bodies but authorize
+as `data.read`. See [Regional Event Bus SDK](REGIONAL_EVENT_BUS_SDK.md) and
+[ADR-0020](adr/0020-regional-event-bus-v1-and-sdk-routing.md).
 
 ## Configuration and hard limits
 
@@ -264,4 +278,5 @@ make test-bus-tablet
 Still required are the target executors themselves, rate limiting, redrive and
 terminal-record retention, replay attempt lineage, built-in Queue/Stream writes,
 long-poll and push transports, webhook/HTTP security and signing, snapshots,
-compaction, authentication, and public API/SDK contracts.
+compaction, production identity/TLS, generated response models, package
+publication, and multi-shard routing.

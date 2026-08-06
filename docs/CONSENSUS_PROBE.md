@@ -5,7 +5,7 @@ fixed-three-voter persistent Raft adapter. Its default mode replicates opaque
 diagnostic payloads. Mutually exclusive opt-in modes can instead attach one
 typed, single-partition Stream, Queue, or Event Bus ingress/outbox tablet,
 or one single-shard Cache tablet. Those direct single-group modes remain
-internal. Separate catalog-materialized regional Stream, Queue, and Cache alpha
+internal. Separate catalog-materialized regional Stream, Queue, Cache, and Event Bus alpha
 routes delegate to the same typed state machines; standalone durability remains
 an independent `local_durable` ceiling.
 
