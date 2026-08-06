@@ -112,6 +112,18 @@ func TestRegionalStreamClientPreservesDefinitiveDiscoveryFailure(t *testing.T) {
 	}
 }
 
+func TestRegionalRouteRequiresCanonicalUnsignedIntegers(t *testing.T) {
+	for _, route := range []regionalRoute{
+		{ResourceGeneration: "01", TabletEpoch: "3", Term: "8"},
+		{ResourceGeneration: "5", TabletEpoch: "+3", Term: "8"},
+		{ResourceGeneration: "5", TabletEpoch: "3", Term: "18446744073709551616"},
+	} {
+		if validRegionalRoute(route) {
+			t.Fatalf("accepted noncanonical or out-of-range route: %#v", route)
+		}
+	}
+}
+
 func TestRegionalStreamClientDiscoversLeaderAndCarriesAuthFencesAndTerm(t *testing.T) {
 	follower := &regionalFakeTransport{route: Document{
 		"resource_generation": "5",

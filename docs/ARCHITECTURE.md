@@ -269,15 +269,18 @@ leader confirms a majority and the actor applies the local typed profile
 through the returned index before dispatch. An explicit `local_stale` request
 keeps the direct stale-capable behavior; there is no silent downgrade.
 
-The application-facing Stream adapter is fully qualified beneath
-`/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/streams/{name}/shards/{shard}`.
-It delegates to the same materialized tablet and never proxies through Go.
-Go, Java, and Python clients discover a current leader before every call,
-authenticate, copy resource-generation/tablet-epoch fences, preserve an
-explicit mutation idempotency key across one bounded rediscovery, and request
-linearizable fetch/lag reads. The generic regional and direct tablet routes
-remain internal verification surfaces. See
-[ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md).
+The application-facing Stream and Queue adapters are fully qualified beneath
+`/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/{streams|queues}/{name}/shards/{shard}`.
+They delegate to the same materialized tablets and never proxy through Go.
+Go, Java, and Python clients share a private leader-discovery/fencing core,
+authenticate, copy resource-generation/tablet-epoch fences, preserve explicit
+mutation idempotency keys across one bounded rediscovery, and request
+linearizable reads. Queue exposes its complete implemented lifecycle: enqueue,
+credit acquire, all lease dispositions, maintenance, histories, redrive,
+counts, flow, mutation lookup, and status. The generic regional and direct
+tablet routes remain internal verification surfaces. See
+[ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md) and
+[ADR-0018](adr/0018-regional-queue-v1-and-sdk-routing.md).
 
 The current placement remains fixed at three configured voters, but it is now
 topology-aware at admission. Every Rust node reports its authenticated
@@ -293,7 +296,8 @@ placement API. See [ADR-0009](adr/0009-regional-tablet-catalog.md),
 `crates/epoch-tablet` also contains the canonical single-partition Queue tablet
 state machine. `epoch-node` attaches it as the only selected profile for one
 fixed consensus group, rebuilds it from EPRS before readiness, and mounts
-strict mutation/status/count/DLQ/redrive/consumer-flow routes on the internal listener. The
+strict mutation/status/count/DLQ/redrive/consumer-flow routes on the internal listener and
+the versioned regional Queue adapter on the authenticated public listener. The
 actor alone applies committed commands; reads never advance time; business
 rejections are committed receipts; structural divergence fails the actor and
 drains both listeners. Real-runtime and container gates prove leader-term and

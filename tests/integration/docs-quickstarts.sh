@@ -114,11 +114,14 @@ javac --release 25 -Xlint:all -Werror \
   -cp "sdk/java/target/classes:$epoch_java_runtime_classpath" \
   -d "$epoch_java_classes" \
   console/src/quickstarts/Quickstart.java \
-  console/src/quickstarts/regional/RegionalQuickstart.java
+  console/src/quickstarts/regional/RegionalQuickstart.java \
+  console/src/quickstarts/regional_queue/RegionalQueueQuickstart.java
 
 go test ./console/src/quickstarts/regional
+go test ./console/src/quickstarts/regional_queue
 "$epoch_docs_tmp/python/bin/python" -m py_compile \
-  console/src/quickstarts/regional/quickstart.py
+  console/src/quickstarts/regional/quickstart.py \
+  console/src/quickstarts/regional_queue/quickstart.py
 
 for epoch_language in go java python; do
   printf 'Executing displayed %s SDK lifecycle\n' "$epoch_language"
@@ -130,4 +133,4 @@ for epoch_language in go java python; do
   stop_node
 done
 
-printf 'All displayed standalone SDK quickstarts survived forced restart; regional sources compile.\n'
+printf 'All displayed standalone SDK quickstarts survived forced restart; regional Stream and Queue sources compile.\n'

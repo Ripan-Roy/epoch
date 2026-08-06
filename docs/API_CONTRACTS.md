@@ -567,6 +567,23 @@ SDK contract maps `records` and
 Stream tablet. The stable adapter removes the generic `kind` and `data`
 segments but does not introduce another log or state store.
 
+The versioned regional Queue application route follows the same discovery and
+fencing boundary:
+
+```text
+GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/queues/{name}/shards/{shard}
+POST /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/queues/{name}/shards/{shard}/mutations
+GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/queues/{name}/shards/{shard}/{counts|dead-letters|redrives|status}
+GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/queues/{name}/shards/{shard}/mutations/{proposal_id}
+GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/queues/{name}/shards/{shard}/consumers/{consumer}/flow
+```
+
+The strict mutation union covers enqueue, credit-aware acquire, acknowledge,
+lease extension, release, Nack, Reject, redrive, and maintenance for partition
+`0`. Counts, mutation lookup, histories, consumer flow, and status are
+linearizable SDK reads. This adapter delegates to the same replicated Queue
+tablet and owns no queue state or request translation.
+
 Catalog mutations require a bounded `request_token`, expected generation,
 shard count, and the currently fixed replica count of three. The exact token
 and semantic request replay their committed result; token rebinding conflicts.
@@ -601,14 +618,19 @@ The JSON body also reports `read_consistency`, `linearizable_read_barrier`,
 leader-routing conflict. Direct profile routes remain explicitly
 `local_profile_applied_stale_capable`.
 
-Regional SDKs configure one or more Rust endpoints and discover a complete
+Regional Stream and Queue SDKs configure one or more Rust endpoints and discover a complete
 `accepts_writes: true` route before every operation. They copy the exact
 generation/tablet epoch, use the discovered term for mutations, and request
-`linearizable` for fetch, group fetch, and lag. Append and checkpoint calls
-require a caller-owned idempotency key. Retryable transport, leader, fence,
+`linearizable` for profile reads. Stream append/checkpoint and every Queue
+mutation require a caller-owned idempotency key. Retryable transport, leader, fence,
 route, or barrier outcomes permit at most one rediscovery, always with the same
 key; definitive validation, authorization, idempotency, or committed business
 outcomes return immediately.
+
+See [ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md),
+[ADR-0018](adr/0018-regional-queue-v1-and-sdk-routing.md),
+[Regional Stream SDK](REGIONAL_STREAM_SDK.md), and
+[Regional Queue SDK](REGIONAL_QUEUE_SDK.md).
 
 The fence and consistency headers are included in the node's exact-origin CORS
 allowlist. Regional HTTP is bootstrap-authenticated and action-authorized, but

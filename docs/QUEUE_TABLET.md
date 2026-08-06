@@ -361,8 +361,10 @@ failure.
 
 ## Deliberate limitations
 
-This milestone still has no stable public Queue-tablet route, gRPC service, CLI
-or SDK surface, native bidirectional receive stream, connection-scoped credit
+The versioned regional Queue v1 route and repository-local Go, Java, and Python
+SDKs now expose this complete implemented lifecycle through authenticated,
+generation/tablet-fenced, leader-discovered calls with linearizable reads. It
+still has no gRPC service, CLI, native bidirectional receive stream, connection-scoped credit
 replenishment, automatic prefetch/fairness, automatic timer proposal, or
 production durability claim. It has one resource, one tablet, partition `0`,
 static configuration,
@@ -375,6 +377,10 @@ filesystem failure, or network partition schedule.
 
 The standalone Queue WAL and legacy token format remain separate compatibility
 paths. Adding this core does not migrate them or raise their guarantee.
+
+See [Regional Queue SDK](REGIONAL_QUEUE_SDK.md) and
+[ADR-0018](adr/0018-regional-queue-v1-and-sdk-routing.md) for the application
+route and bounded retry contract.
 
 See [Architecture](ARCHITECTURE.md), [Semantics](SEMANTICS.md),
 [Testing](TESTING.md), [Requirements traceability](REQUIREMENTS_TRACEABILITY.md),

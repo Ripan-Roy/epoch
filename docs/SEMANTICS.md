@@ -510,10 +510,11 @@ The direct experimental Stream, Queue, Cache, and Event Bus profile routes also
 lack a read barrier, authenticated transport, multiple partitions/tablets, and
 bounded idempotency retention. The regional resource/shard wrapper supplies a
 leader ReadIndex by default; it does not change the direct-route contract. The
-regional Stream v1 SDK makes that explicit wrapper callable from Go, Java, and
-Python but does not turn fixed-voter evidence into a production durability
-claim or add consumer coordination. See
+regional Stream and Queue v1 SDKs make those explicit wrappers callable from
+Go, Java, and Python but do not turn fixed-voter evidence into a production
+durability claim or add consumer/session coordination. See
 [REGIONAL_STREAM_SDK.md](REGIONAL_STREAM_SDK.md),
+[REGIONAL_QUEUE_SDK.md](REGIONAL_QUEUE_SDK.md),
 [STREAM_TABLET.md](STREAM_TABLET.md), and
 [QUEUE_TABLET.md](QUEUE_TABLET.md).
 The Cache tablet additionally lacks profile

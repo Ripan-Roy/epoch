@@ -12,16 +12,15 @@ Epoch has 120 catalog requirements: 51 P0, 54 P1, 14 P2, and one explicitly defe
 
 The credible program remains the PRD's 21–26 month route to initial GA for an experienced 12–15 person team. The first 90 days produce a fault-injected vertical slice, not a production broker. Correctness, recovery, and truthful guarantees are schedule gates; protocol and connector breadth are not.
 
-The active M1/M2 boundary is the regional multi-tablet feature. Local evidence
-now covers a consensus-backed catalog, several fixed-voter groups per Rust
-process, simultaneous four-profile materialization and fenced routing, Go
-desired-state reconciliation and browser BFF, transactional single-owner Go
-metadata recovery, Go and Rust process loss, catch-up, exact replay, and
-same-volume all-node recovery. The durable-control, bootstrap trust, and
-topology-admission increments have passed protected `main` CI. The active
-feature adds safe quorum-confirmed leader ReadIndex barriers and
-linearizable-by-default regional reads while preserving an explicit local-stale
-mode. Replicated multi-instance hosted metadata, production identity, follower
+The active M1/M2 boundary is the regional multi-tablet feature. Protected
+`main` evidence now covers the consensus-backed catalog, durable hosted control,
+bootstrap authorization, topology admission, quorum-confirmed leader ReadIndex
+barriers, Queue credit flow, Stream batches and consumer checkpoints, and the
+regional Stream v1 SDK. The current feature exposes the existing replicated
+Queue tablet through the same authenticated, fenced regional route and shared
+Go, Java, and Python discovery/retry contract. Local evidence includes a real
+Python Queue lifecycle after leader loss and same-volume all-node recovery.
+Replicated multi-instance hosted metadata, production identity, follower
 routing, dynamic membership/voter selection, repair/rebalance, and the broader
 M2 profile/security/performance gates remain open.
 
@@ -189,14 +188,21 @@ The Queue application core now runs behind the same profile-neutral persistent
 actor boundary. It deterministically applies strict single-partition commands,
 leader/consumer-fenced leases, retry/schedule/expiry, recorded business
 outcomes, immutable DLQ/redrive history, and credit-bounded per-consumer
-in-flight windows. Typed internal routes, exact flow evidence, EPRS startup
-replay, real-runtime saturation/replenishment, leader `SIGKILL`, redelivery, and
-all-node container recovery are executable. Committed-order time normalization
-also prevents a retained pending entry followed by a lower-clock leader from
-fail-stopping live apply or recovery. This advances QUEUE-011 but does not
-complete native bidirectional receive, connection credit, fairness/load proof,
-placement, stable public routing/SDKs, authenticated transport, or production
-durability evidence. See
+in-flight windows. A fully qualified authenticated regional Queue v1 route maps
+to that same tablet. Repository-local Go, Java, and Python clients cover
+enqueue, acquire, lease extension, acknowledge/release/nack/reject, maintenance,
+counts, flow, mutation lookup, dead letters, redrive, and status. They discover
+the leader before each operation, carry generation/tablet/term fences, preserve
+caller idempotency across one bounded rediscovery, and explicitly request
+linearizable reads. Contract tests, exact compiled Pages examples, and a real
+Python lifecycle after Queue-leader `SIGKILL` plus all-node recovery are
+executable. Committed-order time normalization also prevents a retained pending
+entry followed by a lower-clock leader from fail-stopping live apply or
+recovery. This advances QUEUE-001/002/004/005/006/011 but does not complete
+native bidirectional receive, connection-level credit, fairness/load proof,
+dynamic placement, package publication, generated models, or production
+durability evidence. See [Regional Queue SDK](REGIONAL_QUEUE_SDK.md),
+[ADR-0018](adr/0018-regional-queue-v1-and-sdk-routing.md), and
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
 The Cache application work now has a bounded deterministic tablet runtime. A

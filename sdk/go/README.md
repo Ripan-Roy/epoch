@@ -50,9 +50,16 @@ requests linearizable fetch/lag reads. See the
 [complete regional example](../../console/src/quickstarts/regional/quickstart.go)
 and [contract guide](../../docs/REGIONAL_STREAM_SDK.md).
 
+`RegionalQueueClient` applies that same discovery, bearer, fence, same-key
+rediscovery, and linearizable-read contract to the complete replicated Queue
+lifecycle: enqueue, credit-aware acquire, every lease disposition, maintenance,
+DLQ/redrive history, redrive, counts, flow, mutation lookup, and status. See the
+[complete Queue example](../../console/src/quickstarts/regional_queue/quickstart.go)
+and [Queue contract guide](../../docs/REGIONAL_QUEUE_SDK.md).
+
 The provisional module path is not a publishable compatibility promise. Native
 gRPC streaming, coordinated consumer sessions, generated response types, and
-the complete Go/Java/Python contract matrix remain future work.
+package publication remain future work.
 
 Run the package gate from the repository root:
 

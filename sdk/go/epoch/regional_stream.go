@@ -30,12 +30,16 @@ type RegionalScope struct {
 // It discovers the current leader before each operation and retries only with
 // the caller's unchanged idempotency key.
 type RegionalStreamClient struct {
+	regional *regionalClient
+}
+
+type regionalClient struct {
 	transports []Transport
 	token      string
 	scopePath  string
 }
 
-type regionalStreamRoute struct {
+type regionalRoute struct {
 	ResourceGeneration string `json:"resource_generation"`
 	TabletEpoch        string `json:"tablet_epoch"`
 	Term               string `json:"term"`
@@ -44,6 +48,23 @@ type regionalStreamRoute struct {
 
 // NewRegionalStreamClient builds a regional client over one or more HTTP endpoints.
 func NewRegionalStreamClient(endpoints []string, token string, scope RegionalScope, timeout time.Duration) (*RegionalStreamClient, error) {
+	regional, err := newRegionalClient(endpoints, token, scope, timeout)
+	if err != nil {
+		return nil, err
+	}
+	return &RegionalStreamClient{regional: regional}, nil
+}
+
+// NewRegionalStreamClientWithTransports injects endpoint transports for tests or custom networking.
+func NewRegionalStreamClientWithTransports(transports []Transport, token string, scope RegionalScope) (*RegionalStreamClient, error) {
+	regional, err := newRegionalClientWithTransports(transports, token, scope)
+	if err != nil {
+		return nil, err
+	}
+	return &RegionalStreamClient{regional: regional}, nil
+}
+
+func newRegionalClient(endpoints []string, token string, scope RegionalScope, timeout time.Duration) (*regionalClient, error) {
 	if len(endpoints) == 0 {
 		return nil, fmt.Errorf("epoch: at least one regional endpoint is required")
 	}
@@ -55,11 +76,10 @@ func NewRegionalStreamClient(endpoints []string, token string, scope RegionalSco
 		}
 		transports = append(transports, transport)
 	}
-	return NewRegionalStreamClientWithTransports(transports, token, scope)
+	return newRegionalClientWithTransports(transports, token, scope)
 }
 
-// NewRegionalStreamClientWithTransports injects endpoint transports for tests or custom networking.
-func NewRegionalStreamClientWithTransports(transports []Transport, token string, scope RegionalScope) (*RegionalStreamClient, error) {
+func newRegionalClientWithTransports(transports []Transport, token string, scope RegionalScope) (*regionalClient, error) {
 	if len(transports) == 0 {
 		return nil, fmt.Errorf("epoch: at least one regional transport is required")
 	}
@@ -76,7 +96,7 @@ func NewRegionalStreamClientWithTransports(transports []Transport, token string,
 	if err != nil {
 		return nil, err
 	}
-	return &RegionalStreamClient{transports: append([]Transport(nil), transports...), token: token, scopePath: scopePath}, nil
+	return &regionalClient{transports: append([]Transport(nil), transports...), token: token, scopePath: scopePath}, nil
 }
 
 // Append appends one record after discovering the current leader and route fences.
@@ -88,7 +108,7 @@ func (client *RegionalStreamClient) Append(ctx context.Context, stream string, s
 	if err != nil {
 		return nil, err
 	}
-	return regionalCall[Document](ctx, client, stream, shard, func(route regionalStreamRoute) Request {
+	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, func(route regionalRoute) Request {
 		return Request{
 			Method: "POST",
 			Path:   "/records",
@@ -107,7 +127,7 @@ func (client *RegionalStreamClient) Fetch(ctx context.Context, stream string, sh
 	if limit == 0 || limit > maxRegionalFetchRecords {
 		return nil, fmt.Errorf("epoch: fetch limit must be between 1 and %d", maxRegionalFetchRecords)
 	}
-	return regionalCall[Document](ctx, client, stream, shard, func(_ regionalStreamRoute) Request {
+	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, func(_ regionalRoute) Request {
 		return Request{Method: "GET", Path: "/records", Query: url.Values{
 			"offset": {strconv.FormatUint(offset, 10)},
 			"limit":  {strconv.FormatUint(uint64(limit), 10)},
@@ -134,7 +154,7 @@ func (client *RegionalStreamClient) CommitOffset(ctx context.Context, stream str
 	if reset {
 		mode = "reset"
 	}
-	return regionalCall[Document](ctx, client, stream, shard, func(route regionalStreamRoute) Request {
+	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, func(route regionalRoute) Request {
 		return Request{Method: "PUT", Path: "/groups/" + groupSegment + "/offsets", Body: struct {
 			IdempotencyKey string `json:"idempotency_key"`
 			ExpectedTerm   string `json:"expected_term"`
@@ -153,7 +173,7 @@ func (client *RegionalStreamClient) Lag(ctx context.Context, stream string, shar
 	if err != nil {
 		return nil, err
 	}
-	return regionalCall[Document](ctx, client, stream, shard, func(_ regionalStreamRoute) Request {
+	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, func(_ regionalRoute) Request {
 		return Request{Method: "GET", Path: "/groups/" + groupSegment + "/lag", Headers: map[string]string{regionalReadHeader: "linearizable"}}
 	})
 }
@@ -167,17 +187,24 @@ func (client *RegionalStreamClient) FetchGroup(ctx context.Context, stream strin
 	if err != nil {
 		return nil, err
 	}
-	return regionalCall[Document](ctx, client, stream, shard, func(_ regionalStreamRoute) Request {
+	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, func(_ regionalRoute) Request {
 		return Request{Method: "GET", Path: "/groups/" + groupSegment + "/records", Query: url.Values{"limit": {strconv.FormatUint(uint64(limit), 10)}}, Headers: map[string]string{regionalReadHeader: "linearizable"}}
 	})
 }
 
-func regionalCall[T any](ctx context.Context, client *RegionalStreamClient, stream string, shard uint32, requestFor func(regionalStreamRoute) Request) (T, error) {
+func (client *RegionalStreamClient) regionalClient() *regionalClient {
+	if client == nil {
+		return nil
+	}
+	return client.regional
+}
+
+func regionalCall[T any](ctx context.Context, client *regionalClient, collection, resourceLabel, resource string, shard uint32, requestFor func(regionalRoute) Request) (T, error) {
 	var zero T
 	if client == nil {
-		return zero, fmt.Errorf("epoch: regional Stream client is not configured")
+		return zero, fmt.Errorf("epoch: regional %s client is not configured", resourceLabel)
 	}
-	basePath, err := client.streamShardPath(stream, shard)
+	basePath, err := client.resourceShardPath(collection, resourceLabel, resource, shard)
 	if err != nil {
 		return zero, err
 	}
@@ -204,17 +231,17 @@ func regionalCall[T any](ctx context.Context, client *RegionalStreamClient, stre
 			}
 		}
 	}
-	return zero, fmt.Errorf("epoch: regional Stream operation could not reach a current leader: %w", lastErr)
+	return zero, fmt.Errorf("epoch: regional %s operation could not reach a current leader: %w", resourceLabel, lastErr)
 }
 
-func (client *RegionalStreamClient) discoverLeader(ctx context.Context, path string) (Transport, regionalStreamRoute, error) {
+func (client *regionalClient) discoverLeader(ctx context.Context, path string) (Transport, regionalRoute, error) {
 	var lastErr error
 	for _, transport := range client.transports {
-		var route regionalStreamRoute
+		var route regionalRoute
 		err := transport.Do(ctx, Request{Method: "GET", Path: path, Headers: map[string]string{regionalAuthorizationHeader: "Bearer " + client.token}}, &route)
 		if err != nil {
 			if !regionalRediscoveryError(err) {
-				return nil, regionalStreamRoute{}, err
+				return nil, regionalRoute{}, err
 			}
 			lastErr = err
 			continue
@@ -230,20 +257,20 @@ func (client *RegionalStreamClient) discoverLeader(ctx context.Context, path str
 	if lastErr == nil {
 		lastErr = fmt.Errorf("epoch: no configured endpoint reported the current leader")
 	}
-	return nil, regionalStreamRoute{}, lastErr
+	return nil, regionalRoute{}, lastErr
 }
 
-func validRegionalRoute(route regionalStreamRoute) bool {
+func validRegionalRoute(route regionalRoute) bool {
 	for _, value := range []string{route.ResourceGeneration, route.TabletEpoch, route.Term} {
 		parsed, err := strconv.ParseUint(value, 10, 64)
-		if err != nil || parsed == 0 {
+		if err != nil || parsed == 0 || value != strconv.FormatUint(parsed, 10) {
 			return false
 		}
 	}
 	return true
 }
 
-func mergedRegionalHeaders(headers map[string]string, token string, route regionalStreamRoute) map[string]string {
+func mergedRegionalHeaders(headers map[string]string, token string, route regionalRoute) map[string]string {
 	merged := make(map[string]string, len(headers)+3)
 	for name, value := range headers {
 		merged[name] = value
@@ -290,10 +317,10 @@ func regionalScopePath(scope RegionalScope) (string, error) {
 	return "/v1/organizations/" + organization + "/projects/" + project + "/environments/" + environment + "/namespaces/" + namespace, nil
 }
 
-func (client *RegionalStreamClient) streamShardPath(stream string, shard uint32) (string, error) {
-	streamName, err := segment(stream, "stream")
+func (client *regionalClient) resourceShardPath(collection, resourceLabel, resource string, shard uint32) (string, error) {
+	resourceName, err := segment(resource, resourceLabel)
 	if err != nil {
 		return "", err
 	}
-	return client.scopePath + "/streams/" + streamName + "/shards/" + strconv.FormatUint(uint64(shard), 10), nil
+	return client.scopePath + "/" + collection + "/" + resourceName + "/shards/" + strconv.FormatUint(uint64(shard), 10), nil
 }

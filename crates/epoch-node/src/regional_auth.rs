@@ -31,7 +31,7 @@ const CATALOG_ROOT: &str = "/experimental/v1/regional/catalog";
 const CATALOG_RESOURCE_PREFIX: &str = "/experimental/v1/regional/catalog/resources/";
 const RESOURCE_PREFIX: &str = "/experimental/v1/regional/resources/";
 const TOPOLOGY_PATH: &str = "/experimental/v1/regional/topology";
-const NATIVE_STREAM_PREFIX: &str = "/v1/organizations/";
+const NATIVE_RESOURCE_PREFIX: &str = "/v1/organizations/";
 const MAX_REQUEST_ID_BYTES: usize = 128;
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
@@ -166,7 +166,7 @@ fn action_for_request(method: &Method, path: &str) -> Action {
             _ => Action::CatalogRead,
         };
     }
-    if let Ok(Some(native)) = native_stream_request(path) {
+    if let Ok(Some(native)) = native_resource_request(path) {
         return if native.data_operation {
             if *method == Method::GET {
                 Action::DataRead
@@ -202,7 +202,7 @@ fn scope_for_path(path: &str) -> Result<ResourceScope, ()> {
     if path == CATALOG_ROOT || path == TOPOLOGY_PATH {
         return Ok(ResourceScope::new("", "", "", ""));
     }
-    if let Some(native) = native_stream_request(path)? {
+    if let Some(native) = native_resource_request(path)? {
         return Ok(native.scope);
     }
     let remainder = path
@@ -222,13 +222,13 @@ fn scope_for_path(path: &str) -> Result<ResourceScope, ()> {
 }
 
 #[derive(Debug)]
-struct NativeStreamRequest {
+struct NativeResourceRequest {
     scope: ResourceScope,
     data_operation: bool,
 }
 
-fn native_stream_request(path: &str) -> Result<Option<NativeStreamRequest>, ()> {
-    let Some(remainder) = path.strip_prefix(NATIVE_STREAM_PREFIX) else {
+fn native_resource_request(path: &str) -> Result<Option<NativeResourceRequest>, ()> {
+    let Some(remainder) = path.strip_prefix(NATIVE_RESOURCE_PREFIX) else {
         return Ok(None);
     };
     let segments: Vec<_> = remainder.split('/').collect();
@@ -236,7 +236,7 @@ fn native_stream_request(path: &str) -> Result<Option<NativeStreamRequest>, ()> 
         || segments[1] != "projects"
         || segments[3] != "environments"
         || segments[5] != "namespaces"
-        || segments[7] != "streams"
+        || !matches!(segments[7], "streams" | "queues")
         || segments[9] != "shards"
         || segments[10].parse::<u32>().is_err()
         || (segments.len() > 11 && segments[11..].iter().any(|segment| segment.is_empty()))
@@ -254,7 +254,7 @@ fn native_stream_request(path: &str) -> Result<Option<NativeStreamRequest>, ()> 
             return Err(());
         }
     }
-    Ok(Some(NativeStreamRequest {
+    Ok(Some(NativeResourceRequest {
         scope: ResourceScope::new(
             decode_segment(segments[0])?,
             decode_segment(segments[2])?,
@@ -356,6 +356,7 @@ mod tests {
     use super::*;
 
     const STREAM_ROUTE: &str = "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/streams/orders/shards/0";
+    const QUEUE_ROUTE: &str = "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/queues/jobs/shards/0";
 
     #[test]
     fn native_stream_routes_use_data_actions_only_after_the_shard_boundary() {
@@ -393,9 +394,29 @@ mod tests {
         assert!(scope_for_path("/v1/organizations/acme/projects/shop").is_err());
         assert!(
             scope_for_path(
-                "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/queues/jobs/shards/0"
+                "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/tables/jobs/shards/0"
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn native_queue_routes_use_the_same_scope_and_data_action_boundary() {
+        assert_eq!(
+            action_for_request(&Method::GET, QUEUE_ROUTE),
+            Action::RouteRead
+        );
+        assert_eq!(
+            action_for_request(&Method::GET, &format!("{QUEUE_ROUTE}/counts")),
+            Action::DataRead
+        );
+        assert_eq!(
+            action_for_request(&Method::POST, &format!("{QUEUE_ROUTE}/mutations")),
+            Action::DataWrite
+        );
+        assert_eq!(
+            scope_for_path(&format!("{QUEUE_ROUTE}/consumers/worker-a/flow")).unwrap(),
+            ResourceScope::new("acme", "shop", "dev", "core")
         );
     }
 }
