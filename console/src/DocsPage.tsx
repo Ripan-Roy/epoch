@@ -6,6 +6,9 @@ import pythonSource from "./quickstarts/quickstart.py?raw";
 import regionalGoSource from "./quickstarts/regional/quickstart.go?raw";
 import regionalJavaSource from "./quickstarts/regional/RegionalQuickstart.java?raw";
 import regionalPythonSource from "./quickstarts/regional/quickstart.py?raw";
+import regionalQueueGoSource from "./quickstarts/regional_queue/quickstart.go?raw";
+import regionalQueueJavaSource from "./quickstarts/regional_queue/RegionalQueueQuickstart.java?raw";
+import regionalQueuePythonSource from "./quickstarts/regional_queue/quickstart.py?raw";
 
 const repositoryUrl = "https://github.com/Ripan-Roy/epoch";
 const repositoryDocsUrl = `${repositoryUrl}/blob/main/docs`;
@@ -52,6 +55,23 @@ curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
     "resource":{
       "organization":"acme","project":"shop","environment":"dev","namespace":"core",
       "kind":"stream","name":"orders",
+      "spec":{"shard_count":1,"replica_count":3,"placement":{
+        "allowed_regions":["ap-south"],"minimum_zones":3,
+        "required_node_class":"general-purpose"
+      }}
+    }
+  }'`;
+
+const regionalQueueResource = `# Terminal C · create one replicated Queue
+curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
+  --header 'authorization: Bearer epoch-dev-admin-v1' \
+  --header 'content-type: application/json' \
+  --data '{
+    "request_token":"docs-create-jobs-v1",
+    "expected_generation":0,
+    "resource":{
+      "organization":"acme","project":"shop","environment":"dev","namespace":"core",
+      "kind":"queue","name":"jobs",
       "spec":{"shard_count":1,"replica_count":3,"placement":{
         "allowed_regions":["ap-south"],"minimum_zones":3,
         "required_node_class":"general-purpose"
@@ -148,6 +168,35 @@ python -m pip install -e ./sdk/python`,
   },
 };
 
+const regionalQueueLanguageGuides: typeof regionalLanguageGuides = {
+  go: {
+    filename: "quickstart.go",
+    source: regionalQueueGoSource,
+    setup: "# Uses the repository-local Go module; no separate install is required.",
+    run: "go run ./console/src/quickstarts/regional_queue/quickstart.go",
+  },
+  java: {
+    filename: "RegionalQueueQuickstart.java",
+    source: regionalQueueJavaSource,
+    setup: `cd sdk/java
+./mvnw -q -DskipTests package dependency:build-classpath \
+  -Dmdep.outputFile=target/runtime-classpath.txt
+export EPOCH_JAVA_CP="target/classes:$(cat target/runtime-classpath.txt)"
+javac -cp "$EPOCH_JAVA_CP" ../../console/src/quickstarts/regional_queue/RegionalQueueQuickstart.java \
+  -d target/regional-queue-docs-classes`,
+    run: `cd sdk/java
+java -cp "target/regional-queue-docs-classes:$EPOCH_JAVA_CP" RegionalQueueQuickstart`,
+  },
+  python: {
+    filename: "quickstart.py",
+    source: regionalQueuePythonSource,
+    setup: `python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ./sdk/python`,
+    run: "python console/src/quickstarts/regional_queue/quickstart.py",
+  },
+};
+
 const sdkSurface = [
   {
     area: "Connection",
@@ -180,6 +229,13 @@ const sdkSurface = [
     python: "RegionalStreamClient · append · fetch · commit_offset · lag · fetch_group",
   },
   {
+    area: "Regional Queue",
+    go: "RegionalQueueClient · Enqueue · Acquire · ExtendLease · Acknowledge · Release · Nack · Reject · Redrive · Maintain · Counts · ConsumerFlow",
+    java: "RegionalQueueClient · enqueue · acquire · extendLease · acknowledge · release · nack · reject · redrive · maintain · counts · consumerFlow",
+    python:
+      "RegionalQueueClient · enqueue · acquire · extend_lease · acknowledge · release · nack · reject · redrive · maintain · counts · consumer_flow",
+  },
+  {
     area: "Queue",
     go: "CreateQueue · Send · Receive · Acknowledge · Release · Reject · ExtendLease · QueueCounts · Redrive",
     java: "createQueue · send · receive · acknowledge · release · reject · extendLease · queueCounts · redrive",
@@ -204,6 +260,7 @@ type DocsSectionId =
   | "guarantees"
   | "cluster-milestone"
   | "regional-stream"
+  | "regional-queue"
   | "sdk-reference"
   | "reference";
 
@@ -234,6 +291,7 @@ const docsNavigation: ReadonlyArray<DocsNavigationGroup> = [
     label: "SDKs & reference",
     items: [
       { id: "regional-stream", label: "Regional Stream SDK" },
+      { id: "regional-queue", label: "Regional Queue SDK" },
       { id: "sdk-reference", label: "SDK reference" },
       { id: "reference", label: "Design reference" },
     ],
@@ -251,6 +309,7 @@ export function DocsPage({ section }: DocsPageProps) {
   const mobileNavigationButton = useRef<HTMLButtonElement>(null);
   const guide = languageGuides.find((candidate) => candidate.id === language) ?? languageGuides[0];
   const regionalGuide = regionalLanguageGuides[language];
+  const regionalQueueGuide = regionalQueueLanguageGuides[language];
 
   useEffect(() => {
     navigateToSection(section);
@@ -313,7 +372,11 @@ export function DocsPage({ section }: DocsPageProps) {
     }
   }
 
-  function handleLanguageKey(event: KeyboardEvent<HTMLButtonElement>, current: LanguageId) {
+  function handleLanguageKey(
+    event: KeyboardEvent<HTMLButtonElement>,
+    current: LanguageId,
+    tabPrefix = "language-tab",
+  ) {
     const currentIndex = languageGuides.findIndex((candidate) => candidate.id === current);
     let nextIndex: number | null = null;
     if (event.key === "ArrowRight" || event.key === "ArrowDown") {
@@ -335,7 +398,7 @@ export function DocsPage({ section }: DocsPageProps) {
       return;
     }
     setLanguage(nextLanguage.id);
-    window.requestAnimationFrame(() => document.getElementById(`language-tab-${nextLanguage.id}`)?.focus());
+    window.requestAnimationFrame(() => document.getElementById(`${tabPrefix}-${nextLanguage.id}`)?.focus());
   }
 
   if (!guide) {
@@ -650,11 +713,11 @@ export function DocsPage({ section }: DocsPageProps) {
                     conflicting member across failover and EPRS rebuild. These are experimental HTTP/tablet
                     slices, not yet coordinated join, heartbeat, assignment, rebalance, native bidirectional
                     streaming, automatic client batching, or compression negotiation. The separate regional
-                    Stream v1 client below now exposes single append, fetch, checkpoint, lag, and replay with
-                    leader/fence-aware Go, Java, and Python routing; it is not a coordinated streaming
-                    session. Managed HTTP/gRPC and regional HTTP require a shared deny-by-default bootstrap
-                    bearer policy, but that is not OIDC, TLS/mTLS, credential expiry/revocation, or immutable
-                    audit export.
+                    Stream and Queue v1 clients below expose the implemented partition-0 operations with
+                    leader/fence-aware Go, Java, and Python routing. Stream remains uncoordinated; Queue
+                    receive is request/response rather than a managed streaming session. Managed HTTP/gRPC and
+                    regional HTTP require a shared deny-by-default bootstrap bearer policy, but that is not
+                    OIDC, TLS/mTLS, credential expiry/revocation, or immutable audit export.
                   </p>
                 </div>
               </div>
@@ -673,6 +736,15 @@ export function DocsPage({ section }: DocsPageProps) {
                   <p>
                     Repeated receive saturates at zero; Ack, Nack, Release, Reject, or expiry processing
                     replenishes capacity from replicated state.
+                  </p>
+                </article>
+                <article>
+                  <span>QUEUE SDK RECOVERY</span>
+                  <strong>Lease, retry, dead-letter, redrive, and settle survive leader loss.</strong>
+                  <p>
+                    The real Python client preserves <code>docs-python-redrive-v1</code>, route fences, and
+                    opaque lease tokens while the Docker campaign kills the Queue leader and later reopens
+                    every voter from the same volumes.
                   </p>
                 </article>
                 <article>
@@ -777,7 +849,7 @@ export function DocsPage({ section }: DocsPageProps) {
                       aria-controls={`regional-language-panel-${candidate.id}`}
                       tabIndex={language === candidate.id ? 0 : -1}
                       onClick={() => setLanguage(candidate.id)}
-                      onKeyDown={(event) => handleLanguageKey(event, candidate.id)}
+                      onKeyDown={(event) => handleLanguageKey(event, candidate.id, "regional-language-tab")}
                     >
                       <span>{candidate.label}</span>
                       <small>{candidate.version}</small>
@@ -836,21 +908,131 @@ export function DocsPage({ section }: DocsPageProps) {
             </section>
 
             <section
+              id="regional-queue"
+              className="docs-section"
+              aria-labelledby="regional-queue-title"
+              tabIndex={-1}
+            >
+              <div className="docs-section__heading">
+                <span>06</span>
+                <div>
+                  <p className="eyebrow">VERSIONED REGIONAL QUEUE V1</p>
+                  <h2 id="regional-queue-title">Run the complete Queue lifecycle through one fenced API.</h2>
+                  <p>
+                    Regional Queue SDK calls target the existing replicated Queue tablet. Every operation is
+                    tenant-qualified and authenticated; discovery selects a writable leader, then the request
+                    carries the observed resource generation, tablet epoch, and—on mutations—leader term. One
+                    routing retry preserves the caller&apos;s exact mutation identity.
+                  </p>
+                </div>
+              </div>
+
+              <div className="guide-intro">
+                <span className="step-badge">A</span>
+                <div>
+                  <h3>Start the voters and provision the Queue</h3>
+                  <p>
+                    Reuse the same disposable regional topology and development-only credentials. The Go
+                    bridge provisions <code>jobs</code>; the native data path then goes directly to the
+                    discovered Rust Queue leader.
+                  </p>
+                </div>
+              </div>
+              <CodeBlock label="Terminal A · regional nodes" value={regionalNodes} />
+              <CodeBlock label="Terminal B · managed bridge" value={regionalControl} />
+              <CodeBlock label="Terminal C · provision" value={regionalQueueResource} />
+
+              <div className="language-picker">
+                <div>
+                  <p className="eyebrow">CHOOSE YOUR REGIONAL QUEUE SDK</p>
+                  <h3>One lease and redrive contract in three ecosystems.</h3>
+                </div>
+                <div className="language-tabs" role="tablist" aria-label="Regional Queue language">
+                  {languageGuides.map((candidate) => (
+                    <button
+                      key={candidate.id}
+                      id={`regional-queue-language-tab-${candidate.id}`}
+                      type="button"
+                      role="tab"
+                      aria-selected={language === candidate.id}
+                      aria-controls={`regional-queue-language-panel-${candidate.id}`}
+                      tabIndex={language === candidate.id ? 0 : -1}
+                      onClick={() => setLanguage(candidate.id)}
+                      onKeyDown={(event) =>
+                        handleLanguageKey(event, candidate.id, "regional-queue-language-tab")
+                      }
+                    >
+                      <span>{candidate.label}</span>
+                      <small>{candidate.version}</small>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div
+                id={`regional-queue-language-panel-${language}`}
+                className="language-panel"
+                role="tabpanel"
+                aria-labelledby={`regional-queue-language-tab-${language}`}
+              >
+                <CodeBlock label={`${guide.label} · setup`} value={regionalQueueGuide.setup} />
+                <CodeBlock label={regionalQueueGuide.filename} value={regionalQueueGuide.source} tall />
+                <CodeBlock label="Terminal C · run" value={regionalQueueGuide.run} />
+              </div>
+
+              <div className="sdk-notes" aria-label="Regional Queue SDK guarantees">
+                <article>
+                  <span>LEASE SAFETY</span>
+                  <strong>Settlement is fenced twice.</strong>
+                  <p>
+                    Acquire declares a consumer epoch and credit window. Extend, acknowledge, release, nack,
+                    and reject require the opaque lease token returned by the replicated transition.
+                  </p>
+                </article>
+                <article>
+                  <span>UNKNOWN OUTCOME</span>
+                  <strong>Every mutation starts with caller-owned identity.</strong>
+                  <p>
+                    Enqueue through maintenance require an idempotency key. Rediscovery reuses the same key
+                    and payload, so an exact replay returns the committed receipt instead of duplicating work.
+                  </p>
+                </article>
+                <article>
+                  <span>OBSERVATION</span>
+                  <strong>Operational reads require a leader barrier.</strong>
+                  <p>
+                    Counts, flow, mutation receipts, status, dead letters, and redrive history explicitly
+                    request <code>linearizable</code> and never silently downgrade to stale state.
+                  </p>
+                </article>
+              </div>
+
+              <aside className="docs-access-note">
+                <strong>Current boundary</strong>
+                <span>
+                  Regional Queue v1 is a repository-local, single-partition alpha. Native bidirectional
+                  receive, automatic session management, fairness/load evidence, dynamic placement, generated
+                  response models, and public package-registry releases remain open.
+                </span>
+              </aside>
+            </section>
+
+            <section
               id="sdk-reference"
               className="docs-section"
               aria-labelledby="sdk-reference-title"
               tabIndex={-1}
             >
               <div className="docs-section__heading">
-                <span>06</span>
+                <span>07</span>
                 <div>
                   <p className="eyebrow">STANDALONE ALPHA SURFACE</p>
                   <h2 id="sdk-reference-title">The same operation, native to each ecosystem.</h2>
                   <p>
                     All implemented standalone profile operations have Go, Java, and Python entry points. The
-                    versioned regional Stream client above is intentionally separate because it adds
-                    authentication, route discovery, fencing, and bounded idempotent rediscovery. Responses
-                    remain dynamic documents in this alpha.
+                    versioned regional Stream and Queue clients above are intentionally separate because they
+                    add authentication, route discovery, fencing, and bounded idempotent rediscovery.
+                    Responses remain dynamic documents in this alpha.
                   </p>
                 </div>
               </div>
@@ -892,7 +1074,7 @@ export function DocsPage({ section }: DocsPageProps) {
                   <p>
                     Go exposes <code>Default*Config</code>, Java exposes <code>*.defaults()</code>, and Python
                     uses typed keyword defaults. Set <code>EPOCH_URL</code> in the walkthrough to select a
-                    node.
+                    node. Regional clients instead take all configured voter endpoints plus a bearer token.
                   </p>
                 </article>
                 <article>
@@ -908,8 +1090,9 @@ export function DocsPage({ section }: DocsPageProps) {
                   <strong>The server owns semantic validation.</strong>
                   <p>
                     Client-side checks improve feedback but do not replace server validation. Go also accepts
-                    a context for per-call cancellation and deadlines. Standalone Stream helpers keep their
-                    local contract; <code>RegionalStreamClient</code> is the explicit replicated alternative.
+                    a context for per-call cancellation and deadlines. Standalone helpers keep their local
+                    contract; <code>RegionalStreamClient</code> and <code>RegionalQueueClient</code> are the
+                    explicit replicated alternatives.
                   </p>
                 </article>
               </div>
@@ -917,7 +1100,7 @@ export function DocsPage({ section }: DocsPageProps) {
 
             <section id="reference" className="docs-section" aria-labelledby="reference-title" tabIndex={-1}>
               <div className="docs-section__heading">
-                <span>07</span>
+                <span>08</span>
                 <div>
                   <p className="eyebrow">SOURCE OF TRUTH</p>
                   <h2 id="reference-title">Go deeper without losing the boundary.</h2>
@@ -954,6 +1137,12 @@ export function DocsPage({ section }: DocsPageProps) {
                   title="Regional Stream SDK"
                   description="Fully qualified v1 routes, leader discovery, generation/tablet fencing, idempotent retry, linearizable reads, and three-language examples."
                   href={`${repositoryDocsUrl}/REGIONAL_STREAM_SDK.md`}
+                />
+                <ReferenceCard
+                  eyebrow="SDK CONTRACT"
+                  title="Regional Queue SDK"
+                  description="Complete Queue lifecycle, leader discovery, generation/tablet fencing, exact mutation replay, linearizable reads, and three-language examples."
+                  href={`${repositoryDocsUrl}/REGIONAL_QUEUE_SDK.md`}
                 />
                 <ReferenceCard
                   eyebrow="REGIONAL RUNTIME"
@@ -996,6 +1185,12 @@ export function DocsPage({ section }: DocsPageProps) {
                   title="Queue credit and in-flight windows"
                   description="Atomic grant semantics, cross-epoch consumer accounting, command compatibility, flow evidence, and streaming non-claims."
                   href={`${repositoryDocsUrl}/adr/0014-queue-consumer-credit.md`}
+                />
+                <ReferenceCard
+                  eyebrow="QUEUE DESIGN"
+                  title="Regional Queue routing decision"
+                  description="Native v1 route shape, shared discovery and retry contract, lease-token handling, authorization, recovery evidence, and explicit alpha boundaries."
+                  href={`${repositoryDocsUrl}/adr/0018-regional-queue-v1-and-sdk-routing.md`}
                 />
                 <ReferenceCard
                   eyebrow="CACHE TABLET"

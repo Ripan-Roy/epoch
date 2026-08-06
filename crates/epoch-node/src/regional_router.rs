@@ -28,6 +28,8 @@ pub const REGIONAL_RESOURCE_ROUTE_PATH: &str = "/experimental/v1/regional/resour
 pub const REGIONAL_RESOURCE_DATA_PATH: &str = "/experimental/v1/regional/resources/{organization}/{project}/{environment}/{namespace}/{kind}/{name}/shards/{shard}/data/{*operation}";
 pub const REGIONAL_STREAM_ROUTE_PATH: &str = "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/streams/{name}/shards/{shard}";
 pub const REGIONAL_STREAM_DATA_PATH: &str = "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/streams/{name}/shards/{shard}/{*operation}";
+pub const REGIONAL_QUEUE_ROUTE_PATH: &str = "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/queues/{name}/shards/{shard}";
+pub const REGIONAL_QUEUE_DATA_PATH: &str = "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/queues/{name}/shards/{shard}/{*operation}";
 pub const RESOURCE_GENERATION_HEADER: &str = "x-epoch-resource-generation";
 pub const TABLET_EPOCH_HEADER: &str = "x-epoch-tablet-epoch";
 pub const READ_CONSISTENCY_HEADER: &str = "x-epoch-read-consistency";
@@ -85,6 +87,27 @@ struct RegionalStreamDataPath {
     operation: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct RegionalQueuePath {
+    organization: String,
+    project: String,
+    environment: String,
+    namespace: String,
+    name: String,
+    shard: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RegionalQueueDataPath {
+    organization: String,
+    project: String,
+    environment: String,
+    namespace: String,
+    name: String,
+    shard: String,
+    operation: String,
+}
+
 impl RegionalStreamPath {
     fn regional_path(&self) -> RegionalResourcePath {
         RegionalResourcePath {
@@ -107,6 +130,35 @@ impl RegionalStreamDataPath {
             environment: self.environment.clone(),
             namespace: self.namespace.clone(),
             kind: "stream".into(),
+            name: self.name.clone(),
+            shard: self.shard.clone(),
+            operation: self.operation.clone(),
+        }
+    }
+}
+
+impl RegionalQueuePath {
+    fn regional_path(&self) -> RegionalResourcePath {
+        RegionalResourcePath {
+            organization: self.organization.clone(),
+            project: self.project.clone(),
+            environment: self.environment.clone(),
+            namespace: self.namespace.clone(),
+            kind: "queue".into(),
+            name: self.name.clone(),
+            shard: self.shard.clone(),
+        }
+    }
+}
+
+impl RegionalQueueDataPath {
+    fn regional_path(&self) -> RegionalDataPath {
+        RegionalDataPath {
+            organization: self.organization.clone(),
+            project: self.project.clone(),
+            environment: self.environment.clone(),
+            namespace: self.namespace.clone(),
+            kind: "queue".into(),
             name: self.name.clone(),
             shard: self.shard.clone(),
             operation: self.operation.clone(),
@@ -339,6 +391,8 @@ pub fn regional_tablet_router_with_read_timeout(
         .route(REGIONAL_RESOURCE_DATA_PATH, any(dispatch_data))
         .route(REGIONAL_STREAM_ROUTE_PATH, get(resolve_stream_route))
         .route(REGIONAL_STREAM_DATA_PATH, any(dispatch_stream_data))
+        .route(REGIONAL_QUEUE_ROUTE_PATH, get(resolve_queue_route))
+        .route(REGIONAL_QUEUE_DATA_PATH, any(dispatch_queue_data))
         .with_state(RegionalRouterState {
             directory,
             read_barrier_timeout,
@@ -365,6 +419,13 @@ async fn resolve_stream_route(
     resolve_route(State(state), Path(path.regional_path())).await
 }
 
+async fn resolve_queue_route(
+    State(state): State<RegionalRouterState>,
+    Path(path): Path<RegionalQueuePath>,
+) -> Result<Json<RegionalRouteResponse>, RegionalRouterError> {
+    resolve_route(State(state), Path(path.regional_path())).await
+}
+
 async fn dispatch_data(
     State(state): State<RegionalRouterState>,
     Path(path): Path<RegionalDataPath>,
@@ -376,6 +437,14 @@ async fn dispatch_data(
 async fn dispatch_stream_data(
     State(state): State<RegionalRouterState>,
     Path(path): Path<RegionalStreamDataPath>,
+    request: Request<Body>,
+) -> Result<Response, RegionalRouterError> {
+    dispatch_data_request(&state, &path.regional_path(), request).await
+}
+
+async fn dispatch_queue_data(
+    State(state): State<RegionalRouterState>,
+    Path(path): Path<RegionalQueueDataPath>,
     request: Request<Body>,
 ) -> Result<Response, RegionalRouterError> {
     dispatch_data_request(&state, &path.regional_path(), request).await
@@ -674,22 +743,17 @@ mod tests {
         Url::parse(&format!("http://127.0.0.1:{port}/")).expect("test peer URL should parse")
     }
 
-    async fn routed_stream(
+    async fn routed_resource(
         directory: &TempDir,
+        kind: ResourceKind,
+        name: &str,
+        workload_profile: WorkloadProfile,
     ) -> (RegionalTabletMaterializer, Router, ResourceRecord) {
         let resource = ResourceRecord {
-            name: ResourceName::new(
-                "acme",
-                "shop",
-                "dev",
-                "core",
-                ResourceKind::Stream,
-                "orders",
-            )
-            .unwrap(),
+            name: ResourceName::new("acme", "shop", "dev", "core", kind, name).unwrap(),
             generation: 5,
             spec: ResourceSpec {
-                workload_profile: WorkloadProfile::StreamLog,
+                workload_profile,
                 shard_count: 1,
                 replica_count: 3,
             },
@@ -699,7 +763,7 @@ mod tests {
                 shard_index: 0,
                 tablet_epoch: 3,
                 resource_generation: 5,
-                workload_profile: WorkloadProfile::StreamLog,
+                workload_profile,
                 replica_count: 3,
             }],
         };
@@ -731,6 +795,30 @@ mod tests {
         (materializer, router, resource)
     }
 
+    async fn routed_stream(
+        directory: &TempDir,
+    ) -> (RegionalTabletMaterializer, Router, ResourceRecord) {
+        routed_resource(
+            directory,
+            ResourceKind::Stream,
+            "orders",
+            WorkloadProfile::StreamLog,
+        )
+        .await
+    }
+
+    async fn routed_queue(
+        directory: &TempDir,
+    ) -> (RegionalTabletMaterializer, Router, ResourceRecord) {
+        routed_resource(
+            directory,
+            ResourceKind::Queue,
+            "jobs",
+            WorkloadProfile::WorkQueue,
+        )
+        .await
+    }
+
     fn route_path() -> &'static str {
         "/experimental/v1/regional/resources/acme/shop/dev/core/stream/orders/shards/0"
     }
@@ -745,6 +833,14 @@ mod tests {
 
     fn native_stream_data_path(operation: &str) -> String {
         format!("{}/{operation}", native_stream_route_path())
+    }
+
+    fn native_queue_route_path() -> &'static str {
+        "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/queues/jobs/shards/0"
+    }
+
+    fn native_queue_data_path(operation: &str) -> String {
+        format!("{}/{operation}", native_queue_route_path())
     }
 
     async fn json(response: Response) -> Value {
@@ -1041,6 +1137,50 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(wrong_profile.status(), StatusCode::NOT_FOUND);
+
+        materializer.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_queue_v1_routes_to_the_existing_queue_tablet() {
+        assert_eq!(
+            REGIONAL_QUEUE_ROUTE_PATH,
+            "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/queues/{name}/shards/{shard}"
+        );
+        assert_eq!(
+            REGIONAL_QUEUE_DATA_PATH,
+            "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/queues/{name}/shards/{shard}/{*operation}"
+        );
+
+        let data_directory = TempDir::new().expect("temp directory should be created");
+        let (mut materializer, router, _resource) = routed_queue(&data_directory).await;
+
+        let discovery = router
+            .clone()
+            .oneshot(
+                Request::get(native_queue_route_path())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(discovery.status(), StatusCode::OK);
+        let discovery = json(discovery).await;
+        assert_eq!(discovery["workload_profile"], "work_queue");
+
+        let counts = router
+            .oneshot(
+                Request::get(native_queue_data_path("counts"))
+                    .header(RESOURCE_GENERATION_HEADER, "5")
+                    .header(TABLET_EPOCH_HEADER, "3")
+                    .header(READ_CONSISTENCY_HEADER, "local_stale")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(counts.status(), StatusCode::OK);
+        assert_eq!(json(counts).await["counts"]["ready"], "0");
 
         materializer.shutdown().await.unwrap();
     }

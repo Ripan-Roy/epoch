@@ -1,8 +1,8 @@
 # Epoch Delivery Checklist
 
-**Last reviewed:** 5 August 2026
+**Last reviewed:** 6 August 2026
 **Current release:** `v0.1.0-alpha.3`
-**Current core target:** Stream consumer-group checkpoints and fencing
+**Current core target:** Regional Queue v1 and complete three-language SDK lifecycle
 
 This is the operational checklist for turning PRD scope into verified,
 releasable increments. [PRD.md](PRD.md) owns product scope,
@@ -73,7 +73,7 @@ complete.
 | MT-11 | Reconcile hosted desired state through the Rust authority | Go control plane | MT-06, MT-10 | 🟡 | Real authenticated gRPC lifecycle, transactional bbolt desired/status/token/tombstone state, exact replay and generation continuity across restart, corruption/version/exclusive-owner rejection, complete topology inventory, incremental capacity admission, generation-fenced status, and Go-to-Rust container reconciliation pass locally; multi-instance consistency, transactional reservations, OIDC/mTLS, and replicated policy remain open |
 | MT-12 | Show achieved placement and risk without overclaiming | TypeScript console | MT-10, MT-11 | 🟡 | The console reads only the Go BFF with a session-only interactive credential, preserves decimal 64-bit IDs, distinguishes pending/ready/degraded/failed, and lists observed voters/leaders plus consistent configured zone/class/group-capacity evidence and remaining server-identity/rack/dynamic-membership non-claims; OIDC exchange and browser visual/accessibility automation remain open |
 | MT-13 | Real-process and container fault campaign | Test infrastructure | MT-06–MT-12 | 🟡 | Three policy-protected regional containers cover node-local topology/group capacity, pre-catalog rejection, catalog plus five resources/four profiles, service-authenticated Go-to-Rust apply/BFF, Go control `SIGKILL`/same-file reopen/exact replay, leader `SIGKILL`, two-voter degradation, post-failover Python regional SDK append/retry/fetch/checkpoint/lag, catch-up, all-node `SIGKILL`, same-volume reopen, and digest convergence locally; this increment's protected-branch CI and broader crash/I/O/auth-abuse faults remain |
-| MT-14 | Documentation, traceability, changelog, and release notes | Cross-cutting | MT-13 | 🟡 | ADR-0010–0017, architecture, security, APIs, testing, development, SDK/runtime guides, traceability, checklist, published docs content, and `Unreleased` notes describe the implemented boundaries and non-claims; final version notes and release follow merge and green `main` |
+| MT-14 | Documentation, traceability, changelog, and release notes | Cross-cutting | MT-13 | 🟡 | ADR-0010–0018, architecture, security, APIs, testing, development, SDK/runtime guides, traceability, checklist, published docs content, and `Unreleased` notes describe the implemented boundaries and non-claims; final version notes and release follow merge and green `main` |
 
 ## Current placement delivery: topology-aware fixed-voter admission
 
@@ -121,42 +121,55 @@ complete.
 
 | ID | Checklist item | Boundary | State | Evidence / acceptance |
 |---|---|---|---:|---|
-| SF-01 | Freeze framing, atomicity, limits, and non-claims | Semantics + ADR | 🟡 | ADR-0015 specifies canonical records, codec frames, exact idempotent input, whole-batch visibility, ceilings, and stable-native non-claims |
-| SF-02 | Preserve historical command and digest compatibility | Rust tablet contract | 🟡 | Single `Append` remains canonical v1; only `AppendBatch` emits v2; public golden tests pin both command forms and the original digest |
-| SF-03 | Bound and validate every decompression path | Rust codec boundary | 🟡 | `none`, gzip, LZ4 frame, Snappy framed, and Zstd frame validate canonical base64/JSON, exact sizes/count, unique sequences, 4 MiB output, and an 8 MiB Zstd window before mutation |
-| SF-04 | Apply a correlated batch atomically | Rust Stream/tablet | 🟡 | A cloned state transition exposes no prefix; receipts return codec/size/count evidence and one exact decimal offset/disposition per client sequence |
-| SF-05 | Expose strict direct and regional routes | Rust HTTP | 🟡 | `records/batches` validates client-supplied frames, advertises limits/codecs in status, inherits regional fencing/auth/leader checks, and preserves exact retry/conflict semantics |
-| SF-06 | Prove all codecs through real consensus and recovery | Rust tests | 🟡 | Unit corpus plus a real three-runtime HTTP cluster commit/retry every codec, compare correlated offsets, and rebuild all batches from EPRS |
-| SF-07 | Exercise an independent client frame in containers | Compose integration | 🟡 | The Stream campaign generates gzip with Python, commits after leader replacement, retries/conflicts, then proves all-voter convergence and `SIGKILL` replay |
-| SF-08 | Keep product claims and documentation aligned | Documentation + console | 🟡 | Stream/API/semantics/architecture/testing/plan/traceability/user docs and Pages content name the bounded slice and remaining work |
-| SF-09 | Pass protected pull-request evidence | GitHub | ⬜ | Required CI and Pages must pass before this increment is verified on `main` |
+| SF-01 | Freeze framing, atomicity, limits, and non-claims | Semantics + ADR | ✅ | ADR-0015 specifies canonical records, codec frames, exact idempotent input, whole-batch visibility, ceilings, and stable-native non-claims |
+| SF-02 | Preserve historical command and digest compatibility | Rust tablet contract | ✅ | Single `Append` remains canonical v1; only `AppendBatch` emits v2; public golden tests pin both command forms and the original digest |
+| SF-03 | Bound and validate every decompression path | Rust codec boundary | ✅ | `none`, gzip, LZ4 frame, Snappy framed, and Zstd frame validate canonical base64/JSON, exact sizes/count, unique sequences, 4 MiB output, and an 8 MiB Zstd window before mutation |
+| SF-04 | Apply a correlated batch atomically | Rust Stream/tablet | ✅ | A cloned state transition exposes no prefix; receipts return codec/size/count evidence and one exact decimal offset/disposition per client sequence |
+| SF-05 | Expose strict direct and regional routes | Rust HTTP | ✅ | `records/batches` validates client-supplied frames, advertises limits/codecs in status, inherits regional fencing/auth/leader checks, and preserves exact retry/conflict semantics |
+| SF-06 | Prove all codecs through real consensus and recovery | Rust tests | ✅ | Unit corpus plus a real three-runtime HTTP cluster commit/retry every codec, compare correlated offsets, and rebuild all batches from EPRS |
+| SF-07 | Exercise an independent client frame in containers | Compose integration | ✅ | The Stream campaign generates gzip with Python, commits after leader replacement, retries/conflicts, then proves all-voter convergence and `SIGKILL` replay |
+| SF-08 | Keep product claims and documentation aligned | Documentation + console | ✅ | Stream/API/semantics/architecture/testing/plan/traceability/user docs and Pages content name the bounded slice and remaining work |
+| SF-09 | Pass protected pull-request evidence | GitHub | ✅ | PR #47 merged as `cdbee3a7`; exact-main CI `31031439800` and Pages `31031439717` passed |
 
 ## Current Stream delivery: consumer-group checkpoints and fencing
 
 | ID | Checklist item | Boundary | State | Evidence / acceptance |
 |---|---|---|---:|---|
-| CG-01 | Freeze next-offset, ownership, reset, and non-claim semantics | Semantics + ADR | 🟡 | ADR-0016 defines first/next generation, owner fencing, monotonic commit, explicit retained-range reset, committed rejection, and coordinator/SDK non-claims |
-| CG-02 | Preserve append and batch compatibility | Rust tablet contract | 🟡 | `GroupOffset` alone emits canonical v3; public tests retain exact v1 command/digest and v2 batch goldens |
-| CG-03 | Apply checkpoints and fences deterministically | Rust Stream/tablet | 🟡 | Cloned transitions replicate owner plus next offset; wrong/stale/skipped generations, rewind/range, and capacity races return typed committed rejection without business-state mutation |
-| CG-04 | Expose strict mutation, lag, and replay routes | Rust HTTP + regional router | 🟡 | Direct `groups/{group}/{offsets|lag|records}` routes use browser-safe positions; regional mapping inherits authorization, generation/tablet fences, leader admission, and safe read barriers |
-| CG-05 | Prove exact retry, convergence, and rebuild | Rust tests | 🟡 | Canonical/state tests plus a real three-runtime HTTP cluster prove commit, replay, handoff/reset, owner fencing, lag/replay convergence, and EPRS reopen |
-| CG-06 | Exercise process failover and crash recovery | Compose integration | 🟡 | Stream container campaign commits applied and rejected group outcomes after leader replacement, compares all voters, then verifies checkpoint/lag/replay plus digest after all-node `SIGKILL` |
-| CG-07 | Keep SDK and product claims honest | Documentation + console | 🟡 | Stream/API/architecture/semantics/testing/plan/traceability/changelog/Pages content distinguish standalone helpers from the explicit regional Go/Java/Python checkpoint primitive and list every remaining coordinator/session behavior |
-| CG-08 | Pass protected pull-request evidence | GitHub | ⬜ | Required CI and Pages must pass before this increment is verified on `main` |
+| CG-01 | Freeze next-offset, ownership, reset, and non-claim semantics | Semantics + ADR | ✅ | ADR-0016 defines first/next generation, owner fencing, monotonic commit, explicit retained-range reset, committed rejection, and coordinator/SDK non-claims |
+| CG-02 | Preserve append and batch compatibility | Rust tablet contract | ✅ | `GroupOffset` alone emits canonical v3; public tests retain exact v1 command/digest and v2 batch goldens |
+| CG-03 | Apply checkpoints and fences deterministically | Rust Stream/tablet | ✅ | Cloned transitions replicate owner plus next offset; wrong/stale/skipped generations, rewind/range, and capacity races return typed committed rejection without business-state mutation |
+| CG-04 | Expose strict mutation, lag, and replay routes | Rust HTTP + regional router | ✅ | Direct `groups/{group}/{offsets|lag|records}` routes use browser-safe positions; regional mapping inherits authorization, generation/tablet fences, leader admission, and safe read barriers |
+| CG-05 | Prove exact retry, convergence, and rebuild | Rust tests | ✅ | Canonical/state tests plus a real three-runtime HTTP cluster prove commit, replay, handoff/reset, owner fencing, lag/replay convergence, and EPRS reopen |
+| CG-06 | Exercise process failover and crash recovery | Compose integration | ✅ | Stream container campaign commits applied and rejected group outcomes after leader replacement, compares all voters, then verifies checkpoint/lag/replay plus digest after all-node `SIGKILL` |
+| CG-07 | Keep SDK and product claims honest | Documentation + console | ✅ | Stream/API/architecture/semantics/testing/plan/traceability/changelog/Pages content distinguish standalone helpers from the explicit regional Go/Java/Python checkpoint primitive and list every remaining coordinator/session behavior |
+| CG-08 | Pass protected pull-request evidence | GitHub | ✅ | PR #49 merged as `14719d32`; exact-main CI `31035898600` and Pages `31035898592` passed |
 
 ## Current native delivery: regional Stream v1 and SDK routing
 
 | ID | Checklist item | Boundary | State | Evidence / acceptance |
 |---|---|---|---:|---|
-| RS-01 | Freeze the fully qualified route and retry contract | API + ADR | 🟡 | ADR-0017 defines one organization/project/environment/namespace/Stream/shard identity, current-leader discovery, generation/tablet fences, linearizable reads, and same-key bounded rediscovery |
-| RS-02 | Authenticate and authorize the exact tenant scope | Rust ingress | 🟡 | Strict route parsing maps discovery to `route.read`, GET data to `data.read`, and mutations to `data.write`; middleware tests cover missing credentials, denied writes, and cross-tenant denial |
-| RS-03 | Adapt v1 to the existing replicated tablet | Rust gateway | 🟡 | The versioned route delegates to the same materialized Stream router and state machine; record and parameterized group routes retain fences/read barriers with no Go proxy or second store |
-| RS-04 | Prevent outer/inner path-parameter contamination | Rust regression | 🟡 | A red handler test reproduced the real post-failover group-route 500; dispatch now clears cached outer parameters at the adapter boundary while preserving intentional read metadata |
-| RS-05 | Implement one route contract in three SDKs | Go + Java + Python | 🟡 | `RegionalScope` and `RegionalStreamClient` cover append, bounded fetch, checkpoint commit/reset, lag, and checkpoint replay with custom-transport seams and header-aware HTTP transports |
-| RS-06 | Prove routing, fences, term, reads, and validation | SDK tests | 🟡 | All three unit suites assert leader selection, bearer/fence/term propagation, encoded segments, linearizable reads, group paths, and fail-fast input validation |
-| RS-07 | Prove a real SDK after leader loss and full restart | Compose integration | 🟡 | The three-node campaign kills the old leader, runs Python append/exact-retry/fetch/checkpoint/lag against all endpoints, catches up the old voter, then reopens all EPRS volumes and verifies applied convergence |
-| RS-08 | Publish executable end-to-end docs | Docs + Pages | 🟡 | A dedicated SDK guide, ADR, API/runtime/architecture/traceability updates, and exact compilable Go/Java/Python examples are embedded in the docs-only bundle with content assertions |
-| RS-09 | Pass protected pull-request evidence | GitHub | ⬜ | Full local gates, PR CI, and Pages verification must pass before merge; deployment occurs from `main` only |
+| RS-01 | Freeze the fully qualified route and retry contract | API + ADR | ✅ | ADR-0017 defines one organization/project/environment/namespace/Stream/shard identity, current-leader discovery, generation/tablet fences, linearizable reads, and same-key bounded rediscovery |
+| RS-02 | Authenticate and authorize the exact tenant scope | Rust ingress | ✅ | Strict route parsing maps discovery to `route.read`, GET data to `data.read`, and mutations to `data.write`; middleware tests cover missing credentials, denied writes, and cross-tenant denial |
+| RS-03 | Adapt v1 to the existing replicated tablet | Rust gateway | ✅ | The versioned route delegates to the same materialized Stream router and state machine; record and parameterized group routes retain fences/read barriers with no Go proxy or second store |
+| RS-04 | Prevent outer/inner path-parameter contamination | Rust regression | ✅ | A red handler test reproduced the real post-failover group-route 500; dispatch now clears cached outer parameters at the adapter boundary while preserving intentional read metadata |
+| RS-05 | Implement one route contract in three SDKs | Go + Java + Python | ✅ | `RegionalScope` and `RegionalStreamClient` cover append, bounded fetch, checkpoint commit/reset, lag, and checkpoint replay with custom-transport seams and header-aware HTTP transports |
+| RS-06 | Prove routing, fences, term, reads, and validation | SDK tests | ✅ | All three unit suites assert leader selection, bearer/fence/term propagation, encoded segments, linearizable reads, group paths, and fail-fast input validation |
+| RS-07 | Prove a real SDK after leader loss and full restart | Compose integration | ✅ | The three-node campaign kills the old leader, runs Python append/exact-retry/fetch/checkpoint/lag against all endpoints, catches up the old voter, then reopens all EPRS volumes and verifies applied convergence |
+| RS-08 | Publish executable end-to-end docs | Docs + Pages | ✅ | A dedicated SDK guide, ADR, API/runtime/architecture/traceability updates, and exact compilable Go/Java/Python examples are embedded in the docs-only bundle with content assertions |
+| RS-09 | Pass protected pull-request evidence | GitHub | ✅ | PR #50 merged as `34e86ddb`; exact-main CI `31041617501` and Pages `31041621626` passed and the live Pages URL contained the regional SDK content |
+
+## Current native delivery: regional Queue v1 and SDK routing
+
+| ID | Checklist item | Boundary | State | Evidence / acceptance |
+|---|---|---|---:|---|
+| RQ-01 | Freeze the fully qualified Queue route and lifecycle contract | API + ADR | 🟡 | ADR-0018 defines discovery, fences, strict mutation union, linearizable reads, same-key bounded rediscovery, and streaming non-claims |
+| RQ-02 | Authenticate and authorize the exact tenant scope | Rust ingress | 🟡 | Strict native parsing accepts only Stream/Queue collections; unit and middleware tests cover Queue discovery/read/write, missing credential, denied write, and cross-tenant denial |
+| RQ-03 | Adapt v1 to the existing replicated tablet | Rust gateway | 🟡 | Versioned Queue routes delegate to the same materialized Work Queue router with generation/tablet fences, leader admission, and ReadIndex barriers; no Go proxy or second store exists |
+| RQ-04 | Implement the complete lifecycle in three SDKs | Go + Java + Python | 🟡 | Shared private regional cores plus `RegionalQueueClient` expose all nine mutations and mutation/count/history/flow/status reads with fail-fast bounds and opaque tokens |
+| RQ-05 | Prove exact contracts and same-key rediscovery | SDK tests | 🟡 | Go, Java, and Python tests cover encoded resource/consumer paths, bearer/fences/term, every lifecycle route, browser-safe integers, linearizable reads, validation, and unchanged mutation identity |
+| RQ-06 | Prove the SDK after Queue leader loss and full restart | Compose integration | 🟡 | Real Python runs enqueue replay, credit acquire, renewal, settlement/retry, DLQ/redrive, reads, 11-command survivor convergence, old-voter catch-up, and all-voter EPRS reopen |
+| RQ-07 | Publish executable end-to-end docs | Docs + Pages | 🟡 | Regional Queue guide, ADR, cross-cutting docs, exact Go/Java/Python programs, docs compile gate, navigation, and Pages content assertions are included in this feature branch |
+| RQ-08 | Pass protected pull-request evidence | GitHub | ⬜ | Full local gates, PR CI, and Pages verification must pass before merge; deployment remains restricted to `main` |
 
 ## Current security delivery: bootstrap trust baseline
 

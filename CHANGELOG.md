@@ -66,6 +66,18 @@ notes explicitly list additional verified artifacts.
 - ADR-0017 and an end-to-end regional SDK guide embedded in the public docs;
   the container campaign runs the Python SDK after leader loss and through
   subsequent all-voter recovery.
+- A fully qualified regional Queue v1 route over the existing replicated tablet,
+  with strict scoped route/data authorization, generation/tablet fencing,
+  leader-only mutation admission, and linearizable counts, mutation, history,
+  flow, and status reads.
+- Complete repository-local Go, Java, and Python `RegionalQueueClient`
+  lifecycle surfaces for enqueue, credit acquire, acknowledgement, renewal,
+  release, Nack, Reject, maintenance, dead-letter/redrive history, redrive,
+  mutation lookup, counts, consumer flow, and status. Shared private regional
+  cores keep Stream and Queue discovery/retry rules identical.
+- ADR-0018, an end-to-end regional Queue SDK guide, exact three-language Pages
+  examples, and a real post-leader-loss Python Queue lifecycle followed by
+  survivor convergence, voter catch-up, and all-voter recovery.
 
 ### Fixed
 
@@ -90,10 +102,12 @@ notes explicitly list additional verified artifacts.
   surface. Direct profile routes remain stale-capable; follower forwarding,
   dynamic membership, regional SDK coverage for the other profiles, and
   cross-tablet read transactions remain unimplemented.
-- Queue credit is currently an experimental HTTP request/response slice. Native
+- Queue receive is currently an alpha HTTP request/response slice, even though
+  the full implemented tablet lifecycle now has a versioned regional route and
+  repository-local SDK coverage. Native
   bidirectional receive, connection-scoped credit, automatic prefetch,
-  cross-consumer fairness, indexed backlog-scale counting, and stable SDK
-  exposure remain unimplemented.
+  cross-consumer fairness, indexed backlog-scale counting, generated response
+  models, and package publication remain unimplemented.
 - Stream batching/compression is currently an experimental single-partition,
   whole-command-atomic HTTP/tablet slice. Stable bidirectional Produce,
   automatic producer batching and codec negotiation, non-atomic partial
@@ -108,7 +122,8 @@ notes explicitly list additional verified artifacts.
   expose only the explicit partition-0 checkpoint primitive; standalone offset
   helpers keep their local contract.
 - The regional SDKs remain repository-local alpha source. Package publication,
-  generated response models, batch/compression helpers, TLS/OIDC/mTLS, dynamic
+  generated response models, Stream batch/compression helpers, Cache/Event-Bus
+  regional clients, TLS/OIDC/mTLS, dynamic
   membership, and live-cluster execution for every language remain open.
 
 ## [0.1.0-alpha.3] - 2026-07-29

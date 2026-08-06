@@ -106,12 +106,12 @@ browser-safe placement BFF; the TypeScript console never contacts storage nodes.
 Regional reads now default to a safe leader ReadIndex barrier, complete only
 after majority confirmation and local typed-profile apply, and expose exact
 barrier evidence. Callers must explicitly select `local_stale` to bypass it.
-The fully qualified
-`/v1/organizations/.../namespaces/.../streams/.../shards/...` surface maps to
-that same replicated tablet. Go, Java, and Python regional clients discover the
+The fully qualified Stream and Queue
+`/v1/organizations/.../namespaces/.../{streams|queues}/.../shards/...` surfaces map to
+those same replicated tablets. Go, Java, and Python regional clients discover the
 current leader before every operation, carry generation/tablet fences, preserve
 caller idempotency keys across bounded rediscovery, and request linearizable
-fetch/lag reads without routing application data through Go.
+reads without routing application data through Go.
 
 The strict single-partition Queue tablet now runs through that same persistent
 three-node actor boundary. Its internal typed API covers enqueue, acquire,
@@ -121,8 +121,12 @@ Flow-controlled acquire adds bounded request credit, a per-consumer live-lease
 window, exact capacity evidence, and a pure consumer-flow read while preserving
 legacy command bytes. Real-runtime and container gates prove saturation,
 settlement replenishment, failover, exact renewal replay, convergence, and
-all-node `SIGKILL` recovery. Native bidirectional receive/fairness and the
-stable SDK surface remain open; this does not raise the standalone
+all-node `SIGKILL` recovery. The regional Queue v1 adapter and repository-local
+Go, Java, and Python clients now expose enqueue, credit acquire, renewal, every
+disposition, maintenance, DLQ/redrive histories, counts, flow, mutation lookup,
+and status. The real Python client executes that lifecycle after active-leader
+loss and before all-node recovery. Native bidirectional receive/fairness remains
+open; this does not raise the standalone
 `local_durable` ceiling.
 
 The deterministic single-shard Cache tablet now runs through the same opt-in
@@ -148,11 +152,12 @@ state is not a target-delivery claim. See the
 [Event Bus tablet guide](docs/BUS_TABLET.md),
 [regional runtime guide](docs/REGIONAL_RUNTIME.md),
 [regional Stream SDK guide](docs/REGIONAL_STREAM_SDK.md),
+[regional Queue SDK guide](docs/REGIONAL_QUEUE_SDK.md),
 [probe guide](docs/CONSENSUS_PROBE.md), [spike report](docs/CONSENSUS_SPIKE.md),
 and proposed [ADR-0003](docs/adr/0003-consensus-adapter.md). An exhaustive crash
 matrix, snapshots, membership/epoch transitions, follower read routing,
-authenticated transport, dynamic/zone-aware placement, and stable public
-Cache/Queue/Event-Bus routing remain open.
+authenticated peer transport, dynamic/zone-aware placement, and stable public
+Cache/Event-Bus routing remain open.
 
 ## Quick start
 

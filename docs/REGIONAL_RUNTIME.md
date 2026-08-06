@@ -1,14 +1,15 @@
 # Regional Multi-Tablet Runtime
 
-**Status:** Topology-validated fixed-three-voter alpha with regional Stream v1
+**Status:** Topology-validated fixed-three-voter alpha with regional Stream and Queue v1
 
 **Authority:** Rust catalog and tablet consensus groups
 
 **Hosted bridge:** Go desired-state reconciler and browser BFF
 
 This guide describes only the implementation that exists now. The standalone
-SDK contract remains separate. A versioned regional Stream v1 client now exists
-for Go, Java, and Python; it does not claim dynamic production placement.
+SDK contract remains separate. Versioned regional Stream and Queue v1 clients
+now exist for Go, Java, and Python; they do not claim dynamic production
+placement.
 
 ## Ownership and data flow
 
@@ -34,8 +35,9 @@ bounded multi-group supervisor
 
 Go / Java / Python application
         |
-        | bearer + fully qualified regional Stream v1 + route fences
-        `----------------------------------------------> Stream tablet leader
+        | bearer + fully qualified regional Stream/Queue v1 + route fences
+        +----------------------------------------------> Stream tablet leader
+        `----------------------------------------------> Queue tablet leader
 ```
 
 Rust owns catalog correctness, tablet state, consensus, routing, and every data
@@ -224,6 +226,29 @@ checkpoint. The complete executable Go, Java, and Python examples plus setup
 commands are in [Regional Stream SDK](REGIONAL_STREAM_SDK.md) and embedded on
 the published documentation page.
 
+## Use the regional Queue v1 SDK
+
+The Queue client uses the fully qualified versioned shard route:
+
+```text
+/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/queues/jobs/shards/0
+```
+
+Go, Java, and Python expose `RegionalQueueClient` over the same shared discovery,
+authorization, fencing, linearizable-read, and one-rediscovery contract as the
+Stream client. Mutations require caller-owned idempotency keys and cover enqueue,
+acquire, lease extension, acknowledge, release, nack, reject, redrive, and
+bounded maintenance. Reads cover mutation receipts, counts, dead-letter and
+redrive histories, consumer flow, and status. Acquire additionally carries the
+consumer epoch and explicit credit, while settlement operations carry the
+opaque lease token returned by acquire.
+
+The exact compiled examples, lifecycle guidance, and failure semantics are in
+[Regional Queue SDK](REGIONAL_QUEUE_SDK.md) and embedded on the published
+documentation page. This is a single-partition alpha surface; it is not a claim
+of streaming receive, automatic session coordination, package publication, or
+production placement.
+
 Regional reads are linearizable by default and therefore must target the
 current leader. Epoch submits a safe Raft `ReadIndex`, waits for majority
 confirmation, applies locally through the returned index, and only then reads
@@ -298,7 +323,7 @@ digests, and deletes only its scoped containers/network/volumes.
   solver.
 - Membership changes, online rebalance, repair, split/merge, snapshots,
   compaction, and retention deletion are absent. Read barriers are leader-only
-  and regional-only; follower forwarding and stable Queue/Cache/Event-Bus SDK
+  and regional-only; follower forwarding and stable Cache/Event-Bus SDK
   exposure remain absent.
 - Rust regional HTTP and Go management enforce the bootstrap policy, and the
   console supplies a session-only credential. They still have no TLS/OIDC/mTLS,
@@ -307,11 +332,11 @@ digests, and deletes only its scoped containers/network/volumes.
 - Go management metadata is durable for one process and one bbolt file. It is
   not replicated, multi-instance linearizable, backed up automatically, or
   protected by management leader election.
-- Go, Java, and Python now share the regional Stream v1 route/retry/fence
-  contract. It remains repository-local alpha source and covers only the
-  partition-0 methods documented above; package publication, generated models,
-  coordinated membership, multi-partition routing, and production transport
-  remain open.
+- Go, Java, and Python now share the regional Stream and Queue v1
+  route/retry/fence contract. They remain repository-local alpha source and
+  cover only the partition-0 methods documented above; package publication,
+  generated models, coordinated membership/sessions, multi-partition routing,
+  and production transport remain open.
 - The BFF reports policy-protected configured-endpoint region/zone/class and
   group-capacity evidence. Plain HTTP still lacks Rust server identity.
   Rack separation, dynamic membership, and online rebalancing remain

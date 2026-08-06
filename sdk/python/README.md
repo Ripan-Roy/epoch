@@ -31,6 +31,12 @@ rediscovery, and requests linearizable fetch/lag reads. See the
 [complete regional example](../../console/src/quickstarts/regional/quickstart.py)
 and [contract guide](../../docs/REGIONAL_STREAM_SDK.md).
 
+`RegionalQueueClient` applies that same discovery, bearer, fence, same-key
+rediscovery, and linearizable-read contract to enqueue, credit-aware acquire,
+every lease disposition, maintenance, DLQ/redrive history, redrive, counts,
+flow, mutation lookup, and status. See the
+[complete Queue example](../../console/src/quickstarts/regional_queue/quickstart.py)
+and [Queue contract guide](../../docs/REGIONAL_QUEUE_SDK.md).
+
 Native gRPC streaming, coordinated consumer sessions, generated response
-models, package publication, and the complete DX-001 compatibility matrix
-remain future work.
+models, and package publication remain future work.

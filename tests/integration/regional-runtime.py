@@ -789,7 +789,9 @@ def prove_python_sdk_native_stream_after_failover(
     replayed = client.append(resource.name, 0, "python-sdk-append-2", event)
     assert replayed.get("state") == "committed", replayed
     receipt = replayed.get("receipt")
-    assert isinstance(receipt, dict) and receipt.get("disposition") == "replayed", replayed
+    assert isinstance(receipt, dict) and receipt.get("disposition") == "replayed", (
+        replayed
+    )
 
     fetched = client.fetch(resource.name, 0, 0, limit=10)
     records = fetched.get("records")
@@ -812,6 +814,167 @@ def prove_python_sdk_native_stream_after_failover(
     assert isinstance(observation, dict), lag
     assert observation.get("committed_offset") == "2", lag
     assert observation.get("lag") == "0", lag
+
+
+def queue_result(document: dict[str, Any], expected_kind: str) -> dict[str, Any]:
+    receipt = document.get("receipt")
+    assert isinstance(receipt, dict), document
+    outcome = receipt.get("outcome")
+    assert isinstance(outcome, dict) and outcome.get("status") == "applied", document
+    result = outcome.get("result")
+    assert isinstance(result, dict) and result.get("kind") == expected_kind, document
+    return result
+
+
+def prove_python_sdk_native_queue_after_failover(
+    cluster: RegionalCluster,
+    resource: Resource,
+) -> None:
+    sdk_source = str(REPO_ROOT / "sdk/python/src")
+    if sdk_source not in sys.path:
+        sys.path.insert(0, sdk_source)
+    epoch_sdk = importlib.import_module("epoch_sdk")
+    client = epoch_sdk.RegionalQueueClient(
+        [f"http://127.0.0.1:{cluster.http_ports[node]}" for node in NODES],
+        token=ADMIN_TOKEN,
+        scope=epoch_sdk.RegionalScope("acme", "shop", "dev", "core"),
+        timeout=2.0,
+    )
+    event = epoch_sdk.EventEnvelope(
+        id="jobs-2",
+        source="python-regional-sdk",
+        event_type="job.created",
+        payload={"id": 2},
+        time_ms=2,
+    )
+    committed = client.enqueue(resource.name, 0, "python-sdk-enqueue-2", event)
+    queue_result(committed, "enqueued")
+    replayed = client.enqueue(resource.name, 0, "python-sdk-enqueue-2", event)
+    assert replayed.get("receipt", {}).get("disposition") == "replayed", replayed
+
+    acquired = client.acquire(
+        resource.name,
+        0,
+        "python-sdk-acquire-2",
+        consumer="python-worker",
+        consumer_epoch=1,
+        max_messages=2,
+        max_in_flight=2,
+        visibility_timeout_ms=5_000,
+    )
+    deliveries = queue_result(acquired, "acquired").get("deliveries")
+    assert isinstance(deliveries, list) and len(deliveries) == 2, acquired
+    by_message = {
+        delivery.get("message_id"): delivery
+        for delivery in deliveries
+        if isinstance(delivery, dict)
+    }
+    assert set(by_message) == {"jobs-1", "jobs-2"}, acquired
+
+    renewed = client.extend_lease(
+        resource.name,
+        0,
+        "python-sdk-extend-2",
+        "python-worker",
+        1,
+        by_message["jobs-1"]["lease_token"],
+        60_000,
+    )
+    renewed_token = queue_result(renewed, "lease_extended").get("lease_token")
+    assert isinstance(renewed_token, str), renewed
+    queue_result(
+        client.acknowledge(
+            resource.name,
+            0,
+            "python-sdk-ack-1",
+            "python-worker",
+            1,
+            renewed_token,
+        ),
+        "acknowledged",
+    )
+    queue_result(
+        client.release(
+            resource.name,
+            0,
+            "python-sdk-release-2",
+            "python-worker",
+            1,
+            by_message["jobs-2"]["lease_token"],
+            0,
+            "retry once",
+        ),
+        "released",
+    )
+
+    reacquired = client.acquire(
+        resource.name,
+        0,
+        "python-sdk-reacquire-2",
+        consumer="python-worker",
+        consumer_epoch=1,
+        max_messages=1,
+        max_in_flight=2,
+    )
+    redelivery = queue_result(reacquired, "acquired")["deliveries"][0]
+    rejected = client.reject(
+        resource.name,
+        0,
+        "python-sdk-reject-2",
+        "python-worker",
+        1,
+        redelivery["lease_token"],
+        "poison",
+    )
+    history_id = queue_result(rejected, "dead_lettered").get("dead_letter_history_id")
+    assert isinstance(history_id, str) and history_id.isdecimal(), rejected
+    dead_letters = client.dead_letters(resource.name, 0, limit=10)
+    records = dead_letters.get("records")
+    assert isinstance(records, list) and records[-1].get("history_id") == history_id, (
+        dead_letters
+    )
+
+    queue_result(
+        client.redrive(
+            resource.name,
+            0,
+            "python-sdk-redrive-2",
+            "jobs-2",
+            int(history_id),
+        ),
+        "redriven",
+    )
+    final_acquire = client.acquire(
+        resource.name,
+        0,
+        "python-sdk-final-acquire-2",
+        consumer="python-worker",
+        consumer_epoch=1,
+        max_messages=1,
+        max_in_flight=2,
+    )
+    final_delivery = queue_result(final_acquire, "acquired")["deliveries"][0]
+    queue_result(
+        client.acknowledge(
+            resource.name,
+            0,
+            "python-sdk-final-ack-2",
+            "python-worker",
+            1,
+            final_delivery["lease_token"],
+        ),
+        "acknowledged",
+    )
+    counts = client.counts(resource.name, 0).get("counts")
+    assert isinstance(counts, dict), counts
+    assert counts.get("ready") == "0" and counts.get("in_flight") == "0", counts
+    assert counts.get("acknowledged") == "2" and counts.get("dead_lettered") == "0", (
+        counts
+    )
+    flow = client.consumer_flow(resource.name, 0, "python-worker").get("flow")
+    assert isinstance(flow, dict) and flow.get("in_flight") == "0", flow
+    redrives = client.redrives(resource.name, 0, limit=10).get("records")
+    assert isinstance(redrives, list) and len(redrives) == 1, redrives
 
 
 def run_campaign(cluster: RegionalCluster) -> None:
@@ -855,6 +1018,19 @@ def run_campaign(cluster: RegionalCluster) -> None:
     for resource in RESOURCES:
         wait_for_profile_apply(cluster, resource, 1)
 
+    queue = next(resource for resource in RESOURCES if resource.kind == "queue")
+    queue_old_leader, queue_old_term = wait_for_routes(cluster, queue)
+    cluster.stop_node(queue_old_leader)
+    queue_survivors = tuple(node for node in NODES if node != queue_old_leader)
+    queue_new_leader, queue_new_term = wait_for_routes(cluster, queue, queue_survivors)
+    assert queue_new_leader != queue_old_leader
+    assert queue_new_term > queue_old_term
+    prove_python_sdk_native_queue_after_failover(cluster, queue)
+    wait_for_profile_apply(cluster, queue, 11, queue_survivors)
+    cluster.start_node(queue_old_leader)
+    wait_for_nodes(cluster)
+    wait_for_profile_apply(cluster, queue, 11)
+
     cluster.crash_all()
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "pending", 0)
     cluster.restart_all()
@@ -863,7 +1039,7 @@ def run_campaign(cluster: RegionalCluster) -> None:
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
     wait_for_profile_apply(cluster, stream, 3)
     for resource in RESOURCES:
-        wait_for_profile_apply(cluster, resource, 1)
+        wait_for_profile_apply(cluster, resource, 11 if resource == queue else 1)
 
 
 def main() -> int:
@@ -880,7 +1056,7 @@ def main() -> int:
     if not failed:
         print(
             "Epoch Go-to-Rust regional catalog/BFF/four-profile/failover/"
-            "control-SIGKILL/all-node recovery container campaign passed."
+            "Stream-and-Queue-SDK/control-SIGKILL/all-node recovery container campaign passed."
         )
     return 0
 

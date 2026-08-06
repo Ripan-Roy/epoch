@@ -377,6 +377,11 @@ placement, commits through the replacement, restarts and catches up the old
 voter. After leader loss, the real Python `RegionalStreamClient` uses all three
 endpoints to append, repeat the exact idempotency key, perform a linearizable
 fetch, commit a generation-fenced checkpoint, and verify lag. The campaign then
+kills the active Queue leader and runs the real Python `RegionalQueueClient`
+through enqueue/exact replay, credit acquire, lease extension, acknowledge,
+release/reacquire, terminal reject, immutable dead-letter observation, redrive,
+final settlement, and linearizable counts/flow/redrive reads. It waits for 11
+Queue commands to converge on the survivors and catches up the old voter. The campaign then
 kills every node, verifies Go clears stale placement while authority is
 unavailable, and reopens the same volumes before comparing catalog/profile
 digests and the increased applied-command index. CI captures control logs,
@@ -389,8 +394,8 @@ only `job-1001`, kills the node with `SIGKILL`, restarts from the same bytes,
 and proves that the Stream record, acknowledgement count, and only `job-1002`
 survived. The GitHub Pages deploy job depends on this lifecycle test as well as
 the documentation-only frontend build. The same script compiles the exact
-displayed regional Go and Java programs and Python bytecode against the current
-repository-local SDKs; the real regional Python execution remains in
+displayed regional Stream and Queue Go and Java programs and Python bytecode
+against the current repository-local SDKs; the real regional Python executions remain in
 `test-regional-runtime`. Pull-request runs execute both gates but cannot upload
 or deploy Pages; publication is restricted to `main`.
 
