@@ -1,7 +1,7 @@
 # Experimental Replicated Cache Tablet
 
-**Status:** Deterministic single-shard profile mounted and tested on the
-experimental fixed-three-voter runtime; not a public API or production claim
+**Status:** Deterministic single-shard profile with authenticated regional v1
+Go/Java/Python clients and real failover evidence; not a production claim
 
 `epoch-cache`, `epoch-tablet`, and `epoch-node` implement the bounded first
 replicated Cache and State slice. A strict internal API proposes canonical
@@ -45,6 +45,24 @@ distinct-key mutations in one transaction. Cross-shard transactions, snapshot
 restore, change capture, collection-specific mutations, and compatibility
 protocols remain outside this slice.
 
+## Regional v1 application API
+
+The authenticated versioned shard route is:
+
+```text
+/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}
+```
+
+`GET` on the base performs route discovery. `mutations`,
+`mutations/{proposal_id}`, `observations?key=...`, and `status` delegate to the
+same typed tablet. Data requests require the discovered resource-generation and
+tablet-epoch fences; mutations also carry the discovered term and a caller-owned
+idempotency key. Observation, lookup, and status reads request a leader
+ReadIndex. The repository-local Go, Java, and Python `RegionalCacheClient`
+surfaces cover every command and every strict value kind; see
+[Regional Cache SDK](REGIONAL_CACHE_SDK.md) and
+[ADR-0019](adr/0019-regional-cache-v1-and-sdk-routing.md).
+
 ## Internal runtime API
 
 The Cache profile is opt-in and mutually exclusive with the opaque, Stream, and
@@ -76,7 +94,8 @@ read barrier. Through the regional resource/shard route, reads default to a
 safe leader ReadIndex and report exact barrier term/read/applied indexes.
 Callers must explicitly request
 `x-epoch-read-consistency: local_stale` to retain the direct behavior. The
-internal listener is unauthenticated and has no SDK compatibility commitment.
+internal listener is unauthenticated and has no SDK compatibility commitment;
+the regional v1 boundary above owns the application-facing alpha contract.
 
 ## Command operations
 
@@ -266,10 +285,11 @@ make test-cache-tablet
 cargo clippy --locked -p epoch-cache -p epoch-tablet -p epoch-node --all-targets --all-features -- -D warnings
 ```
 
-This advances CACHE-006 and CACHE-007 to a tested internal fixed-voter slice. It
-does not complete either requirement: a concurrent history checker,
+This advances CACHE-001, CACHE-002, CACHE-004, CACHE-006, and CACHE-007 with a
+tested fixed-voter and three-language application slice. It does not complete
+the parent requirements: a concurrent history checker,
 follower-served linearizable reads, multi-shard routing, profile snapshots/compaction,
-authenticated transport, public APIs/SDKs, placement, and the exhaustive fault
+production identity/TLS, placement, and the exhaustive fault
 matrix remain required. The in-memory exact-replay map also retains one complete
 receipt per unique proposal without a retention window; large overwritten
 values can therefore outlive the current Cache entry. Bounded idempotency

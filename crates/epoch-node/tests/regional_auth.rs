@@ -19,6 +19,8 @@ const NATIVE_STREAM_ROUTE: &str = "/v1/organizations/{organization}/projects/{pr
 const NATIVE_STREAM_DATA: &str = "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/streams/{name}/shards/{shard}/{*operation}";
 const NATIVE_QUEUE_ROUTE: &str = "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/queues/{name}/shards/{shard}";
 const NATIVE_QUEUE_DATA: &str = "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/queues/{name}/shards/{shard}/{*operation}";
+const NATIVE_CACHE_ROUTE: &str = "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}";
+const NATIVE_CACHE_DATA: &str = "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}/{*operation}";
 
 fn protected_router() -> Router {
     let router = Router::new()
@@ -32,6 +34,8 @@ fn protected_router() -> Router {
         .route(NATIVE_STREAM_DATA, any(|| async { StatusCode::NO_CONTENT }))
         .route(NATIVE_QUEUE_ROUTE, any(|| async { StatusCode::NO_CONTENT }))
         .route(NATIVE_QUEUE_DATA, any(|| async { StatusCode::NO_CONTENT }))
+        .route(NATIVE_CACHE_ROUTE, any(|| async { StatusCode::NO_CONTENT }))
+        .route(NATIVE_CACHE_DATA, any(|| async { StatusCode::NO_CONTENT }))
         .route(TOPOLOGY_ROUTE, any(|| async { StatusCode::NO_CONTENT }));
     let policy = BootstrapPolicy::from_json(POLICY).unwrap();
     with_regional_auth(router, Arc::new(policy))
@@ -270,6 +274,63 @@ async fn native_queue_v1_uses_the_same_fail_closed_scope_and_data_actions() {
             Method::GET,
             &format!("{route}/counts"),
             Some("epoch-dev-control-v1")
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn native_cache_v1_uses_the_same_fail_closed_scope_and_data_actions() {
+    let router = protected_router();
+    let route = "/v1/organizations/acme/projects/payments/environments/production/namespaces/orders/caches/sessions/shards/0";
+
+    assert_eq!(
+        call(router.clone(), Method::GET, route, None)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(
+            router.clone(),
+            Method::GET,
+            route,
+            Some("epoch-dev-reader-v1")
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        call(
+            router.clone(),
+            Method::GET,
+            &format!("{route}/observations?key=session-1"),
+            Some("epoch-dev-reader-v1")
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        call(
+            router.clone(),
+            Method::POST,
+            &format!("{route}/mutations"),
+            Some("epoch-dev-reader-v1")
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(
+            router,
+            Method::GET,
+            "/v1/organizations/otherco/projects/payments/environments/production/namespaces/orders/caches/sessions/shards/0/status",
+            Some("epoch-dev-reader-v1")
         )
         .await
         .status(),

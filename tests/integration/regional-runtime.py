@@ -826,6 +826,215 @@ def queue_result(document: dict[str, Any], expected_kind: str) -> dict[str, Any]
     return result
 
 
+def cache_result(document: dict[str, Any], expected_kind: str) -> dict[str, Any]:
+    receipt = document.get("receipt")
+    assert isinstance(receipt, dict), document
+    outcome = receipt.get("outcome")
+    assert isinstance(outcome, dict) and outcome.get("status") == "applied", document
+    result = outcome.get("result")
+    assert isinstance(result, dict) and result.get("kind") == expected_kind, document
+    return result
+
+
+def prove_python_sdk_native_cache_after_failover(
+    cluster: RegionalCluster,
+    resource: Resource,
+) -> None:
+    sdk_source = str(REPO_ROOT / "sdk/python/src")
+    if sdk_source not in sys.path:
+        sys.path.insert(0, sdk_source)
+    epoch_sdk = importlib.import_module("epoch_sdk")
+    client = epoch_sdk.RegionalCacheClient(
+        [f"http://127.0.0.1:{cluster.http_ports[node]}" for node in NODES],
+        token=ADMIN_TOKEN,
+        scope=epoch_sdk.RegionalScope("acme", "shop", "dev", "core"),
+        timeout=2.0,
+    )
+
+    initial = client.observe(resource.name, 0, "session-1")
+    assert initial.get("read_consistency") == "linearizable", initial
+    item = initial.get("observation", {}).get("item")
+    assert isinstance(item, dict), initial
+    assert item.get("value") == {"kind": "string", "value": "ready"}, initial
+    assert item.get("version") == "1", initial
+
+    set_profile = client.set(
+        resource.name,
+        0,
+        "python-cache-set-profile-2",
+        "profile",
+        epoch_sdk.RegionalCacheValue.string("v2"),
+    )
+    cache_result(set_profile, "set")
+    replayed = client.set(
+        resource.name,
+        0,
+        "python-cache-set-profile-2",
+        "profile",
+        epoch_sdk.RegionalCacheValue.string("v2"),
+    )
+    assert replayed.get("receipt", {}).get("disposition") == "replayed", replayed
+
+    cache_result(
+        client.compare_and_set(
+            resource.name,
+            0,
+            "python-cache-cas-session-1",
+            "session-1",
+            epoch_sdk.RegionalCacheExpectation.version(1),
+            epoch_sdk.RegionalCacheValue.blob(b"ready-v2"),
+        ),
+        "compared_and_set",
+    )
+    incremented = cache_result(
+        client.increment(
+            resource.name,
+            0,
+            "python-cache-increment-visits",
+            "visits",
+            2,
+            expected_version=0,
+        ),
+        "incremented",
+    )
+    assert incremented.get("value") == "2", incremented
+
+    committed = cache_result(
+        client.transaction(
+            resource.name,
+            0,
+            "python-cache-values-transaction",
+            4,
+            [
+                epoch_sdk.RegionalCacheMutation.set(
+                    "typed-string", epoch_sdk.RegionalCacheValue.string("value")
+                ),
+                epoch_sdk.RegionalCacheMutation.set(
+                    "typed-blob", epoch_sdk.RegionalCacheValue.blob(b"\x00\xff")
+                ),
+                epoch_sdk.RegionalCacheMutation.set(
+                    "typed-counter", epoch_sdk.RegionalCacheValue.counter(-7)
+                ),
+                epoch_sdk.RegionalCacheMutation.set(
+                    "typed-hash", epoch_sdk.RegionalCacheValue.hash({"role": "admin"})
+                ),
+                epoch_sdk.RegionalCacheMutation.set(
+                    "typed-list", epoch_sdk.RegionalCacheValue.list(["a", "b"])
+                ),
+                epoch_sdk.RegionalCacheMutation.set(
+                    "typed-set", epoch_sdk.RegionalCacheValue.set(["a", "b"])
+                ),
+                epoch_sdk.RegionalCacheMutation.set(
+                    "typed-ranked",
+                    epoch_sdk.RegionalCacheValue.sorted_set({"alice": 1.5}),
+                ),
+            ],
+        ),
+        "transaction_committed",
+    )
+    assert committed.get("revision") == "5", committed
+    assert len(committed.get("results", [])) == 7, committed
+
+    acquired = cache_result(
+        client.acquire_lock(
+            resource.name,
+            0,
+            "python-cache-acquire-critical",
+            "critical",
+            "python-worker",
+            1,
+            60_000,
+        ),
+        "lock_acquired",
+    )
+    lease_token = acquired.get("lease_token")
+    assert isinstance(lease_token, str) and lease_token, acquired
+    guard = epoch_sdk.RegionalCacheLockGuard(
+        "critical", "python-worker", 1, lease_token
+    )
+    guarded_set = cache_result(
+        client.set(
+            resource.name,
+            0,
+            "python-cache-guarded-set",
+            "protected",
+            epoch_sdk.RegionalCacheValue.string("owned"),
+            lock_guard=guard,
+        ),
+        "set",
+    )
+    protected_version = int(guarded_set["item"]["version"])
+
+    renewed = cache_result(
+        client.renew_lock(
+            resource.name,
+            0,
+            "python-cache-renew-critical",
+            "critical",
+            "python-worker",
+            1,
+            lease_token,
+            60_000,
+        ),
+        "lock_renewed",
+    )
+    renewed_token = renewed.get("lease_token")
+    assert isinstance(renewed_token, str) and renewed_token != lease_token, renewed
+    assert renewed.get("fencing_token") == acquired.get("fencing_token"), renewed
+    renewed_guard = epoch_sdk.RegionalCacheLockGuard(
+        "critical", "python-worker", 1, renewed_token
+    )
+    cache_result(
+        client.delete(
+            resource.name,
+            0,
+            "python-cache-guarded-delete",
+            "protected",
+            expected_version=protected_version,
+            lock_guard=renewed_guard,
+        ),
+        "deleted",
+    )
+    cache_result(
+        client.release_lock(
+            resource.name,
+            0,
+            "python-cache-release-critical",
+            "critical",
+            "python-worker",
+            1,
+            renewed_token,
+        ),
+        "lock_released",
+    )
+
+    cache_result(
+        client.set(
+            resource.name,
+            0,
+            "python-cache-set-ephemeral",
+            "ephemeral",
+            epoch_sdk.RegionalCacheValue.string("short"),
+            ttl_ms=1,
+        ),
+        "set",
+    )
+    time.sleep(0.02)
+    maintained = cache_result(
+        client.maintain(
+            resource.name,
+            0,
+            "python-cache-maintain-expiry",
+            max_expirations=100,
+        ),
+        "maintained",
+    )
+    assert "ephemeral" in maintained.get("expired_keys", []), maintained
+    final = client.observe(resource.name, 0, "ephemeral")
+    assert final.get("read_consistency") == "linearizable", final
+    assert final.get("observation", {}).get("item") is None, final
+
+
 def prove_python_sdk_native_queue_after_failover(
     cluster: RegionalCluster,
     resource: Resource,
@@ -1031,6 +1240,21 @@ def run_campaign(cluster: RegionalCluster) -> None:
     wait_for_nodes(cluster)
     wait_for_profile_apply(cluster, queue, 11)
 
+    cache = next(resource for resource in RESOURCES if resource.kind == "cache")
+    cache_old_leader, cache_old_term = wait_for_routes(cluster, cache)
+    cluster.stop_node(cache_old_leader)
+    cache_survivors = tuple(node for node in NODES if node != cache_old_leader)
+    cache_new_leader, cache_new_term = wait_for_routes(
+        cluster, cache, cache_survivors
+    )
+    assert cache_new_leader != cache_old_leader
+    assert cache_new_term > cache_old_term
+    prove_python_sdk_native_cache_after_failover(cluster, cache)
+    wait_for_profile_apply(cluster, cache, 12, cache_survivors)
+    cluster.start_node(cache_old_leader)
+    wait_for_nodes(cluster)
+    wait_for_profile_apply(cluster, cache, 12)
+
     cluster.crash_all()
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "pending", 0)
     cluster.restart_all()
@@ -1039,7 +1263,8 @@ def run_campaign(cluster: RegionalCluster) -> None:
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
     wait_for_profile_apply(cluster, stream, 3)
     for resource in RESOURCES:
-        wait_for_profile_apply(cluster, resource, 11 if resource == queue else 1)
+        expected = 11 if resource == queue else 12 if resource == cache else 1
+        wait_for_profile_apply(cluster, resource, expected)
 
 
 def main() -> int:
@@ -1056,7 +1281,7 @@ def main() -> int:
     if not failed:
         print(
             "Epoch Go-to-Rust regional catalog/BFF/four-profile/failover/"
-            "Stream-and-Queue-SDK/control-SIGKILL/all-node recovery container campaign passed."
+            "Stream-Queue-and-Cache-SDK/control-SIGKILL/all-node recovery container campaign passed."
         )
     return 0
 

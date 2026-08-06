@@ -236,7 +236,7 @@ fn native_resource_request(path: &str) -> Result<Option<NativeResourceRequest>, 
         || segments[1] != "projects"
         || segments[3] != "environments"
         || segments[5] != "namespaces"
-        || !matches!(segments[7], "streams" | "queues")
+        || !matches!(segments[7], "streams" | "queues" | "caches")
         || segments[9] != "shards"
         || segments[10].parse::<u32>().is_err()
         || (segments.len() > 11 && segments[11..].iter().any(|segment| segment.is_empty()))
@@ -357,6 +357,7 @@ mod tests {
 
     const STREAM_ROUTE: &str = "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/streams/orders/shards/0";
     const QUEUE_ROUTE: &str = "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/queues/jobs/shards/0";
+    const CACHE_ROUTE: &str = "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/caches/sessions/shards/0";
 
     #[test]
     fn native_stream_routes_use_data_actions_only_after_the_shard_boundary() {
@@ -416,6 +417,26 @@ mod tests {
         );
         assert_eq!(
             scope_for_path(&format!("{QUEUE_ROUTE}/consumers/worker-a/flow")).unwrap(),
+            ResourceScope::new("acme", "shop", "dev", "core")
+        );
+    }
+
+    #[test]
+    fn native_cache_routes_use_the_same_scope_and_data_action_boundary() {
+        assert_eq!(
+            action_for_request(&Method::GET, CACHE_ROUTE),
+            Action::RouteRead
+        );
+        assert_eq!(
+            action_for_request(&Method::GET, &format!("{CACHE_ROUTE}/observations")),
+            Action::DataRead
+        );
+        assert_eq!(
+            action_for_request(&Method::POST, &format!("{CACHE_ROUTE}/mutations")),
+            Action::DataWrite
+        );
+        assert_eq!(
+            scope_for_path(&format!("{CACHE_ROUTE}/observations")).unwrap(),
             ResourceScope::new("acme", "shop", "dev", "core")
         );
     }

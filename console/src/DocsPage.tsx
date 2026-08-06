@@ -9,6 +9,9 @@ import regionalPythonSource from "./quickstarts/regional/quickstart.py?raw";
 import regionalQueueGoSource from "./quickstarts/regional_queue/quickstart.go?raw";
 import regionalQueueJavaSource from "./quickstarts/regional_queue/RegionalQueueQuickstart.java?raw";
 import regionalQueuePythonSource from "./quickstarts/regional_queue/quickstart.py?raw";
+import regionalCacheGoSource from "./quickstarts/regional_cache/quickstart.go?raw";
+import regionalCacheJavaSource from "./quickstarts/regional_cache/RegionalCacheQuickstart.java?raw";
+import regionalCachePythonSource from "./quickstarts/regional_cache/quickstart.py?raw";
 
 const repositoryUrl = "https://github.com/Ripan-Roy/epoch";
 const repositoryDocsUrl = `${repositoryUrl}/blob/main/docs`;
@@ -72,6 +75,23 @@ curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
     "resource":{
       "organization":"acme","project":"shop","environment":"dev","namespace":"core",
       "kind":"queue","name":"jobs",
+      "spec":{"shard_count":1,"replica_count":3,"placement":{
+        "allowed_regions":["ap-south"],"minimum_zones":3,
+        "required_node_class":"general-purpose"
+      }}
+    }
+  }'`;
+
+const regionalCacheResource = `# Terminal C · create one replicated Cache
+curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
+  --header 'authorization: Bearer epoch-dev-admin-v1' \
+  --header 'content-type: application/json' \
+  --data '{
+    "request_token":"docs-create-sessions-v1",
+    "expected_generation":0,
+    "resource":{
+      "organization":"acme","project":"shop","environment":"dev","namespace":"core",
+      "kind":"cache","name":"sessions",
       "spec":{"shard_count":1,"replica_count":3,"placement":{
         "allowed_regions":["ap-south"],"minimum_zones":3,
         "required_node_class":"general-purpose"
@@ -197,6 +217,35 @@ python -m pip install -e ./sdk/python`,
   },
 };
 
+const regionalCacheLanguageGuides: typeof regionalLanguageGuides = {
+  go: {
+    filename: "quickstart.go",
+    source: regionalCacheGoSource,
+    setup: "# Uses the repository-local Go module; no separate install is required.",
+    run: "go run ./console/src/quickstarts/regional_cache/quickstart.go",
+  },
+  java: {
+    filename: "RegionalCacheQuickstart.java",
+    source: regionalCacheJavaSource,
+    setup: `cd sdk/java
+./mvnw -q -DskipTests package dependency:build-classpath \
+  -Dmdep.outputFile=target/runtime-classpath.txt
+export EPOCH_JAVA_CP="target/classes:$(cat target/runtime-classpath.txt)"
+javac -cp "$EPOCH_JAVA_CP" ../../console/src/quickstarts/regional_cache/RegionalCacheQuickstart.java \
+  -d target/regional-cache-docs-classes`,
+    run: `cd sdk/java
+java -cp "target/regional-cache-docs-classes:$EPOCH_JAVA_CP" RegionalCacheQuickstart`,
+  },
+  python: {
+    filename: "quickstart.py",
+    source: regionalCachePythonSource,
+    setup: `python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ./sdk/python`,
+    run: "python console/src/quickstarts/regional_cache/quickstart.py",
+  },
+};
+
 const sdkSurface = [
   {
     area: "Connection",
@@ -236,6 +285,13 @@ const sdkSurface = [
       "RegionalQueueClient · enqueue · acquire · extend_lease · acknowledge · release · nack · reject · redrive · maintain · counts · consumer_flow",
   },
   {
+    area: "Regional Cache",
+    go: "RegionalCacheClient · Set · Delete · CompareAndSet · Increment · Transaction · AcquireLock · RenewLock · ReleaseLock · Maintain · Observe",
+    java: "RegionalCacheClient · set · delete · compareAndSet · increment · transaction · acquireLock · renewLock · releaseLock · maintain · observe",
+    python:
+      "RegionalCacheClient · set · delete · compare_and_set · increment · transaction · acquire_lock · renew_lock · release_lock · maintain · observe",
+  },
+  {
     area: "Queue",
     go: "CreateQueue · Send · Receive · Acknowledge · Release · Reject · ExtendLease · QueueCounts · Redrive",
     java: "createQueue · send · receive · acknowledge · release · reject · extendLease · queueCounts · redrive",
@@ -261,6 +317,7 @@ type DocsSectionId =
   | "cluster-milestone"
   | "regional-stream"
   | "regional-queue"
+  | "regional-cache"
   | "sdk-reference"
   | "reference";
 
@@ -292,6 +349,7 @@ const docsNavigation: ReadonlyArray<DocsNavigationGroup> = [
     items: [
       { id: "regional-stream", label: "Regional Stream SDK" },
       { id: "regional-queue", label: "Regional Queue SDK" },
+      { id: "regional-cache", label: "Regional Cache SDK" },
       { id: "sdk-reference", label: "SDK reference" },
       { id: "reference", label: "Design reference" },
     ],
@@ -310,6 +368,7 @@ export function DocsPage({ section }: DocsPageProps) {
   const guide = languageGuides.find((candidate) => candidate.id === language) ?? languageGuides[0];
   const regionalGuide = regionalLanguageGuides[language];
   const regionalQueueGuide = regionalQueueLanguageGuides[language];
+  const regionalCacheGuide = regionalCacheLanguageGuides[language];
 
   useEffect(() => {
     navigateToSection(section);
@@ -713,11 +772,12 @@ export function DocsPage({ section }: DocsPageProps) {
                     conflicting member across failover and EPRS rebuild. These are experimental HTTP/tablet
                     slices, not yet coordinated join, heartbeat, assignment, rebalance, native bidirectional
                     streaming, automatic client batching, or compression negotiation. The separate regional
-                    Stream and Queue v1 clients below expose the implemented partition-0 operations with
-                    leader/fence-aware Go, Java, and Python routing. Stream remains uncoordinated; Queue
-                    receive is request/response rather than a managed streaming session. Managed HTTP/gRPC and
-                    regional HTTP require a shared deny-by-default bootstrap bearer policy, but that is not
-                    OIDC, TLS/mTLS, credential expiry/revocation, or immutable audit export.
+                    Stream, Queue, and Cache v1 clients below expose the implemented partition-0/shard-0
+                    operations with leader/fence-aware Go, Java, and Python routing. Stream remains
+                    uncoordinated; Queue receive is request/response rather than a managed streaming session;
+                    Cache expiry is explicit and single-shard. Managed HTTP/gRPC and regional HTTP require a
+                    shared deny-by-default bootstrap bearer policy, but that is not OIDC, TLS/mTLS, credential
+                    expiry/revocation, or immutable audit export.
                   </p>
                 </div>
               </div>
@@ -745,6 +805,14 @@ export function DocsPage({ section }: DocsPageProps) {
                     The real Python client preserves <code>docs-python-redrive-v1</code>, route fences, and
                     opaque lease tokens while the Docker campaign kills the Queue leader and later reopens
                     every voter from the same volumes.
+                  </p>
+                </article>
+                <article>
+                  <span>CACHE SDK RECOVERY</span>
+                  <strong>Typed values, CAS, transaction, fencing, and expiry survive leader loss.</strong>
+                  <p>
+                    The Python client executes the complete shard-0 lifecycle after Cache leadership changes,
+                    then the old voter catches up and all three reopen the same committed state.
                   </p>
                 </article>
                 <article>
@@ -1018,21 +1086,133 @@ export function DocsPage({ section }: DocsPageProps) {
             </section>
 
             <section
+              id="regional-cache"
+              className="docs-section"
+              aria-labelledby="regional-cache-title"
+              tabIndex={-1}
+            >
+              <div className="docs-section__heading">
+                <span>07</span>
+                <div>
+                  <p className="eyebrow">VERSIONED REGIONAL CACHE V1</p>
+                  <h2 id="regional-cache-title">CAS, transaction, fencing, expiry, and recovery.</h2>
+                  <p>
+                    Regional Cache SDK calls target the existing replicated Cache tablet. Discovery chooses
+                    the writable Rust leader; every data request carries generation and tablet-epoch fences,
+                    every mutation preserves caller-owned identity, and observations wait for a quorum-backed
+                    leader barrier.
+                  </p>
+                </div>
+              </div>
+
+              <div className="guide-intro">
+                <span className="step-badge">A</span>
+                <div>
+                  <h3>Start the voters and provision the Cache</h3>
+                  <p>
+                    Reuse the disposable three-zone topology and development credentials. The Go bridge
+                    provisions <code>sessions</code>; application data then travels directly to the discovered
+                    Rust Cache leader.
+                  </p>
+                </div>
+              </div>
+              <CodeBlock label="Terminal A · regional nodes" value={regionalNodes} />
+              <CodeBlock label="Terminal B · managed bridge" value={regionalControl} />
+              <CodeBlock label="Terminal C · provision" value={regionalCacheResource} />
+
+              <div className="language-picker">
+                <div>
+                  <p className="eyebrow">CHOOSE YOUR REGIONAL CACHE SDK</p>
+                  <h3>One strict value and fencing contract in three ecosystems.</h3>
+                </div>
+                <div className="language-tabs" role="tablist" aria-label="Regional Cache language">
+                  {languageGuides.map((candidate) => (
+                    <button
+                      key={candidate.id}
+                      id={`regional-cache-language-tab-${candidate.id}`}
+                      type="button"
+                      role="tab"
+                      aria-selected={language === candidate.id}
+                      aria-controls={`regional-cache-language-panel-${candidate.id}`}
+                      tabIndex={language === candidate.id ? 0 : -1}
+                      onClick={() => setLanguage(candidate.id)}
+                      onKeyDown={(event) =>
+                        handleLanguageKey(event, candidate.id, "regional-cache-language-tab")
+                      }
+                    >
+                      <span>{candidate.label}</span>
+                      <small>{candidate.version}</small>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div
+                id={`regional-cache-language-panel-${language}`}
+                className="language-panel"
+                role="tabpanel"
+                aria-labelledby={`regional-cache-language-tab-${language}`}
+              >
+                <CodeBlock label={`${guide.label} · setup`} value={regionalCacheGuide.setup} />
+                <CodeBlock label={regionalCacheGuide.filename} value={regionalCacheGuide.source} tall />
+                <CodeBlock label="Terminal C · run" value={regionalCacheGuide.run} />
+              </div>
+
+              <div className="sdk-notes" aria-label="Regional Cache SDK guarantees">
+                <article>
+                  <span>STRICT VALUES</span>
+                  <strong>Seven kinds, one canonical wire contract.</strong>
+                  <p>
+                    Typed constructors cover string, blob, signed counter, hash, list, unique set, and finite
+                    sorted set. Invalid members, scores, integers, and transaction bounds fail before
+                    discovery.
+                  </p>
+                </article>
+                <article>
+                  <span>ATOMICITY &amp; FENCING</span>
+                  <strong>Revision checks and lock guards survive leader loss.</strong>
+                  <p>
+                    CAS distinguishes exact version from missing-at-revision. Transactions commit one
+                    revision, while guarded writes require the newest opaque lease token and expose a
+                    downstream fence.
+                  </p>
+                </article>
+                <article>
+                  <span>DETERMINISTIC EXPIRY</span>
+                  <strong>Reads stay pure; maintenance is a replicated command.</strong>
+                  <p>
+                    TTL never causes a hidden read mutation. Submit bounded maintenance to reclaim due keys
+                    and locks; observation, lookup, and status explicitly request <code>linearizable</code>.
+                  </p>
+                </article>
+              </div>
+
+              <aside className="docs-access-note">
+                <strong>Current boundary</strong>
+                <span>
+                  Regional Cache v1 is a repository-local, single-shard alpha. Background active expiry,
+                  eviction families, multi-shard transactions, snapshots, Pub/Sub, generated response models,
+                  and public package-registry releases remain open.
+                </span>
+              </aside>
+            </section>
+
+            <section
               id="sdk-reference"
               className="docs-section"
               aria-labelledby="sdk-reference-title"
               tabIndex={-1}
             >
               <div className="docs-section__heading">
-                <span>07</span>
+                <span>08</span>
                 <div>
                   <p className="eyebrow">STANDALONE ALPHA SURFACE</p>
                   <h2 id="sdk-reference-title">The same operation, native to each ecosystem.</h2>
                   <p>
                     All implemented standalone profile operations have Go, Java, and Python entry points. The
-                    versioned regional Stream and Queue clients above are intentionally separate because they
-                    add authentication, route discovery, fencing, and bounded idempotent rediscovery.
-                    Responses remain dynamic documents in this alpha.
+                    versioned regional Stream, Queue, and Cache clients above are intentionally separate
+                    because they add authentication, route discovery, fencing, and bounded idempotent
+                    rediscovery. Responses remain dynamic documents in this alpha.
                   </p>
                 </div>
               </div>
@@ -1091,8 +1271,8 @@ export function DocsPage({ section }: DocsPageProps) {
                   <p>
                     Client-side checks improve feedback but do not replace server validation. Go also accepts
                     a context for per-call cancellation and deadlines. Standalone helpers keep their local
-                    contract; <code>RegionalStreamClient</code> and <code>RegionalQueueClient</code> are the
-                    explicit replicated alternatives.
+                    contract; <code>RegionalStreamClient</code>, <code>RegionalQueueClient</code>, and
+                    <code>RegionalCacheClient</code> are the explicit replicated alternatives.
                   </p>
                 </article>
               </div>
@@ -1100,7 +1280,7 @@ export function DocsPage({ section }: DocsPageProps) {
 
             <section id="reference" className="docs-section" aria-labelledby="reference-title" tabIndex={-1}>
               <div className="docs-section__heading">
-                <span>08</span>
+                <span>09</span>
                 <div>
                   <p className="eyebrow">SOURCE OF TRUTH</p>
                   <h2 id="reference-title">Go deeper without losing the boundary.</h2>
@@ -1143,6 +1323,12 @@ export function DocsPage({ section }: DocsPageProps) {
                   title="Regional Queue SDK"
                   description="Complete Queue lifecycle, leader discovery, generation/tablet fencing, exact mutation replay, linearizable reads, and three-language examples."
                   href={`${repositoryDocsUrl}/REGIONAL_QUEUE_SDK.md`}
+                />
+                <ReferenceCard
+                  eyebrow="SDK CONTRACT"
+                  title="Regional Cache SDK"
+                  description="Strict values, CAS, atomic transaction, fenced locks, explicit expiry, leader discovery, exact retry, and three-language examples."
+                  href={`${repositoryDocsUrl}/REGIONAL_CACHE_SDK.md`}
                 />
                 <ReferenceCard
                   eyebrow="REGIONAL RUNTIME"
@@ -1191,6 +1377,12 @@ export function DocsPage({ section }: DocsPageProps) {
                   title="Regional Queue routing decision"
                   description="Native v1 route shape, shared discovery and retry contract, lease-token handling, authorization, recovery evidence, and explicit alpha boundaries."
                   href={`${repositoryDocsUrl}/adr/0018-regional-queue-v1-and-sdk-routing.md`}
+                />
+                <ReferenceCard
+                  eyebrow="CACHE DESIGN"
+                  title="Regional Cache routing decision"
+                  description="Native v1 route shape, strict values and mutations, CAS/transaction/expiry/lock semantics, shared retry contract, and alpha boundaries."
+                  href={`${repositoryDocsUrl}/adr/0019-regional-cache-v1-and-sdk-routing.md`}
                 />
                 <ReferenceCard
                   eyebrow="CACHE TABLET"

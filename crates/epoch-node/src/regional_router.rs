@@ -30,6 +30,8 @@ pub const REGIONAL_STREAM_ROUTE_PATH: &str = "/v1/organizations/{organization}/p
 pub const REGIONAL_STREAM_DATA_PATH: &str = "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/streams/{name}/shards/{shard}/{*operation}";
 pub const REGIONAL_QUEUE_ROUTE_PATH: &str = "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/queues/{name}/shards/{shard}";
 pub const REGIONAL_QUEUE_DATA_PATH: &str = "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/queues/{name}/shards/{shard}/{*operation}";
+pub const REGIONAL_CACHE_ROUTE_PATH: &str = "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}";
+pub const REGIONAL_CACHE_DATA_PATH: &str = "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}/{*operation}";
 pub const RESOURCE_GENERATION_HEADER: &str = "x-epoch-resource-generation";
 pub const TABLET_EPOCH_HEADER: &str = "x-epoch-tablet-epoch";
 pub const READ_CONSISTENCY_HEADER: &str = "x-epoch-read-consistency";
@@ -108,6 +110,27 @@ struct RegionalQueueDataPath {
     operation: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct RegionalCachePath {
+    organization: String,
+    project: String,
+    environment: String,
+    namespace: String,
+    name: String,
+    shard: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RegionalCacheDataPath {
+    organization: String,
+    project: String,
+    environment: String,
+    namespace: String,
+    name: String,
+    shard: String,
+    operation: String,
+}
+
 impl RegionalStreamPath {
     fn regional_path(&self) -> RegionalResourcePath {
         RegionalResourcePath {
@@ -159,6 +182,35 @@ impl RegionalQueueDataPath {
             environment: self.environment.clone(),
             namespace: self.namespace.clone(),
             kind: "queue".into(),
+            name: self.name.clone(),
+            shard: self.shard.clone(),
+            operation: self.operation.clone(),
+        }
+    }
+}
+
+impl RegionalCachePath {
+    fn regional_path(&self) -> RegionalResourcePath {
+        RegionalResourcePath {
+            organization: self.organization.clone(),
+            project: self.project.clone(),
+            environment: self.environment.clone(),
+            namespace: self.namespace.clone(),
+            kind: "cache".into(),
+            name: self.name.clone(),
+            shard: self.shard.clone(),
+        }
+    }
+}
+
+impl RegionalCacheDataPath {
+    fn regional_path(&self) -> RegionalDataPath {
+        RegionalDataPath {
+            organization: self.organization.clone(),
+            project: self.project.clone(),
+            environment: self.environment.clone(),
+            namespace: self.namespace.clone(),
+            kind: "cache".into(),
             name: self.name.clone(),
             shard: self.shard.clone(),
             operation: self.operation.clone(),
@@ -393,6 +445,8 @@ pub fn regional_tablet_router_with_read_timeout(
         .route(REGIONAL_STREAM_DATA_PATH, any(dispatch_stream_data))
         .route(REGIONAL_QUEUE_ROUTE_PATH, get(resolve_queue_route))
         .route(REGIONAL_QUEUE_DATA_PATH, any(dispatch_queue_data))
+        .route(REGIONAL_CACHE_ROUTE_PATH, get(resolve_cache_route))
+        .route(REGIONAL_CACHE_DATA_PATH, any(dispatch_cache_data))
         .with_state(RegionalRouterState {
             directory,
             read_barrier_timeout,
@@ -426,6 +480,13 @@ async fn resolve_queue_route(
     resolve_route(State(state), Path(path.regional_path())).await
 }
 
+async fn resolve_cache_route(
+    State(state): State<RegionalRouterState>,
+    Path(path): Path<RegionalCachePath>,
+) -> Result<Json<RegionalRouteResponse>, RegionalRouterError> {
+    resolve_route(State(state), Path(path.regional_path())).await
+}
+
 async fn dispatch_data(
     State(state): State<RegionalRouterState>,
     Path(path): Path<RegionalDataPath>,
@@ -445,6 +506,14 @@ async fn dispatch_stream_data(
 async fn dispatch_queue_data(
     State(state): State<RegionalRouterState>,
     Path(path): Path<RegionalQueueDataPath>,
+    request: Request<Body>,
+) -> Result<Response, RegionalRouterError> {
+    dispatch_data_request(&state, &path.regional_path(), request).await
+}
+
+async fn dispatch_cache_data(
+    State(state): State<RegionalRouterState>,
+    Path(path): Path<RegionalCacheDataPath>,
     request: Request<Body>,
 ) -> Result<Response, RegionalRouterError> {
     dispatch_data_request(&state, &path.regional_path(), request).await
@@ -819,6 +888,18 @@ mod tests {
         .await
     }
 
+    async fn routed_cache(
+        directory: &TempDir,
+    ) -> (RegionalTabletMaterializer, Router, ResourceRecord) {
+        routed_resource(
+            directory,
+            ResourceKind::Cache,
+            "sessions",
+            WorkloadProfile::CacheAndState,
+        )
+        .await
+    }
+
     fn route_path() -> &'static str {
         "/experimental/v1/regional/resources/acme/shop/dev/core/stream/orders/shards/0"
     }
@@ -841,6 +922,14 @@ mod tests {
 
     fn native_queue_data_path(operation: &str) -> String {
         format!("{}/{operation}", native_queue_route_path())
+    }
+
+    fn native_cache_route_path() -> &'static str {
+        "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/caches/sessions/shards/0"
+    }
+
+    fn native_cache_data_path(operation: &str) -> String {
+        format!("{}/{operation}", native_cache_route_path())
     }
 
     async fn json(response: Response) -> Value {
@@ -1181,6 +1270,49 @@ mod tests {
             .unwrap();
         assert_eq!(counts.status(), StatusCode::OK);
         assert_eq!(json(counts).await["counts"]["ready"], "0");
+
+        materializer.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_cache_v1_routes_to_the_existing_cache_tablet() {
+        assert_eq!(
+            REGIONAL_CACHE_ROUTE_PATH,
+            "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}"
+        );
+        assert_eq!(
+            REGIONAL_CACHE_DATA_PATH,
+            "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}/{*operation}"
+        );
+
+        let data_directory = TempDir::new().expect("temp directory should be created");
+        let (mut materializer, router, _resource) = routed_cache(&data_directory).await;
+
+        let discovery = router
+            .clone()
+            .oneshot(
+                Request::get(native_cache_route_path())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(discovery.status(), StatusCode::OK);
+        assert_eq!(json(discovery).await["workload_profile"], "cache_and_state");
+
+        let observation = router
+            .oneshot(
+                Request::get(native_cache_data_path("observations?key=missing"))
+                    .header(RESOURCE_GENERATION_HEADER, "5")
+                    .header(TABLET_EPOCH_HEADER, "3")
+                    .header(READ_CONSISTENCY_HEADER, "local_stale")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(observation.status(), StatusCode::OK);
+        assert!(json(observation).await["observation"]["item"].is_null());
 
         materializer.shutdown().await.unwrap();
     }

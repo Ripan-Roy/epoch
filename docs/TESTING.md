@@ -266,7 +266,7 @@ Tests must always capture node configuration, logs, seed, process exit status,
 and relevant data manifests on failure. Payloads and credentials are redacted.
 
 The current fast integration smoke starts real Rust and Go processes, exercises
-all four profile APIs through the Python SDK, validates the Go and Java SDKs
+all four standalone profile APIs through the Python SDK, validates the Go and Java SDKs
 against the same node, restarts the Rust process, proves local-durable Stream
 and Queue state survived, and proves volatile resources did not. The node HTTP
 suite forces a small segment threshold, verifies physical rotation, restarts,
@@ -394,7 +394,7 @@ only `job-1001`, kills the node with `SIGKILL`, restarts from the same bytes,
 and proves that the Stream record, acknowledgement count, and only `job-1002`
 survived. The GitHub Pages deploy job depends on this lifecycle test as well as
 the documentation-only frontend build. The same script compiles the exact
-displayed regional Stream and Queue Go and Java programs and Python bytecode
+displayed regional Stream, Queue, and Cache Go and Java programs and Python bytecode
 against the current repository-local SDKs; the real regional Python executions remain in
 `test-regional-runtime`. Pull-request runs execute both gates but cannot upload
 or deploy Pages; publication is restricted to `main`.

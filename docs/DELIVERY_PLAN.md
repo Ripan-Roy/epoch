@@ -16,10 +16,11 @@ The active M1/M2 boundary is the regional multi-tablet feature. Protected
 `main` evidence now covers the consensus-backed catalog, durable hosted control,
 bootstrap authorization, topology admission, quorum-confirmed leader ReadIndex
 barriers, Queue credit flow, Stream batches and consumer checkpoints, and the
-regional Stream v1 SDK. The current feature exposes the existing replicated
-Queue tablet through the same authenticated, fenced regional route and shared
-Go, Java, and Python discovery/retry contract. Local evidence includes a real
-Python Queue lifecycle after leader loss and same-volume all-node recovery.
+regional Stream and Queue v1 SDKs. The current feature exposes the existing
+replicated Cache tablet through the same authenticated, fenced regional route
+and shared Go, Java, and Python discovery/retry contract. Local evidence
+includes a real Python Cache lifecycle after leader loss and same-volume
+all-node recovery.
 Replicated multi-instance hosted metadata, production identity, follower
 routing, dynamic membership/voter selection, repair/rebalance, and the broader
 M2 profile/security/performance gates remain open.
@@ -205,19 +206,25 @@ durability evidence. See [Regional Queue SDK](REGIONAL_QUEUE_SDK.md),
 [ADR-0018](adr/0018-regional-queue-v1-and-sdk-routing.md), and
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
-The Cache application work now has a bounded deterministic tablet runtime. A
+The Cache application work now has a bounded deterministic tablet runtime and
+versioned regional application boundary. A
 sorted `CacheShard` provides a pure read path, checked
 non-repeating revision/version allocation, bounded staged transactions, checked
 counters and TTLs, no-eviction capacity, and ordered expiry. Its typed tablet
 adds absent-state ABA fencing, advisory composite lock fences, canonical
 committed outcomes, exact replay, time normalization, and convergence digests.
-`epoch-node` mounts it as an opt-in mutually exclusive profile, rejects stale
-term admission, rebuilds from EPRS before readiness, and exposes only strict
-internal mutation and stale-capable local-observation routes. Real-runtime and
-container gates exercise failover, catch-up, fenced locks, convergence, and
-all-node recovery. Concurrent history checking, public routing/SDKs,
-linearizable reads, profile snapshots/compaction, and production durability
-evidence remain open. See [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
+`epoch-node` mounts it as an opt-in profile, rejects stale-term admission,
+rebuilds from EPRS before readiness, and exposes the authenticated Cache v1
+route with leader ReadIndex observations. Repository-local Go, Java, and Python
+clients cover all seven values, set/delete/CAS/increment, atomic transaction,
+fenced locks, explicit expiry, lookup, observation, and status with exact retry.
+Real-runtime and container gates exercise the Python client after leader loss,
+catch-up, convergence, and all-node recovery. Concurrent history checking,
+multi-shard routing, background expiry, eviction, profile snapshots/compaction,
+and production durability evidence remain open. See
+[Regional Cache SDK](REGIONAL_CACHE_SDK.md),
+[ADR-0019](adr/0019-regional-cache-v1-and-sdk-routing.md), and
+[Experimental Replicated Cache Tablet](CACHE_TABLET.md).
 
 The Event Bus application work now runs behind the same actor-owned persistent
 boundary. Strict internal routes cover subscription mutation, publish ingress,

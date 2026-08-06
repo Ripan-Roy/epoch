@@ -57,6 +57,13 @@ DLQ/redrive history, redrive, counts, flow, mutation lookup, and status. See the
 [complete Queue example](../../console/src/quickstarts/regional_queue/quickstart.go)
 and [Queue contract guide](../../docs/REGIONAL_QUEUE_SDK.md).
 
+`RegionalCacheClient` exposes strict string/blob/counter/hash/list/set/sorted-set
+values, set/delete/CAS/increment, bounded transactions, fenced lock lifecycle,
+explicit expiry maintenance, mutation lookup, observation, and status over the
+same regional core. See the
+[complete Cache example](../../console/src/quickstarts/regional_cache/quickstart.go)
+and [Cache contract guide](../../docs/REGIONAL_CACHE_SDK.md).
+
 The provisional module path is not a publishable compatibility promise. Native
 gRPC streaming, coordinated consumer sessions, generated response types, and
 package publication remain future work.

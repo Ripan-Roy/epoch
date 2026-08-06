@@ -269,18 +269,21 @@ leader confirms a majority and the actor applies the local typed profile
 through the returned index before dispatch. An explicit `local_stale` request
 keeps the direct stale-capable behavior; there is no silent downgrade.
 
-The application-facing Stream and Queue adapters are fully qualified beneath
-`/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/{streams|queues}/{name}/shards/{shard}`.
+The application-facing Stream, Queue, and Cache adapters are fully qualified beneath
+`/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/{streams|queues|caches}/{name}/shards/{shard}`.
 They delegate to the same materialized tablets and never proxy through Go.
 Go, Java, and Python clients share a private leader-discovery/fencing core,
 authenticate, copy resource-generation/tablet-epoch fences, preserve explicit
 mutation idempotency keys across one bounded rediscovery, and request
 linearizable reads. Queue exposes its complete implemented lifecycle: enqueue,
 credit acquire, all lease dispositions, maintenance, histories, redrive,
-counts, flow, mutation lookup, and status. The generic regional and direct
+counts, flow, mutation lookup, and status. Cache exposes every strict value
+kind, set/delete/CAS/increment, atomic transactions, fenced locks, explicit
+expiry, observation, mutation lookup, and status. The generic regional and direct
 tablet routes remain internal verification surfaces. See
-[ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md) and
-[ADR-0018](adr/0018-regional-queue-v1-and-sdk-routing.md).
+[ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md),
+[ADR-0018](adr/0018-regional-queue-v1-and-sdk-routing.md), and
+[ADR-0019](adr/0019-regional-cache-v1-and-sdk-routing.md).
 
 The current placement remains fixed at three configured voters, but it is now
 topology-aware at admission. Every Rust node reports its authenticated
@@ -494,6 +497,13 @@ a leadership change. New writes carry `expected_term`, which the consensus actor
 checks atomically with leader role immediately before proposal; this is a write
 admission fence, not a linearizable read barrier. Profile snapshots, compaction,
 multi-shard routing, and the full concurrency history remain open.
+
+The regional Cache v1 adapter delegates directly to this tablet. SDK reads
+always request a leader ReadIndex; mutations carry discovered generation,
+tablet epoch, term, and a caller-owned idempotency key. The Go, Java, and Python
+clients validate typed values, transaction bounds, owner epochs, opaque lease
+tokens, and maintenance limits before discovery. They do not add another cache
+state machine or turn the fixed-voter alpha into a production durability claim.
 
 ### 8.4 Event Bus
 
