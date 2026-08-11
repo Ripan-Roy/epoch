@@ -16,12 +16,15 @@ The runnable node supports volatile resources for all four profiles and an
 explicit `local_durable` mode for Streams and Work Queues. Durable Stream
 records/offsets and Queue messages/leases/settlements are fsynced into a
 checksummed, rotating, single-node journal and replayed on restart. This is not
-replication, a snapshot/compaction system, or protection from total machine
-loss.
+replication, a standalone snapshot/compaction system, or protection from total
+machine loss.
 
 An opt-in regional alpha also runs a three-voter catalog plus several
 profile-specific consensus groups in each Rust node. It is fixed-topology
-engineering evidence, not a production or multi-zone guarantee.
+engineering evidence, not a production or multi-zone guarantee. Its replicated
+core now supports bounded canonical consensus checkpoints, logical Raft-prefix
+compaction, lagging-voter snapshot catch-up, and checkpoint-plus-tail reopen;
+those are not profile backups, PITR, or physical EPRS space reclamation.
 
 ## Design boundaries
 
@@ -163,9 +166,10 @@ exact-retry, and linearizable-read contract as the other profiles. See the
 [regional Queue SDK guide](docs/REGIONAL_QUEUE_SDK.md),
 [regional Cache SDK guide](docs/REGIONAL_CACHE_SDK.md),
 [regional Event Bus SDK guide](docs/REGIONAL_EVENT_BUS_SDK.md),
+[consensus checkpoint guide](docs/CONSENSUS_CHECKPOINTS.md),
 [probe guide](docs/CONSENSUS_PROBE.md), [spike report](docs/CONSENSUS_SPIKE.md),
 and proposed [ADR-0003](docs/adr/0003-consensus-adapter.md). An exhaustive crash
-matrix, snapshots, membership/epoch transitions, follower read routing,
+matrix, profile-native snapshots/backups, membership/epoch transitions, follower read routing,
 authenticated peer transport, dynamic/zone-aware placement, and external Event
 Bus target execution remain open.
 

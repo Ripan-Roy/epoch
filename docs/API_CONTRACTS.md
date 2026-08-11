@@ -682,8 +682,11 @@ fixed-voter consensus probe:
 - `POST /internal/v1/consensus/messages` accepts only bounded Epoch peer frames
   with `application/octet-stream`;
 - `GET /experimental/v1/consensus/status` reports the local role, leader, term,
-  commit/applied indexes, cumulative per-peer queue/delivery/drop evidence, and
-  explicit non-production capability fields;
+  commit/applied/checkpoint/retained-first indexes, cumulative per-peer
+  queue/delivery/drop evidence, and explicit non-production capability fields;
+- `POST /experimental/v1/consensus/checkpoints` creates an fsync-backed local
+  consensus checkpoint and reports its index, term, proposal count, encoded
+  bytes, and logical-compaction semantics;
 - `POST /experimental/v1/consensus/proposals` proposes opaque diagnostic bytes
   with a caller-supplied proposal ID and expected term; and
 - `GET /experimental/v1/consensus/proposals/{proposal_id}` distinguishes a
@@ -863,7 +866,9 @@ external business side effect. See
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 Neither the earlier single-profile modes nor the regional multi-group mode is
-the final tablet service. Snapshots/compaction, retention deletion, dynamic
+the final tablet service. The core's consensus checkpoint/logical-prefix
+compaction path is not profile-native snapshotting or physical EPRS reclamation.
+Retention deletion, dynamic
 membership, dynamic constraint-aware placement, follower read routing,
 TLS/mTLS transport, and production identity remain absent. Regional Stream,
 Queue, Cache, and Event Bus v1 routes and repository-local Go/Java/Python

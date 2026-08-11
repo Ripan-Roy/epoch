@@ -8,6 +8,16 @@ notes explicitly list additional verified artifacts.
 
 ### Added
 
+- Canonical bounded EPSN v1 consensus checkpoints embedded in additive EPRS
+  records, with fsync-before-install ordering, logical Raft-prefix compaction,
+  checkpoint-plus-tail reopen, exact proposal retry preservation, and
+  fail-closed metadata/digest validation.
+- Snapshot-based catch-up for a lagging fixed voter, including typed profile
+  replay before committed-tail application, real three-runtime HTTP evidence,
+  local checkpoint status, and an experimental checkpoint trigger. This does
+  not add profile-native backups, PITR, physical EPRS reclamation, dynamic
+  membership, or production repair.
+
 - A strict version-one bootstrap identity policy shared by Go and Rust, with
   SHA-256 token fingerprints, explicit actions, hierarchical tenant scopes, a
   JSON Schema, and a cross-language decision corpus.

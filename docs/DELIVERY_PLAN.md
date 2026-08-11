@@ -144,7 +144,7 @@ built-in executor or external-side-effect claim. Those
 typed receipts are bounded
 fixed-topology evidence, not a public or placement-aware quorum-durable
 acknowledgement, and all public profile APIs remain standalone. Exhaustive crash
-points, snapshots, membership and authoritative epoch transitions,
+points, membership and authoritative epoch transitions,
 follower-served linearizable reads, authenticated transport, dynamic placement,
 broader profile/tablet integration, and model/chaos reports remain
 required for the metadata/replication work package and G3. See
@@ -152,6 +152,16 @@ required for the metadata/replication work package and G3. See
 [Quorum Read Barriers](adr/0013-quorum-read-barriers.md),
 [Experimental Stream Tablet](STREAM_TABLET.md), and
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
+
+The next consensus storage slice adds a canonical bounded EPSN v1 checkpoint,
+an additive EPRS checkpoint record, fsync-before-install ordering, logical
+Raft-prefix compaction, checkpoint-plus-tail reopen, and lagging-voter snapshot
+catch-up with typed profile replay. Local operator status and an experimental
+trigger expose the checkpoint/retained range. This advances G2/G3, but it does
+not implement profile-native compact images, bounded idempotency retention,
+physical EPRS reclamation, backups/PITR, automatic repair, or membership. See
+[Consensus Checkpoints and Snapshot Catch-up](CONSENSUS_CHECKPOINTS.md) and
+[ADR-0021](adr/0021-consensus-checkpoint-and-snapshot-installation.md).
 
 The Stream application core now accepts a version-two atomic batch command
 without changing the canonical version-one single append. A batch carries
@@ -261,9 +271,10 @@ pending rotation. Missing, truncated, foreign, untracked, or changed committed
 state fails closed. A pre-existing valid `engine.wal` instead remains on the
 legacy single-file writer, including new appends; no segmented directory or
 automatic migration is created, preserving offline downgrade. This does not
-close the broader storage or replication gates: no snapshots, compaction,
-retention deletion, product-integrated consensus, replicas, or repair exist
-yet.
+close the broader storage or replication gates: the standalone engine still
+has no snapshots, compaction, retention deletion, or repair. The separate
+replicated core now has bounded consensus checkpoints and logical Raft-prefix
+compaction, but no profile backup/PITR or physical EPRS reclamation.
 
 ### M1 exit criteria
 

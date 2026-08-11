@@ -804,7 +804,7 @@ fn peer_wire_rejects_noncanonical_protobuf_and_local_only_message_classes() {
 }
 
 #[test]
-fn snapshot_transport_message_is_rejected_until_checkpoint_installation_exists() {
+fn snapshot_transport_message_without_a_canonical_checkpoint_is_rejected() {
     let mut message = valid_peer_message();
     let mut raft_message = RaftWireMessage::decode(message.encoded.as_slice()).unwrap();
     raft_message.msg_type = MessageType::MsgSnapshot as i32;
@@ -812,7 +812,100 @@ fn snapshot_transport_message_is_rejected_until_checkpoint_installation_exists()
 
     assert!(matches!(
         message.to_wire(),
-        Err(ConsensusError::Unsupported(_))
+        Err(ConsensusError::InvalidMessage(_))
+    ));
+}
+
+#[test]
+fn checkpoint_codec_is_canonical_bounded_and_metadata_fenced() {
+    let image = checkpoint_image_fixture();
+    let encoded = encode_checkpoint_image(&image).unwrap();
+    assert_eq!(
+        encoded.len(),
+        SNAPSHOT_HEADER_LEN + SNAPSHOT_PROPOSAL_FIXED_LEN + 3
+    );
+    assert_eq!(decode_checkpoint_image(&encoded).unwrap(), image);
+    assert_eq!(
+        <[u8; 32]>::from(Sha256::digest(&encoded)),
+        [
+            0x5c, 0x00, 0xf6, 0x6c, 0x57, 0x52, 0x99, 0x44, 0xfe, 0x10, 0x02, 0x06, 0x7b, 0xaf,
+            0xcd, 0x75, 0x26, 0xb6, 0x58, 0xf2, 0x0d, 0xc4, 0xea, 0x60, 0xb9, 0x59, 0xc8, 0x41,
+            0x35, 0xd1, 0x4e, 0xb1,
+        ],
+        "checkpoint format compatibility golden changed"
+    );
+
+    let snapshot = checkpoint_snapshot(&image, voters()).unwrap();
+    assert_eq!(
+        decode_checkpoint_snapshot(&snapshot, group_id(), group_epoch(), voters()).unwrap(),
+        image
+    );
+    assert!(matches!(
+        decode_checkpoint_snapshot(
+            &snapshot,
+            GroupId::new(group_id().get() + 1).unwrap(),
+            group_epoch(),
+            voters()
+        ),
+        Err(ConsensusError::InvalidMessage(_))
+    ));
+    assert!(matches!(
+        decode_checkpoint_snapshot(
+            &snapshot,
+            group_id(),
+            GroupEpoch::new(group_epoch().get() + 1).unwrap(),
+            voters()
+        ),
+        Err(ConsensusError::InvalidMessage(_))
+    ));
+
+    let mut wrong_term = snapshot.clone();
+    wrong_term.mut_metadata().term += 1;
+    assert!(matches!(
+        decode_checkpoint_snapshot(&wrong_term, group_id(), group_epoch(), voters()),
+        Err(ConsensusError::InvalidMessage(_))
+    ));
+    let mut wrong_voters = snapshot;
+    wrong_voters
+        .mut_metadata()
+        .mut_conf_state()
+        .set_voters(vec![1, 2, 4]);
+    assert!(matches!(
+        decode_checkpoint_snapshot(&wrong_voters, group_id(), group_epoch(), voters()),
+        Err(ConsensusError::InvalidMessage(_))
+    ));
+}
+
+#[test]
+fn checkpoint_codec_enforces_the_transport_size_budget() {
+    let mut oversized = checkpoint_image_fixture();
+    oversized.applied = vec![
+        CommittedProposal {
+            receipt: CommitReceipt {
+                group_id: group_id(),
+                group_epoch: group_epoch(),
+                proposal_id: proposal(21),
+                term: Term::new(3),
+                log_index: LogIndex::new(8),
+            },
+            payload: vec![0; 400 * 1024],
+        },
+        CommittedProposal {
+            receipt: CommitReceipt {
+                group_id: group_id(),
+                group_epoch: group_epoch(),
+                proposal_id: proposal(22),
+                term: Term::new(3),
+                log_index: LogIndex::new(9),
+            },
+            payload: vec![1; 400 * 1024],
+        },
+    ];
+    oversized.state_digest =
+        compute_state_digest(group_id(), group_epoch(), &oversized.applied).unwrap();
+    assert!(matches!(
+        encode_checkpoint_image(&oversized),
+        Err(ConsensusError::CheckpointTooLarge { .. })
     ));
 }
 
@@ -1135,6 +1228,32 @@ fn peer(node_id: NodeId) -> PeerId {
 
 fn proposal(value: u64) -> ProposalId {
     ProposalId::new(value).unwrap()
+}
+
+fn checkpoint_image_fixture() -> CheckpointImage {
+    let committed = CommittedProposal {
+        receipt: CommitReceipt {
+            group_id: group_id(),
+            group_epoch: group_epoch(),
+            proposal_id: proposal(11),
+            term: Term::new(2),
+            log_index: LogIndex::new(7),
+        },
+        payload: b"abc".to_vec(),
+    };
+    CheckpointImage {
+        group_id: group_id(),
+        group_epoch: group_epoch(),
+        index: LogIndex::new(9),
+        term: Term::new(3),
+        state_digest: compute_state_digest(
+            group_id(),
+            group_epoch(),
+            std::slice::from_ref(&committed),
+        )
+        .unwrap(),
+        applied: vec![committed],
+    }
 }
 
 fn read_barrier(value: u64) -> ReadBarrierId {

@@ -113,7 +113,8 @@ Full applied histories and SHA-256 state digests are compared; proposal tests
 cover restart reconstruction, overwrite, exact duplicate application,
 conflicting payload reuse, and corrupt restart images. The bounded peer-frame
 suite covers destination, membership, canonical encoding, corruption, local
-message classes, snapshots, and maximum size.
+message classes, canonical EPSN snapshots, foreign group/epoch/voter/term
+fences, and maximum size.
 
 The distributed fault histories still use `MemStorage` and graceful in-process
 restart images. A separate EPRS v1 suite exercises the local fsync-backed
@@ -124,7 +125,10 @@ yet an exhaustive injected-I/O or real-process-crash matrix. Persistent adapter
 tests additionally reopen a three-voter committed history, preserve an isolated
 pending proposal, verify stable-barrier message ordering, recover after an
 injected post-append error, and publish a commit-ahead-of-checkpoint receipt
-exactly once.
+exactly once. The checkpoint corpus adds a pinned canonical EPSN digest,
+malformed/oversize rejection, fsync-before-memory failure recovery,
+checkpoint-plus-tail reopen, exact retry preservation, lagging-follower
+installation, and post-restart election/commit/read-barrier behavior.
 
 The explicit `test-consensus-process` gate extends that evidence across real
 process boundaries. A parent harness starts three child test executables, each
@@ -139,13 +143,23 @@ This is process-crash evidence for the isolated adapter, not node-to-node HTTP
 transport, product profile replication, or a complete crash-point matrix.
 The complementary `three_probe_runtimes_elect_and_commit_over_real_http` test
 starts three persistent probe runtimes with ephemeral loopback listeners,
-elects through the runtime probe HTTP transport, commits opaque bytes, and
-compares proposal lookup at every voter. It covers runtime transport but not
+elects through the runtime probe HTTP transport, commits opaque bytes, creates
+a checkpoint through the experimental route, and verifies the reported
+compacted range. `lagging_profile_voter_replays_a_checkpoint_before_applying_its_tail`
+proves typed Catalog replay and tail convergence after a listener outage. These
+cover runtime transport but not
 separate process loss; the two test layers intentionally prove different
 boundaries. `sustained_minority_outage_drops_only_that_peers_frames_and_majority_commits`
 uses a one-frame outbound queue, keeps the lower-ID destination unavailable
 until drops and exhausted retries are observed, and proves eight subsequent
 proposals still commit on the healthy majority.
+
+The `test-consensus-probe` container gate now adds the process boundary: it
+stops one follower, checkpoints the live leader through HTTP, verifies the
+reported compacted range, commits a tail on the majority, restarts the follower,
+requires the follower's installed checkpoint index and tail lookup to converge,
+then performs the existing active-leader replacement and final all-voter
+comparison.
 
 The typed Stream-tablet layer adds bounded durable fixed-voter-majority and
 deterministic profile-application evidence for one fixed group and partition.

@@ -361,6 +361,13 @@ none changes the public API or SDK guarantee ceiling. Run
 `make test-stream-tablet`, `make test-queue-tablet`, `make test-cache-tablet`,
 or `make test-bus-tablet` for the disposable three-container proofs.
 
+The diagnostic listener also supports explicit local consensus checkpoint
+creation at `POST /experimental/v1/consensus/checkpoints`; status reports
+`checkpoint_index` and `retained_log_first_index`. See
+[Consensus Checkpoints and Snapshot Catch-up](CONSENSUS_CHECKPOINTS.md). The
+checkpoint is bounded and fsynced before logical Raft-prefix compaction. It is
+not a profile backup, PITR artifact, or physical EPRS cleanup operation.
+
 Validate or run the regional multi-tablet topology:
 
 ```shell
@@ -411,7 +418,7 @@ resources. The displayed Go, Java, and Python regional sources are compiled by
 [Regional Event Bus SDK](REGIONAL_EVENT_BUS_SDK.md). `epoch-catalog` remains
 independently testable with `cargo test -p epoch-catalog --all-targets`. Dynamic
 membership, general voter selection, rack placement, production peer
-identity/TLS, snapshots, follower read routing, and coordinated consumer
+identity/TLS, profile-native snapshots/backups, follower read routing, and coordinated consumer
 sessions remain subsequent slices; see
 [ADR-0009](adr/0009-regional-tablet-catalog.md) and
 [ADR-0010](adr/0010-durable-managed-metadata.md), the bootstrap security

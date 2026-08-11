@@ -27,8 +27,8 @@ use axum::{
     routing::{get, post},
 };
 use epoch_consensus::{
-    CommitReceipt, CommittedProposal, CompletedReadBarrier, ConsensusAdapter, ConsensusError,
-    ConsensusOutput, ConsensusRole, ConsensusStatus, GroupEpoch, GroupId,
+    CommitReceipt, CommittedProposal, CompletedReadBarrier, ConsensusAdapter, ConsensusCheckpoint,
+    ConsensusError, ConsensusOutput, ConsensusRole, ConsensusStatus, GroupEpoch, GroupId,
     MAX_PEER_MESSAGE_WIRE_BYTES, MAX_PROPOSAL_PAYLOAD_BYTES, NodeId, PeerMessage,
     PersistentOpenResult, PersistentRaftAdapter, PersistentRecovery, Proposal, ProposalId,
     ProposalLookup, ReadBarrierId, ReadBarrierRequest, Term,
@@ -43,6 +43,7 @@ use url::Url;
 
 pub const INTERNAL_PEER_MESSAGE_PATH: &str = "/internal/v1/consensus/messages";
 pub const EXPERIMENTAL_STATUS_PATH: &str = "/experimental/v1/consensus/status";
+pub const EXPERIMENTAL_CHECKPOINTS_PATH: &str = "/experimental/v1/consensus/checkpoints";
 pub const EXPERIMENTAL_PROPOSALS_PATH: &str = "/experimental/v1/consensus/proposals";
 pub const EXPERIMENTAL_PROPOSAL_LOOKUP_PATH: &str =
     "/experimental/v1/consensus/proposals/{proposal_id}";
@@ -461,6 +462,9 @@ enum ActorCommand {
     AppliedProposals {
         reply: ActorReply<Vec<CommittedProposal>>,
     },
+    Checkpoint {
+        reply: ActorReply<ConsensusCheckpoint>,
+    },
     #[cfg(test)]
     InjectFailure {
         error: ConsensusProbeError,
@@ -633,6 +637,12 @@ impl ConsensusProbeHandle {
 
     pub async fn applied_proposals(&self) -> ConsensusProbeResult<Vec<CommittedProposal>> {
         self.request(|reply| ActorCommand::AppliedProposals { reply })
+            .await
+    }
+
+    /// Creates a durable consensus checkpoint at this voter's applied index.
+    pub async fn checkpoint(&self) -> ConsensusProbeResult<ConsensusCheckpoint> {
+        self.request(|reply| ActorCommand::Checkpoint { reply })
             .await
     }
 
@@ -1110,6 +1120,10 @@ fn handle_actor_command(
         ActorCommand::AppliedProposals { reply } => {
             let _ = reply.send(Ok(adapter.applied_proposals().to_vec()));
         }
+        ActorCommand::Checkpoint { reply } => {
+            let result = adapter.checkpoint().map_err(Into::into);
+            deliver_actor_result(adapter, reply, result)?;
+        }
         #[cfg(test)]
         ActorCommand::InjectFailure { error, reply } => {
             deliver_actor_result(adapter, reply, Err(error))?;
@@ -1142,6 +1156,7 @@ fn publish_output(
     let ConsensusOutput {
         messages,
         commits: output_commits,
+        installed_checkpoint,
         read_barriers: completed_read_barriers,
         status,
     } = output;
@@ -1179,6 +1194,13 @@ fn publish_output(
                 }
             }
         }
+    }
+    if let Some(installed) = installed_checkpoint
+        && let Some(applier) = applier
+    {
+        applier
+            .replay(&installed.proposals)
+            .map_err(ConsensusProbeError::ProfileApplication)?;
     }
     for commit in output_commits {
         if let Some(applier) = applier {
@@ -1370,6 +1392,7 @@ pub fn internal_peer_router(handle: ConsensusProbeHandle) -> Router {
 pub fn experimental_consensus_router(handle: ConsensusProbeHandle) -> Router {
     Router::new()
         .route(EXPERIMENTAL_STATUS_PATH, get(consensus_status))
+        .route(EXPERIMENTAL_CHECKPOINTS_PATH, post(create_checkpoint))
         .route(EXPERIMENTAL_PROPOSALS_PATH, post(propose))
         .route(EXPERIMENTAL_PROPOSAL_LOOKUP_PATH, get(lookup_proposal))
         .layer(DefaultBodyLimit::max(MAX_PROPOSAL_JSON_BYTES))
@@ -1401,6 +1424,16 @@ async fn consensus_status(
         &consensus,
         handle.outbound_transport_status(),
     )))
+}
+
+async fn create_checkpoint(
+    State(handle): State<ConsensusProbeHandle>,
+) -> Result<(StatusCode, Json<ConsensusProbeCheckpointResponse>), ConsensusProbeApiError> {
+    let checkpoint = handle.checkpoint().await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ConsensusProbeCheckpointResponse::from(checkpoint)),
+    ))
 }
 
 async fn propose(
@@ -1493,6 +1526,8 @@ pub struct ConsensusProbeStatus {
     pub term: u64,
     pub commit_index: u64,
     pub applied_index: u64,
+    pub checkpoint_index: u64,
+    pub retained_log_first_index: u64,
     pub voter_count: usize,
     pub fail_stopped: bool,
     pub observation_scope: &'static str,
@@ -1519,6 +1554,8 @@ impl ConsensusProbeStatus {
             term: status.term.get(),
             commit_index: status.commit_index.get(),
             applied_index: status.applied_index.get(),
+            checkpoint_index: status.checkpoint_index.get(),
+            retained_log_first_index: status.retained_log_first_index.get(),
             voter_count: status.voter_count,
             fail_stopped: status.fail_stopped,
             observation_scope: "local",
@@ -1526,6 +1563,29 @@ impl ConsensusProbeStatus {
             profile_guarantee_ceiling: "local_durable",
             peer_authentication: "none",
             outbound_transport,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct ConsensusProbeCheckpointResponse {
+    pub index: u64,
+    pub term: u64,
+    pub proposal_count: usize,
+    pub encoded_bytes: usize,
+    pub durability: &'static str,
+    pub compaction: &'static str,
+}
+
+impl From<ConsensusCheckpoint> for ConsensusProbeCheckpointResponse {
+    fn from(checkpoint: ConsensusCheckpoint) -> Self {
+        Self {
+            index: checkpoint.index.get(),
+            term: checkpoint.term.get(),
+            proposal_count: checkpoint.proposal_count,
+            encoded_bytes: checkpoint.encoded_bytes,
+            durability: "fsync_before_install",
+            compaction: "logical_raft_prefix",
         }
     }
 }
@@ -1655,6 +1715,9 @@ impl IntoResponse for ConsensusProbeApiError {
                 "read_barrier_unavailable",
                 None,
             ),
+            ConsensusProbeError::Consensus(ConsensusError::CheckpointTooLarge { .. }) => {
+                (StatusCode::PAYLOAD_TOO_LARGE, "checkpoint_too_large", None)
+            }
             ConsensusProbeError::ActorUnavailable
             | ConsensusProbeError::OutboundUnavailable(_)
             | ConsensusProbeError::ProfileApplication(_)
@@ -1698,7 +1761,7 @@ mod tests {
 
     use axum::{body::Body, http::Request};
     use epoch_catalog::{ApplyResource, CatalogCommand, ResourceName, ResourceSpec};
-    use epoch_consensus::{InMemoryRaftAdapter, LogIndex};
+    use epoch_consensus::{InMemoryRaftAdapter, LogIndex, MAX_SNAPSHOT_DATA_BYTES};
     use epoch_core::{ResourceKind, WorkloadProfile};
     use http_body_util::BodyExt;
     use serde_json::{Value, json};
@@ -1853,6 +1916,10 @@ mod tests {
             ConsensusProbeError::Consensus(ConsensusError::Unsupported(
                 "unsupported peer capability".into(),
             )),
+            ConsensusProbeError::Consensus(ConsensusError::CheckpointTooLarge {
+                observed_bytes: MAX_SNAPSHOT_DATA_BYTES + 1,
+                max_bytes: MAX_SNAPSHOT_DATA_BYTES,
+            }),
         ];
 
         for error in expected {
@@ -1865,6 +1932,27 @@ mod tests {
                 .expect("an expected request error must leave the actor available");
         }
         runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn checkpoint_size_error_has_a_stable_nonfatal_http_contract() {
+        let response = ConsensusProbeApiError(ConsensusProbeError::Consensus(
+            ConsensusError::CheckpointTooLarge {
+                observed_bytes: MAX_SNAPSHOT_DATA_BYTES + 1,
+                max_bytes: MAX_SNAPSHOT_DATA_BYTES,
+            },
+        ))
+        .into_response();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("error body should collect")
+            .to_bytes();
+        let document: Value = serde_json::from_slice(&body).expect("error should be JSON");
+        assert_eq!(document["code"], "checkpoint_too_large");
+        assert!(document["message"].as_str().unwrap().contains("786432"));
     }
 
     #[tokio::test]
@@ -1927,6 +2015,8 @@ mod tests {
         assert_eq!(status["observation_scope"], "local");
         assert_eq!(status["stability"], "experimental");
         assert_eq!(status["production_readiness"], "not_production_ready");
+        assert_eq!(status["checkpoint_index"], 0);
+        assert_eq!(status["retained_log_first_index"], 1);
         let outbound_transport = status["outbound_transport"]
             .as_array()
             .expect("outbound transport status should be an array");
@@ -2292,6 +2382,29 @@ mod tests {
             );
         }
 
+        async fn start_peer_listener(&mut self, index: usize) {
+            assert!(
+                self.servers[index].is_none(),
+                "peer listener must be stopped before it is restarted"
+            );
+            let address = self.peers[index]
+                .1
+                .socket_addrs(|| None)
+                .expect("peer URL should resolve without DNS")
+                .into_iter()
+                .next()
+                .expect("peer URL should contain a socket address");
+            let listener = tokio::net::TcpListener::bind(address)
+                .await
+                .expect("peer listener should rebind");
+            let router = self.runtimes[index].internal_router();
+            self.servers[index] = Some(tokio::spawn(async move {
+                axum::serve(listener, router)
+                    .await
+                    .expect("restarted peer server should run");
+            }));
+        }
+
         async fn stop(&mut self) {
             for server in &mut self.servers {
                 if let Some(server) = server.take() {
@@ -2436,6 +2549,33 @@ mod tests {
         .expect("proposal should commit on all three nodes")
     }
 
+    async fn wait_for_commit_on(
+        handles: &[ConsensusProbeHandle],
+        indexes: &[usize],
+        proposal_id: u64,
+    ) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let mut committed = true;
+                for index in indexes {
+                    committed &= matches!(
+                        handles[*index]
+                            .lookup(proposal_id)
+                            .await
+                            .expect("lookup should be available"),
+                        ProposalLookup::Committed(_)
+                    );
+                }
+                if committed {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("proposal should commit on the selected voters");
+    }
+
     async fn propose_through_current_leader(
         handles: &[ConsensusProbeHandle],
         proposal_id: u64,
@@ -2511,6 +2651,38 @@ mod tests {
             };
             assert_eq!(committed.payload, payload);
         }
+
+        let response = cluster.runtimes[leader_index]
+            .experimental_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(EXPERIMENTAL_CHECKPOINTS_PATH)
+                    .body(Body::empty())
+                    .expect("checkpoint request should build"),
+            )
+            .await
+            .expect("checkpoint route should respond");
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("checkpoint response body should collect")
+            .to_bytes();
+        let checkpoint: Value =
+            serde_json::from_slice(&body).expect("checkpoint response should be JSON");
+        assert_eq!(checkpoint["durability"], "fsync_before_install");
+        assert_eq!(checkpoint["compaction"], "logical_raft_prefix");
+        assert!(checkpoint["proposal_count"].as_u64().unwrap() >= 1);
+        assert!(checkpoint["encoded_bytes"].as_u64().unwrap() > 0);
+        let checkpoint_index = checkpoint["index"].as_u64().unwrap();
+        let status = handles[leader_index].status().await.unwrap();
+        assert_eq!(status.checkpoint_index.get(), checkpoint_index);
+        assert_eq!(
+            status.retained_log_first_index.get(),
+            checkpoint_index.saturating_add(1)
+        );
         cluster.shutdown().await;
     }
 
@@ -2645,6 +2817,73 @@ mod tests {
         assert_eq!(continued[0].resource_count, 3);
         assert_eq!(continued[0].tablet_count, 5);
         assert_eq!(continued[0].applied_command_count, 3);
+        cluster.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn lagging_profile_voter_replays_a_checkpoint_before_applying_its_tail() {
+        let scope = CatalogTabletScope::new(77, 1).expect("catalog scope should be valid");
+        let services = (0..3)
+            .map(|_| CatalogTabletService::new(scope))
+            .collect::<Vec<_>>();
+        let appliers = services
+            .iter()
+            .map(|service| Some(Arc::clone(service) as Arc<dyn CommittedProposalApplier>))
+            .collect();
+        let mut cluster =
+            TestProbeCluster::start_with_appliers(DEFAULT_OUTBOUND_QUEUE_CAPACITY, appliers).await;
+        let handles = cluster.handles();
+        let (leader_index, _) = wait_for_leader(&handles).await;
+        let lagging_index = (0..handles.len())
+            .find(|index| *index != leader_index)
+            .expect("cluster should contain a follower");
+        let healthy_indexes = (0..handles.len())
+            .filter(|index| *index != lagging_index)
+            .collect::<Vec<_>>();
+        cluster.stop_peer_listener(lagging_index).await;
+
+        for (proposal_id, command) in [
+            (801, catalog_command("snapshot-orders-v1", "orders", 2)),
+            (802, catalog_command("snapshot-audit-v1", "audit", 1)),
+        ] {
+            let _ = propose_through_current_leader(
+                &handles,
+                proposal_id,
+                command.encode().expect("catalog command should encode"),
+            )
+            .await;
+            wait_for_commit_on(&handles, &healthy_indexes, proposal_id).await;
+        }
+
+        let checkpoint = handles[leader_index]
+            .checkpoint()
+            .await
+            .expect("leader checkpoint should persist and compact");
+        assert!(checkpoint.proposal_count >= 2);
+
+        let _ = propose_through_current_leader(
+            &handles,
+            803,
+            catalog_command("snapshot-ledger-v1", "ledger", 2)
+                .encode()
+                .expect("catalog tail command should encode"),
+        )
+        .await;
+        wait_for_commit_on(&handles, &healthy_indexes, 803).await;
+
+        cluster.start_peer_listener(lagging_index).await;
+        let _ = wait_for_commit(&handles, 803).await;
+
+        let snapshots = services
+            .iter()
+            .map(|service| service.snapshot().expect("catalog should remain healthy"))
+            .collect::<Vec<_>>();
+        assert!(snapshots.windows(2).all(|pair| pair[0] == pair[1]));
+        assert_eq!(snapshots[0].resource_count, 3);
+        assert_eq!(snapshots[0].tablet_count, 5);
+        assert_eq!(snapshots[0].applied_command_count, 3);
+        let lagging_status = handles[lagging_index].status().await.unwrap();
+        assert!(lagging_status.applied_index > checkpoint.index);
         cluster.shutdown().await;
     }
 
@@ -2803,6 +3042,8 @@ mod tests {
                 term: Term::new(4),
                 commit_index: LogIndex::new(5),
                 applied_index: LogIndex::new(5),
+                checkpoint_index: LogIndex::new(3),
+                retained_log_first_index: LogIndex::new(4),
                 voter_count: 3,
                 fail_stopped: false,
             });
@@ -2811,6 +3052,8 @@ mod tests {
             assert_eq!(status.observation_scope, "local");
             assert_eq!(status.stability, "experimental");
             assert_eq!(status.production_readiness, "not_production_ready");
+            assert_eq!(status.checkpoint_index, 3);
+            assert_eq!(status.retained_log_first_index, 4);
         }
     }
 }

@@ -10,9 +10,10 @@ use epoch_testkit::{PeerId, PeerTransport};
 use raft::prelude::{Entry, EntryType, HardState};
 
 use super::{
-    CommittedProposal, ConsensusAdapter, ConsensusError, ConsensusOutput, ConsensusRole,
-    GroupEpoch, GroupId, LogIndex, NodeId, PeerMessage, PersistentRaftAdapter, ProcessingTrace,
-    Proposal, ProposalId, ProposalLookup, StateDigest, Term, encode_command,
+    CommittedProposal, CompletedReadBarrier, ConsensusAdapter, ConsensusError, ConsensusOutput,
+    ConsensusRole, GroupEpoch, GroupId, LogIndex, NodeId, PeerMessage, PersistentRaftAdapter,
+    ProcessingTrace, Proposal, ProposalId, ProposalLookup, ReadBarrierId, ReadBarrierRequest,
+    StateDigest, Term, encode_command,
     stable::{DiskStableStore, StableCheckpoint, StableIdentity},
 };
 
@@ -26,6 +27,8 @@ struct PersistentCluster {
     paths: BTreeMap<NodeId, PathBuf>,
     transport: PeerTransport,
     commits: Vec<(NodeId, CommittedProposal)>,
+    checkpoint_installs: Vec<(NodeId, LogIndex)>,
+    read_barriers: Vec<(NodeId, CompletedReadBarrier)>,
     root: PathBuf,
 }
 
@@ -41,6 +44,8 @@ impl PersistentCluster {
             paths,
             transport: PeerTransport::new(seed),
             commits: Vec::new(),
+            checkpoint_installs: Vec::new(),
+            read_barriers: Vec::new(),
             root,
         };
         cluster.reopen_all();
@@ -83,6 +88,23 @@ impl PersistentCluster {
         }
     }
 
+    fn read_barrier(&mut self, node_id: NodeId, request_id: u64) {
+        let status = self.nodes[&node_id].status();
+        let output = self
+            .nodes
+            .get_mut(&node_id)
+            .unwrap()
+            .read_barrier(ReadBarrierRequest::new(
+                group_id(),
+                group_epoch(),
+                status.term,
+                ReadBarrierId::new(request_id).unwrap(),
+            ))
+            .unwrap();
+        self.capture(node_id, output);
+        self.drain();
+    }
+
     fn isolate(&mut self, isolated: NodeId) {
         let others = voters()
             .into_iter()
@@ -92,6 +114,10 @@ impl PersistentCluster {
         self.transport
             .partition(&[peer(isolated)], &others)
             .unwrap();
+    }
+
+    fn heal_all(&mut self) {
+        self.transport.heal_all().unwrap();
     }
 
     fn reopen_all(&mut self) {
@@ -133,8 +159,17 @@ impl PersistentCluster {
 
     fn capture(&mut self, node_id: NodeId, output: ConsensusOutput) {
         assert_eq!(output.status.node_id, node_id);
+        if let Some(installed) = output.installed_checkpoint.as_ref() {
+            self.checkpoint_installs.push((node_id, installed.index));
+        }
         self.commits
             .extend(output.commits.into_iter().map(|commit| (node_id, commit)));
+        self.read_barriers.extend(
+            output
+                .read_barriers
+                .into_iter()
+                .map(|barrier| (node_id, barrier)),
+        );
         for message in output.messages {
             assert_eq!(message.from(), node_id);
             let wire = message.to_wire().unwrap();
@@ -214,6 +249,170 @@ fn committed_history_and_digest_survive_reopening_every_adapter() {
             expected_digests[&node_id]
         );
         assert!(cluster.nodes[&node_id].recovery().stable_generation > 0);
+        assert!(matches!(
+            cluster.nodes[&node_id].lookup_proposal(proposal(1)),
+            ProposalLookup::Committed(_)
+        ));
+    }
+}
+
+#[test]
+fn durable_checkpoint_reopens_with_a_committed_tail_and_exact_retry_state() {
+    let mut cluster = PersistentCluster::new(TEST_SEED + 10);
+    cluster.campaign(node(1));
+    cluster.propose(node(1), 1, b"before-checkpoint");
+    cluster.tick_repeatedly(node(1), 4);
+
+    let checkpoint = cluster
+        .nodes
+        .get_mut(&node(1))
+        .unwrap()
+        .checkpoint()
+        .unwrap();
+    assert_eq!(
+        checkpoint.index,
+        cluster.nodes[&node(1)].status().applied_index
+    );
+    assert!(checkpoint.proposal_count >= 1);
+    let checkpoint_generation = cluster.nodes[&node(1)].inner.stable_generation;
+    assert_eq!(
+        cluster
+            .nodes
+            .get_mut(&node(1))
+            .unwrap()
+            .checkpoint()
+            .unwrap(),
+        checkpoint,
+        "repeating the exact checkpoint should be idempotent"
+    );
+    assert_eq!(
+        cluster.nodes[&node(1)].inner.stable_generation,
+        checkpoint_generation,
+        "an exact checkpoint retry must not append another stable transition"
+    );
+
+    cluster.propose(node(1), 2, b"after-checkpoint");
+    cluster.tick_repeatedly(node(1), 4);
+    let expected_history = cluster.applied_history(node(1));
+    let expected_digest = cluster.nodes[&node(1)].state_digest();
+    let expected_lookup = cluster.nodes[&node(1)].lookup_proposal(proposal(1));
+
+    cluster.reopen_one(node(1));
+
+    assert_eq!(cluster.applied_history(node(1)), expected_history);
+    assert_eq!(cluster.nodes[&node(1)].state_digest(), expected_digest);
+    assert_eq!(
+        cluster.nodes[&node(1)].lookup_proposal(proposal(1)),
+        expected_lookup
+    );
+    assert_eq!(
+        cluster.nodes[&node(1)].recovery().checkpoint_index,
+        checkpoint.index
+    );
+
+    cluster.reopen_all();
+    cluster.campaign(node(1));
+    cluster.propose(node(1), 3, b"after-checkpoint-election");
+    cluster.read_barrier(node(1), 1);
+    assert!(
+        cluster
+            .read_barriers
+            .iter()
+            .any(|(node_id, barrier)| *node_id == node(1)
+                && barrier.request_id == ReadBarrierId::new(1).unwrap()
+                && barrier.applied_index >= barrier.read_index)
+    );
+}
+
+#[test]
+fn oversized_checkpoint_is_rejected_without_poisoning_or_advancing_storage() {
+    let mut cluster = PersistentCluster::new(TEST_SEED + 13);
+    cluster.campaign(node(1));
+    cluster.propose(node(1), 1, &vec![0x41; 400 * 1024]);
+    cluster.propose(node(1), 2, &vec![0x42; 400 * 1024]);
+
+    let generation = cluster.nodes[&node(1)].inner.stable_generation;
+    assert!(matches!(
+        cluster.nodes.get_mut(&node(1)).unwrap().checkpoint(),
+        Err(ConsensusError::CheckpointTooLarge { .. })
+    ));
+    assert_eq!(cluster.nodes[&node(1)].inner.stable_generation, generation);
+    assert!(!cluster.nodes[&node(1)].status().fail_stopped);
+
+    cluster.propose(node(1), 3, b"healthy-after-size-rejection");
+    assert!(matches!(
+        cluster.nodes[&node(1)].lookup_proposal(proposal(3)),
+        ProposalLookup::Committed(_)
+    ));
+}
+
+#[test]
+fn checkpoint_fsync_failure_fail_stops_memory_and_reopens_the_durable_result() {
+    let mut cluster = PersistentCluster::new(TEST_SEED + 12);
+    cluster.campaign(node(1));
+    cluster.propose(node(1), 1, b"checkpoint-before-crash");
+    cluster.tick_repeatedly(node(1), 4);
+    let applied_index = cluster.nodes[&node(1)].status().applied_index;
+    cluster
+        .nodes
+        .get_mut(&node(1))
+        .unwrap()
+        .inner
+        .disk_store
+        .as_mut()
+        .unwrap()
+        .fail_after_next_append();
+
+    assert!(matches!(
+        cluster.nodes.get_mut(&node(1)).unwrap().checkpoint(),
+        Err(ConsensusError::Storage(_))
+    ));
+    assert!(cluster.nodes[&node(1)].status().fail_stopped);
+
+    cluster.reopen_one(node(1));
+
+    assert_eq!(
+        cluster.nodes[&node(1)].recovery().checkpoint_index,
+        applied_index
+    );
+    assert!(!cluster.nodes[&node(1)].status().fail_stopped);
+    assert!(matches!(
+        cluster.nodes[&node(1)].lookup_proposal(proposal(1)),
+        ProposalLookup::Committed(_)
+    ));
+}
+
+#[test]
+fn lagging_voter_installs_the_leader_checkpoint_then_converges_on_the_tail() {
+    let mut cluster = PersistentCluster::new(TEST_SEED + 11);
+    cluster.campaign(node(1));
+    cluster.isolate(node(3));
+    cluster.propose(node(1), 1, b"checkpoint-one");
+    cluster.propose(node(1), 2, b"checkpoint-two");
+    cluster.tick_repeatedly(node(1), 4);
+
+    let checkpoint = cluster
+        .nodes
+        .get_mut(&node(1))
+        .unwrap()
+        .checkpoint()
+        .unwrap();
+    cluster.propose(node(1), 3, b"tail-after-checkpoint");
+    let expected_history = cluster.applied_history(node(1));
+    let expected_digest = cluster.nodes[&node(1)].state_digest();
+
+    cluster.heal_all();
+    cluster.tick_repeatedly(node(1), 12);
+
+    assert!(
+        cluster
+            .checkpoint_installs
+            .contains(&(node(3), checkpoint.index)),
+        "the lagging voter must install the checkpoint rather than receive a missing prefix"
+    );
+    for node_id in voters() {
+        assert_eq!(cluster.applied_history(node_id), expected_history);
+        assert_eq!(cluster.nodes[&node_id].state_digest(), expected_digest);
         assert!(matches!(
             cluster.nodes[&node_id].lookup_proposal(proposal(1)),
             ProposalLookup::Committed(_)

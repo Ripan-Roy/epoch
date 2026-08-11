@@ -277,6 +277,6 @@ make test-bus-tablet
 
 Still required are the target executors themselves, rate limiting, redrive and
 terminal-record retention, replay attempt lineage, built-in Queue/Stream writes,
-long-poll and push transports, webhook/HTTP security and signing, snapshots,
-compaction, production identity/TLS, generated response models, package
+long-poll and push transports, webhook/HTTP security and signing, compact
+profile-native snapshots, physical EPRS reclamation, production identity/TLS, generated response models, package
 publication, and multi-shard routing.

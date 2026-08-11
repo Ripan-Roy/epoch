@@ -1,24 +1,23 @@
 //! Disk-backed stable-state journal for the fixed-voter consensus adapter.
 //!
-//! The journal is intentionally narrower than a snapshot-capable Raft store.
-//! Record zero fixes the immutable group identity. Every later record contains
-//! a complete `HardState`, an Epoch checkpoint, and an optional contiguous batch
-//! of normal entries. The outer [`FileWal`] supplies the durable, checksummed
-//! append boundary; this module supplies canonical Epoch-owned framing and
-//! logical suffix replacement during replay.
+//! Record zero fixes the immutable group identity. Later records contain either
+//! a complete `HardState` plus application checkpoint and normal-entry batch,
+//! or an additive canonical consensus checkpoint plus its contiguous retained
+//! tail. The outer [`FileWal`] supplies the durable, checksummed append boundary;
+//! this module supplies canonical Epoch-owned framing, logical suffix
+//! replacement, checkpoint installation, and prefix compaction during replay.
 
 use std::{collections::BTreeMap, fmt, path::Path};
 
-use epoch_storage::{CommitLog, FileWal};
-use raft::{
-    prelude::{ConfState, Entry, EntryType, HardState},
-    storage::MemStorage,
-};
+use epoch_storage::{CommitLog, FileWal, LogRecord};
+use raft::prelude::{ConfState, Entry, EntryType, HardState};
 
 use super::{
-    CommitReceipt, CommittedProposal, ConsensusError, ConsensusResult, GroupEpoch, GroupId,
-    LogIndex, NodeId, ProposalId, StateDigest, Term, compute_state_digest, decode_command,
-    validate_command_scope, validate_hard_state, validate_log_order, validate_voters,
+    CheckpointImage, CommitReceipt, CommittedProposal, ConsensusError, ConsensusResult,
+    EpochRaftStorage, GroupEpoch, GroupId, LogIndex, NodeId, ProposalId, StateDigest, Term,
+    checkpoint_snapshot, compute_state_digest, decode_checkpoint_image, decode_command,
+    encode_checkpoint_image, validate_checkpoint_image, validate_command_scope,
+    validate_hard_state, validate_log_order, validate_voters,
 };
 
 const RECORD_MAGIC: [u8; 4] = *b"EPRS";
@@ -26,8 +25,10 @@ const RECORD_VERSION: u16 = 1;
 const RECORD_HEADER_LEN: usize = 12;
 const IDENTITY_KIND: u16 = 1;
 const TRANSITION_KIND: u16 = 2;
+const CHECKPOINT_KIND: u16 = 3;
 const IDENTITY_PAYLOAD_LEN: usize = 48;
 const TRANSITION_FIXED_PAYLOAD_LEN: usize = 84;
+const CHECKPOINT_FIXED_PAYLOAD_LEN: usize = 88;
 const ENTRY_FIXED_PAYLOAD_LEN: usize = 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,7 +58,7 @@ impl StableCheckpoint {
 
 pub(crate) struct RecoveredDiskState {
     pub(crate) store: DiskStableStore,
-    pub(crate) storage: MemStorage,
+    pub(crate) storage: EpochRaftStorage,
     pub(crate) stable_generation: u64,
     pub(crate) repaired_partial_tail: bool,
     pub(crate) checkpoint: StableCheckpoint,
@@ -82,6 +83,7 @@ pub(crate) struct DiskStableStore {
     wal: FileWal,
     identity: StableIdentity,
     hard_state: HardState,
+    snapshot: Option<CheckpointImage>,
     entries: Vec<Entry>,
     checkpoint: StableCheckpoint,
     stable_generation: u64,
@@ -98,9 +100,119 @@ struct StableTransition {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+struct StableCheckpointTransition {
+    generation: u64,
+    hard_state: HardState,
+    checkpoint: StableCheckpoint,
+    image: CheckpointImage,
+    entries: Vec<Entry>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 enum StableRecord {
     Identity(StableIdentity),
     Transition(StableTransition),
+    Checkpoint(StableCheckpointTransition),
+}
+
+fn initialize_or_validate_identity(
+    wal: &mut FileWal,
+    records: &[LogRecord],
+    identity: StableIdentity,
+) -> ConsensusResult<()> {
+    let Some(first) = records.first() else {
+        let encoded = encode_record(&StableRecord::Identity(identity))?;
+        let record = wal.append(0, &encoded, true).map_err(storage_error)?;
+        if record.sequence != 0 {
+            return Err(ConsensusError::InvalidState(format!(
+                "stable identity was written at WAL sequence {}; expected 0",
+                record.sequence
+            )));
+        }
+        return Ok(());
+    };
+    if first.sequence != 0 || first.timestamp_ms != 0 {
+        return Err(ConsensusError::InvalidState(
+            "stable identity must be WAL sequence zero with timestamp zero".into(),
+        ));
+    }
+    match decode_record(&first.payload)? {
+        StableRecord::Identity(stored) if stored == identity => Ok(()),
+        StableRecord::Identity(stored) => Err(ConsensusError::InvalidState(format!(
+            "stable identity mismatch: stored {stored:?}, requested {identity:?}"
+        ))),
+        StableRecord::Transition(_) | StableRecord::Checkpoint(_) => {
+            Err(ConsensusError::InvalidState(
+                "stable WAL sequence zero is not an identity record".into(),
+            ))
+        }
+    }
+}
+
+fn replay_transitions(
+    identity: StableIdentity,
+    records: &[LogRecord],
+) -> ConsensusResult<(CandidateState, u64)> {
+    let mut state = CandidateState {
+        hard_state: HardState::default(),
+        snapshot: None,
+        entries: Vec::new(),
+        checkpoint: StableCheckpoint::empty(identity)?,
+    };
+    let mut stable_generation = 0_u64;
+    for record in records.iter().skip(1) {
+        if record.timestamp_ms != 0 {
+            return Err(ConsensusError::InvalidState(format!(
+                "stable WAL generation {} has a nonzero timestamp",
+                record.sequence
+            )));
+        }
+        let expected_generation = stable_generation
+            .checked_add(1)
+            .ok_or_else(|| ConsensusError::InvalidState("stable generation overflow".into()))?;
+        if record.sequence != expected_generation {
+            return Err(ConsensusError::InvalidState(format!(
+                "stable generation mismatch: WAL sequence {}, expected {expected_generation}",
+                record.sequence
+            )));
+        }
+        let decoded = decode_record(&record.payload)?;
+        let observed_generation = match &decoded {
+            StableRecord::Identity(_) => {
+                return Err(ConsensusError::InvalidState(format!(
+                    "stable WAL generation {} repeats the identity record",
+                    record.sequence
+                )));
+            }
+            StableRecord::Transition(transition) => transition.generation,
+            StableRecord::Checkpoint(transition) => transition.generation,
+        };
+        if observed_generation != expected_generation {
+            return Err(ConsensusError::InvalidState(format!(
+                "stable record generation {observed_generation} does not match WAL generation {expected_generation}"
+            )));
+        }
+        state = match decoded {
+            StableRecord::Identity(_) => unreachable!("identity handled above"),
+            StableRecord::Transition(transition) => prepare_transition(
+                identity,
+                state.prior(),
+                transition.hard_state,
+                &transition.entries,
+                transition.checkpoint,
+            )?,
+            StableRecord::Checkpoint(transition) => prepare_checkpoint_transition(
+                identity,
+                state.prior(),
+                transition.hard_state,
+                transition.image,
+                &transition.entries,
+                transition.checkpoint,
+            )?,
+        };
+        stable_generation = expected_generation;
+    }
+    Ok((state, stable_generation))
 }
 
 impl DiskStableStore {
@@ -112,88 +224,27 @@ impl DiskStableStore {
         let mut wal = FileWal::open(path).map_err(storage_error)?;
         let repaired_partial_tail = wal.recovered_partial_tail();
         let records = wal.records_from(0, usize::MAX);
+        initialize_or_validate_identity(&mut wal, &records, identity)?;
+        let (state, stable_generation) = replay_transitions(identity, &records)?;
+        let CandidateState {
+            hard_state,
+            snapshot,
+            entries,
+            checkpoint,
+        } = state;
 
-        if records.is_empty() {
-            let encoded = encode_record(&StableRecord::Identity(identity))?;
-            let record = wal.append(0, &encoded, true).map_err(storage_error)?;
-            if record.sequence != 0 {
-                return Err(ConsensusError::InvalidState(format!(
-                    "stable identity was written at WAL sequence {}; expected 0",
-                    record.sequence
-                )));
-            }
-        } else {
-            let first = &records[0];
-            if first.sequence != 0 || first.timestamp_ms != 0 {
-                return Err(ConsensusError::InvalidState(
-                    "stable identity must be WAL sequence zero with timestamp zero".into(),
-                ));
-            }
-            match decode_record(&first.payload)? {
-                StableRecord::Identity(stored) if stored == identity => {}
-                StableRecord::Identity(stored) => {
-                    return Err(ConsensusError::InvalidState(format!(
-                        "stable identity mismatch: stored {stored:?}, requested {identity:?}"
-                    )));
-                }
-                StableRecord::Transition(_) => {
-                    return Err(ConsensusError::InvalidState(
-                        "stable WAL sequence zero is not an identity record".into(),
-                    ));
-                }
-            }
-        }
-
-        let mut hard_state = HardState::default();
-        let mut entries = Vec::new();
-        let mut checkpoint = StableCheckpoint::empty(identity)?;
-        let mut stable_generation = 0_u64;
-
-        for record in records.iter().skip(1) {
-            if record.timestamp_ms != 0 {
-                return Err(ConsensusError::InvalidState(format!(
-                    "stable WAL generation {} has a nonzero timestamp",
-                    record.sequence
-                )));
-            }
-            let StableRecord::Transition(transition) = decode_record(&record.payload)? else {
-                return Err(ConsensusError::InvalidState(format!(
-                    "stable WAL generation {} repeats the identity record",
-                    record.sequence
-                )));
-            };
-            let expected_generation = stable_generation
-                .checked_add(1)
-                .ok_or_else(|| ConsensusError::InvalidState("stable generation overflow".into()))?;
-            if record.sequence != expected_generation
-                || transition.generation != expected_generation
-            {
-                return Err(ConsensusError::InvalidState(format!(
-                    "stable generation mismatch: WAL sequence {}, record generation {}, expected {expected_generation}",
-                    record.sequence, transition.generation
-                )));
-            }
-            let candidate = prepare_transition(
-                identity,
-                &hard_state,
-                &entries,
-                checkpoint,
-                transition.hard_state,
-                &transition.entries,
-                transition.checkpoint,
-            )?;
-            hard_state = candidate.hard_state;
-            entries = candidate.entries;
-            checkpoint = candidate.checkpoint;
-            stable_generation = expected_generation;
-        }
-
-        let applied = derive_applied_history(identity, &entries, checkpoint.applied_index)?;
-        let storage = materialize_storage(identity, &hard_state, &entries)?;
+        let applied = derive_applied_history(
+            identity,
+            snapshot.as_ref(),
+            &entries,
+            checkpoint.applied_index,
+        )?;
+        let storage = materialize_storage(identity, &hard_state, snapshot.as_ref(), &entries)?;
         let store = Self {
             wal,
             identity,
             hard_state,
+            snapshot,
             entries,
             checkpoint,
             stable_generation,
@@ -230,9 +281,7 @@ impl DiskStableStore {
 
         let candidate = prepare_transition(
             self.identity,
-            &self.hard_state,
-            &self.entries,
-            self.checkpoint,
+            self.prior_state(),
             hard_state.clone(),
             entries,
             checkpoint,
@@ -268,6 +317,63 @@ impl DiskStableStore {
         }
 
         self.hard_state = candidate.hard_state;
+        self.snapshot = candidate.snapshot;
+        self.entries = candidate.entries;
+        self.checkpoint = candidate.checkpoint;
+        self.stable_generation = expected_generation;
+        Ok(record.sequence)
+    }
+
+    pub(crate) fn persist_checkpoint(
+        &mut self,
+        expected_generation: u64,
+        hard_state: &HardState,
+        image: &CheckpointImage,
+        entries: &[Entry],
+        checkpoint: StableCheckpoint,
+    ) -> ConsensusResult<u64> {
+        let next_generation = self
+            .stable_generation
+            .checked_add(1)
+            .ok_or_else(|| ConsensusError::InvalidState("stable generation overflow".into()))?;
+        if expected_generation != next_generation {
+            return Err(ConsensusError::InvalidState(format!(
+                "stable generation {expected_generation} does not follow {}",
+                self.stable_generation
+            )));
+        }
+        let candidate = prepare_checkpoint_transition(
+            self.identity,
+            self.prior_state(),
+            hard_state.clone(),
+            image.clone(),
+            entries,
+            checkpoint,
+        )?;
+        let transition = StableCheckpointTransition {
+            generation: expected_generation,
+            hard_state: hard_state.clone(),
+            checkpoint,
+            image: image.clone(),
+            entries: entries.to_vec(),
+        };
+        let encoded = encode_record(&StableRecord::Checkpoint(transition))?;
+        let record = self.wal.append(0, &encoded, true).map_err(storage_error)?;
+        if record.sequence != expected_generation {
+            return Err(ConsensusError::InvalidState(format!(
+                "stable WAL returned sequence {}; expected generation {expected_generation}",
+                record.sequence
+            )));
+        }
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_after_next_append) {
+            return Err(ConsensusError::Storage(
+                "injected failure after stable checkpoint fsync and before cache mutation".into(),
+            ));
+        }
+
+        self.hard_state = candidate.hard_state;
+        self.snapshot = candidate.snapshot;
         self.entries = candidate.entries;
         self.checkpoint = candidate.checkpoint;
         self.stable_generation = expected_generation;
@@ -276,6 +382,15 @@ impl DiskStableStore {
 
     pub(crate) const fn stable_generation(&self) -> u64 {
         self.stable_generation
+    }
+
+    fn prior_state(&self) -> PriorState<'_> {
+        PriorState {
+            hard_state: &self.hard_state,
+            snapshot: self.snapshot.as_ref(),
+            entries: &self.entries,
+            checkpoint: self.checkpoint,
+        }
     }
 
     pub(crate) const fn checkpoint(&self) -> StableCheckpoint {
@@ -291,34 +406,54 @@ impl DiskStableStore {
 #[derive(Debug)]
 struct CandidateState {
     hard_state: HardState,
+    snapshot: Option<CheckpointImage>,
     entries: Vec<Entry>,
+    checkpoint: StableCheckpoint,
+}
+
+impl CandidateState {
+    fn prior(&self) -> PriorState<'_> {
+        PriorState {
+            hard_state: &self.hard_state,
+            snapshot: self.snapshot.as_ref(),
+            entries: &self.entries,
+            checkpoint: self.checkpoint,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PriorState<'a> {
+    hard_state: &'a HardState,
+    snapshot: Option<&'a CheckpointImage>,
+    entries: &'a [Entry],
     checkpoint: StableCheckpoint,
 }
 
 fn prepare_transition(
     identity: StableIdentity,
-    previous_hard_state: &HardState,
-    previous_entries: &[Entry],
-    previous_checkpoint: StableCheckpoint,
+    previous: PriorState<'_>,
     hard_state: HardState,
     new_entries: &[Entry],
     checkpoint: StableCheckpoint,
 ) -> ConsensusResult<CandidateState> {
     validate_entry_batch(new_entries)?;
-    validate_hard_state_transition(identity, previous_hard_state, &hard_state)?;
-    validate_checkpoint_transition(previous_checkpoint, checkpoint)?;
+    validate_hard_state_transition(identity, previous.hard_state, &hard_state)?;
+    validate_checkpoint_transition(previous.checkpoint, checkpoint)?;
 
-    let mut entries = previous_entries.to_vec();
+    let mut entries = previous.entries.to_vec();
     if let Some(first) = new_entries.first() {
-        if first.index <= previous_hard_state.commit {
+        if first.index <= previous.hard_state.commit {
             return Err(ConsensusError::InvalidState(format!(
                 "stable update would overwrite committed index {} with an entry beginning at {}",
-                previous_hard_state.commit, first.index
+                previous.hard_state.commit, first.index
             )));
         }
+        let base_index = previous.snapshot.map_or(0, |image| image.index.get());
         let expected_next = u64::try_from(entries.len())
             .map_err(|_| ConsensusError::InvalidState("stable log is too large".into()))?
-            .checked_add(1)
+            .checked_add(base_index)
+            .and_then(|value| value.checked_add(1))
             .ok_or_else(|| ConsensusError::InvalidState("stable log index overflow".into()))?;
         if first.index > expected_next {
             return Err(ConsensusError::InvalidState(format!(
@@ -327,16 +462,81 @@ fn prepare_transition(
                 expected_next - 1
             )));
         }
-        let retained = usize::try_from(first.index - 1)
+        let retained = usize::try_from(first.index - base_index - 1)
             .map_err(|_| ConsensusError::InvalidState("stable log index is too large".into()))?;
         entries.truncate(retained);
         entries.extend_from_slice(new_entries);
     }
 
-    validate_complete_state(identity, &hard_state, &entries, checkpoint)?;
+    validate_complete_state(
+        identity,
+        &hard_state,
+        previous.snapshot,
+        &entries,
+        checkpoint,
+    )?;
     Ok(CandidateState {
         hard_state,
+        snapshot: previous.snapshot.cloned(),
         entries,
+        checkpoint,
+    })
+}
+
+fn prepare_checkpoint_transition(
+    identity: StableIdentity,
+    previous: PriorState<'_>,
+    hard_state: HardState,
+    image: CheckpointImage,
+    entries: &[Entry],
+    checkpoint: StableCheckpoint,
+) -> ConsensusResult<CandidateState> {
+    validate_hard_state_transition(identity, previous.hard_state, &hard_state)?;
+    validate_checkpoint_transition(previous.checkpoint, checkpoint)?;
+    validate_checkpoint_image(&image)?;
+    if image.group_id != identity.group_id || image.group_epoch != identity.group_epoch {
+        return Err(ConsensusError::InvalidState(
+            "stable checkpoint belongs to a different group or epoch".into(),
+        ));
+    }
+    if previous
+        .snapshot
+        .is_some_and(|prior| image.index < prior.index)
+    {
+        return Err(ConsensusError::InvalidState(
+            "stable checkpoint index regresses".into(),
+        ));
+    }
+    let previous_applied = derive_applied_history(
+        identity,
+        previous.snapshot,
+        previous.entries,
+        previous.checkpoint.applied_index,
+    )?;
+    if image.applied.get(..previous_applied.len()) != Some(previous_applied.as_slice()) {
+        return Err(ConsensusError::InvalidState(
+            "stable checkpoint does not extend the prior applied history".into(),
+        ));
+    }
+    if image.index != checkpoint.applied_index || image.state_digest != checkpoint.state_digest {
+        return Err(ConsensusError::InvalidState(
+            "stable checkpoint image does not match its application checkpoint".into(),
+        ));
+    }
+    validate_entry_batch(entries)?;
+    if entries
+        .first()
+        .is_some_and(|entry| entry.index != image.index.get().saturating_add(1))
+    {
+        return Err(ConsensusError::InvalidState(
+            "stable checkpoint tail is not contiguous after its index".into(),
+        ));
+    }
+    validate_complete_state(identity, &hard_state, Some(&image), entries, checkpoint)?;
+    Ok(CandidateState {
+        hard_state,
+        snapshot: Some(image),
+        entries: entries.to_vec(),
         checkpoint,
     })
 }
@@ -429,13 +629,16 @@ fn validate_normal_entry(entry: &Entry) -> ConsensusResult<()> {
 fn validate_complete_state(
     identity: StableIdentity,
     hard_state: &HardState,
+    snapshot: Option<&CheckpointImage>,
     entries: &[Entry],
     checkpoint: StableCheckpoint,
 ) -> ConsensusResult<()> {
     validate_voters(identity.node_id, identity.voters)?;
     validate_hard_state(hard_state, identity.voters)?;
-    let last_index = entries.last().map_or(0, |entry| entry.index);
-    validate_log_order(entries, last_index, hard_state.term)?;
+    let base_index = snapshot.map_or(0, |image| image.index.get());
+    let base_term = snapshot.map_or(0, |image| image.term.get());
+    let last_index = entries.last().map_or(base_index, |entry| entry.index);
+    validate_retained_log_order(entries, base_index, base_term, last_index, hard_state.term)?;
     if hard_state.commit > last_index {
         return Err(ConsensusError::InvalidState(format!(
             "stable HardState commit {} exceeds last index {last_index}",
@@ -448,13 +651,19 @@ fn validate_complete_state(
             checkpoint.applied_index, hard_state.commit
         )));
     }
+    if checkpoint.applied_index.get() < base_index {
+        return Err(ConsensusError::InvalidState(format!(
+            "stable applied index {} is below checkpoint index {base_index}",
+            checkpoint.applied_index
+        )));
+    }
     if checkpoint.applied_index != checkpoint.publishable_index {
         return Err(ConsensusError::InvalidState(
             "stable v1 checkpoint applied and publishable indexes differ".into(),
         ));
     }
 
-    let applied = derive_applied_history(identity, entries, checkpoint.applied_index)?;
+    let applied = derive_applied_history(identity, snapshot, entries, checkpoint.applied_index)?;
     let expected_digest = compute_state_digest(identity.group_id, identity.group_epoch, &applied)?;
     if checkpoint.state_digest != expected_digest {
         return Err(ConsensusError::InvalidState(
@@ -466,11 +675,15 @@ fn validate_complete_state(
 
 fn derive_applied_history(
     identity: StableIdentity,
+    snapshot: Option<&CheckpointImage>,
     entries: &[Entry],
     applied_index: LogIndex,
 ) -> ConsensusResult<Vec<CommittedProposal>> {
-    let mut seen = BTreeMap::<ProposalId, Vec<u8>>::new();
-    let mut applied = Vec::new();
+    let mut applied = snapshot.map_or_else(Vec::new, |image| image.applied.clone());
+    let mut seen = applied
+        .iter()
+        .map(|proposal| (proposal.receipt.proposal_id, proposal.payload.clone()))
+        .collect::<BTreeMap<ProposalId, Vec<u8>>>();
 
     for entry in entries {
         validate_normal_entry(entry)?;
@@ -507,9 +720,10 @@ fn derive_applied_history(
 fn materialize_storage(
     identity: StableIdentity,
     hard_state: &HardState,
+    snapshot: Option<&CheckpointImage>,
     entries: &[Entry],
-) -> ConsensusResult<MemStorage> {
-    let storage = MemStorage::new_with_conf_state(ConfState::from((
+) -> ConsensusResult<EpochRaftStorage> {
+    let mut storage = EpochRaftStorage::new_with_conf_state(ConfState::from((
         identity
             .voters
             .iter()
@@ -517,7 +731,13 @@ fn materialize_storage(
             .collect::<Vec<_>>(),
         Vec::<u64>::new(),
     )));
-    {
+    if let Some(image) = snapshot {
+        storage.install_snapshot(
+            checkpoint_snapshot(image, identity.voters)?,
+            entries,
+            hard_state.clone(),
+        )?;
+    } else {
         let mut core = storage.wl();
         core.append(entries)
             .map_err(|error| ConsensusError::Storage(error.to_string()))?;
@@ -526,10 +746,64 @@ fn materialize_storage(
     Ok(storage)
 }
 
+fn validate_retained_log_order(
+    entries: &[Entry],
+    base_index: u64,
+    base_term: u64,
+    last_index: u64,
+    hard_state_term: u64,
+) -> ConsensusResult<()> {
+    if base_index == 0 {
+        return validate_log_order(entries, last_index, hard_state_term);
+    }
+    let expected_len = last_index
+        .checked_sub(base_index)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| ConsensusError::InvalidState("stable log length overflow".into()))?;
+    if entries.len() != expected_len {
+        return Err(ConsensusError::InvalidState(
+            "persisted compacted log is not complete after its checkpoint".into(),
+        ));
+    }
+    let mut previous_term = base_term;
+    for (offset, entry) in entries.iter().enumerate() {
+        let expected =
+            base_index
+                .checked_add(u64::try_from(offset).map_err(|_| {
+                    ConsensusError::InvalidState("stable log index overflow".into())
+                })?)
+                .and_then(|value| value.checked_add(1))
+                .ok_or_else(|| ConsensusError::InvalidState("stable log index overflow".into()))?;
+        validate_normal_entry(entry)?;
+        if entry.index != expected {
+            return Err(ConsensusError::InvalidState(format!(
+                "persisted compacted log entry {} is out of order; expected {expected}",
+                entry.index
+            )));
+        }
+        if entry.term < previous_term {
+            return Err(ConsensusError::InvalidState(format!(
+                "persisted log term {} at index {} regresses below prior term {previous_term}",
+                entry.term, entry.index
+            )));
+        }
+        previous_term = entry.term;
+    }
+    if previous_term > hard_state_term {
+        return Err(ConsensusError::InvalidState(format!(
+            "stored HardState term {hard_state_term} is below retained log term {previous_term}"
+        )));
+    }
+    Ok(())
+}
+
 fn encode_record(record: &StableRecord) -> ConsensusResult<Vec<u8>> {
     let (kind, payload) = match record {
         StableRecord::Identity(identity) => (IDENTITY_KIND, encode_identity(*identity)),
         StableRecord::Transition(transition) => (TRANSITION_KIND, encode_transition(transition)?),
+        StableRecord::Checkpoint(transition) => {
+            (CHECKPOINT_KIND, encode_checkpoint_transition(transition)?)
+        }
     };
     let payload_len = u32::try_from(payload.len()).map_err(|_| {
         ConsensusError::InvalidState("stable record payload exceeds the v1 length field".into())
@@ -576,6 +850,7 @@ fn decode_record(encoded: &[u8]) -> ConsensusResult<StableRecord> {
     let record = match kind {
         IDENTITY_KIND => StableRecord::Identity(decode_identity(payload)?),
         TRANSITION_KIND => StableRecord::Transition(decode_transition(payload)?),
+        CHECKPOINT_KIND => StableRecord::Checkpoint(decode_checkpoint_transition(payload)?),
         _ => {
             return Err(ConsensusError::Unsupported(format!(
                 "unsupported stable record kind {kind}"
@@ -708,6 +983,105 @@ fn decode_transition(payload: &[u8]) -> ConsensusResult<StableTransition> {
         generation,
         hard_state,
         checkpoint,
+        entries,
+    })
+}
+
+fn encode_checkpoint_transition(
+    transition: &StableCheckpointTransition,
+) -> ConsensusResult<Vec<u8>> {
+    validate_entry_batch(&transition.entries)?;
+    validate_checkpoint_image(&transition.image)?;
+    let image = encode_checkpoint_image(&transition.image)?;
+    let image_len = u32::try_from(image.len()).map_err(|_| {
+        ConsensusError::InvalidState("stable checkpoint image exceeds its length field".into())
+    })?;
+    let entry_count = u32::try_from(transition.entries.len()).map_err(|_| {
+        ConsensusError::InvalidState("stable checkpoint has too many tail entries".into())
+    })?;
+    let mut capacity = CHECKPOINT_FIXED_PAYLOAD_LEN
+        .checked_add(image.len())
+        .ok_or_else(|| ConsensusError::InvalidState("stable checkpoint length overflow".into()))?;
+    for entry in &transition.entries {
+        capacity = capacity
+            .checked_add(ENTRY_FIXED_PAYLOAD_LEN)
+            .and_then(|value| value.checked_add(entry.data.len()))
+            .ok_or_else(|| {
+                ConsensusError::InvalidState("stable checkpoint length overflow".into())
+            })?;
+    }
+
+    let mut payload = Vec::with_capacity(capacity);
+    payload.extend_from_slice(&transition.generation.to_be_bytes());
+    payload.extend_from_slice(&transition.hard_state.term.to_be_bytes());
+    payload.extend_from_slice(&transition.hard_state.vote.to_be_bytes());
+    payload.extend_from_slice(&transition.hard_state.commit.to_be_bytes());
+    payload.extend_from_slice(&transition.checkpoint.applied_index.get().to_be_bytes());
+    payload.extend_from_slice(&transition.checkpoint.publishable_index.get().to_be_bytes());
+    payload.extend_from_slice(&transition.checkpoint.state_digest);
+    payload.extend_from_slice(&image_len.to_be_bytes());
+    payload.extend_from_slice(&entry_count.to_be_bytes());
+    payload.extend_from_slice(&image);
+    for entry in &transition.entries {
+        let data_len = u32::try_from(entry.data.len()).map_err(|_| {
+            ConsensusError::InvalidState("stable entry data exceeds its length field".into())
+        })?;
+        payload.extend_from_slice(&entry.index.to_be_bytes());
+        payload.extend_from_slice(&entry.term.to_be_bytes());
+        payload.extend_from_slice(&data_len.to_be_bytes());
+        payload.extend_from_slice(entry.data.as_ref());
+    }
+    Ok(payload)
+}
+
+fn decode_checkpoint_transition(payload: &[u8]) -> ConsensusResult<StableCheckpointTransition> {
+    if payload.len() < CHECKPOINT_FIXED_PAYLOAD_LEN {
+        return Err(ConsensusError::InvalidState(
+            "stable checkpoint transition is truncated".into(),
+        ));
+    }
+    let mut reader = Reader::new(payload);
+    let generation = reader.read_u64("generation")?;
+    let hard_state = HardState {
+        term: reader.read_u64("HardState term")?,
+        vote: reader.read_u64("HardState vote")?,
+        commit: reader.read_u64("HardState commit")?,
+    };
+    let checkpoint = StableCheckpoint {
+        applied_index: LogIndex::new(reader.read_u64("applied index")?),
+        publishable_index: LogIndex::new(reader.read_u64("publishable index")?),
+        state_digest: reader.read_array("state digest")?,
+    };
+    let image_len = reader.read_u32("checkpoint image length")? as usize;
+    let entry_count = reader.read_u32("tail entry count")? as usize;
+    let image = decode_checkpoint_image(reader.read_slice(image_len, "checkpoint image")?)?;
+    if entry_count > reader.remaining_len() / ENTRY_FIXED_PAYLOAD_LEN {
+        return Err(ConsensusError::InvalidState(
+            "stable checkpoint tail count exceeds its remaining bytes".into(),
+        ));
+    }
+    let mut entries = Vec::with_capacity(entry_count);
+    for _ in 0..entry_count {
+        let index = reader.read_u64("entry index")?;
+        let term = reader.read_u64("entry term")?;
+        let data_len = reader.read_u32("entry data length")? as usize;
+        let data = reader.read_slice(data_len, "entry data")?.to_vec();
+        let mut entry = Entry {
+            entry_type: EntryType::EntryNormal as i32,
+            term,
+            index,
+            ..Entry::default()
+        };
+        entry.data = data;
+        entries.push(entry);
+    }
+    reader.finish("stable checkpoint transition")?;
+    validate_entry_batch(&entries)?;
+    Ok(StableCheckpointTransition {
+        generation,
+        hard_state,
+        checkpoint,
+        image,
         entries,
     })
 }
@@ -948,6 +1322,130 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_record_reopens_a_compacted_prefix_and_contiguous_tail() {
+        let directory = TestDirectory::new();
+        let path = directory.wal_path();
+        let recovered = DiskStableStore::open(&path, identity()).unwrap();
+        let mut store = recovered.store;
+        store
+            .persist(
+                1,
+                &hard_state(1, 1, 1),
+                &[normal_entry(1, 1), normal_entry(2, 1)],
+                checkpoint_at(1),
+            )
+            .unwrap();
+        let image = empty_image_at(1, 1);
+        store
+            .persist_checkpoint(
+                2,
+                &hard_state(1, 1, 1),
+                &image,
+                &[normal_entry(2, 1)],
+                checkpoint_at(1),
+            )
+            .unwrap();
+        drop(store);
+
+        let reopened = DiskStableStore::open(&path, identity()).unwrap();
+        assert_eq!(reopened.storage.first_index().unwrap(), 2);
+        assert_eq!(reopened.storage.term(1).unwrap(), 1);
+        assert_eq!(reopened.storage.last_index().unwrap(), 2);
+        assert_eq!(
+            reopened
+                .storage
+                .entries(2, 3, None, GetEntriesContext::empty(false))
+                .unwrap(),
+            vec![normal_entry(2, 1)]
+        );
+        assert_eq!(reopened.checkpoint, checkpoint_at(1));
+
+        let mut store = reopened.store;
+        store
+            .persist(3, &hard_state(1, 1, 2), &[], checkpoint_at(2))
+            .unwrap();
+        drop(store);
+        let reopened = DiskStableStore::open(&path, identity()).unwrap();
+        assert_eq!(reopened.checkpoint.applied_index, LogIndex::new(2));
+        assert_eq!(reopened.storage.first_index().unwrap(), 2);
+        assert_eq!(reopened.storage.last_index().unwrap(), 2);
+    }
+
+    #[test]
+    fn checkpoint_codec_rejects_digest_corruption_and_noncontiguous_tail() {
+        let image = empty_image_at(1, 1);
+        let record = StableRecord::Checkpoint(StableCheckpointTransition {
+            generation: 1,
+            hard_state: hard_state(1, 1, 1),
+            checkpoint: checkpoint_at(1),
+            image: image.clone(),
+            entries: Vec::new(),
+        });
+        let mut encoded = encode_record(&record).unwrap();
+        let image_digest_offset = RECORD_HEADER_LEN + CHECKPOINT_FIXED_PAYLOAD_LEN + 40;
+        encoded[image_digest_offset] ^= 0xff;
+        assert!(decode_record(&encoded).is_err());
+
+        let directory = TestDirectory::new();
+        let recovered = DiskStableStore::open(&directory.wal_path(), identity()).unwrap();
+        let mut store = recovered.store;
+        store
+            .persist(
+                1,
+                &hard_state(1, 1, 1),
+                &[normal_entry(1, 1)],
+                checkpoint_at(1),
+            )
+            .unwrap();
+        assert!(matches!(
+            store.persist_checkpoint(
+                2,
+                &hard_state(1, 1, 1),
+                &image,
+                &[normal_entry(3, 1)],
+                checkpoint_at(1),
+            ),
+            Err(ConsensusError::InvalidState(_))
+        ));
+        assert_eq!(store.stable_generation(), 1);
+    }
+
+    #[test]
+    fn checkpoint_transition_rejects_a_canonical_but_divergent_applied_prefix() {
+        let previous = image_with_proposal(1, b"original");
+        let conflicting = image_with_proposal(1, b"different");
+        let previous_checkpoint = StableCheckpoint {
+            applied_index: previous.index,
+            publishable_index: previous.index,
+            state_digest: previous.state_digest,
+        };
+        let next_checkpoint = StableCheckpoint {
+            applied_index: conflicting.index,
+            publishable_index: conflicting.index,
+            state_digest: conflicting.state_digest,
+        };
+        let previous_hard_state = hard_state(1, 1, 1);
+        let previous_state = PriorState {
+            hard_state: &previous_hard_state,
+            snapshot: Some(&previous),
+            entries: &[],
+            checkpoint: previous_checkpoint,
+        };
+
+        assert!(matches!(
+            prepare_checkpoint_transition(
+                identity(),
+                previous_state,
+                hard_state(1, 1, 1),
+                conflicting,
+                &[],
+                next_checkpoint,
+            ),
+            Err(ConsensusError::InvalidState(_))
+        ));
+    }
+
+    #[test]
     fn reopen_repairs_only_a_partial_outer_wal_tail() {
         let directory = TestDirectory::new();
         let path = directory.wal_path();
@@ -1076,6 +1574,43 @@ mod tests {
             term,
             index,
             ..Entry::default()
+        }
+    }
+
+    fn empty_image_at(index: u64, term: u64) -> CheckpointImage {
+        CheckpointImage {
+            group_id: identity().group_id,
+            group_epoch: identity().group_epoch,
+            index: LogIndex::new(index),
+            term: Term::new(term),
+            state_digest: empty_checkpoint().state_digest,
+            applied: Vec::new(),
+        }
+    }
+
+    fn image_with_proposal(proposal_id: u64, payload: &[u8]) -> CheckpointImage {
+        let applied = vec![CommittedProposal {
+            receipt: CommitReceipt {
+                group_id: identity().group_id,
+                group_epoch: identity().group_epoch,
+                proposal_id: ProposalId::new(proposal_id).unwrap(),
+                term: Term::new(1),
+                log_index: LogIndex::new(1),
+            },
+            payload: payload.to_vec(),
+        }];
+        CheckpointImage {
+            group_id: identity().group_id,
+            group_epoch: identity().group_epoch,
+            index: LogIndex::new(1),
+            term: Term::new(1),
+            state_digest: compute_state_digest(
+                identity().group_id,
+                identity().group_epoch,
+                &applied,
+            )
+            .unwrap(),
+            applied,
         }
     }
 

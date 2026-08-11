@@ -218,7 +218,13 @@ stable journal over `FileWal` exposed through `PersistentRaftAdapter`. EPRS
 records immutable voter identity, complete `HardState`, normal-entry
 index/term/data, and an applied/publishable digest checkpoint without persisting
 raw library protobuf. It supports checksummed
-local reopen and logical uncommitted-suffix replacement. An opt-in node runtime
+local reopen and logical uncommitted-suffix replacement. Additive EPRS kind-3
+records embed a bounded canonical EPSN v1 checkpoint and contiguous tail.
+Checkpoint creation fsyncs before local installation; the snapshot-aware Raft
+store can send that image to a lagging fixed voter, whose typed profile is
+replayed before later committed entries apply. Reopen reconstructs the same
+checkpoint-plus-tail state and exact retry registry. This is logical Raft-prefix
+compaction only: old EPRS outer-WAL records remain on disk. An opt-in node runtime
 wraps it in a dedicated actor, bounded ordered HTTP peer queues, and a static
 three-container topology. Its default probe mode carries opaque diagnostics.
 An alternative experimental mode attaches one single-partition Stream tablet:
@@ -343,8 +349,8 @@ execution remains explicitly unimplemented: the outbox proves durable intent
 and settlements, not that a target side effect occurred. See
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
-Snapshots, compaction, membership changes, general placement solving,
-online transfer/repair/rebalance, authenticated peer transport, follower
+Profile-native snapshots/backups, physical EPRS compaction, membership changes,
+general placement solving, online transfer/repair/rebalance, authenticated peer transport, follower
 linearizable routing, and cross-tablet read transactions remain disabled. The
 leader-only regional read barrier is experimental. The byte contract is
 documented in [EPRS v1 consensus stable
@@ -354,7 +360,9 @@ non-claims are recorded in
 [Experimental Consensus Probe](CONSENSUS_PROBE.md), and the typed milestone in
 [Experimental Stream Tablet](STREAM_TABLET.md), and the Queue boundary in
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md), and the Cache boundary
-in [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
+in [Experimental Replicated Cache Tablet](CACHE_TABLET.md). Consensus checkpoint
+operation and its non-claims are in
+[Consensus Checkpoints and Snapshot Catch-up](CONSENSUS_CHECKPOINTS.md).
 
 Rust peer replication uses batched, framed, mutually authenticated connections
 with separate priorities for control, append, snapshot, and repair traffic.

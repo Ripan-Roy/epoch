@@ -94,7 +94,22 @@ The `create_stream`, checksum-less `create_queue`, and checksummed
 `create_queue` vectors are compiled into the engine test suite. Any intentional
 change requires a new version or an explicit compatible-fixture review. This
 node-level journal is replaced by the tablet log/snapshot format in the
-replicated architecture; it has no snapshot or compaction contract.
+replicated architecture; it has no standalone snapshot or compaction contract.
+
+## Consensus stable journal and checkpoint version 1
+
+The fixed-voter replicated core uses two related internal formats:
+
+- [EPRS v1](consensus-stable-store-v1.md) frames immutable identity, stable
+  transitions, and additive checkpoint transitions inside the checksummed
+  `FileWal` container.
+- [EPSN v1](consensus-checkpoint-v1.md) canonically binds group/epoch,
+  index/term, the EPDG digest, and complete committed-proposal registry for
+  local compaction, follower snapshot installation, and checkpoint-plus-tail
+  reopen.
+
+These formats are pre-alpha consensus recovery evidence, not a profile backup,
+PITR, or production tablet snapshot contract.
 
 ## Deterministic test trace version 1
 

@@ -9,6 +9,7 @@ epoch_artifact_dir="${EPOCH_PROBE_ARTIFACT_DIR:-}"
 epoch_use_existing_image="${EPOCH_PROBE_USE_EXISTING_IMAGE:-0}"
 epoch_internal_peer_message_path=/internal/v1/consensus/messages
 epoch_experimental_status_path=/experimental/v1/consensus/status
+epoch_experimental_checkpoints_path=/experimental/v1/consensus/checkpoints
 
 epoch_ports=()
 while IFS= read -r epoch_port; do
@@ -145,6 +146,29 @@ lookup_for_node() {
     "http://127.0.0.1:${port}/experimental/v1/consensus/proposals/${proposal_id}"
 }
 
+checkpoint_node() {
+  local node_id=$1
+  local port="${epoch_peer_ports[node_id - 1]}"
+  curl --fail --silent --show-error --request POST \
+    "http://127.0.0.1:${port}${epoch_experimental_checkpoints_path}"
+}
+
+assert_checkpoint() {
+  local document=$1
+  python3 -c '
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+assert isinstance(document["index"], int) and document["index"] > 0, document
+assert isinstance(document["term"], int) and document["term"] > 0, document
+assert document["proposal_count"] >= 1, document
+assert 0 < document["encoded_bytes"] <= 768 * 1024, document
+assert document["durability"] == "fsync_before_install", document
+assert document["compaction"] == "logical_raft_prefix", document
+' "$document"
+}
+
 wait_for_nodes() {
   local node_id
   local ready
@@ -259,9 +283,39 @@ for epoch_node_id in 1 2 3; do
 done
 
 read -r epoch_leader epoch_term < <(wait_for_leader)
+epoch_lagging=1
+if (( epoch_lagging == epoch_leader )); then
+  epoch_lagging=2
+fi
+epoch_lagging_service="${epoch_services[epoch_lagging - 1]}"
+"${epoch_compose[@]}" stop "$epoch_lagging_service" >/dev/null
+epoch_checkpoint_survivors=()
+for epoch_node_id in 1 2 3; do
+  if (( epoch_node_id != epoch_lagging )); then
+    epoch_checkpoint_survivors+=("$epoch_node_id")
+  fi
+done
+
 propose "$epoch_leader" "$epoch_term" 101 '[101,112,111,99,104]'
+wait_for_commit 101 "${epoch_checkpoint_survivors[@]}"
+assert_identical_commit 101 '[101,112,111,99,104]' "${epoch_checkpoint_survivors[@]}"
+epoch_checkpoint="$(checkpoint_node "$epoch_leader")"
+assert_checkpoint "$epoch_checkpoint"
+epoch_checkpoint_index="$(json_field "$epoch_checkpoint" index)"
+epoch_checkpoint_status="$(status_for_node "$epoch_leader")"
+[[ "$(json_field "$epoch_checkpoint_status" checkpoint_index)" == "$epoch_checkpoint_index" ]]
+[[ "$(json_field "$epoch_checkpoint_status" retained_log_first_index)" == "$((epoch_checkpoint_index + 1))" ]]
+
+propose "$epoch_leader" "$epoch_term" 102 '[99,104,101,99,107,112,111,105,110,116,45,116,97,105,108]'
+wait_for_commit 102 "${epoch_checkpoint_survivors[@]}"
+"${epoch_compose[@]}" start "$epoch_lagging_service" >/dev/null
 wait_for_commit 101 1 2 3
+wait_for_commit 102 1 2 3
 assert_identical_commit 101 '[101,112,111,99,104]' 1 2 3
+assert_identical_commit 102 '[99,104,101,99,107,112,111,105,110,116,45,116,97,105,108]' 1 2 3
+epoch_lagging_status="$(status_for_node "$epoch_lagging")"
+[[ "$(json_field "$epoch_lagging_status" checkpoint_index)" == "$epoch_checkpoint_index" ]]
+[[ "$(json_field "$epoch_lagging_status" retained_log_first_index)" == "$((epoch_checkpoint_index + 1))" ]]
 
 epoch_leader_service="${epoch_services[epoch_leader - 1]}"
 "${epoch_compose[@]}" stop "$epoch_leader_service" >/dev/null
@@ -270,17 +324,17 @@ if (( epoch_next_term <= epoch_term )); then
   printf 'leader term did not advance: %s -> %s\n' "$epoch_term" "$epoch_next_term" >&2
   exit 1
 fi
-propose "$epoch_next_leader" "$epoch_next_term" 102 '[102,97,105,108,111,118,101,114]'
+propose "$epoch_next_leader" "$epoch_next_term" 103 '[102,97,105,108,111,118,101,114]'
 epoch_survivors=()
 for epoch_node_id in 1 2 3; do
   if (( epoch_node_id != epoch_leader )); then
     epoch_survivors+=("$epoch_node_id")
   fi
 done
-wait_for_commit 102 "${epoch_survivors[@]}"
+wait_for_commit 103 "${epoch_survivors[@]}"
 
 "${epoch_compose[@]}" start "$epoch_leader_service" >/dev/null
-wait_for_commit 102 1 2 3
-assert_identical_commit 102 '[102,97,105,108,111,118,101,114]' 1 2 3
+wait_for_commit 103 1 2 3
+assert_identical_commit 103 '[102,97,105,108,111,118,101,114]' 1 2 3
 
-printf 'Epoch three-container consensus probe failover smoke passed.\n'
+printf 'Epoch three-container checkpoint catch-up and failover smoke passed.\n'

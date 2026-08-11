@@ -304,8 +304,8 @@ peer endpoints are isolated and trusted; an unauthenticated peer can spoof a
 voter, so this is not durable-majority proof under a hostile network. Do not
 expose it to an untrusted network.
 
-It also has static membership, one group/resource, one partition, no snapshots,
-log compaction, retention deletion, follower read routing, catalog-authorized epoch
+It also has static membership, one group/resource, one partition, no compact
+profile-native snapshot, physical EPRS reclamation, retention deletion, follower read routing, catalog-authorized epoch
 transition, placement, authenticated peer identity, bounded idempotency
 retention, replica-progress/ISR contract, or exhaustive crash/I/O matrix.
 Consumer groups add no join, heartbeat, assignment, revoke, session timeout,

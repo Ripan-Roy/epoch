@@ -44,6 +44,17 @@ cargo run -p epoch-node -- --data-dir .epoch`;
 const regionalNodes = `# Terminal A · build and start three fixed voters
 make compose-regional-up`;
 
+const consensusCheckpoint = `# Start the disposable fixed-voter probe
+make compose-probe-up
+
+# Inspect voter-local checkpoint and retained-log positions
+curl --fail --silent --show-error \
+  http://127.0.0.1:17701/experimental/v1/consensus/status
+
+# Fsync a canonical checkpoint before logical Raft-prefix compaction
+curl --fail-with-body --request POST \
+  http://127.0.0.1:17701/experimental/v1/consensus/checkpoints`;
+
 const regionalControl = `# Terminal B · keep the managed bridge running
 EPOCH_CONTROL_REGIONAL_ENDPOINTS=http://127.0.0.1:18661,http://127.0.0.1:18662,http://127.0.0.1:18663 \
 EPOCH_CONTROL_STATE_PATH=.epoch/control/registry.db \
@@ -371,6 +382,7 @@ type DocsSectionId =
   | "restart"
   | "guarantees"
   | "cluster-milestone"
+  | "consensus-recovery"
   | "regional-stream"
   | "regional-queue"
   | "regional-cache"
@@ -399,6 +411,7 @@ const docsNavigation: ReadonlyArray<DocsNavigationGroup> = [
     items: [
       { id: "guarantees", label: "Guarantees & errors" },
       { id: "cluster-milestone", label: "Cluster milestone" },
+      { id: "consensus-recovery", label: "Consensus recovery" },
     ],
   },
   {
@@ -937,13 +950,73 @@ export function DocsPage({ section }: DocsPageProps) {
             </section>
 
             <section
+              id="consensus-recovery"
+              className="docs-section"
+              aria-labelledby="consensus-recovery-title"
+              tabIndex={-1}
+            >
+              <div className="docs-section__heading">
+                <span>05</span>
+                <div>
+                  <p className="eyebrow">FIXED-VOTER RECOVERY CORE</p>
+                  <h2 id="consensus-recovery-title">Checkpoint, compact, catch up, and reopen.</h2>
+                  <p>
+                    The replicated core can encode a bounded canonical <code>EPSN v1</code> checkpoint at one
+                    voter&apos;s applied Raft index, fsync it inside an additive EPRS record, then logically
+                    compact the prefix. A lagging fixed voter validates and persists that image, replaces its
+                    typed profile through deterministic replay, and applies the committed tail. Status keeps
+                    the local checkpoint and retained-log boundary visible.
+                  </p>
+                </div>
+              </div>
+
+              <div className="verification-grid">
+                <article>
+                  <span>DURABLE ORDER</span>
+                  <strong>Disk becomes authoritative before memory changes.</strong>
+                  <p>
+                    A post-fsync failure stops the live adapter; reopening the same journal recovers the
+                    checkpoint, proposal lookup, and digest without inventing another receipt.
+                  </p>
+                </article>
+                <article>
+                  <span>FOLLOWER CATCH-UP</span>
+                  <strong>Profile replay completes before the retained tail applies.</strong>
+                  <p>
+                    Real HTTP runtimes prove a stopped Catalog voter installs the checkpoint and converges on
+                    later resources after its listener returns.
+                  </p>
+                </article>
+                <article>
+                  <span>EXACT BOUNDARY</span>
+                  <strong>This is a consensus checkpoint, not a backup.</strong>
+                  <p>
+                    The 768 KiB image retains complete proposal history. There is no profile-native compact
+                    image, PITR, physical EPRS reclamation, dynamic membership, or production repair yet.
+                  </p>
+                </article>
+              </div>
+
+              <CodeBlock label="Local checkpoint evidence" value={consensusCheckpoint} />
+
+              <aside className="docs-access-note">
+                <strong>Local experimental surface</strong>
+                <span>
+                  <code>checkpoint_index</code> and <code>retained_log_first_index</code> are voter-local
+                  facts. The trigger is explicit and unauthenticated on the diagnostic listener; do not expose
+                  it to an untrusted network.
+                </span>
+              </aside>
+            </section>
+
+            <section
               id="regional-stream"
               className="docs-section"
               aria-labelledby="regional-stream-title"
               tabIndex={-1}
             >
               <div className="docs-section__heading">
-                <span>05</span>
+                <span>06</span>
                 <div>
                   <p className="eyebrow">VERSIONED REGIONAL STREAM V1</p>
                   <h2 id="regional-stream-title">Run one authenticated client across three voters.</h2>
@@ -1052,7 +1125,7 @@ export function DocsPage({ section }: DocsPageProps) {
               tabIndex={-1}
             >
               <div className="docs-section__heading">
-                <span>06</span>
+                <span>07</span>
                 <div>
                   <p className="eyebrow">VERSIONED REGIONAL QUEUE V1</p>
                   <h2 id="regional-queue-title">Run the complete Queue lifecycle through one fenced API.</h2>
@@ -1162,7 +1235,7 @@ export function DocsPage({ section }: DocsPageProps) {
               tabIndex={-1}
             >
               <div className="docs-section__heading">
-                <span>07</span>
+                <span>08</span>
                 <div>
                   <p className="eyebrow">VERSIONED REGIONAL CACHE V1</p>
                   <h2 id="regional-cache-title">CAS, transaction, fencing, expiry, and recovery.</h2>
@@ -1274,7 +1347,7 @@ export function DocsPage({ section }: DocsPageProps) {
               tabIndex={-1}
             >
               <div className="docs-section__heading">
-                <span>08</span>
+                <span>09</span>
                 <div>
                   <p className="eyebrow">VERSIONED REGIONAL EVENT BUS V1</p>
                   <h2 id="regional-bus-title">Route, archive, lease, settle, and recover.</h2>
@@ -1386,7 +1459,7 @@ export function DocsPage({ section }: DocsPageProps) {
               tabIndex={-1}
             >
               <div className="docs-section__heading">
-                <span>09</span>
+                <span>10</span>
                 <div>
                   <p className="eyebrow">STANDALONE ALPHA SURFACE</p>
                   <h2 id="sdk-reference-title">The same operation, native to each ecosystem.</h2>
@@ -1462,7 +1535,7 @@ export function DocsPage({ section }: DocsPageProps) {
 
             <section id="reference" className="docs-section" aria-labelledby="reference-title" tabIndex={-1}>
               <div className="docs-section__heading">
-                <span>10</span>
+                <span>11</span>
                 <div>
                   <p className="eyebrow">SOURCE OF TRUTH</p>
                   <h2 id="reference-title">Go deeper without losing the boundary.</h2>
@@ -1529,6 +1602,12 @@ export function DocsPage({ section }: DocsPageProps) {
                   title="Quorum read barriers"
                   description="Safe ReadIndex admission, majority and local-apply completion, explicit stale opt-in, timeout behavior, and non-claims."
                   href={`${repositoryDocsUrl}/adr/0013-quorum-read-barriers.md`}
+                />
+                <ReferenceCard
+                  eyebrow="RECOVERY CORE"
+                  title="Consensus checkpoints"
+                  description="EPSN bytes, fsync-before-install ordering, logical prefix compaction, lagging-voter catch-up, checkpoint-plus-tail reopen, and exact non-claims."
+                  href={`${repositoryDocsUrl}/CONSENSUS_CHECKPOINTS.md`}
                 />
                 <ReferenceCard
                   eyebrow="CLUSTER CORE"

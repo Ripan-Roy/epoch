@@ -501,7 +501,7 @@ webhook/Queue/Stream/HTTP side effect. See
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 Epoch does **not** yet provide a production clustered durability contract,
-dynamic regional placement/membership, persisted profile snapshots,
+dynamic regional placement/membership, compact profile-native snapshots/backups,
 consumer-group coordination, bounded transactions, object tier, geo
 replication, native Protobuf data services, compatibility gateways, durable
 webhook delivery, connector execution, or the production security controls in
@@ -526,6 +526,14 @@ idempotency-receipt retention; see [CACHE_TABLET.md](CACHE_TABLET.md). The Bus
 profile additionally lacks target executors, rate limiting, redrive/terminal
 retention, replay-attempt lineage, public pull/push contracts, and target
 security; see [BUS_TABLET.md](BUS_TABLET.md).
+
+The replicated core separately supports bounded **consensus checkpoints**: a
+canonical complete proposal registry at one applied Raft index is fsynced before
+logical prefix compaction and can replace a lagging fixed voter's state before
+tail replay. This preserves exact retry semantics but is not a Cache snapshot,
+Stream retention compaction, backup, PITR, or physical EPRS space reclamation.
+See [Consensus Checkpoints](CONSENSUS_CHECKPOINTS.md) and
+[ADR-0021](adr/0021-consensus-checkpoint-and-snapshot-installation.md).
 
 Current JSON-shaped payloads, standalone epochs, HTTP endpoints, and local WAL
 frames are provisional scaffold interfaces. They are not frozen compatibility

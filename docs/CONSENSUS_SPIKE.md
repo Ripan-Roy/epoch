@@ -1,7 +1,7 @@
 # Consensus Feasibility Spike
 
-**Status:** Stage 2 typed Stream, Queue, Cache, and Event Bus tablet
-integration; still not a public product replication mode
+**Status:** Stage 2 typed tablets plus bounded consensus checkpoint/snapshot
+catch-up; still not a public product replication mode
 
 **Decision:** [ADR-0003](adr/0003-consensus-adapter.md) remains Proposed
 
@@ -35,13 +35,18 @@ The adapter currently supports:
 - apply-time suppression of an exact duplicate proposal and fail-stop handling
   for the same proposal ID with a different payload;
 - full restart-image validation and a canonically framed SHA-256 applied-state
-  digest; and
+  digest;
+- canonical EPSN v1 checkpoint creation at the applied index, fsync-before-
+  install ordering, logical Raft-prefix compaction, snapshot transport and
+  fixed-voter installation, checkpoint-plus-tail reopen, and exact proposal
+  retry preservation; and
 - fail-stop behavior after an error occurs while processing `Ready` work.
 
 The disk sub-slice adds EPRS v1: an immutable fixed-voter identity followed by
 checksummed, fsync-backed generations containing complete `HardState` fields, an
 applied/publishable state-digest checkpoint, and optional normal entries. EPRS
-stores explicit Epoch fields rather than raw `raft-rs` protobuf. Reopen replays
+now also has an additive kind-3 record containing one bounded canonical EPSN
+image and contiguous retained tail. It stores explicit Epoch fields rather than raw `raft-rs` protobuf. Reopen replays
 logical uncommitted-suffix replacement, rejects committed-entry overwrite and
 state regression, rebuilds applied proposal history, verifies the SHA-256 state
 digest, and materializes a fresh in-memory Raft view. Persistent open returns
@@ -57,7 +62,7 @@ nonblocking per-destination reservations, so saturation or failure of one peer
 cannot block ticks or traffic to another; local cumulative queue, delivery,
 drop, and exhausted-retry evidence is exposed in probe status. Raw internal
 frames have a strict body limit and no CORS surface. Experimental status,
-propose, and lookup endpoints replicate opaque bytes only and always disclose
+checkpoint, propose, and lookup endpoints replicate opaque bytes only and always disclose
 local observation, no peer authentication, `profile_replication: false`, and a
 `local_durable` product-profile ceiling. A static three-container Compose model
 gives every voter its own data volume. See
@@ -106,12 +111,14 @@ side-effect claim; see
 
 ```mermaid
 flowchart LR
-    Input["Epoch proposal, read barrier, tick, or peer frame"] --> Validate["Validate scope, term, member, size, and frame"]
+    Input["Epoch proposal, checkpoint, read barrier, tick, or peer frame"] --> Validate["Validate scope, term, member, size, and frame"]
     Validate --> Raft["raft-rs RawNode"]
     Raft --> Ready["Prevalidate the complete Ready apply batch"]
     Ready --> Store["Persist EPRS generation or update memory test store"]
     Store --> Messages["Release peer messages"]
     Store --> Apply["Apply committed Epoch commands"]
+    Store --> Snapshot["Install or publish canonical checkpoint"]
+    Snapshot --> Replay["Replace typed profile through replay before tail apply"]
     Apply --> Receipt["Emit commit receipt and update proposal lookup"]
     Apply --> Barrier["Publish quorum-confirmed read after local profile apply"]
     Ready -->|any failure after Ready is taken| Stop["Fail-stop the adapter"]
@@ -121,9 +128,10 @@ For the memory adapter, the stable-store barrier remains an ordering model and
 is not disk durability. On the disk path, one complete EPRS transition is one
 durable `FileWal` append before persisted messages or commit receipts are
 released. A committed batch is decoded and checked in full before Epoch
-application state is mutated. Snapshot messages, snapshot-bearing Ready work,
-and membership-changing entries are rejected because their required Epoch
-state-machine protocols do not exist yet.
+application state is mutated. Snapshot messages and snapshot-bearing Ready work
+are accepted only for the canonical fixed-voter EPSN protocol.
+Membership-changing entries remain rejected because their Epoch transition
+protocol does not exist yet.
 
 ## Deterministic evidence
 
@@ -142,6 +150,12 @@ adapter tests reopen all three voters with identical committed histories and
 digests, preserve a minority-only pending proposal, order persisted messages
 after stable barriers, recover a proposal after an injected post-append error,
 and publish a commit-ahead-of-checkpoint receipt exactly once during recovery.
+Checkpoint tests pin the codec digest, reject foreign group/epoch/voters/term,
+corruption and oversize, prove idempotent creation and post-fsync failure reopen,
+reopen a compacted prefix plus committed tail, and elect/commit/complete a
+quorum read barrier after all voters reopen. A real HTTP/runtime test stops one
+typed Catalog voter, checkpoints the leader, commits a tail, then proves the
+lagging voter replays the snapshot before its tail and converges exactly.
 
 An explicitly selected multiprocess smoke starts three child test executables,
 each owning a `PersistentRaftAdapter` and separate EPRS path. The parent uses
@@ -188,7 +202,9 @@ This slice does not provide:
   tablet reports only `fixed_voter_majority_persisted` with two durable voters;
 - an exhaustive process-crash, fsync-failure, disk-full, or partial-write
   matrix beyond the bounded incomplete-tail and corruption tests;
-- snapshots, compaction, log purge, or state-machine checkpoint installation;
+- profile-native compact images, bounded idempotency history, physical EPRS
+  reclamation, product backup/PITR, or chunked snapshots larger than one peer
+  frame;
 - membership changes, learners, joint consensus, or placement;
 - an authoritative catalog epoch transition that can fence an old voter set;
 - follower-served or cross-group linearizable reads; the implemented safe
@@ -211,7 +227,8 @@ This slice does not provide:
    three-voter harness.
 2. Expand the new-process EPRS reopen harness across every supported crash
    boundary and unknown-outcome publication point.
-3. Add a versioned state-machine checkpoint and atomic snapshot installation.
+3. Add profile-native compact state images, bounded idempotency retention,
+   physical EPRS reclamation, and automatic checkpoint policy.
 4. Add joint-consensus membership, catalog-authorized epoch transitions, and
    old-configuration fencing tests.
 5. Add authenticated peer identity, follower routing/forwarding, replica
