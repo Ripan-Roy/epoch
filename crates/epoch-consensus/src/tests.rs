@@ -822,7 +822,7 @@ fn checkpoint_codec_is_canonical_bounded_and_metadata_fenced() {
     let encoded = encode_checkpoint_image(&image).unwrap();
     assert_eq!(
         encoded.len(),
-        SNAPSHOT_HEADER_LEN + SNAPSHOT_PROPOSAL_FIXED_LEN + 3
+        SNAPSHOT_V1_HEADER_LEN + SNAPSHOT_PROPOSAL_FIXED_LEN + 3
     );
     assert_eq!(decode_checkpoint_image(&encoded).unwrap(), image);
     assert_eq!(
@@ -901,11 +901,81 @@ fn checkpoint_codec_enforces_the_transport_size_budget() {
             payload: vec![1; 400 * 1024],
         },
     ];
+    oversized.applied_command_count = 2;
     oversized.state_digest =
         compute_state_digest(group_id(), group_epoch(), &oversized.applied).unwrap();
     assert!(matches!(
         encode_checkpoint_image(&oversized),
         Err(ConsensusError::CheckpointTooLarge { .. })
+    ));
+}
+
+#[test]
+fn profile_checkpoint_v2_is_canonical_and_detects_corruption() {
+    let image = profile_checkpoint_image_fixture();
+    let encoded = encode_checkpoint_image(&image).unwrap();
+    let application_len = image.application_snapshot.as_ref().unwrap().payload().len();
+    assert_eq!(
+        encoded.len(),
+        SNAPSHOT_V2_HEADER_LEN
+            + application_len
+            + SNAPSHOT_PROPOSAL_FIXED_LEN
+            + 3
+            + SNAPSHOT_V2_TRAILER_LEN
+    );
+    assert_eq!(decode_checkpoint_image(&encoded).unwrap(), image);
+
+    let mut corrupt_payload = encoded.clone();
+    corrupt_payload[SNAPSHOT_V2_HEADER_LEN] ^= 0xff;
+    assert!(matches!(
+        decode_checkpoint_image(&corrupt_payload),
+        Err(ConsensusError::InvalidMessage(_))
+    ));
+    let mut corrupt_trailer = encoded;
+    *corrupt_trailer.last_mut().unwrap() ^= 0xff;
+    assert!(matches!(
+        decode_checkpoint_image(&corrupt_trailer),
+        Err(ConsensusError::InvalidMessage(_))
+    ));
+}
+
+#[test]
+fn profile_checkpoint_v2_enforces_application_and_retry_bounds() {
+    assert!(matches!(
+        ApplicationSnapshot::new(
+            LogIndex::new(1),
+            *b"CATALOG_STATE_V1",
+            1,
+            [0; 32],
+            vec![0; MAX_APPLICATION_SNAPSHOT_BYTES + 1]
+        ),
+        Err(ConsensusError::CheckpointTooLarge { .. })
+    ));
+
+    let mut image = profile_checkpoint_image_fixture();
+    image.applied = (1..=3_u64)
+        .map(|index| CommittedProposal {
+            receipt: CommitReceipt {
+                group_id: group_id(),
+                group_epoch: group_epoch(),
+                proposal_id: proposal(index),
+                term: Term::new(1),
+                log_index: LogIndex::new(index),
+            },
+            payload: vec![0; 400 * 1024],
+        })
+        .collect();
+    image.index = LogIndex::new(3);
+    image.term = Term::new(1);
+    image.applied_command_count = 3;
+    image
+        .application_snapshot
+        .as_mut()
+        .unwrap()
+        .checkpoint_index = image.index;
+    assert!(matches!(
+        encode_checkpoint_image(&image),
+        Err(ConsensusError::InvalidState(_))
     ));
 }
 
@@ -1252,7 +1322,46 @@ fn checkpoint_image_fixture() -> CheckpointImage {
             std::slice::from_ref(&committed),
         )
         .unwrap(),
+        applied_command_count: 1,
         applied: vec![committed],
+        application_snapshot: None,
+    }
+}
+
+fn profile_checkpoint_image_fixture() -> CheckpointImage {
+    let committed = CommittedProposal {
+        receipt: CommitReceipt {
+            group_id: group_id(),
+            group_epoch: group_epoch(),
+            proposal_id: proposal(11),
+            term: Term::new(2),
+            log_index: LogIndex::new(7),
+        },
+        payload: b"abc".to_vec(),
+    };
+    let payload = br#"{"format_version":1,"resource_count":1}"#.to_vec();
+    let application_snapshot = ApplicationSnapshot::new(
+        LogIndex::new(9),
+        *b"CATALOG_STATE_V1",
+        1,
+        Sha256::digest(&payload).into(),
+        payload,
+    )
+    .unwrap();
+    CheckpointImage {
+        group_id: group_id(),
+        group_epoch: group_epoch(),
+        index: LogIndex::new(9),
+        term: Term::new(3),
+        state_digest: compute_rolling_state_digest(
+            group_id(),
+            group_epoch(),
+            std::slice::from_ref(&committed),
+        )
+        .unwrap(),
+        applied_command_count: 1,
+        applied: vec![committed],
+        application_snapshot: Some(application_snapshot),
     }
 }
 

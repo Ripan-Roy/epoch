@@ -4,21 +4,24 @@ use std::collections::BTreeMap;
 
 use epoch_bus::{DeliveryCounts, DeliveryLease, DeliveryStateKind, SubscriptionTarget};
 use epoch_core::{EpochError, EventEnvelope};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::TabletWriteEvidence;
-use crate::common::serialize_u64_as_decimal;
+use crate::common::{
+    deserialize_optional_u64_from_number_or_decimal, deserialize_u64_from_number_or_decimal,
+    serialize_u64_as_decimal,
+};
 
 pub type BusTabletWriteEvidence = TabletWriteEvidence;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BusTabletDisposition {
     New,
     Replayed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum BusTabletOutcome {
     Applied {
@@ -30,7 +33,7 @@ pub enum BusTabletOutcome {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BusTabletRejectionCode {
     AlreadyExists,
@@ -42,25 +45,37 @@ pub enum BusTabletRejectionCode {
     Unavailable,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BusTabletOperationResult {
     SubscriptionUpserted {
         name: String,
         replaced: bool,
-        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
         route_plan_version: u64,
     },
     SubscriptionRemoved {
         name: String,
         removed: bool,
-        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
         route_plan_version: u64,
     },
     Published {
-        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
         position: u64,
-        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
         route_plan_version: u64,
         delivery_count: usize,
         delivery_plan_digest: String,
@@ -75,8 +90,10 @@ pub enum BusTabletOperationResult {
         delivery_id: String,
         state: DeliveryStateKind,
         #[serde(
+            default,
             skip_serializing_if = "Option::is_none",
-            serialize_with = "serialize_optional_u64_as_decimal"
+            serialize_with = "serialize_optional_u64_as_decimal",
+            deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
         )]
         next_eligible_at_ms: Option<u64>,
     },
@@ -88,23 +105,32 @@ pub enum BusTabletOperationResult {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BusTabletDelivery {
     pub delivery_id: String,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub publish_position: u64,
     pub subscription: String,
     pub target: SubscriptionTarget,
     pub envelope: BusTabletEnvelope,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub route_plan_version: u64,
     pub attempt: u32,
     pub lease_token: String,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub lease_deadline_ms: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BusTabletEnvelope {
     pub id: String,
     pub source: String,
@@ -112,7 +138,10 @@ pub struct BusTabletEnvelope {
     pub event_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub time_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
@@ -124,13 +153,17 @@ pub struct BusTabletEnvelope {
     pub traceparent: Option<String>,
     pub payload: serde_json::Value,
     #[serde(
+        default,
         skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_u64_as_decimal"
+        serialize_with = "serialize_optional_u64_as_decimal",
+        deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
     )]
     pub deliver_at_ms: Option<u64>,
     #[serde(
+        default,
         skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_u64_as_decimal"
+        serialize_with = "serialize_optional_u64_as_decimal",
+        deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
     )]
     pub ttl_ms: Option<u64>,
     pub priority: u8,
@@ -141,31 +174,61 @@ pub struct BusTabletEnvelope {
     pub extensions: BTreeMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BusTabletDeliveryCounts {
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub pending: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub in_flight: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub acknowledged: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub dead_lettered: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BusTabletReceipt {
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub proposal_id: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub tablet_id: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub tablet_epoch: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub term: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub commit_index: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub applied_at_ms: u64,
     pub write_evidence: BusTabletWriteEvidence,
     pub durable_voter_acks: u16,

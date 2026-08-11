@@ -27,11 +27,11 @@ use axum::{
     routing::{get, post},
 };
 use epoch_consensus::{
-    CommitReceipt, CommittedProposal, CompletedReadBarrier, ConsensusAdapter, ConsensusCheckpoint,
-    ConsensusError, ConsensusOutput, ConsensusRole, ConsensusStatus, GroupEpoch, GroupId,
-    MAX_PEER_MESSAGE_WIRE_BYTES, MAX_PROPOSAL_PAYLOAD_BYTES, NodeId, PeerMessage,
-    PersistentOpenResult, PersistentRaftAdapter, PersistentRecovery, Proposal, ProposalId,
-    ProposalLookup, ReadBarrierId, ReadBarrierRequest, Term,
+    ApplicationSnapshot, CommitReceipt, CommittedProposal, CompletedReadBarrier, ConsensusAdapter,
+    ConsensusCheckpoint, ConsensusError, ConsensusOutput, ConsensusRole, ConsensusStatus,
+    GroupEpoch, GroupId, LogIndex, MAX_PEER_MESSAGE_WIRE_BYTES, MAX_PROPOSAL_PAYLOAD_BYTES, NodeId,
+    PeerMessage, PersistentOpenResult, PersistentRaftAdapter, PersistentRecovery, Proposal,
+    ProposalId, ProposalLookup, ReadBarrierId, ReadBarrierRequest, Term,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -100,14 +100,31 @@ pub enum ConsensusProbeError {
 
 /// Applies consensus-decoded commands to a profile state machine.
 ///
-/// Implementations must be deterministic and idempotent. Recovery replays the
-/// complete committed history before the runtime reports ready, while live
-/// application runs on the consensus actor thread before a commit notification
-/// or successful lookup can be observed by the typed profile boundary.
+/// Implementations must be deterministic and idempotent. Recovery installs a
+/// native checkpoint when present and then replays only the retained committed
+/// tail before the runtime reports ready; legacy histories still replay in
+/// full. Live application runs on the consensus actor thread before a commit
+/// notification or successful lookup can be observed by the typed boundary.
 pub trait CommittedProposalApplier: fmt::Debug + Send + Sync + 'static {
     fn replay(&self, committed: &[CommittedProposal]) -> Result<(), String>;
 
     fn apply(&self, committed: &CommittedProposal) -> Result<(), String>;
+
+    fn capture_snapshot(
+        &self,
+        _checkpoint_index: LogIndex,
+        _retained: &[CommittedProposal],
+    ) -> Result<ApplicationSnapshot, String> {
+        Err("profile-native snapshot capture is unsupported by this applier".into())
+    }
+
+    fn install_snapshot(&self, _snapshot: &ApplicationSnapshot) -> Result<(), String> {
+        Err("profile-native snapshot installation is unsupported by this applier".into())
+    }
+
+    fn supports_native_snapshots(&self) -> bool {
+        false
+    }
 }
 
 /// Validated configuration for one fixed-three-voter probe group.
@@ -1011,12 +1028,35 @@ fn run_persistent_actor(
         }
     };
     let recovery = adapter.recovery();
-    if let Some(applier) = applier
-        && let Err(error) = applier.replay(adapter.applied_proposals())
-    {
-        let error = ConsensusProbeError::ProfileApplication(error);
-        let _ = initialized.send(Err(error.clone()));
-        return Err(error);
+    if let Some(applier) = applier {
+        let application_snapshot = match adapter.application_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let error = ConsensusProbeError::ProfileApplication(format!(
+                    "could not inspect the durable application snapshot: {error}"
+                ));
+                let _ = initialized.send(Err(error.clone()));
+                return Err(error);
+            }
+        };
+        let restoration =
+            if let Some(snapshot) = application_snapshot {
+                applier.install_snapshot(&snapshot).and_then(|()| {
+                    for committed in adapter.applied_proposals().iter().filter(|committed| {
+                        committed.receipt.log_index > snapshot.checkpoint_index()
+                    }) {
+                        applier.apply(committed)?;
+                    }
+                    Ok(())
+                })
+            } else {
+                applier.replay(adapter.applied_proposals())
+            };
+        if let Err(error) = restoration {
+            let error = ConsensusProbeError::ProfileApplication(error);
+            let _ = initialized.send(Err(error.clone()));
+            return Err(error);
+        }
     }
     // `PersistentRaftAdapter::open` has already included recovery commits in
     // `applied_proposals`, so replay above is authoritative. Publish only its
@@ -1121,7 +1161,20 @@ fn handle_actor_command(
             let _ = reply.send(Ok(adapter.applied_proposals().to_vec()));
         }
         ActorCommand::Checkpoint { reply } => {
-            let result = adapter.checkpoint().map_err(Into::into);
+            let result = (|| {
+                let Some(applier) = applier.filter(|applier| applier.supports_native_snapshots())
+                else {
+                    return adapter.checkpoint().map_err(Into::into);
+                };
+                let checkpoint_index = adapter.status().applied_index;
+                let retained = adapter.checkpoint_retry_proposals()?;
+                let snapshot = applier
+                    .capture_snapshot(checkpoint_index, &retained)
+                    .map_err(ConsensusProbeError::ProfileApplication)?;
+                adapter
+                    .checkpoint_with_application(snapshot)
+                    .map_err(Into::into)
+            })();
             deliver_actor_result(adapter, reply, result)?;
         }
         #[cfg(test)]
@@ -1198,9 +1251,15 @@ fn publish_output(
     if let Some(installed) = installed_checkpoint
         && let Some(applier) = applier
     {
-        applier
-            .replay(&installed.proposals)
-            .map_err(ConsensusProbeError::ProfileApplication)?;
+        if let Some(snapshot) = installed.application_snapshot.as_ref() {
+            applier
+                .install_snapshot(snapshot)
+                .map_err(ConsensusProbeError::ProfileApplication)?;
+        } else {
+            applier
+                .replay(&installed.proposals)
+                .map_err(ConsensusProbeError::ProfileApplication)?;
+        }
     }
     for commit in output_commits {
         if let Some(applier) = applier {
@@ -1585,7 +1644,7 @@ impl From<ConsensusCheckpoint> for ConsensusProbeCheckpointResponse {
             proposal_count: checkpoint.proposal_count,
             encoded_bytes: checkpoint.encoded_bytes,
             durability: "fsync_before_install",
-            compaction: "logical_raft_prefix",
+            compaction: "logical_raft_prefix_and_physical_eprs",
         }
     }
 }
@@ -1952,7 +2011,12 @@ mod tests {
             .to_bytes();
         let document: Value = serde_json::from_slice(&body).expect("error should be JSON");
         assert_eq!(document["code"], "checkpoint_too_large");
-        assert!(document["message"].as_str().unwrap().contains("786432"));
+        assert!(
+            document["message"]
+                .as_str()
+                .unwrap()
+                .contains(&MAX_SNAPSHOT_DATA_BYTES.to_string())
+        );
     }
 
     #[tokio::test]
@@ -2673,7 +2737,10 @@ mod tests {
         let checkpoint: Value =
             serde_json::from_slice(&body).expect("checkpoint response should be JSON");
         assert_eq!(checkpoint["durability"], "fsync_before_install");
-        assert_eq!(checkpoint["compaction"], "logical_raft_prefix");
+        assert_eq!(
+            checkpoint["compaction"],
+            "logical_raft_prefix_and_physical_eprs"
+        );
         assert!(checkpoint["proposal_count"].as_u64().unwrap() >= 1);
         assert!(checkpoint["encoded_bytes"].as_u64().unwrap() > 0);
         let checkpoint_index = checkpoint["index"].as_u64().unwrap();
@@ -2740,7 +2807,7 @@ mod tests {
         let mut cluster =
             TestProbeCluster::start_with_appliers(DEFAULT_OUTBOUND_QUEUE_CAPACITY, appliers).await;
         let handles = cluster.handles();
-        let _ = wait_for_leader(&handles).await;
+        let (leader_index, _) = wait_for_leader(&handles).await;
 
         for (proposal_id, command) in [
             (701, catalog_command("orders-v1", "orders", 2)),
@@ -2771,6 +2838,11 @@ mod tests {
         );
         assert_eq!(before_restart[0].resource_count, 2);
         assert_eq!(before_restart[0].tablet_count, 3);
+        let checkpoint = handles[leader_index]
+            .checkpoint()
+            .await
+            .expect("Catalog profile checkpoint should persist");
+        assert_eq!(checkpoint.proposal_count, 2);
 
         cluster.stop().await;
         let recovered_services = (0..3)

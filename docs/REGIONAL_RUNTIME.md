@@ -366,9 +366,11 @@ digests, and deletes only its scoped containers/network/volumes.
 - Placement is exactly three configured voters. Region, zone count, and node
   class are validated, but there is no general voter-selection or rack-aware
   solver.
-- Membership changes, online rebalance, repair, split/merge, snapshots,
-  compaction, and retention deletion are absent. Read barriers are leader-only
-  and regional-only; follower forwarding remains absent.
+- Membership changes, online rebalance, repair, split/merge, user-exportable
+  backups/PITR, automatic checkpoint scheduling, and retention deletion are
+  absent. Internal native voter checkpoints and physical EPRS reclamation are
+  implemented. Read barriers are leader-only and regional-only; follower
+  forwarding remains absent.
 - Rust regional HTTP and Go management enforce the bootstrap policy, and the
   console supplies a session-only credential. They still have no TLS/OIDC/mTLS,
   token expiry/revocation, rate limiting, replicated policy, or immutable audit

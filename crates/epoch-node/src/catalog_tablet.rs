@@ -10,14 +10,18 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use epoch_catalog::{Catalog, CatalogCommand, CatalogMutation, ResourceRecord};
-use epoch_consensus::CommittedProposal;
-use serde::Serialize;
+use epoch_consensus::{ApplicationSnapshot, CommittedProposal, LogIndex};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     consensus::CommittedProposalApplier,
-    tablet_http::{hex_digest, serialize_u64_as_decimal},
+    tablet_http::{deserialize_u64_from_number_or_decimal, hex_digest, serialize_u64_as_decimal},
 };
+
+const CATALOG_APPLICATION_SNAPSHOT_FORMAT_ID: [u8; 16] = *b"CATALOG_STATE_V1";
+const CATALOG_APPLICATION_SNAPSHOT_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CatalogTabletScope {
@@ -48,13 +52,22 @@ impl CatalogTabletScope {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogTabletReceipt {
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub proposal_id: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub term: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub commit_index: u64,
     pub mutation: CatalogMutation,
     pub state_digest: String,
@@ -78,10 +91,29 @@ pub struct CatalogTabletSnapshot {
     pub resources: Vec<ResourceRecord>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct AppliedCatalogCommand {
     payload: Vec<u8>,
     receipt: CatalogTabletReceipt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogApplicationCheckpoint {
+    format_version: u16,
+    group_id: u64,
+    group_epoch: u64,
+    checkpoint_index: u64,
+    last_applied_index: u64,
+    catalog_base64: String,
+    applied: Vec<AppliedCatalogCheckpoint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AppliedCatalogCheckpoint {
+    proposal_id: u64,
+    command: AppliedCatalogCommand,
 }
 
 #[derive(Debug)]
@@ -215,6 +247,148 @@ impl CommittedProposalApplier for CatalogTabletService {
 
     fn apply(&self, committed: &CommittedProposal) -> Result<(), String> {
         self.apply_one(committed).map(|_| ())
+    }
+
+    fn capture_snapshot(
+        &self,
+        checkpoint_index: LogIndex,
+        retained: &[CommittedProposal],
+    ) -> Result<ApplicationSnapshot, String> {
+        self.ensure_healthy()?;
+        let state = self
+            .state
+            .read()
+            .map_err(|_| "catalog state read lock was poisoned".to_owned())?;
+        if state.last_applied_index > checkpoint_index.get() {
+            return Err(format!(
+                "catalog applied index {} exceeds consensus checkpoint index {}",
+                state.last_applied_index, checkpoint_index
+            ));
+        }
+        let mut applied = Vec::with_capacity(retained.len());
+        for committed in retained {
+            let proposal_id = committed.receipt.proposal_id.get();
+            let command = state.applied.get(&proposal_id).ok_or_else(|| {
+                format!("catalog retry proposal {proposal_id} has no typed applied result")
+            })?;
+            if command.payload != committed.payload
+                || command.receipt.term != committed.receipt.term.get()
+                || command.receipt.commit_index != committed.receipt.log_index.get()
+            {
+                return Err(format!(
+                    "catalog retry proposal {proposal_id} disagrees with consensus"
+                ));
+            }
+            applied.push(AppliedCatalogCheckpoint {
+                proposal_id,
+                command: command.clone(),
+            });
+        }
+        applied.sort_by_key(|entry| entry.command.receipt.commit_index);
+        let catalog_bytes = state
+            .catalog
+            .encode_snapshot()
+            .map_err(|error| error.to_string())?;
+        let state_digest = state
+            .catalog
+            .state_digest()
+            .map_err(|error| error.to_string())?;
+        let checkpoint = CatalogApplicationCheckpoint {
+            format_version: CATALOG_APPLICATION_SNAPSHOT_VERSION,
+            group_id: self.scope.group_id,
+            group_epoch: self.scope.group_epoch,
+            checkpoint_index: checkpoint_index.get(),
+            last_applied_index: state.last_applied_index,
+            catalog_base64: STANDARD_NO_PAD.encode(catalog_bytes),
+            applied,
+        };
+        let payload = serde_json::to_vec(&checkpoint).map_err(|error| error.to_string())?;
+        ApplicationSnapshot::new(
+            checkpoint_index,
+            CATALOG_APPLICATION_SNAPSHOT_FORMAT_ID,
+            CATALOG_APPLICATION_SNAPSHOT_VERSION,
+            state_digest,
+            payload,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn install_snapshot(&self, snapshot: &ApplicationSnapshot) -> Result<(), String> {
+        self.ensure_healthy()?;
+        let result: Result<CatalogTabletState, String> = (|| {
+            if snapshot.format_id() != CATALOG_APPLICATION_SNAPSHOT_FORMAT_ID
+                || snapshot.format_version() != CATALOG_APPLICATION_SNAPSHOT_VERSION
+            {
+                return Err("application snapshot is not a supported Catalog image".into());
+            }
+            let checkpoint: CatalogApplicationCheckpoint =
+                serde_json::from_slice(snapshot.payload()).map_err(|error| error.to_string())?;
+            if serde_json::to_vec(&checkpoint).map_err(|error| error.to_string())?
+                != snapshot.payload()
+            {
+                return Err("Catalog application snapshot is not canonical".into());
+            }
+            if checkpoint.format_version != CATALOG_APPLICATION_SNAPSHOT_VERSION
+                || checkpoint.group_id != self.scope.group_id
+                || checkpoint.group_epoch != self.scope.group_epoch
+                || checkpoint.checkpoint_index != snapshot.checkpoint_index().get()
+                || checkpoint.last_applied_index > checkpoint.checkpoint_index
+            {
+                return Err("Catalog application snapshot scope or index is invalid".into());
+            }
+            let catalog_bytes = STANDARD_NO_PAD
+                .decode(&checkpoint.catalog_base64)
+                .map_err(|error| format!("Catalog snapshot base64 is invalid: {error}"))?;
+            let catalog =
+                Catalog::decode_snapshot(&catalog_bytes).map_err(|error| error.to_string())?;
+            if !catalog.is_consensus_group_reserved(self.scope.group_id)
+                || catalog.state_digest().map_err(|error| error.to_string())?
+                    != snapshot.state_digest()
+            {
+                return Err(
+                    "Catalog application snapshot state digest or reservation is invalid".into(),
+                );
+            }
+
+            let mut applied = BTreeMap::new();
+            let mut previous_index = 0_u64;
+            for entry in checkpoint.applied {
+                let receipt = &entry.command.receipt;
+                if entry.proposal_id == 0
+                    || receipt.proposal_id != entry.proposal_id
+                    || receipt.term == 0
+                    || receipt.commit_index <= previous_index
+                    || receipt.commit_index > checkpoint.last_applied_index
+                    || applied
+                        .insert(entry.proposal_id, entry.command.clone())
+                        .is_some()
+                {
+                    return Err("Catalog application retry registry is invalid".into());
+                }
+                CatalogCommand::decode(&entry.command.payload)
+                    .map_err(|error| error.to_string())?;
+                previous_index = receipt.commit_index;
+            }
+            Ok(CatalogTabletState {
+                catalog,
+                applied,
+                last_applied_index: checkpoint.last_applied_index,
+            })
+        })();
+        match result {
+            Ok(restored) => {
+                *self
+                    .state
+                    .write()
+                    .map_err(|_| self.fail("catalog state write lock was poisoned"))? = restored;
+                Ok(())
+            }
+            Err(error) => Err(self.fail(error)),
+        }
+    }
+
+    fn supports_native_snapshots(&self) -> bool {
+        true
     }
 }
 
@@ -388,5 +562,47 @@ mod tests {
         let rebound = committed(31, 2, 2, &command("audit-v1", "audit", 1));
         assert!(service.apply(&rebound).is_err());
         assert!(service.ensure_healthy().is_err());
+    }
+
+    #[test]
+    fn native_snapshot_restores_full_catalog_and_only_the_retained_retry_suffix() {
+        let service = CatalogTabletService::new(CatalogTabletScope::new(9, 4).unwrap());
+        let first = committed(31, 2, 1, &command("orders-v1", "orders", 2));
+        let second = committed(32, 2, 2, &command("audit-v1", "audit", 1));
+        service.apply(&first).unwrap();
+        service.apply(&second).unwrap();
+        let expected = service.snapshot().unwrap();
+
+        let image = service
+            .capture_snapshot(LogIndex::new(2), std::slice::from_ref(&second))
+            .unwrap();
+        let restored = CatalogTabletService::new(CatalogTabletScope::new(9, 4).unwrap());
+        restored.install_snapshot(&image).unwrap();
+
+        let actual = restored.snapshot().unwrap();
+        assert_eq!(actual.resources, expected.resources);
+        assert_eq!(actual.state_digest, expected.state_digest);
+        assert_eq!(actual.last_applied_index, 2);
+        assert_eq!(actual.applied_command_count, 1);
+        assert!(restored.receipt(31).unwrap().is_none());
+        assert_eq!(restored.receipt(32).unwrap(), service.receipt(32).unwrap());
+        restored
+            .apply(&committed(33, 2, 3, &command("next-v1", "next", 1)))
+            .unwrap();
+        assert_eq!(restored.snapshot().unwrap().resource_count, 3);
+    }
+
+    #[test]
+    fn native_snapshot_install_rejects_foreign_scope_without_partial_state() {
+        let source = CatalogTabletService::new(CatalogTabletScope::new(9, 4).unwrap());
+        let proposal = committed(31, 2, 1, &command("orders-v1", "orders", 1));
+        source.apply(&proposal).unwrap();
+        let image = source
+            .capture_snapshot(LogIndex::new(1), std::slice::from_ref(&proposal))
+            .unwrap();
+        let target = CatalogTabletService::new(CatalogTabletScope::new(10, 4).unwrap());
+
+        assert!(target.install_snapshot(&image).is_err());
+        assert!(target.ensure_healthy().is_err());
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use epoch_bus::{
     BusConfig, DeliveryBackoffStrategy, DeliveryPolicy, DeliveryRetryPolicy, DeliveryState,
@@ -329,6 +329,89 @@ fn identical_committed_history_converges_on_every_voter() {
             expected
         );
     }
+}
+
+#[test]
+fn native_snapshot_restores_routes_archive_delivery_state_and_retry_suffix() {
+    let mut live = BusTablet::new(scope(), BusConfig::default()).unwrap();
+    let route = BusTabletCommand::upsert_subscription(
+        &scope(),
+        "route-audit",
+        subscription("audit", SubscriptionTarget::Pull),
+        11,
+    )
+    .unwrap();
+    let (route_id, route_payload) = encoded(&route);
+    live.apply(committed(route_id, 2, 4, &route_payload))
+        .unwrap();
+    let publish =
+        BusTabletCommand::publish(&scope(), "publish-1", event("evt-1", "order.created"), 12)
+            .unwrap();
+    let (publish_id, publish_payload) = encoded(&publish);
+    live.apply(committed(publish_id, 2, 5, &publish_payload))
+        .unwrap();
+    let expected_digest = live.state_digest();
+    let expected_business_digest = live.business_state_digest();
+
+    let snapshot = live.encode_snapshot(&BTreeSet::from([publish_id])).unwrap();
+    let mut restored = BusTablet::decode_snapshot(&scope(), &snapshot).unwrap();
+
+    assert_eq!(restored.subscription_count(), 1);
+    assert_eq!(restored.commit_position(), 1);
+    assert_eq!(restored.archived_event_count(), 1);
+    assert_eq!(restored.delivery_counts().pending, 1);
+    assert_eq!(restored.state_digest(), expected_digest);
+    assert_eq!(restored.business_state_digest(), expected_business_digest);
+    assert_eq!(restored.last_applied_command_index(), 5);
+    assert_eq!(restored.applied_command_count(), 1);
+    assert!(
+        restored
+            .receipt_for_committed(committed(route_id, 2, 4, &route_payload))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        restored
+            .receipt_for_committed(committed(publish_id, 2, 5, &publish_payload))
+            .unwrap()
+            .is_some()
+    );
+
+    let next =
+        BusTabletCommand::publish(&scope(), "publish-2", event("evt-2", "order.updated"), 13)
+            .unwrap();
+    let (next_id, next_payload) = encoded(&next);
+    restored
+        .apply(committed(next_id, 2, 6, &next_payload))
+        .unwrap();
+    assert_eq!(restored.commit_position(), 2);
+    assert_eq!(restored.delivery_counts().pending, 2);
+}
+
+#[test]
+fn native_snapshot_rejects_noncanonical_or_foreign_images() {
+    let mut live = BusTablet::new(scope(), BusConfig::default()).unwrap();
+    let publish =
+        BusTabletCommand::publish(&scope(), "publish-1", event("evt-1", "order.created"), 12)
+            .unwrap();
+    let (proposal_id, payload) = encoded(&publish);
+    live.apply(committed(proposal_id, 2, 4, &payload)).unwrap();
+    let snapshot = live
+        .encode_snapshot(&BTreeSet::from([proposal_id]))
+        .unwrap();
+    let document: VersionedBusTabletSnapshot = serde_json::from_slice(&snapshot).unwrap();
+
+    assert!(
+        BusTablet::decode_snapshot(&scope(), &serde_json::to_vec_pretty(&document).unwrap())
+            .is_err()
+    );
+    assert!(
+        BusTablet::decode_snapshot(
+            &BusTabletScope::new(30, 4, "orders-bus").unwrap(),
+            &snapshot,
+        )
+        .is_err()
+    );
 }
 
 #[test]

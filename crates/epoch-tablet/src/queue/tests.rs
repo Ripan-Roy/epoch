@@ -988,6 +988,89 @@ fn receipt_json_keeps_nested_u64_values_browser_safe() {
 }
 
 #[test]
+fn native_snapshot_restores_queue_state_and_only_the_retained_retry_suffix() {
+    let mut live = QueueTablet::new(scope(), config()).unwrap();
+    let enqueue = QueueTabletCommand::enqueue(&scope(), "enqueue", event("one", 10), 10).unwrap();
+    let enqueue_payload = enqueue.encode(&scope()).unwrap();
+    let enqueue_id = enqueue.proposal_id(&scope()).unwrap();
+    live.apply(committed(enqueue_id, 2, 1, &enqueue_payload))
+        .unwrap();
+    let acquire = command(
+        "acquire",
+        11,
+        QueueTabletOperation::Acquire(QueueAcquireCommand {
+            partition: 0,
+            consumer: "worker".into(),
+            consumer_epoch: 1,
+            max_messages: 1,
+            visibility_timeout_ms: Some(100),
+        }),
+    );
+    let acquire_payload = acquire.encode(&scope()).unwrap();
+    let acquire_id = acquire.proposal_id(&scope()).unwrap();
+    let acquired = live
+        .apply(committed(acquire_id, 2, 2, &acquire_payload))
+        .unwrap();
+    let lease_token = acquired_delivery(&acquired).lease_token.clone();
+    let expected_digest = live.state_digest();
+    let expected_checksum = live.queue_recovery_state_checksum();
+
+    let snapshot = live.encode_snapshot(&BTreeSet::from([acquire_id])).unwrap();
+    let mut restored = QueueTablet::decode_snapshot(&scope(), &snapshot).unwrap();
+
+    assert_eq!(restored.counts().in_flight, 1);
+    assert_eq!(restored.consumer_epoch("worker"), Some(1));
+    assert_eq!(restored.state_digest(), expected_digest);
+    assert_eq!(restored.queue_recovery_state_checksum(), expected_checksum);
+    assert_eq!(restored.last_applied_command_index(), 2);
+    assert_eq!(restored.applied_command_count(), 1);
+    assert!(
+        restored
+            .receipt_for_committed(committed(enqueue_id, 2, 1, &enqueue_payload))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        restored
+            .receipt_for_committed(committed(acquire_id, 2, 2, &acquire_payload))
+            .unwrap()
+            .is_some()
+    );
+
+    let acknowledge = command(
+        "ack",
+        12,
+        QueueTabletOperation::Acknowledge(QueueAcknowledgeCommand {
+            partition: 0,
+            consumer: "worker".into(),
+            consumer_epoch: 1,
+            lease_token,
+        }),
+    );
+    apply_command(&mut restored, &acknowledge, 2, 3);
+    assert_eq!(restored.counts().acknowledged, 1);
+}
+
+#[test]
+fn native_snapshot_rejects_noncanonical_or_foreign_images() {
+    let mut live = QueueTablet::new(scope(), config()).unwrap();
+    let enqueue = QueueTabletCommand::enqueue(&scope(), "enqueue", event("one", 10), 10).unwrap();
+    let proposal_id = enqueue.proposal_id(&scope()).unwrap();
+    apply_command(&mut live, &enqueue, 2, 1);
+    let snapshot = live
+        .encode_snapshot(&BTreeSet::from([proposal_id]))
+        .unwrap();
+    let document: VersionedQueueTabletSnapshot = serde_json::from_slice(&snapshot).unwrap();
+    let pretty = serde_json::to_vec_pretty(&document).unwrap();
+
+    assert!(QueueTablet::decode_snapshot(&scope(), &pretty).is_err());
+    assert!(
+        QueueTablet::decode_snapshot(&QueueTabletScope::new(8, 3, "jobs").unwrap(), &snapshot,)
+            .is_err()
+    );
+}
+
+#[test]
 fn digest_hashes_complete_outcomes_and_has_a_golden_state_vector() {
     let first = QueueTabletOutcome::Applied {
         result: QueueTabletOperationResult::Enqueued {

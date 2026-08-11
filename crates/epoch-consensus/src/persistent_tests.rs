@@ -8,12 +8,13 @@ use std::{
 
 use epoch_testkit::{PeerId, PeerTransport};
 use raft::prelude::{Entry, EntryType, HardState};
+use sha2::{Digest, Sha256};
 
 use super::{
-    CommittedProposal, CompletedReadBarrier, ConsensusAdapter, ConsensusError, ConsensusOutput,
-    ConsensusRole, GroupEpoch, GroupId, LogIndex, NodeId, PeerMessage, PersistentRaftAdapter,
-    ProcessingTrace, Proposal, ProposalId, ProposalLookup, ReadBarrierId, ReadBarrierRequest,
-    StateDigest, Term, encode_command,
+    ApplicationSnapshot, CommittedProposal, CompletedReadBarrier, ConsensusAdapter, ConsensusError,
+    ConsensusOutput, ConsensusRole, GroupEpoch, GroupId, LogIndex, NodeId, PeerMessage,
+    PersistentRaftAdapter, ProcessingTrace, Proposal, ProposalId, ProposalLookup, ReadBarrierId,
+    ReadBarrierRequest, StateDigest, Term, encode_command,
     stable::{DiskStableStore, StableCheckpoint, StableIdentity},
 };
 
@@ -325,6 +326,71 @@ fn durable_checkpoint_reopens_with_a_committed_tail_and_exact_retry_state() {
 }
 
 #[test]
+fn profile_checkpoint_reopens_from_native_state_with_a_bounded_retry_suffix() {
+    let mut cluster = PersistentCluster::new(TEST_SEED + 14);
+    cluster.campaign(node(1));
+    cluster.propose(node(1), 1, &vec![0x41; 400 * 1024]);
+    cluster.propose(node(1), 2, &vec![0x42; 400 * 1024]);
+    cluster.propose(node(1), 3, &vec![0x43; 400 * 1024]);
+    let checkpoint_index = cluster.nodes[&node(1)].status().applied_index;
+    let profile_payload = br#"{"format_version":1,"state":"native"}"#.to_vec();
+    let application = ApplicationSnapshot::new(
+        checkpoint_index,
+        *b"CATALOG_STATE_V1",
+        1,
+        Sha256::digest(&profile_payload).into(),
+        profile_payload,
+    )
+    .unwrap();
+
+    let checkpoint = cluster
+        .nodes
+        .get_mut(&node(1))
+        .unwrap()
+        .checkpoint_with_application(application.clone())
+        .unwrap();
+    assert_eq!(checkpoint.proposal_count, 2);
+    assert_eq!(
+        cluster.nodes[&node(1)].application_snapshot().unwrap(),
+        Some(application.clone())
+    );
+    assert_eq!(
+        cluster.nodes[&node(1)].lookup_proposal(proposal(1)),
+        ProposalLookup::Unknown
+    );
+    assert!(matches!(
+        cluster.nodes[&node(1)].lookup_proposal(proposal(2)),
+        ProposalLookup::Committed(_)
+    ));
+
+    cluster.propose(node(1), 4, b"tail-after-native-checkpoint");
+    let expected_digest = cluster.nodes[&node(1)].state_digest();
+    cluster.reopen_one(node(1));
+
+    assert_eq!(
+        cluster.nodes[&node(1)].application_snapshot().unwrap(),
+        Some(application)
+    );
+    assert_eq!(cluster.nodes[&node(1)].state_digest(), expected_digest);
+    assert_eq!(
+        cluster.nodes[&node(1)].lookup_proposal(proposal(1)),
+        ProposalLookup::Unknown
+    );
+    assert!(matches!(
+        cluster.nodes[&node(1)].lookup_proposal(proposal(4)),
+        ProposalLookup::Committed(_)
+    ));
+    assert_eq!(
+        cluster.nodes[&node(1)]
+            .applied_proposals()
+            .iter()
+            .map(|committed| committed.receipt.proposal_id)
+            .collect::<Vec<_>>(),
+        [proposal(2), proposal(3), proposal(4)]
+    );
+}
+
+#[test]
 fn oversized_checkpoint_is_rejected_without_poisoning_or_advancing_storage() {
     let mut cluster = PersistentCluster::new(TEST_SEED + 13);
     cluster.campaign(node(1));
@@ -418,6 +484,51 @@ fn lagging_voter_installs_the_leader_checkpoint_then_converges_on_the_tail() {
             ProposalLookup::Committed(_)
         ));
     }
+}
+
+#[test]
+fn lagging_voter_installs_a_profile_checkpoint_before_its_committed_tail() {
+    let mut cluster = PersistentCluster::new(TEST_SEED + 15);
+    cluster.campaign(node(1));
+    cluster.isolate(node(3));
+    cluster.propose(node(1), 1, b"native-checkpoint-one");
+    cluster.propose(node(1), 2, b"native-checkpoint-two");
+    let index = cluster.nodes[&node(1)].status().applied_index;
+    let payload = br#"{"format_version":1,"resources":["one","two"]}"#.to_vec();
+    let application = ApplicationSnapshot::new(
+        index,
+        *b"CATALOG_STATE_V1",
+        1,
+        Sha256::digest(&payload).into(),
+        payload,
+    )
+    .unwrap();
+    let checkpoint = cluster
+        .nodes
+        .get_mut(&node(1))
+        .unwrap()
+        .checkpoint_with_application(application.clone())
+        .unwrap();
+    cluster.propose(node(1), 3, b"native-tail");
+    let expected_digest = cluster.nodes[&node(1)].state_digest();
+
+    cluster.heal_all();
+    cluster.tick_repeatedly(node(1), 12);
+
+    assert!(
+        cluster
+            .checkpoint_installs
+            .contains(&(node(3), checkpoint.index))
+    );
+    assert_eq!(
+        cluster.nodes[&node(3)].application_snapshot().unwrap(),
+        Some(application)
+    );
+    assert_eq!(cluster.nodes[&node(3)].state_digest(), expected_digest);
+    assert!(matches!(
+        cluster.nodes[&node(3)].lookup_proposal(proposal(3)),
+        ProposalLookup::Committed(_)
+    ));
 }
 
 #[test]

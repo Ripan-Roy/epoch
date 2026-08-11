@@ -153,15 +153,19 @@ required for the metadata/replication work package and G3. See
 [Experimental Stream Tablet](STREAM_TABLET.md), and
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
-The next consensus storage slice adds a canonical bounded EPSN v1 checkpoint,
-an additive EPRS checkpoint record, fsync-before-install ordering, logical
-Raft-prefix compaction, checkpoint-plus-tail reopen, and lagging-voter snapshot
-catch-up with typed profile replay. Local operator status and an experimental
-trigger expose the checkpoint/retained range. This advances G2/G3, but it does
-not implement profile-native compact images, bounded idempotency retention,
-physical EPRS reclamation, backups/PITR, automatic repair, or membership. See
+The replicated consensus storage slice now has compatible EPSN v1/v2
+checkpoints, additive EPRS checkpoint and compacted-baseline records,
+durable-before-memory ordering, logical Raft-prefix compaction,
+checkpoint-plus-tail reopen, and lagging-voter snapshot catch-up. EPSN v2
+captures Catalog, Stream, Queue, Cache, or Event Bus state, retains a bounded
+exact-retry suffix, and kind 4 physically reclaims obsolete EPRS generations.
+Local operator status and an experimental trigger expose the
+checkpoint/retained range. This advances G2/G3, but it does not implement
+downloadable backups/PITR, scheduled checkpoints, automatic repair, or
+membership. See
 [Consensus Checkpoints and Snapshot Catch-up](CONSENSUS_CHECKPOINTS.md) and
-[ADR-0021](adr/0021-consensus-checkpoint-and-snapshot-installation.md).
+[ADR-0021](adr/0021-consensus-checkpoint-and-snapshot-installation.md) plus
+[ADR-0022](adr/0022-profile-native-checkpoints-and-physical-reclamation.md).
 
 The Stream application core now accepts a version-two atomic batch command
 without changing the canonical version-one single append. A batch carries
@@ -230,8 +234,9 @@ clients cover all seven values, set/delete/CAS/increment, atomic transaction,
 fenced locks, explicit expiry, lookup, observation, and status with exact retry.
 Real-runtime and container gates exercise the Python client after leader loss,
 catch-up, convergence, and all-node recovery. Concurrent history checking,
-multi-shard routing, background expiry, eviction, profile snapshots/compaction,
-and production durability evidence remain open. See
+multi-shard routing, background expiry, eviction, exported backup/PITR,
+automatic checkpoint scheduling, and production durability evidence remain
+open. See
 [Regional Cache SDK](REGIONAL_CACHE_SDK.md),
 [ADR-0019](adr/0019-regional-cache-v1-and-sdk-routing.md), and
 [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
@@ -273,8 +278,9 @@ legacy single-file writer, including new appends; no segmented directory or
 automatic migration is created, preserving offline downgrade. This does not
 close the broader storage or replication gates: the standalone engine still
 has no snapshots, compaction, retention deletion, or repair. The separate
-replicated core now has bounded consensus checkpoints and logical Raft-prefix
-compaction, but no profile backup/PITR or physical EPRS reclamation.
+replicated core now has native-profile consensus checkpoints, logical
+Raft-prefix compaction, and physical EPRS reclamation, but no downloadable
+profile backup/PITR lifecycle.
 
 ### M1 exit criteria
 

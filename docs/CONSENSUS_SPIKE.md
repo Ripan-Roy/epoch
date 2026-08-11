@@ -71,8 +71,9 @@ gives every voter its own data volume. See
 The typed bounded slice attaches `crates/epoch-tablet` to the same runtime for
 one configured, single-partition Stream. Canonical typed commands enter the
 persistent Raft log, become visible only after fixed-voter majority commit and
-local profile application, and rebuild the tablet from the complete committed
-history before its status route becomes ready. Exact idempotent retries retain
+local profile application. Startup installs a native checkpoint plus retained
+tail before its status route becomes ready, while legacy histories still
+replay. Exact recent idempotent retries retain
 the original command bytes and Stream offset. A three-container gate proves
 leader rejection, ordered failover, lagging-voter catch-up, and identical
 profile recovery after all voters receive `SIGKILL`. This mode is documented in

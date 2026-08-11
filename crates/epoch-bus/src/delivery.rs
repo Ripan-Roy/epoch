@@ -11,7 +11,7 @@ use epoch_core::{EpochError, EpochResult, EventEnvelope, validate_resource_name}
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{RoutedDelivery, SubscriptionTarget};
+use crate::{EventFilter, EventTransform, RoutedDelivery, Subscription, SubscriptionTarget};
 
 pub const DEFAULT_MAX_OUTBOX_DELIVERIES: usize = 100_000;
 pub const MAX_BUS_OUTBOX_DELIVERIES: usize = 10_000_000;
@@ -123,7 +123,8 @@ impl DeliveryPolicy {
 }
 
 /// Replicated ownership coordinates for one dispatch attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeliveryFence {
     tablet_id: u64,
     tablet_epoch: u64,
@@ -175,7 +176,7 @@ pub enum DeliveryStateKind {
     DeadLettered,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeliveryState {
     Pending {
@@ -209,7 +210,7 @@ impl DeliveryState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeliveryAttemptOutcome {
     InFlight,
@@ -223,7 +224,8 @@ pub enum DeliveryAttemptOutcome {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeliveryAttempt {
     pub attempt: u32,
     pub dispatcher: String,
@@ -234,7 +236,8 @@ pub struct DeliveryAttempt {
     pub outcome: DeliveryAttemptOutcome,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeliveryRecord {
     pub delivery_id: String,
     pub publish_position: u64,
@@ -249,7 +252,8 @@ pub struct DeliveryRecord {
     pub attempts: Vec<DeliveryAttempt>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeliveryLease {
     pub delivery_id: String,
     pub publish_position: u64,
@@ -262,7 +266,7 @@ pub struct DeliveryLease {
     pub lease_deadline_ms: u64,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliveryCounts {
     pub pending: usize,
     pub in_flight: usize,
@@ -270,7 +274,7 @@ pub struct DeliveryCounts {
     pub dead_lettered: usize,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliveryMaintenanceResult {
     pub processed: usize,
     pub retried: usize,
@@ -278,7 +282,8 @@ pub struct DeliveryMaintenanceResult {
     pub counts: DeliveryCounts,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct DeliveryLedger {
     enabled: bool,
     max_deliveries: usize,
@@ -601,6 +606,76 @@ impl DeliveryLedger {
         counts
     }
 
+    pub(crate) fn validate_snapshot(
+        &self,
+        enabled: bool,
+        max_deliveries: usize,
+        commit_position: u64,
+        route_plan_version: u64,
+    ) -> EpochResult<()> {
+        if self.enabled != enabled
+            || self.max_deliveries != max_deliveries
+            || self.records.len() > self.max_deliveries
+            || (!self.enabled && (!self.records.is_empty() || !self.dispatcher_epochs.is_empty()))
+        {
+            return Err(EpochError::InvalidArgument(
+                "event bus snapshot delivery-ledger configuration is invalid".into(),
+            ));
+        }
+        for (dispatcher, epoch) in &self.dispatcher_epochs {
+            validate_dispatcher(dispatcher)?;
+            if *epoch == 0 {
+                return Err(EpochError::InvalidArgument(
+                    "event bus snapshot has a zero dispatcher epoch".into(),
+                ));
+            }
+        }
+        for (delivery_id_key, record) in &self.records {
+            if delivery_id_key != &record.delivery_id
+                || record.delivery_id != delivery_id(record.publish_position, &record.subscription)
+                || record.publish_position == 0
+                || record.publish_position > commit_position
+                || record.route_plan_version == 0
+                || record.route_plan_version > route_plan_version
+                || record.attempts.len()
+                    > usize::try_from(record.policy.retry.max_attempts).unwrap_or(usize::MAX)
+            {
+                return Err(EpochError::InvalidArgument(
+                    "event bus snapshot delivery record identity is invalid".into(),
+                ));
+            }
+            record.envelope.validate()?;
+            Subscription {
+                name: record.subscription.clone(),
+                filter: EventFilter::default(),
+                target: record.target.clone(),
+                transform: EventTransform::default(),
+                delivery_policy: record.policy.clone(),
+            }
+            .validate()?;
+            let expected_expiry = record
+                .policy
+                .retry
+                .max_age_ms
+                .map(|max_age_ms| {
+                    record.created_at_ms.checked_add(max_age_ms).ok_or_else(|| {
+                        EpochError::InvalidArgument(
+                            "event bus snapshot delivery expiry overflowed".into(),
+                        )
+                    })
+                })
+                .transpose()?;
+            if record.expires_at_ms != expected_expiry {
+                return Err(EpochError::InvalidArgument(
+                    "event bus snapshot delivery expiry is invalid".into(),
+                ));
+            }
+            validate_snapshot_attempts(record, &self.dispatcher_epochs)?;
+            validate_snapshot_delivery_state(record)?;
+        }
+        Ok(())
+    }
+
     fn accept_dispatcher_epoch(
         &mut self,
         dispatcher: &str,
@@ -700,6 +775,102 @@ impl DeliveryLedger {
             }
         };
         Ok(record.clone())
+    }
+}
+
+fn validate_snapshot_attempts(
+    record: &DeliveryRecord,
+    dispatcher_epochs: &BTreeMap<String, u64>,
+) -> EpochResult<()> {
+    for (position, attempt) in record.attempts.iter().enumerate() {
+        validate_dispatcher(&attempt.dispatcher)?;
+        if u32::try_from(position + 1).ok() != Some(attempt.attempt)
+            || attempt.dispatcher_epoch == 0
+            || attempt.leader_term == 0
+            || attempt.lease_deadline_ms == 0
+            || dispatcher_epochs
+                .get(&attempt.dispatcher)
+                .is_none_or(|epoch| attempt.dispatcher_epoch > *epoch)
+        {
+            return Err(EpochError::InvalidArgument(
+                "event bus snapshot delivery attempt registry is invalid".into(),
+            ));
+        }
+        if let DeliveryAttemptOutcome::Failed { reason, .. } = &attempt.outcome {
+            validate_reason(reason)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_snapshot_delivery_state(record: &DeliveryRecord) -> EpochResult<()> {
+    let valid = match &record.state {
+        DeliveryState::Pending { eligible_at_ms } => match record.attempts.last() {
+            None => *eligible_at_ms == record.created_at_ms,
+            Some(DeliveryAttempt {
+                outcome: DeliveryAttemptOutcome::Failed { retry_at_ms, .. },
+                ..
+            }) => *retry_at_ms == Some(*eligible_at_ms),
+            Some(_) => false,
+        },
+        DeliveryState::InFlight {
+            dispatcher,
+            dispatcher_epoch,
+            attempt,
+            lease_token: active_token,
+            lease_deadline_ms,
+            fence,
+        } => {
+            fence.validate()?;
+            matches!(
+                record.attempts.last(),
+                Some(current)
+                    if current.attempt == *attempt
+                        && current.dispatcher == *dispatcher
+                        && current.dispatcher_epoch == *dispatcher_epoch
+                        && current.leader_term == fence.leader_term
+                        && current.lease_deadline_ms == *lease_deadline_ms
+                        && current.outcome == DeliveryAttemptOutcome::InFlight
+                        && *active_token == lease_token(
+                            &record.delivery_id,
+                            dispatcher,
+                            *attempt,
+                            *lease_deadline_ms,
+                            *fence,
+                        )
+            )
+        }
+        DeliveryState::Acknowledged { acknowledged_at_ms } => matches!(
+            record.attempts.last(),
+            Some(DeliveryAttempt {
+                outcome: DeliveryAttemptOutcome::Acknowledged { completed_at_ms },
+                ..
+            }) if completed_at_ms == acknowledged_at_ms
+        ),
+        DeliveryState::DeadLettered {
+            dead_lettered_at_ms,
+            reason,
+        } => {
+            validate_reason(reason)?;
+            matches!(
+                record.attempts.last(),
+                Some(DeliveryAttempt {
+                    outcome: DeliveryAttemptOutcome::Failed {
+                        failed_at_ms,
+                        reason: failed_reason,
+                        retry_at_ms: None,
+                    },
+                    ..
+                }) if failed_at_ms == dead_lettered_at_ms && failed_reason == reason
+            )
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(EpochError::InvalidArgument(
+            "event bus snapshot delivery state is inconsistent with its attempts".into(),
+        ))
     }
 }
 

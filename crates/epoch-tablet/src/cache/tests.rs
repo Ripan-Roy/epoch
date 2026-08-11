@@ -1633,6 +1633,94 @@ fn live_and_recovered_histories_have_identical_digest_and_receipts() {
 }
 
 #[test]
+fn native_snapshot_restores_cache_and_lock_state_with_a_bounded_retry_suffix() {
+    let mut live = CacheTablet::new(scope(), config()).unwrap();
+    let set_command = command("set", 10, set("key", CacheValue::String("value".into())));
+    let set_payload = set_command.encode(&scope()).unwrap();
+    let set_id = set_command.proposal_id(&scope()).unwrap();
+    live.apply(committed(set_id, 2, 1, &set_payload)).unwrap();
+    let acquire = command(
+        "acquire",
+        11,
+        CacheTabletOperation::AcquireLock(CacheAcquireLockCommand {
+            shard: 0,
+            lock_key: "key-lock".into(),
+            owner: "worker".into(),
+            owner_epoch: 1,
+            lease_ms: 100,
+        }),
+    );
+    let acquire_payload = acquire.encode(&scope()).unwrap();
+    let acquire_id = acquire.proposal_id(&scope()).unwrap();
+    let acquired = live
+        .apply(committed(acquire_id, 2, 2, &acquire_payload))
+        .unwrap();
+    let lease_token = acquired_token(&acquired);
+    let expected_digest = live.state_digest();
+    let expected_cache_digest = live.cache_recovery_state_digest();
+
+    let snapshot = live.encode_snapshot(&BTreeSet::from([acquire_id])).unwrap();
+    let mut restored = CacheTablet::decode_snapshot(&scope(), &snapshot).unwrap();
+
+    assert_eq!(restored.observe("key"), live.observe("key"));
+    assert_eq!(restored.active_lock_count(), 1);
+    assert_eq!(restored.state_digest(), expected_digest);
+    assert_eq!(
+        restored.cache_recovery_state_digest(),
+        expected_cache_digest
+    );
+    assert_eq!(restored.last_applied_command_index(), 2);
+    assert_eq!(restored.applied_command_count(), 1);
+    assert!(
+        restored
+            .receipt_for_committed(committed(set_id, 2, 1, &set_payload))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        restored
+            .receipt_for_committed(committed(acquire_id, 2, 2, &acquire_payload))
+            .unwrap()
+            .is_some()
+    );
+
+    let release = command(
+        "release",
+        12,
+        CacheTabletOperation::ReleaseLock(CacheReleaseLockCommand {
+            shard: 0,
+            lock_key: "key-lock".into(),
+            owner: "worker".into(),
+            owner_epoch: 1,
+            lease_token,
+        }),
+    );
+    apply_command(&mut restored, &release, 2, 3);
+    assert_eq!(restored.active_lock_count(), 0);
+}
+
+#[test]
+fn native_snapshot_rejects_noncanonical_or_foreign_images() {
+    let mut live = CacheTablet::new(scope(), config()).unwrap();
+    let set_command = command("set", 10, set("key", CacheValue::String("value".into())));
+    let proposal_id = set_command.proposal_id(&scope()).unwrap();
+    apply_command(&mut live, &set_command, 2, 1);
+    let snapshot = live
+        .encode_snapshot(&BTreeSet::from([proposal_id]))
+        .unwrap();
+    let document: VersionedCacheTabletSnapshot = serde_json::from_slice(&snapshot).unwrap();
+
+    assert!(
+        CacheTablet::decode_snapshot(&scope(), &serde_json::to_vec_pretty(&document).unwrap())
+            .is_err()
+    );
+    assert!(
+        CacheTablet::decode_snapshot(&CacheTabletScope::new(8, 3, "sessions").unwrap(), &snapshot,)
+            .is_err()
+    );
+}
+
+#[test]
 fn receipt_and_complete_state_digest_have_golden_vectors() {
     let mut tablet = CacheTablet::new(scope(), config()).unwrap();
     let golden = command(

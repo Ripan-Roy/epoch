@@ -84,6 +84,15 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+report_error() {
+  local epoch_status=$?
+  local epoch_source="${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}"
+  local epoch_line="${BASH_LINENO[0]:-$LINENO}"
+  printf 'consensus probe failed with status %s at %s:%s\n' \
+    "$epoch_status" "$epoch_source" "$epoch_line" >&2
+}
+trap report_error ERR
+
 json_field() {
   local document=$1
   local field=$2
@@ -125,8 +134,10 @@ assert_identical_commit() {
     assert_committed_lookup "$lookup" "$proposal_id" "$expected_payload"
     if [[ -z "$reference" ]]; then
       reference=$lookup
-    else
-      [[ "$lookup" == "$reference" ]]
+    elif [[ "$lookup" != "$reference" ]]; then
+      printf 'proposal %s differed on node %s: expected %s, received %s\n' \
+        "$proposal_id" "$node_id" "$reference" "$lookup" >&2
+      return 1
     fi
   done
 }
@@ -165,7 +176,7 @@ assert isinstance(document["term"], int) and document["term"] > 0, document
 assert document["proposal_count"] >= 1, document
 assert 0 < document["encoded_bytes"] <= 768 * 1024, document
 assert document["durability"] == "fsync_before_install", document
-assert document["compaction"] == "logical_raft_prefix", document
+assert document["compaction"] == "logical_raft_prefix_and_physical_eprs", document
 ' "$document"
 }
 
@@ -264,6 +275,31 @@ wait_for_commit() {
   return 1
 }
 
+wait_for_checkpoint_metadata() {
+  local node_id=$1
+  local expected_checkpoint_index=$2
+  local status=
+  for _ in {1..200}; do
+    status="$(status_for_node "$node_id" 2>/dev/null || true)"
+    if [[ -n "$status" ]] && python3 -c '
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+checkpoint_index = int(sys.argv[2])
+assert document["checkpoint_index"] == checkpoint_index, document
+assert document["retained_log_first_index"] == checkpoint_index + 1, document
+' "$status" "$expected_checkpoint_index" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  printf 'node %s did not expose checkpoint %s with retained first index %s; last status: %s\n' \
+    "$node_id" "$expected_checkpoint_index" "$((expected_checkpoint_index + 1))" \
+    "${status:-unavailable}" >&2
+  return 1
+}
+
 cd "$epoch_repo_root"
 if [[ "$epoch_use_existing_image" == 1 ]]; then
   "${epoch_compose[@]}" up --no-build --detach
@@ -290,32 +326,55 @@ fi
 epoch_lagging_service="${epoch_services[epoch_lagging - 1]}"
 "${epoch_compose[@]}" stop "$epoch_lagging_service" >/dev/null
 epoch_checkpoint_survivors=()
+epoch_checkpoint_survivor_services=()
 for epoch_node_id in 1 2 3; do
   if (( epoch_node_id != epoch_lagging )); then
     epoch_checkpoint_survivors+=("$epoch_node_id")
+    epoch_checkpoint_survivor_services+=("${epoch_services[epoch_node_id - 1]}")
   fi
 done
 
 propose "$epoch_leader" "$epoch_term" 101 '[101,112,111,99,104]'
 wait_for_commit 101 "${epoch_checkpoint_survivors[@]}"
 assert_identical_commit 101 '[101,112,111,99,104]' "${epoch_checkpoint_survivors[@]}"
-epoch_checkpoint="$(checkpoint_node "$epoch_leader")"
-assert_checkpoint "$epoch_checkpoint"
-epoch_checkpoint_index="$(json_field "$epoch_checkpoint" index)"
-epoch_checkpoint_status="$(status_for_node "$epoch_leader")"
-[[ "$(json_field "$epoch_checkpoint_status" checkpoint_index)" == "$epoch_checkpoint_index" ]]
-[[ "$(json_field "$epoch_checkpoint_status" retained_log_first_index)" == "$((epoch_checkpoint_index + 1))" ]]
+epoch_checkpoint_index=
+for epoch_node_id in "${epoch_checkpoint_survivors[@]}"; do
+  epoch_checkpoint="$(checkpoint_node "$epoch_node_id")"
+  assert_checkpoint "$epoch_checkpoint"
+  epoch_node_checkpoint_index="$(json_field "$epoch_checkpoint" index)"
+  if [[ -z "$epoch_checkpoint_index" ]]; then
+    epoch_checkpoint_index=$epoch_node_checkpoint_index
+  elif [[ "$epoch_node_checkpoint_index" != "$epoch_checkpoint_index" ]]; then
+    printf 'checkpoint index differed on node %s: expected %s, received %s\n' \
+      "$epoch_node_id" "$epoch_checkpoint_index" "$epoch_node_checkpoint_index" >&2
+    exit 1
+  fi
+  wait_for_checkpoint_metadata "$epoch_node_id" "$epoch_checkpoint_index"
+done
 
 propose "$epoch_leader" "$epoch_term" 102 '[99,104,101,99,107,112,111,105,110,116,45,116,97,105,108]'
 wait_for_commit 102 "${epoch_checkpoint_survivors[@]}"
+assert_identical_commit 102 '[99,104,101,99,107,112,111,105,110,116,45,116,97,105,108]' \
+  "${epoch_checkpoint_survivors[@]}"
+
+# Restart every checkpoint-bearing survivor while the lagging voter remains
+# offline. This clears pre-compaction outbound frames, so the recovered leader
+# can catch the lagging voter up only through the durable checkpoint plus tail.
+"${epoch_compose[@]}" stop "${epoch_checkpoint_survivor_services[@]}" >/dev/null
+"${epoch_compose[@]}" start "${epoch_checkpoint_survivor_services[@]}" >/dev/null
+read -r epoch_leader epoch_term < <(wait_for_leader "$epoch_lagging")
+wait_for_commit 101 "${epoch_checkpoint_survivors[@]}"
+wait_for_commit 102 "${epoch_checkpoint_survivors[@]}"
+for epoch_node_id in "${epoch_checkpoint_survivors[@]}"; do
+  wait_for_checkpoint_metadata "$epoch_node_id" "$epoch_checkpoint_index"
+done
+
 "${epoch_compose[@]}" start "$epoch_lagging_service" >/dev/null
 wait_for_commit 101 1 2 3
 wait_for_commit 102 1 2 3
 assert_identical_commit 101 '[101,112,111,99,104]' 1 2 3
 assert_identical_commit 102 '[99,104,101,99,107,112,111,105,110,116,45,116,97,105,108]' 1 2 3
-epoch_lagging_status="$(status_for_node "$epoch_lagging")"
-[[ "$(json_field "$epoch_lagging_status" checkpoint_index)" == "$epoch_checkpoint_index" ]]
-[[ "$(json_field "$epoch_lagging_status" retained_log_first_index)" == "$((epoch_checkpoint_index + 1))" ]]
+wait_for_checkpoint_metadata "$epoch_lagging" "$epoch_checkpoint_index"
 
 epoch_leader_service="${epoch_services[epoch_leader - 1]}"
 "${epoch_compose[@]}" stop "$epoch_leader_service" >/dev/null

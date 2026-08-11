@@ -1,6 +1,7 @@
 //! Experimental Event Bus ingress/outbox tablet over fixed-voter consensus.
 
 use std::{
+    collections::BTreeSet,
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -17,9 +18,10 @@ use epoch_bus::{
     EventFilter, MAX_DELIVERY_QUERY_RESULTS, MAX_REPLAY_EVENTS, Subscription, SubscriptionTarget,
 };
 use epoch_consensus::{
-    CommittedProposal, ConsensusError, ConsensusRole, ConsensusStatus, ProposalLookup,
+    ApplicationSnapshot, CommittedProposal, ConsensusError, ConsensusRole, ConsensusStatus,
+    LogIndex, ProposalLookup,
 };
-use epoch_core::{Clock, EpochError};
+use epoch_core::{Clock, DurabilityProfile, EpochError};
 use epoch_tablet::{
     BusTablet, BusTabletCommand, BusTabletDisposition, BusTabletOperation, BusTabletReceipt,
     BusTabletScope, CommittedCommand, MAX_BUS_TABLET_COMMAND_BYTES, TabletError,
@@ -46,6 +48,8 @@ pub const EXPERIMENTAL_BUS_TABLET_DELIVERY_QUERY_PATH: &str =
 
 const TABLET_REQUEST_BODY_BYTES: usize = MAX_BUS_TABLET_COMMAND_BYTES + 16 * 1024;
 const DEFAULT_REPLAY_LIMIT: usize = 100;
+const BUS_APPLICATION_SNAPSHOT_FORMAT_ID: [u8; 16] = *b"EVENTBUS_STATEV1";
+const BUS_APPLICATION_SNAPSHOT_VERSION: u16 = 1;
 pub const DEFAULT_COMMIT_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
@@ -268,6 +272,91 @@ impl CommittedProposalApplier for BusTabletService {
 
     fn apply(&self, committed: &CommittedProposal) -> Result<(), String> {
         self.apply_one(committed).map(|_| ())
+    }
+
+    fn capture_snapshot(
+        &self,
+        checkpoint_index: LogIndex,
+        retained: &[CommittedProposal],
+    ) -> Result<ApplicationSnapshot, String> {
+        self.ensure_healthy()?;
+        let tablet = self
+            .tablet
+            .read()
+            .map_err(|_| "Event Bus tablet read lock was poisoned".to_owned())?;
+        if tablet.last_applied_command_index() > checkpoint_index.get() {
+            return Err(format!(
+                "Event Bus applied index {} exceeds consensus checkpoint index {}",
+                tablet.last_applied_command_index(),
+                checkpoint_index
+            ));
+        }
+        let mut retained_ids = BTreeSet::new();
+        for committed in retained {
+            let proposal_id = committed.receipt.proposal_id.get();
+            if !retained_ids.insert(proposal_id) {
+                return Err(format!(
+                    "Event Bus retry proposal {proposal_id} appears more than once"
+                ));
+            }
+            tablet
+                .receipt_for_committed(committed_command(committed))
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| {
+                    format!("Event Bus retry proposal {proposal_id} has no typed applied result")
+                })?;
+        }
+        let payload = tablet
+            .encode_snapshot(&retained_ids)
+            .map_err(|error| error.to_string())?;
+        ApplicationSnapshot::new(
+            checkpoint_index,
+            BUS_APPLICATION_SNAPSHOT_FORMAT_ID,
+            BUS_APPLICATION_SNAPSHOT_VERSION,
+            tablet.state_digest(),
+            payload,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn install_snapshot(&self, snapshot: &ApplicationSnapshot) -> Result<(), String> {
+        self.ensure_healthy()?;
+        let result: Result<BusTablet, String> = (|| {
+            if snapshot.format_id() != BUS_APPLICATION_SNAPSHOT_FORMAT_ID
+                || snapshot.format_version() != BUS_APPLICATION_SNAPSHOT_VERSION
+            {
+                return Err("application snapshot is not a supported Event Bus image".into());
+            }
+            let restored = BusTablet::decode_snapshot(&self.scope, snapshot.payload())
+                .map_err(|error| error.to_string())?;
+            let mut expected_config = self.config.clone();
+            expected_config.durability = DurabilityProfile::Volatile;
+            expected_config.delivery_outbox = true;
+            if restored.last_applied_command_index() > snapshot.checkpoint_index().get()
+                || restored.state_digest() != snapshot.state_digest()
+                || restored.bus_config() != &expected_config
+            {
+                return Err(
+                    "Event Bus application snapshot index, state digest, or configuration is invalid"
+                        .into(),
+                );
+            }
+            Ok(restored)
+        })();
+        match result {
+            Ok(restored) => {
+                *self
+                    .tablet
+                    .write()
+                    .map_err(|_| self.fail("Event Bus tablet write lock was poisoned"))? = restored;
+                Ok(())
+            }
+            Err(error) => Err(self.fail(error)),
+        }
+    }
+
+    fn supports_native_snapshots(&self) -> bool {
+        true
     }
 }
 
@@ -1374,6 +1463,49 @@ mod tests {
     }
 
     #[test]
+    fn native_snapshot_restores_bus_state_and_only_the_retained_retry_suffix() {
+        let service = BusTabletService::with_default_config(scope()).unwrap();
+        let first = publish("publish-1", "event-1", 10, 4);
+        let second = publish("publish-2", "event-2", 11, 5);
+        service.apply(&first).unwrap();
+        service.apply(&second).unwrap();
+        let expected = service.snapshot().unwrap();
+
+        let image = service
+            .capture_snapshot(LogIndex::new(5), std::slice::from_ref(&second))
+            .unwrap();
+        let restored = BusTabletService::with_default_config(scope()).unwrap();
+        restored.install_snapshot(&image).unwrap();
+
+        let actual = restored.snapshot().unwrap();
+        assert_eq!(actual.state_digest, expected.state_digest);
+        assert_eq!(actual.commit_position, 2);
+        assert_eq!(actual.archived_event_count, 2);
+        assert_eq!(actual.last_profile_mutation_index, 5);
+        assert_eq!(actual.applied_command_count, 1);
+        restored
+            .apply(&publish("publish-3", "event-3", 12, 6))
+            .unwrap();
+        assert_eq!(restored.snapshot().unwrap().commit_position, 3);
+    }
+
+    #[test]
+    fn native_snapshot_install_rejects_foreign_scope_without_partial_state() {
+        let source = BusTabletService::with_default_config(scope()).unwrap();
+        let proposal = publish("publish-1", "event-1", 10, 4);
+        source.apply(&proposal).unwrap();
+        let image = source
+            .capture_snapshot(LogIndex::new(4), std::slice::from_ref(&proposal))
+            .unwrap();
+        let target =
+            BusTabletService::with_default_config(BusTabletScope::new(8, 3, "events").unwrap())
+                .unwrap();
+
+        assert!(target.install_snapshot(&image).is_err());
+        assert!(target.snapshot().is_err());
+    }
+
+    #[test]
     fn malformed_commit_fail_stops_reads_and_future_apply() {
         let service = BusTabletService::with_default_config(scope()).unwrap();
         let mut malformed = publish("publish-1", "event-1", 10, 4);
@@ -2027,6 +2159,12 @@ mod tests {
         let state_digest = assert_converged_status(&cluster, &client, publish_commit_index).await;
         assert_replay_on_every_node(&cluster, &client).await;
         assert_acknowledged_delivery_on_every_node(&cluster, &client).await;
+        cluster.nodes[leader_index]
+            .runtime
+            .handle()
+            .checkpoint()
+            .await
+            .expect("Event Bus profile checkpoint should persist before restart");
         cluster.shutdown().await;
 
         let reopened = RunningBusCluster::start(&paths).await;

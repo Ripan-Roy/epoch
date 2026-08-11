@@ -1,6 +1,7 @@
 //! Experimental typed Stream tablet over the fixed-voter consensus runtime.
 
 use std::{
+    collections::BTreeSet,
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -12,7 +13,8 @@ use axum::{
     routing::get,
 };
 use epoch_consensus::{
-    CommittedProposal, ConsensusError, ConsensusRole, ConsensusStatus, ProposalLookup,
+    ApplicationSnapshot, CommittedProposal, ConsensusError, ConsensusRole, ConsensusStatus,
+    LogIndex, ProposalLookup,
 };
 use epoch_core::{Clock, EventEnvelope};
 use epoch_stream::StreamRecord;
@@ -52,6 +54,8 @@ pub const EXPERIMENTAL_STREAM_TABLET_GROUP_RECORDS_PATH: &str =
 pub const DEFAULT_COMMIT_WAIT: Duration = Duration::from_secs(5);
 const MAX_FETCH_RECORDS: usize = 1_000;
 const TABLET_REQUEST_BODY_BYTES: usize = MAX_STREAM_TABLET_COMMAND_BYTES + 16 * 1024;
+const STREAM_APPLICATION_SNAPSHOT_FORMAT_ID: [u8; 16] = *b"STREAM__STATE_V1";
+const STREAM_APPLICATION_SNAPSHOT_VERSION: u16 = 1;
 
 type StreamTabletApiError = TabletApiError;
 
@@ -222,6 +226,92 @@ impl CommittedProposalApplier for StreamTabletService {
 
     fn apply(&self, committed: &CommittedProposal) -> Result<(), String> {
         self.apply_one(committed).map(|_| ())
+    }
+
+    fn capture_snapshot(
+        &self,
+        checkpoint_index: LogIndex,
+        retained: &[CommittedProposal],
+    ) -> Result<ApplicationSnapshot, String> {
+        self.ensure_healthy()?;
+        let tablet = self
+            .tablet
+            .read()
+            .map_err(|_| "Stream tablet read lock was poisoned".to_owned())?;
+        if tablet.last_applied_command_index() > checkpoint_index.get() {
+            return Err(format!(
+                "Stream applied index {} exceeds consensus checkpoint index {}",
+                tablet.last_applied_command_index(),
+                checkpoint_index
+            ));
+        }
+
+        let mut retained_ids = BTreeSet::new();
+        for committed in retained {
+            let proposal_id = committed.receipt.proposal_id.get();
+            if !retained_ids.insert(proposal_id) {
+                return Err(format!(
+                    "Stream retry proposal {proposal_id} appears more than once"
+                ));
+            }
+            tablet
+                .mutation_receipt_for_committed(CommittedCommand {
+                    group_id: committed.receipt.group_id.get(),
+                    group_epoch: committed.receipt.group_epoch.get(),
+                    proposal_id,
+                    term: committed.receipt.term.get(),
+                    log_index: committed.receipt.log_index.get(),
+                    payload: &committed.payload,
+                })
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| {
+                    format!("Stream retry proposal {proposal_id} has no typed applied result")
+                })?;
+        }
+        let payload = tablet
+            .encode_snapshot(&retained_ids)
+            .map_err(|error| error.to_string())?;
+        ApplicationSnapshot::new(
+            checkpoint_index,
+            STREAM_APPLICATION_SNAPSHOT_FORMAT_ID,
+            STREAM_APPLICATION_SNAPSHOT_VERSION,
+            tablet.state_digest(),
+            payload,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn install_snapshot(&self, snapshot: &ApplicationSnapshot) -> Result<(), String> {
+        self.ensure_healthy()?;
+        let result: Result<StreamTablet, String> = (|| {
+            if snapshot.format_id() != STREAM_APPLICATION_SNAPSHOT_FORMAT_ID
+                || snapshot.format_version() != STREAM_APPLICATION_SNAPSHOT_VERSION
+            {
+                return Err("application snapshot is not a supported Stream image".into());
+            }
+            let restored = StreamTablet::decode_snapshot(&self.scope, snapshot.payload())
+                .map_err(|error| error.to_string())?;
+            if restored.last_applied_command_index() > snapshot.checkpoint_index().get()
+                || restored.state_digest() != snapshot.state_digest()
+            {
+                return Err("Stream application snapshot index or state digest is invalid".into());
+            }
+            Ok(restored)
+        })();
+        match result {
+            Ok(restored) => {
+                *self
+                    .tablet
+                    .write()
+                    .map_err(|_| self.fail("Stream tablet write lock was poisoned"))? = restored;
+                Ok(())
+            }
+            Err(error) => Err(self.fail(error)),
+        }
+    }
+
+    fn supports_native_snapshots(&self) -> bool {
+        true
     }
 }
 
@@ -1091,6 +1181,45 @@ mod tests {
     }
 
     #[test]
+    fn native_snapshot_restores_stream_state_and_only_the_retained_retry_suffix() {
+        let service = StreamTabletService::new(scope()).unwrap();
+        let first = committed("one", "one", 4);
+        let second = committed("two", "two", 5);
+        service.apply(&first).unwrap();
+        service.apply(&second).unwrap();
+        let expected = service.snapshot().unwrap();
+
+        let image = service
+            .capture_snapshot(LogIndex::new(5), std::slice::from_ref(&second))
+            .unwrap();
+        let restored = StreamTabletService::new(scope()).unwrap();
+        restored.install_snapshot(&image).unwrap();
+
+        let actual = restored.snapshot().unwrap();
+        assert_eq!(restored.fetch(0, 10).unwrap().len(), 2);
+        assert_eq!(actual.state_digest, expected.state_digest);
+        assert_eq!(actual.last_profile_mutation_index, 5);
+        assert_eq!(actual.applied_command_count, 1);
+        restored.apply(&committed("three", "three", 6)).unwrap();
+        assert_eq!(restored.fetch(0, 10).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn native_snapshot_install_rejects_foreign_scope_without_partial_state() {
+        let source = StreamTabletService::new(scope()).unwrap();
+        let proposal = committed("one", "one", 4);
+        source.apply(&proposal).unwrap();
+        let image = source
+            .capture_snapshot(LogIndex::new(4), std::slice::from_ref(&proposal))
+            .unwrap();
+        let target =
+            StreamTabletService::new(StreamTabletScope::new(8, 3, "orders").unwrap()).unwrap();
+
+        assert!(target.install_snapshot(&image).is_err());
+        assert!(target.snapshot().is_err());
+    }
+
+    #[test]
     fn an_http_lookup_cannot_apply_a_commit_the_actor_missed() {
         let service = StreamTabletService::new(scope()).unwrap();
 
@@ -1563,6 +1692,13 @@ mod tests {
         commit_reset_and_fence_consumer_group(&cluster, &client).await;
         assert_all_records(&cluster, &client, 12).await;
         assert_group_checkpoint_on_every_voter(&cluster, &client).await;
+        let (leader_index, _) = cluster.leader().await;
+        cluster.nodes[leader_index]
+            .runtime
+            .handle()
+            .checkpoint()
+            .await
+            .expect("Stream profile checkpoint should persist before restart");
         cluster.shutdown().await;
 
         let reopened = RunningTabletCluster::start(&paths).await;

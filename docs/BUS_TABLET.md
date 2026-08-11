@@ -14,8 +14,9 @@ and terminal dead-letter state. `BusTablet` applies strict commands only after
 consensus commit, records exact retry receipts, and chains every committed
 outcome into a deterministic state digest. `epoch-node` mounts that state
 machine as the one typed profile for a fixed consensus group and as one
-catalog-materialized regional group, rebuilds it from EPRS before exposing its
-APIs, and fail-stops if committed application diverges.
+catalog-materialized regional group. Startup installs a canonical native Bus
+checkpoint plus retained EPRS tail before exposing its APIs, while legacy
+histories still replay; committed application divergence fail-stops the group.
 
 ## Boundary
 
@@ -277,6 +278,7 @@ make test-bus-tablet
 
 Still required are the target executors themselves, rate limiting, redrive and
 terminal-record retention, replay attempt lineage, built-in Queue/Stream writes,
-long-poll and push transports, webhook/HTTP security and signing, compact
-profile-native snapshots, physical EPRS reclamation, production identity/TLS, generated response models, package
+long-poll and push transports, webhook/HTTP security and signing,
+user-exportable backups/PITR, scheduled checkpoints, production identity/TLS,
+generated response models, package
 publication, and multi-shard routing.

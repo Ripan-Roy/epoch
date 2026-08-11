@@ -17,9 +17,9 @@ use serde::{Deserialize, Serialize};
 mod replicated;
 
 pub use replicated::{
-    CacheExpiryResult, CacheMutation, CacheMutationResult, CacheObservation, CacheShard,
-    CacheTransaction, CacheTransactionResult, MAX_CACHE_ATOMIC_OPERATIONS,
-    MAX_CACHE_MAINTENANCE_KEYS,
+    CACHE_SHARD_SNAPSHOT_FORMAT_VERSION, CacheExpiryResult, CacheMutation, CacheMutationResult,
+    CacheObservation, CacheShard, CacheTransaction, CacheTransactionResult,
+    MAX_CACHE_ATOMIC_OPERATIONS, MAX_CACHE_MAINTENANCE_KEYS, MAX_CACHE_SHARD_SNAPSHOT_BYTES,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

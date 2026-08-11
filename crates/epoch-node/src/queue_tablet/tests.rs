@@ -161,6 +161,48 @@ fn exact_live_commit_is_applied_only_once() {
 }
 
 #[test]
+fn native_snapshot_restores_queue_state_and_only_the_retained_retry_suffix() {
+    let service = QueueTabletService::with_default_config(scope()).unwrap();
+    let first = enqueue("enqueue-1", "job-1", 10, 4);
+    let second = enqueue("enqueue-2", "job-2", 11, 5);
+    service.apply(&first).unwrap();
+    service.apply(&second).unwrap();
+    let expected = service.snapshot().unwrap();
+
+    let image = service
+        .capture_snapshot(LogIndex::new(5), std::slice::from_ref(&second))
+        .unwrap();
+    let restored = QueueTabletService::with_default_config(scope()).unwrap();
+    restored.install_snapshot(&image).unwrap();
+
+    let actual = restored.snapshot().unwrap();
+    assert_eq!(actual.counts.ready, 2);
+    assert_eq!(actual.state_digest, expected.state_digest);
+    assert_eq!(actual.last_profile_mutation_index, 5);
+    assert_eq!(actual.applied_command_count, 1);
+    restored
+        .apply(&enqueue("enqueue-3", "job-3", 12, 6))
+        .unwrap();
+    assert_eq!(restored.snapshot().unwrap().counts.ready, 3);
+}
+
+#[test]
+fn native_snapshot_install_rejects_foreign_scope_without_partial_state() {
+    let source = QueueTabletService::with_default_config(scope()).unwrap();
+    let proposal = enqueue("enqueue-1", "job-1", 10, 4);
+    source.apply(&proposal).unwrap();
+    let image = source
+        .capture_snapshot(LogIndex::new(4), std::slice::from_ref(&proposal))
+        .unwrap();
+    let target =
+        QueueTabletService::with_default_config(QueueTabletScope::new(8, 3, "jobs").unwrap())
+            .unwrap();
+
+    assert!(target.install_snapshot(&image).is_err());
+    assert!(target.snapshot().is_err());
+}
+
+#[test]
 fn committed_lookup_cannot_apply_a_commit_the_actor_missed() {
     let service = QueueTabletService::with_default_config(scope()).unwrap();
 
@@ -579,6 +621,13 @@ async fn typed_queue_tablet_commits_retries_converges_and_rebuilds() {
     exercise_enqueue_acquire_ack(&cluster, &client).await;
     exercise_retry_dead_letter_and_redrive(&cluster, &client).await;
     let digest = converged_digest(&cluster, &client).await;
+    let (leader_index, _) = cluster.leader().await;
+    cluster.nodes[leader_index]
+        .runtime
+        .handle()
+        .checkpoint()
+        .await
+        .expect("Queue profile checkpoint should persist before restart");
     cluster.shutdown().await;
 
     let reopened = RunningQueueCluster::start(&paths, 2_000).await;

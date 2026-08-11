@@ -33,17 +33,17 @@ strict internal HTTP DTO + idempotency key + expected current term
   idempotency, advisory fenced locks, committed receipts, exact replay, and the
   complete replicated state digest.
 - `epoch-consensus` remains profile-neutral. `CacheTabletService` supplies its
-  committed-proposal applier, fail-stops on structural divergence, rebuilds a
-  fresh tablet from sorted committed history, and never applies a missed commit
-  from an HTTP request task.
+  committed-proposal applier, fail-stops on structural divergence, installs a
+  native checkpoint plus retained tail (or replays a legacy history), and never
+  applies a missed commit from an HTTP request task.
 - The existing standalone `Cache` remains a separate volatile compatibility
   path. The new shard is additive and does not silently route volatile writes
   through consensus.
 
 Version 1 supports one shard (`shard = 0`), no eviction, and at most 128
-distinct-key mutations in one transaction. Cross-shard transactions, snapshot
-restore, change capture, collection-specific mutations, and compatibility
-protocols remain outside this slice.
+distinct-key mutations in one transaction. Cross-shard transactions,
+downloadable backup/PITR restore, change capture, collection-specific
+mutations, and compatibility protocols remain outside this slice.
 
 ## Regional v1 application API
 
@@ -288,10 +288,10 @@ cargo clippy --locked -p epoch-cache -p epoch-tablet -p epoch-node --all-targets
 This advances CACHE-001, CACHE-002, CACHE-004, CACHE-006, and CACHE-007 with a
 tested fixed-voter and three-language application slice. It does not complete
 the parent requirements: a concurrent history checker,
-follower-served linearizable reads, multi-shard routing, profile snapshots/compaction,
+follower-served linearizable reads, multi-shard routing, exported backups/PITR,
 production identity/TLS, placement, and the exhaustive fault
-matrix remain required. The in-memory exact-replay map also retains one complete
-receipt per unique proposal without a retention window; large overwritten
-values can therefore outlive the current Cache entry. Bounded idempotency
-retention and its advertised retry window are required before this can become a
-long-running service.
+matrix remain required. A native checkpoint retains only the newest bounded
+consensus retry suffix, but no public idempotency horizon is advertised and the
+map can grow between explicit checkpoints. A product retry-window contract and
+automatic checkpoint policy are required before this can become a long-running
+service.

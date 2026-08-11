@@ -1,7 +1,7 @@
 //! Profile-neutral tablet command and application primitives.
 
 use epoch_core::{EpochError, validate_resource_name};
-use serde::Serialize;
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -33,7 +33,8 @@ pub enum TabletError {
 }
 
 /// Stable identity and fencing epoch shared by profile-specific tablets.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StreamTabletScope {
     pub tablet_id: u64,
     pub consensus_group_id: u64,
@@ -102,14 +103,15 @@ pub struct CommittedCommand<'a> {
 }
 
 /// Bounded durability evidence supported by the current fixed-voter milestone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TabletWriteEvidence {
     FixedVoterMajorityPersisted,
 }
 
 /// Exact command identity retained with a deterministic applied result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AppliedCommandMetadata {
     pub proposal_id: u64,
     pub term: u64,
@@ -141,7 +143,8 @@ impl AppliedCommandMetadata {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AppliedCommand<Receipt> {
     pub metadata: AppliedCommandMetadata,
     pub receipt: Receipt,
@@ -225,4 +228,45 @@ where
     S: serde::Serializer,
 {
     serializer.serialize_str(&value.to_string())
+}
+
+pub(crate) fn deserialize_u64_from_number_or_decimal<'de, D>(
+    deserializer: D,
+) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Representation {
+        Number(u64),
+        Decimal(String),
+    }
+
+    match Representation::deserialize(deserializer)? {
+        Representation::Number(value) => Ok(value),
+        Representation::Decimal(value) => value.parse().map_err(serde::de::Error::custom),
+    }
+}
+
+pub(crate) fn deserialize_optional_u64_from_number_or_decimal<'de, D>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Representation {
+        Number(u64),
+        Decimal(String),
+    }
+
+    match Option::<Representation>::deserialize(deserializer)? {
+        Some(Representation::Number(value)) => Ok(Some(value)),
+        Some(Representation::Decimal(value)) => {
+            value.parse().map(Some).map_err(serde::de::Error::custom)
+        }
+        None => Ok(None),
+    }
 }

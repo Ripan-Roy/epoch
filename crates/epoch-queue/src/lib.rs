@@ -4,7 +4,7 @@
 //! transitions. Lease tokens carry a generation so an expired or replaced
 //! owner cannot acknowledge work after being fenced.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use crc32fast::Hasher;
 use epoch_core::{AckMetadata, DurabilityProfile, EpochError, EpochResult, EventEnvelope};
@@ -20,6 +20,8 @@ pub use lease::{
 };
 
 const RECOVERY_STATE_CHECKSUM_VERSION: u16 = 1;
+pub const QUEUE_SNAPSHOT_FORMAT_VERSION: u16 = 1;
+pub const MAX_QUEUE_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -141,6 +143,29 @@ struct DedupeEntry {
     receipt: AckMetadata,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VersionedQueueSnapshot {
+    format_version: u16,
+    config: QueueConfig,
+    messages: Vec<QueueMessage>,
+    order: Vec<String>,
+    dead_letters: Vec<DeadLetter>,
+    dedupe: Vec<QueueSnapshotDedupeEntry>,
+    commit_position: u64,
+    lease_generation: u64,
+    state_checksum: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueueSnapshotDedupeEntry {
+    dedupe_id: String,
+    message_id: String,
+    expires_at_ms: u64,
+    receipt: AckMetadata,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Queue {
     config: QueueConfig,
@@ -198,6 +223,81 @@ impl Queue {
         let mut encoder = CanonicalRecoveryState::new();
         encoder.queue(self);
         encoder.finish()
+    }
+
+    /// Encodes the complete Queue business state in a deterministic,
+    /// versioned image suitable for an application-native consensus snapshot.
+    pub fn encode_snapshot(&self) -> EpochResult<Vec<u8>> {
+        let mut messages = self.messages.values().cloned().collect::<Vec<_>>();
+        messages.sort_unstable_by(|left, right| left.id.as_bytes().cmp(right.id.as_bytes()));
+        let mut dedupe = self
+            .dedupe
+            .iter()
+            .map(|(dedupe_id, entry)| QueueSnapshotDedupeEntry {
+                dedupe_id: dedupe_id.clone(),
+                message_id: entry.message_id.clone(),
+                expires_at_ms: entry.expires_at_ms,
+                receipt: entry.receipt.clone(),
+            })
+            .collect::<Vec<_>>();
+        dedupe.sort_unstable_by(|left, right| {
+            left.dedupe_id.as_bytes().cmp(right.dedupe_id.as_bytes())
+        });
+        let encoded = serde_json::to_vec(&VersionedQueueSnapshot {
+            format_version: QUEUE_SNAPSHOT_FORMAT_VERSION,
+            config: self.config.clone(),
+            messages,
+            order: self.order.iter().cloned().collect(),
+            dead_letters: self.dead_letters.iter().cloned().collect(),
+            dedupe,
+            commit_position: self.commit_position,
+            lease_generation: self.lease_generation,
+            state_checksum: self.recovery_state_checksum(),
+        })
+        .map_err(|error| EpochError::InvalidArgument(error.to_string()))?;
+        if encoded.len() > MAX_QUEUE_SNAPSHOT_BYTES {
+            return Err(EpochError::Capacity(format!(
+                "Queue snapshot is {} bytes; maximum is {MAX_QUEUE_SNAPSHOT_BYTES}",
+                encoded.len()
+            )));
+        }
+        Ok(encoded)
+    }
+
+    /// Decodes and validates a canonical Queue snapshot without mutating an
+    /// existing state machine.
+    pub fn decode_snapshot(encoded: &[u8]) -> EpochResult<Self> {
+        let snapshot = decode_snapshot_envelope(encoded)?;
+        let messages = restore_snapshot_messages(
+            snapshot.messages,
+            snapshot.commit_position,
+            snapshot.lease_generation,
+        )?;
+        validate_snapshot_order(&snapshot.order, &messages)?;
+        validate_snapshot_dead_letters(&snapshot.dead_letters, &messages)?;
+        let dedupe = restore_snapshot_dedupe(
+            snapshot.dedupe,
+            &messages,
+            &snapshot.config,
+            snapshot.commit_position,
+        )?;
+        let queue = Self {
+            config: snapshot.config,
+            messages,
+            order: snapshot.order.into(),
+            dead_letters: snapshot.dead_letters.into(),
+            dedupe,
+            commit_position: snapshot.commit_position,
+            lease_generation: snapshot.lease_generation,
+        };
+        if queue.active_len() > queue.config.max_messages
+            || queue.recovery_state_checksum() != snapshot.state_checksum
+        {
+            return Err(EpochError::InvalidArgument(
+                "Queue snapshot state checksum or capacity is invalid".into(),
+            ));
+        }
+        Ok(queue)
     }
 
     pub fn enqueue(&mut self, envelope: EventEnvelope, now_ms: u64) -> EpochResult<EnqueueReceipt> {
@@ -1111,6 +1211,177 @@ impl Queue {
     }
 }
 
+fn decode_snapshot_envelope(encoded: &[u8]) -> EpochResult<VersionedQueueSnapshot> {
+    if encoded.len() > MAX_QUEUE_SNAPSHOT_BYTES {
+        return Err(EpochError::Capacity(format!(
+            "Queue snapshot is {} bytes; maximum is {MAX_QUEUE_SNAPSHOT_BYTES}",
+            encoded.len()
+        )));
+    }
+    let snapshot: VersionedQueueSnapshot = serde_json::from_slice(encoded)
+        .map_err(|error| EpochError::InvalidArgument(error.to_string()))?;
+    if snapshot.format_version != QUEUE_SNAPSHOT_FORMAT_VERSION {
+        return Err(EpochError::InvalidArgument(format!(
+            "unsupported Queue snapshot version {}",
+            snapshot.format_version
+        )));
+    }
+    if serde_json::to_vec(&snapshot)
+        .map_err(|error| EpochError::InvalidArgument(error.to_string()))?
+        != encoded
+    {
+        return Err(EpochError::InvalidArgument(
+            "Queue snapshot is not canonical".into(),
+        ));
+    }
+    Queue::new(snapshot.config.clone())?;
+    Ok(snapshot)
+}
+
+fn restore_snapshot_messages(
+    snapshot_messages: Vec<QueueMessage>,
+    commit_position: u64,
+    lease_generation: u64,
+) -> EpochResult<HashMap<String, QueueMessage>> {
+    let mut messages = HashMap::with_capacity(snapshot_messages.len());
+    for message in snapshot_messages {
+        message.envelope.validate()?;
+        if message.id != message.envelope.id
+            || message.id.trim().is_empty()
+            || message.commit_position == 0
+            || message.commit_position > commit_position
+            || !valid_snapshot_queue_state(&message, lease_generation)
+            || messages.insert(message.id.clone(), message).is_some()
+        {
+            return Err(EpochError::InvalidArgument(
+                "Queue snapshot message registry is invalid".into(),
+            ));
+        }
+    }
+    Ok(messages)
+}
+
+fn validate_snapshot_order(
+    order: &[String],
+    messages: &HashMap<String, QueueMessage>,
+) -> EpochResult<()> {
+    let mut ordered = BTreeSet::new();
+    for message_id in order {
+        if !messages.contains_key(message_id) || !ordered.insert(message_id) {
+            return Err(EpochError::InvalidArgument(
+                "Queue snapshot order is invalid".into(),
+            ));
+        }
+    }
+    if ordered.len() != messages.len() {
+        return Err(EpochError::InvalidArgument(
+            "Queue snapshot order does not cover every message".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_snapshot_dead_letters(
+    dead_letters: &[DeadLetter],
+    messages: &HashMap<String, QueueMessage>,
+) -> EpochResult<()> {
+    let mut dead_letter_ids = BTreeSet::new();
+    for letter in dead_letters {
+        let Some(message) = messages.get(&letter.message_id) else {
+            return Err(EpochError::InvalidArgument(
+                "Queue snapshot dead-letter registry is invalid".into(),
+            ));
+        };
+        let QueueState::DeadLettered { reason } = &message.state else {
+            return Err(EpochError::InvalidArgument(
+                "Queue snapshot dead-letter registry is invalid".into(),
+            ));
+        };
+        if !dead_letter_ids.insert(&letter.message_id)
+            || reason.trim().is_empty()
+            || letter.reason != *reason
+            || letter.envelope != message.envelope
+            || letter.original_enqueued_at_ms != message.enqueued_at_ms
+            || letter.attempts != message.attempt
+            || letter.last_error != message.last_error
+        {
+            return Err(EpochError::InvalidArgument(
+                "Queue snapshot dead-letter registry is invalid".into(),
+            ));
+        }
+    }
+    let expected = messages
+        .values()
+        .filter(|message| matches!(message.state, QueueState::DeadLettered { .. }))
+        .count();
+    if dead_letter_ids.len() != expected {
+        return Err(EpochError::InvalidArgument(
+            "Queue snapshot omits active dead-letter evidence".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn restore_snapshot_dedupe(
+    snapshot_dedupe: Vec<QueueSnapshotDedupeEntry>,
+    messages: &HashMap<String, QueueMessage>,
+    config: &QueueConfig,
+    commit_position: u64,
+) -> EpochResult<HashMap<String, DedupeEntry>> {
+    let mut dedupe = HashMap::with_capacity(snapshot_dedupe.len());
+    for entry in snapshot_dedupe {
+        let Some(message) = messages.get(&entry.message_id) else {
+            return Err(EpochError::InvalidArgument(
+                "Queue snapshot deduplication registry is invalid".into(),
+            ));
+        };
+        if entry.dedupe_id.trim().is_empty()
+            || message.envelope.dedupe_id.as_deref() != Some(entry.dedupe_id.as_str())
+            || entry.receipt.durability != config.durability
+            || entry.receipt.commit_position == 0
+            || entry.receipt.commit_position > commit_position
+            || entry.receipt.duplicate
+            || dedupe
+                .insert(
+                    entry.dedupe_id,
+                    DedupeEntry {
+                        message_id: entry.message_id,
+                        expires_at_ms: entry.expires_at_ms,
+                        receipt: entry.receipt,
+                    },
+                )
+                .is_some()
+        {
+            return Err(EpochError::InvalidArgument(
+                "Queue snapshot deduplication registry is invalid".into(),
+            ));
+        }
+    }
+    Ok(dedupe)
+}
+
+fn valid_snapshot_queue_state(message: &QueueMessage, lease_generation: u64) -> bool {
+    match &message.state {
+        QueueState::Ready | QueueState::Acknowledged | QueueState::Expired => true,
+        QueueState::Scheduled { eligible_at_ms } => *eligible_at_ms > 0,
+        QueueState::Leased {
+            consumer,
+            token,
+            deadline_ms,
+            generation,
+        } => {
+            !consumer.trim().is_empty()
+                && !token.is_empty()
+                && *deadline_ms > 0
+                && *generation > 0
+                && *generation <= lease_generation
+        }
+        QueueState::DeadLettered { reason } => {
+            !reason.trim().is_empty() && message.last_error.as_deref() == Some(reason.as_str())
+        }
+    }
+}
+
 struct CanonicalRecoveryState {
     hasher: Hasher,
 }
@@ -1461,6 +1732,39 @@ mod tests {
             .unwrap();
         queue.acquire("worker-b", 1, None, 14).unwrap();
         queue
+    }
+
+    #[test]
+    fn native_snapshot_round_trips_complete_queue_state_and_continues() {
+        let queue = checksum_fixture_queue();
+        let encoded = queue.encode_snapshot().unwrap();
+        let mut restored = Queue::decode_snapshot(&encoded).unwrap();
+
+        assert_eq!(restored, queue);
+        assert_eq!(restored.encode_snapshot().unwrap(), encoded);
+        assert_eq!(
+            restored.recovery_state_checksum(),
+            queue.recovery_state_checksum()
+        );
+        restored.enqueue(event("three"), 20).unwrap();
+        assert!(restored.get("three").is_some());
+    }
+
+    #[test]
+    fn native_snapshot_rejects_noncanonical_unknown_or_corrupt_images() {
+        let queue = checksum_fixture_queue();
+        let encoded = queue.encode_snapshot().unwrap();
+        let snapshot: VersionedQueueSnapshot = serde_json::from_slice(&encoded).unwrap();
+        let pretty = serde_json::to_vec_pretty(&snapshot).unwrap();
+        assert!(Queue::decode_snapshot(&pretty).is_err());
+
+        let mut unknown = snapshot.clone();
+        unknown.format_version = 99;
+        assert!(Queue::decode_snapshot(&serde_json::to_vec(&unknown).unwrap()).is_err());
+
+        let mut corrupt = snapshot;
+        corrupt.state_checksum ^= 1;
+        assert!(Queue::decode_snapshot(&serde_json::to_vec(&corrupt).unwrap()).is_err());
     }
 
     #[test]

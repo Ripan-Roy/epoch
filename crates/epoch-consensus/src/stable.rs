@@ -3,8 +3,9 @@
 //! Record zero fixes the immutable group identity. Later records contain either
 //! a complete `HardState` plus application checkpoint and normal-entry batch,
 //! or an additive canonical consensus checkpoint plus its contiguous retained
-//! tail. The outer [`FileWal`] supplies the durable, checksummed append boundary;
-//! this module supplies canonical Epoch-owned framing, logical suffix
+//! tail. A compacted baseline can atomically replace obsolete generations. The
+//! outer [`FileWal`] supplies the durable, checksummed append/replacement
+//! boundary; this module supplies canonical Epoch-owned framing, logical suffix
 //! replacement, checkpoint installation, and prefix compaction during replay.
 
 use std::{collections::BTreeMap, fmt, path::Path};
@@ -26,6 +27,7 @@ const RECORD_HEADER_LEN: usize = 12;
 const IDENTITY_KIND: u16 = 1;
 const TRANSITION_KIND: u16 = 2;
 const CHECKPOINT_KIND: u16 = 3;
+const COMPACTED_CHECKPOINT_KIND: u16 = 4;
 const IDENTITY_PAYLOAD_LEN: usize = 48;
 const TRANSITION_FIXED_PAYLOAD_LEN: usize = 84;
 const CHECKPOINT_FIXED_PAYLOAD_LEN: usize = 88;
@@ -113,6 +115,7 @@ enum StableRecord {
     Identity(StableIdentity),
     Transition(StableTransition),
     Checkpoint(StableCheckpointTransition),
+    CompactedCheckpoint(StableCheckpointTransition),
 }
 
 fn initialize_or_validate_identity(
@@ -141,11 +144,11 @@ fn initialize_or_validate_identity(
         StableRecord::Identity(stored) => Err(ConsensusError::InvalidState(format!(
             "stable identity mismatch: stored {stored:?}, requested {identity:?}"
         ))),
-        StableRecord::Transition(_) | StableRecord::Checkpoint(_) => {
-            Err(ConsensusError::InvalidState(
-                "stable WAL sequence zero is not an identity record".into(),
-            ))
-        }
+        StableRecord::Transition(_)
+        | StableRecord::Checkpoint(_)
+        | StableRecord::CompactedCheckpoint(_) => Err(ConsensusError::InvalidState(
+            "stable WAL sequence zero is not an identity record".into(),
+        )),
     }
 }
 
@@ -167,15 +170,6 @@ fn replay_transitions(
                 record.sequence
             )));
         }
-        let expected_generation = stable_generation
-            .checked_add(1)
-            .ok_or_else(|| ConsensusError::InvalidState("stable generation overflow".into()))?;
-        if record.sequence != expected_generation {
-            return Err(ConsensusError::InvalidState(format!(
-                "stable generation mismatch: WAL sequence {}, expected {expected_generation}",
-                record.sequence
-            )));
-        }
         let decoded = decode_record(&record.payload)?;
         let observed_generation = match &decoded {
             StableRecord::Identity(_) => {
@@ -185,11 +179,30 @@ fn replay_transitions(
                 )));
             }
             StableRecord::Transition(transition) => transition.generation,
-            StableRecord::Checkpoint(transition) => transition.generation,
+            StableRecord::Checkpoint(transition)
+            | StableRecord::CompactedCheckpoint(transition) => transition.generation,
+        };
+        let compacted_baseline = matches!(&decoded, StableRecord::CompactedCheckpoint(_));
+        if compacted_baseline && (record.sequence != 1 || stable_generation != 0) {
+            return Err(ConsensusError::InvalidState(
+                "compacted stable checkpoint must be the first transition after identity".into(),
+            ));
+        }
+        let expected_generation = if compacted_baseline {
+            if observed_generation == 0 {
+                return Err(ConsensusError::InvalidState(
+                    "compacted stable checkpoint generation must be nonzero".into(),
+                ));
+            }
+            observed_generation
+        } else {
+            stable_generation
+                .checked_add(1)
+                .ok_or_else(|| ConsensusError::InvalidState("stable generation overflow".into()))?
         };
         if observed_generation != expected_generation {
             return Err(ConsensusError::InvalidState(format!(
-                "stable record generation {observed_generation} does not match WAL generation {expected_generation}"
+                "stable record generation {observed_generation} does not follow logical generation {stable_generation}"
             )));
         }
         state = match decoded {
@@ -201,7 +214,8 @@ fn replay_transitions(
                 &transition.entries,
                 transition.checkpoint,
             )?,
-            StableRecord::Checkpoint(transition) => prepare_checkpoint_transition(
+            StableRecord::Checkpoint(transition)
+            | StableRecord::CompactedCheckpoint(transition) => prepare_checkpoint_transition(
                 identity,
                 state.prior(),
                 transition.hard_state,
@@ -302,13 +316,7 @@ impl DiskStableStore {
             entries: entries.to_vec(),
         };
         let encoded = encode_record(&StableRecord::Transition(transition))?;
-        let record = self.wal.append(0, &encoded, true).map_err(storage_error)?;
-        if record.sequence != expected_generation {
-            return Err(ConsensusError::InvalidState(format!(
-                "stable WAL returned sequence {}; expected generation {expected_generation}",
-                record.sequence
-            )));
-        }
+        self.wal.append(0, &encoded, true).map_err(storage_error)?;
         #[cfg(test)]
         if std::mem::take(&mut self.fail_after_next_append) {
             return Err(ConsensusError::Storage(
@@ -321,7 +329,7 @@ impl DiskStableStore {
         self.entries = candidate.entries;
         self.checkpoint = candidate.checkpoint;
         self.stable_generation = expected_generation;
-        Ok(record.sequence)
+        Ok(expected_generation)
     }
 
     pub(crate) fn persist_checkpoint(
@@ -357,14 +365,9 @@ impl DiskStableStore {
             image: image.clone(),
             entries: entries.to_vec(),
         };
-        let encoded = encode_record(&StableRecord::Checkpoint(transition))?;
-        let record = self.wal.append(0, &encoded, true).map_err(storage_error)?;
-        if record.sequence != expected_generation {
-            return Err(ConsensusError::InvalidState(format!(
-                "stable WAL returned sequence {}; expected generation {expected_generation}",
-                record.sequence
-            )));
-        }
+        let encoded = encode_record(&StableRecord::Checkpoint(transition.clone()))?;
+        self.wal.append(0, &encoded, true).map_err(storage_error)?;
+        self.replace_with_checkpoint_baseline(&transition)?;
         #[cfg(test)]
         if std::mem::take(&mut self.fail_after_next_append) {
             return Err(ConsensusError::Storage(
@@ -377,11 +380,22 @@ impl DiskStableStore {
         self.entries = candidate.entries;
         self.checkpoint = candidate.checkpoint;
         self.stable_generation = expected_generation;
-        Ok(record.sequence)
+        Ok(expected_generation)
     }
 
     pub(crate) const fn stable_generation(&self) -> u64 {
         self.stable_generation
+    }
+
+    fn replace_with_checkpoint_baseline(
+        &mut self,
+        transition: &StableCheckpointTransition,
+    ) -> ConsensusResult<()> {
+        let identity = encode_record(&StableRecord::Identity(self.identity))?;
+        let checkpoint = encode_record(&StableRecord::CompactedCheckpoint(transition.clone()))?;
+        self.wal
+            .replace_with_records(&[(0, identity.as_slice()), (0, checkpoint.as_slice())])
+            .map_err(storage_error)
     }
 
     fn prior_state(&self) -> PriorState<'_> {
@@ -507,16 +521,18 @@ fn prepare_checkpoint_transition(
             "stable checkpoint index regresses".into(),
         ));
     }
-    let previous_applied = derive_applied_history(
-        identity,
-        previous.snapshot,
-        previous.entries,
-        previous.checkpoint.applied_index,
-    )?;
-    if image.applied.get(..previous_applied.len()) != Some(previous_applied.as_slice()) {
-        return Err(ConsensusError::InvalidState(
-            "stable checkpoint does not extend the prior applied history".into(),
-        ));
+    if image.application_snapshot.is_none() {
+        let previous_applied = derive_applied_history(
+            identity,
+            previous.snapshot,
+            previous.entries,
+            previous.checkpoint.applied_index,
+        )?;
+        if image.applied.get(..previous_applied.len()) != Some(previous_applied.as_slice()) {
+            return Err(ConsensusError::InvalidState(
+                "stable v1 checkpoint does not extend the prior applied history".into(),
+            ));
+        }
     }
     if image.index != checkpoint.applied_index || image.state_digest != checkpoint.state_digest {
         return Err(ConsensusError::InvalidState(
@@ -664,7 +680,19 @@ fn validate_complete_state(
     }
 
     let applied = derive_applied_history(identity, snapshot, entries, checkpoint.applied_index)?;
-    let expected_digest = compute_state_digest(identity.group_id, identity.group_epoch, &applied)?;
+    let expected_digest = match snapshot {
+        Some(image) if image.application_snapshot.is_some() => {
+            let mut digest = image.state_digest;
+            for committed in applied
+                .iter()
+                .filter(|committed| committed.receipt.log_index > image.index)
+            {
+                digest = super::advance_rolling_state_digest(digest, committed)?;
+            }
+            digest
+        }
+        _ => compute_state_digest(identity.group_id, identity.group_epoch, &applied)?,
+    };
     if checkpoint.state_digest != expected_digest {
         return Err(ConsensusError::InvalidState(
             "stable checkpoint digest does not match its applied log history".into(),
@@ -804,6 +832,10 @@ fn encode_record(record: &StableRecord) -> ConsensusResult<Vec<u8>> {
         StableRecord::Checkpoint(transition) => {
             (CHECKPOINT_KIND, encode_checkpoint_transition(transition)?)
         }
+        StableRecord::CompactedCheckpoint(transition) => (
+            COMPACTED_CHECKPOINT_KIND,
+            encode_checkpoint_transition(transition)?,
+        ),
     };
     let payload_len = u32::try_from(payload.len()).map_err(|_| {
         ConsensusError::InvalidState("stable record payload exceeds the v1 length field".into())
@@ -851,6 +883,9 @@ fn decode_record(encoded: &[u8]) -> ConsensusResult<StableRecord> {
         IDENTITY_KIND => StableRecord::Identity(decode_identity(payload)?),
         TRANSITION_KIND => StableRecord::Transition(decode_transition(payload)?),
         CHECKPOINT_KIND => StableRecord::Checkpoint(decode_checkpoint_transition(payload)?),
+        COMPACTED_CHECKPOINT_KIND => {
+            StableRecord::CompactedCheckpoint(decode_checkpoint_transition(payload)?)
+        }
         _ => {
             return Err(ConsensusError::Unsupported(format!(
                 "unsupported stable record kind {kind}"
@@ -1372,6 +1407,118 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_physically_reclaims_old_generations_and_keeps_logical_generation() {
+        let directory = TestDirectory::new();
+        let path = directory.wal_path();
+        let recovered = DiskStableStore::open(&path, identity()).unwrap();
+        let mut store = recovered.store;
+        store
+            .persist(
+                1,
+                &hard_state(1, 1, 1),
+                &[normal_entry(1, 1)],
+                checkpoint_at(1),
+            )
+            .unwrap();
+        for generation in 2..=128_u64 {
+            store
+                .persist(
+                    generation,
+                    &hard_state(generation, 1, 1),
+                    &[normal_entry(generation, generation)],
+                    checkpoint_at(1),
+                )
+                .unwrap();
+        }
+        let before = fs::metadata(&path).unwrap().len();
+        let image = empty_image_at(1, 1);
+        let tail = (2..=128_u64)
+            .map(|index| normal_entry(index, index))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            store
+                .persist_checkpoint(129, &hard_state(128, 1, 1), &image, &tail, checkpoint_at(1),)
+                .unwrap(),
+            129
+        );
+        let after = fs::metadata(&path).unwrap().len();
+        assert!(after < before, "expected {after} to be below {before}");
+        drop(store);
+
+        let reopened = DiskStableStore::open(&path, identity()).unwrap();
+        assert_eq!(reopened.stable_generation, 129);
+        assert_eq!(reopened.storage.first_index().unwrap(), 2);
+        assert_eq!(reopened.storage.last_index().unwrap(), 128);
+        let mut store = reopened.store;
+        assert_eq!(
+            store
+                .persist(
+                    130,
+                    &hard_state(129, 1, 1),
+                    &[normal_entry(129, 129)],
+                    checkpoint_at(1),
+                )
+                .unwrap(),
+            130
+        );
+        let second_tail = (2..=129_u64)
+            .map(|index| normal_entry(index, index))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            store
+                .persist_checkpoint(
+                    131,
+                    &hard_state(129, 1, 1),
+                    &image,
+                    &second_tail,
+                    checkpoint_at(1),
+                )
+                .unwrap(),
+            131
+        );
+        drop(store);
+        assert_eq!(
+            DiskStableStore::open(&path, identity())
+                .unwrap()
+                .stable_generation,
+            131
+        );
+    }
+
+    #[test]
+    fn compacted_checkpoint_kind_is_rejected_outside_the_baseline_position() {
+        let directory = TestDirectory::new();
+        let path = directory.wal_path();
+        let mut wal = FileWal::open(&path).unwrap();
+        let identity_record = encode_record(&StableRecord::Identity(identity())).unwrap();
+        wal.append(0, &identity_record, true).unwrap();
+        let transition = StableCheckpointTransition {
+            generation: 1,
+            hard_state: hard_state(1, 1, 1),
+            checkpoint: checkpoint_at(1),
+            image: empty_image_at(1, 1),
+            entries: Vec::new(),
+        };
+        let ordinary = encode_record(&StableRecord::Checkpoint(transition.clone())).unwrap();
+        wal.append(0, &ordinary, true).unwrap();
+        let misplaced = encode_record(&StableRecord::CompactedCheckpoint(
+            StableCheckpointTransition {
+                generation: 2,
+                ..transition
+            },
+        ))
+        .unwrap();
+        wal.append(0, &misplaced, true).unwrap();
+        drop(wal);
+
+        assert!(matches!(
+            DiskStableStore::open(&path, identity()),
+            Err(ConsensusError::InvalidState(_))
+        ));
+    }
+
+    #[test]
     fn checkpoint_codec_rejects_digest_corruption_and_noncontiguous_tail() {
         let image = empty_image_at(1, 1);
         let record = StableRecord::Checkpoint(StableCheckpointTransition {
@@ -1584,7 +1731,9 @@ mod tests {
             index: LogIndex::new(index),
             term: Term::new(term),
             state_digest: empty_checkpoint().state_digest,
+            applied_command_count: 0,
             applied: Vec::new(),
+            application_snapshot: None,
         }
     }
 
@@ -1610,7 +1759,9 @@ mod tests {
                 &applied,
             )
             .unwrap(),
+            applied_command_count: u64::try_from(applied.len()).unwrap(),
             applied,
+            application_snapshot: None,
         }
     }
 

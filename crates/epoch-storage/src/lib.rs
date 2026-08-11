@@ -118,6 +118,8 @@ pub struct FileWal {
     content_hasher: Hasher,
     recovered_partial_tail: bool,
     poisoned: Option<String>,
+    #[cfg(test)]
+    fail_replacement_parent_sync: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -248,6 +250,8 @@ impl FileWal {
             content_hasher: recovered.content_hasher,
             recovered_partial_tail: recovered.recovered_partial_tail,
             poisoned: None,
+            #[cfg(test)]
+            fail_replacement_parent_sync: false,
         })
     }
 
@@ -264,10 +268,101 @@ impl FileWal {
         self.file.sync_data().map_err(storage_error)
     }
 
+    /// Atomically replaces this WAL with a complete, newly sequenced history.
+    ///
+    /// The replacement is written and locked as a sibling file first. The
+    /// rename happens while both the old and new inodes remain exclusively
+    /// locked, so another writer cannot acquire the active path in between.
+    /// Reopen therefore observes either the complete old history or the
+    /// complete replacement. Callers must ensure both histories represent a
+    /// valid recovery point for their higher-level format.
+    pub fn replace_with_records(&mut self, records: &[(u64, &[u8])]) -> EpochResult<()> {
+        self.ensure_available()?;
+        let active_path = self.path.clone();
+        let file_name = active_path.file_name().ok_or_else(|| {
+            EpochError::Storage(format!(
+                "WAL path {} has no file name for atomic replacement",
+                active_path.display()
+            ))
+        })?;
+        let parent = active_path.parent().ok_or_else(|| {
+            EpochError::Storage(format!(
+                "WAL path {} has no parent for atomic replacement",
+                active_path.display()
+            ))
+        })?;
+        let replacement_name = format!(
+            ".{}.replace-{}.tmp",
+            file_name.to_string_lossy(),
+            Uuid::now_v7()
+        );
+        let replacement_path = parent.join(replacement_name);
+        let mut replacement =
+            Self::open_segment(&replacement_path, 0, false, WalOpenMode::CreateIfMissing)?;
+
+        let prepare_result = (|| {
+            for (timestamp_ms, payload) in records {
+                replacement.append(*timestamp_ms, payload, false)?;
+            }
+            replacement.sync()?;
+            Ok(())
+        })();
+        if let Err(error) = prepare_result {
+            drop(replacement);
+            let _ = fs::remove_file(&replacement_path);
+            return Err(error);
+        }
+
+        if let Err(error) = fs::rename(&replacement_path, &active_path) {
+            drop(replacement);
+            let _ = fs::remove_file(&replacement_path);
+            return Err(storage_error(error));
+        }
+
+        #[cfg(test)]
+        let fail_parent_sync = std::mem::take(&mut self.fail_replacement_parent_sync);
+
+        // Keep the inode now reachable at the active path locked even if the
+        // directory fsync outcome is unknown. The caller will fail-stop and a
+        // later reopen will select whichever complete rename outcome survived.
+        replacement.path.clone_from(&active_path);
+        std::mem::swap(self, &mut replacement);
+        let sync_result = {
+            #[cfg(test)]
+            {
+                if fail_parent_sync {
+                    Err(EpochError::Storage(
+                        "injected parent-directory sync failure after WAL replacement rename"
+                            .into(),
+                    ))
+                } else {
+                    sync_parent_directory(&self.path)
+                }
+            }
+            #[cfg(not(test))]
+            {
+                sync_parent_directory(&self.path)
+            }
+        };
+        if let Err(error) = sync_result {
+            let reason = format!(
+                "WAL replacement rename completed but parent-directory sync failed: {error}"
+            );
+            self.poisoned = Some(reason.clone());
+            return Err(EpochError::Storage(reason));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn fail_next_replacement_parent_sync(&mut self) {
+        self.fail_replacement_parent_sync = true;
+    }
+
     fn ensure_available(&self) -> EpochResult<()> {
         if let Some(reason) = &self.poisoned {
             return Err(EpochError::Storage(format!(
-                "WAL is unavailable after an append rollback failure: {reason}"
+                "WAL is unavailable after a storage failure: {reason}"
             )));
         }
         Ok(())
@@ -1754,6 +1849,124 @@ mod tests {
         ));
         drop(first);
         FileWal::open(temp.path()).expect("lock is released when the owner closes");
+    }
+
+    #[test]
+    fn file_wal_atomically_replaces_history_repeatedly_and_keeps_the_active_path_locked() {
+        let temporary = TempDir::new().unwrap();
+        let path = temporary.path().join("stable.wal");
+        let mut wal = FileWal::open(&path).unwrap();
+        for sequence in 0..32_u64 {
+            wal.append(sequence, &[0x5a; 512], true).unwrap();
+        }
+        let old_len = std::fs::metadata(&path).unwrap().len();
+
+        wal.replace_with_records(&[(0, b"identity"), (0, b"checkpoint")])
+            .unwrap();
+
+        assert_eq!(wal.path(), path.as_path());
+        assert!(std::fs::metadata(&path).unwrap().len() < old_len);
+        assert_eq!(
+            wal.records_from(0, usize::MAX)
+                .into_iter()
+                .map(|record| record.payload)
+                .collect::<Vec<_>>(),
+            [b"identity".to_vec(), b"checkpoint".to_vec()]
+        );
+        assert_eq!(wal.append(0, b"tail", true).unwrap().sequence, 2);
+        wal.replace_with_records(&[(0, b"identity-2"), (0, b"checkpoint-2")])
+            .unwrap();
+        assert_eq!(wal.path(), path.as_path());
+        assert_eq!(
+            wal.records_from(0, usize::MAX)
+                .into_iter()
+                .map(|record| record.payload)
+                .collect::<Vec<_>>(),
+            [b"identity-2".to_vec(), b"checkpoint-2".to_vec()]
+        );
+        assert_eq!(wal.append(0, b"tail-2", true).unwrap().sequence, 2);
+        assert!(matches!(FileWal::open(&path), Err(EpochError::Storage(_))));
+
+        drop(wal);
+        let reopened = FileWal::open(&path).unwrap();
+        assert_eq!(reopened.last_sequence(), Some(2));
+        assert_eq!(reopened.records_from(2, 1)[0].payload, b"tail-2");
+    }
+
+    #[test]
+    fn failed_file_wal_replacement_preserves_the_owned_source_history() {
+        let temporary = TempDir::new().unwrap();
+        let path = temporary.path().join("stable.wal");
+        let mut wal = FileWal::open(&path).unwrap();
+        wal.append(10, b"identity", true).unwrap();
+        wal.append(20, b"durable-transition", true).unwrap();
+        let oversized = vec![0_u8; MAX_PAYLOAD_LEN + 1];
+
+        assert!(matches!(
+            wal.replace_with_records(&[(0, oversized.as_slice())]),
+            Err(EpochError::Capacity(_))
+        ));
+        assert_eq!(wal.last_sequence(), Some(1));
+        assert_eq!(
+            wal.records_from(0, usize::MAX)[1].payload,
+            b"durable-transition"
+        );
+        wal.append(30, b"still-owned", true).unwrap();
+
+        drop(wal);
+        let reopened = FileWal::open(&path).unwrap();
+        assert_eq!(reopened.last_sequence(), Some(2));
+        assert_eq!(reopened.records_from(2, 1)[0].payload, b"still-owned");
+    }
+
+    #[test]
+    fn post_rename_sync_failure_keeps_the_new_history_locked_and_fails_stopped() {
+        let temporary = TempDir::new().unwrap();
+        let path = temporary.path().join("stable.wal");
+        let mut wal = FileWal::open(&path).unwrap();
+        wal.append(0, b"old-history", true).unwrap();
+        wal.fail_next_replacement_parent_sync();
+
+        assert!(matches!(
+            wal.replace_with_records(&[(0, b"identity"), (0, b"checkpoint")]),
+            Err(EpochError::Storage(_))
+        ));
+        assert_eq!(wal.path(), path.as_path());
+        assert!(matches!(
+            wal.append(0, b"tail", true),
+            Err(EpochError::Storage(_))
+        ));
+        assert!(matches!(FileWal::open(&path), Err(EpochError::Storage(_))));
+
+        drop(wal);
+        let reopened = FileWal::open(&path).unwrap();
+        assert_eq!(
+            reopened
+                .records_from(0, usize::MAX)
+                .into_iter()
+                .map(|record| record.payload)
+                .collect::<Vec<_>>(),
+            [b"identity".to_vec(), b"checkpoint".to_vec()]
+        );
+    }
+
+    #[test]
+    fn orphan_file_wal_replacement_is_never_selected_as_active_history() {
+        let temporary = TempDir::new().unwrap();
+        let path = temporary.path().join("stable.wal");
+        {
+            let mut wal = FileWal::open(&path).unwrap();
+            wal.append(0, b"authoritative", true).unwrap();
+        }
+        let orphan_path = temporary.path().join(".stable.wal.replace-orphan.tmp");
+        {
+            let mut orphan = FileWal::open(&orphan_path).unwrap();
+            orphan.append(0, b"orphan", true).unwrap();
+        }
+
+        let reopened = FileWal::open(&path).unwrap();
+        assert_eq!(reopened.records_from(0, 1)[0].payload, b"authoritative");
+        assert!(orphan_path.exists());
     }
 
     #[test]

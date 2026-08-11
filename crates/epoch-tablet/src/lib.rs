@@ -16,11 +16,13 @@ mod queue;
 mod stream_batch;
 mod stream_group;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use common::{
-    AppliedCommand, hash_length_prefixed, proposal_id_from_domain, serialize_u64_as_decimal,
-    validate_committed_command_scope, validate_idempotency_key,
+    AppliedCommand, deserialize_u64_from_number_or_decimal, hash_length_prefixed,
+    proposal_id_from_domain, serialize_u64_as_decimal, validate_committed_command_scope,
+    validate_idempotency_key,
 };
 use epoch_core::{DurabilityProfile, EventEnvelope};
 use epoch_stream::{AppendReceipt, Stream, StreamConfig, StreamRecord};
@@ -44,6 +46,7 @@ pub const STREAM_TABLET_BATCH_COMMAND_FORMAT_VERSION: u16 = 2;
 // boundary repeats the check so a command can never validate here and then be
 // rejected only after it reaches Raft.
 pub const MAX_STREAM_TABLET_COMMAND_BYTES: usize = 512 * 1024;
+pub const STREAM_TABLET_SNAPSHOT_FORMAT_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -296,22 +299,43 @@ pub fn proposal_id_for(scope: &StreamTabletScope, idempotency_key: &str) -> Tabl
     )
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamTabletAppendReceipt {
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub proposal_id: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub tablet_id: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub tablet_epoch: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub term: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub commit_index: u64,
     pub partition: u32,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub offset: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub applied_at_ms: u64,
     pub write_evidence: StreamTabletWriteEvidence,
     pub durable_voter_acks: u16,
@@ -320,7 +344,7 @@ pub struct StreamTabletAppendReceipt {
     pub batch: Option<StreamTabletBatchReceipt>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamTabletBatchReceipt {
     pub compression: StreamCompression,
     pub record_count: u16,
@@ -329,16 +353,19 @@ pub struct StreamTabletBatchReceipt {
     pub records: Vec<StreamTabletBatchRecordReceipt>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamTabletBatchRecordReceipt {
     pub client_sequence: u32,
     pub partition: u32,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub offset: u64,
     pub disposition: StreamTabletAppendDisposition,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamTabletAppendDisposition {
     New,
@@ -346,11 +373,30 @@ pub enum StreamTabletAppendDisposition {
     ProfileDeduplicated,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum StreamTabletMutationReceipt {
     Append(StreamTabletAppendReceipt),
     Group(StreamTabletGroupReceipt),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VersionedStreamTabletSnapshot {
+    format_version: u16,
+    scope: StreamTabletScope,
+    stream_base64: String,
+    consumer_groups: BTreeMap<String, StreamConsumerGroupOwner>,
+    applied: Vec<StreamTabletAppliedSnapshot>,
+    last_applied_command_index: u64,
+    state_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StreamTabletAppliedSnapshot {
+    proposal_id: u64,
+    applied: AppliedCommand<StreamTabletMutationReceipt>,
 }
 
 impl StreamTabletMutationReceipt {
@@ -562,6 +608,128 @@ impl StreamTablet {
         self.state_digest
     }
 
+    pub fn encode_snapshot(&self, retained: &BTreeSet<u64>) -> TabletResult<Vec<u8>> {
+        let mut applied = self
+            .applied
+            .iter()
+            .filter(|(proposal_id, _)| retained.contains(proposal_id))
+            .map(|(proposal_id, applied)| StreamTabletAppliedSnapshot {
+                proposal_id: *proposal_id,
+                applied: applied.clone(),
+            })
+            .collect::<Vec<_>>();
+        if applied.len() != retained.len() {
+            return Err(TabletError::InvalidCommand(
+                "Stream snapshot retry set contains an unknown proposal".into(),
+            ));
+        }
+        applied.sort_by_key(|entry| entry.applied.metadata.log_index);
+        let stream = self.stream.encode_snapshot()?;
+        serde_json::to_vec(&VersionedStreamTabletSnapshot {
+            format_version: STREAM_TABLET_SNAPSHOT_FORMAT_VERSION,
+            scope: self.scope.clone(),
+            stream_base64: STANDARD_NO_PAD.encode(stream),
+            consumer_groups: self.consumer_groups.clone(),
+            applied,
+            last_applied_command_index: self.last_applied_command_index,
+            state_digest: self.state_digest,
+        })
+        .map_err(|error| TabletError::Encoding(error.to_string()))
+    }
+
+    pub fn decode_snapshot(
+        expected_scope: &StreamTabletScope,
+        encoded: &[u8],
+    ) -> TabletResult<Self> {
+        let snapshot: VersionedStreamTabletSnapshot = serde_json::from_slice(encoded)
+            .map_err(|error| TabletError::Decoding(error.to_string()))?;
+        if snapshot.format_version != STREAM_TABLET_SNAPSHOT_FORMAT_VERSION {
+            return Err(TabletError::InvalidCommand(format!(
+                "unsupported Stream tablet snapshot version {}",
+                snapshot.format_version
+            )));
+        }
+        if &snapshot.scope != expected_scope {
+            return Err(TabletError::InvalidCommand(
+                "Stream tablet snapshot scope is fenced".into(),
+            ));
+        }
+        snapshot.scope.validate()?;
+        if serde_json::to_vec(&snapshot)
+            .map_err(|error| TabletError::Encoding(error.to_string()))?
+            != encoded
+        {
+            return Err(TabletError::InvalidCommand(
+                "Stream tablet snapshot is not canonical".into(),
+            ));
+        }
+        let stream_bytes = STANDARD_NO_PAD
+            .decode(&snapshot.stream_base64)
+            .map_err(|error| TabletError::Decoding(error.to_string()))?;
+        let stream = Stream::decode_snapshot(&stream_bytes)?;
+        if stream.config()
+            != &(StreamConfig {
+                partitions: 1,
+                durability: DurabilityProfile::Volatile,
+                max_records_per_partition: None,
+            })
+        {
+            return Err(TabletError::InvalidCommand(
+                "Stream tablet snapshot engine configuration is invalid".into(),
+            ));
+        }
+        if snapshot.consumer_groups.len() > MAX_STREAM_CONSUMER_GROUPS {
+            return Err(TabletError::InvalidCommand(
+                "Stream tablet snapshot exceeds the consumer-group bound".into(),
+            ));
+        }
+        for (group, owner) in &snapshot.consumer_groups {
+            validate_stream_consumer_group(group)?;
+            stream_group::validate_bounded_identifier(
+                "consumer member_id",
+                &owner.member_id,
+                MAX_STREAM_CONSUMER_MEMBER_BYTES,
+            )?;
+            if owner.generation == 0 {
+                return Err(TabletError::InvalidCommand(
+                    "Stream tablet snapshot has a zero group generation".into(),
+                ));
+            }
+        }
+
+        let mut applied = BTreeMap::new();
+        let mut previous_index = 0_u64;
+        for entry in snapshot.applied {
+            let metadata = entry.applied.metadata;
+            if entry.proposal_id == 0
+                || metadata.proposal_id != entry.proposal_id
+                || metadata.term == 0
+                || metadata.log_index <= previous_index
+                || metadata.log_index > snapshot.last_applied_command_index
+                || entry.applied.receipt.proposal_id() != entry.proposal_id
+                || !stream_receipt_matches_metadata(
+                    &entry.applied.receipt,
+                    &metadata,
+                    expected_scope,
+                )
+                || applied.insert(entry.proposal_id, entry.applied).is_some()
+            {
+                return Err(TabletError::InvalidCommand(
+                    "Stream tablet snapshot retry registry is invalid".into(),
+                ));
+            }
+            previous_index = metadata.log_index;
+        }
+        Ok(Self {
+            scope: snapshot.scope,
+            stream,
+            consumer_groups: snapshot.consumer_groups,
+            applied,
+            last_applied_command_index: snapshot.last_applied_command_index,
+            state_digest: snapshot.state_digest,
+        })
+    }
+
     fn apply_append(
         &mut self,
         committed: CommittedCommand<'_>,
@@ -769,6 +937,27 @@ impl StreamTablet {
         hasher.update(receipt.end_offset.to_be_bytes());
         hasher.update([group_outcome_code(receipt)]);
         self.state_digest = hasher.finalize().into();
+    }
+}
+
+fn stream_receipt_matches_metadata(
+    receipt: &StreamTabletMutationReceipt,
+    metadata: &AppliedCommandMetadata,
+    scope: &StreamTabletScope,
+) -> bool {
+    match receipt {
+        StreamTabletMutationReceipt::Append(receipt) => {
+            receipt.tablet_id == scope.tablet_id
+                && receipt.tablet_epoch == scope.tablet_epoch
+                && receipt.term == metadata.term
+                && receipt.commit_index == metadata.log_index
+        }
+        StreamTabletMutationReceipt::Group(receipt) => {
+            receipt.tablet_id == scope.tablet_id
+                && receipt.tablet_epoch == scope.tablet_epoch
+                && receipt.term == metadata.term
+                && receipt.commit_index == metadata.log_index
+        }
     }
 }
 
@@ -995,6 +1184,68 @@ mod tests {
                 0xb2, 0x00, 0xa5, 0x85, 0x3d, 0x7c, 0xdf, 0x34, 0x55, 0xe4, 0xd6, 0xc3, 0x5a, 0x29,
                 0x4f, 0x18, 0x39, 0x5f,
             ]
+        );
+    }
+
+    #[test]
+    fn native_snapshot_restores_business_state_and_only_the_retained_retry_suffix() {
+        let (first_id, first_payload) = encoded("request-1", "one", 11);
+        let (second_id, second_payload) = encoded("request-2", "two", 12);
+        let mut live = StreamTablet::new(scope()).unwrap();
+        live.apply(committed(first_id, 2, 4, &first_payload))
+            .unwrap();
+        live.apply(committed(second_id, 2, 5, &second_payload))
+            .unwrap();
+        let expected_records = live.fetch(0, 10).unwrap();
+        let expected_digest = live.state_digest();
+
+        let snapshot = live.encode_snapshot(&BTreeSet::from([second_id])).unwrap();
+        let mut restored = StreamTablet::decode_snapshot(&scope(), &snapshot).unwrap();
+
+        assert_eq!(restored.fetch(0, 10).unwrap(), expected_records);
+        assert_eq!(restored.state_digest(), expected_digest);
+        assert_eq!(restored.last_applied_command_index(), 5);
+        assert_eq!(restored.applied_command_count(), 1);
+        assert!(
+            restored
+                .mutation_receipt_for_committed(committed(first_id, 2, 4, &first_payload))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            restored
+                .mutation_receipt_for_committed(committed(second_id, 2, 5, &second_payload))
+                .unwrap()
+                .is_some()
+        );
+
+        let (third_id, third_payload) = encoded("request-3", "three", 13);
+        restored
+            .apply(committed(third_id, 2, 6, &third_payload))
+            .unwrap();
+        assert_eq!(restored.fetch(0, 10).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn native_snapshot_rejects_noncanonical_or_foreign_images() {
+        let (proposal_id, payload) = encoded("request-1", "one", 11);
+        let mut live = StreamTablet::new(scope()).unwrap();
+        live.apply(committed(proposal_id, 2, 4, &payload)).unwrap();
+        let encoded = live
+            .encode_snapshot(&BTreeSet::from([proposal_id]))
+            .unwrap();
+        let pretty = serde_json::to_vec_pretty(
+            &serde_json::from_slice::<VersionedStreamTabletSnapshot>(&encoded).unwrap(),
+        )
+        .unwrap();
+
+        assert!(StreamTablet::decode_snapshot(&scope(), &pretty).is_err());
+        assert!(
+            StreamTablet::decode_snapshot(
+                &StreamTabletScope::new(8, 3, "orders").unwrap(),
+                &encoded,
+            )
+            .is_err()
         );
     }
 

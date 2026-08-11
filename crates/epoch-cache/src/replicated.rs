@@ -14,6 +14,8 @@ use crate::{CacheItem, CacheValue, SetOptions};
 
 pub const MAX_CACHE_ATOMIC_OPERATIONS: usize = 128;
 pub const MAX_CACHE_MAINTENANCE_KEYS: usize = 1_000;
+pub const CACHE_SHARD_SNAPSHOT_FORMAT_VERSION: u16 = 1;
+pub const MAX_CACHE_SHARD_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -101,7 +103,8 @@ pub struct CacheExpiryResult {
     pub expired_keys: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReplicatedEntry {
     value: CacheValue,
     version: u64,
@@ -131,6 +134,17 @@ pub struct CacheShard {
     entries: BTreeMap<String, ReplicatedEntry>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VersionedCacheShardSnapshot {
+    format_version: u16,
+    max_entries: usize,
+    default_ttl_ms: Option<u64>,
+    revision: u64,
+    entries: BTreeMap<String, ReplicatedEntry>,
+    state_digest: [u8; 32],
+}
+
 impl CacheShard {
     /// Creates a deterministic Cache shard.
     ///
@@ -158,6 +172,14 @@ impl CacheShard {
 
     pub const fn revision(&self) -> u64 {
         self.revision
+    }
+
+    pub const fn max_entries(&self) -> usize {
+        self.max_entries
+    }
+
+    pub const fn default_ttl_ms(&self) -> Option<u64> {
+        self.default_ttl_ms
     }
 
     pub fn len(&self) -> usize {
@@ -317,6 +339,88 @@ impl CacheShard {
         let mut digest = Sha256::new();
         self.encode_recovery_state(&mut digest);
         digest.finalize().into()
+    }
+
+    /// Encodes the complete deterministic shard state as a canonical,
+    /// versioned application snapshot.
+    pub fn encode_snapshot(&self) -> EpochResult<Vec<u8>> {
+        let encoded = serde_json::to_vec(&VersionedCacheShardSnapshot {
+            format_version: CACHE_SHARD_SNAPSHOT_FORMAT_VERSION,
+            max_entries: self.max_entries,
+            default_ttl_ms: self.default_ttl_ms,
+            revision: self.revision,
+            entries: self.entries.clone(),
+            state_digest: self.recovery_state_digest(),
+        })
+        .map_err(|error| EpochError::InvalidArgument(error.to_string()))?;
+        if encoded.len() > MAX_CACHE_SHARD_SNAPSHOT_BYTES {
+            return Err(EpochError::Capacity(format!(
+                "Cache shard snapshot is {} bytes; maximum is {MAX_CACHE_SHARD_SNAPSHOT_BYTES}",
+                encoded.len()
+            )));
+        }
+        Ok(encoded)
+    }
+
+    /// Decodes and fully validates a canonical Cache shard snapshot.
+    pub fn decode_snapshot(encoded: &[u8]) -> EpochResult<Self> {
+        if encoded.len() > MAX_CACHE_SHARD_SNAPSHOT_BYTES {
+            return Err(EpochError::Capacity(format!(
+                "Cache shard snapshot is {} bytes; maximum is {MAX_CACHE_SHARD_SNAPSHOT_BYTES}",
+                encoded.len()
+            )));
+        }
+        let snapshot: VersionedCacheShardSnapshot = serde_json::from_slice(encoded)
+            .map_err(|error| EpochError::InvalidArgument(error.to_string()))?;
+        if snapshot.format_version != CACHE_SHARD_SNAPSHOT_FORMAT_VERSION {
+            return Err(EpochError::InvalidArgument(format!(
+                "unsupported Cache shard snapshot version {}",
+                snapshot.format_version
+            )));
+        }
+        if serde_json::to_vec(&snapshot)
+            .map_err(|error| EpochError::InvalidArgument(error.to_string()))?
+            != encoded
+        {
+            return Err(EpochError::InvalidArgument(
+                "Cache shard snapshot is not canonical".into(),
+            ));
+        }
+        CacheShard::new(snapshot.max_entries, snapshot.default_ttl_ms)?;
+        if snapshot.entries.len() > snapshot.max_entries {
+            return Err(EpochError::InvalidArgument(
+                "Cache shard snapshot exceeds its configured capacity".into(),
+            ));
+        }
+        for (key, entry) in &snapshot.entries {
+            if key.is_empty()
+                || entry.version == 0
+                || entry.version > snapshot.revision
+                || entry.expires_at_ms == Some(0)
+            {
+                return Err(EpochError::InvalidArgument(
+                    "Cache shard snapshot entry registry is invalid".into(),
+                ));
+            }
+            validate_cache_value(&entry.value)?;
+        }
+        if snapshot.revision == 0 && !snapshot.entries.is_empty() {
+            return Err(EpochError::InvalidArgument(
+                "Cache shard snapshot revision is invalid".into(),
+            ));
+        }
+        let shard = Self {
+            max_entries: snapshot.max_entries,
+            default_ttl_ms: snapshot.default_ttl_ms,
+            revision: snapshot.revision,
+            entries: snapshot.entries,
+        };
+        if shard.recovery_state_digest() != snapshot.state_digest {
+            return Err(EpochError::InvalidArgument(
+                "Cache shard snapshot state digest is invalid".into(),
+            ));
+        }
+        Ok(shard)
     }
 
     fn encode_recovery_state(&self, sink: &mut dyn CanonicalSink) {
@@ -749,6 +853,68 @@ mod tests {
             expected_revision: None,
             operations,
         }
+    }
+
+    #[test]
+    fn native_snapshot_round_trips_complete_shard_state_and_continues() {
+        let mut shard = CacheShard::new(10, Some(100)).unwrap();
+        shard
+            .transact(
+                transaction(vec![
+                    set("alpha", CacheValue::String("one".into())),
+                    set("counter", CacheValue::Counter(2)),
+                ]),
+                10,
+            )
+            .unwrap();
+        let encoded = shard.encode_snapshot().unwrap();
+        let mut restored = CacheShard::decode_snapshot(&encoded).unwrap();
+
+        assert_eq!(restored.revision(), shard.revision());
+        assert_eq!(
+            restored.recovery_state_digest(),
+            shard.recovery_state_digest()
+        );
+        assert_eq!(restored.observe("alpha", 10), shard.observe("alpha", 10));
+        assert_eq!(restored.encode_snapshot().unwrap(), encoded);
+        restored
+            .transact(
+                transaction(vec![CacheMutation::Increment {
+                    key: "counter".into(),
+                    delta: 3,
+                    expected_version: Some(1),
+                }]),
+                20,
+            )
+            .unwrap();
+        assert_eq!(
+            restored.observe("counter", 20).item.unwrap().value,
+            CacheValue::Counter(5)
+        );
+    }
+
+    #[test]
+    fn native_snapshot_rejects_noncanonical_unknown_or_corrupt_images() {
+        let mut shard = CacheShard::new(10, None).unwrap();
+        shard
+            .transact(
+                transaction(vec![set("alpha", CacheValue::String("one".into()))]),
+                10,
+            )
+            .unwrap();
+        let encoded = shard.encode_snapshot().unwrap();
+        let snapshot: VersionedCacheShardSnapshot = serde_json::from_slice(&encoded).unwrap();
+        assert!(
+            CacheShard::decode_snapshot(&serde_json::to_vec_pretty(&snapshot).unwrap()).is_err()
+        );
+
+        let mut unknown = snapshot.clone();
+        unknown.format_version = 99;
+        assert!(CacheShard::decode_snapshot(&serde_json::to_vec(&unknown).unwrap()).is_err());
+
+        let mut corrupt = snapshot;
+        corrupt.state_digest[0] ^= 1;
+        assert!(CacheShard::decode_snapshot(&serde_json::to_vec(&corrupt).unwrap()).is_err());
     }
 
     #[test]

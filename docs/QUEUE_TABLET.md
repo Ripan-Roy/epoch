@@ -291,9 +291,9 @@ Redrive requires both message ID and the exact currently active dead-letter
 history ID. A stale ID is a recorded fenced rejection. A successful redrive
 appends its own immutable history record with the source proposal, term, index,
 time, and referenced dead-letter history. Checked counters fail closed rather
-than wrap. These histories are currently memory-resident and are reconstructed
-only by replaying the same committed commands; snapshots and bounded retention
-do not exist yet.
+than wrap. These histories are memory-resident while running and included in
+the canonical native Queue voter checkpoint. User-configurable history
+retention and exported backup/PITR do not exist yet.
 
 ## Digest and receipt evidence
 
@@ -367,9 +367,8 @@ generation/tablet-fenced, leader-discovered calls with linearizable reads. It
 still has no gRPC service, CLI, native bidirectional receive stream, connection-scoped credit
 replenishment, automatic prefetch/fairness, automatic timer proposal, or
 production durability claim. It has one resource, one tablet, partition `0`,
-static configuration,
-unbounded in-memory idempotency and audit history, no compact profile-native
-snapshot or physical EPRS reclamation,
+static configuration, no automatic checkpoint schedule, no advertised product
+idempotency horizon or audit-history retention, no user-exportable backup/PITR,
 no catalog-authorized tablet epoch transition, dynamic placement, membership change,
 consumer-group/session coordinator, follower read routing, authenticated peer identity,
 token authentication, multi-tenant policy, or exhaustive crash/I/O matrix.

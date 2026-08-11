@@ -96,17 +96,20 @@ change requires a new version or an explicit compatible-fixture review. This
 node-level journal is replaced by the tablet log/snapshot format in the
 replicated architecture; it has no standalone snapshot or compaction contract.
 
-## Consensus stable journal and checkpoint version 1
+## Consensus stable journal and checkpoints
 
 The fixed-voter replicated core uses two related internal formats:
 
 - [EPRS v1](consensus-stable-store-v1.md) frames immutable identity, stable
-  transitions, and additive checkpoint transitions inside the checksummed
-  `FileWal` container.
+  transitions, additive checkpoint transitions, and compacted baselines inside
+  the checksummed `FileWal` container.
 - [EPSN v1](consensus-checkpoint-v1.md) canonically binds group/epoch,
   index/term, the EPDG digest, and complete committed-proposal registry for
   local compaction, follower snapshot installation, and checkpoint-plus-tail
   reopen.
+- [EPSN v2](consensus-checkpoint-v2.md) adds a canonical native-profile image,
+  rolling EPDG state, bounded exact-retry suffix, and complete-frame SHA-256
+  trailer so restart metadata no longer grows with total command history.
 
 These formats are pre-alpha consensus recovery evidence, not a profile backup,
 PITR, or production tablet snapshot contract.

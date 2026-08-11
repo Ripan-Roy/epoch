@@ -126,6 +126,66 @@ fn exact_live_commit_is_applied_only_once() {
 }
 
 #[test]
+fn native_snapshot_restores_cache_state_and_only_the_retained_retry_suffix() {
+    let service = CacheTabletService::with_default_config(scope()).unwrap();
+    let first = set_counter("set-1", 1, 10, 4);
+    let second = committed(
+        "increment-1",
+        CacheTabletOperation::Increment(CacheIncrementCommand {
+            shard: 0,
+            key: "visits".into(),
+            delta: 2,
+            expected_version: Some(1),
+            ttl_ms: None,
+            lock_guard: None,
+        }),
+        11,
+        2,
+        5,
+    );
+    service.apply(&first).unwrap();
+    service.apply(&second).unwrap();
+    let expected = service.snapshot().unwrap();
+
+    let image = service
+        .capture_snapshot(LogIndex::new(5), std::slice::from_ref(&second))
+        .unwrap();
+    let restored = CacheTabletService::with_default_config(scope()).unwrap();
+    restored.install_snapshot(&image).unwrap();
+
+    let actual = restored.snapshot().unwrap();
+    assert_eq!(actual.state_digest, expected.state_digest);
+    assert_eq!(actual.cache_revision, 2);
+    assert_eq!(actual.last_profile_mutation_index, 5);
+    assert_eq!(actual.applied_command_count, 1);
+    assert_eq!(
+        restored.observe("visits").unwrap().item.unwrap().value,
+        CacheValue::Counter(3)
+    );
+    restored.apply(&set_counter("set-2", 9, 12, 6)).unwrap();
+    assert_eq!(
+        restored.observe("visits").unwrap().item.unwrap().value,
+        CacheValue::Counter(9)
+    );
+}
+
+#[test]
+fn native_snapshot_install_rejects_foreign_scope_without_partial_state() {
+    let source = CacheTabletService::with_default_config(scope()).unwrap();
+    let proposal = set_counter("set-1", 1, 10, 4);
+    source.apply(&proposal).unwrap();
+    let image = source
+        .capture_snapshot(LogIndex::new(4), std::slice::from_ref(&proposal))
+        .unwrap();
+    let target =
+        CacheTabletService::with_default_config(CacheTabletScope::new(8, 3, "sessions").unwrap())
+            .unwrap();
+
+    assert!(target.install_snapshot(&image).is_err());
+    assert!(target.snapshot().is_err());
+}
+
+#[test]
 fn committed_lookup_cannot_apply_a_commit_the_actor_missed() {
     let service = CacheTabletService::with_default_config(scope()).unwrap();
 
@@ -620,6 +680,13 @@ async fn real_three_voter_cache_history_converges_and_reopens_from_eprs() {
     let cluster = RunningCacheCluster::start(&paths).await;
     let commits = commit_fenced_cache_history(&cluster).await;
     let evidence = converged_cache_evidence(&cluster, &commits).await;
+    let (leader_index, _) = cluster.leader().await;
+    cluster.nodes[leader_index]
+        .runtime
+        .handle()
+        .checkpoint()
+        .await
+        .expect("Cache profile checkpoint should persist before restart");
     cluster.shutdown().await;
 
     let reopened = RunningCacheCluster::start(&paths).await;
