@@ -15,12 +15,15 @@ The credible program remains the PRD's 21–26 month route to initial GA for an 
 The active M1/M2 boundary is the regional multi-tablet feature. Protected
 `main` evidence now covers the consensus-backed catalog, durable hosted control,
 bootstrap authorization, topology admission, quorum-confirmed leader ReadIndex
-barriers, Queue credit flow, Stream batches and consumer checkpoints, and the
-regional Stream, Queue, and Cache v1 SDKs. The current feature exposes the
-existing replicated Event Bus tablet through the same authenticated, fenced
-regional route and shared Go, Java, and Python discovery/retry contract. Local
-evidence includes a real Python Event Bus ingress/archive/delivery lifecycle
-after leader loss and same-volume all-node recovery.
+barriers, Queue credit flow, Stream batches and consumer checkpoints, all four
+regional profile SDKs, and profile-native checkpoint restore with physical
+EPRS reclamation. The current feature implements replicated Stream time, size,
+record-count, and combined retention through a canonical v4 mutation, direct
+and regional operations, and shared Go, Java, and Python clients. Focused local
+evidence covers deterministic enforcement, stale-checkpoint interaction,
+three-voter convergence, checkpoint/reopen, SDK request contracts, and the
+regional Python SDK container campaign; the full workspace and
+protected-branch gates remain pending.
 Replicated multi-instance hosted metadata, production identity, follower
 routing, dynamic membership/voter selection, repair/rebalance, and the broader
 M2 profile/security/performance gates remain open.
@@ -198,6 +201,24 @@ types, coordinated sessions, all-language live-cluster execution, package
 publication, and production scale/fault evidence remain open. See
 [ADR-0016](adr/0016-stream-consumer-group-checkpoints.md) and
 [ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md).
+
+The Stream tablet now also accepts a version-four retention mutation without
+changing v1 single-append, v2 batch, or v3 checkpoint bytes. A complete policy
+may combine record-count, compact canonical JSON byte, and inclusive age
+bounds. Configure enforces immediately; append enforces at its committed time;
+and explicit maintenance advances idle age deletion through the same Raft
+history. Retained offsets are never renumbered, the monotonic time watermark
+survives checkpoints, and a consumer checkpoint below the retained base is
+preserved and flagged out of range until an explicit fenced reset. Direct and
+authenticated regional routes plus Go, Java, and Python clients configure,
+maintain, and linearly observe the policy. Deterministic core/tablet tests and
+a real three-voter checkpoint/reopen test are executable; the regional
+container campaign exercises the same SDK path. This advances STREAM-002 but
+does not provide automatic periodic maintenance, multiple partitions, keyed
+compaction/tombstones, object-tier retention, namespace/legal-hold governance,
+or production scale evidence. See
+[ADR-0023](adr/0023-stream-retention-policies.md) and
+[Experimental Stream Tablet](STREAM_TABLET.md).
 
 The Queue application core now runs behind the same profile-neutral persistent
 actor boundary. It deterministically applies strict single-partition commands,

@@ -265,6 +265,20 @@ Go, Java, and Python now expose this primitive through the regional Stream v1
 client without claiming those coordinator behaviors. See
 [ADR-0016](adr/0016-stream-consumer-group-checkpoints.md).
 
+Command v4 makes Stream retention another canonical state transition rather
+than a voter-local timer. Configure replaces the complete record-count,
+compact-JSON-byte, and inclusive-age policy and enforces it immediately;
+maintain advances idle age expiry at an explicit committed time. Append uses
+the same monotonic watermark. Combined policies always remove the oldest
+records, advance `base_offset` without renumbering the retained suffix, and
+remove record-scoped dedupe entries. A group checkpoint below the retained
+base is preserved and flagged out of range until an explicit fenced reset. The
+policy, base, records, groups, dedupe state, and watermark are part of the
+canonical Stream image installed before retained-tail replay. Regional
+configure and maintain use the ordinary leader/fence/idempotency path;
+observation uses the ordinary leader ReadIndex barrier. See
+[ADR-0023](adr/0023-stream-retention-policies.md).
+
 The regional multi-tablet alpha composes that adapter with `epoch-catalog`.
 Catalog group 1 commits canonical resource commands through three EPRS-backed
 voters. A bounded group supervisor reserves that identity, demultiplexes peer
@@ -902,3 +916,4 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0020: Regional Event Bus v1 and SDK Routing](adr/0020-regional-event-bus-v1-and-sdk-routing.md)
 - [ADR-0021: Consensus Checkpoint and Snapshot Installation](adr/0021-consensus-checkpoint-and-snapshot-installation.md)
 - [ADR-0022: Profile-Native Checkpoints and Physical EPRS Reclamation](adr/0022-profile-native-checkpoints-and-physical-reclamation.md)
+- [ADR-0023: Replicated Stream Time and Size Retention](adr/0023-stream-retention-policies.md)

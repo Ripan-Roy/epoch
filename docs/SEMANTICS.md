@@ -458,6 +458,20 @@ task. The receipt names this as bounded fixed-voter evidence, not the PRD's
 zone-aware quorum profile. It remains intentionally separate from the public
 standalone API, which continues to reject quorum durability.
 
+The replicated Stream tablet applies retention only as canonical committed
+state transitions. Command v4 can replace a complete record-count,
+compact-canonical-JSON byte, and inclusive-age policy or run explicit idle
+maintenance at a supplied time. Append/configure/maintain use a monotonic
+retention watermark, remove oldest records for the union of enabled bounds,
+advance the base without renumbering offsets, and persist the policy and
+watermark in the native checkpoint. A consumer checkpoint below the retained
+base remains visible as `checkpoint_out_of_range`; replay fails until an
+explicit generation-fenced reset. Go, Java, and Python expose configure,
+maintain, and quorum-confirmed observe methods on the regional v1 route. This
+does not add automatic periodic maintenance, compaction/tombstones, object
+tiering, legal hold, or multi-partition routing. See
+[ADR-0023](adr/0023-stream-retention-policies.md).
+
 The same persistent actor can instead mount a separate, single-partition Queue
 state machine over the shared committed-command substrate. Given the same
 ordered history, independent voters reproduce fenced acquire/settlement,
@@ -512,8 +526,9 @@ The direct experimental Stream, Queue, Cache, and Event Bus profile routes also
 lack a read barrier, authenticated transport, multiple partitions/tablets, and
 bounded idempotency retention. The regional resource/shard wrapper supplies a
 leader ReadIndex by default; it does not change the direct-route contract. The
-regional Stream, Queue, Cache, and Event Bus v1 SDKs make those explicit wrappers callable from
-Go, Java, and Python but do not turn fixed-voter evidence into a production
+regional Stream, Queue, Cache, and Event Bus v1 SDKs make those explicit
+wrappers callable from Go, Java, and Python, including Stream retention policy
+operations, but do not turn fixed-voter evidence into a production
 durability claim, add consumer/session coordination, or execute external Bus
 targets. See
 [REGIONAL_STREAM_SDK.md](REGIONAL_STREAM_SDK.md),

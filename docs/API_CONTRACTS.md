@@ -562,9 +562,10 @@ GET /v1/organizations/{org}/projects/{project}/environments/{environment}/namesp
 ```
 
 `GET` on the shard base performs discovery. The current Go, Java, and Python
-SDK contract maps `records` and
-`groups/{group}/{offsets|lag|records}` to the same replicated partition-0
-Stream tablet. The stable adapter removes the generic `kind` and `data`
+SDK contract maps `records`, `groups/{group}/{offsets|lag|records}`, and
+`retention[/maintenance]` to the same replicated partition-0 Stream tablet.
+Retention reads use the same default leader ReadIndex barrier. The stable
+adapter removes the generic `kind` and `data`
 segments but does not introduce another log or state store.
 
 The versioned regional Queue application route follows the same discovery and
@@ -714,7 +715,13 @@ not mounted on that group. The listener instead exposes:
 - `GET /experimental/v1/tablets/stream/groups/{group}/lag` for owner,
   generation, retained range, next offset, end offset, and lag;
 - `GET /experimental/v1/tablets/stream/groups/{group}/records` for bounded
-  replay beginning at the durable next offset; and
+  replay beginning at the durable next offset;
+- `PUT /experimental/v1/tablets/stream/retention` for complete count, byte, and
+  age policy replacement plus immediate enforcement;
+- `POST /experimental/v1/tablets/stream/retention/maintenance` for committed
+  idle age enforcement at an explicit time;
+- `GET /experimental/v1/tablets/stream/retention` for the current policy,
+  retained boundary, canonical bytes, and monotonic time watermark; and
 - `GET /experimental/v1/tablets/stream/mutations/{proposal_id}` for unknown,
   pending, or committed outcome resolution.
 

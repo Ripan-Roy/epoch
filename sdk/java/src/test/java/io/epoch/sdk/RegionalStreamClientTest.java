@@ -160,6 +160,48 @@ final class RegionalStreamClientTest {
   }
 
   @Test
+  void retentionMutationsAndLinearizableObservationAreExplicit() throws Exception {
+    RecordingRegionalTransport leader =
+        new RecordingRegionalTransport(
+            MAPPER.readTree(
+                """
+                {"resource_generation":"2","tablet_epoch":"4","term":"9","accepts_writes":true}
+                """));
+    RegionalStreamClient client =
+        RegionalStreamClient.withTransports(
+            List.of(leader), "secret-token", new RegionalScope("acme", "shop", "dev", "core"));
+    StreamRetentionPolicy policy =
+        new StreamRetentionPolicy(
+            100, BigInteger.valueOf(1_048_576), BigInteger.valueOf(86_400_000));
+
+    client.configureRetention("orders", 0, "retention-1", policy);
+    client.maintainRetention("orders", 0, "retention-sweep-1");
+    client.retention("orders", 0);
+
+    Request configure = leader.requests.get(1);
+    assertEquals("PUT", configure.method());
+    assertEquals(true, configure.path().endsWith("/retention"));
+    assertEquals("retention-1", configure.body().path("idempotency_key").asText());
+    assertEquals("9", configure.body().path("expected_term").asText());
+    assertEquals("1048576", configure.body().path("max_bytes_per_partition").asText());
+    assertEquals("86400000", configure.body().path("max_age_ms").asText());
+    Request maintenance = leader.requests.get(3);
+    assertEquals("POST", maintenance.method());
+    assertEquals(true, maintenance.path().endsWith("/retention/maintenance"));
+    Request read = leader.requests.get(5);
+    assertEquals("linearizable", read.headers().get("x-epoch-read-consistency"));
+  }
+
+  @Test
+  void invalidRetentionPolicyFailsBeforeNetwork() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            new StreamRetentionPolicy(
+                null, BigInteger.valueOf(3L * 1024 * 1024 + 1), BigInteger.ONE));
+  }
+
+  @Test
   void scopeAndMutationInputsFailBeforeNetwork() {
     assertThrows(
         IllegalArgumentException.class, () -> new RegionalScope("", "shop", "dev", "core"));

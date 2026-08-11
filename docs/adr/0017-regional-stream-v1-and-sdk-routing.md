@@ -82,9 +82,11 @@ Rust when Go is unavailable.
 - This is a versioned alpha application surface, not a completed consumer
   coordinator. Join, heartbeat, assignment, revoke, dead-member detection,
   automatic generation allocation, rebalance, multi-partition ownership,
-  transactional offsets, retention interaction, producer auto-batching,
-  compression negotiation, generated response models, and package-registry
-  publication remain open.
+  transactional offsets, producer auto-batching, compression negotiation,
+  generated response models, and package-registry publication remain open.
+  ADR-0023 subsequently adds retention configure, maintain, and observe methods
+  to this route and all three clients without changing its discovery/retry
+  contract.
 
 ## Rejected alternatives
 

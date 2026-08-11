@@ -150,6 +150,7 @@ pub struct StreamTabletGroupObservation {
     pub end_offset: u64,
     #[serde(serialize_with = "serialize_u64_as_decimal")]
     pub lag: u64,
+    pub checkpoint_out_of_range: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

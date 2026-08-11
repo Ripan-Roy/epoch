@@ -60,14 +60,14 @@ release-check: ## Verify synchronized cross-language release metadata.
 
 format: ## Format Rust, Go, Java, Python, and JavaScript/TypeScript sources.
 	@if [ -f Cargo.toml ]; then cargo fmt --all; fi
-	@files="$$(find control operator sdk/go -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then gofmt -w $$files; fi
+	@files="$$(find control operator sdk/go console/src/quickstarts -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then gofmt -w $$files; fi
 	@if [ -d sdk/python ]; then ruff format sdk/python; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) spotless:apply; fi
 	@$(PNPM_ENV) pnpm run format
 
 format-check: ## Check formatting without changing files.
 	@if [ -f Cargo.toml ]; then cargo fmt --all --check; fi
-	@files="$$(find control operator sdk/go -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then unformatted="$$(gofmt -l $$files)"; test -z "$$unformatted" || { printf '%s\n' "$$unformatted"; exit 1; }; fi
+	@files="$$(find control operator sdk/go console/src/quickstarts -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then unformatted="$$(gofmt -l $$files)"; test -z "$$unformatted" || { printf '%s\n' "$$unformatted"; exit 1; }; fi
 	@if [ -d sdk/python ]; then ruff format --check sdk/python; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) spotless:check; fi
 	@$(PNPM_ENV) pnpm run format:check

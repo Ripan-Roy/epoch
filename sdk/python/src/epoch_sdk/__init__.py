@@ -12,7 +12,7 @@ from .models import (
     Subscription,
     SubscriptionTarget,
 )
-from .regional import RegionalScope, RegionalStreamClient
+from .regional import RegionalScope, RegionalStreamClient, StreamRetentionPolicy
 from .regional_bus import RegionalBusClient
 from .regional_cache import (
     RegionalCacheClient,
@@ -42,6 +42,7 @@ __all__ = [
     "RegionalQueueClient",
     "RegionalScope",
     "RegionalStreamClient",
+    "StreamRetentionPolicy",
     "Subscription",
     "SubscriptionTarget",
     "Transport",
