@@ -357,8 +357,9 @@ It builds the real Go control binary, verifies the three node-local topology
 and live capacity responses, creates a three-zone resource through Go, proves
 an over-capacity request never reaches the catalog, verifies the
 BFF/CORS/placement contract, kills and reopens Go against the same metadata
-file, proves exact replay, creates and mutates all four profiles, kills a
-leader, catches it up, kills all nodes, reopens the same volumes, compares
+file, proves exact replay, creates and mutates all four profiles, configures and
+observes Stream retention through the Python SDK, kills a leader, catches it
+up, kills all nodes, reopens the same volumes, compares retained boundaries and
 digests, and deletes only its scoped containers/network/volumes.
 
 ## Current boundaries
@@ -367,10 +368,12 @@ digests, and deletes only its scoped containers/network/volumes.
   class are validated, but there is no general voter-selection or rack-aware
   solver.
 - Membership changes, online rebalance, repair, split/merge, user-exportable
-  backups/PITR, automatic checkpoint scheduling, and retention deletion are
-  absent. Internal native voter checkpoints and physical EPRS reclamation are
-  implemented. Read barriers are leader-only and regional-only; follower
-  forwarding remains absent.
+  backups/PITR, and automatic checkpoint scheduling are absent. Internal
+  native voter checkpoints, physical EPRS reclamation, and replicated Stream
+  time/size/combined logical retention are implemented. Retention still lacks
+  automatic idle maintenance, keyed compaction, object-tier deletion, and
+  legal-hold governance. Read barriers are leader-only and regional-only;
+  follower forwarding remains absent.
 - Rust regional HTTP and Go management enforce the bootstrap policy, and the
   console supplies a session-only credential. They still have no TLS/OIDC/mTLS,
   token expiry/revocation, rate limiting, replicated policy, or immutable audit
@@ -378,8 +381,9 @@ digests, and deletes only its scoped containers/network/volumes.
 - Go management metadata is durable for one process and one bbolt file. It is
   not replicated, multi-instance linearizable, backed up automatically, or
   protected by management leader election.
-- Go, Java, and Python now share the regional Stream, Queue, Cache, and Event Bus v1
-  route/retry/fence contract. They remain repository-local alpha source and
+- Go, Java, and Python now share the regional Stream, Queue, Cache, and Event
+  Bus v1 route/retry/fence contract, including Stream retention
+  configure/maintain/observe. They remain repository-local alpha source and
   cover only the partition-0 methods documented above; package publication,
   generated models, coordinated membership/sessions, multi-partition routing,
   and production transport remain open.

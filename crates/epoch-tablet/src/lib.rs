@@ -15,6 +15,7 @@ mod common;
 mod queue;
 mod stream_batch;
 mod stream_group;
+mod stream_retention;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -25,7 +26,7 @@ use common::{
     validate_idempotency_key,
 };
 use epoch_core::{DurabilityProfile, EventEnvelope};
-use epoch_stream::{AppendReceipt, Stream, StreamConfig, StreamRecord};
+use epoch_stream::{AppendReceipt, Stream, StreamConfig, StreamRecord, StreamRetentionPolicy};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -39,6 +40,7 @@ pub use common::{
 pub use queue::*;
 pub use stream_batch::*;
 pub use stream_group::*;
+pub use stream_retention::*;
 
 pub const STREAM_TABLET_COMMAND_FORMAT_VERSION: u16 = 1;
 pub const STREAM_TABLET_BATCH_COMMAND_FORMAT_VERSION: u16 = 2;
@@ -70,6 +72,7 @@ pub enum StreamTabletOperation {
     Append(StreamAppendCommand),
     AppendBatch(StreamAppendBatchCommand),
     GroupOffset(StreamGroupOffsetCommand),
+    Retention(StreamRetentionCommand),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -174,6 +177,49 @@ impl StreamTabletCommand {
         Ok(command)
     }
 
+    pub fn configure_retention(
+        scope: &StreamTabletScope,
+        idempotency_key: impl Into<String>,
+        policy: StreamRetentionPolicy,
+        applied_at_ms: u64,
+    ) -> TabletResult<Self> {
+        let command = Self {
+            format_version: STREAM_TABLET_RETENTION_COMMAND_FORMAT_VERSION,
+            tablet_id: scope.tablet_id,
+            tablet_epoch: scope.tablet_epoch,
+            resource: scope.resource.clone(),
+            idempotency_key: idempotency_key.into(),
+            applied_at_ms,
+            operation: StreamTabletOperation::Retention(StreamRetentionCommand {
+                mode: StreamTabletRetentionMode::Configure,
+                policy: Some(policy),
+            }),
+        };
+        command.validate(scope)?;
+        Ok(command)
+    }
+
+    pub fn maintain_retention(
+        scope: &StreamTabletScope,
+        idempotency_key: impl Into<String>,
+        applied_at_ms: u64,
+    ) -> TabletResult<Self> {
+        let command = Self {
+            format_version: STREAM_TABLET_RETENTION_COMMAND_FORMAT_VERSION,
+            tablet_id: scope.tablet_id,
+            tablet_epoch: scope.tablet_epoch,
+            resource: scope.resource.clone(),
+            idempotency_key: idempotency_key.into(),
+            applied_at_ms,
+            operation: StreamTabletOperation::Retention(StreamRetentionCommand {
+                mode: StreamTabletRetentionMode::Maintain,
+                policy: None,
+            }),
+        };
+        command.validate(scope)?;
+        Ok(command)
+    }
+
     pub fn encode(&self, scope: &StreamTabletScope) -> TabletResult<Vec<u8>> {
         self.validate(scope)?;
         let encoded =
@@ -223,6 +269,9 @@ impl StreamTabletCommand {
             )),
             StreamTabletOperation::GroupOffset(_) => Err(TabletError::InvalidCommand(
                 "consumer-group offset command has no batch payload".into(),
+            )),
+            StreamTabletOperation::Retention(_) => Err(TabletError::InvalidCommand(
+                "retention command has no batch payload".into(),
             )),
         }
     }
@@ -285,6 +334,15 @@ impl StreamTabletCommand {
                     )));
                 }
                 validate_group_offset_command(group)?;
+            }
+            StreamTabletOperation::Retention(retention) => {
+                if self.format_version != STREAM_TABLET_RETENTION_COMMAND_FORMAT_VERSION {
+                    return Err(TabletError::InvalidCommand(format!(
+                        "retention mutation requires format_version {STREAM_TABLET_RETENTION_COMMAND_FORMAT_VERSION}; observed {}",
+                        self.format_version
+                    )));
+                }
+                validate_retention_command(retention)?;
             }
         }
         Ok(())
@@ -378,6 +436,7 @@ pub enum StreamTabletAppendDisposition {
 pub enum StreamTabletMutationReceipt {
     Append(StreamTabletAppendReceipt),
     Group(StreamTabletGroupReceipt),
+    Retention(StreamTabletRetentionReceipt),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -404,6 +463,7 @@ impl StreamTabletMutationReceipt {
         match self {
             Self::Append(receipt) => receipt.proposal_id,
             Self::Group(receipt) => receipt.proposal_id,
+            Self::Retention(receipt) => receipt.proposal_id,
         }
     }
 
@@ -414,6 +474,9 @@ impl StreamTabletMutationReceipt {
             }
             Self::Group(receipt) => {
                 receipt.disposition = StreamTabletGroupDisposition::Replayed;
+            }
+            Self::Retention(receipt) => {
+                receipt.disposition = StreamTabletRetentionDisposition::Replayed;
             }
         }
     }
@@ -439,6 +502,8 @@ impl StreamTablet {
             // rather than being mislabeled with a product durability profile.
             durability: DurabilityProfile::Volatile,
             max_records_per_partition: None,
+            max_bytes_per_partition: None,
+            max_age_ms: None,
         })?;
         let mut hasher = Sha256::new();
         hasher.update(b"epoch/stream-tablet/state/v1\0");
@@ -465,14 +530,19 @@ impl StreamTablet {
         committed: CommittedCommand<'_>,
     ) -> TabletResult<StreamTabletAppendReceipt> {
         let command = StreamTabletCommand::decode(committed.payload, &self.scope)?;
-        if matches!(command.operation, StreamTabletOperation::GroupOffset(_)) {
+        if !matches!(
+            command.operation,
+            StreamTabletOperation::Append(_) | StreamTabletOperation::AppendBatch(_)
+        ) {
             return Err(TabletError::InvalidCommand(
-                "consumer-group commands require apply_mutation".into(),
+                "non-append commands require apply_mutation".into(),
             ));
         }
         match self.apply_mutation(committed)? {
             StreamTabletMutationReceipt::Append(receipt) => Ok(receipt),
-            StreamTabletMutationReceipt::Group(_) => unreachable!("operation checked above"),
+            StreamTabletMutationReceipt::Group(_) | StreamTabletMutationReceipt::Retention(_) => {
+                unreachable!("operation checked above")
+            }
         }
     }
 
@@ -514,6 +584,10 @@ impl StreamTablet {
                 let receipt = self.apply_group_offset(committed, command.applied_at_ms, group)?;
                 StreamTabletMutationReceipt::Group(receipt)
             }
+            StreamTabletOperation::Retention(retention) => {
+                let receipt = self.apply_retention(committed, command.applied_at_ms, &retention)?;
+                StreamTabletMutationReceipt::Retention(receipt)
+            }
         };
         match &receipt {
             StreamTabletMutationReceipt::Append(receipt) => {
@@ -521,6 +595,9 @@ impl StreamTablet {
             }
             StreamTabletMutationReceipt::Group(receipt) => {
                 self.advance_group_digest(committed, metadata.payload_digest, receipt);
+            }
+            StreamTabletMutationReceipt::Retention(receipt) => {
+                self.advance_retention_digest(committed, metadata.payload_digest, receipt);
             }
         }
         self.last_applied_command_index = committed.log_index;
@@ -539,7 +616,8 @@ impl StreamTablet {
             .get(&proposal_id)
             .and_then(|applied| match &applied.receipt {
                 StreamTabletMutationReceipt::Append(receipt) => Some(receipt.clone()),
-                StreamTabletMutationReceipt::Group(_) => None,
+                StreamTabletMutationReceipt::Group(_)
+                | StreamTabletMutationReceipt::Retention(_) => None,
             })
     }
 
@@ -551,7 +629,10 @@ impl StreamTablet {
     ) -> TabletResult<Option<StreamTabletAppendReceipt>> {
         Ok(match self.mutation_receipt_for_committed(committed)? {
             Some(StreamTabletMutationReceipt::Append(receipt)) => Some(receipt),
-            Some(StreamTabletMutationReceipt::Group(_)) | None => None,
+            Some(
+                StreamTabletMutationReceipt::Group(_) | StreamTabletMutationReceipt::Retention(_),
+            )
+            | None => None,
         })
     }
 
@@ -591,6 +672,21 @@ impl StreamTablet {
             committed_offset: lag.committed_offset,
             end_offset,
             lag: lag.lag,
+            checkpoint_out_of_range: lag.checkpoint_out_of_range,
+        })
+    }
+
+    pub fn retention_observation(&self) -> TabletResult<StreamTabletRetentionObservation> {
+        let (base_offset, end_offset) = self.stream.offsets(0)?;
+        let retained_records = self.stream.fetch(0, base_offset, usize::MAX)?.len();
+        Ok(StreamTabletRetentionObservation {
+            policy: self.stream.retention_policy(),
+            retention_watermark_ms: self.stream.retention_watermark_ms(),
+            partition: 0,
+            base_offset,
+            end_offset,
+            retained_records,
+            retained_bytes: self.stream.retained_bytes(0)?,
         })
     }
 
@@ -667,12 +763,8 @@ impl StreamTablet {
             .decode(&snapshot.stream_base64)
             .map_err(|error| TabletError::Decoding(error.to_string()))?;
         let stream = Stream::decode_snapshot(&stream_bytes)?;
-        if stream.config()
-            != &(StreamConfig {
-                partitions: 1,
-                durability: DurabilityProfile::Volatile,
-                max_records_per_partition: None,
-            })
+        if stream.config().partitions != 1
+            || stream.config().durability != DurabilityProfile::Volatile
         {
             return Err(TabletError::InvalidCommand(
                 "Stream tablet snapshot engine configuration is invalid".into(),
@@ -878,6 +970,55 @@ impl StreamTablet {
         })
     }
 
+    fn apply_retention(
+        &mut self,
+        committed: CommittedCommand<'_>,
+        applied_at_ms: u64,
+        command: &StreamRetentionCommand,
+    ) -> TabletResult<StreamTabletRetentionReceipt> {
+        let previous = self.retention_observation()?;
+        let mut next_stream = self.stream.clone();
+        let report = match (command.mode, command.policy) {
+            (StreamTabletRetentionMode::Configure, Some(policy)) => {
+                next_stream.configure_retention(policy, applied_at_ms)?
+            }
+            (StreamTabletRetentionMode::Maintain, None) => {
+                next_stream.maintain_retention(applied_at_ms)?
+            }
+            _ => {
+                return Err(TabletError::InvalidCommand(
+                    "retention command mode and policy are inconsistent".into(),
+                ));
+            }
+        };
+        let partition = report.partitions.first().ok_or_else(|| {
+            TabletError::InvalidCommand("Stream retention produced no partition evidence".into())
+        })?;
+        let receipt = StreamTabletRetentionReceipt {
+            proposal_id: committed.proposal_id,
+            tablet_id: self.scope.tablet_id,
+            tablet_epoch: self.scope.tablet_epoch,
+            term: committed.term,
+            commit_index: committed.log_index,
+            mode: command.mode,
+            policy: next_stream.retention_policy(),
+            cutoff_ms: report.cutoff_ms,
+            previous_base_offset: previous.base_offset,
+            base_offset: partition.base_offset,
+            end_offset: partition.end_offset,
+            removed_records: report.removed_records,
+            removed_bytes: report.removed_bytes,
+            retained_records: partition.retained_records,
+            retained_bytes: partition.retained_bytes,
+            applied_at_ms,
+            write_evidence: StreamTabletWriteEvidence::FixedVoterMajorityPersisted,
+            durable_voter_acks: 2,
+            disposition: StreamTabletRetentionDisposition::New,
+        };
+        self.stream = next_stream;
+        Ok(receipt)
+    }
+
     fn validate_commit_scope(&self, committed: CommittedCommand<'_>) -> TabletResult<()> {
         validate_committed_command_scope(&self.scope, committed)
     }
@@ -938,6 +1079,27 @@ impl StreamTablet {
         hasher.update([group_outcome_code(receipt)]);
         self.state_digest = hasher.finalize().into();
     }
+
+    fn advance_retention_digest(
+        &mut self,
+        committed: CommittedCommand<'_>,
+        payload_digest: [u8; 32],
+        receipt: &StreamTabletRetentionReceipt,
+    ) {
+        let mut hasher = Sha256::new();
+        hasher.update(b"epoch/stream-tablet/state-transition/retention/v4\0");
+        hasher.update(self.state_digest);
+        hasher.update(committed.proposal_id.to_be_bytes());
+        hasher.update(committed.term.to_be_bytes());
+        hasher.update(committed.log_index.to_be_bytes());
+        hasher.update(payload_digest);
+        hasher.update(receipt.previous_base_offset.to_be_bytes());
+        hasher.update(receipt.base_offset.to_be_bytes());
+        hasher.update(receipt.end_offset.to_be_bytes());
+        hasher.update(receipt.removed_bytes.to_be_bytes());
+        hasher.update(receipt.retained_bytes.to_be_bytes());
+        self.state_digest = hasher.finalize().into();
+    }
 }
 
 fn stream_receipt_matches_metadata(
@@ -953,6 +1115,12 @@ fn stream_receipt_matches_metadata(
                 && receipt.commit_index == metadata.log_index
         }
         StreamTabletMutationReceipt::Group(receipt) => {
+            receipt.tablet_id == scope.tablet_id
+                && receipt.tablet_epoch == scope.tablet_epoch
+                && receipt.term == metadata.term
+                && receipt.commit_index == metadata.log_index
+        }
+        StreamTabletMutationReceipt::Retention(receipt) => {
             receipt.tablet_id == scope.tablet_id
                 && receipt.tablet_epoch == scope.tablet_epoch
                 && receipt.term == metadata.term

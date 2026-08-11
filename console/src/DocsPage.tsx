@@ -333,9 +333,10 @@ const sdkSurface = [
   },
   {
     area: "Regional Stream",
-    go: "RegionalStreamClient · Append · Fetch · CommitOffset · Lag · FetchGroup",
-    java: "RegionalStreamClient · append · fetch · commitOffset · lag · fetchGroup",
-    python: "RegionalStreamClient · append · fetch · commit_offset · lag · fetch_group",
+    go: "RegionalStreamClient · Append · Fetch · CommitOffset · Lag · FetchGroup · ConfigureRetention · MaintainRetention · Retention",
+    java: "RegionalStreamClient · append · fetch · commitOffset · lag · fetchGroup · configureRetention · maintainRetention · retention",
+    python:
+      "RegionalStreamClient · append · fetch · commit_offset · lag · fetch_group · configure_retention · maintain_retention · retention",
   },
   {
     area: "Regional Queue",
@@ -841,7 +842,10 @@ export function DocsPage({ section }: DocsPageProps) {
                     becomes visible atomically and exact retries retain every sequence-to-offset result. A
                     Stream consumer group can now replicate its next offset, commit forward, reset explicitly,
                     observe lag, and replay from that checkpoint; caller-supplied generations fence an old or
-                    conflicting member across failover and EPRS rebuild. These are experimental HTTP/tablet
+                    conflicting member across failover and EPRS rebuild. Canonical command v4 now commits
+                    per-partition time, persisted-byte, and record bounds plus explicit idle-stream
+                    maintenance; every voter preserves the same base offset, retention watermark, and
+                    stale-checkpoint signal through checkpoint restore. These are experimental HTTP/tablet
                     slices, not yet coordinated join, heartbeat, assignment, rebalance, native bidirectional
                     streaming, automatic client batching, or compression negotiation. The separate regional
                     Stream, Queue, Cache, and Event Bus v1 clients below expose the implemented
@@ -912,6 +916,15 @@ export function DocsPage({ section }: DocsPageProps) {
                   <p>
                     Commit, reset, lag, and replay converge on every voter; stale or wrong generations are
                     durable rejected outcomes without moving the next offset.
+                  </p>
+                </article>
+                <article>
+                  <span>STREAM RETENTION</span>
+                  <strong>Time, byte, and combined deletion advances through one committed boundary.</strong>
+                  <p>
+                    Configure, maintenance, append-triggered expiry, out-of-range checkpoint signaling, exact
+                    retry, three-voter convergence, and native snapshot restore are covered without
+                    renumbering offsets.
                   </p>
                 </article>
                 <article>
@@ -1095,15 +1108,17 @@ export function DocsPage({ section }: DocsPageProps) {
                   <strong>Mutation identity stays with the caller.</strong>
                   <p>
                     Append and checkpoint calls require an idempotency key. A routing retry reuses that exact
-                    key; changing the key or request creates a different mutation or a conflict.
+                    key; retention configuration and maintenance use the same rule. Changing the key or
+                    request creates a different mutation or a conflict.
                   </p>
                 </article>
                 <article>
                   <span>CONSISTENCY</span>
                   <strong>Reads require a leader barrier.</strong>
                   <p>
-                    Fetch, group fetch, and lag explicitly request <code>linearizable</code>. They never fall
-                    back to a local stale read. A minority returns a retryable unavailability error.
+                    Fetch, group fetch, lag, and retention observation explicitly request{" "}
+                    <code>linearizable</code>. They never fall back to a local stale read. A minority returns
+                    a retryable unavailability error.
                   </p>
                 </article>
               </div>
@@ -1633,6 +1648,12 @@ export function DocsPage({ section }: DocsPageProps) {
                   title="Replicated checkpoint decision"
                   description="Next-offset commit/reset, caller-generation owner fencing, committed rejection, lag/replay routes, recovery evidence, and coordinator/SDK non-claims."
                   href={`${repositoryDocsUrl}/adr/0016-stream-consumer-group-checkpoints.md`}
+                />
+                <ReferenceCard
+                  eyebrow="STREAM RETENTION"
+                  title="Replicated time and size retention"
+                  description="Canonical byte accounting, inclusive age boundaries, combined policies, committed maintenance, checkpoint interaction, SDK routes, recovery evidence, and explicit non-claims."
+                  href={`${repositoryDocsUrl}/adr/0023-stream-retention-policies.md`}
                 />
                 <ReferenceCard
                   eyebrow="QUEUE TABLET"

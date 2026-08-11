@@ -26,8 +26,9 @@ and performs no hidden retries for standalone operations.
 `RegionalStreamClient` is the explicit replicated alternative. Configure it
 with every Rust node endpoint, a `RegionalScope`, and a bearer token. It
 discovers the current leader before every call, copies generation/tablet
-fences, preserves caller-owned append/checkpoint idempotency across one bounded
-rediscovery, and requests linearizable fetch/lag reads. See the
+fences, preserves caller-owned append/checkpoint/retention idempotency across
+one bounded rediscovery, exposes time/size/combined retention configuration and
+explicit idle maintenance, and requests linearizable fetch/lag/retention reads. See the
 [complete regional example](../../console/src/quickstarts/regional/quickstart.py)
 and [contract guide](../../docs/REGIONAL_STREAM_SDK.md).
 

@@ -815,6 +815,33 @@ def prove_python_sdk_native_stream_after_failover(
     assert observation.get("committed_offset") == "2", lag
     assert observation.get("lag") == "0", lag
 
+    configured = client.configure_retention(
+        resource.name,
+        0,
+        "python-sdk-retention-1",
+        epoch_sdk.StreamRetentionPolicy(
+            max_records_per_partition=1,
+            max_bytes_per_partition=1_048_576,
+            max_age_ms=86_400_000,
+        ),
+    )
+    assert configured.get("state") == "committed", configured
+    retention_receipt = configured.get("receipt")
+    assert isinstance(retention_receipt, dict), configured
+    assert retention_receipt.get("base_offset") == "1", configured
+    assert retention_receipt.get("retained_records") == 1, configured
+
+    maintained = client.maintain_retention(
+        resource.name, 0, "python-sdk-retention-maintenance-1"
+    )
+    assert maintained.get("state") == "committed", maintained
+    retention = client.retention(resource.name, 0)
+    observation = retention.get("retention")
+    assert isinstance(observation, dict), retention
+    assert observation.get("base_offset") == "1", retention
+    assert observation.get("end_offset") == "2", retention
+    assert observation.get("retained_records") == 1, retention
+
 
 def queue_result(document: dict[str, Any], expected_kind: str) -> dict[str, Any]:
     receipt = document.get("receipt")
@@ -1382,11 +1409,11 @@ def run_campaign(cluster: RegionalCluster) -> None:
     assert new_leader != old_leader
     assert new_term > old_term
     prove_python_sdk_native_stream_after_failover(cluster, stream)
-    wait_for_profile_apply(cluster, stream, 3, survivors)
+    wait_for_profile_apply(cluster, stream, 5, survivors)
 
     cluster.start_node(old_leader)
     wait_for_nodes(cluster)
-    wait_for_profile_apply(cluster, stream, 3)
+    wait_for_profile_apply(cluster, stream, 5)
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
     for resource in RESOURCES:
         wait_for_profile_apply(cluster, resource, 1)
@@ -1436,7 +1463,7 @@ def run_campaign(cluster: RegionalCluster) -> None:
     wait_for_nodes(cluster)
     assert wait_for_catalog(cluster, expected_resources) == initial_catalog_digest
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
-    wait_for_profile_apply(cluster, stream, 3)
+    wait_for_profile_apply(cluster, stream, 5)
     for resource in RESOURCES:
         expected = (
             11

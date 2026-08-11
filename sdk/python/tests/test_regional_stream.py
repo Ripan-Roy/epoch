@@ -3,7 +3,13 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
-from epoch_sdk import EpochAPIError, EventEnvelope, RegionalScope, RegionalStreamClient
+from epoch_sdk import (
+    EpochAPIError,
+    EventEnvelope,
+    RegionalScope,
+    RegionalStreamClient,
+    StreamRetentionPolicy,
+)
 
 
 class RegionalFakeTransport:
@@ -126,6 +132,45 @@ class RegionalStreamClientTests(unittest.TestCase):
                 "",
                 EventEnvelope(source="checkout", event_type="created", payload={}),
             )
+
+    def test_retention_mutations_and_linearizable_observation(self) -> None:
+        self.client.configure_retention(
+            "orders",
+            0,
+            "retention-1",
+            StreamRetentionPolicy(
+                max_records_per_partition=100,
+                max_bytes_per_partition=1_048_576,
+                max_age_ms=86_400_000,
+            ),
+        )
+        self.client.maintain_retention("orders", 0, "retention-sweep-1")
+        self.client.retention("orders", 0)
+
+        configure = self.leader.requests[1]
+        self.assertEqual((configure["method"], configure["path"][-10:]), ("PUT", "/retention"))
+        self.assertEqual(
+            configure["body"],
+            {
+                "idempotency_key": "retention-1",
+                "expected_term": "8",
+                "max_records_per_partition": 100,
+                "max_bytes_per_partition": "1048576",
+                "max_age_ms": "86400000",
+            },
+        )
+        maintenance = self.leader.requests[3]
+        self.assertEqual(
+            (maintenance["method"], maintenance["path"][-22:]),
+            ("POST", "/retention/maintenance"),
+        )
+        read = self.leader.requests[5]
+        self.assertEqual(read["headers"]["x-epoch-read-consistency"], "linearizable")
+
+    def test_invalid_retention_policy_fails_before_network(self) -> None:
+        with self.assertRaisesRegex(ValueError, "max bytes"):
+            StreamRetentionPolicy(max_bytes_per_partition=3 * 1024 * 1024 + 1)
+        self.assertEqual(len(self.leader.requests), 0)
 
     def test_retryable_leader_race_rediscovers_without_changing_mutation_identity(self) -> None:
         leader = RegionalFakeTransport(

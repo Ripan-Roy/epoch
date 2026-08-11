@@ -8,6 +8,18 @@ notes explicitly list additional verified artifacts.
 
 ### Added
 
+- Additive Stream command v4 for deterministic record-count, compact canonical
+  JSON byte, inclusive-age, and combined retention. Configure, append, and
+  explicit idle maintenance advance one replicated monotonic watermark while
+  preserving v1/v2/v3 command bytes and never renumbering retained offsets.
+- Retention-aware consumer observations preserve stale checkpoints, report
+  `checkpoint_out_of_range`, clamp lag to readable retained records, and require
+  an explicit generation-fenced reset before replay. Native checkpoints restore
+  the exact policy, retained base, dedupe state, and time watermark.
+- Strict direct and authenticated regional retention configure, maintain, and
+  linearizable observe routes, with matching Go, Java, and Python clients,
+  executable Pages quickstarts, real three-voter checkpoint/reopen tests, and a
+  Python-driven regional container campaign.
 - Additive EPSN v2 native-profile checkpoints for Catalog, Stream, Queue,
   Cache, and Event Bus, with canonical scope/configuration validation, rolling
   consensus digests, a bounded 1,024-record/1 MiB exact-retry suffix, and a
@@ -159,11 +171,13 @@ notes explicitly list additional verified artifacts.
 - Replicated Stream consumer groups currently provide checkpoint storage and a
   caller-supplied generation fence only. Join, heartbeat, assignment, revoke,
   dead-member detection, automatic generation allocation, rebalance,
-  multi-partition ownership, transactional offset commits, retention
-  interaction, scale/fairness evidence, generated coordinated-session types,
-  and production fault coverage remain unimplemented. The regional clients
-  expose only the explicit partition-0 checkpoint primitive; standalone offset
-  helpers keep their local contract.
+  multi-partition ownership, transactional offset commits, scale/fairness
+  evidence, generated coordinated-session types, and production fault coverage
+  remain unimplemented. Retention interaction is explicit for the replicated
+  partition-0 primitive, but automatic maintenance scheduling, keyed
+  compaction/tombstones, object-tier retention, legal-hold governance, and
+  multi-partition policy remain open. Standalone offset helpers keep their
+  local contract.
 - The regional SDKs remain repository-local alpha source. Package publication,
   generated response models, Stream batch/compression helpers, Event Bus
   external webhook/HTTP/push execution and signing, Cache background

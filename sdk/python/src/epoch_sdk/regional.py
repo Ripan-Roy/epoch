@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from ._regional import (
@@ -16,6 +17,45 @@ from ._regional import (
 from .models import EventEnvelope
 
 _MAX_FETCH_RECORDS = 1_000
+_MAX_RETENTION_RECORDS = 100_000
+_MAX_RETENTION_BYTES = 3 * 1024 * 1024
+_MAX_RETENTION_AGE_MS = 10 * 365 * 24 * 60 * 60 * 1_000
+
+
+@dataclass(frozen=True, slots=True)
+class StreamRetentionPolicy:
+    """Independent per-partition record, canonical-byte, and age bounds."""
+
+    max_records_per_partition: int | None = None
+    max_bytes_per_partition: int | None = None
+    max_age_ms: int | None = None
+
+    def __post_init__(self) -> None:
+        _optional_bound(
+            self.max_records_per_partition,
+            "Stream retention max records",
+            _MAX_RETENTION_RECORDS,
+        )
+        _optional_bound(
+            self.max_bytes_per_partition,
+            "Stream retention max bytes",
+            _MAX_RETENTION_BYTES,
+        )
+        _optional_bound(
+            self.max_age_ms,
+            "Stream retention max age",
+            _MAX_RETENTION_AGE_MS,
+        )
+
+    def to_wire(self) -> dict[str, Any]:
+        document: dict[str, Any] = {}
+        if self.max_records_per_partition is not None:
+            document["max_records_per_partition"] = self.max_records_per_partition
+        if self.max_bytes_per_partition is not None:
+            document["max_bytes_per_partition"] = str(self.max_bytes_per_partition)
+        if self.max_age_ms is not None:
+            document["max_age_ms"] = str(self.max_age_ms)
+        return document
 
 
 class RegionalStreamClient(RegionalClient):
@@ -129,6 +169,62 @@ class RegionalStreamClient(RegionalClient):
             ),
         )
 
+    def configure_retention(
+        self,
+        stream: str,
+        shard: int,
+        idempotency_key: str,
+        policy: StreamRetentionPolicy,
+    ) -> dict[str, Any]:
+        """Commit a replacement retention policy and apply it immediately."""
+        _required(idempotency_key, "idempotency key")
+        if not isinstance(policy, StreamRetentionPolicy):
+            raise TypeError("policy must be a StreamRetentionPolicy")
+        return self._stream_call(
+            stream,
+            shard,
+            lambda route: (
+                "PUT",
+                "/retention",
+                {
+                    "idempotency_key": idempotency_key,
+                    "expected_term": route.term,
+                    **policy.to_wire(),
+                },
+                None,
+                {},
+            ),
+        )
+
+    def maintain_retention(self, stream: str, shard: int, idempotency_key: str) -> dict[str, Any]:
+        """Commit an idle-stream age sweep using the current leader time."""
+        _required(idempotency_key, "idempotency key")
+        return self._stream_call(
+            stream,
+            shard,
+            lambda route: (
+                "POST",
+                "/retention/maintenance",
+                {"idempotency_key": idempotency_key, "expected_term": route.term},
+                None,
+                {},
+            ),
+        )
+
+    def retention(self, stream: str, shard: int) -> dict[str, Any]:
+        """Return a linearizable retention policy and retained boundary."""
+        return self._stream_call(
+            stream,
+            shard,
+            lambda _route: (
+                "GET",
+                "/retention",
+                None,
+                None,
+                {"x-epoch-read-consistency": "linearizable"},
+            ),
+        )
+
     def _stream_call(self, stream: str, shard: int, request_for: Any) -> Any:
         return self.call("streams", "Stream", stream, shard, request_for)
 
@@ -138,4 +234,11 @@ def _fetch_limit(limit: int) -> None:
         raise ValueError(f"fetch limit must be between 1 and {_MAX_FETCH_RECORDS}")
 
 
-__all__ = ["RegionalScope", "RegionalStreamClient", "Route"]
+def _optional_bound(value: int | None, name: str, maximum: int) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+        raise ValueError(f"{name} must be between 1 and {maximum} when set")
+
+
+__all__ = ["RegionalScope", "RegionalStreamClient", "Route", "StreamRetentionPolicy"]

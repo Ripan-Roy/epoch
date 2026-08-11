@@ -32,8 +32,10 @@ implemented.
    rejected, and exactly the next generation may establish a new owner.
 4. `commit` is monotonic and cannot move behind the current checkpoint.
    `reset` is the explicit rewind operation. Both must remain within the
-   retained range from earliest through end offset. The current tablet has no
-   retention deletion, so its earliest offset remains zero.
+   retained range from earliest through end offset. At this decision's
+   introduction the tablet had no retention deletion and its earliest offset
+   was zero. ADR-0023 later allows that base to advance and makes a checkpoint
+   below it explicitly out of range until reset.
 5. Static malformed input is rejected before proposal. Ownership, generation,
    range, rewind, and group-capacity races are evaluated in committed order and
    return a typed committed `rejected` receipt. A business rejection changes no
@@ -75,10 +77,12 @@ implemented.
 - Offset commits are not atomic with record production or transactions in this
   slice. STREAM-008 remains responsible for atomic offsets and read-committed
   transaction semantics.
-- STREAM-003 advances from a local prototype to a replicated slice. It remains
-  incomplete pending coordinated sessions, multi-partition assignment,
-  retention interaction, authorization/audit specificity, generated session
-  contracts, scale/fairness evidence, and the production fault matrix.
+- STREAM-003 advances from a local prototype to a replicated slice. ADR-0023
+  subsequently defines retention interaction: stale checkpoints are preserved,
+  flagged out of range, and require explicit reset. Coordinated sessions,
+  multi-partition assignment, authorization/audit specificity, generated
+  session contracts, scale/fairness evidence, and the production fault matrix
+  remain incomplete.
 
 ## Rejected alternatives
 

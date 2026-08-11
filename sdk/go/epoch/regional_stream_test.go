@@ -226,6 +226,79 @@ func TestRegionalStreamClientBuildsGroupAndLinearizableReadContracts(t *testing.
 	}
 }
 
+func TestRegionalStreamClientBuildsRetentionMutationAndReadContracts(t *testing.T) {
+	leader := &regionalFakeTransport{route: Document{
+		"resource_generation": "2", "tablet_epoch": "4", "term": "9", "accepts_writes": true,
+	}}
+	client, err := NewRegionalStreamClientWithTransports(
+		[]Transport{leader}, "secret-token",
+		RegionalScope{Organization: "acme", Project: "shop", Environment: "dev", Namespace: "core"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := StreamRetentionPolicy{
+		MaxRecordsPerPartition: 100,
+		MaxBytesPerPartition:   1_048_576,
+		MaxAgeMS:               86_400_000,
+	}
+
+	if _, err := client.ConfigureRetention(context.Background(), "orders", 0, "retention-1", policy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.MaintainRetention(context.Background(), "orders", 0, "retention-sweep-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Retention(context.Background(), "orders", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	configure := leader.requests[1]
+	if configure.Method != "PUT" || !strings.HasSuffix(configure.Path, "/retention") {
+		t.Fatalf("unexpected retention configuration: %#v", configure)
+	}
+	body, marshalErr := json.Marshal(configure.Body)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	var document map[string]any
+	if unmarshalErr := json.Unmarshal(body, &document); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
+	}
+	if document["idempotency_key"] != "retention-1" || document["expected_term"] != "9" ||
+		document["max_bytes_per_partition"] != "1048576" || document["max_age_ms"] != "86400000" {
+		t.Fatalf("unexpected retention body: %#v", document)
+	}
+	maintenance := leader.requests[3]
+	if maintenance.Method != "POST" || !strings.HasSuffix(maintenance.Path, "/retention/maintenance") {
+		t.Fatalf("unexpected retention maintenance: %#v", maintenance)
+	}
+	read := leader.requests[5]
+	if read.Method != "GET" || !strings.HasSuffix(read.Path, "/retention") ||
+		read.Headers[regionalReadHeader] != "linearizable" {
+		t.Fatalf("unexpected retention read: %#v", read)
+	}
+}
+
+func TestRegionalStreamRetentionRejectsInvalidPolicyBeforeNetwork(t *testing.T) {
+	leader := &regionalFakeTransport{route: Document{
+		"resource_generation": "2", "tablet_epoch": "4", "term": "9", "accepts_writes": true,
+	}}
+	client, err := NewRegionalStreamClientWithTransports(
+		[]Transport{leader}, "secret-token",
+		RegionalScope{Organization: "acme", Project: "shop", Environment: "dev", Namespace: "core"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.ConfigureRetention(context.Background(), "orders", 0, "retention-invalid", StreamRetentionPolicy{
+		MaxBytesPerPartition: 3*1024*1024 + 1,
+	})
+	if err == nil || len(leader.requests) != 0 {
+		t.Fatalf("invalid retention must fail locally, got %v and %d requests", err, len(leader.requests))
+	}
+}
+
 type regionalErrorTransport struct {
 	err      error
 	requests int

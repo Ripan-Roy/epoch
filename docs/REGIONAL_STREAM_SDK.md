@@ -11,8 +11,8 @@ and requests quorum-confirmed reads. It does not send application data through
 the Go control plane.
 
 See [ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md) for the binding
-decision and [Regional runtime](REGIONAL_RUNTIME.md) for provisioning and
-operations.
+decision, [ADR-0023](adr/0023-stream-retention-policies.md) for retention, and
+[Regional runtime](REGIONAL_RUNTIME.md) for provisioning and operations.
 
 ## End-to-end flow
 
@@ -82,6 +82,9 @@ available for tests in all three SDKs.
 | Commit or reset checkpoint | `CommitOffset` | `commitOffset` | `commit_offset` |
 | Observe checkpoint and lag | `Lag` | `lag` | `lag` |
 | Fetch from checkpoint | `FetchGroup` | `fetchGroup` | `fetch_group` |
+| Configure retention | `ConfigureRetention` | `configureRetention` | `configure_retention` |
+| Commit idle maintenance | `MaintainRetention` | `maintainRetention` | `maintain_retention` |
+| Observe retention | `Retention` | `retention` | `retention` |
 
 Append and checkpoint operations require an explicit idempotency key. A
 checkpoint also requires the caller's nonzero member generation. `reset` is the
@@ -93,10 +96,18 @@ serialized as decimal strings by the server. Go uses `uint64`, Python uses
 arbitrary-precision `int`, and Java provides `BigInteger` overloads so the
 complete unsigned 64-bit range remains representable.
 
+`StreamRetentionPolicy` accepts optional per-partition record, canonical-byte,
+and age limits. Go uses zero to omit a bound; Java uses `null`; Python uses
+`None`. Configured values must be within 100,000 records, 3 MiB, and ten years.
+Configuration and maintenance require idempotency keys. Retention observation
+is linearizable and reports the active policy, watermark, base/end offsets,
+retained record count, and retained canonical bytes.
+
 ## Executable examples
 
 The complete examples append, repeat the exact append, fetch by offset, fetch
-from a group checkpoint, commit that checkpoint, and observe lag:
+from a group checkpoint, commit that checkpoint, observe lag, configure a
+combined retention policy, commit idle maintenance, and inspect retention:
 
 - [Go regional quickstart](../console/src/quickstarts/regional/quickstart.go)
 - [Java regional quickstart](../console/src/quickstarts/regional/RegionalQuickstart.java)
@@ -149,6 +160,8 @@ The base route is:
 /groups/{group}/offsets
 /groups/{group}/lag
 /groups/{group}/records
+/retention
+/retention/maintenance
 ```
 
 Every data request carries:
@@ -192,9 +205,9 @@ cargo test -p epoch-node regional_router::tests
 ```
 
 The real recovery gate builds the node image, kills the active leader, runs the
-Python regional SDK through append/exact-retry/fetch/checkpoint/lag, restarts
-the old voter, kills every voter, reopens the same volumes, and verifies
-convergence:
+Python regional SDK through append/exact-retry/fetch/checkpoint/lag and
+retention configure/maintenance/observation, restarts the old voter, kills
+every voter, reopens the same volumes, and verifies convergence:
 
 ```shell
 make test-regional-runtime
@@ -202,10 +215,12 @@ make test-regional-runtime
 
 ## Current boundaries
 
-This versioned alpha covers one Stream shard/partition and caller-supplied
-consumer generations. It is not coordinated membership. Join, heartbeat,
+This versioned alpha covers one Stream shard/partition, caller-supplied
+consumer generations, and replicated time/size/combined retention. It is not
+coordinated membership. Join, heartbeat,
 assignment, revoke, dead-member detection, rebalance, multi-partition
-ownership, retention interaction, atomic produce-and-offset transactions,
+ownership, automatic idle-retention scheduling, keyed compaction, legal hold,
+atomic produce-and-offset transactions,
 automatic batching/compression, generated response models, package-registry
 publication, TLS/OIDC/mTLS, dynamic membership, and the production fault/scale
 matrix remain open.

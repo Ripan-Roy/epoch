@@ -16,6 +16,9 @@ const (
 	regionalTabletEpochHeader   = "x-epoch-tablet-epoch"
 	regionalReadHeader          = "x-epoch-read-consistency"
 	maxRegionalFetchRecords     = 1_000
+	maxStreamRetentionRecords   = 100_000
+	maxStreamRetentionBytes     = 3 * 1024 * 1024
+	maxStreamRetentionAgeMS     = 10 * 365 * 24 * 60 * 60 * 1_000
 )
 
 // RegionalScope identifies one fully-qualified Epoch namespace.
@@ -44,6 +47,27 @@ type regionalRoute struct {
 	TabletEpoch        string `json:"tablet_epoch"`
 	Term               string `json:"term"`
 	AcceptsWrites      bool   `json:"accepts_writes"`
+}
+
+// StreamRetentionPolicy bounds retained records independently by count, canonical bytes,
+// and age. A zero field disables that bound.
+type StreamRetentionPolicy struct {
+	MaxRecordsPerPartition uint64
+	MaxBytesPerPartition   uint64
+	MaxAgeMS               uint64
+}
+
+func (policy StreamRetentionPolicy) validate() error {
+	if policy.MaxRecordsPerPartition > maxStreamRetentionRecords {
+		return fmt.Errorf("epoch: Stream retention max records must be between 1 and %d when set", maxStreamRetentionRecords)
+	}
+	if policy.MaxBytesPerPartition > maxStreamRetentionBytes {
+		return fmt.Errorf("epoch: Stream retention max bytes must be between 1 and %d when set", maxStreamRetentionBytes)
+	}
+	if policy.MaxAgeMS > maxStreamRetentionAgeMS {
+		return fmt.Errorf("epoch: Stream retention max age must be between 1 and %d milliseconds when set", maxStreamRetentionAgeMS)
+	}
+	return nil
 }
 
 // NewRegionalStreamClient builds a regional client over one or more HTTP endpoints.
@@ -189,6 +213,56 @@ func (client *RegionalStreamClient) FetchGroup(ctx context.Context, stream strin
 	}
 	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, func(_ regionalRoute) Request {
 		return Request{Method: "GET", Path: "/groups/" + groupSegment + "/records", Query: url.Values{"limit": {strconv.FormatUint(uint64(limit), 10)}}, Headers: map[string]string{regionalReadHeader: "linearizable"}}
+	})
+}
+
+// ConfigureRetention commits a replacement time/size/count policy and immediately applies it.
+func (client *RegionalStreamClient) ConfigureRetention(ctx context.Context, stream string, shard uint32, idempotencyKey string, policy StreamRetentionPolicy) (Document, error) {
+	if strings.TrimSpace(idempotencyKey) == "" {
+		return nil, fmt.Errorf("epoch: idempotency key is required")
+	}
+	if err := policy.validate(); err != nil {
+		return nil, err
+	}
+	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, func(route regionalRoute) Request {
+		body := struct {
+			IdempotencyKey         string `json:"idempotency_key"`
+			ExpectedTerm           string `json:"expected_term"`
+			MaxRecordsPerPartition uint64 `json:"max_records_per_partition,omitempty"`
+			MaxBytesPerPartition   string `json:"max_bytes_per_partition,omitempty"`
+			MaxAgeMS               string `json:"max_age_ms,omitempty"`
+		}{
+			IdempotencyKey:         idempotencyKey,
+			ExpectedTerm:           route.Term,
+			MaxRecordsPerPartition: policy.MaxRecordsPerPartition,
+		}
+		if policy.MaxBytesPerPartition != 0 {
+			body.MaxBytesPerPartition = strconv.FormatUint(policy.MaxBytesPerPartition, 10)
+		}
+		if policy.MaxAgeMS != 0 {
+			body.MaxAgeMS = strconv.FormatUint(policy.MaxAgeMS, 10)
+		}
+		return Request{Method: "PUT", Path: "/retention", Body: body}
+	})
+}
+
+// MaintainRetention commits an idle-stream age sweep using the current leader time.
+func (client *RegionalStreamClient) MaintainRetention(ctx context.Context, stream string, shard uint32, idempotencyKey string) (Document, error) {
+	if strings.TrimSpace(idempotencyKey) == "" {
+		return nil, fmt.Errorf("epoch: idempotency key is required")
+	}
+	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, func(route regionalRoute) Request {
+		return Request{Method: "POST", Path: "/retention/maintenance", Body: struct {
+			IdempotencyKey string `json:"idempotency_key"`
+			ExpectedTerm   string `json:"expected_term"`
+		}{idempotencyKey, route.Term}}
+	})
+}
+
+// Retention returns the linearizable policy, watermark, retained boundary, and byte count.
+func (client *RegionalStreamClient) Retention(ctx context.Context, stream string, shard uint32) (Document, error) {
+	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, func(_ regionalRoute) Request {
+		return Request{Method: "GET", Path: "/retention", Headers: map[string]string{regionalReadHeader: "linearizable"}}
 	})
 }
 

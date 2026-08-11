@@ -153,6 +153,49 @@ public final class RegionalStreamClient {
                 linearizable()));
   }
 
+  /** Commits a replacement time/size/count policy and immediately applies it. */
+  public JsonNode configureRetention(
+      String stream, int shard, String idempotencyKey, StreamRetentionPolicy policy)
+      throws IOException, InterruptedException {
+    RegionalClientCore.required(idempotencyKey, "idempotency key");
+    Objects.requireNonNull(policy, "policy");
+    return call(
+        stream,
+        shard,
+        route -> {
+          ObjectNode body = policy.toJson();
+          body.put("idempotency_key", idempotencyKey);
+          body.put("expected_term", route.term());
+          return new RegionalClientCore.RequestSpec("PUT", "/retention", body, Map.of(), Map.of());
+        });
+  }
+
+  /** Commits an idle-stream age sweep using the current leader time. */
+  public JsonNode maintainRetention(String stream, int shard, String idempotencyKey)
+      throws IOException, InterruptedException {
+    RegionalClientCore.required(idempotencyKey, "idempotency key");
+    return call(
+        stream,
+        shard,
+        route -> {
+          ObjectNode body = RegionalClientCore.MAPPER.createObjectNode();
+          body.put("idempotency_key", idempotencyKey);
+          body.put("expected_term", route.term());
+          return new RegionalClientCore.RequestSpec(
+              "POST", "/retention/maintenance", body, Map.of(), Map.of());
+        });
+  }
+
+  /** Returns a linearizable policy, watermark, retained boundary, and byte count. */
+  public JsonNode retention(String stream, int shard) throws IOException, InterruptedException {
+    return call(
+        stream,
+        shard,
+        route ->
+            new RegionalClientCore.RequestSpec(
+                "GET", "/retention", null, Map.of(), linearizable()));
+  }
+
   private JsonNode call(String stream, int shard, RegionalClientCore.RequestFactory requestFactory)
       throws IOException, InterruptedException {
     return regional.call("streams", "Stream", stream, shard, requestFactory);

@@ -40,10 +40,22 @@ func main() {
 	must(err)
 	lag, err := client.Lag(ctx, "orders", 0, "docs-go")
 	must(err)
+	configured, err := client.ConfigureRetention(ctx, "orders", 0, "docs-go-retention-v1", epoch.StreamRetentionPolicy{
+		MaxRecordsPerPartition: 10_000,
+		MaxBytesPerPartition:   3 * 1024 * 1024,
+		MaxAgeMS:                7 * 24 * 60 * 60 * 1_000,
+	})
+	must(err)
+	maintained, err := client.MaintainRetention(ctx, "orders", 0, "docs-go-retention-sweep-v1")
+	must(err)
+	retention, err := client.Retention(ctx, "orders", 0)
+	must(err)
 
 	output, err := json.MarshalIndent(map[string]any{
 		"append": appended, "exact_retry": replayed, "fetch": fetched,
 		"group_fetch": groupRecords, "checkpoint": checkpoint, "lag": lag,
+		"retention_configure": configured, "retention_maintenance": maintained,
+		"retention": retention,
 	}, "", "  ")
 	must(err)
 	fmt.Println(string(output))

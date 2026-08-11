@@ -9,7 +9,7 @@ API or SDKs.
 ## What is implemented
 
 ```text
-typed append, compressed batch, or consumer-checkpoint request
+typed append, compressed batch, consumer-checkpoint, or retention request
   -> canonical versioned tablet command
   -> persistent Raft proposal
   -> durable fixed-voter-majority commit
@@ -33,7 +33,8 @@ typed append, compressed batch, or consumer-checkpoint request
   old-leader proposal cannot satisfy a waiter for different input.
 
 The historical single append remains canonical command v1 byte-for-byte. A
-batch alone emits v2 and a consumer-group offset mutation alone emits v3. All
+batch alone emits v2, a consumer-group offset mutation alone emits v3, and a
+retention configuration or maintenance mutation alone emits v4. All
 accept only partition `0`, reject unknown fields and
 version/kind mismatches, are limited to the consensus proposal ceiling, and
 must match canonical JSON exactly. A batch contains 1–1,000 unique client
@@ -51,6 +52,21 @@ requests are committed as typed fenced rejections. `commit` moves only forward;
 `reset` is the explicit retained-range rewind. A group/member is limited to 256
 bytes and one tablet retains at most 10,000 groups. These are checkpoint and
 fencing semantics, not automatic membership or rebalancing.
+
+Command v4 replaces or maintains an independent per-partition time, canonical
+persisted-byte, and record-count policy. Age expiry is inclusive, combined
+policies remove the oldest record whenever any configured bound requires it,
+and offsets never change identity. Every append enforces the active policy;
+idle streams advance age deletion through an explicit committed maintenance
+call. The retained time watermark cannot regress across leader changes.
+Configuration is bounded to 100,000 records, 3 MiB, and ten years per
+partition. A record larger than the byte bound fails before mutation.
+
+Retention preserves a group checkpoint below the new base and exposes
+`checkpoint_out_of_range: true`. Group replay then fails at the retained-range
+boundary until the caller explicitly resets to a valid offset. Profile
+deduplication expires with its record, while the independently bounded
+consensus retry suffix can still resolve an exact old proposal.
 
 The proposal ID is currently a scope-separated 64-bit prefix of SHA-256; the
 complete key remains in the command, so a collision fails as a conflict instead
@@ -279,6 +295,40 @@ local contract. The separate Go, Java, and Python `RegionalStreamClient`
 explicitly opts into replicated member/generation fencing and linearizable
 reads.
 
+### Configure and maintain retention
+
+Configure any combination of time, canonical bytes, and record count on the
+current leader:
+
+```shell
+curl --fail-with-body --request PUT \
+  --header 'content-type: application/json' \
+  --data '{
+    "idempotency_key":"orders-retention-v1",
+    "expected_term":"1",
+    "max_records_per_partition":10000,
+    "max_bytes_per_partition":"3145728",
+    "max_age_ms":"604800000"
+  }' \
+  http://127.0.0.1:17701/experimental/v1/tablets/stream/retention
+```
+
+An append or configuration evaluates the policy immediately. Commit
+maintenance to advance age expiry while the Stream is idle, then inspect the
+effective policy, watermark, base/end offsets, retained records, and canonical
+bytes:
+
+```text
+POST /experimental/v1/tablets/stream/retention/maintenance
+GET  /experimental/v1/tablets/stream/retention
+```
+
+The maintenance body contains `idempotency_key` and `expected_term`. The
+authenticated regional v1 route exposes the same `retention` and
+`retention/maintenance` suffixes; the regional GET uses the normal linearizable
+ReadIndex contract. See [ADR-0023](adr/0023-stream-retention-policies.md) for
+the byte definition, inclusive age boundary, recovery rules, and non-claims.
+
 Leader-local committed reads use:
 
 ```text
@@ -305,7 +355,7 @@ voter, so this is not durable-majority proof under a hostile network. Do not
 expose it to an untrusted network.
 
 It also has static membership, one group/resource, one partition, no automatic
-checkpoint schedule, user-exportable backup/PITR, retention deletion, follower
+checkpoint or idle-retention schedule, user-exportable backup/PITR, follower
 read routing, catalog-authorized epoch
 transition, placement, authenticated peer identity, bounded idempotency
 retention, replica-progress/ISR contract, or exhaustive crash/I/O matrix.
@@ -313,6 +363,8 @@ Consumer groups add no join, heartbeat, assignment, revoke, session timeout,
 automatic generation allocation, dead-member detection, rebalance strategy,
 multi-partition ownership, transactional offset commit, or coordinated consumer
 session surface.
+Retention does not add keyed compaction, tombstones, legal hold, object-tier
+deletion, namespace policy guardrails, or multi-partition routing.
 The regional Stream v1 SDK exposes the current checkpoint primitive, but it
 does not turn that primitive into a coordinated consumer session.
 The batch route is whole-command atomic and client-framed; it does not provide

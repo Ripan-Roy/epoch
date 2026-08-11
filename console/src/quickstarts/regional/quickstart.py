@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 
-from epoch_sdk import EventEnvelope, RegionalScope, RegionalStreamClient
+from epoch_sdk import EventEnvelope, RegionalScope, RegionalStreamClient, StreamRetentionPolicy
 
 
 endpoints = os.getenv(
@@ -39,6 +39,18 @@ checkpoint = client.commit_offset(
     idempotency_key="docs-python-checkpoint-v1",
 )
 lag = client.lag("orders", 0, "docs-python")
+configured = client.configure_retention(
+    "orders",
+    0,
+    "docs-python-retention-v1",
+    StreamRetentionPolicy(
+        max_records_per_partition=10_000,
+        max_bytes_per_partition=3 * 1024 * 1024,
+        max_age_ms=7 * 24 * 60 * 60 * 1_000,
+    ),
+)
+maintained = client.maintain_retention("orders", 0, "docs-python-retention-sweep-v1")
+retention = client.retention("orders", 0)
 
 print(
     json.dumps(
@@ -49,6 +61,9 @@ print(
             "group_fetch": group_records,
             "checkpoint": checkpoint,
             "lag": lag,
+            "retention_configure": configured,
+            "retention_maintenance": maintained,
+            "retention": retention,
         },
         indent=2,
     )

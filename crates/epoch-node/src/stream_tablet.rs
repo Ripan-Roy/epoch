@@ -17,15 +17,17 @@ use epoch_consensus::{
     LogIndex, ProposalLookup,
 };
 use epoch_core::{Clock, EventEnvelope};
-use epoch_stream::StreamRecord;
+use epoch_stream::{StreamRecord, StreamRetentionPolicy};
 use epoch_tablet::{
     CommittedCommand, MAX_STREAM_BATCH_COMPRESSED_BYTES, MAX_STREAM_BATCH_RECORDS,
     MAX_STREAM_BATCH_UNCOMPRESSED_BYTES, MAX_STREAM_CONSUMER_GROUP_BYTES,
-    MAX_STREAM_CONSUMER_GROUPS, MAX_STREAM_CONSUMER_MEMBER_BYTES, MAX_STREAM_TABLET_COMMAND_BYTES,
-    StreamBatchPayload, StreamCompression, StreamGroupOffsetMode, StreamTablet,
-    StreamTabletCommand, StreamTabletGroupObservation, StreamTabletMutationReceipt,
-    StreamTabletOperation, StreamTabletScope, TabletError, decode_stream_batch_payload,
-    proposal_id_for, validate_stream_consumer_group,
+    MAX_STREAM_CONSUMER_GROUPS, MAX_STREAM_CONSUMER_MEMBER_BYTES, MAX_STREAM_RETENTION_AGE_MS,
+    MAX_STREAM_RETENTION_BYTES_PER_PARTITION, MAX_STREAM_RETENTION_RECORDS_PER_PARTITION,
+    MAX_STREAM_TABLET_COMMAND_BYTES, StreamBatchPayload, StreamCompression, StreamGroupOffsetMode,
+    StreamTablet, StreamTabletCommand, StreamTabletGroupObservation, StreamTabletMutationReceipt,
+    StreamTabletOperation, StreamTabletRetentionMode, StreamTabletRetentionObservation,
+    StreamTabletScope, TabletError, decode_stream_batch_payload, proposal_id_for,
+    validate_retention_policy, validate_stream_consumer_group,
 };
 #[cfg(test)]
 use epoch_tablet::{StreamBatchRecord, encode_stream_batch_payload};
@@ -35,8 +37,9 @@ use tokio::sync::{Mutex, broadcast};
 use crate::consensus::{CommittedProposalApplier, ConsensusProbeError, ConsensusProbeHandle};
 use crate::tablet_http::{
     StrictEventEnvelope, TabletApiError, TabletApiResult, TabletReadMetadata,
-    deserialize_strict_event_envelope, deserialize_u64_from_number_or_decimal, hex_digest,
-    serialize_optional_u64_as_decimal, serialize_u64_as_decimal, tablet_read_metadata,
+    deserialize_optional_u64_from_number_or_decimal, deserialize_strict_event_envelope,
+    deserialize_u64_from_number_or_decimal, hex_digest, serialize_optional_u64_as_decimal,
+    serialize_u64_as_decimal, tablet_read_metadata,
 };
 
 pub const EXPERIMENTAL_STREAM_TABLET_STATUS_PATH: &str = "/experimental/v1/tablets/stream/status";
@@ -51,6 +54,10 @@ pub const EXPERIMENTAL_STREAM_TABLET_GROUP_LAG_PATH: &str =
     "/experimental/v1/tablets/stream/groups/{group}/lag";
 pub const EXPERIMENTAL_STREAM_TABLET_GROUP_RECORDS_PATH: &str =
     "/experimental/v1/tablets/stream/groups/{group}/records";
+pub const EXPERIMENTAL_STREAM_TABLET_RETENTION_PATH: &str =
+    "/experimental/v1/tablets/stream/retention";
+pub const EXPERIMENTAL_STREAM_TABLET_RETENTION_MAINTENANCE_PATH: &str =
+    "/experimental/v1/tablets/stream/retention/maintenance";
 pub const DEFAULT_COMMIT_WAIT: Duration = Duration::from_secs(5);
 const MAX_FETCH_RECORDS: usize = 1_000;
 const TABLET_REQUEST_BODY_BYTES: usize = MAX_STREAM_TABLET_COMMAND_BYTES + 16 * 1024;
@@ -182,6 +189,15 @@ impl StreamTabletService {
             .read()
             .map_err(|_| "Stream tablet read lock was poisoned".to_owned())?
             .group_observation(group)
+            .map_err(|error| error.to_string())
+    }
+
+    fn retention_observation(&self) -> Result<StreamTabletRetentionObservation, String> {
+        self.ensure_healthy()?;
+        self.tablet
+            .read()
+            .map_err(|_| "Stream tablet read lock was poisoned".to_owned())?
+            .retention_observation()
             .map_err(|error| error.to_string())
     }
 
@@ -360,6 +376,14 @@ pub fn router(
             EXPERIMENTAL_STREAM_TABLET_GROUP_RECORDS_PATH,
             get(fetch_group_records),
         )
+        .route(
+            EXPERIMENTAL_STREAM_TABLET_RETENTION_PATH,
+            get(get_retention).put(configure_retention),
+        )
+        .route(
+            EXPERIMENTAL_STREAM_TABLET_RETENTION_MAINTENANCE_PATH,
+            axum::routing::post(maintain_retention),
+        )
         .layer(DefaultBodyLimit::max(TABLET_REQUEST_BODY_BYTES))
         .with_state(state)
 }
@@ -417,6 +441,44 @@ struct GroupOffsetRequestBody {
     #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
     next_offset: u64,
     mode: StreamGroupOffsetMode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetentionConfigureRequest {
+    idempotency_key: String,
+    #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+    expected_term: u64,
+    #[serde(default)]
+    max_records_per_partition: Option<usize>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
+    )]
+    max_bytes_per_partition: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
+    )]
+    max_age_ms: Option<u64>,
+}
+
+impl RetentionConfigureRequest {
+    const fn policy(&self) -> StreamRetentionPolicy {
+        StreamRetentionPolicy {
+            max_records_per_partition: self.max_records_per_partition,
+            max_bytes_per_partition: self.max_bytes_per_partition,
+            max_age_ms: self.max_age_ms,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetentionMaintenanceRequest {
+    idempotency_key: String,
+    #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+    expected_term: u64,
 }
 
 #[derive(Debug)]
@@ -522,6 +584,76 @@ impl StreamMutationSemantics for AppendBatchRequest {
     }
 }
 
+impl StreamMutationSemantics for RetentionConfigureRequest {
+    fn idempotency_key(&self) -> &str {
+        &self.idempotency_key
+    }
+
+    fn expected_term(&self) -> u64 {
+        self.expected_term
+    }
+
+    fn validate(&self, _scope: &StreamTabletScope) -> TabletApiResult<()> {
+        validate_retention_policy(self.policy())?;
+        Ok(())
+    }
+
+    fn command(
+        &self,
+        scope: &StreamTabletScope,
+        applied_at_ms: u64,
+    ) -> Result<StreamTabletCommand, TabletError> {
+        StreamTabletCommand::configure_retention(
+            scope,
+            self.idempotency_key.clone(),
+            self.policy(),
+            applied_at_ms,
+        )
+    }
+
+    fn matches_command(&self, command: &StreamTabletCommand) -> bool {
+        matches!(
+            &command.operation,
+            StreamTabletOperation::Retention(retention)
+                if command.idempotency_key == self.idempotency_key
+                    && retention.mode == StreamTabletRetentionMode::Configure
+                    && retention.policy == Some(self.policy())
+        )
+    }
+}
+
+impl StreamMutationSemantics for RetentionMaintenanceRequest {
+    fn idempotency_key(&self) -> &str {
+        &self.idempotency_key
+    }
+
+    fn expected_term(&self) -> u64 {
+        self.expected_term
+    }
+
+    fn validate(&self, _scope: &StreamTabletScope) -> TabletApiResult<()> {
+        Ok(())
+    }
+
+    fn command(
+        &self,
+        scope: &StreamTabletScope,
+        applied_at_ms: u64,
+    ) -> Result<StreamTabletCommand, TabletError> {
+        StreamTabletCommand::maintain_retention(scope, self.idempotency_key.clone(), applied_at_ms)
+    }
+
+    fn matches_command(&self, command: &StreamTabletCommand) -> bool {
+        matches!(
+            &command.operation,
+            StreamTabletOperation::Retention(retention)
+                if command.idempotency_key == self.idempotency_key
+                    && retention.mode == StreamTabletRetentionMode::Maintain
+                    && retention.policy.is_none()
+        )
+    }
+}
+
 impl StreamMutationSemantics for GroupOffsetRequest {
     fn idempotency_key(&self) -> &str {
         &self.body.idempotency_key
@@ -609,6 +741,28 @@ async fn update_group_offset(
         message: rejection.body_text(),
     })?;
     submit_mutation(state, GroupOffsetRequest::new(group, request)).await
+}
+
+async fn configure_retention(
+    State(state): State<StreamTabletApiState>,
+    request: Result<Json<RetentionConfigureRequest>, JsonRejection>,
+) -> TabletApiResult<(StatusCode, Json<StreamTabletMutationResponse>)> {
+    let Json(request) = request.map_err(|rejection| StreamTabletApiError::RequestBody {
+        status: rejection.status(),
+        message: rejection.body_text(),
+    })?;
+    submit_mutation(state, request).await
+}
+
+async fn maintain_retention(
+    State(state): State<StreamTabletApiState>,
+    request: Result<Json<RetentionMaintenanceRequest>, JsonRejection>,
+) -> TabletApiResult<(StatusCode, Json<StreamTabletMutationResponse>)> {
+    let Json(request) = request.map_err(|rejection| StreamTabletApiError::RequestBody {
+        status: rejection.status(),
+        message: rejection.body_text(),
+    })?;
+    submit_mutation(state, request).await
 }
 
 async fn submit_mutation<R: StreamMutationSemantics>(
@@ -871,6 +1025,16 @@ async fn fetch_group_records(
     }))
 }
 
+async fn get_retention(
+    State(state): State<StreamTabletApiState>,
+    read: Option<Extension<TabletReadMetadata>>,
+) -> TabletApiResult<Json<StreamTabletRetentionResponse>> {
+    Ok(Json(StreamTabletRetentionResponse {
+        read: tablet_read_metadata(read),
+        retention: state.service.retention_observation()?,
+    }))
+}
+
 fn validate_fetch_limit(limit: usize) -> TabletApiResult<()> {
     if limit == 0 || limit > MAX_FETCH_RECORDS {
         return Err(StreamTabletApiError::InvalidRequest(format!(
@@ -919,6 +1083,12 @@ struct StreamTabletStatus {
     max_consumer_groups: usize,
     max_consumer_group_bytes: usize,
     max_consumer_member_bytes: usize,
+    retention_contract: &'static str,
+    max_retention_records_per_partition: usize,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    max_retention_bytes_per_partition: u64,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    max_retention_age_ms: u64,
     #[serde(serialize_with = "serialize_u64_as_decimal")]
     tablet_id: u64,
     #[serde(serialize_with = "serialize_u64_as_decimal")]
@@ -987,6 +1157,10 @@ impl StreamTabletStatus {
             max_consumer_groups: MAX_STREAM_CONSUMER_GROUPS,
             max_consumer_group_bytes: MAX_STREAM_CONSUMER_GROUP_BYTES,
             max_consumer_member_bytes: MAX_STREAM_CONSUMER_MEMBER_BYTES,
+            retention_contract: "replicated_v4_time_size_combined_with_explicit_idle_maintenance",
+            max_retention_records_per_partition: MAX_STREAM_RETENTION_RECORDS_PER_PARTITION,
+            max_retention_bytes_per_partition: MAX_STREAM_RETENTION_BYTES_PER_PARTITION,
+            max_retention_age_ms: MAX_STREAM_RETENTION_AGE_MS,
             tablet_id: scope.tablet_id,
             tablet_epoch: scope.tablet_epoch,
             resource: scope.resource.clone(),
@@ -1030,6 +1204,13 @@ struct StreamTabletGroupFetchResponse {
     read: TabletReadMetadata,
     checkpoint: StreamTabletGroupObservation,
     records: Vec<StreamTabletRecordResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamTabletRetentionResponse {
+    #[serde(flatten)]
+    read: TabletReadMetadata,
+    retention: StreamTabletRetentionObservation,
 }
 
 #[derive(Debug, Serialize)]
@@ -1420,6 +1601,44 @@ mod tests {
     }
 
     #[test]
+    fn retention_requests_are_strict_browser_safe_bounded_and_semantic() {
+        let document = json!({
+            "idempotency_key": "retention-1",
+            "expected_term": u64::MAX.to_string(),
+            "max_records_per_partition": 100,
+            "max_bytes_per_partition": "1048576",
+            "max_age_ms": "86400000"
+        });
+        let request: RetentionConfigureRequest = serde_json::from_value(document.clone()).unwrap();
+        assert_eq!(request.expected_term, u64::MAX);
+        assert_eq!(request.policy().max_bytes_per_partition, Some(1_048_576));
+        assert_eq!(request.policy().max_age_ms, Some(86_400_000));
+        request.validate(&scope()).unwrap();
+        let command = request.command(&scope(), 123).unwrap();
+        assert!(request.matches_command(&command));
+
+        let mut unknown = document;
+        unknown["retention_bytes"] = json!(1);
+        assert!(serde_json::from_value::<RetentionConfigureRequest>(unknown).is_err());
+
+        let invalid: RetentionConfigureRequest = serde_json::from_value(json!({
+            "idempotency_key": "retention-invalid",
+            "expected_term": "1",
+            "max_bytes_per_partition": "0"
+        }))
+        .unwrap();
+        assert!(invalid.validate(&scope()).is_err());
+
+        let maintenance: RetentionMaintenanceRequest = serde_json::from_value(json!({
+            "idempotency_key": "retention-sweep-1",
+            "expected_term": "1"
+        }))
+        .unwrap();
+        let command = maintenance.command(&scope(), 124).unwrap();
+        assert!(maintenance.matches_command(&command));
+    }
+
+    #[test]
     fn group_offset_retry_semantics_compare_every_client_controlled_field() {
         let body: GroupOffsetRequestBody = serde_json::from_value(json!({
             "idempotency_key": "billing-commit-1",
@@ -1566,6 +1785,7 @@ mod tests {
         runtime: ConsensusProbeRuntime,
         server: JoinHandle<()>,
         base_url: Url,
+        clock: Arc<ManualClock>,
     }
 
     struct RunningTabletCluster {
@@ -1609,10 +1829,11 @@ mod tests {
                     ConsensusProbeRuntime::start_with_profile_applier(config, stable_path, applier)
                         .await
                         .unwrap();
+                let clock = Arc::new(ManualClock::new(1_000));
                 let app = runtime.internal_router().merge(router(
                     service,
                     runtime.handle(),
-                    Arc::new(ManualClock::new(1_000)),
+                    clock.clone(),
                     Duration::from_secs(2),
                 ));
                 let server = tokio::spawn(async move {
@@ -1622,6 +1843,7 @@ mod tests {
                     runtime,
                     server,
                     base_url: urls[index].clone(),
+                    clock,
                 });
             }
             Self { nodes }
@@ -1704,6 +1926,58 @@ mod tests {
         let reopened = RunningTabletCluster::start(&paths).await;
         assert_rebuilt_records(&reopened, &client, 12, 11).await;
         assert_group_checkpoint_on_every_voter(&reopened, &client).await;
+        reopened.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn retention_commits_converges_and_restores_on_three_real_runtimes() {
+        let temporary = TempDir::new().unwrap();
+        let paths = tablet_paths(temporary.path());
+        let cluster = RunningTabletCluster::start(&paths).await;
+        let client = reqwest::Client::new();
+
+        let configure = json!({
+            "idempotency_key": "retention-age-10",
+            "expected_term": "0",
+            "max_records_per_partition": 10,
+            "max_bytes_per_partition": "1048576",
+            "max_age_ms": "10"
+        });
+        let (status, configured) =
+            put_retention_to_current_leader(&cluster, &client, &configure).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(configured["receipt"]["mode"], "configure");
+        assert_eq!(configured["receipt"]["policy"]["max_age_ms"], 10);
+
+        let (status, appended) = post_to_current_leader(&cluster, &client, &append_body(1)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(appended["receipt"]["offset"], "0");
+        for node in &cluster.nodes {
+            node.clock.set_wall_time_ms(1_010);
+        }
+        let maintain = json!({
+            "idempotency_key": "retention-sweep-1010",
+            "expected_term": "0"
+        });
+        let (status, maintained) =
+            post_retention_maintenance_to_current_leader(&cluster, &client, &maintain).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(maintained["receipt"]["mode"], "maintain");
+        assert_eq!(maintained["receipt"]["removed_records"], 1);
+        assert_eq!(maintained["receipt"]["base_offset"], "1");
+
+        assert_retention_on_every_voter(&cluster, &client, "1", "1", 0).await;
+        let (leader, _) = cluster.leader().await;
+        cluster.nodes[leader]
+            .runtime
+            .handle()
+            .checkpoint()
+            .await
+            .expect("retained Stream boundary should checkpoint");
+        cluster.shutdown().await;
+
+        let reopened = RunningTabletCluster::start(&paths).await;
+        assert_retention_on_every_voter(&reopened, &client, "1", "1", 0).await;
         reopened.shutdown().await;
     }
 
@@ -2053,6 +2327,80 @@ mod tests {
         .expect("an exact group mutation should resolve under stable leadership")
     }
 
+    async fn put_retention_to_current_leader(
+        cluster: &RunningTabletCluster,
+        client: &reqwest::Client,
+        request: &Value,
+    ) -> (StatusCode, Value) {
+        submit_retention_to_current_leader(cluster, client, request, true).await
+    }
+
+    async fn post_retention_maintenance_to_current_leader(
+        cluster: &RunningTabletCluster,
+        client: &reqwest::Client,
+        request: &Value,
+    ) -> (StatusCode, Value) {
+        submit_retention_to_current_leader(cluster, client, request, false).await
+    }
+
+    async fn submit_retention_to_current_leader(
+        cluster: &RunningTabletCluster,
+        client: &reqwest::Client,
+        request: &Value,
+        configure: bool,
+    ) -> (StatusCode, Value) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let (leader, term) = cluster.leader().await;
+                let mut attempt = request.clone();
+                attempt["expected_term"] = json!(term);
+                let builder = if configure {
+                    client.put(retention_url_for(&cluster.nodes[leader]))
+                } else {
+                    client.post(retention_maintenance_url_for(&cluster.nodes[leader]))
+                };
+                let response = builder.json(&attempt).send().await.unwrap();
+                let status = response.status();
+                let document: Value = response.json().await.unwrap();
+                if is_retryable_leadership_response(status, &document) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    continue;
+                }
+                return (status, document);
+            }
+        })
+        .await
+        .expect("an exact retention mutation should resolve under stable leadership")
+    }
+
+    async fn assert_retention_on_every_voter(
+        cluster: &RunningTabletCluster,
+        client: &reqwest::Client,
+        expected_base: &str,
+        expected_end: &str,
+        expected_records: usize,
+    ) {
+        for node in &cluster.nodes {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let response = client.get(retention_url_for(node)).send().await.unwrap();
+                    let document: Value = response.json().await.unwrap();
+                    if document["retention"]["base_offset"] == expected_base
+                        && document["retention"]["end_offset"] == expected_end
+                    {
+                        assert_eq!(document["retention"]["retained_records"], expected_records);
+                        assert_eq!(document["retention"]["retention_watermark_ms"], "1010");
+                        assert_eq!(document["retention"]["policy"]["max_age_ms"], 10);
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("every voter should expose the committed retention boundary");
+        }
+    }
+
     fn is_retryable_leadership_response(status: StatusCode, document: &Value) -> bool {
         (status == StatusCode::SERVICE_UNAVAILABLE
             && document["error"]["code"] == "not_leader"
@@ -2176,6 +2524,18 @@ mod tests {
     fn group_records_url_for(node: &RunningTabletNode) -> Url {
         node.base_url
             .join("experimental/v1/tablets/stream/groups/billing/records")
+            .unwrap()
+    }
+
+    fn retention_url_for(node: &RunningTabletNode) -> Url {
+        node.base_url
+            .join(EXPERIMENTAL_STREAM_TABLET_RETENTION_PATH.trim_start_matches('/'))
+            .unwrap()
+    }
+
+    fn retention_maintenance_url_for(node: &RunningTabletNode) -> Url {
+        node.base_url
+            .join(EXPERIMENTAL_STREAM_TABLET_RETENTION_MAINTENANCE_PATH.trim_start_matches('/'))
             .unwrap()
     }
 

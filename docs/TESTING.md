@@ -188,6 +188,20 @@ rejected outcomes across three voters and reopens every EPRS history. This
 proves replicated checkpoints, not automatic join/heartbeat/assignment or a
 complete group-coordinator fault matrix.
 
+The Stream-retention corpus adds canonical command v4 while pinning v1/v2/v3
+bytes and operation kinds. Core tests cover the inclusive time boundary,
+canonical retained bytes, oldest-first combined policies, oversized-record
+rollback, dedupe reclamation, monotonic time, stale checkpoint reporting, and
+snapshot validation. Tablet tests pin exact v4 bytes and deterministic digests;
+the node test commits through three real EPRS-backed voters, advances explicit
+maintenance, compares every retained boundary, checkpoints, reopens all voter
+paths, and verifies the same policy/base/end/watermark before readiness. SDK
+contract suites cover strict configure/maintain/observe requests in Go, Java,
+and Python. The regional container campaign runs the Python path and verifies
+the retained range through leader loss and same-volume recovery. This is not
+automatic retention scheduling, keyed compaction, or a production scale/fault
+matrix.
+
 Regional adapter tests cover the fully qualified Stream v1 route and its strict
 authorization actions/scope. A handler-level regression sends a group lag read
 through both router layers: it first reproduced a real HTTP 500 caused by

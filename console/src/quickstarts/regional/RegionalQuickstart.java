@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.epoch.sdk.EventEnvelope;
 import io.epoch.sdk.RegionalScope;
 import io.epoch.sdk.RegionalStreamClient;
+import io.epoch.sdk.StreamRetentionPolicy;
+import java.math.BigInteger;
 import java.net.URI;
 import java.time.Duration;
 import java.util.Arrays;
@@ -51,6 +53,18 @@ public final class RegionalQuickstart {
             false,
             "docs-java-checkpoint-v1");
     JsonNode lag = client.lag("orders", 0, "docs-java");
+    JsonNode configured =
+        client.configureRetention(
+            "orders",
+            0,
+            "docs-java-retention-v1",
+            new StreamRetentionPolicy(
+                10_000,
+                BigInteger.valueOf(3L * 1024 * 1024),
+                BigInteger.valueOf(7L * 24 * 60 * 60 * 1_000)));
+    JsonNode maintained =
+        client.maintainRetention("orders", 0, "docs-java-retention-sweep-v1");
+    JsonNode retention = client.retention("orders", 0);
 
     ObjectNode output = MAPPER.createObjectNode();
     output.set("append", appended);
@@ -59,6 +73,9 @@ public final class RegionalQuickstart {
     output.set("group_fetch", groupRecords);
     output.set("checkpoint", checkpoint);
     output.set("lag", lag);
+    output.set("retention_configure", configured);
+    output.set("retention_maintenance", maintained);
+    output.set("retention", retention);
     System.out.println(MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(output));
   }
 
