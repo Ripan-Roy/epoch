@@ -76,13 +76,26 @@ docker compose -f deploy/compose/docker-compose.consensus-probe.yml \
   restart epoch-probe-1
 ```
 
+Create a durable local consensus checkpoint on one voter with:
+
+```shell
+curl --fail-with-body --request POST \
+  http://127.0.0.1:17701/experimental/v1/consensus/checkpoints
+```
+
+Status exposes `checkpoint_index` and `retained_log_first_index`. Creation
+fsyncs the canonical checkpoint before logically compacting the local Raft
+prefix. A lagging fixed voter can then install it and apply the retained tail.
+This endpoint is explicit and experimental; see
+[Consensus Checkpoints and Snapshot Catch-up](CONSENSUS_CHECKPOINTS.md).
+
 Stop the topology without deleting its three volumes:
 
 ```shell
 make compose-probe-down
 ```
 
-Run the disposable end-to-end election/failover/catch-up proof with:
+Run the disposable end-to-end checkpoint-catch-up/election/failover proof with:
 
 ```shell
 make test-consensus-probe
@@ -131,8 +144,8 @@ retains its explicit origin allowlist.
 ## Explicit non-claims
 
 The probe has static membership, plaintext unauthenticated transport, one
-fixed group, no snapshot installation, no compaction, no read barrier, no
-catalog-authorized epoch transition, and no public or production profile
+fixed group, no automatic checkpoint policy, no physical EPRS reclamation, no
+profile-native backup/PITR, no catalog-authorized epoch transition, and no public or production profile
 integration. The typed Stream, Queue, Cache, and Event Bus modes are bounded internal milestones,
 not a public durability contract. Default opaque-mode status reports:
 
@@ -144,6 +157,8 @@ not a public durability contract. Default opaque-mode status reports:
   "profile_replication": false,
   "profile_guarantee_ceiling": "local_durable",
   "peer_authentication": "none",
+  "checkpoint_index": 9,
+  "retained_log_first_index": 10,
   "outbound_transport": [
     {
       "peer_id": 2,

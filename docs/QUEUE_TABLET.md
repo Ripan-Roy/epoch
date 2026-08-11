@@ -368,7 +368,8 @@ still has no gRPC service, CLI, native bidirectional receive stream, connection-
 replenishment, automatic prefetch/fairness, automatic timer proposal, or
 production durability claim. It has one resource, one tablet, partition `0`,
 static configuration,
-unbounded in-memory idempotency and audit history, no snapshot or compaction,
+unbounded in-memory idempotency and audit history, no compact profile-native
+snapshot or physical EPRS reclamation,
 no catalog-authorized tablet epoch transition, dynamic placement, membership change,
 consumer-group/session coordinator, follower read routing, authenticated peer identity,
 token authentication, multi-tenant policy, or exhaustive crash/I/O matrix.

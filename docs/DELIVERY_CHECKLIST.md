@@ -1,8 +1,8 @@
 # Epoch Delivery Checklist
 
-**Last reviewed:** 6 August 2026
+**Last reviewed:** 11 August 2026
 **Current release:** `v0.1.0-alpha.3`
-**Current core target:** Regional Event Bus v1 and complete three-language SDK lifecycle
+**Current core target:** Durable consensus checkpoints, snapshot catch-up, and logical Raft-prefix compaction
 
 This is the operational checklist for turning PRD scope into verified,
 releasable increments. [PRD.md](PRD.md) owns product scope,
@@ -30,7 +30,7 @@ protected-branch evidence agree.
 |---|---|---:|---|---|
 | G0 | Semantic contracts | 🟡 | Versioned envelope, errors, durability, ordering, delivery, time, fencing, and transaction limits | [Semantics](SEMANTICS.md), [API contracts](API_CONTRACTS.md); transaction limits remain open |
 | G1 | Repository and deterministic foundation | 🟡 | Reproducible toolchains, generated contracts, deterministic clock/fault harness, cross-language build | [Development](DEVELOPMENT.md), [Testing](TESTING.md), CI; broader fuzz/formal harness remains open |
-| G2 | Storage and recovery | 🟡 | Checksummed formats, crash recovery, corruption policy, snapshots, compaction, retention, tiering | Segmented WAL and EPRS pass; snapshots, compaction, tiering, and restore campaigns remain open |
+| G2 | Storage and recovery | 🟡 | Checksummed formats, crash recovery, corruption policy, snapshots, compaction, retention, tiering | Segmented WAL, EPRS, bounded consensus checkpoints, logical Raft-prefix compaction, checkpoint-plus-tail reopen, and fixed-voter snapshot catch-up pass locally; profile snapshots, physical reclamation, retention, tiering, backup/PITR, and restore campaigns remain open |
 | G3 | Consensus, catalog, and placement | 🟡 | Quorum safety, persistent catalog, multi-group supervision, membership, placement, repair, read barriers | Dedicated catalog consensus, shared multi-group supervision, deterministic materialization, authenticated fixed-voter region/zone/class validation, limiting group-capacity admission, fenced routing, safe leader ReadIndex barriers, leader replacement, and same-volume recovery pass locally; dynamic membership/voter selection, rack placement, transfer/repair, follower reads, and broader model evidence remain open |
 | G4 | Native profile cores | 🟡 | Cache, Stream, Queue, and Bus P0 semantics with truthful public routing and fault evidence | All four typed tablet cores run simultaneously behind resource/shard routing and pass process/container recovery; all four have authenticated versioned three-language clients. External Event Bus target execution and remaining P0 breadth are open |
 | G5 | Trust and observability | 🟡 | Identity, authorization, TLS/mTLS, encryption, audit, telemetry, quotas, explain | Shared Go/Rust bootstrap authentication, scoped action authorization, collection isolation, session-only console credential, and credential-free decision logs pass protected `main` CI; OIDC, expiry/revocation, TLS/mTLS/peer identity, encryption, replicated policy, immutable audit export, telemetry, and quotas remain open |
@@ -188,14 +188,27 @@ complete.
 
 | ID | Checklist item | Boundary | State | Evidence / acceptance |
 |---|---|---|---:|---|
-| RBU-01 | Freeze the fully qualified Event Bus route and lifecycle contract | API + ADR | 🟡 | ADR-0020 defines discovery, fences, subscription delivery policy, ingress, archive, delivery leases and settlement, linearizable reads, same-key bounded rediscovery, and target-executor non-claims |
-| RBU-02 | Authenticate and authorize the exact tenant scope | Rust ingress | 🟡 | Strict parsing accepts `buses`; unit and middleware tests cover discovery/read/write actions, query-shaped POST reads, missing credential, denied write, and cross-tenant denial |
-| RBU-03 | Adapt v1 to the existing replicated Event Bus tablet | Rust gateway | 🟡 | Versioned Event Bus routes delegate to the same materialized Bus router with generation/tablet fences, leader admission, ReadIndex barriers, and durable delivery outbox enabled; no Go proxy or second store exists |
-| RBU-04 | Implement the complete current lifecycle in three SDKs | Go + Java + Python | 🟡 | `RegionalBusClient` exposes subscription upsert/removal, publish, delivery acquire/ack/fail/maintenance, mutation lookup, archive replay, delivery query, and status with bounded delivery-policy models |
-| RBU-05 | Prove exact contracts and validation | SDK tests | 🟡 | Go, Java, and Python suites cover encoded paths, auth/fences/term, all lifecycle routes, exact caller keys, opaque lease tokens, linearizable GET and POST reads, delivery-policy serialization, and pre-network validation |
-| RBU-06 | Prove the SDK after Event Bus leader loss and full restart | Compose integration | 🟡 | Real Python exact publish, archive, acquire/fail/maintenance/reacquire/ack, acknowledged-query, subscription removal, nine-command survivor convergence, old-voter catch-up, and all-voter EPRS reopen pass locally; protected-branch evidence remains |
-| RBU-07 | Publish executable end-to-end docs | Docs + Pages | 🟡 | Event Bus guide, ADR, cross-cutting docs, exact Go/Java/Python programs, compile gate, navigation, and Pages content assertions pass locally; merge and live-bundle verification remain |
-| RBU-08 | Pass protected pull-request evidence | GitHub | ⬜ | Open the feature PR, pass required CI and Pages preview, squash-merge, then record exact-main CI, Pages deployment, and live URL evidence |
+| RBU-01 | Freeze the fully qualified Event Bus route and lifecycle contract | API + ADR | ✅ | ADR-0020 defines discovery, fences, subscription delivery policy, ingress, archive, delivery leases and settlement, linearizable reads, same-key bounded rediscovery, and target-executor non-claims |
+| RBU-02 | Authenticate and authorize the exact tenant scope | Rust ingress | ✅ | Strict parsing accepts `buses`; unit and middleware tests cover discovery/read/write actions, query-shaped POST reads, missing credential, denied write, and cross-tenant denial |
+| RBU-03 | Adapt v1 to the existing replicated Event Bus tablet | Rust gateway | ✅ | Versioned Event Bus routes delegate to the same materialized Bus router with generation/tablet fences, leader admission, ReadIndex barriers, and durable delivery outbox enabled; no Go proxy or second store exists |
+| RBU-04 | Implement the complete current lifecycle in three SDKs | Go + Java + Python | ✅ | `RegionalBusClient` exposes subscription upsert/removal, publish, delivery acquire/ack/fail/maintenance, mutation lookup, archive replay, delivery query, and status with bounded delivery-policy models |
+| RBU-05 | Prove exact contracts and validation | SDK tests | ✅ | Go, Java, and Python suites cover encoded paths, auth/fences/term, all lifecycle routes, exact caller keys, opaque lease tokens, linearizable GET and POST reads, delivery-policy serialization, and pre-network validation |
+| RBU-06 | Prove the SDK after Event Bus leader loss and full restart | Compose integration | ✅ | Real Python exact publish, archive, acquire/fail/maintenance/reacquire/ack, acknowledged-query, subscription removal, nine-command survivor convergence, old-voter catch-up, and all-voter EPRS reopen passed in exact-main CI run `31085110527` |
+| RBU-07 | Publish executable end-to-end docs | Docs + Pages | ✅ | Event Bus guide, ADR, cross-cutting docs, exact Go/Java/Python programs, compile gate, navigation, and content assertions passed main-only Pages run `31085110436`; the live bundle exposes the guide and all three SDK examples |
+| RBU-08 | Pass protected pull-request evidence | GitHub | ✅ | PR #53 was squash-merged as `b6fa972e`; exact-main CI `31085110527` and Pages `31085110436` passed and the live Pages bundle contained the Event Bus SDK guide and lifecycle example |
+
+## Current storage delivery: consensus checkpoints and snapshot catch-up
+
+| ID | Checklist item | Boundary | State | Evidence / acceptance |
+|---|---|---|---:|---|
+| CP-01 | Freeze checkpoint bytes, ordering, and non-claims | Format + ADR | 🟡 | EPSN v1 and ADR-0021 define canonical bytes, the 768 KiB ceiling, complete retry registry, fsync-before-install order, fixed voters, and backup/PITR/physical-reclamation non-claims; protected merge remains pending |
+| CP-02 | Preserve legacy EPRS histories | Rust storage | 🟡 | EPRS kinds 1/2 remain readable and byte-compatible; additive kind 3 embeds EPSN plus a contiguous tail; full local regression is pending final gates |
+| CP-03 | Create and reopen a durable compacted checkpoint | Rust consensus | 🟡 | Tests prove idempotent creation, no generation advance on exact retry, checkpoint-plus-committed-tail reopen, lookup/digest preservation, and retained-index status |
+| CP-04 | Enforce the stable barrier and corruption policy | Rust storage | 🟡 | Injected post-fsync failure fail-stops memory and reopens the durable result; malformed, foreign, wrong-voter/term, digest-corrupt, oversize, and noncontiguous images fail closed |
+| CP-05 | Catch up a lagging fixed voter through Raft snapshot | Rust consensus | 🟡 | Persistent harness isolates a voter, compacts the leader, commits a tail, heals, observes installation, and compares full history and digest |
+| CP-06 | Replace typed profile state before tail apply | Rust node + container | 🟡 | Three real HTTP runtimes stop a Catalog voter and prove replay-before-tail convergence across resources/tablets/digest; the Compose probe separately stops a container, checkpoints through HTTP, commits a tail, and verifies installed checkpoint/tail positions after restart |
+| CP-07 | Expose truthful operator evidence and documentation | API + Docs + Pages | 🟡 | Experimental POST trigger, local checkpoint/retained-first status, format/operations docs, traceability, changelog, and docs-site section are implemented; Pages evidence remains pending |
+| CP-08 | Pass full local and protected pull-request evidence | Quality + GitHub | 🟡 | `make check`, `make build`, the real multiprocess `SIGKILL` gate, and the enhanced three-container checkpoint-catch-up/failover campaign pass locally; PR checks, merge SHA, exact-main CI, and Pages evidence remain pending |
 
 ## Current security delivery: bootstrap trust baseline
 

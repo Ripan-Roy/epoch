@@ -395,6 +395,8 @@ fn status_is_browser_safe_and_truthful_about_retained_storage() {
         term: Term::new(u64::MAX),
         commit_index: LogIndex::new(u64::MAX),
         applied_index: LogIndex::new(u64::MAX - 1),
+        checkpoint_index: LogIndex::ZERO,
+        retained_log_first_index: LogIndex::new(1),
         voter_count: 3,
         fail_stopped: false,
     };

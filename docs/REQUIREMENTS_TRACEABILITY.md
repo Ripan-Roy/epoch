@@ -2,7 +2,7 @@
 
 This register turns the prioritized catalog in [PRD.md](./PRD.md) into a delivery and verification index. It is intentionally terse: the PRD remains the source of semantic detail, while this document owns milestone, dependency, status, and evidence tracking.
 
-Last synchronized with PRD version 0.3 on 5 August 2026.
+Last synchronized with PRD version 0.3 on 11 August 2026.
 
 ## How to use this register
 
@@ -67,9 +67,12 @@ The segmented standalone WAL supplies partial G2 evidence: configured physical
 rotation, checksummed v1 frames, single-writer ownership, global sequence
 validation, manifest-bounded active-suffix repair, restart replay, durable
 identity/topology checks, and crash-safe fresh-layout activation. Existing valid
-single-file journals remain on the legacy writer and are not migrated. G2
-remains open because profile snapshots, durable index rebuild, compaction,
-retention, and general production replica recovery are not implemented. The
+single-file journals remain on the legacy writer and are not migrated. The
+replicated core separately supplies a bounded canonical consensus checkpoint,
+logical Raft-prefix compaction, checkpoint-plus-tail reopen, and fixed-voter
+snapshot catch-up. G2 remains open because profile-native snapshots, durable
+derived-index rebuild, physical reclamation, retention, tiering, backup/PITR,
+and general production replica recovery are not implemented. The
 bounded EPRS and typed-profile recovery evidence is tracked separately below.
 
 The shared clock now distinguishes wall and process-local monotonic time, and
@@ -114,13 +117,18 @@ regional boundary now adds safe leader
 ReadIndex requests that require majority confirmation and local typed-profile
 application; default regional reads expose exact barrier evidence, explicit
 `local_stale` reads remain available, and a minority times out without
-downgrade. G3 remains open for the exhaustive crash matrix, snapshots,
+downgrade. Additive EPRS kind-3/EPSN v1 checkpoints now fsync before local or
+received installation, preserve the exact proposal registry, logically compact
+the Raft prefix, reopen with a committed tail, and let a lagging typed voter
+replay before tail application. G3 remains open for the exhaustive crash matrix,
 membership and authoritative epoch transitions, follower read routing,
 authenticated transport, dynamic placement/repair, model and chaos reports,
 density, and performance. See [Consensus Feasibility Spike](CONSENSUS_SPIKE.md),
 [ADR-0013](adr/0013-quorum-read-barriers.md),
 [ADR-0015](adr/0015-stream-batch-compression.md),
 [ADR-0016](adr/0016-stream-consumer-group-checkpoints.md),
+[ADR-0021](adr/0021-consensus-checkpoint-and-snapshot-installation.md),
+[Consensus Checkpoints](CONSENSUS_CHECKPOINTS.md),
 [Experimental Stream Tablet](STREAM_TABLET.md), and
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md), and
 [Experimental Replicated Cache Tablet](CACHE_TABLET.md), and
@@ -139,7 +147,7 @@ durability.
 | CACHE-005 | P0 | Pipeline, multiplex, batch, pool guidance | M1 → M2 | Slice | G1, G4 | Pending: ordering and throughput suite |
 | CACHE-006 | P0 | CAS, optimistic transaction, increment, fenced lock | M2 | Slice | G0, G3, G4 | Deterministic and real-runtime tests plus the authenticated Cache v1 route and complete Go/Java/Python clients cover non-ABA CAS, atomic transaction/rollback, checked increment/TTL, guarded locks, opaque-token renewal, current-term admission, leader loss, EPRS replay, convergence, and leader ReadIndex observations. Pending: concurrent history checker, follower routing, and production fault matrix |
 | CACHE-007 | P0 | Volatile, replicated-memory, quorum modes | M1 prototype → M2 | Slice | G0, G2, G3, G4 | Standalone volatile Cache remains separate; the regional Cache v1 path exposes the fixed-three-voter majority-persisted tablet through authenticated routing and proves post-leader-loss/all-voter replay without claiming a generally selectable public quorum profile. Pending: replicated-memory mode, named durability selection, and placement-aware durability fault matrix |
-| CACHE-008 | P1 | Snapshot, WAL restore, backup, PITR | M3 | Planned | G2, G5, G7 | Segmented WAL is not a Cache snapshot; pending: snapshot/backup/PITR implementation and restore drill |
+| CACHE-008 | P1 | Snapshot, WAL restore, backup, PITR | M3 | Planned | G2, G5, G7 | Consensus checkpoint/catch-up is a storage prerequisite but not a compact Cache image or backup; pending: Cache snapshot, backup/PITR implementation, catalog, and restore drill |
 | CACHE-009 | P1 | Explicitly lossy Pub/Sub and patterns | M3 | Planned | G0, G4, G6 | Pending: route and disconnect semantics suite |
 | CACHE-010 | P1 | Durable mutation change stream | M3 | Planned | G2, G4, G7 | Pending: mutation-to-offset reconciliation |
 | CACHE-011 | P2 | Bitmap, cardinality, probabilistic, geo types | M6 | Planned | G2, G4 | Pending: accuracy and persistence corpus |
@@ -215,9 +223,9 @@ durability.
 | MGD-001 | P1 | Serverless and dedicated choices | M4 | Planned | G4, G5, G8, G10 | Pending: topology/semantic/isolation matrix |
 | MGD-002 | P0 | Automatic placement and online rebalance | M1 prototype → M2 | Slice | G2, G3, G5 | The consensus-backed Rust catalog allocates stable tablet/group identities, the bounded supervisor materializes fixed three-voter profile groups, and Go validates policy-protected configured-endpoint region/zone/class plus incremental group capacity before catalog mutation while separating desired replicas from observed voters; pending: mTLS server identity, general voter selection, transactional reservation, dynamic membership, online transfer/rebalance, and production chaos report |
 | MGD-003 | P1 | Policy-bound multidimensional autoscaling | M4 | Planned | G5, G8 | Pending: hysteresis/headroom load report |
-| MGD-004 | P0 | Multi-zone replicas and failover | M1 prototype → M2 | Slice | G2, G3, G5 | Bounded fixed-voter evidence includes three policy-protected configured zones, catalog plus simultaneous Cache/Stream/Queue/Bus groups, EPRS persistence, real-process/container leader replacement, truthful two-voter degradation in the Go BFF, catch-up, minority non-commit, and all-voter `SIGKILL` replay; pending: mTLS server identity, rack constraints, dynamic membership, public durability policy, broader fault matrix, and failover SLO report |
+| MGD-004 | P0 | Multi-zone replicas and failover | M1 prototype → M2 | Slice | G2, G3, G5 | Bounded fixed-voter evidence includes three policy-protected configured zones, catalog plus simultaneous Cache/Stream/Queue/Bus groups, EPRS persistence, real-process/container leader replacement, truthful two-voter degradation in the Go BFF, entry and consensus-snapshot catch-up, minority non-commit, and all-voter `SIGKILL` replay; pending: mTLS server identity, rack constraints, dynamic membership, public durability policy, broader fault matrix, and failover SLO report |
 | MGD-005 | P1 | Geo DR, switch, promotion, failback | M4 → M5 | Planned | G3, G8, G9 | Pending: RPO/RTO and split-brain drill |
-| MGD-006 | P1 | Backup, validation, semantic PITR | M3 | Planned | G2, G5, G7, G8 | Pending: scheduled restore evidence |
+| MGD-006 | P1 | Backup, validation, semantic PITR | M3 | Planned | G2, G5, G7, G8 | Consensus checkpoints now prove fixed-voter catch-up only; pending: backup artifact/catalog, encryption, semantic PITR, retention, scheduled restore, and validation evidence |
 | MGD-007 | P1 | Guarded rolling upgrades | M5 | Planned | G3, G5, G6, G8, G10 | Pending: mixed-version stop/rollback drill |
 | MGD-008 | P0 | Unified workload identity and authorization | M2 baseline → M4 | Slice | G0, G5, G6 | A shared strict fingerprint-only bootstrap policy authenticates Go HTTP/gRPC, Go-to-Rust workload calls, and Rust regional HTTP; explicit actions plus organization/project/environment/namespace scopes fail closed and one Go/Rust corpus prevents evaluator drift. Pending: OIDC, short-lived/revocable credentials, mTLS/peer identity, replicated policy/ACLs, compatibility-protocol mapping, and the full authorization differential matrix |
 | MGD-009 | P1 | Private ingress and controlled egress | M4 | Planned | G5, G8 | Pending: cloud connectivity/isolation report |
@@ -289,7 +297,7 @@ durability.
 | PKG-001 | P0 | Selective four-profile Rust node | M1 scaffold → M4 complete | Slice | G1, G4, G10 | One binary retains all four standalone profiles, supports the earlier mutually exclusive single-group modes, and now runs catalog plus simultaneous Cache, Stream, Queue, and Event Bus groups through one bounded regional supervisor; pending: production role/profile selection, dynamic membership, resource budgets, and complete feature/config startup matrix |
 | PKG-002 | P0 | Shared engine/format standalone and cluster | M1 → M2 | Slice | G1, G2, G3, G10 | Checksummed segmented standalone format plus canonical typed Stream, Queue, Cache, and Event Bus commands applied from EPRS without a second clustered WAL; pending: supported standalone-to-cluster format/migration equivalence |
 | PKG-003 | P0 | Standalone without hosted Go services | M1 | Slice | G1, G2, G10 | Rust node restart/recovery test; pending: extended disconnected lifecycle suite |
-| PKG-004 | P0 | Three-node quorum/failover/placement | M1 prototype → M2 | Slice | G2, G3, G10 | Deterministic, real-process, and three-container evidence covers a dedicated catalog group, three authenticated zones, live group capacity, pre-catalog rejection, resource/shard routing, generation/epoch fencing, majority commit, leader loss, Go-observed degradation, catch-up, and same-volume all-node `SIGKILL` recovery; pending: dynamic membership/voter selection, rack placement, stable public APIs, exhaustive faults, and published SLO report |
+| PKG-004 | P0 | Three-node quorum/failover/placement | M1 prototype → M2 | Slice | G2, G3, G10 | Deterministic, real-process, and three-container evidence covers a dedicated catalog group, three authenticated zones, live group capacity, pre-catalog rejection, resource/shard routing, generation/epoch fencing, majority commit, leader loss, Go-observed degradation, entry and consensus-snapshot catch-up, and same-volume all-node `SIGKILL` recovery; pending: dynamic membership/voter selection, rack placement, stable public APIs, exhaustive faults, and published SLO report |
 | PKG-005 | P0 | OCI, Kubernetes dev, signed binaries | M1 dev → M2 | Slice | G1, G5, G10 | Pending: clean-install/signature/SBOM CI |
 | PKG-006 | P1 | Rust embedded engine with guarantee ceiling | M2 experimental → M3 | Planned | G0, G1, G2, G10 | Pending: lifecycle/persistence contract suite |
 | PKG-007 | P1 | Supervised sidecar/child for other languages | M2 → M3 | Planned | G1, G5, G10 | Pending: crash/isolation/upgrade matrix |

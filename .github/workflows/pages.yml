@@ -76,6 +76,8 @@ jobs:
           grep -Rq 'Regional Event Bus SDK' console/dist/assets
           grep -Rq 'Route, archive, lease, settle, and recover' console/dist/assets
           grep -Rq 'docs-python-bus-ack-v1' console/dist/assets
+          grep -Rq 'Checkpoint, compact, catch up, and reopen' console/dist/assets
+          grep -Rq 'retained_log_first_index' console/dist/assets
           grep -Rq 'Multi-tablet operations' console/dist/assets
           release_version="$(cat VERSION)"
           grep -RFq "v${release_version} release notes" console/dist/assets
