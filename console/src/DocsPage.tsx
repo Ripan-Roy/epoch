@@ -51,7 +51,7 @@ make compose-probe-up
 curl --fail --silent --show-error \
   http://127.0.0.1:17701/experimental/v1/consensus/status
 
-# Fsync a canonical checkpoint before logical Raft-prefix compaction
+# Fsync a native-profile checkpoint and atomically reclaim old EPRS generations
 curl --fail-with-body --request POST \
   http://127.0.0.1:17701/experimental/v1/consensus/checkpoints`;
 
@@ -961,11 +961,11 @@ export function DocsPage({ section }: DocsPageProps) {
                   <p className="eyebrow">FIXED-VOTER RECOVERY CORE</p>
                   <h2 id="consensus-recovery-title">Checkpoint, compact, catch up, and reopen.</h2>
                   <p>
-                    The replicated core can encode a bounded canonical <code>EPSN v1</code> checkpoint at one
-                    voter&apos;s applied Raft index, fsync it inside an additive EPRS record, then logically
-                    compact the prefix. A lagging fixed voter validates and persists that image, replaces its
-                    typed profile through deterministic replay, and applies the committed tail. Status keeps
-                    the local checkpoint and retained-log boundary visible.
+                    The replicated core can encode a bounded canonical <code>EPSN v2</code> image for Catalog,
+                    Stream, Queue, Cache, or Event Bus at one voter&apos;s applied Raft index. It fsyncs the
+                    checkpoint, atomically replaces the EPRS journal with one compacted baseline, then
+                    installs the logical snapshot. A lagging fixed voter validates and persists that native
+                    state before applying its retained committed tail. EPSN v1 remains readable.
                   </p>
                 </div>
               </div>
@@ -981,18 +981,19 @@ export function DocsPage({ section }: DocsPageProps) {
                 </article>
                 <article>
                   <span>FOLLOWER CATCH-UP</span>
-                  <strong>Profile replay completes before the retained tail applies.</strong>
+                  <strong>Native profile restore completes before the retained tail applies.</strong>
                   <p>
-                    Real HTTP runtimes prove a stopped Catalog voter installs the checkpoint and converges on
-                    later resources after its listener returns.
+                    Catalog proves lagging-voter snapshot-plus-tail catch-up, while all five profiles force a
+                    checkpoint and restore automatically in their real three-voter restart tests.
                   </p>
                 </article>
                 <article>
                   <span>EXACT BOUNDARY</span>
                   <strong>This is a consensus checkpoint, not a backup.</strong>
                   <p>
-                    The 768 KiB image retains complete proposal history. There is no profile-native compact
-                    image, PITR, physical EPRS reclamation, dynamic membership, or production repair yet.
+                    V2 bounds exact-retry metadata to 1,024 records and 1 MiB, caps profile bytes at 4 MiB and
+                    the complete image at 6 MiB, and reclaims older journal generations. It is not a
+                    downloadable backup, PITR, dynamic membership, or production repair workflow.
                   </p>
                 </article>
               </div>
@@ -1606,8 +1607,14 @@ export function DocsPage({ section }: DocsPageProps) {
                 <ReferenceCard
                   eyebrow="RECOVERY CORE"
                   title="Consensus checkpoints"
-                  description="EPSN bytes, fsync-before-install ordering, logical prefix compaction, lagging-voter catch-up, checkpoint-plus-tail reopen, and exact non-claims."
+                  description="EPSN v1/v2 bytes, native profile restore, bounded retry history, physical reclamation, lagging-voter catch-up, checkpoint-plus-tail reopen, and exact non-claims."
                   href={`${repositoryDocsUrl}/CONSENSUS_CHECKPOINTS.md`}
+                />
+                <ReferenceCard
+                  eyebrow="RECOVERY DESIGN"
+                  title="Native checkpoints and reclamation"
+                  description="Profile ownership, rolling digest and retry bounds, durable ordering, atomic EPRS replacement, required evidence, and backup/PITR non-claims."
+                  href={`${repositoryDocsUrl}/adr/0022-profile-native-checkpoints-and-physical-reclamation.md`}
                 />
                 <ReferenceCard
                   eyebrow="CLUSTER CORE"

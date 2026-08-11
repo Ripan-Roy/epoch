@@ -6,8 +6,10 @@ mod model;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use epoch_core::{DurabilityProfile, EpochError};
 use epoch_queue::{FencedLeaseTokenMetadata, LeaseFence, Queue, QueueConfig, QueueCounts};
+use serde::{Deserialize, Serialize};
 
 use crate::common::{AppliedCommand, validate_committed_command_scope};
 use crate::{
@@ -18,6 +20,9 @@ pub use command::*;
 use digest::{encode_auxiliary_state, initial_state_digest, transition_digest};
 use model::history_ids_as_decimal;
 pub use model::*;
+
+pub const QUEUE_TABLET_SNAPSHOT_FORMAT_VERSION: u16 = 1;
+pub const MAX_QUEUE_TABLET_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 struct QueueTabletBusinessState {
@@ -38,6 +43,31 @@ pub struct QueueTablet {
     last_applied_command_index: u64,
     last_applied_time_ms: u64,
     state_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VersionedQueueTabletSnapshot {
+    format_version: u16,
+    scope: QueueTabletScope,
+    queue_base64: String,
+    consumer_epochs: BTreeMap<String, u64>,
+    dead_letter_history: BTreeMap<u64, QueueTabletDeadLetterHistory>,
+    active_dead_letters: BTreeMap<String, u64>,
+    next_dead_letter_history_id: u64,
+    redrive_history: BTreeMap<u64, QueueTabletRedriveHistory>,
+    next_redrive_history_id: u64,
+    applied: Vec<QueueTabletAppliedSnapshot>,
+    last_applied_command_index: u64,
+    last_applied_time_ms: u64,
+    state_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueueTabletAppliedSnapshot {
+    proposal_id: u64,
+    applied: AppliedCommand<QueueTabletReceipt>,
 }
 
 impl QueueTablet {
@@ -175,6 +205,10 @@ impl QueueTablet {
         self.state.queue.counts()
     }
 
+    pub fn queue_config(&self) -> &QueueConfig {
+        self.state.queue.config()
+    }
+
     pub fn consumer_epoch(&self, consumer: &str) -> Option<u64> {
         self.state.consumer_epochs.get(consumer).copied()
     }
@@ -235,6 +269,229 @@ impl QueueTablet {
     pub fn state_digest(&self) -> [u8; 32] {
         self.state_digest
     }
+
+    pub fn encode_snapshot(&self, retained: &BTreeSet<u64>) -> TabletResult<Vec<u8>> {
+        let mut applied = self
+            .applied
+            .iter()
+            .filter(|(proposal_id, _)| retained.contains(proposal_id))
+            .map(|(proposal_id, applied)| QueueTabletAppliedSnapshot {
+                proposal_id: *proposal_id,
+                applied: applied.clone(),
+            })
+            .collect::<Vec<_>>();
+        if applied.len() != retained.len() {
+            return Err(TabletError::InvalidCommand(
+                "Queue snapshot retry set contains an unknown proposal".into(),
+            ));
+        }
+        applied.sort_by_key(|entry| entry.applied.metadata.log_index);
+        let queue = self
+            .state
+            .queue
+            .encode_snapshot()
+            .map_err(TabletError::Profile)?;
+        let encoded = serde_json::to_vec(&VersionedQueueTabletSnapshot {
+            format_version: QUEUE_TABLET_SNAPSHOT_FORMAT_VERSION,
+            scope: self.scope.clone(),
+            queue_base64: STANDARD_NO_PAD.encode(queue),
+            consumer_epochs: self.state.consumer_epochs.clone(),
+            dead_letter_history: self.state.dead_letter_history.clone(),
+            active_dead_letters: self.state.active_dead_letters.clone(),
+            next_dead_letter_history_id: self.state.next_dead_letter_history_id,
+            redrive_history: self.state.redrive_history.clone(),
+            next_redrive_history_id: self.state.next_redrive_history_id,
+            applied,
+            last_applied_command_index: self.last_applied_command_index,
+            last_applied_time_ms: self.last_applied_time_ms,
+            state_digest: self.state_digest,
+        })
+        .map_err(|error| TabletError::Encoding(error.to_string()))?;
+        if encoded.len() > MAX_QUEUE_TABLET_SNAPSHOT_BYTES {
+            return Err(TabletError::InvalidCommand(format!(
+                "Queue tablet snapshot is {} bytes; maximum is {MAX_QUEUE_TABLET_SNAPSHOT_BYTES}",
+                encoded.len()
+            )));
+        }
+        Ok(encoded)
+    }
+
+    pub fn decode_snapshot(
+        expected_scope: &QueueTabletScope,
+        encoded: &[u8],
+    ) -> TabletResult<Self> {
+        if encoded.len() > MAX_QUEUE_TABLET_SNAPSHOT_BYTES {
+            return Err(TabletError::InvalidCommand(format!(
+                "Queue tablet snapshot is {} bytes; maximum is {MAX_QUEUE_TABLET_SNAPSHOT_BYTES}",
+                encoded.len()
+            )));
+        }
+        let snapshot: VersionedQueueTabletSnapshot = serde_json::from_slice(encoded)
+            .map_err(|error| TabletError::Decoding(error.to_string()))?;
+        if snapshot.format_version != QUEUE_TABLET_SNAPSHOT_FORMAT_VERSION {
+            return Err(TabletError::InvalidCommand(format!(
+                "unsupported Queue tablet snapshot version {}",
+                snapshot.format_version
+            )));
+        }
+        if &snapshot.scope != expected_scope {
+            return Err(TabletError::InvalidCommand(
+                "Queue tablet snapshot scope is fenced".into(),
+            ));
+        }
+        snapshot.scope.validate()?;
+        if serde_json::to_vec(&snapshot)
+            .map_err(|error| TabletError::Encoding(error.to_string()))?
+            != encoded
+        {
+            return Err(TabletError::InvalidCommand(
+                "Queue tablet snapshot is not canonical".into(),
+            ));
+        }
+
+        let queue_bytes = STANDARD_NO_PAD
+            .decode(&snapshot.queue_base64)
+            .map_err(|error| TabletError::Decoding(error.to_string()))?;
+        let queue = Queue::decode_snapshot(&queue_bytes).map_err(TabletError::Profile)?;
+        if queue.config().durability != DurabilityProfile::Volatile {
+            return Err(TabletError::InvalidCommand(
+                "Queue tablet snapshot engine durability is invalid".into(),
+            ));
+        }
+        validate_queue_snapshot_auxiliary(&queue, &snapshot)?;
+
+        let mut applied = BTreeMap::new();
+        let mut previous_index = 0_u64;
+        for entry in snapshot.applied {
+            let metadata = entry.applied.metadata;
+            let receipt = &entry.applied.receipt;
+            if entry.proposal_id == 0
+                || metadata.proposal_id != entry.proposal_id
+                || metadata.term == 0
+                || metadata.log_index <= previous_index
+                || metadata.log_index > snapshot.last_applied_command_index
+                || receipt.proposal_id != entry.proposal_id
+                || receipt.tablet_id != expected_scope.tablet_id
+                || receipt.tablet_epoch != expected_scope.tablet_epoch
+                || receipt.term != metadata.term
+                || receipt.commit_index != metadata.log_index
+                || receipt.applied_at_ms > snapshot.last_applied_time_ms
+                || receipt.write_evidence != TabletWriteEvidence::FixedVoterMajorityPersisted
+                || receipt.durable_voter_acks != 2
+                || applied.insert(entry.proposal_id, entry.applied).is_some()
+            {
+                return Err(TabletError::InvalidCommand(
+                    "Queue tablet snapshot retry registry is invalid".into(),
+                ));
+            }
+            previous_index = metadata.log_index;
+        }
+        if snapshot.last_applied_command_index == 0
+            && (snapshot.last_applied_time_ms != 0 || !applied.is_empty())
+        {
+            return Err(TabletError::InvalidCommand(
+                "Queue tablet snapshot application position is invalid".into(),
+            ));
+        }
+
+        Ok(Self {
+            scope: snapshot.scope,
+            state: QueueTabletBusinessState {
+                queue,
+                consumer_epochs: snapshot.consumer_epochs,
+                dead_letter_history: snapshot.dead_letter_history,
+                active_dead_letters: snapshot.active_dead_letters,
+                next_dead_letter_history_id: snapshot.next_dead_letter_history_id,
+                redrive_history: snapshot.redrive_history,
+                next_redrive_history_id: snapshot.next_redrive_history_id,
+            },
+            applied,
+            last_applied_command_index: snapshot.last_applied_command_index,
+            last_applied_time_ms: snapshot.last_applied_time_ms,
+            state_digest: snapshot.state_digest,
+        })
+    }
+}
+
+fn validate_queue_snapshot_auxiliary(
+    queue: &Queue,
+    snapshot: &VersionedQueueTabletSnapshot,
+) -> TabletResult<()> {
+    for (consumer, epoch) in &snapshot.consumer_epochs {
+        command::validate_consumer_name(consumer)?;
+        if *epoch == 0 {
+            return Err(TabletError::InvalidCommand(
+                "Queue tablet snapshot has a zero consumer epoch".into(),
+            ));
+        }
+    }
+
+    if u64::try_from(snapshot.dead_letter_history.len()).ok()
+        != Some(snapshot.next_dead_letter_history_id)
+        || snapshot.dead_letter_history.iter().enumerate().any(
+            |(position, (history_id, record))| {
+                u64::try_from(position + 1).ok() != Some(*history_id)
+                    || record.history_id != *history_id
+                    || record.recorded_term == 0
+                    || record.recorded_commit_index == 0
+                    || record.source_proposal_id == 0
+                    || record.dead_letter.message_id.trim().is_empty()
+                    || record.dead_letter.reason.trim().is_empty()
+            },
+        )
+    {
+        return Err(TabletError::InvalidCommand(
+            "Queue tablet snapshot dead-letter history is invalid".into(),
+        ));
+    }
+    let active_letters = queue.dead_letters(usize::MAX);
+    if active_letters.len() != snapshot.active_dead_letters.len() {
+        return Err(TabletError::InvalidCommand(
+            "Queue tablet snapshot active dead-letter registry is invalid".into(),
+        ));
+    }
+    for letter in active_letters {
+        let Some(history_id) = snapshot.active_dead_letters.get(&letter.message_id) else {
+            return Err(TabletError::InvalidCommand(
+                "Queue tablet snapshot active dead-letter registry is invalid".into(),
+            ));
+        };
+        let Some(history) = snapshot.dead_letter_history.get(history_id) else {
+            return Err(TabletError::InvalidCommand(
+                "Queue tablet snapshot active dead-letter registry is invalid".into(),
+            ));
+        };
+        if history.dead_letter != QueueTabletDeadLetter::from(letter) {
+            return Err(TabletError::InvalidCommand(
+                "Queue tablet snapshot active dead-letter evidence disagrees with the engine"
+                    .into(),
+            ));
+        }
+    }
+
+    if u64::try_from(snapshot.redrive_history.len()).ok() != Some(snapshot.next_redrive_history_id)
+        || snapshot
+            .redrive_history
+            .iter()
+            .enumerate()
+            .any(|(position, (history_id, record))| {
+                u64::try_from(position + 1).ok() != Some(*history_id)
+                    || record.history_id != *history_id
+                    || record.dead_letter_history_id == 0
+                    || !snapshot
+                        .dead_letter_history
+                        .contains_key(&record.dead_letter_history_id)
+                    || record.message_id.trim().is_empty()
+                    || record.source_proposal_id == 0
+                    || record.recorded_term == 0
+                    || record.recorded_commit_index == 0
+            })
+    {
+        return Err(TabletError::InvalidCommand(
+            "Queue tablet snapshot redrive history is invalid".into(),
+        ));
+    }
+    Ok(())
 }
 
 impl QueueTabletBusinessState {

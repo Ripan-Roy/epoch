@@ -17,6 +17,8 @@ const MAX_SHARDS_PER_RESOURCE: u32 = 4_096;
 const MAX_REPLICAS_PER_TABLET: u16 = 9;
 const MAX_COMMAND_BYTES: usize = 512 * 1024;
 pub const CATALOG_COMMAND_FORMAT_VERSION: u16 = 1;
+pub const CATALOG_SNAPSHOT_FORMAT_VERSION: u16 = 1;
+pub const MAX_CATALOG_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 
 pub type CatalogResult<T> = Result<T, CatalogError>;
 
@@ -87,6 +89,14 @@ pub enum CatalogError {
     UnsupportedCommandVersion(u16),
     #[error("catalog command is not in canonical v1 encoding")]
     NonCanonicalCommand,
+    #[error("unsupported catalog snapshot format version {0}")]
+    UnsupportedSnapshotVersion(u16),
+    #[error("catalog snapshot is not in canonical v1 encoding")]
+    NonCanonicalSnapshot,
+    #[error("catalog snapshot state digest does not match its contents")]
+    SnapshotDigestMismatch,
+    #[error("catalog snapshot exceeds the {MAX_CATALOG_SNAPSHOT_BYTES}-byte limit")]
+    SnapshotTooLarge,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -331,21 +341,21 @@ pub struct TabletRoute {
     pub tablet: TabletDescriptor,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CompletedRequest {
     command: CatalogCommand,
     mutation: CatalogMutation,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResourceGeneration {
     name: ResourceName,
     generation: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogSnapshot {
     resources: Vec<ResourceRecord>,
@@ -354,6 +364,14 @@ pub struct CatalogSnapshot {
     next_consensus_group_id: u64,
     reserved_consensus_group_ids: Vec<u64>,
     completed_requests: BTreeMap<String, CompletedRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VersionedCatalogSnapshot {
+    format_version: u16,
+    state_digest: [u8; 32],
+    snapshot: CatalogSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -461,6 +479,10 @@ impl Catalog {
         self.tablet_index.len()
     }
 
+    pub fn is_consensus_group_reserved(&self, group_id: u64) -> bool {
+        self.reserved_consensus_group_ids.contains(&group_id)
+    }
+
     pub fn snapshot(&self) -> CatalogSnapshot {
         CatalogSnapshot {
             resources: self.resources.values().cloned().collect(),
@@ -495,6 +517,70 @@ impl Catalog {
         );
         hasher.update(encoded);
         Ok(hasher.finalize().into())
+    }
+
+    pub fn encode_snapshot(&self) -> CatalogResult<Vec<u8>> {
+        let encoded = serde_json::to_vec(&VersionedCatalogSnapshot {
+            format_version: CATALOG_SNAPSHOT_FORMAT_VERSION,
+            state_digest: self.state_digest()?,
+            snapshot: self.snapshot(),
+        })
+        .map_err(|error| CatalogError::Encoding(error.to_string()))?;
+        if encoded.len() > MAX_CATALOG_SNAPSHOT_BYTES {
+            return Err(CatalogError::SnapshotTooLarge);
+        }
+        Ok(encoded)
+    }
+
+    pub fn decode_snapshot(encoded: &[u8]) -> CatalogResult<Self> {
+        if encoded.len() > MAX_CATALOG_SNAPSHOT_BYTES {
+            return Err(CatalogError::SnapshotTooLarge);
+        }
+        let envelope: VersionedCatalogSnapshot = serde_json::from_slice(encoded)
+            .map_err(|error| CatalogError::Decoding(error.to_string()))?;
+        if envelope.format_version != CATALOG_SNAPSHOT_FORMAT_VERSION {
+            return Err(CatalogError::UnsupportedSnapshotVersion(
+                envelope.format_version,
+            ));
+        }
+        let catalog = Self::from_snapshot(envelope.snapshot)?;
+        if catalog.state_digest()? != envelope.state_digest {
+            return Err(CatalogError::SnapshotDigestMismatch);
+        }
+        if catalog.encode_snapshot()?.as_slice() != encoded {
+            return Err(CatalogError::NonCanonicalSnapshot);
+        }
+        Ok(catalog)
+    }
+
+    fn from_snapshot(snapshot: CatalogSnapshot) -> CatalogResult<Self> {
+        let reserved_consensus_group_ids = snapshot
+            .reserved_consensus_group_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        validate_snapshot_identity(&snapshot)?;
+        let restored =
+            restore_snapshot_resources(&snapshot.resources, &reserved_consensus_group_ids)?;
+        let last_generations =
+            restore_snapshot_generations(&snapshot.last_generations, &restored.resources)?;
+        validate_snapshot_high_water_marks(
+            snapshot.next_tablet_id,
+            snapshot.next_consensus_group_id,
+            &restored.tablet_index,
+            &restored.allocated_groups,
+        )?;
+        validate_completed_requests(&snapshot.completed_requests)?;
+
+        Ok(Self {
+            resources: restored.resources,
+            last_generations,
+            tablet_index: restored.tablet_index,
+            next_tablet_id: snapshot.next_tablet_id,
+            next_consensus_group_id: snapshot.next_consensus_group_id,
+            reserved_consensus_group_ids,
+            completed_requests: snapshot.completed_requests,
+        })
     }
 
     fn apply_resource(&mut self, request: &ApplyResource) -> CatalogResult<CatalogMutation> {
@@ -678,6 +764,210 @@ fn validate_name_component(label: &str, value: &str) -> CatalogResult<()> {
         return Err(CatalogError::InvalidName(format!(
             "{label} cannot contain '/'"
         )));
+    }
+    Ok(())
+}
+
+struct RestoredCatalogResources {
+    resources: BTreeMap<ResourceName, ResourceRecord>,
+    tablet_index: BTreeMap<u64, (ResourceName, u32)>,
+    allocated_groups: BTreeSet<u64>,
+}
+
+fn validate_snapshot_identity(snapshot: &CatalogSnapshot) -> CatalogResult<()> {
+    if snapshot.next_tablet_id == 0 || snapshot.next_consensus_group_id == 0 {
+        return Err(CatalogError::InvalidSpec(
+            "catalog snapshot identity high-water marks must be nonzero".into(),
+        ));
+    }
+    validate_strictly_sorted(
+        &snapshot.reserved_consensus_group_ids,
+        "reserved consensus group IDs",
+    )?;
+    if snapshot
+        .reserved_consensus_group_ids
+        .first()
+        .is_some_and(|group_id| *group_id == 0)
+    {
+        return Err(CatalogError::InvalidSpec(
+            "reserved consensus group IDs must be nonzero".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn restore_snapshot_resources(
+    snapshot_resources: &[ResourceRecord],
+    reserved_groups: &BTreeSet<u64>,
+) -> CatalogResult<RestoredCatalogResources> {
+    let mut restored = RestoredCatalogResources {
+        resources: BTreeMap::new(),
+        tablet_index: BTreeMap::new(),
+        allocated_groups: BTreeSet::new(),
+    };
+    let mut previous_resource: Option<&ResourceName> = None;
+    for resource in snapshot_resources {
+        if previous_resource.is_some_and(|previous| previous >= &resource.name) {
+            return Err(CatalogError::InvalidSpec(
+                "catalog snapshot resources are not strictly sorted".into(),
+            ));
+        }
+        previous_resource = Some(&resource.name);
+        resource.name.validate()?;
+        resource.spec.validate(resource.name.kind)?;
+        if resource.generation == 0
+            || resource.tablets.len()
+                != usize::try_from(resource.spec.shard_count)
+                    .map_err(|_| CatalogError::IdentityExhausted)?
+        {
+            return Err(CatalogError::InvalidSpec(
+                "catalog snapshot resource generation or shard count is invalid".into(),
+            ));
+        }
+        restore_resource_tablets(resource, reserved_groups, &mut restored)?;
+        if restored
+            .resources
+            .insert(resource.name.clone(), resource.clone())
+            .is_some()
+        {
+            return Err(CatalogError::InvalidSpec(
+                "catalog snapshot contains duplicate resources".into(),
+            ));
+        }
+    }
+    Ok(restored)
+}
+
+fn restore_resource_tablets(
+    resource: &ResourceRecord,
+    reserved_groups: &BTreeSet<u64>,
+    restored: &mut RestoredCatalogResources,
+) -> CatalogResult<()> {
+    for (shard_index, tablet) in resource.tablets.iter().enumerate() {
+        let expected_shard =
+            u32::try_from(shard_index).map_err(|_| CatalogError::IdentityExhausted)?;
+        if tablet.tablet_id == 0
+            || tablet.consensus_group_id == 0
+            || tablet.tablet_epoch == 0
+            || tablet.shard_index != expected_shard
+            || tablet.resource_generation != resource.generation
+            || tablet.workload_profile != resource.spec.workload_profile
+            || tablet.replica_count != resource.spec.replica_count
+            || reserved_groups.contains(&tablet.consensus_group_id)
+        {
+            return Err(CatalogError::InvalidSpec(
+                "catalog snapshot contains an invalid tablet descriptor".into(),
+            ));
+        }
+        if restored
+            .tablet_index
+            .insert(
+                tablet.tablet_id,
+                (resource.name.clone(), tablet.shard_index),
+            )
+            .is_some()
+            || !restored.allocated_groups.insert(tablet.consensus_group_id)
+        {
+            return Err(CatalogError::InvalidSpec(
+                "catalog snapshot reuses a tablet or consensus-group identity".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn restore_snapshot_generations(
+    generations: &[ResourceGeneration],
+    resources: &BTreeMap<ResourceName, ResourceRecord>,
+) -> CatalogResult<BTreeMap<ResourceName, u64>> {
+    let mut restored = BTreeMap::new();
+    let mut previous_name: Option<&ResourceName> = None;
+    for generation in generations {
+        if previous_name.is_some_and(|previous| previous >= &generation.name)
+            || generation.generation == 0
+        {
+            return Err(CatalogError::InvalidSpec(
+                "catalog snapshot generations are invalid or unsorted".into(),
+            ));
+        }
+        previous_name = Some(&generation.name);
+        generation.name.validate()?;
+        if resources
+            .get(&generation.name)
+            .is_some_and(|resource| resource.generation > generation.generation)
+            || restored
+                .insert(generation.name.clone(), generation.generation)
+                .is_some()
+        {
+            return Err(CatalogError::InvalidSpec(
+                "catalog snapshot generation history is inconsistent".into(),
+            ));
+        }
+    }
+    if resources
+        .iter()
+        .any(|(name, resource)| restored.get(name) != Some(&resource.generation))
+    {
+        return Err(CatalogError::InvalidSpec(
+            "catalog snapshot omits a live resource generation".into(),
+        ));
+    }
+    Ok(restored)
+}
+
+fn validate_snapshot_high_water_marks(
+    next_tablet_id: u64,
+    next_group_id: u64,
+    tablet_index: &BTreeMap<u64, (ResourceName, u32)>,
+    allocated_groups: &BTreeSet<u64>,
+) -> CatalogResult<()> {
+    let max_tablet_id = tablet_index.keys().next_back().copied().unwrap_or(0);
+    let max_group_id = allocated_groups.iter().next_back().copied().unwrap_or(0);
+    if next_tablet_id <= max_tablet_id || next_group_id <= max_group_id {
+        return Err(CatalogError::InvalidSpec(
+            "catalog snapshot identity high-water mark would reuse an allocated identity".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_strictly_sorted(values: &[u64], label: &str) -> CatalogResult<()> {
+    if values.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(CatalogError::InvalidSpec(format!(
+            "catalog snapshot {label} are not strictly sorted"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_completed_requests(
+    completed_requests: &BTreeMap<String, CompletedRequest>,
+) -> CatalogResult<()> {
+    for (token, completed) in completed_requests {
+        validate_request_token(token)?;
+        if completed.command.request_token() != token {
+            return Err(CatalogError::InvalidSpec(
+                "catalog snapshot request token does not match its completed command".into(),
+            ));
+        }
+        completed.command.encode()?;
+        let consistent = match (&completed.command, &completed.mutation) {
+            (
+                CatalogCommand::Apply(request),
+                CatalogMutation::Applied {
+                    resource, replayed, ..
+                },
+            ) => resource.name == request.name && !replayed,
+            (CatalogCommand::Delete(request), CatalogMutation::Deleted { name, replayed, .. }) => {
+                name == &request.name && !replayed
+            }
+            _ => false,
+        };
+        if !consistent {
+            return Err(CatalogError::InvalidSpec(
+                "catalog snapshot completed request and mutation disagree".into(),
+            ));
+        }
     }
     Ok(())
 }

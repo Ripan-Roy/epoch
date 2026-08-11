@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    StreamTabletWriteEvidence, TabletError, TabletResult, common::serialize_u64_as_decimal,
+    StreamTabletWriteEvidence, TabletError, TabletResult,
+    common::{deserialize_u64_from_number_or_decimal, serialize_u64_as_decimal},
 };
 
 pub const STREAM_TABLET_GROUP_COMMAND_FORMAT_VERSION: u16 = 3;
@@ -29,21 +30,21 @@ pub enum StreamGroupOffsetMode {
     Reset,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamTabletGroupDisposition {
     New,
     Replayed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamTabletGroupOutcome {
     Applied,
     Rejected,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamTabletGroupRejection {
     OwnerMismatch,
@@ -55,35 +56,71 @@ pub enum StreamTabletGroupRejection {
     GroupCapacityReached,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamTabletGroupReceipt {
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub proposal_id: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub tablet_id: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub tablet_epoch: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub term: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub commit_index: u64,
     pub group: String,
     pub member_id: String,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub group_generation: u64,
     pub partition: u32,
     pub mode: StreamGroupOffsetMode,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub requested_next_offset: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub previous_offset: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub committed_offset: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub end_offset: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub lag: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub applied_at_ms: u64,
     pub outcome: StreamTabletGroupOutcome,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -115,7 +152,7 @@ pub struct StreamTabletGroupObservation {
     pub lag: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct StreamConsumerGroupOwner {
     pub member_id: String,
     pub generation: u64,
@@ -151,7 +188,11 @@ pub fn validate_stream_consumer_group(group: &str) -> TabletResult<()> {
     validate_bounded_identifier("consumer group", group, MAX_STREAM_CONSUMER_GROUP_BYTES)
 }
 
-fn validate_bounded_identifier(name: &str, value: &str, maximum: usize) -> TabletResult<()> {
+pub(crate) fn validate_bounded_identifier(
+    name: &str,
+    value: &str,
+    maximum: usize,
+) -> TabletResult<()> {
     if value.trim().is_empty() {
         return Err(TabletError::InvalidCommand(format!("{name} is required")));
     }

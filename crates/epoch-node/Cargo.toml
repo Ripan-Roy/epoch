@@ -8,6 +8,7 @@ authors.workspace = true
 
 [dependencies]
 axum.workspace = true
+base64.workspace = true
 clap.workspace = true
 epoch-bus = { path = "../epoch-bus" }
 epoch-cache = { path = "../epoch-cache" }

@@ -23,8 +23,9 @@ An opt-in regional alpha also runs a three-voter catalog plus several
 profile-specific consensus groups in each Rust node. It is fixed-topology
 engineering evidence, not a production or multi-zone guarantee. Its replicated
 core now supports bounded canonical consensus checkpoints, logical Raft-prefix
-compaction, lagging-voter snapshot catch-up, and checkpoint-plus-tail reopen;
-those are not profile backups, PITR, or physical EPRS space reclamation.
+compaction, lagging-voter snapshot catch-up, native Catalog/Stream/Queue/Cache/Bus
+state images, checkpoint-plus-tail reopen, and physical EPRS reclamation. These
+are internal voter-recovery primitives, not downloadable backups or PITR.
 
 ## Design boundaries
 
@@ -169,7 +170,7 @@ exact-retry, and linearizable-read contract as the other profiles. See the
 [consensus checkpoint guide](docs/CONSENSUS_CHECKPOINTS.md),
 [probe guide](docs/CONSENSUS_PROBE.md), [spike report](docs/CONSENSUS_SPIKE.md),
 and proposed [ADR-0003](docs/adr/0003-consensus-adapter.md). An exhaustive crash
-matrix, profile-native snapshots/backups, membership/epoch transitions, follower read routing,
+matrix, user-exportable snapshots/backups, membership/epoch transitions, follower read routing,
 authenticated peer transport, dynamic/zone-aware placement, and external Event
 Bus target execution remain open.
 

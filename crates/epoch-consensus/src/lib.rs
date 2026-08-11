@@ -4,8 +4,9 @@
 //! [`PersistentRaftAdapter`] journals each stable Raft transition and its
 //! publishable application checkpoint through Epoch's checksummed WAL before it
 //! releases persisted messages or commit receipts. The persistent adapter is
-//! still a fixed-voter feasibility slice: snapshots, compaction, membership
-//! changes, production transport, and node/API integration remain disabled.
+//! still a fixed-voter feasibility slice: it supports bounded native-profile
+//! snapshots and physical journal compaction, while membership changes,
+//! production transport, backup/PITR, and general repair remain disabled.
 
 mod stable;
 
@@ -37,9 +38,13 @@ const PEER_MESSAGE_VERSION: u16 = 1;
 const PEER_MESSAGE_HEADER_LEN: usize = 50;
 const STATE_DIGEST_MAGIC: [u8; 4] = *b"EPDG";
 const STATE_DIGEST_VERSION: u16 = 1;
+const ROLLING_STATE_DIGEST_VERSION: u16 = 2;
 const SNAPSHOT_MAGIC: [u8; 4] = *b"EPSN";
-const SNAPSHOT_VERSION: u16 = 1;
-const SNAPSHOT_HEADER_LEN: usize = 76;
+const SNAPSHOT_V1_VERSION: u16 = 1;
+const SNAPSHOT_V2_VERSION: u16 = 2;
+const SNAPSHOT_V1_HEADER_LEN: usize = 76;
+const SNAPSHOT_V2_HEADER_LEN: usize = 172;
+const SNAPSHOT_V2_TRAILER_LEN: usize = 32;
 const SNAPSHOT_PROPOSAL_FIXED_LEN: usize = 28;
 const HEARTBEAT_TICK: usize = 2;
 const ELECTION_TICK: usize = 10;
@@ -49,11 +54,19 @@ const MAX_PENDING_READ_BARRIERS: usize = 1_024;
 const READ_BARRIER_CONTEXT_BYTES: usize = 8;
 
 /// Maximum accepted size of a complete canonical Epoch peer-message frame.
-pub const MAX_PEER_MESSAGE_WIRE_BYTES: usize = 1024 * 1024;
+pub const MAX_PEER_MESSAGE_WIRE_BYTES: usize = 8 * 1024 * 1024;
 /// Maximum command payload accepted before it enters `RawNode`.
 pub const MAX_PROPOSAL_PAYLOAD_BYTES: usize = 512 * 1024;
 /// Maximum canonical Epoch checkpoint data carried inside one Raft snapshot.
-pub const MAX_SNAPSHOT_DATA_BYTES: usize = 768 * 1024;
+pub const MAX_SNAPSHOT_DATA_BYTES: usize = 6 * 1024 * 1024;
+/// Original EPSN v1 bound retained for byte- and behavior-compatible writes.
+pub const MAX_V1_SNAPSHOT_DATA_BYTES: usize = 768 * 1024;
+/// Maximum canonical profile payload embedded in an EPSN v2 checkpoint.
+pub const MAX_APPLICATION_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum exact-retry entries retained in an EPSN v2 checkpoint.
+pub const MAX_CHECKPOINT_RETRY_PROPOSALS: usize = 1_024;
+/// Maximum encoded exact-retry suffix retained in an EPSN v2 checkpoint.
+pub const MAX_CHECKPOINT_RETRY_BYTES: usize = 1024 * 1024;
 
 /// SHA-256 over the canonically framed applied Epoch state history.
 pub type StateDigest = [u8; 32];
@@ -546,6 +559,57 @@ pub struct InstalledCheckpoint {
     pub index: LogIndex,
     pub term: Term,
     pub proposals: Vec<CommittedProposal>,
+    pub application_snapshot: Option<ApplicationSnapshot>,
+}
+
+/// Opaque canonical state owned and validated by one typed profile runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplicationSnapshot {
+    checkpoint_index: LogIndex,
+    format_id: [u8; 16],
+    format_version: u16,
+    state_digest: StateDigest,
+    payload: Vec<u8>,
+}
+
+impl ApplicationSnapshot {
+    pub fn new(
+        checkpoint_index: LogIndex,
+        format_id: [u8; 16],
+        format_version: u16,
+        state_digest: StateDigest,
+        payload: Vec<u8>,
+    ) -> ConsensusResult<Self> {
+        let snapshot = Self {
+            checkpoint_index,
+            format_id,
+            format_version,
+            state_digest,
+            payload,
+        };
+        validate_application_snapshot(&snapshot)?;
+        Ok(snapshot)
+    }
+
+    pub const fn checkpoint_index(&self) -> LogIndex {
+        self.checkpoint_index
+    }
+
+    pub const fn format_id(&self) -> [u8; 16] {
+        self.format_id
+    }
+
+    pub const fn format_version(&self) -> u16 {
+        self.format_version
+    }
+
+    pub const fn state_digest(&self) -> StateDigest {
+        self.state_digest
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
 }
 
 pub trait ConsensusAdapter {
@@ -728,6 +792,12 @@ struct PlannedEntry {
     committed: Option<CommittedProposal>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StateDigestScheme {
+    CompleteHistoryV1,
+    RollingV2,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CheckpointImage {
     group_id: GroupId,
@@ -735,7 +805,9 @@ struct CheckpointImage {
     index: LogIndex,
     term: Term,
     state_digest: StateDigest,
+    applied_command_count: u64,
     applied: Vec<CommittedProposal>,
+    application_snapshot: Option<ApplicationSnapshot>,
 }
 
 /// A fixed-three-voter, in-memory adapter used only to establish the Epoch
@@ -749,6 +821,8 @@ pub struct InMemoryRaftAdapter {
     applied_index: LogIndex,
     applied: Vec<CommittedProposal>,
     state_digest: StateDigest,
+    state_digest_scheme: StateDigestScheme,
+    applied_command_count: u64,
     proposals: BTreeMap<ProposalId, TrackedProposal>,
     pending_read_barriers: BTreeMap<ReadBarrierId, PendingReadBarrier>,
     stable_generation: u64,
@@ -849,7 +923,7 @@ impl InMemoryRaftAdapter {
         stable: MemoryStableState,
         disk_store: Option<DiskStableStore>,
     ) -> ConsensusResult<Self> {
-        let proposals = validate_persisted_state(PersistedStateView {
+        let validated = validate_persisted_state(PersistedStateView {
             node_id: stable.node_id,
             group_id: stable.group_id,
             group_epoch: stable.group_epoch,
@@ -872,7 +946,9 @@ impl InMemoryRaftAdapter {
             applied_index: stable.applied_index,
             applied: stable.applied,
             state_digest: stable.state_digest,
-            proposals,
+            state_digest_scheme: validated.state_digest_scheme,
+            applied_command_count: validated.applied_command_count,
+            proposals: validated.proposals,
             pending_read_barriers: BTreeMap::new(),
             stable_generation: stable.stable_generation,
             disk_store,
@@ -929,9 +1005,47 @@ impl InMemoryRaftAdapter {
         &self.applied
     }
 
+    fn checkpoint_retry_proposals(&self) -> ConsensusResult<Vec<CommittedProposal>> {
+        self.ensure_healthy()?;
+        checkpoint_retry_suffix(&self.applied)
+    }
+
+    fn application_snapshot(&self) -> ConsensusResult<Option<ApplicationSnapshot>> {
+        self.raw_node
+            .store()
+            .snapshot
+            .as_ref()
+            .map(|snapshot| {
+                decode_checkpoint_image(snapshot.data.as_ref())
+                    .map(|image| image.application_snapshot)
+            })
+            .transpose()
+            .map(Option::flatten)
+    }
+
     /// Creates a durable checkpoint at the current applied index and compacts
     /// the local Raft prefix only after the stable-store barrier succeeds.
     pub fn checkpoint(&mut self) -> ConsensusResult<ConsensusCheckpoint> {
+        if self.state_digest_scheme == StateDigestScheme::RollingV2 {
+            return Err(ConsensusError::InvalidState(
+                "a profile-native adapter requires an application snapshot for every later checkpoint"
+                    .into(),
+            ));
+        }
+        self.checkpoint_with_optional_application(None)
+    }
+
+    pub fn checkpoint_with_application(
+        &mut self,
+        application_snapshot: ApplicationSnapshot,
+    ) -> ConsensusResult<ConsensusCheckpoint> {
+        self.checkpoint_with_optional_application(Some(application_snapshot))
+    }
+
+    fn checkpoint_with_optional_application(
+        &mut self,
+        application_snapshot: Option<ApplicationSnapshot>,
+    ) -> ConsensusResult<ConsensusCheckpoint> {
         self.ensure_healthy()?;
         if self.raw_node.has_ready() {
             return Err(ConsensusError::InvalidState(
@@ -943,24 +1057,22 @@ impl InMemoryRaftAdapter {
                 "cannot checkpoint an empty consensus history".into(),
             ));
         }
-        self.checkpoint_inner()
+        if let Some(application) = &application_snapshot
+            && application.checkpoint_index != self.applied_index
+        {
+            return Err(ConsensusError::InvalidState(format!(
+                "application snapshot index {} does not equal adapter applied index {}",
+                application.checkpoint_index, self.applied_index
+            )));
+        }
+        self.checkpoint_inner(application_snapshot)
     }
 
-    fn checkpoint_inner(&mut self) -> ConsensusResult<ConsensusCheckpoint> {
-        let term = Term::new(
-            self.raw_node
-                .store()
-                .term(self.applied_index.get())
-                .map_err(|error| ConsensusError::Storage(error.to_string()))?,
-        );
-        let image = CheckpointImage {
-            group_id: self.group_id,
-            group_epoch: self.group_epoch,
-            index: self.applied_index,
-            term,
-            state_digest: self.state_digest,
-            applied: self.applied.clone(),
-        };
+    fn checkpoint_inner(
+        &mut self,
+        application_snapshot: Option<ApplicationSnapshot>,
+    ) -> ConsensusResult<ConsensusCheckpoint> {
+        let image = self.build_checkpoint_image(application_snapshot)?;
         let snapshot = checkpoint_snapshot(&image, self.voters)?;
         let checkpoint = ConsensusCheckpoint {
             index: image.index,
@@ -969,10 +1081,76 @@ impl InMemoryRaftAdapter {
             encoded_bytes: snapshot.data.len(),
         };
         if self.raw_node.store().checkpoint_index() == image.index {
-            return Ok(checkpoint);
+            let existing = self
+                .raw_node
+                .store()
+                .snapshot
+                .as_ref()
+                .map(|snapshot| decode_checkpoint_image(snapshot.data.as_ref()))
+                .transpose()?;
+            if existing.as_ref() == Some(&image) {
+                return Ok(checkpoint);
+            }
+            return Err(ConsensusError::InvalidState(format!(
+                "checkpoint index {} already has a different durable image",
+                image.index
+            )));
         }
+        let (hard_state, tail) = self.checkpoint_storage_material(image.index)?;
+        let transaction =
+            self.persist_and_install_checkpoint(&image, snapshot, checkpoint, hard_state, &tail);
+        if let Err(error) = &transaction {
+            self.poisoned = Some(error.to_string());
+        }
+        transaction
+    }
 
-        let current_hard_state = self
+    fn build_checkpoint_image(
+        &self,
+        application_snapshot: Option<ApplicationSnapshot>,
+    ) -> ConsensusResult<CheckpointImage> {
+        let term = Term::new(
+            self.raw_node
+                .store()
+                .term(self.applied_index.get())
+                .map_err(|error| ConsensusError::Storage(error.to_string()))?,
+        );
+        let (state_digest, applied_command_count, applied) = if application_snapshot.is_some() {
+            let state_digest = match self.state_digest_scheme {
+                StateDigestScheme::CompleteHistoryV1 => {
+                    compute_rolling_state_digest(self.group_id, self.group_epoch, &self.applied)?
+                }
+                StateDigestScheme::RollingV2 => self.state_digest,
+            };
+            (
+                state_digest,
+                self.applied_command_count,
+                checkpoint_retry_suffix(&self.applied)?,
+            )
+        } else {
+            (
+                self.state_digest,
+                self.applied_command_count,
+                self.applied.clone(),
+            )
+        };
+        Ok(CheckpointImage {
+            group_id: self.group_id,
+            group_epoch: self.group_epoch,
+            index: self.applied_index,
+            term,
+            state_digest,
+            applied_command_count,
+            applied,
+            application_snapshot,
+        })
+    }
+
+    fn checkpoint_storage_material(
+        &self,
+        checkpoint_index: LogIndex,
+    ) -> ConsensusResult<(HardState, Vec<Entry>)> {
+        let hard_state = self
             .raw_node
             .store()
             .initial_state()
@@ -983,11 +1161,11 @@ impl InMemoryRaftAdapter {
             .store()
             .last_index()
             .map_err(|error| ConsensusError::Storage(error.to_string()))?;
-        let tail = if last_index > image.index.get() {
+        let tail = if last_index > checkpoint_index.get() {
             self.raw_node
                 .store()
                 .entries(
-                    image.index.get().checked_add(1).ok_or_else(|| {
+                    checkpoint_index.get().checked_add(1).ok_or_else(|| {
                         ConsensusError::InvalidState("checkpoint index overflow".into())
                     })?,
                     last_index.checked_add(1).ok_or_else(|| {
@@ -1000,46 +1178,66 @@ impl InMemoryRaftAdapter {
         } else {
             Vec::new()
         };
-        let stable_checkpoint = self.current_checkpoint();
+        Ok((hard_state, tail))
+    }
+
+    fn persist_and_install_checkpoint(
+        &mut self,
+        image: &CheckpointImage,
+        snapshot: Snapshot,
+        checkpoint: ConsensusCheckpoint,
+        hard_state: HardState,
+        tail: &[Entry],
+    ) -> ConsensusResult<ConsensusCheckpoint> {
+        let stable_checkpoint = StableCheckpoint {
+            applied_index: image.index,
+            publishable_index: image.index,
+            state_digest: image.state_digest,
+        };
         let generation = self.next_stable_generation()?;
-        let transaction = (|| {
-            if let Some(store) = self.disk_store.as_mut() {
-                let observed = store.persist_checkpoint(
-                    generation,
-                    &current_hard_state,
-                    &image,
-                    &tail,
-                    stable_checkpoint,
-                )?;
-                if observed != generation {
-                    return Err(ConsensusError::InvalidState(format!(
-                        "stable store returned generation {observed}; expected {generation}"
-                    )));
-                }
+        if let Some(store) = self.disk_store.as_mut() {
+            let observed = store.persist_checkpoint(
+                generation,
+                &hard_state,
+                image,
+                tail,
+                stable_checkpoint,
+            )?;
+            if observed != generation {
+                return Err(ConsensusError::InvalidState(format!(
+                    "stable store returned generation {observed}; expected {generation}"
+                )));
             }
-            self.stable_generation = generation;
-            self.raw_node
-                .mut_store()
-                .install_snapshot(snapshot, &tail, current_hard_state)?;
-            self.proposals = validate_persisted_state(PersistedStateView {
-                node_id: self.node_id,
-                group_id: self.group_id,
-                group_epoch: self.group_epoch,
-                voters: self.voters,
-                storage: self.raw_node.store(),
-                applied_index: self.applied_index,
-                applied: &self.applied,
-                state_digest: self.state_digest,
-            })?;
-            #[cfg(test)]
-            self.processing_trace
-                .push(ProcessingTrace::StableStoreBarrier(generation));
-            Ok(checkpoint)
-        })();
-        if let Err(error) = &transaction {
-            self.poisoned = Some(error.to_string());
         }
-        transaction
+        self.stable_generation = generation;
+        self.raw_node
+            .mut_store()
+            .install_snapshot(snapshot, tail, hard_state)?;
+        self.state_digest = image.state_digest;
+        self.state_digest_scheme = if image.application_snapshot.is_some() {
+            StateDigestScheme::RollingV2
+        } else {
+            StateDigestScheme::CompleteHistoryV1
+        };
+        self.applied_command_count = image.applied_command_count;
+        self.applied.clone_from(&image.applied);
+        let validated = validate_persisted_state(PersistedStateView {
+            node_id: self.node_id,
+            group_id: self.group_id,
+            group_epoch: self.group_epoch,
+            voters: self.voters,
+            storage: self.raw_node.store(),
+            applied_index: self.applied_index,
+            applied: &self.applied,
+            state_digest: self.state_digest,
+        })?;
+        self.proposals = validated.proposals;
+        self.state_digest_scheme = validated.state_digest_scheme;
+        self.applied_command_count = validated.applied_command_count;
+        #[cfg(test)]
+        self.processing_trace
+            .push(ProcessingTrace::StableStoreBarrier(generation));
+        Ok(checkpoint)
     }
 
     pub fn lookup_proposal(&self, proposal_id: ProposalId) -> ProposalLookup {
@@ -1303,7 +1501,7 @@ impl InMemoryRaftAdapter {
             self.submit_pending_read_barriers()?;
         }
 
-        self.proposals = validate_persisted_state(PersistedStateView {
+        let validated = validate_persisted_state(PersistedStateView {
             node_id: self.node_id,
             group_id: self.group_id,
             group_epoch: self.group_epoch,
@@ -1313,6 +1511,9 @@ impl InMemoryRaftAdapter {
             applied: &self.applied,
             state_digest: self.state_digest,
         })?;
+        self.proposals = validated.proposals;
+        self.state_digest_scheme = validated.state_digest_scheme;
+        self.applied_command_count = validated.applied_command_count;
         let read_barriers = self.take_completed_read_barriers()?;
 
         Ok(ConsensusOutput {
@@ -1383,9 +1584,11 @@ impl InMemoryRaftAdapter {
                 image.index, self.applied_index
             )));
         }
-        if image.applied.get(..self.applied.len()) != Some(self.applied.as_slice()) {
+        if image.application_snapshot.is_none()
+            && image.applied.get(..self.applied.len()) != Some(self.applied.as_slice())
+        {
             return Err(ConsensusError::InvalidState(
-                "incoming checkpoint does not extend the local applied history".into(),
+                "incoming v1 checkpoint does not extend the local applied history".into(),
             ));
         }
         let snapshot = ready.snapshot().clone();
@@ -1419,7 +1622,7 @@ impl InMemoryRaftAdapter {
         self.applied_index = image.index;
         self.state_digest = image.state_digest;
         self.applied.clone_from(&image.applied);
-        self.proposals = validate_persisted_state(PersistedStateView {
+        let validated = validate_persisted_state(PersistedStateView {
             node_id: self.node_id,
             group_id: self.group_id,
             group_epoch: self.group_epoch,
@@ -1429,6 +1632,9 @@ impl InMemoryRaftAdapter {
             applied: &self.applied,
             state_digest: self.state_digest,
         })?;
+        self.proposals = validated.proposals;
+        self.state_digest_scheme = validated.state_digest_scheme;
+        self.applied_command_count = validated.applied_command_count;
         #[cfg(test)]
         self.processing_trace
             .push(ProcessingTrace::StableStoreBarrier(generation));
@@ -1437,6 +1643,7 @@ impl InMemoryRaftAdapter {
             InstalledCheckpoint {
                 index: image.index,
                 term: image.term,
+                application_snapshot: image.application_snapshot.clone(),
                 proposals: image.applied,
             },
         ))
@@ -1519,16 +1726,35 @@ impl InMemoryRaftAdapter {
         let applied_index = planned
             .last()
             .map_or(self.applied_index, |entry| entry.log_index);
-        let mut projected_applied = self.applied.clone();
-        projected_applied.extend(planned.iter().filter_map(|entry| entry.committed.clone()));
+        let state_digest = match self.state_digest_scheme {
+            StateDigestScheme::CompleteHistoryV1 => {
+                let mut projected_applied = self.applied.clone();
+                projected_applied
+                    .extend(planned.iter().filter_map(|entry| entry.committed.clone()));
+                compute_state_digest(self.group_id, self.group_epoch, &projected_applied)?
+            }
+            StateDigestScheme::RollingV2 => {
+                let mut digest = self.state_digest;
+                for committed in planned.iter().filter_map(|entry| entry.committed.as_ref()) {
+                    digest = advance_rolling_state_digest(digest, committed)?;
+                }
+                digest
+            }
+        };
+        let unique_count = planned
+            .iter()
+            .filter(|entry| entry.committed.is_some())
+            .count();
+        let unique_count = u64::try_from(unique_count).map_err(|_| {
+            ConsensusError::InvalidState("committed batch command count is too large".into())
+        })?;
+        self.applied_command_count
+            .checked_add(unique_count)
+            .ok_or_else(|| ConsensusError::InvalidState("applied command count overflow".into()))?;
         Ok(StableCheckpoint {
             applied_index,
             publishable_index: applied_index,
-            state_digest: compute_state_digest(
-                self.group_id,
-                self.group_epoch,
-                &projected_applied,
-            )?,
+            state_digest,
         })
     }
 
@@ -1671,6 +1897,10 @@ impl InMemoryRaftAdapter {
                 );
                 self.applied.push(committed.clone());
                 new_commits.push(committed);
+                self.applied_command_count = self
+                    .applied_command_count
+                    .checked_add(1)
+                    .expect("validated applied command count must not overflow");
             }
             self.applied_index = planned_entry.log_index;
             #[cfg(test)]
@@ -1899,12 +2129,27 @@ impl PersistentRaftAdapter {
         self.inner.applied_proposals()
     }
 
+    pub fn checkpoint_retry_proposals(&self) -> ConsensusResult<Vec<CommittedProposal>> {
+        self.inner.checkpoint_retry_proposals()
+    }
+
+    pub fn application_snapshot(&self) -> ConsensusResult<Option<ApplicationSnapshot>> {
+        self.inner.application_snapshot()
+    }
+
     pub fn lookup_proposal(&self, proposal_id: ProposalId) -> ProposalLookup {
         self.inner.lookup_proposal(proposal_id)
     }
 
     pub fn checkpoint(&mut self) -> ConsensusResult<ConsensusCheckpoint> {
         self.inner.checkpoint()
+    }
+
+    pub fn checkpoint_with_application(
+        &mut self,
+        application_snapshot: ApplicationSnapshot,
+    ) -> ConsensusResult<ConsensusCheckpoint> {
+        self.inner.checkpoint_with_application(application_snapshot)
     }
 }
 
@@ -1984,6 +2229,76 @@ fn expected_conf_state(voters: [NodeId; 3]) -> ConfState {
     ))
 }
 
+fn validate_application_snapshot(snapshot: &ApplicationSnapshot) -> ConsensusResult<()> {
+    if snapshot.checkpoint_index == LogIndex::ZERO {
+        return Err(ConsensusError::InvalidState(
+            "application snapshot checkpoint index must be nonzero".into(),
+        ));
+    }
+    if snapshot.format_id == [0; 16] || snapshot.format_version == 0 {
+        return Err(ConsensusError::InvalidState(
+            "application snapshot format ID and version must be nonzero".into(),
+        ));
+    }
+    if snapshot.payload.len() > MAX_APPLICATION_SNAPSHOT_BYTES {
+        return Err(ConsensusError::CheckpointTooLarge {
+            observed_bytes: snapshot.payload.len(),
+            max_bytes: MAX_APPLICATION_SNAPSHOT_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn encoded_retry_bytes(applied: &[CommittedProposal]) -> ConsensusResult<usize> {
+    let mut bytes = 0_usize;
+    for proposal in applied {
+        if proposal.payload.len() > MAX_PROPOSAL_PAYLOAD_BYTES {
+            return Err(ConsensusError::InvalidState(format!(
+                "consensus checkpoint proposal payload is {} bytes; maximum is {MAX_PROPOSAL_PAYLOAD_BYTES}",
+                proposal.payload.len()
+            )));
+        }
+        bytes = bytes
+            .checked_add(SNAPSHOT_PROPOSAL_FIXED_LEN)
+            .and_then(|value| value.checked_add(proposal.payload.len()))
+            .ok_or_else(|| {
+                ConsensusError::InvalidState("consensus checkpoint length overflow".into())
+            })?;
+    }
+    Ok(bytes)
+}
+
+fn checkpoint_retry_suffix(
+    applied: &[CommittedProposal],
+) -> ConsensusResult<Vec<CommittedProposal>> {
+    let mut retained_bytes = 0_usize;
+    let mut retained_count = 0_usize;
+    let mut start = applied.len();
+    for proposal in applied.iter().rev() {
+        let proposal_bytes = SNAPSHOT_PROPOSAL_FIXED_LEN
+            .checked_add(proposal.payload.len())
+            .ok_or_else(|| {
+                ConsensusError::InvalidState("checkpoint retry length overflow".into())
+            })?;
+        if retained_count == MAX_CHECKPOINT_RETRY_PROPOSALS
+            || retained_bytes
+                .checked_add(proposal_bytes)
+                .is_none_or(|bytes| bytes > MAX_CHECKPOINT_RETRY_BYTES)
+        {
+            break;
+        }
+        retained_bytes += proposal_bytes;
+        retained_count += 1;
+        start -= 1;
+    }
+    if !applied.is_empty() && retained_count == 0 {
+        return Err(ConsensusError::InvalidState(
+            "the newest proposal does not fit the checkpoint retry budget".into(),
+        ));
+    }
+    Ok(applied[start..].to_vec())
+}
+
 fn validate_checkpoint_image(image: &CheckpointImage) -> ConsensusResult<()> {
     if image.index == LogIndex::ZERO || image.term == Term::ZERO {
         return Err(ConsensusError::InvalidState(
@@ -2005,50 +2320,82 @@ fn validate_checkpoint_image(image: &CheckpointImage) -> ConsensusResult<()> {
             "consensus checkpoint contains a zero-term proposal".into(),
         ));
     }
-    let expected_digest = compute_state_digest(image.group_id, image.group_epoch, &image.applied)?;
-    if image.state_digest != expected_digest {
-        return Err(ConsensusError::InvalidState(
-            "consensus checkpoint digest does not match its proposal history".into(),
-        ));
+    match &image.application_snapshot {
+        None => {
+            let applied_count = u64::try_from(image.applied.len()).map_err(|_| {
+                ConsensusError::InvalidState("consensus checkpoint history is too large".into())
+            })?;
+            if image.applied_command_count != applied_count {
+                return Err(ConsensusError::InvalidState(
+                    "EPSN v1 command count does not match its complete proposal history".into(),
+                ));
+            }
+            let expected_digest =
+                compute_state_digest(image.group_id, image.group_epoch, &image.applied)?;
+            if image.state_digest != expected_digest {
+                return Err(ConsensusError::InvalidState(
+                    "consensus checkpoint digest does not match its proposal history".into(),
+                ));
+            }
+        }
+        Some(application) => {
+            validate_application_snapshot(application)?;
+            if application.checkpoint_index != image.index {
+                return Err(ConsensusError::InvalidState(
+                    "application snapshot index does not match its consensus checkpoint".into(),
+                ));
+            }
+            let retry_count = u64::try_from(image.applied.len()).map_err(|_| {
+                ConsensusError::InvalidState("checkpoint retry history is too large".into())
+            })?;
+            if image.applied_command_count < retry_count {
+                return Err(ConsensusError::InvalidState(
+                    "checkpoint total command count is below its retry suffix count".into(),
+                ));
+            }
+            if image.applied.len() > MAX_CHECKPOINT_RETRY_PROPOSALS {
+                return Err(ConsensusError::InvalidState(format!(
+                    "checkpoint retry suffix has {} proposals; maximum is {MAX_CHECKPOINT_RETRY_PROPOSALS}",
+                    image.applied.len()
+                )));
+            }
+            let retry_bytes = encoded_retry_bytes(&image.applied)?;
+            if retry_bytes > MAX_CHECKPOINT_RETRY_BYTES {
+                return Err(ConsensusError::InvalidState(format!(
+                    "checkpoint retry suffix is {retry_bytes} bytes; maximum is {MAX_CHECKPOINT_RETRY_BYTES}"
+                )));
+            }
+        }
     }
     Ok(())
 }
 
 fn encode_checkpoint_image(image: &CheckpointImage) -> ConsensusResult<Vec<u8>> {
     validate_checkpoint_image(image)?;
+    if image.application_snapshot.is_some() {
+        encode_v2_checkpoint_image(image)
+    } else {
+        encode_v1_checkpoint_image(image)
+    }
+}
+
+fn encode_v1_checkpoint_image(image: &CheckpointImage) -> ConsensusResult<Vec<u8>> {
     let proposal_count = u32::try_from(image.applied.len()).map_err(|_| {
         ConsensusError::InvalidState("consensus checkpoint has too many proposals".into())
     })?;
-    let mut capacity = SNAPSHOT_HEADER_LEN;
-    for proposal in &image.applied {
-        let payload_len = u32::try_from(proposal.payload.len()).map_err(|_| {
-            ConsensusError::InvalidState(
-                "consensus checkpoint proposal exceeds its length field".into(),
-            )
-        })?;
-        if proposal.payload.len() > MAX_PROPOSAL_PAYLOAD_BYTES {
-            return Err(ConsensusError::InvalidState(format!(
-                "consensus checkpoint proposal payload is {} bytes; maximum is {MAX_PROPOSAL_PAYLOAD_BYTES}",
-                proposal.payload.len()
-            )));
-        }
-        capacity = capacity
-            .checked_add(SNAPSHOT_PROPOSAL_FIXED_LEN)
-            .and_then(|value| value.checked_add(payload_len as usize))
-            .ok_or_else(|| {
-                ConsensusError::InvalidState("consensus checkpoint length overflow".into())
-            })?;
-    }
-    if capacity > MAX_SNAPSHOT_DATA_BYTES {
+    let capacity = SNAPSHOT_V1_HEADER_LEN
+        .checked_add(encoded_retry_bytes(&image.applied)?)
+        .ok_or_else(|| ConsensusError::InvalidState("checkpoint length overflow".into()))?;
+    if capacity > MAX_V1_SNAPSHOT_DATA_BYTES {
         return Err(ConsensusError::CheckpointTooLarge {
             observed_bytes: capacity,
-            max_bytes: MAX_SNAPSHOT_DATA_BYTES,
+            max_bytes: MAX_V1_SNAPSHOT_DATA_BYTES,
         });
     }
 
     let mut encoded = Vec::with_capacity(capacity);
     encoded.extend_from_slice(&SNAPSHOT_MAGIC);
-    encoded.extend_from_slice(&SNAPSHOT_VERSION.to_be_bytes());
+    encoded.extend_from_slice(&SNAPSHOT_V1_VERSION.to_be_bytes());
     encoded.extend_from_slice(&0_u16.to_be_bytes());
     encoded.extend_from_slice(&image.group_id.get().to_be_bytes());
     encoded.extend_from_slice(&image.group_epoch.get().to_be_bytes());
@@ -2072,6 +2419,73 @@ fn encode_checkpoint_image(image: &CheckpointImage) -> ConsensusResult<Vec<u8>> 
     Ok(encoded)
 }
 
+fn encode_v2_checkpoint_image(image: &CheckpointImage) -> ConsensusResult<Vec<u8>> {
+    let application = image
+        .application_snapshot
+        .as_ref()
+        .expect("v2 encoder requires an application snapshot");
+    let proposal_count = u32::try_from(image.applied.len())
+        .map_err(|_| ConsensusError::InvalidState("checkpoint retry count exceeds u32".into()))?;
+    let payload_len = u32::try_from(application.payload.len()).map_err(|_| {
+        ConsensusError::InvalidState("application snapshot length exceeds u32".into())
+    })?;
+    let retry_bytes = encoded_retry_bytes(&image.applied)?;
+    let capacity = SNAPSHOT_V2_HEADER_LEN
+        .checked_add(application.payload.len())
+        .and_then(|value| value.checked_add(retry_bytes))
+        .and_then(|value| value.checked_add(SNAPSHOT_V2_TRAILER_LEN))
+        .ok_or_else(|| ConsensusError::InvalidState("checkpoint length overflow".into()))?;
+    if capacity > MAX_SNAPSHOT_DATA_BYTES {
+        return Err(ConsensusError::CheckpointTooLarge {
+            observed_bytes: capacity,
+            max_bytes: MAX_SNAPSHOT_DATA_BYTES,
+        });
+    }
+
+    let mut encoded = Vec::with_capacity(capacity);
+    encoded.extend_from_slice(&SNAPSHOT_MAGIC);
+    encoded.extend_from_slice(&SNAPSHOT_V2_VERSION.to_be_bytes());
+    encoded.extend_from_slice(&1_u16.to_be_bytes());
+    encoded.extend_from_slice(&image.group_id.get().to_be_bytes());
+    encoded.extend_from_slice(&image.group_epoch.get().to_be_bytes());
+    encoded.extend_from_slice(&image.index.get().to_be_bytes());
+    encoded.extend_from_slice(&image.term.get().to_be_bytes());
+    encoded.extend_from_slice(&image.state_digest);
+    encoded.extend_from_slice(&image.applied_command_count.to_be_bytes());
+    encoded.extend_from_slice(&proposal_count.to_be_bytes());
+    encoded.extend_from_slice(&application.format_id);
+    encoded.extend_from_slice(&application.format_version.to_be_bytes());
+    encoded.extend_from_slice(&0_u16.to_be_bytes());
+    encoded.extend_from_slice(&payload_len.to_be_bytes());
+    encoded.extend_from_slice(&application.state_digest);
+    encoded.extend_from_slice(Sha256::digest(&application.payload).as_slice());
+    encoded.extend_from_slice(&application.payload);
+    encode_checkpoint_proposals(&mut encoded, &image.applied)?;
+    let image_digest = Sha256::digest(&encoded);
+    encoded.extend_from_slice(image_digest.as_slice());
+    debug_assert_eq!(encoded.len(), capacity);
+    Ok(encoded)
+}
+
+fn encode_checkpoint_proposals(
+    encoded: &mut Vec<u8>,
+    applied: &[CommittedProposal],
+) -> ConsensusResult<()> {
+    for proposal in applied {
+        encoded.extend_from_slice(&proposal.receipt.proposal_id.get().to_be_bytes());
+        encoded.extend_from_slice(&proposal.receipt.term.get().to_be_bytes());
+        encoded.extend_from_slice(&proposal.receipt.log_index.get().to_be_bytes());
+        let payload_len = u32::try_from(proposal.payload.len()).map_err(|_| {
+            ConsensusError::InvalidState(
+                "consensus checkpoint proposal exceeds its length field".into(),
+            )
+        })?;
+        encoded.extend_from_slice(&payload_len.to_be_bytes());
+        encoded.extend_from_slice(&proposal.payload);
+    }
+    Ok(())
+}
+
 fn decode_checkpoint_image(encoded: &[u8]) -> ConsensusResult<CheckpointImage> {
     if encoded.len() > MAX_SNAPSHOT_DATA_BYTES {
         return Err(ConsensusError::InvalidMessage(format!(
@@ -2079,19 +2493,32 @@ fn decode_checkpoint_image(encoded: &[u8]) -> ConsensusResult<CheckpointImage> {
             encoded.len()
         )));
     }
-    if encoded.len() < SNAPSHOT_HEADER_LEN || encoded[..4] != SNAPSHOT_MAGIC {
+    if encoded.len() < 8 || encoded[..4] != SNAPSHOT_MAGIC {
         return Err(ConsensusError::InvalidMessage(
             "consensus checkpoint has an invalid header".into(),
         ));
     }
+    let version = u16::from_be_bytes([encoded[4], encoded[5]]);
+    match version {
+        SNAPSHOT_V1_VERSION => decode_v1_checkpoint_image(encoded),
+        SNAPSHOT_V2_VERSION => decode_v2_checkpoint_image(encoded),
+        _ => Err(ConsensusError::Unsupported(format!(
+            "unsupported consensus checkpoint version {version}"
+        ))),
+    }
+}
+
+fn decode_v1_checkpoint_image(encoded: &[u8]) -> ConsensusResult<CheckpointImage> {
+    if encoded.len() > MAX_V1_SNAPSHOT_DATA_BYTES || encoded.len() < SNAPSHOT_V1_HEADER_LEN {
+        return Err(ConsensusError::InvalidMessage(format!(
+            "EPSN v1 checkpoint is {} bytes; maximum is {MAX_V1_SNAPSHOT_DATA_BYTES}",
+            encoded.len()
+        )));
+    }
     let mut reader = SnapshotReader::new(encoded);
     reader.read_exact(4, "magic")?;
     let version = reader.read_u16("version")?;
-    if version != SNAPSHOT_VERSION {
-        return Err(ConsensusError::Unsupported(format!(
-            "unsupported consensus checkpoint version {version}"
-        )));
-    }
+    debug_assert_eq!(version, SNAPSHOT_V1_VERSION);
     let flags = reader.read_u16("flags")?;
     if flags != 0 {
         return Err(ConsensusError::Unsupported(format!(
@@ -2139,7 +2566,11 @@ fn decode_checkpoint_image(encoded: &[u8]) -> ConsensusResult<CheckpointImage> {
         index,
         term,
         state_digest,
+        applied_command_count: u64::try_from(applied.len()).map_err(|_| {
+            ConsensusError::InvalidState("checkpoint applied history is too large".into())
+        })?,
         applied,
+        application_snapshot: None,
     };
     validate_checkpoint_image(&image)?;
     if encode_checkpoint_image(&image)? != encoded {
@@ -2148,6 +2579,131 @@ fn decode_checkpoint_image(encoded: &[u8]) -> ConsensusResult<CheckpointImage> {
         ));
     }
     Ok(image)
+}
+
+fn decode_v2_checkpoint_image(encoded: &[u8]) -> ConsensusResult<CheckpointImage> {
+    let minimum = SNAPSHOT_V2_HEADER_LEN + SNAPSHOT_V2_TRAILER_LEN;
+    if encoded.len() < minimum {
+        return Err(ConsensusError::InvalidMessage(
+            "EPSN v2 checkpoint is truncated".into(),
+        ));
+    }
+    let digest_offset = encoded.len() - SNAPSHOT_V2_TRAILER_LEN;
+    let expected_image_digest = Sha256::digest(&encoded[..digest_offset]);
+    if expected_image_digest.as_slice() != &encoded[digest_offset..] {
+        return Err(ConsensusError::InvalidMessage(
+            "EPSN v2 image digest does not match its bytes".into(),
+        ));
+    }
+
+    let mut reader = SnapshotReader::new(encoded);
+    reader.read_exact(4, "magic")?;
+    let version = reader.read_u16("version")?;
+    debug_assert_eq!(version, SNAPSHOT_V2_VERSION);
+    let flags = reader.read_u16("flags")?;
+    if flags != 1 {
+        return Err(ConsensusError::Unsupported(format!(
+            "unsupported EPSN v2 flags {flags:#06x}"
+        )));
+    }
+    let group_id = GroupId::new(reader.read_u64("group ID")?)?;
+    let group_epoch = GroupEpoch::new(reader.read_u64("group epoch")?)?;
+    let index = LogIndex::new(reader.read_u64("checkpoint index")?);
+    let term = Term::new(reader.read_u64("checkpoint term")?);
+    let state_digest = reader.read_array("state digest")?;
+    let applied_command_count = reader.read_u64("total command count")?;
+    let proposal_count = reader.read_u32("retry proposal count")? as usize;
+    let format_id = reader.read_array("application format ID")?;
+    let format_version = reader.read_u16("application format version")?;
+    let reserved = reader.read_u16("reserved application flags")?;
+    if reserved != 0 {
+        return Err(ConsensusError::Unsupported(format!(
+            "unsupported EPSN v2 application flags {reserved:#06x}"
+        )));
+    }
+    let application_len = reader.read_u32("application payload length")? as usize;
+    if application_len > MAX_APPLICATION_SNAPSHOT_BYTES {
+        return Err(ConsensusError::InvalidMessage(format!(
+            "application snapshot is {application_len} bytes; maximum is {MAX_APPLICATION_SNAPSHOT_BYTES}"
+        )));
+    }
+    let application_state_digest = reader.read_array("application state digest")?;
+    let application_payload_digest: [u8; 32] = reader.read_array("application payload digest")?;
+    let application_payload = reader
+        .read_exact(application_len, "application payload")?
+        .to_vec();
+    if Sha256::digest(&application_payload).as_slice() != application_payload_digest {
+        return Err(ConsensusError::InvalidMessage(
+            "application snapshot payload digest does not match its bytes".into(),
+        ));
+    }
+    if proposal_count > MAX_CHECKPOINT_RETRY_PROPOSALS
+        || proposal_count > reader.remaining_len() / SNAPSHOT_PROPOSAL_FIXED_LEN
+    {
+        return Err(ConsensusError::InvalidMessage(
+            "EPSN v2 retry proposal count exceeds its bound or remaining bytes".into(),
+        ));
+    }
+    let applied = decode_checkpoint_proposals(&mut reader, proposal_count, group_id, group_epoch)?;
+    let trailer: [u8; SNAPSHOT_V2_TRAILER_LEN] = reader.read_array("image digest")?;
+    debug_assert_eq!(trailer.as_slice(), expected_image_digest.as_slice());
+    reader.finish()?;
+    let application_snapshot = ApplicationSnapshot::new(
+        index,
+        format_id,
+        format_version,
+        application_state_digest,
+        application_payload,
+    )?;
+    let image = CheckpointImage {
+        group_id,
+        group_epoch,
+        index,
+        term,
+        state_digest,
+        applied_command_count,
+        applied,
+        application_snapshot: Some(application_snapshot),
+    };
+    validate_checkpoint_image(&image)?;
+    if encode_checkpoint_image(&image)? != encoded {
+        return Err(ConsensusError::InvalidMessage(
+            "consensus checkpoint is not canonically encoded".into(),
+        ));
+    }
+    Ok(image)
+}
+
+fn decode_checkpoint_proposals(
+    reader: &mut SnapshotReader<'_>,
+    proposal_count: usize,
+    group_id: GroupId,
+    group_epoch: GroupEpoch,
+) -> ConsensusResult<Vec<CommittedProposal>> {
+    let mut applied = Vec::with_capacity(proposal_count);
+    for _ in 0..proposal_count {
+        let proposal_id = ProposalId::new(reader.read_u64("proposal ID")?)?;
+        let proposal_term = Term::new(reader.read_u64("proposal term")?);
+        let log_index = LogIndex::new(reader.read_u64("proposal log index")?);
+        let payload_len = reader.read_u32("proposal payload length")? as usize;
+        if payload_len > MAX_PROPOSAL_PAYLOAD_BYTES {
+            return Err(ConsensusError::InvalidMessage(format!(
+                "checkpoint proposal payload is {payload_len} bytes; maximum is {MAX_PROPOSAL_PAYLOAD_BYTES}"
+            )));
+        }
+        let payload = reader.read_exact(payload_len, "proposal payload")?.to_vec();
+        applied.push(CommittedProposal {
+            receipt: CommitReceipt {
+                group_id,
+                group_epoch,
+                proposal_id,
+                term: proposal_term,
+                log_index,
+            },
+            payload,
+        });
+    }
+    Ok(applied)
 }
 
 fn checkpoint_snapshot(image: &CheckpointImage, voters: [NodeId; 3]) -> ConsensusResult<Snapshot> {
@@ -2491,9 +3047,42 @@ struct PersistedStateView<'a> {
     state_digest: StateDigest,
 }
 
+struct ValidatedPersistentState {
+    proposals: BTreeMap<ProposalId, TrackedProposal>,
+    state_digest_scheme: StateDigestScheme,
+    applied_command_count: u64,
+}
+
 fn validate_persisted_state(
     state: PersistedStateView<'_>,
-) -> ConsensusResult<BTreeMap<ProposalId, TrackedProposal>> {
+) -> ConsensusResult<ValidatedPersistentState> {
+    let checkpoint_image = validate_persisted_storage(state)?;
+    validate_applied_receipts(
+        state.group_id,
+        state.group_epoch,
+        state.applied_index,
+        state.applied,
+    )?;
+    let (state_digest_scheme, applied_command_count) =
+        validate_persisted_digest(state, checkpoint_image.as_ref())?;
+    let proposals = build_proposal_tracking(
+        state.group_id,
+        state.group_epoch,
+        state.storage,
+        state.applied_index,
+        state.applied,
+        state.voters,
+    )?;
+    Ok(ValidatedPersistentState {
+        proposals,
+        state_digest_scheme,
+        applied_command_count,
+    })
+}
+
+fn validate_persisted_storage(
+    state: PersistedStateView<'_>,
+) -> ConsensusResult<Option<CheckpointImage>> {
     validate_voters(state.node_id, state.voters)?;
     let raft_state = state
         .storage
@@ -2546,14 +3135,14 @@ fn validate_persisted_state(
             state.applied_index, raft_state.hard_state.commit
         )));
     }
+    Ok(checkpoint_image)
+}
 
-    validate_applied_receipts(
-        state.group_id,
-        state.group_epoch,
-        state.applied_index,
-        state.applied,
-    )?;
-    if let Some(image) = checkpoint_image.as_ref()
+fn validate_persisted_digest(
+    state: PersistedStateView<'_>,
+    checkpoint_image: Option<&CheckpointImage>,
+) -> ConsensusResult<(StateDigestScheme, u64)> {
+    if let Some(image) = checkpoint_image
         && (state.applied_index < image.index
             || state.applied.get(..image.applied.len()) != Some(image.applied.as_slice()))
     {
@@ -2561,20 +3150,51 @@ fn validate_persisted_state(
             "stored applied history does not extend its consensus checkpoint".into(),
         ));
     }
-    let expected_digest = compute_state_digest(state.group_id, state.group_epoch, state.applied)?;
+    let (scheme, command_count, expected_digest) = match checkpoint_image {
+        Some(image) if image.application_snapshot.is_some() => {
+            let tail = state.applied.get(image.applied.len()..).ok_or_else(|| {
+                ConsensusError::InvalidState(
+                    "stored retry history is shorter than its v2 checkpoint".into(),
+                )
+            })?;
+            if tail
+                .iter()
+                .any(|committed| committed.receipt.log_index <= image.index)
+            {
+                return Err(ConsensusError::InvalidState(
+                    "stored v2 checkpoint tail does not follow its checkpoint index".into(),
+                ));
+            }
+            let mut digest = image.state_digest;
+            for committed in tail {
+                digest = advance_rolling_state_digest(digest, committed)?;
+            }
+            let tail_count = u64::try_from(tail.len())
+                .map_err(|_| ConsensusError::InvalidState("checkpoint tail is too large".into()))?;
+            let count = image
+                .applied_command_count
+                .checked_add(tail_count)
+                .ok_or_else(|| {
+                    ConsensusError::InvalidState("applied command count overflow".into())
+                })?;
+            (StateDigestScheme::RollingV2, count, digest)
+        }
+        _ => {
+            let count = u64::try_from(state.applied.len())
+                .map_err(|_| ConsensusError::InvalidState("applied history is too large".into()))?;
+            (
+                StateDigestScheme::CompleteHistoryV1,
+                count,
+                compute_state_digest(state.group_id, state.group_epoch, state.applied)?,
+            )
+        }
+    };
     if expected_digest != state.state_digest {
         return Err(ConsensusError::InvalidState(
             "stored state digest does not match the canonical applied history".into(),
         ));
     }
-    build_proposal_tracking(
-        state.group_id,
-        state.group_epoch,
-        state.storage,
-        state.applied_index,
-        state.applied,
-        state.voters,
-    )
+    Ok((scheme, command_count))
 }
 
 fn validate_hard_state(hard_state: &HardState, voters: [NodeId; 3]) -> ConsensusResult<()> {
@@ -2869,6 +3489,44 @@ fn compute_state_digest(
         hasher.update(&committed.payload);
     }
     Ok(hasher.finalize().into())
+}
+
+fn initial_rolling_state_digest(group_id: GroupId, group_epoch: GroupEpoch) -> StateDigest {
+    let mut hasher = Sha256::new();
+    hasher.update(STATE_DIGEST_MAGIC);
+    hasher.update(ROLLING_STATE_DIGEST_VERSION.to_be_bytes());
+    hasher.update(group_id.get().to_be_bytes());
+    hasher.update(group_epoch.get().to_be_bytes());
+    hasher.finalize().into()
+}
+
+fn advance_rolling_state_digest(
+    previous: StateDigest,
+    committed: &CommittedProposal,
+) -> ConsensusResult<StateDigest> {
+    let payload_len = u64::try_from(committed.payload.len()).map_err(|_| {
+        ConsensusError::InvalidState("applied proposal payload is too large".into())
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(previous);
+    hasher.update(committed.receipt.log_index.get().to_be_bytes());
+    hasher.update(committed.receipt.term.get().to_be_bytes());
+    hasher.update(committed.receipt.proposal_id.get().to_be_bytes());
+    hasher.update(payload_len.to_be_bytes());
+    hasher.update(&committed.payload);
+    Ok(hasher.finalize().into())
+}
+
+fn compute_rolling_state_digest(
+    group_id: GroupId,
+    group_epoch: GroupEpoch,
+    applied: &[CommittedProposal],
+) -> ConsensusResult<StateDigest> {
+    let mut digest = initial_rolling_state_digest(group_id, group_epoch);
+    for committed in applied {
+        digest = advance_rolling_state_digest(digest, committed)?;
+    }
+    Ok(digest)
 }
 
 struct DigestDebug<'a>(&'a StateDigest);

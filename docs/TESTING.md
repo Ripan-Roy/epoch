@@ -125,9 +125,10 @@ yet an exhaustive injected-I/O or real-process-crash matrix. Persistent adapter
 tests additionally reopen a three-voter committed history, preserve an isolated
 pending proposal, verify stable-barrier message ordering, recover after an
 injected post-append error, and publish a commit-ahead-of-checkpoint receipt
-exactly once. The checkpoint corpus adds a pinned canonical EPSN digest,
+exactly once. The checkpoint corpus adds pinned canonical EPSN v1/v2 digests,
 malformed/oversize rejection, fsync-before-memory failure recovery,
-checkpoint-plus-tail reopen, exact retry preservation, lagging-follower
+checkpoint-plus-tail reopen, bounded exact-retry preservation and truthful
+expiry, physical WAL replacement/reopen histories, lagging-follower
 installation, and post-restart election/commit/read-barrier behavior.
 
 The explicit `test-consensus-process` gate extends that evidence across real
@@ -146,8 +147,12 @@ starts three persistent probe runtimes with ephemeral loopback listeners,
 elects through the runtime probe HTTP transport, commits opaque bytes, creates
 a checkpoint through the experimental route, and verifies the reported
 compacted range. `lagging_profile_voter_replays_a_checkpoint_before_applying_its_tail`
-proves typed Catalog replay and tail convergence after a listener outage. These
-cover runtime transport but not
+proves typed Catalog snapshot installation and tail convergence after a
+listener outage. Profile-specific core, tablet, and node tests cover canonical
+capture/install for Catalog, Stream, Queue, Cache, and Event Bus; every real
+three-voter profile restart now forces a native checkpoint before shutdown and
+proves automatic restoration before readiness. These cover runtime transport
+but not
 separate process loss; the two test layers intentionally prove different
 boundaries. `sustained_minority_outage_drops_only_that_peers_frames_and_majority_commits`
 uses a one-frame outbound queue, keeps the lower-ID destination unavailable
@@ -167,8 +172,10 @@ Its batch corpus pins legacy v1 plus additive v2 golden commands, all required
 codec round trips, strict base64/JSON/count/size/sequence validation, bounded
 decompression, an 8 MiB Zstd window, atomic cloned apply, correlated offsets,
 exact retry, and unchanged v1 digests. The real-runtime test commits and reopens
-every codec through three EPRS-backed voters. It does not add snapshot,
-membership-transition, authoritative epoch-fencing, public product
+every codec through three EPRS-backed voters. Its internal voter-recovery image
+is now covered by the shared native-checkpoint suite; it does not add a
+user-exportable Stream backup, membership-transition, authoritative
+epoch-fencing, public product
 acknowledgement, stable streaming Produce, or complete G3 evidence. Those
 scenarios remain required before G3 or the emulator is complete; see
 [Consensus Feasibility Spike](CONSENSUS_SPIKE.md).

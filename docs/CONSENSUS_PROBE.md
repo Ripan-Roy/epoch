@@ -144,8 +144,8 @@ retains its explicit origin allowlist.
 ## Explicit non-claims
 
 The probe has static membership, plaintext unauthenticated transport, one
-fixed group, no automatic checkpoint policy, no physical EPRS reclamation, no
-profile-native backup/PITR, no catalog-authorized epoch transition, and no public or production profile
+fixed group, no automatic checkpoint policy, no user-exportable backup/PITR,
+no catalog-authorized epoch transition, and no public or production profile
 integration. The typed Stream, Queue, Cache, and Event Bus modes are bounded internal milestones,
 not a public durability contract. Default opaque-mode status reports:
 

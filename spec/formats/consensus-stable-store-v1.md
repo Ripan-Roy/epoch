@@ -19,9 +19,12 @@ limit, and CRC32 checksum. EPRS always writes an outer timestamp of zero and
 requests a durable append. Consequently, one EPRS transition is one
 checksummed `FileWal` append and sync boundary.
 
-Outer sequence zero is the identity record. Every later outer sequence is a
-transition, and its sequence must equal the EPRS generation. Generations start
-at one and are contiguous.
+Outer sequence zero is the identity record. In a legacy journal, every later
+outer sequence is a transition whose sequence equals the EPRS generation;
+generations start at one and are contiguous. A compacted journal instead puts
+kind 4 at physical sequence one with the latest logical generation, after
+which physical sequence and logical generation advance independently and
+contiguously.
 
 `FileWal` may truncate only an incomplete final outer frame during open. A
 complete frame with an invalid checksum is corruption and fails open. The file
@@ -37,7 +40,7 @@ to the beginning of the EPRS payload stored in the outer WAL record.
 |---:|---:|---|
 | 0 | 4 | ASCII magic `EPRS` |
 | 4 | 2 | Format version, exactly `1` |
-| 6 | 2 | Record kind: `1` identity, `2` transition, `3` checkpoint transition |
+| 6 | 2 | Record kind: `1` identity, `2` transition, `3` checkpoint transition, `4` compacted checkpoint baseline |
 | 8 | 4 | Kind-payload length |
 | 12 | variable | Kind payload |
 
@@ -75,7 +78,7 @@ The transition begins with this fixed 84-byte prefix:
 | 24 | 8 | HardState commit index |
 | 32 | 8 | Checkpoint applied index |
 | 40 | 8 | Checkpoint publishable index |
-| 48 | 32 | EPDG v1 SHA-256 state digest |
+| 48 | 32 | EPDG v1/v2 state digest determined by the active checkpoint |
 | 80 | 4 | Entry count |
 
 Each entry then has this layout:
@@ -110,22 +113,41 @@ bytes:
 | 24 | 8 | HardState commit index |
 | 32 | 8 | Checkpoint applied index |
 | 40 | 8 | Checkpoint publishable index |
-| 48 | 32 | EPDG v1 SHA-256 state digest |
+| 48 | 32 | EPDG state digest matching the embedded EPSN version |
 | 80 | 4 | Embedded EPSN image length |
 | 84 | 4 | Retained tail entry count |
 
-One complete canonical [EPSN v1 image](consensus-checkpoint-v1.md) follows the
-prefix, then exactly `tail entry count` normal entries using the kind-2 entry
-layout. The first tail entry, when present, is checkpoint index plus one and
-the remainder is contiguous. The EPSN index equals both application checkpoint
-indexes, and its digest equals the EPDG field.
+One complete canonical [EPSN v1 image](consensus-checkpoint-v1.md) or additive
+[EPSN v2 profile checkpoint](consensus-checkpoint-v2.md) follows the prefix,
+then exactly `tail entry count` normal entries using the kind-2 entry layout.
+The first tail entry, when present, is checkpoint index plus one and the
+remainder is contiguous. The EPSN index equals both application checkpoint
+indexes, and its digest equals the EPDG field. For v2, replay validates later
+committed entries by advancing its rolling EPDG chain.
+
+## Kind 4: compacted checkpoint baseline
+
+Kind 4 has the same payload layout and validation rules as kind 3. It differs
+only in placement and generation semantics:
+
+- it is valid only at outer WAL sequence one, immediately after identity;
+- it is the only transition in that replacement file when created;
+- its logical stable generation may be greater than outer sequence one; and
+- it establishes that logical generation for subsequent contiguous kind-2 or
+  kind-3 records.
+
+The active file is replaced only after the same checkpoint has already been
+durably appended to the old file. A kind-4 record elsewhere, or a first legacy
+kind-2/3 record whose generation is not one, is corruption.
 
 ## Replay invariants
 
 Transitions are applied in generation order to an initially empty retained log.
 Replay enforces all of the following:
 
-- generation equals the outer WAL sequence and advances by exactly one;
+- legacy generation equals outer WAL sequence; after kind 4, logical
+  generation and physical sequence advance independently but each remains
+  contiguous;
 - `HardState` term and commit index never decrease;
 - a nonzero vote names a fixed voter, and an existing nonzero vote cannot
   change within the same term;
@@ -143,8 +165,9 @@ Replay enforces all of the following:
   exceed commit;
 - every nonempty entry is a valid, in-scope EPCM command; conflicting reuse of
   a proposal ID fails closed; and
-- replay derives the unique applied proposals through the checkpoint index and
-  recomputes the EPDG digest, which must exactly match the checkpoint.
+- replay derives the unique retained proposals through the checkpoint index
+  and validates EPDG v1 from complete history or advances EPDG v2 from the
+  compact profile checkpoint.
 
 After successful replay, the implementation materializes a snapshot-aware Raft
 storage view with the immutable voter configuration, latest canonical EPSN
@@ -171,15 +194,15 @@ quorum acknowledgement or the complete system fault model.
 
 ## Limitations and non-claims
 
-- The container is the current single-file `FileWal`; EPRS has no segment,
-  manifest, rotation, retention, or migration contract.
+- The container remains one active `FileWal`. Kind 4 plus atomic sibling-WAL
+  replacement reclaims generations older than the latest checkpoint; this is
+  not general segmentation, retention, or backup lifecycle management.
 - Without a committed-length manifest, an incomplete final outer frame is
   treated as a crash tail. The store cannot prove whether arbitrary later
   truncation damaged a frame that had previously synced; such post-ack media or
   filesystem loss is outside this slice's demonstrated fault model.
-- Consensus checkpoint installation and logical Raft-prefix compaction exist,
-  but older kind-1/2/3 outer-WAL records are not physically reclaimed. There is
-  no purge, profile-native snapshot, or product restore format.
+- Kind 4 reclamation is internal voter maintenance, not a user-visible purge,
+  downloadable snapshot, backup catalog, or product restore format.
 - Membership changes, learners, joint consensus, and voter-set migration are
   unsupported; identity is fixed for the file's lifetime.
 - A complete valid prefix or whole-file rollback cannot be detected locally.
@@ -207,6 +230,8 @@ preserves an uncommitted isolated-leader proposal, verifies that persisted
 messages follow a durable stable-store barrier, recovers a fully appended
 proposal after an injected error prevents publication, and emits a committed
 entry ahead of the stored checkpoint exactly once while reopening. Checkpoint
-tests add canonical codec/corruption coverage, fsync-before-memory failure
-reopen, checkpoint-plus-tail reopen, exact retry preservation, lagging-voter
-snapshot installation, and post-restart election/read-barrier evidence.
+tests add canonical v1/v2 codec and corruption coverage, fsync-before-memory
+failure reopen, checkpoint-plus-tail reopen, bounded exact retry
+preservation/expiry, native-profile capture and install for all five profiles,
+physical replacement histories, lagging-voter snapshot installation, and
+post-restart election/read-barrier evidence.

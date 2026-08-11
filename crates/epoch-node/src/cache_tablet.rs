@@ -23,7 +23,8 @@ use axum::{
 };
 use epoch_cache::{CacheConfig, CacheValue};
 use epoch_consensus::{
-    CommittedProposal, ConsensusError, ConsensusRole, ConsensusStatus, ProposalLookup,
+    ApplicationSnapshot, CommittedProposal, ConsensusError, ConsensusRole, ConsensusStatus,
+    LogIndex, ProposalLookup,
 };
 use epoch_core::Clock;
 use epoch_tablet::{
@@ -56,6 +57,8 @@ pub const EXPERIMENTAL_CACHE_TABLET_OBSERVATIONS_PATH: &str =
     "/experimental/v1/tablets/cache/observations";
 
 const TABLET_REQUEST_BODY_BYTES: usize = MAX_CACHE_TABLET_COMMAND_BYTES + 16 * 1024;
+const CACHE_APPLICATION_SNAPSHOT_FORMAT_ID: [u8; 16] = *b"CACHE___STATE_V1";
+const CACHE_APPLICATION_SNAPSHOT_VERSION: u16 = 1;
 pub const DEFAULT_COMMIT_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
@@ -220,6 +223,89 @@ impl CommittedProposalApplier for CacheTabletService {
 
     fn apply(&self, committed: &CommittedProposal) -> Result<(), String> {
         self.apply_one(committed).map(|_| ())
+    }
+
+    fn capture_snapshot(
+        &self,
+        checkpoint_index: LogIndex,
+        retained: &[CommittedProposal],
+    ) -> Result<ApplicationSnapshot, String> {
+        self.ensure_healthy()?;
+        let tablet = self
+            .tablet
+            .read()
+            .map_err(|_| "Cache tablet read lock was poisoned".to_owned())?;
+        if tablet.last_applied_command_index() > checkpoint_index.get() {
+            return Err(format!(
+                "Cache applied index {} exceeds consensus checkpoint index {}",
+                tablet.last_applied_command_index(),
+                checkpoint_index
+            ));
+        }
+        let mut retained_ids = BTreeSet::new();
+        for committed in retained {
+            let proposal_id = committed.receipt.proposal_id.get();
+            if !retained_ids.insert(proposal_id) {
+                return Err(format!(
+                    "Cache retry proposal {proposal_id} appears more than once"
+                ));
+            }
+            tablet
+                .receipt_for_committed(committed_command(committed))
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| {
+                    format!("Cache retry proposal {proposal_id} has no typed applied result")
+                })?;
+        }
+        let payload = tablet
+            .encode_snapshot(&retained_ids)
+            .map_err(|error| error.to_string())?;
+        ApplicationSnapshot::new(
+            checkpoint_index,
+            CACHE_APPLICATION_SNAPSHOT_FORMAT_ID,
+            CACHE_APPLICATION_SNAPSHOT_VERSION,
+            tablet.state_digest(),
+            payload,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn install_snapshot(&self, snapshot: &ApplicationSnapshot) -> Result<(), String> {
+        self.ensure_healthy()?;
+        let result: Result<CacheTablet, String> = (|| {
+            if snapshot.format_id() != CACHE_APPLICATION_SNAPSHOT_FORMAT_ID
+                || snapshot.format_version() != CACHE_APPLICATION_SNAPSHOT_VERSION
+            {
+                return Err("application snapshot is not a supported Cache image".into());
+            }
+            let restored = CacheTablet::decode_snapshot(&self.scope, snapshot.payload())
+                .map_err(|error| error.to_string())?;
+            if restored.last_applied_command_index() > snapshot.checkpoint_index().get()
+                || restored.state_digest() != snapshot.state_digest()
+                || restored.max_entries() != self.config.max_entries
+                || restored.default_ttl_ms() != self.config.default_ttl_ms
+            {
+                return Err(
+                    "Cache application snapshot index, state digest, or configuration is invalid"
+                        .into(),
+                );
+            }
+            Ok(restored)
+        })();
+        match result {
+            Ok(restored) => {
+                *self
+                    .tablet
+                    .write()
+                    .map_err(|_| self.fail("Cache tablet write lock was poisoned"))? = restored;
+                Ok(())
+            }
+            Err(error) => Err(self.fail(error)),
+        }
+    }
+
+    fn supports_native_snapshots(&self) -> bool {
+        true
     }
 }
 

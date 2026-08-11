@@ -165,7 +165,7 @@ assert isinstance(document["term"], int) and document["term"] > 0, document
 assert document["proposal_count"] >= 1, document
 assert 0 < document["encoded_bytes"] <= 768 * 1024, document
 assert document["durability"] == "fsync_before_install", document
-assert document["compaction"] == "logical_raft_prefix", document
+assert document["compaction"] == "logical_raft_prefix_and_physical_eprs", document
 ' "$document"
 }
 

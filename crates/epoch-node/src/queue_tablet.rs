@@ -1,6 +1,7 @@
 //! Experimental typed Queue tablet over the fixed-voter consensus runtime.
 
 use std::{
+    collections::BTreeSet,
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -12,9 +13,10 @@ use axum::{
     routing::{get, post},
 };
 use epoch_consensus::{
-    CommittedProposal, ConsensusError, ConsensusRole, ConsensusStatus, ProposalLookup,
+    ApplicationSnapshot, CommittedProposal, ConsensusError, ConsensusRole, ConsensusStatus,
+    LogIndex, ProposalLookup,
 };
-use epoch_core::Clock;
+use epoch_core::{Clock, DurabilityProfile};
 use epoch_queue::QueueConfig;
 use epoch_tablet::{
     CommittedCommand, MAX_QUEUE_CONSUMER_BYTES, MAX_QUEUE_TABLET_COMMAND_BYTES,
@@ -49,6 +51,8 @@ pub const EXPERIMENTAL_QUEUE_TABLET_CONSUMER_FLOW_PATH: &str =
 
 const MAX_HISTORY_RECORDS: usize = 1_000;
 const TABLET_REQUEST_BODY_BYTES: usize = MAX_QUEUE_TABLET_COMMAND_BYTES + 16 * 1024;
+const QUEUE_APPLICATION_SNAPSHOT_FORMAT_ID: [u8; 16] = *b"QUEUE___STATE_V1";
+const QUEUE_APPLICATION_SNAPSHOT_VERSION: u16 = 1;
 pub const DEFAULT_COMMIT_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
@@ -230,6 +234,90 @@ impl CommittedProposalApplier for QueueTabletService {
 
     fn apply(&self, committed: &CommittedProposal) -> Result<(), String> {
         self.apply_one(committed).map(|_| ())
+    }
+
+    fn capture_snapshot(
+        &self,
+        checkpoint_index: LogIndex,
+        retained: &[CommittedProposal],
+    ) -> Result<ApplicationSnapshot, String> {
+        self.ensure_healthy()?;
+        let tablet = self
+            .tablet
+            .read()
+            .map_err(|_| "Queue tablet read lock was poisoned".to_owned())?;
+        if tablet.last_applied_command_index() > checkpoint_index.get() {
+            return Err(format!(
+                "Queue applied index {} exceeds consensus checkpoint index {}",
+                tablet.last_applied_command_index(),
+                checkpoint_index
+            ));
+        }
+        let mut retained_ids = BTreeSet::new();
+        for committed in retained {
+            let proposal_id = committed.receipt.proposal_id.get();
+            if !retained_ids.insert(proposal_id) {
+                return Err(format!(
+                    "Queue retry proposal {proposal_id} appears more than once"
+                ));
+            }
+            tablet
+                .receipt_for_committed(committed_command(committed))
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| {
+                    format!("Queue retry proposal {proposal_id} has no typed applied result")
+                })?;
+        }
+        let payload = tablet
+            .encode_snapshot(&retained_ids)
+            .map_err(|error| error.to_string())?;
+        ApplicationSnapshot::new(
+            checkpoint_index,
+            QUEUE_APPLICATION_SNAPSHOT_FORMAT_ID,
+            QUEUE_APPLICATION_SNAPSHOT_VERSION,
+            tablet.state_digest(),
+            payload,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn install_snapshot(&self, snapshot: &ApplicationSnapshot) -> Result<(), String> {
+        self.ensure_healthy()?;
+        let result: Result<QueueTablet, String> = (|| {
+            if snapshot.format_id() != QUEUE_APPLICATION_SNAPSHOT_FORMAT_ID
+                || snapshot.format_version() != QUEUE_APPLICATION_SNAPSHOT_VERSION
+            {
+                return Err("application snapshot is not a supported Queue image".into());
+            }
+            let restored = QueueTablet::decode_snapshot(&self.scope, snapshot.payload())
+                .map_err(|error| error.to_string())?;
+            let mut expected_config = self.config.clone();
+            expected_config.durability = DurabilityProfile::Volatile;
+            if restored.last_applied_command_index() > snapshot.checkpoint_index().get()
+                || restored.state_digest() != snapshot.state_digest()
+                || restored.queue_config() != &expected_config
+            {
+                return Err(
+                    "Queue application snapshot index, state digest, or configuration is invalid"
+                        .into(),
+                );
+            }
+            Ok(restored)
+        })();
+        match result {
+            Ok(restored) => {
+                *self
+                    .tablet
+                    .write()
+                    .map_err(|_| self.fail("Queue tablet write lock was poisoned"))? = restored;
+                Ok(())
+            }
+            Err(error) => Err(self.fail(error)),
+        }
+    }
+
+    fn supports_native_snapshots(&self) -> bool {
+        true
     }
 }
 

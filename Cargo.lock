@@ -443,6 +443,7 @@ name = "epoch-node"
 version = "0.1.0-alpha.3"
 dependencies = [
  "axum",
+ "base64 0.23.0",
  "clap",
  "epoch-auth",
  "epoch-bus",

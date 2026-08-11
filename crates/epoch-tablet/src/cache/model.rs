@@ -3,21 +3,24 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use epoch_cache::{CacheItem, CacheValue};
-use serde::Serialize;
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::TabletWriteEvidence;
-use crate::common::serialize_u64_as_decimal;
+use crate::common::{
+    deserialize_optional_u64_from_number_or_decimal, deserialize_u64_from_number_or_decimal,
+    serialize_u64_as_decimal,
+};
 
 pub type CacheTabletWriteEvidence = TabletWriteEvidence;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheTabletDisposition {
     New,
     Replayed,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum CacheTabletOutcome {
     Applied {
@@ -29,7 +32,7 @@ pub enum CacheTabletOutcome {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheTabletRejectionCode {
     AlreadyExists,
@@ -41,13 +44,22 @@ pub enum CacheTabletRejectionCode {
     Unavailable,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CacheTabletItem {
-    #[serde(serialize_with = "serialize_cache_value")]
+    #[serde(
+        serialize_with = "serialize_cache_value",
+        deserialize_with = "deserialize_cache_value"
+    )]
     pub value: CacheValue,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub version: u64,
-    #[serde(serialize_with = "serialize_optional_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_optional_u64_as_decimal",
+        deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
+    )]
     pub expires_at_ms: Option<u64>,
 }
 
@@ -61,11 +73,17 @@ impl From<CacheItem> for CacheTabletItem {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CacheTabletObservation {
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub shard_revision: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub observed_at_ms: u64,
     pub item: Option<CacheTabletItem>,
 }
@@ -73,15 +91,21 @@ pub struct CacheTabletObservation {
 /// Downstream-comparable fence scoped to one resource, shard, and lock key.
 ///
 /// Consumers compare `(tablet_epoch, acquisition_index)` lexicographically.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CacheLockFencingToken {
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub tablet_epoch: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub acquisition_index: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CacheTransactionMutationResult {
     Set {
@@ -91,7 +115,10 @@ pub enum CacheTransactionMutationResult {
     Deleted {
         key: String,
         deleted: bool,
-        #[serde(serialize_with = "serialize_optional_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_optional_u64_as_decimal",
+            deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
+        )]
         previous_version: Option<u64>,
     },
     ComparedAndSet {
@@ -100,16 +127,25 @@ pub enum CacheTransactionMutationResult {
     },
     Incremented {
         key: String,
-        #[serde(serialize_with = "serialize_i64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_i64_as_decimal",
+            deserialize_with = "deserialize_i64_from_number_or_decimal"
+        )]
         value: i64,
-        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
         version: u64,
-        #[serde(serialize_with = "serialize_optional_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_optional_u64_as_decimal",
+            deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
+        )]
         expires_at_ms: Option<u64>,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CacheTabletOperationResult {
     Set {
@@ -119,9 +155,15 @@ pub enum CacheTabletOperationResult {
     Deleted {
         key: String,
         deleted: bool,
-        #[serde(serialize_with = "serialize_optional_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_optional_u64_as_decimal",
+            deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
+        )]
         previous_version: Option<u64>,
-        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
         revision: u64,
     },
     ComparedAndSet {
@@ -130,37 +172,64 @@ pub enum CacheTabletOperationResult {
     },
     Incremented {
         key: String,
-        #[serde(serialize_with = "serialize_i64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_i64_as_decimal",
+            deserialize_with = "deserialize_i64_from_number_or_decimal"
+        )]
         value: i64,
-        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
         version: u64,
-        #[serde(serialize_with = "serialize_optional_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_optional_u64_as_decimal",
+            deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
+        )]
         expires_at_ms: Option<u64>,
     },
     TransactionCommitted {
-        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
         revision: u64,
         results: Vec<CacheTransactionMutationResult>,
     },
     LockAcquired {
         lock_key: String,
         owner: String,
-        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
         owner_epoch: u64,
         fencing_token: CacheLockFencingToken,
         lease_token: String,
-        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
         lease_generation: u64,
-        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
         lease_deadline_ms: u64,
     },
     LockRenewed {
         lock_key: String,
         fencing_token: CacheLockFencingToken,
         lease_token: String,
-        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
         lease_generation: u64,
-        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
         lease_deadline_ms: u64,
     },
     LockReleased {
@@ -168,26 +237,47 @@ pub enum CacheTabletOperationResult {
         fencing_token: CacheLockFencingToken,
     },
     Maintained {
-        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
         cache_revision: u64,
         expired_keys: Vec<String>,
         expired_locks: Vec<String>,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CacheTabletReceipt {
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub proposal_id: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub tablet_id: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub tablet_epoch: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub term: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub commit_index: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub applied_at_ms: u64,
     pub write_evidence: CacheTabletWriteEvidence,
     pub durable_voter_acks: u16,
@@ -225,6 +315,18 @@ enum BrowserSafeCacheValue<'a> {
     SortedSet(&'a BTreeMap<String, f64>),
 }
 
+#[derive(Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+enum OwnedBrowserSafeCacheValue {
+    String(String),
+    Blob(Vec<u8>),
+    Counter(String),
+    Hash(BTreeMap<String, String>),
+    List(Vec<String>),
+    Set(BTreeSet<String>),
+    SortedSet(BTreeMap<String, f64>),
+}
+
 fn serialize_cache_value<S>(value: &CacheValue, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -241,6 +343,25 @@ where
     value.serialize(serializer)
 }
 
+fn deserialize_cache_value<'de, D>(deserializer: D) -> Result<CacheValue, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(
+        match OwnedBrowserSafeCacheValue::deserialize(deserializer)? {
+            OwnedBrowserSafeCacheValue::String(value) => CacheValue::String(value),
+            OwnedBrowserSafeCacheValue::Blob(value) => CacheValue::Blob(value),
+            OwnedBrowserSafeCacheValue::Counter(value) => {
+                CacheValue::Counter(value.parse().map_err(serde::de::Error::custom)?)
+            }
+            OwnedBrowserSafeCacheValue::Hash(value) => CacheValue::Hash(value),
+            OwnedBrowserSafeCacheValue::List(value) => CacheValue::List(value),
+            OwnedBrowserSafeCacheValue::Set(value) => CacheValue::Set(value),
+            OwnedBrowserSafeCacheValue::SortedSet(value) => CacheValue::SortedSet(value),
+        },
+    )
+}
+
 #[allow(
     clippy::trivially_copy_pass_by_ref,
     reason = "serde serialize_with requires a shared reference"
@@ -250,4 +371,21 @@ where
     S: serde::Serializer,
 {
     serializer.serialize_str(&value.to_string())
+}
+
+fn deserialize_i64_from_number_or_decimal<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Representation {
+        Number(i64),
+        Decimal(String),
+    }
+
+    match Representation::deserialize(deserializer)? {
+        Representation::Number(value) => Ok(value),
+        Representation::Decimal(value) => value.parse().map_err(serde::de::Error::custom),
+    }
 }

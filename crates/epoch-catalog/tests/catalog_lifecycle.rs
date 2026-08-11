@@ -257,3 +257,67 @@ fn canonical_command_replay_reconstructs_the_same_catalog_snapshot() {
         Err(CatalogError::NonCanonicalCommand)
     ));
 }
+
+#[test]
+fn native_snapshot_round_trip_restores_state_idempotency_and_identity_high_water_marks() {
+    let mut live = Catalog::with_reserved_consensus_group(1).unwrap();
+    let command = stream("orders", 2);
+    let first = live.apply(command.clone()).unwrap();
+    live.apply(stream("audit", 1)).unwrap();
+    let encoded = live.encode_snapshot().unwrap();
+
+    let mut restored = Catalog::decode_snapshot(&encoded).unwrap();
+    assert_eq!(restored.snapshot(), live.snapshot());
+    assert_eq!(
+        restored.state_digest().unwrap(),
+        live.state_digest().unwrap()
+    );
+    assert!(matches!(
+        restored.apply(command).unwrap(),
+        CatalogMutation::Applied { replayed: true, .. }
+    ));
+
+    let original_max_tablet = first
+        .resource()
+        .unwrap()
+        .tablets
+        .iter()
+        .map(|tablet| tablet.tablet_id)
+        .max()
+        .unwrap();
+    let next = applied(restored.apply(stream("next", 1)).unwrap());
+    assert!(next.tablets[0].tablet_id > original_max_tablet);
+    assert_ne!(next.tablets[0].consensus_group_id, 1);
+}
+
+#[test]
+fn native_snapshot_rejects_noncanonical_corrupt_and_unknown_version_bytes() {
+    let mut catalog = Catalog::new();
+    catalog.apply(stream("orders", 1)).unwrap();
+    let canonical = catalog.encode_snapshot().unwrap();
+
+    let pretty = serde_json::to_vec_pretty(
+        &serde_json::from_slice::<serde_json::Value>(&canonical).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        Catalog::decode_snapshot(&pretty),
+        Err(CatalogError::NonCanonicalSnapshot)
+    ));
+
+    let mut corrupt: serde_json::Value = serde_json::from_slice(&canonical).unwrap();
+    corrupt["snapshot"]["next_tablet_id"] = serde_json::json!(999);
+    let corrupt = serde_json::to_vec(&corrupt).unwrap();
+    assert!(matches!(
+        Catalog::decode_snapshot(&corrupt),
+        Err(CatalogError::SnapshotDigestMismatch)
+    ));
+
+    let mut unknown: serde_json::Value = serde_json::from_slice(&canonical).unwrap();
+    unknown["format_version"] = serde_json::json!(2);
+    let unknown = serde_json::to_vec(&unknown).unwrap();
+    assert!(matches!(
+        Catalog::decode_snapshot(&unknown),
+        Err(CatalogError::UnsupportedSnapshotVersion(2))
+    ));
+}

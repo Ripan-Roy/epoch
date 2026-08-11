@@ -219,18 +219,22 @@ records immutable voter identity, complete `HardState`, normal-entry
 index/term/data, and an applied/publishable digest checkpoint without persisting
 raw library protobuf. It supports checksummed
 local reopen and logical uncommitted-suffix replacement. Additive EPRS kind-3
-records embed a bounded canonical EPSN v1 checkpoint and contiguous tail.
-Checkpoint creation fsyncs before local installation; the snapshot-aware Raft
-store can send that image to a lagging fixed voter, whose typed profile is
-replayed before later committed entries apply. Reopen reconstructs the same
-checkpoint-plus-tail state and exact retry registry. This is logical Raft-prefix
-compaction only: old EPRS outer-WAL records remain on disk. An opt-in node runtime
+records embed compatible EPSN v1 or v2 checkpoints plus a contiguous tail.
+V2 carries one canonical Catalog, Stream, Queue, Cache, or Event Bus image, a
+rolling consensus digest, and a bounded exact-retry suffix. Checkpoint creation
+fsyncs an ordinary record, atomically replaces the journal with identity plus a
+kind-4 compacted baseline, then installs the logical snapshot. The
+snapshot-aware Raft store can send that image to a lagging fixed voter, whose
+typed profile is installed before later committed entries apply. Reopen
+reconstructs the same checkpoint-plus-tail state without replaying discarded
+commands. An opt-in node runtime
 wraps it in a dedicated actor, bounded ordered HTTP peer queues, and a static
 three-container topology. Its default probe mode carries opaque diagnostics.
-An alternative experimental mode attaches one single-partition Stream tablet:
-strict typed commands are applied on the actor after consensus commit, startup
-rebuilds the profile from the complete committed history before readiness, and
-the clustered path never writes the standalone engine journal. Success reports
+Alternative experimental modes attach one single-partition Stream, Queue, or
+Event Bus tablet or one single-shard Cache tablet. Strict typed commands apply
+on the actor after consensus commit; startup installs a native checkpoint when
+present and then applies its retained tail, while legacy histories still
+replay. The clustered path never writes the standalone engine journal. Success reports
 the fixed-voter majority evidence and the logical Stream offset only through
 the dedicated experimental API; it does not claim zone placement. A profile
 application error on the actor drains both listeners and exits the process. If
@@ -349,8 +353,8 @@ execution remains explicitly unimplemented: the outbox proves durable intent
 and settlements, not that a target side effect occurred. See
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
-Profile-native snapshots/backups, physical EPRS compaction, membership changes,
-general placement solving, online transfer/repair/rebalance, authenticated peer transport, follower
+User-exportable snapshots/backups, PITR, membership changes, general placement
+solving, online transfer/repair/rebalance, authenticated peer transport, follower
 linearizable routing, and cross-tablet read transactions remain disabled. The
 leader-only regional read barrier is experimental. The byte contract is
 documented in [EPRS v1 consensus stable
@@ -362,7 +366,8 @@ non-claims are recorded in
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md), and the Cache boundary
 in [Experimental Replicated Cache Tablet](CACHE_TABLET.md). Consensus checkpoint
 operation and its non-claims are in
-[Consensus Checkpoints and Snapshot Catch-up](CONSENSUS_CHECKPOINTS.md).
+[Consensus Checkpoints and Snapshot Catch-up](CONSENSUS_CHECKPOINTS.md) and
+[ADR-0022](adr/0022-profile-native-checkpoints-and-physical-reclamation.md).
 
 Rust peer replication uses batched, framed, mutually authenticated connections
 with separate priorities for control, append, snapshot, and repair traffic.
@@ -509,8 +514,10 @@ admitted under a different term without allowing a second owner before the
 exclusive deadline. Already-appended same-term commands can still commit after
 a leadership change. New writes carry `expected_term`, which the consensus actor
 checks atomically with leader role immediately before proposal; this is a write
-admission fence, not a linearizable read barrier. Profile snapshots, compaction,
-multi-shard routing, and the full concurrency history remain open.
+admission fence, not a linearizable read barrier. The profile has an internal
+canonical voter-recovery snapshot and compacted EPRS baseline; downloadable
+Cache backups/PITR, multi-shard routing, and the full concurrency history remain
+open.
 
 The regional Cache v1 adapter delegates directly to this tablet. SDK reads
 always request a leader ReadIndex; mutations carry discovered generation,
@@ -889,3 +896,9 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0014: Queue Consumer Credit and In-Flight Windows](adr/0014-queue-consumer-credit.md)
 - [ADR-0015: Replicated Stream Batch Compression](adr/0015-stream-batch-compression.md)
 - [ADR-0016: Replicated Stream Consumer-Group Checkpoints](adr/0016-stream-consumer-group-checkpoints.md)
+- [ADR-0017: Regional Stream v1 and SDK Routing](adr/0017-regional-stream-v1-and-sdk-routing.md)
+- [ADR-0018: Regional Queue v1 and SDK Routing](adr/0018-regional-queue-v1-and-sdk-routing.md)
+- [ADR-0019: Regional Cache v1 and SDK Routing](adr/0019-regional-cache-v1-and-sdk-routing.md)
+- [ADR-0020: Regional Event Bus v1 and SDK Routing](adr/0020-regional-event-bus-v1-and-sdk-routing.md)
+- [ADR-0021: Consensus Checkpoint and Snapshot Installation](adr/0021-consensus-checkpoint-and-snapshot-installation.md)
+- [ADR-0022: Profile-Native Checkpoints and Physical EPRS Reclamation](adr/0022-profile-native-checkpoints-and-physical-reclamation.md)

@@ -69,10 +69,11 @@ validation, manifest-bounded active-suffix repair, restart replay, durable
 identity/topology checks, and crash-safe fresh-layout activation. Existing valid
 single-file journals remain on the legacy writer and are not migrated. The
 replicated core separately supplies a bounded canonical consensus checkpoint,
-logical Raft-prefix compaction, checkpoint-plus-tail reopen, and fixed-voter
-snapshot catch-up. G2 remains open because profile-native snapshots, durable
-derived-index rebuild, physical reclamation, retention, tiering, backup/PITR,
-and general production replica recovery are not implemented. The
+logical Raft-prefix compaction, checkpoint-plus-tail reopen, fixed-voter
+snapshot catch-up, native state images for all five profiles, and atomic
+physical EPRS reclamation. G2 remains open because durable derived-index
+rebuild, retention, tiering, backup/PITR, scheduled restore campaigns, and
+general production replica recovery are not implemented. The
 bounded EPRS and typed-profile recovery evidence is tracked separately below.
 
 The shared clock now distinguishes wall and process-local monotonic time, and
@@ -98,8 +99,10 @@ receipts/digests, and one-voter plus all-voter `SIGKILL`/same-path reopen withou
 duplicate receipt publication. An opt-in node runtime adds bounded real HTTP
 transport and opaque diagnostic status/propose/lookup endpoints. A mutually
 exclusive experimental profile mode now applies either one typed,
-single-partition Stream, Queue, or Event Bus ingress/outbox tablet or one single-shard Cache tablet after
-commit and rebuilds it from the complete proposal history before readiness.
+single-partition Stream, Queue, or Event Bus ingress/outbox tablet or one
+single-shard Cache tablet after commit. Startup installs a canonical native
+image when present, then applies only the retained committed tail before
+readiness; legacy histories still replay.
 All four return bounded two-durable-voter evidence. The Event Bus retains
 independent delivery intent and attempt state but explicitly excludes a built-in
 target executor or external-delivery claim. The executable gates
@@ -117,10 +120,11 @@ regional boundary now adds safe leader
 ReadIndex requests that require majority confirmation and local typed-profile
 application; default regional reads expose exact barrier evidence, explicit
 `local_stale` reads remain available, and a minority times out without
-downgrade. Additive EPRS kind-3/EPSN v1 checkpoints now fsync before local or
-received installation, preserve the exact proposal registry, logically compact
-the Raft prefix, reopen with a committed tail, and let a lagging typed voter
-replay before tail application. G3 remains open for the exhaustive crash matrix,
+downgrade. Compatible EPSN v1/v2 checkpoints now fsync before local or received
+installation. V2 binds canonical native state, rolling EPDG state, and a bounded
+retry suffix; EPRS kind 4 atomically reclaims obsolete generations. The runtime
+reopens with a committed tail and installs a lagging voter's typed state before
+tail application. G3 remains open for the exhaustive crash matrix,
 membership and authoritative epoch transitions, follower read routing,
 authenticated transport, dynamic placement/repair, model and chaos reports,
 density, and performance. See [Consensus Feasibility Spike](CONSENSUS_SPIKE.md),
@@ -128,6 +132,7 @@ density, and performance. See [Consensus Feasibility Spike](CONSENSUS_SPIKE.md),
 [ADR-0015](adr/0015-stream-batch-compression.md),
 [ADR-0016](adr/0016-stream-consumer-group-checkpoints.md),
 [ADR-0021](adr/0021-consensus-checkpoint-and-snapshot-installation.md),
+[ADR-0022](adr/0022-profile-native-checkpoints-and-physical-reclamation.md),
 [Consensus Checkpoints](CONSENSUS_CHECKPOINTS.md),
 [Experimental Stream Tablet](STREAM_TABLET.md), and
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md), and
@@ -147,7 +152,7 @@ durability.
 | CACHE-005 | P0 | Pipeline, multiplex, batch, pool guidance | M1 → M2 | Slice | G1, G4 | Pending: ordering and throughput suite |
 | CACHE-006 | P0 | CAS, optimistic transaction, increment, fenced lock | M2 | Slice | G0, G3, G4 | Deterministic and real-runtime tests plus the authenticated Cache v1 route and complete Go/Java/Python clients cover non-ABA CAS, atomic transaction/rollback, checked increment/TTL, guarded locks, opaque-token renewal, current-term admission, leader loss, EPRS replay, convergence, and leader ReadIndex observations. Pending: concurrent history checker, follower routing, and production fault matrix |
 | CACHE-007 | P0 | Volatile, replicated-memory, quorum modes | M1 prototype → M2 | Slice | G0, G2, G3, G4 | Standalone volatile Cache remains separate; the regional Cache v1 path exposes the fixed-three-voter majority-persisted tablet through authenticated routing and proves post-leader-loss/all-voter replay without claiming a generally selectable public quorum profile. Pending: replicated-memory mode, named durability selection, and placement-aware durability fault matrix |
-| CACHE-008 | P1 | Snapshot, WAL restore, backup, PITR | M3 | Planned | G2, G5, G7 | Consensus checkpoint/catch-up is a storage prerequisite but not a compact Cache image or backup; pending: Cache snapshot, backup/PITR implementation, catalog, and restore drill |
+| CACHE-008 | P1 | Snapshot, WAL restore, backup, PITR | M3 | Planned | G2, G5, G7 | The internal compact Cache voter image and automatic fixed-voter restore are storage prerequisites, not an exportable backup/PITR product; pending: artifact/catalog, encryption, retention, semantic PITR, and scheduled restore drill |
 | CACHE-009 | P1 | Explicitly lossy Pub/Sub and patterns | M3 | Planned | G0, G4, G6 | Pending: route and disconnect semantics suite |
 | CACHE-010 | P1 | Durable mutation change stream | M3 | Planned | G2, G4, G7 | Pending: mutation-to-offset reconciliation |
 | CACHE-011 | P2 | Bitmap, cardinality, probabilistic, geo types | M6 | Planned | G2, G4 | Pending: accuracy and persistence corpus |
@@ -225,7 +230,7 @@ durability.
 | MGD-003 | P1 | Policy-bound multidimensional autoscaling | M4 | Planned | G5, G8 | Pending: hysteresis/headroom load report |
 | MGD-004 | P0 | Multi-zone replicas and failover | M1 prototype → M2 | Slice | G2, G3, G5 | Bounded fixed-voter evidence includes three policy-protected configured zones, catalog plus simultaneous Cache/Stream/Queue/Bus groups, EPRS persistence, real-process/container leader replacement, truthful two-voter degradation in the Go BFF, entry and consensus-snapshot catch-up, minority non-commit, and all-voter `SIGKILL` replay; pending: mTLS server identity, rack constraints, dynamic membership, public durability policy, broader fault matrix, and failover SLO report |
 | MGD-005 | P1 | Geo DR, switch, promotion, failback | M4 → M5 | Planned | G3, G8, G9 | Pending: RPO/RTO and split-brain drill |
-| MGD-006 | P1 | Backup, validation, semantic PITR | M3 | Planned | G2, G5, G7, G8 | Consensus checkpoints now prove fixed-voter catch-up only; pending: backup artifact/catalog, encryption, semantic PITR, retention, scheduled restore, and validation evidence |
+| MGD-006 | P1 | Backup, validation, semantic PITR | M3 | Planned | G2, G5, G7, G8 | Native checkpoints now prove bounded internal fixed-voter catch-up/restart and physical journal reclamation only; pending: backup artifact/catalog, encryption, semantic PITR, retention, scheduled restore, and validation evidence |
 | MGD-007 | P1 | Guarded rolling upgrades | M5 | Planned | G3, G5, G6, G8, G10 | Pending: mixed-version stop/rollback drill |
 | MGD-008 | P0 | Unified workload identity and authorization | M2 baseline → M4 | Slice | G0, G5, G6 | A shared strict fingerprint-only bootstrap policy authenticates Go HTTP/gRPC, Go-to-Rust workload calls, and Rust regional HTTP; explicit actions plus organization/project/environment/namespace scopes fail closed and one Go/Rust corpus prevents evaluator drift. Pending: OIDC, short-lived/revocable credentials, mTLS/peer identity, replicated policy/ACLs, compatibility-protocol mapping, and the full authorization differential matrix |
 | MGD-009 | P1 | Private ingress and controlled egress | M4 | Planned | G5, G8 | Pending: cloud connectivity/isolation report |

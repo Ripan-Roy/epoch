@@ -4,21 +4,24 @@ use std::collections::BTreeMap;
 
 use epoch_core::{EpochError, EventEnvelope};
 use epoch_queue::QueueCounts;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::TabletWriteEvidence;
-use crate::common::serialize_u64_as_decimal;
+use crate::common::{
+    deserialize_optional_u64_from_number_or_decimal, deserialize_u64_from_number_or_decimal,
+    serialize_u64_as_decimal,
+};
 
 pub type QueueTabletWriteEvidence = TabletWriteEvidence;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueueTabletDisposition {
     New,
     Replayed,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum QueueTabletOutcome {
     Applied {
@@ -30,7 +33,7 @@ pub enum QueueTabletOutcome {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueueTabletRejectionCode {
     AlreadyExists,
@@ -42,7 +45,7 @@ pub enum QueueTabletRejectionCode {
     Unavailable,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueTabletEnvelope {
     pub id: String,
     pub source: String,
@@ -50,7 +53,10 @@ pub struct QueueTabletEnvelope {
     pub event_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub time_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
@@ -62,13 +68,17 @@ pub struct QueueTabletEnvelope {
     pub traceparent: Option<String>,
     pub payload: serde_json::Value,
     #[serde(
+        default,
         skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_u64_as_decimal"
+        serialize_with = "serialize_optional_u64_as_decimal",
+        deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
     )]
     pub deliver_at_ms: Option<u64>,
     #[serde(
+        default,
         skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_u64_as_decimal"
+        serialize_with = "serialize_optional_u64_as_decimal",
+        deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
     )]
     pub ttl_ms: Option<u64>,
     pub priority: u8,
@@ -103,57 +113,92 @@ impl From<EventEnvelope> for QueueTabletEnvelope {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueTabletDelivery {
     pub message_id: String,
     pub envelope: QueueTabletEnvelope,
     pub attempt: u32,
     pub lease_token: String,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub lease_deadline_ms: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueTabletCounts {
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub ready: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub scheduled: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub in_flight: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub acknowledged: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub expired: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub dead_lettered: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueTabletFlowControl {
     pub requested_credit: u16,
     pub max_in_flight: u16,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub in_flight_before: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub in_flight_after: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub remaining_capacity: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueTabletConsumerFlow {
     pub consumer: String,
     #[serde(
+        default,
         skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_u64_as_decimal"
+        serialize_with = "serialize_optional_u64_as_decimal",
+        deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
     )]
     pub consumer_epoch: Option<u64>,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub in_flight: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum QueueTabletOperationResult {
     Enqueued {
@@ -172,29 +217,47 @@ pub enum QueueTabletOperationResult {
     LeaseExtended {
         message_id: String,
         lease_token: String,
-        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
         lease_deadline_ms: u64,
     },
     Released {
         message_id: String,
-        #[serde(serialize_with = "serialize_optional_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_optional_u64_as_decimal",
+            deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
+        )]
         dead_letter_history_id: Option<u64>,
     },
     Nacked {
         message_id: String,
-        #[serde(serialize_with = "serialize_optional_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_optional_u64_as_decimal",
+            deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
+        )]
         dead_letter_history_id: Option<u64>,
     },
     DeadLettered {
         message_id: String,
-        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
         dead_letter_history_id: u64,
     },
     Redriven {
         message_id: String,
-        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
         dead_letter_history_id: u64,
-        #[serde(serialize_with = "serialize_u64_as_decimal")]
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
         redrive_history_id: u64,
     },
     Maintained {
@@ -203,19 +266,37 @@ pub enum QueueTabletOperationResult {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueTabletReceipt {
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub proposal_id: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub tablet_id: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub tablet_epoch: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub term: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub commit_index: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub applied_at_ms: u64,
     pub write_evidence: QueueTabletWriteEvidence,
     pub durable_voter_acks: u16,
@@ -223,46 +304,82 @@ pub struct QueueTabletReceipt {
     pub outcome: QueueTabletOutcome,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueTabletDeadLetterHistory {
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub history_id: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub recorded_term: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub recorded_commit_index: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub source_proposal_id: u64,
     pub dead_letter: QueueTabletDeadLetter,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueTabletDeadLetter {
     pub message_id: String,
     pub envelope: QueueTabletEnvelope,
     pub reason: String,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub original_enqueued_at_ms: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub dead_lettered_at_ms: u64,
     pub attempts: u32,
     pub last_error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueTabletRedriveHistory {
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub history_id: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub dead_letter_history_id: u64,
     pub message_id: String,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub source_proposal_id: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub recorded_term: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub recorded_commit_index: u64,
-    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
     pub redriven_at_ms: u64,
 }
 

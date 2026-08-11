@@ -4,13 +4,15 @@ mod command;
 mod digest;
 mod model;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use epoch_bus::{
     ArchivedEvent, BusConfig, DeliveryCounts, DeliveryFence, DeliveryRecord, DeliveryState,
     DeliveryStateKind, EventBus, EventFilter,
 };
 use epoch_core::{DurabilityProfile, EpochError, EpochResult};
+use serde::{Deserialize, Serialize};
 
 use crate::common::{AppliedCommand, validate_committed_command_scope};
 use crate::{
@@ -21,6 +23,9 @@ pub use command::*;
 use digest::{delivery_plan_digest, initial_state_digest, transition_digest};
 pub use model::*;
 
+pub const BUS_TABLET_SNAPSHOT_FORMAT_VERSION: u16 = 1;
+pub const MAX_BUS_TABLET_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
+
 #[derive(Debug)]
 pub struct BusTablet {
     scope: BusTabletScope,
@@ -30,6 +35,26 @@ pub struct BusTablet {
     last_applied_time_ms: u64,
     business_state_digest: [u8; 32],
     state_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VersionedBusTabletSnapshot {
+    format_version: u16,
+    scope: BusTabletScope,
+    bus_base64: String,
+    applied: Vec<BusTabletAppliedSnapshot>,
+    last_applied_command_index: u64,
+    last_applied_time_ms: u64,
+    business_state_digest: [u8; 32],
+    state_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BusTabletAppliedSnapshot {
+    proposal_id: u64,
+    applied: AppliedCommand<BusTabletReceipt>,
 }
 
 impl BusTablet {
@@ -188,6 +213,10 @@ impl BusTablet {
         self.bus.subscription_count()
     }
 
+    pub fn bus_config(&self) -> &BusConfig {
+        self.bus.config()
+    }
+
     pub const fn commit_position(&self) -> u64 {
         self.bus.commit_position()
     }
@@ -219,6 +248,130 @@ impl BusTablet {
 
     pub const fn state_digest(&self) -> [u8; 32] {
         self.state_digest
+    }
+
+    pub fn encode_snapshot(&self, retained: &BTreeSet<u64>) -> TabletResult<Vec<u8>> {
+        let mut applied = self
+            .applied
+            .iter()
+            .filter(|(proposal_id, _)| retained.contains(proposal_id))
+            .map(|(proposal_id, applied)| BusTabletAppliedSnapshot {
+                proposal_id: *proposal_id,
+                applied: applied.clone(),
+            })
+            .collect::<Vec<_>>();
+        if applied.len() != retained.len() {
+            return Err(TabletError::InvalidCommand(
+                "Event Bus snapshot retry set contains an unknown proposal".into(),
+            ));
+        }
+        applied.sort_by_key(|entry| entry.applied.metadata.log_index);
+        let bus = self.bus.encode_snapshot().map_err(TabletError::Profile)?;
+        let encoded = serde_json::to_vec(&VersionedBusTabletSnapshot {
+            format_version: BUS_TABLET_SNAPSHOT_FORMAT_VERSION,
+            scope: self.scope.clone(),
+            bus_base64: STANDARD_NO_PAD.encode(bus),
+            applied,
+            last_applied_command_index: self.last_applied_command_index,
+            last_applied_time_ms: self.last_applied_time_ms,
+            business_state_digest: self.business_state_digest,
+            state_digest: self.state_digest,
+        })
+        .map_err(|error| TabletError::Encoding(error.to_string()))?;
+        if encoded.len() > MAX_BUS_TABLET_SNAPSHOT_BYTES {
+            return Err(TabletError::InvalidCommand(format!(
+                "Event Bus tablet snapshot is {} bytes; maximum is {MAX_BUS_TABLET_SNAPSHOT_BYTES}",
+                encoded.len()
+            )));
+        }
+        Ok(encoded)
+    }
+
+    pub fn decode_snapshot(expected_scope: &BusTabletScope, encoded: &[u8]) -> TabletResult<Self> {
+        if encoded.len() > MAX_BUS_TABLET_SNAPSHOT_BYTES {
+            return Err(TabletError::InvalidCommand(format!(
+                "Event Bus tablet snapshot is {} bytes; maximum is {MAX_BUS_TABLET_SNAPSHOT_BYTES}",
+                encoded.len()
+            )));
+        }
+        let snapshot: VersionedBusTabletSnapshot = serde_json::from_slice(encoded)
+            .map_err(|error| TabletError::Decoding(error.to_string()))?;
+        if snapshot.format_version != BUS_TABLET_SNAPSHOT_FORMAT_VERSION {
+            return Err(TabletError::InvalidCommand(format!(
+                "unsupported Event Bus tablet snapshot version {}",
+                snapshot.format_version
+            )));
+        }
+        if &snapshot.scope != expected_scope {
+            return Err(TabletError::InvalidCommand(
+                "Event Bus tablet snapshot scope is fenced".into(),
+            ));
+        }
+        snapshot.scope.validate()?;
+        if serde_json::to_vec(&snapshot)
+            .map_err(|error| TabletError::Encoding(error.to_string()))?
+            != encoded
+        {
+            return Err(TabletError::InvalidCommand(
+                "Event Bus tablet snapshot is not canonical".into(),
+            ));
+        }
+        let bus_bytes = STANDARD_NO_PAD
+            .decode(&snapshot.bus_base64)
+            .map_err(|error| TabletError::Decoding(error.to_string()))?;
+        let bus = EventBus::decode_snapshot(&bus_bytes).map_err(TabletError::Profile)?;
+        let business_state_digest = bus.recovery_state_digest()?;
+        if business_state_digest != snapshot.business_state_digest
+            || !bus.config().delivery_outbox
+            || bus.config().durability != DurabilityProfile::Volatile
+        {
+            return Err(TabletError::InvalidCommand(
+                "Event Bus tablet snapshot business state is invalid".into(),
+            ));
+        }
+
+        let mut applied = BTreeMap::new();
+        let mut previous_index = 0_u64;
+        for entry in snapshot.applied {
+            let metadata = entry.applied.metadata;
+            let receipt = &entry.applied.receipt;
+            if entry.proposal_id == 0
+                || metadata.proposal_id != entry.proposal_id
+                || metadata.term == 0
+                || metadata.log_index <= previous_index
+                || metadata.log_index > snapshot.last_applied_command_index
+                || receipt.proposal_id != entry.proposal_id
+                || receipt.tablet_id != expected_scope.tablet_id
+                || receipt.tablet_epoch != expected_scope.tablet_epoch
+                || receipt.term != metadata.term
+                || receipt.commit_index != metadata.log_index
+                || receipt.applied_at_ms > snapshot.last_applied_time_ms
+                || receipt.write_evidence != TabletWriteEvidence::FixedVoterMajorityPersisted
+                || receipt.durable_voter_acks != 2
+                || applied.insert(entry.proposal_id, entry.applied).is_some()
+            {
+                return Err(TabletError::InvalidCommand(
+                    "Event Bus tablet snapshot retry registry is invalid".into(),
+                ));
+            }
+            previous_index = metadata.log_index;
+        }
+        if snapshot.last_applied_command_index == 0
+            && (snapshot.last_applied_time_ms != 0 || !applied.is_empty())
+        {
+            return Err(TabletError::InvalidCommand(
+                "Event Bus tablet snapshot application position is invalid".into(),
+            ));
+        }
+        Ok(Self {
+            scope: snapshot.scope,
+            bus,
+            applied,
+            last_applied_command_index: snapshot.last_applied_command_index,
+            last_applied_time_ms: snapshot.last_applied_time_ms,
+            business_state_digest,
+            state_digest: snapshot.state_digest,
+        })
     }
 }
 

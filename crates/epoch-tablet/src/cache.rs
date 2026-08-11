@@ -5,14 +5,15 @@ mod digest;
 mod lock;
 mod model;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use epoch_cache::{
     CacheConfig, CacheMutation, CacheMutationResult, CacheShard, CacheTransaction, CacheValue,
     EvictionPolicy, SetOptions,
 };
 use epoch_core::{EpochError, EpochResult};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::common::{AppliedCommand, validate_committed_command_scope};
 use crate::{
@@ -24,7 +25,11 @@ use digest::{encode_auxiliary_state, initial_state_digest, transition_digest};
 pub use lock::*;
 pub use model::*;
 
-#[derive(Debug, Clone, Serialize)]
+pub const CACHE_TABLET_SNAPSHOT_FORMAT_VERSION: u16 = 1;
+pub const MAX_CACHE_TABLET_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ActiveCacheLock {
     owner: String,
     owner_epoch: u64,
@@ -61,6 +66,29 @@ pub struct CacheTablet {
     last_applied_command_index: u64,
     last_applied_time_ms: u64,
     state_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VersionedCacheTabletSnapshot {
+    format_version: u16,
+    scope: CacheTabletScope,
+    shard_base64: String,
+    default_ttl_ms: Option<u64>,
+    max_locks: usize,
+    active_owner_epochs: BTreeMap<String, u64>,
+    locks: BTreeMap<String, ActiveCacheLock>,
+    applied: Vec<CacheTabletAppliedSnapshot>,
+    last_applied_command_index: u64,
+    last_applied_time_ms: u64,
+    state_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CacheTabletAppliedSnapshot {
+    proposal_id: u64,
+    applied: AppliedCommand<CacheTabletReceipt>,
 }
 
 impl CacheTablet {
@@ -204,6 +232,14 @@ impl CacheTablet {
         self.state.shard.revision()
     }
 
+    pub const fn max_entries(&self) -> usize {
+        self.state.shard.max_entries()
+    }
+
+    pub const fn default_ttl_ms(&self) -> Option<u64> {
+        self.state.default_ttl_ms
+    }
+
     /// Returns physically retained entries, including expired values that have
     /// not yet been reclaimed by a committed maintenance command.
     pub fn cache_entry_count(&self) -> usize {
@@ -241,6 +277,200 @@ impl CacheTablet {
     pub const fn state_digest(&self) -> [u8; 32] {
         self.state_digest
     }
+
+    pub fn encode_snapshot(&self, retained: &BTreeSet<u64>) -> TabletResult<Vec<u8>> {
+        let mut applied = self
+            .applied
+            .iter()
+            .filter(|(proposal_id, _)| retained.contains(proposal_id))
+            .map(|(proposal_id, applied)| CacheTabletAppliedSnapshot {
+                proposal_id: *proposal_id,
+                applied: applied.clone(),
+            })
+            .collect::<Vec<_>>();
+        if applied.len() != retained.len() {
+            return Err(TabletError::InvalidCommand(
+                "Cache snapshot retry set contains an unknown proposal".into(),
+            ));
+        }
+        applied.sort_by_key(|entry| entry.applied.metadata.log_index);
+        let shard = self
+            .state
+            .shard
+            .encode_snapshot()
+            .map_err(TabletError::Profile)?;
+        let encoded = serde_json::to_vec(&VersionedCacheTabletSnapshot {
+            format_version: CACHE_TABLET_SNAPSHOT_FORMAT_VERSION,
+            scope: self.scope.clone(),
+            shard_base64: STANDARD_NO_PAD.encode(shard),
+            default_ttl_ms: self.state.default_ttl_ms,
+            max_locks: self.state.max_locks,
+            active_owner_epochs: self.state.active_owner_epochs.clone(),
+            locks: self.state.locks.clone(),
+            applied,
+            last_applied_command_index: self.last_applied_command_index,
+            last_applied_time_ms: self.last_applied_time_ms,
+            state_digest: self.state_digest,
+        })
+        .map_err(|error| TabletError::Encoding(error.to_string()))?;
+        if encoded.len() > MAX_CACHE_TABLET_SNAPSHOT_BYTES {
+            return Err(TabletError::InvalidCommand(format!(
+                "Cache tablet snapshot is {} bytes; maximum is {MAX_CACHE_TABLET_SNAPSHOT_BYTES}",
+                encoded.len()
+            )));
+        }
+        Ok(encoded)
+    }
+
+    pub fn decode_snapshot(
+        expected_scope: &CacheTabletScope,
+        encoded: &[u8],
+    ) -> TabletResult<Self> {
+        if encoded.len() > MAX_CACHE_TABLET_SNAPSHOT_BYTES {
+            return Err(TabletError::InvalidCommand(format!(
+                "Cache tablet snapshot is {} bytes; maximum is {MAX_CACHE_TABLET_SNAPSHOT_BYTES}",
+                encoded.len()
+            )));
+        }
+        let snapshot: VersionedCacheTabletSnapshot = serde_json::from_slice(encoded)
+            .map_err(|error| TabletError::Decoding(error.to_string()))?;
+        if snapshot.format_version != CACHE_TABLET_SNAPSHOT_FORMAT_VERSION {
+            return Err(TabletError::InvalidCommand(format!(
+                "unsupported Cache tablet snapshot version {}",
+                snapshot.format_version
+            )));
+        }
+        if &snapshot.scope != expected_scope {
+            return Err(TabletError::InvalidCommand(
+                "Cache tablet snapshot scope is fenced".into(),
+            ));
+        }
+        snapshot.scope.validate()?;
+        if serde_json::to_vec(&snapshot)
+            .map_err(|error| TabletError::Encoding(error.to_string()))?
+            != encoded
+        {
+            return Err(TabletError::InvalidCommand(
+                "Cache tablet snapshot is not canonical".into(),
+            ));
+        }
+
+        let shard_bytes = STANDARD_NO_PAD
+            .decode(&snapshot.shard_base64)
+            .map_err(|error| TabletError::Decoding(error.to_string()))?;
+        let shard = CacheShard::decode_snapshot(&shard_bytes).map_err(TabletError::Profile)?;
+        if shard.max_entries() != snapshot.max_locks
+            || shard.default_ttl_ms() != snapshot.default_ttl_ms
+        {
+            return Err(TabletError::InvalidCommand(
+                "Cache tablet snapshot configuration is invalid".into(),
+            ));
+        }
+        validate_cache_snapshot_locks(expected_scope, &snapshot)?;
+
+        let mut applied = BTreeMap::new();
+        let mut previous_index = 0_u64;
+        for entry in snapshot.applied {
+            let metadata = entry.applied.metadata;
+            let receipt = &entry.applied.receipt;
+            if entry.proposal_id == 0
+                || metadata.proposal_id != entry.proposal_id
+                || metadata.term == 0
+                || metadata.log_index <= previous_index
+                || metadata.log_index > snapshot.last_applied_command_index
+                || receipt.proposal_id != entry.proposal_id
+                || receipt.tablet_id != expected_scope.tablet_id
+                || receipt.tablet_epoch != expected_scope.tablet_epoch
+                || receipt.term != metadata.term
+                || receipt.commit_index != metadata.log_index
+                || receipt.applied_at_ms > snapshot.last_applied_time_ms
+                || receipt.write_evidence != TabletWriteEvidence::FixedVoterMajorityPersisted
+                || receipt.durable_voter_acks != 2
+                || applied.insert(entry.proposal_id, entry.applied).is_some()
+            {
+                return Err(TabletError::InvalidCommand(
+                    "Cache tablet snapshot retry registry is invalid".into(),
+                ));
+            }
+            previous_index = metadata.log_index;
+        }
+        if snapshot.last_applied_command_index == 0
+            && (snapshot.last_applied_time_ms != 0 || !applied.is_empty())
+        {
+            return Err(TabletError::InvalidCommand(
+                "Cache tablet snapshot application position is invalid".into(),
+            ));
+        }
+
+        Ok(Self {
+            scope: snapshot.scope,
+            state: CacheTabletBusinessState {
+                shard,
+                default_ttl_ms: snapshot.default_ttl_ms,
+                max_locks: snapshot.max_locks,
+                active_owner_epochs: snapshot.active_owner_epochs,
+                locks: snapshot.locks,
+            },
+            applied,
+            last_applied_command_index: snapshot.last_applied_command_index,
+            last_applied_time_ms: snapshot.last_applied_time_ms,
+            state_digest: snapshot.state_digest,
+        })
+    }
+}
+
+fn validate_cache_snapshot_locks(
+    scope: &CacheTabletScope,
+    snapshot: &VersionedCacheTabletSnapshot,
+) -> TabletResult<()> {
+    if snapshot.max_locks == 0
+        || snapshot.locks.len() > snapshot.max_locks
+        || snapshot.active_owner_epochs.len() > snapshot.max_locks
+    {
+        return Err(TabletError::InvalidCommand(
+            "Cache tablet snapshot lock capacity is invalid".into(),
+        ));
+    }
+    let mut expected_owner_epochs = BTreeMap::<String, u64>::new();
+    for (lock_key, lock) in &snapshot.locks {
+        let metadata =
+            CacheLockTokenMetadata::parse(&lock.lease_token).map_err(TabletError::Profile)?;
+        if lock_key.trim().is_empty()
+            || lock_key.len() > MAX_CACHE_KEY_BYTES
+            || lock.owner.trim().is_empty()
+            || lock.owner.len() > MAX_CACHE_OWNER_BYTES
+            || lock.owner_epoch == 0
+            || lock.acquired_term == 0
+            || lock.acquisition_index == 0
+            || lock.acquisition_index > snapshot.last_applied_command_index
+            || lock.lease_generation == 0
+            || lock.lease_deadline_ms == 0
+            || metadata.tablet_id() != scope.tablet_id
+            || metadata.tablet_epoch() != scope.tablet_epoch
+            || metadata.shard() != 0
+            || metadata.leader_term() != lock.acquired_term
+            || metadata.owner_epoch() != lock.owner_epoch
+            || metadata.acquisition_index() != lock.acquisition_index
+            || metadata.lease_generation() != lock.lease_generation
+            || metadata.lease_deadline_ms() != lock.lease_deadline_ms
+            || metadata.lock_key() != lock_key
+            || metadata.owner() != lock.owner
+        {
+            return Err(TabletError::InvalidCommand(
+                "Cache tablet snapshot lock registry is invalid".into(),
+            ));
+        }
+        expected_owner_epochs
+            .entry(lock.owner.clone())
+            .and_modify(|epoch| *epoch = (*epoch).max(lock.owner_epoch))
+            .or_insert(lock.owner_epoch);
+    }
+    if expected_owner_epochs != snapshot.active_owner_epochs {
+        return Err(TabletError::InvalidCommand(
+            "Cache tablet snapshot owner epoch registry is invalid".into(),
+        ));
+    }
+    Ok(())
 }
 
 impl CacheTabletBusinessState {

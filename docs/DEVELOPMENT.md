@@ -418,8 +418,10 @@ resources. The displayed Go, Java, and Python regional sources are compiled by
 [Regional Event Bus SDK](REGIONAL_EVENT_BUS_SDK.md). `epoch-catalog` remains
 independently testable with `cargo test -p epoch-catalog --all-targets`. Dynamic
 membership, general voter selection, rack placement, production peer
-identity/TLS, profile-native snapshots/backups, follower read routing, and coordinated consumer
-sessions remain subsequent slices; see
+identity/TLS, user-exportable backups/PITR, follower read routing, and
+coordinated consumer sessions remain subsequent slices. Internal native voter
+checkpoints and physical EPRS reclamation are documented in
+[ADR-0022](adr/0022-profile-native-checkpoints-and-physical-reclamation.md). See
 [ADR-0009](adr/0009-regional-tablet-catalog.md) and
 [ADR-0010](adr/0010-durable-managed-metadata.md), the bootstrap security
 boundary in [ADR-0011](adr/0011-bootstrap-authz-audit-baseline.md), and

@@ -8,15 +8,23 @@ notes explicitly list additional verified artifacts.
 
 ### Added
 
+- Additive EPSN v2 native-profile checkpoints for Catalog, Stream, Queue,
+  Cache, and Event Bus, with canonical scope/configuration validation, rolling
+  consensus digests, a bounded 1,024-record/1 MiB exact-retry suffix, and a
+  SHA-256 digest over the complete at-most-6-MiB frame.
+- Crash-safe physical EPRS reclamation through an additive compacted-baseline
+  record and locked sibling-WAL replacement, plus automatic profile restore
+  before retained-tail application in every real three-voter profile restart.
+  This is internal voter recovery, not a downloadable backup, PITR, scheduled
+  restore, dynamic membership, or production repair workflow.
 - Canonical bounded EPSN v1 consensus checkpoints embedded in additive EPRS
   records, with fsync-before-install ordering, logical Raft-prefix compaction,
   checkpoint-plus-tail reopen, exact proposal retry preservation, and
   fail-closed metadata/digest validation.
 - Snapshot-based catch-up for a lagging fixed voter, including typed profile
   replay before committed-tail application, real three-runtime HTTP evidence,
-  local checkpoint status, and an experimental checkpoint trigger. This does
-  not add profile-native backups, PITR, physical EPRS reclamation, dynamic
-  membership, or production repair.
+  local checkpoint status, and an experimental checkpoint trigger. EPSN v2
+  extends this foundation without turning it into a backup/PITR product.
 
 - A strict version-one bootstrap identity policy shared by Go and Rust, with
   SHA-256 token fingerprints, explicit actions, hierarchical tenant scopes, a

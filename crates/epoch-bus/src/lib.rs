@@ -37,6 +37,8 @@ pub const MAX_JSON_PATH_BYTES: usize = 1_024;
 pub const MAX_PROJECTED_FIELD_BYTES: usize = 256;
 pub const MAX_FILTER_VALUE_BYTES: usize = 64 * 1024;
 pub const MAX_TARGET_URL_BYTES: usize = 8 * 1024;
+pub const EVENT_BUS_SNAPSHOT_FORMAT_VERSION: u16 = 1;
+pub const MAX_EVENT_BUS_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -357,6 +359,19 @@ pub struct EventBus {
     delivery_ledger: DeliveryLedger,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VersionedEventBusSnapshot {
+    format_version: u16,
+    config: BusConfig,
+    subscriptions: BTreeMap<String, Subscription>,
+    route_plan_version: u64,
+    commit_position: u64,
+    archive: Vec<ArchivedEvent>,
+    delivery_ledger: DeliveryLedger,
+    state_digest: [u8; 32],
+}
+
 impl EventBus {
     pub fn new(config: BusConfig) -> EpochResult<Self> {
         validate_config(&config)?;
@@ -590,6 +605,112 @@ impl EventBus {
         hasher.update(b"epoch/event-bus/recovery-state/v2\0");
         hasher.update(encoded);
         Ok(hasher.finalize().into())
+    }
+
+    /// Encodes the complete routing, archive, and delivery-ledger state as a
+    /// canonical versioned application snapshot.
+    pub fn encode_snapshot(&self) -> EpochResult<Vec<u8>> {
+        let encoded = serde_json::to_vec(&VersionedEventBusSnapshot {
+            format_version: EVENT_BUS_SNAPSHOT_FORMAT_VERSION,
+            config: self.config.clone(),
+            subscriptions: self.subscriptions.clone(),
+            route_plan_version: self.route_plan_version,
+            commit_position: self.commit_position,
+            archive: self.archive.clone(),
+            delivery_ledger: self.delivery_ledger.clone(),
+            state_digest: self.recovery_state_digest()?,
+        })
+        .map_err(|error| EpochError::InvalidArgument(error.to_string()))?;
+        if encoded.len() > MAX_EVENT_BUS_SNAPSHOT_BYTES {
+            return Err(EpochError::Capacity(format!(
+                "Event Bus snapshot is {} bytes; maximum is {MAX_EVENT_BUS_SNAPSHOT_BYTES}",
+                encoded.len()
+            )));
+        }
+        Ok(encoded)
+    }
+
+    /// Decodes and validates a canonical Event Bus snapshot without mutating
+    /// an existing bus.
+    pub fn decode_snapshot(encoded: &[u8]) -> EpochResult<Self> {
+        if encoded.len() > MAX_EVENT_BUS_SNAPSHOT_BYTES {
+            return Err(EpochError::Capacity(format!(
+                "Event Bus snapshot is {} bytes; maximum is {MAX_EVENT_BUS_SNAPSHOT_BYTES}",
+                encoded.len()
+            )));
+        }
+        let snapshot: VersionedEventBusSnapshot = serde_json::from_slice(encoded)
+            .map_err(|error| EpochError::InvalidArgument(error.to_string()))?;
+        if snapshot.format_version != EVENT_BUS_SNAPSHOT_FORMAT_VERSION {
+            return Err(EpochError::InvalidArgument(format!(
+                "unsupported Event Bus snapshot version {}",
+                snapshot.format_version
+            )));
+        }
+        if serde_json::to_vec(&snapshot)
+            .map_err(|error| EpochError::InvalidArgument(error.to_string()))?
+            != encoded
+        {
+            return Err(EpochError::InvalidArgument(
+                "Event Bus snapshot is not canonical".into(),
+            ));
+        }
+        validate_config(&snapshot.config)?;
+        if snapshot.route_plan_version == 0
+            || snapshot.subscriptions.len() > snapshot.config.max_subscriptions
+        {
+            return Err(EpochError::InvalidArgument(
+                "Event Bus snapshot route plan is invalid".into(),
+            ));
+        }
+        for (name, subscription) in &snapshot.subscriptions {
+            if name != &subscription.name {
+                return Err(EpochError::InvalidArgument(
+                    "Event Bus snapshot subscription registry is invalid".into(),
+                ));
+            }
+            subscription.validate()?;
+        }
+        if (snapshot.config.archive
+            && u64::try_from(snapshot.archive.len()).ok() != Some(snapshot.commit_position))
+            || (!snapshot.config.archive && !snapshot.archive.is_empty())
+            || snapshot.archive.len() > snapshot.config.max_archive_events
+        {
+            return Err(EpochError::InvalidArgument(
+                "Event Bus snapshot archive configuration is invalid".into(),
+            ));
+        }
+        for (position, event) in snapshot.archive.iter().enumerate() {
+            if u64::try_from(position + 1).ok() != Some(event.position)
+                || event.route_plan_version == 0
+                || event.route_plan_version > snapshot.route_plan_version
+            {
+                return Err(EpochError::InvalidArgument(
+                    "Event Bus snapshot archive position is invalid".into(),
+                ));
+            }
+            event.envelope.validate()?;
+        }
+        snapshot.delivery_ledger.validate_snapshot(
+            snapshot.config.delivery_outbox,
+            snapshot.config.max_outbox_deliveries,
+            snapshot.commit_position,
+            snapshot.route_plan_version,
+        )?;
+        let bus = Self {
+            config: snapshot.config,
+            subscriptions: snapshot.subscriptions,
+            route_plan_version: snapshot.route_plan_version,
+            commit_position: snapshot.commit_position,
+            archive: snapshot.archive,
+            delivery_ledger: snapshot.delivery_ledger,
+        };
+        if bus.recovery_state_digest()? != snapshot.state_digest {
+            return Err(EpochError::InvalidArgument(
+                "Event Bus snapshot state digest is invalid".into(),
+            ));
+        }
+        Ok(bus)
     }
 
     pub fn has_subscription(&self, name: &str) -> bool {
@@ -1073,6 +1194,61 @@ mod tests {
             bus.replay(0, 1, None, MAX_REPLAY_EVENTS + 1),
             Err(EpochError::InvalidArgument(_))
         ));
+    }
+
+    #[test]
+    fn native_snapshot_round_trips_routes_archive_and_delivery_ledger_then_continues() {
+        let mut bus = EventBus::new(BusConfig {
+            delivery_outbox: true,
+            ..BusConfig::default()
+        })
+        .unwrap();
+        bus.upsert_subscription(subscription("audit", SubscriptionTarget::Pull))
+            .unwrap();
+        bus.publish(event("order.created"), 100).unwrap();
+        let fence = DeliveryFence::new(7, 3, 2, 1).unwrap();
+        let lease = bus
+            .acquire_deliveries("audit", "dispatcher", 1, 100, fence)
+            .unwrap()
+            .remove(0);
+        let expected_digest = bus.recovery_state_digest().unwrap();
+
+        let encoded = bus.encode_snapshot().unwrap();
+        let mut restored = EventBus::decode_snapshot(&encoded).unwrap();
+
+        assert_eq!(restored.encode_snapshot().unwrap(), encoded);
+        assert_eq!(restored.recovery_state_digest().unwrap(), expected_digest);
+        assert_eq!(restored.subscription_count(), 1);
+        assert_eq!(restored.commit_position(), 1);
+        assert_eq!(restored.archived_event_count(), 1);
+        assert_eq!(restored.delivery_counts().in_flight, 1);
+        restored
+            .acknowledge_delivery(
+                &lease.delivery_id,
+                "dispatcher",
+                &lease.lease_token,
+                fence,
+                101,
+            )
+            .unwrap();
+        assert_eq!(restored.delivery_counts().acknowledged, 1);
+    }
+
+    #[test]
+    fn native_snapshot_rejects_noncanonical_unknown_or_corrupt_images() {
+        let mut bus = EventBus::new(BusConfig::default()).unwrap();
+        bus.publish(event("order.created"), 100).unwrap();
+        let encoded = bus.encode_snapshot().unwrap();
+        let snapshot: VersionedEventBusSnapshot = serde_json::from_slice(&encoded).unwrap();
+        assert!(EventBus::decode_snapshot(&serde_json::to_vec_pretty(&snapshot).unwrap()).is_err());
+
+        let mut unknown = snapshot.clone();
+        unknown.format_version = 99;
+        assert!(EventBus::decode_snapshot(&serde_json::to_vec(&unknown).unwrap()).is_err());
+
+        let mut corrupt = snapshot;
+        corrupt.state_digest[0] ^= 1;
+        assert!(EventBus::decode_snapshot(&serde_json::to_vec(&corrupt).unwrap()).is_err());
     }
 
     #[test]

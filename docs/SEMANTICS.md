@@ -489,9 +489,11 @@ subscription changes, publish ingress, and independent delivery state. Each
 voter deterministically derives the captured route-plan version, transformed
 ordered delivery-plan digest, archive record, publish position, per-subscription
 outbox record, fenced attempt history, retry/dead-letter state, and chained
-digest. Startup rebuilds that complete state from EPRS before the internal
-listener is returned. Archive replay and delivery-ledger queries are local and
-stale-capable. Internal dispatchers acquire under both leader term and
+digest. Startup installs the canonical native voter checkpoint when present,
+then applies only its retained EPRS tail before the internal listener is
+returned; legacy histories still replay. Archive replay and delivery-ledger
+queries are local and stale-capable. Internal dispatchers acquire under both
+leader term and
 dispatcher epoch, then commit an acknowledgement or failure; lease expiry is an
 explicit bounded maintenance command. Status reports
 `durable_target_outbox: true` and
@@ -501,7 +503,7 @@ webhook/Queue/Stream/HTTP side effect. See
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 Epoch does **not** yet provide a production clustered durability contract,
-dynamic regional placement/membership, compact profile-native snapshots/backups,
+dynamic regional placement/membership, user-exportable backups/PITR,
 consumer-group coordination, bounded transactions, object tier, geo
 replication, native Protobuf data services, compatibility gateways, durable
 webhook delivery, connector execution, or the production security controls in
@@ -520,9 +522,9 @@ targets. See
 [REGIONAL_EVENT_BUS_SDK.md](REGIONAL_EVENT_BUS_SDK.md),
 [STREAM_TABLET.md](STREAM_TABLET.md), and
 [QUEUE_TABLET.md](QUEUE_TABLET.md).
-The Cache tablet additionally lacks profile snapshots/compaction, background
-active expiry, multi-shard routing, and bounded
-idempotency-receipt retention; see [CACHE_TABLET.md](CACHE_TABLET.md). The Bus
+The Cache tablet additionally lacks user-exportable backup/PITR, automatic
+checkpoint scheduling, background active expiry, multi-shard routing, and a
+public idempotency-retention contract; see [CACHE_TABLET.md](CACHE_TABLET.md). The Bus
 profile additionally lacks target executors, rate limiting, redrive/terminal
 retention, replay-attempt lineage, public pull/push contracts, and target
 security; see [BUS_TABLET.md](BUS_TABLET.md).
