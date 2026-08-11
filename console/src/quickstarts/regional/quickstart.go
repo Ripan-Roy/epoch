@@ -43,7 +43,7 @@ func main() {
 	configured, err := client.ConfigureRetention(ctx, "orders", 0, "docs-go-retention-v1", epoch.StreamRetentionPolicy{
 		MaxRecordsPerPartition: 10_000,
 		MaxBytesPerPartition:   3 * 1024 * 1024,
-		MaxAgeMS:                7 * 24 * 60 * 60 * 1_000,
+		MaxAgeMS:               7 * 24 * 60 * 60 * 1_000,
 	})
 	must(err)
 	maintained, err := client.MaintainRetention(ctx, "orders", 0, "docs-go-retention-sweep-v1")
