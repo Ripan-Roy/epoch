@@ -89,5 +89,6 @@ producer batching, or Kafka protocol negotiation already exists.
   never failing midway.
 - Rewrite single-record commands to version two and invalidate existing
   canonical/digest evidence.
-- Expose an SDK helper before the stable native batch protocol, retry contract,
-  and package compatibility policy are frozen.
+- Expose an SDK helper before its routing, framing, retry, and dependency
+  boundary is reviewed. ADR-0026 now records that additive regional SDK
+  decision without redefining this atomic command as native streaming Produce.

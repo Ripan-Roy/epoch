@@ -15,6 +15,9 @@ from .models import (
 from .regional import (
     RegionalScope,
     RegionalStreamClient,
+    StreamBatchFrame,
+    StreamBatchRecord,
+    StreamCompression,
     StreamRetentionPolicy,
     stream_shard_for,
 )
@@ -47,6 +50,9 @@ __all__ = [
     "RegionalQueueClient",
     "RegionalScope",
     "RegionalStreamClient",
+    "StreamBatchFrame",
+    "StreamBatchRecord",
+    "StreamCompression",
     "StreamRetentionPolicy",
     "Subscription",
     "SubscriptionTarget",

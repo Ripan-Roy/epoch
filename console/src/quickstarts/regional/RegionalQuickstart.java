@@ -5,6 +5,9 @@ import io.epoch.sdk.EventEnvelope;
 import io.epoch.sdk.RegionalScope;
 import io.epoch.sdk.RegionalStreamClient;
 import io.epoch.sdk.StreamPartitioner;
+import io.epoch.sdk.StreamBatchFrame;
+import io.epoch.sdk.StreamBatchRecord;
+import io.epoch.sdk.StreamCompression;
 import io.epoch.sdk.StreamRetentionPolicy;
 import java.math.BigInteger;
 import java.net.URI;
@@ -42,6 +45,18 @@ public final class RegionalQuickstart {
 
     JsonNode appended = client.appendKeyed("orders", "docs-java-keyed-stream-v1", event);
     JsonNode replayed = client.appendKeyed("orders", "docs-java-keyed-stream-v1", event);
+    EventEnvelope secondBatchEvent =
+        EventEnvelope.builder("docs-java", "order.created", Map.of("order_id", "java-43"))
+            .id("docs-java-order-43")
+            .key("customer-0")
+            .timeMs(43)
+            .build();
+    StreamBatchFrame batchFrame =
+        StreamBatchFrame.encode(
+            List.of(new StreamBatchRecord(101, event), new StreamBatchRecord(102, secondBatchEvent)),
+            StreamCompression.GZIP);
+    JsonNode batch =
+        client.appendBatch("orders", shard, "docs-java-gzip-batch-v1", batchFrame);
     long offset = appended.path("receipt").path("offset").asLong();
     JsonNode fetched = client.fetch("orders", shard, offset, 10);
     JsonNode groupRecords = client.fetchGroup("orders", shard, "docs-java", 100);
@@ -95,6 +110,7 @@ public final class RegionalQuickstart {
     output.put("selected_shard", shard);
     output.set("append", appended);
     output.set("exact_retry", replayed);
+    output.set("gzip_batch", batch);
     output.set("fetch", fetched);
     output.set("group_fetch", groupRecords);
     output.set("checkpoint", checkpoint);

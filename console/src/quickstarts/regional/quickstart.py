@@ -7,6 +7,8 @@ from epoch_sdk import (
     EventEnvelope,
     RegionalScope,
     RegionalStreamClient,
+    StreamBatchFrame,
+    StreamBatchRecord,
     StreamRetentionPolicy,
     stream_shard_for,
 )
@@ -34,6 +36,28 @@ shard = stream_shard_for(event.key or event.id, 3)
 
 appended = client.append_keyed("orders", "docs-python-keyed-stream-v1", event)
 replayed = client.append_keyed("orders", "docs-python-keyed-stream-v1", event)
+batch = client.append_batch(
+    "orders",
+    shard,
+    "docs-python-gzip-batch-v1",
+    StreamBatchFrame.encode(
+        [
+            StreamBatchRecord(101, event),
+            StreamBatchRecord(
+                102,
+                EventEnvelope(
+                    id="docs-python-order-43",
+                    key="customer-0",
+                    source="docs-python",
+                    event_type="order.created",
+                    payload={"order_id": "python-43"},
+                    time_ms=43,
+                ),
+            ),
+        ],
+        "gzip",
+    ),
+)
 offset = int(appended["receipt"]["offset"])
 fetched = client.fetch("orders", shard, offset, limit=10)
 group_records = client.fetch_group("orders", shard, "docs-python", limit=100)
@@ -90,6 +114,7 @@ print(
             "selected_shard": shard,
             "append": appended,
             "exact_retry": replayed,
+            "gzip_batch": batch,
             "fetch": fetched,
             "group_fetch": group_records,
             "checkpoint": checkpoint,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import gzip
 import unittest
 from typing import Any
 
@@ -8,6 +10,8 @@ from epoch_sdk import (
     EventEnvelope,
     RegionalScope,
     RegionalStreamClient,
+    StreamBatchFrame,
+    StreamBatchRecord,
     StreamRetentionPolicy,
     stream_shard_for,
 )
@@ -235,6 +239,98 @@ class RegionalStreamClientTests(unittest.TestCase):
         )
         for index in (0, 2, 4, 6, 8):
             self.assertTrue(self.leader.requests[index]["path"].endswith("/shards/0"))
+
+    def test_canonical_gzip_batch_keeps_exact_frame_and_identity_across_retry(self) -> None:
+        leader = RegionalFakeTransport(
+            {
+                "resource_generation": "2",
+                "tablet_epoch": "4",
+                "term": "9",
+                "accepts_writes": True,
+            },
+            [EpochAPIError(409, "not_leader", "leadership changed")],
+        )
+        client = RegionalStreamClient.with_transports(
+            [leader],
+            token="secret-token",
+            scope=RegionalScope("acme", "shop", "dev", "core"),
+        )
+        records = [
+            StreamBatchRecord(7, self._batch_event("order-7", "customer-7")),
+            StreamBatchRecord(8, self._batch_event("order-8", "customer-8")),
+        ]
+        frame = StreamBatchFrame.encode(records, "gzip")
+
+        client.append_batch("orders", 2, "batch-7", frame)
+
+        self.assertEqual(len(leader.requests), 4)
+        first = leader.requests[1]
+        second = leader.requests[3]
+        self.assertTrue(first["path"].endswith("/records/batches"))
+        self.assertEqual(first["body"], second["body"])
+        self.assertEqual(first["body"]["idempotency_key"], "batch-7")
+        self.assertEqual(first["body"]["compression"], "gzip")
+        self.assertEqual(first["body"]["record_count"], 2)
+        plain = gzip.decompress(base64.b64decode(first["body"]["payload_base64"], validate=True))
+        expected = (
+            b'[{"client_sequence":7,"envelope":{"id":"order-7","source":"checkout",'
+            b'"type":"order.created","time_ms":42,"key":"customer-7","headers":'
+            b'{"a":"first","z":"last"},"content_type":"application/json","payload":'
+            b'{"a":7,"z":[{"a":1,"y":2}]},"priority":0,"extensions":{"a":true,'
+            b'"z":{"a":1,"b":2}}}},{"client_sequence":8,"envelope":{"id":"order-8",'
+            b'"source":"checkout","type":"order.created","time_ms":42,'
+            b'"key":"customer-8","headers":{"a":"first","z":"last"},'
+            b'"content_type":"application/json","payload":{"a":7,"z":[{"a":1,'
+            b'"y":2}]},"priority":0,"extensions":{"a":true,"z":{"a":1,"b":2}}}}]'
+        )
+        self.assertEqual(plain, expected)
+
+    def test_duplicate_sequences_and_invalid_frames_fail_before_network(self) -> None:
+        event = self._batch_event("order-7", "customer-7")
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            StreamBatchFrame.encode(
+                [StreamBatchRecord(7, event), StreamBatchRecord(7, event)], "none"
+            )
+        for compression in ("none", "gzip", "lz4", "snappy", "zstd"):
+            StreamBatchFrame.from_compressed(compression, 1, 1, b"x")
+        with self.assertRaisesRegex(ValueError, "compression"):
+            StreamBatchFrame.from_compressed("brotli", 1, 2, b"x")
+        self.assertEqual(len(self.leader.requests), 0)
+
+    def test_canonical_batch_json_keeps_serde_compatible_unicode(self) -> None:
+        frame = StreamBatchFrame.encode(
+            [
+                StreamBatchRecord(
+                    1,
+                    EventEnvelope(
+                        id="订单\u2028七",
+                        key="東京",
+                        source="checkout",
+                        event_type="order.created",
+                        payload={"message": "<paid>&\u2029"},
+                        time_ms=42,
+                    ),
+                )
+            ],
+            "none",
+        )
+        self.assertNotIn(b"\\u2028", frame.compressed)
+        self.assertNotIn(b"\\u2029", frame.compressed)
+        self.assertIn("订单\u2028七".encode(), frame.compressed)
+        self.assertIn("<paid>&\u2029".encode(), frame.compressed)
+
+    @staticmethod
+    def _batch_event(event_id: str, key: str) -> EventEnvelope:
+        return EventEnvelope(
+            id=event_id,
+            key=key,
+            source="checkout",
+            event_type="order.created",
+            payload={"z": [{"y": 2, "a": 1}], "a": 7},
+            time_ms=42,
+            headers={"z": "last", "a": "first"},
+            extensions={"z": {"b": 2, "a": 1}, "a": True},
+        )
 
     def test_scope_and_mutation_inputs_fail_before_network(self) -> None:
         with self.assertRaisesRegex(ValueError, "organization"):

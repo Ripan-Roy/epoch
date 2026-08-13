@@ -5,12 +5,15 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.math.BigInteger;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.zip.GZIPInputStream;
 import org.junit.jupiter.api.Test;
 
 final class RegionalStreamClientTest {
@@ -194,6 +197,116 @@ final class RegionalStreamClientTest {
     for (int index : List.of(0, 2, 4, 6, 8)) {
       assertEquals(true, leader.requests.get(index).path().endsWith("/shards/0"));
     }
+  }
+
+  @Test
+  void canonicalGzipBatchKeepsExactFrameAndIdentityAcrossRetry() throws Exception {
+    RecordingRegionalTransport leader =
+        new RecordingRegionalTransport(
+            MAPPER.readTree(
+                """
+                {"resource_generation":"2","tablet_epoch":"4","term":"9","accepts_writes":true}
+                """),
+            new EpochApiException(
+                409, "not_leader", "leadership changed", MAPPER.createObjectNode()));
+    RegionalStreamClient client =
+        RegionalStreamClient.withTransports(
+            List.of(leader), "secret-token", new RegionalScope("acme", "shop", "dev", "core"));
+    List<StreamBatchRecord> records =
+        List.of(
+            new StreamBatchRecord(7, batchEvent("order-7", "customer-7")),
+            new StreamBatchRecord(8, batchEvent("order-8", "customer-8")));
+    StreamBatchFrame frame = StreamBatchFrame.encode(records, StreamCompression.GZIP);
+
+    client.appendBatch("orders", 2, "batch-7", frame);
+
+    assertEquals(4, leader.requests.size());
+    Request first = leader.requests.get(1);
+    Request second = leader.requests.get(3);
+    assertEquals(true, first.path().endsWith("/records/batches"));
+    assertEquals(first.body(), second.body());
+    assertEquals("batch-7", first.body().path("idempotency_key").asText());
+    assertEquals("gzip", first.body().path("compression").asText());
+    assertEquals(2, first.body().path("record_count").asInt());
+    byte[] compressed = Base64.getDecoder().decode(first.body().path("payload_base64").asText());
+    String plain;
+    try (GZIPInputStream input = new GZIPInputStream(new ByteArrayInputStream(compressed))) {
+      plain = new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+    }
+    String expected =
+        "[{\"client_sequence\":7,\"envelope\":{"
+            + "\"id\":\"order-7\",\"source\":\"checkout\","
+            + "\"type\":\"order.created\",\"time_ms\":42,"
+            + "\"key\":\"customer-7\",\"headers\":{\"a\":\"first\",\"z\":\"last\"},"
+            + "\"content_type\":\"application/json\","
+            + "\"payload\":{\"a\":7,\"z\":[{\"a\":1,\"y\":2}]},"
+            + "\"priority\":0,\"extensions\":{\"a\":true,"
+            + "\"z\":{\"a\":1,\"b\":2}}}},{\"client_sequence\":8,\"envelope\":{"
+            + "\"id\":\"order-8\",\"source\":\"checkout\","
+            + "\"type\":\"order.created\",\"time_ms\":42,"
+            + "\"key\":\"customer-8\",\"headers\":{\"a\":\"first\",\"z\":\"last\"},"
+            + "\"content_type\":\"application/json\","
+            + "\"payload\":{\"a\":7,\"z\":[{\"a\":1,\"y\":2}]},"
+            + "\"priority\":0,\"extensions\":{\"a\":true,"
+            + "\"z\":{\"a\":1,\"b\":2}}}}]";
+    assertEquals(expected, plain);
+  }
+
+  @Test
+  void duplicateSequencesAndUnsupportedFramesFailBeforeNetwork() {
+    EventEnvelope event = batchEvent("order-7", "customer-7");
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            StreamBatchFrame.encode(
+                List.of(new StreamBatchRecord(7, event), new StreamBatchRecord(7, event)),
+                StreamCompression.NONE));
+    for (StreamCompression compression : StreamCompression.values()) {
+      StreamBatchFrame.compressed(compression, 1, 1, new byte[] {1});
+    }
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> StreamBatchFrame.compressed(StreamCompression.NONE, 0, 2, new byte[] {1}));
+  }
+
+  @Test
+  void canonicalBatchJsonKeepsSerdeCompatibleUnicode() throws Exception {
+    EventEnvelope event =
+        EventEnvelope.builder("checkout", "order.created", Map.of("message", "<paid>&\u2029"))
+            .id("订单\u2028七")
+            .key("東京")
+            .timeMs(42)
+            .build();
+    StreamBatchFrame frame =
+        StreamBatchFrame.encode(List.of(new StreamBatchRecord(1, event)), StreamCompression.NONE);
+    RecordingRegionalTransport leader =
+        new RecordingRegionalTransport(
+            MAPPER.readTree(
+                """
+                {"resource_generation":"2","tablet_epoch":"4","term":"9","accepts_writes":true}
+                """));
+    RegionalStreamClient client =
+        RegionalStreamClient.withTransports(
+            List.of(leader), "secret-token", new RegionalScope("acme", "shop", "dev", "core"));
+    client.appendBatch("orders", 0, "unicode-batch", frame);
+    byte[] plain =
+        Base64.getDecoder().decode(leader.requests.get(1).body().path("payload_base64").asText());
+    String document = new String(plain, java.nio.charset.StandardCharsets.UTF_8);
+    assertEquals(false, document.contains("\\u2028"));
+    assertEquals(false, document.contains("\\u2029"));
+    assertEquals(true, document.contains("订单\u2028七"));
+    assertEquals(true, document.contains("<paid>&\u2029"));
+  }
+
+  private static EventEnvelope batchEvent(String id, String key) {
+    return EventEnvelope.builder(
+            "checkout", "order.created", Map.of("z", List.of(Map.of("y", 2, "a", 1)), "a", 7))
+        .id(id)
+        .key(key)
+        .timeMs(42)
+        .headers(Map.of("z", "last", "a", "first"))
+        .extensions(Map.of("z", Map.of("b", 2, "a", 1), "a", true))
+        .build();
   }
 
   @Test

@@ -187,6 +187,13 @@ or decompression failure is a definite pre-proposal rejection; after admission,
 the ordinary unknown-outcome and exact-idempotent-retry rules apply to the whole
 command. A successful exact retry returns the original per-record offsets.
 
+Regional Go, Java, and Python clients expose this exact single-shard atomic
+operation. Their built-in canonical encoders cover `none` and gzip; typed frame
+constructors carry caller-produced standard LZ4, Snappy, or Zstd bytes without
+rewriting them. The same exact frame and idempotency key survive one bounded
+leader rediscovery. This remains client-framed request/response mutation, not
+automatic producer batching or codec negotiation.
+
 `none`, gzip, LZ4 frame, Snappy framed, and Zstd frame are transport encodings
 of the same canonical record array. Compression does not change record
 identity, partition ordering, visibility, acknowledgement evidence, or fetch
@@ -194,7 +201,8 @@ format. The replicated command's codec, exact frame bytes, counts, and sizes
 are semantic input for its idempotency key. This bounded tablet behavior is not
 the eventual non-atomic native Produce contract: that surface must be able to
 report a bad record independently without making successful sibling results
-ambiguous. See [ADR-0015](adr/0015-stream-batch-compression.md).
+ambiguous. See [ADR-0015](adr/0015-stream-batch-compression.md) and the bounded
+regional SDK decision in [ADR-0026](adr/0026-regional-stream-batch-sdks.md).
 
 ### Producers and consumers
 

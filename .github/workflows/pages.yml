@@ -74,7 +74,12 @@ jobs:
           grep -Rq 'docs-go-session-join-v1' console/dist/assets
           grep -Rq 'docs-java-session-join-v1' console/dist/assets
           grep -Rq 'docs-python-session-join-v1' console/dist/assets
+          grep -Rq 'docs-go-gzip-batch-v1' console/dist/assets
+          grep -Rq 'docs-java-gzip-batch-v1' console/dist/assets
+          grep -Rq 'docs-python-gzip-batch-v1' console/dist/assets
+          grep -Rq 'Client-framed atomic batches preserve exact bytes' console/dist/assets
           grep -Rq 'Replicated membership and assignment' console/dist/assets
+          grep -Rq 'Regional atomic batch clients' console/dist/assets
           grep -Rq 'Replicated time and size retention' console/dist/assets
           grep -Rq 'Regional Stream SDK' console/dist/assets
           grep -Rq 'Regional Queue SDK' console/dist/assets

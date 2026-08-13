@@ -35,6 +35,17 @@ func main() {
 	must(err)
 	replayed, err := client.AppendKeyed(ctx, "orders", "docs-go-keyed-stream-v1", event)
 	must(err)
+	batchFrame, err := epoch.EncodeStreamBatch([]epoch.StreamBatchRecord{
+		{ClientSequence: 101, Envelope: event},
+		{ClientSequence: 102, Envelope: func() epoch.EventEnvelope {
+			copy := event
+			copy.ID = "docs-go-order-43"
+			return copy
+		}()},
+	}, epoch.StreamCompressionGzip)
+	must(err)
+	batch, err := client.AppendBatch(ctx, "orders", shard, "docs-go-gzip-batch-v1", batchFrame)
+	must(err)
 	fetched, err := client.Fetch(ctx, "orders", shard, appendOffset(appended), 10)
 	must(err)
 	groupRecords, err := client.FetchGroup(ctx, "orders", shard, "docs-go", 100)
@@ -63,7 +74,8 @@ func main() {
 	must(err)
 
 	output, err := json.MarshalIndent(map[string]any{
-		"selected_shard": shard, "append": appended, "exact_retry": replayed, "fetch": fetched,
+		"selected_shard": shard, "append": appended, "exact_retry": replayed,
+		"gzip_batch": batch, "fetch": fetched,
 		"group_fetch": groupRecords, "checkpoint": checkpoint, "lag": lag,
 		"session_join": joined, "session_heartbeat": heartbeat, "session": session, "session_leave": left,
 		"retention_configure": configured, "retention_maintenance": maintained,

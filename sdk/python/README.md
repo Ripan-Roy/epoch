@@ -26,12 +26,16 @@ and performs no hidden retries for standalone operations.
 `RegionalStreamClient` is the explicit replicated alternative. Configure it
 with every Rust node endpoint, a `RegionalScope`, and a bearer token. It
 discovers the current leader before every call, copies generation/tablet
-fences, preserves caller-owned append/checkpoint/session/retention idempotency
+fences, preserves caller-owned append/batch/checkpoint/session/retention idempotency
 across one bounded rediscovery, and requests linearizable
 fetch/lag/session/retention reads.
 `stream_shard_for` implements the advertised FNV-1a UTF-8 contract, while
 `append_keyed` selects that shard from the event key or ID and fails before
 writing if the resource generation changes. The client also exposes
+single-shard atomic `append_batch`: `StreamBatchFrame.encode` builds canonical
+none or gzip frames, while `StreamBatchFrame.from_compressed` wraps
+caller-produced standard LZ4, Snappy, or Zstd frames without changing their
+bytes. It also exposes
 time/size/combined retention configuration and explicit idle maintenance. Its
 shard-zero session methods cover join, heartbeat, leave, expiry maintenance,
 and deterministic resource-wide assignment observation. See the

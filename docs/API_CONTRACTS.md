@@ -784,9 +784,16 @@ expanded; Zstd's window is capped at 8 MiB. Canonical base64/JSON, exact
 declared metadata, every envelope, and all bounds are validated before
 proposal and on voter decode. A successful receipt adds `batch` evidence with
 the codec/sizes/count and one decimal offset/disposition per client sequence.
-The entire cloned transition becomes visible together. This is the
-experimental atomic tablet contract, not yet the stable non-atomic
-bidirectional `Produce` API or an SDK promise.
+The entire cloned transition becomes visible together. Regional Go, Java, and
+Python SDKs expose this exact atomic route as
+`AppendBatch`/`appendBatch`/`append_batch`. Their typed frame constructors
+derive canonical standard base64 and compressed size from exact bytes, enforce
+the shared hard bounds before network I/O, and preserve the whole frame plus
+idempotency key across bounded rediscovery. Built-in canonical encoding covers
+`none` and gzip; caller-supplied standard LZ4, Snappy, and Zstd frames use the
+same route and remain authoritatively decoded by Rust. This is not yet the
+stable non-atomic bidirectional `Produce` API, automatic batching, or codec
+negotiation. See [ADR-0026](adr/0026-regional-stream-batch-sdks.md).
 A consumer-group mutation supplies `member_id`, `group_generation`, partition
 zero, `next_offset`, and `commit` or `reset`. The first owner uses generation
 one. The active member may repeat its generation, exactly the next generation
@@ -943,8 +950,10 @@ Retention deletion, dynamic
 membership, dynamic constraint-aware placement, follower read routing,
 TLS/mTLS transport, and production identity remain absent. Regional Stream,
 Queue, Cache, and Event Bus v1 routes and repository-local Go/Java/Python
-clients are versioned application slices; stable native data gRPC, coordinated
-streaming, generated response types, and package releases remain absent. The standalone engine journal
+clients are versioned application slices; the Stream clients include bounded
+single-shard atomic batch frames, while stable native data gRPC, coordinated
+streaming, automatic batching, generated response types, and package releases
+remain absent. The standalone engine journal
 remains a separate single-node source of truth and is never used by a
 replicated tablet.
 

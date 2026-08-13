@@ -333,10 +333,10 @@ const sdkSurface = [
   },
   {
     area: "Regional Stream",
-    go: "RegionalStreamClient · StreamShardFor · AppendKeyed · Append · Fetch · CommitOffset · Lag · FetchGroup · JoinConsumerSession · HeartbeatConsumerSession · LeaveConsumerSession · MaintainConsumerSession · ConsumerSession · ConfigureRetention · MaintainRetention · Retention",
-    java: "RegionalStreamClient · StreamPartitioner.shardFor · appendKeyed · append · fetch · commitOffset · lag · fetchGroup · joinConsumerSession · heartbeatConsumerSession · leaveConsumerSession · maintainConsumerSession · consumerSession · configureRetention · maintainRetention · retention",
+    go: "RegionalStreamClient · StreamShardFor · AppendKeyed · Append · EncodeStreamBatch · NewStreamBatchFrame · AppendBatch · Fetch · CommitOffset · Lag · FetchGroup · JoinConsumerSession · HeartbeatConsumerSession · LeaveConsumerSession · MaintainConsumerSession · ConsumerSession · ConfigureRetention · MaintainRetention · Retention",
+    java: "RegionalStreamClient · StreamPartitioner.shardFor · appendKeyed · append · StreamBatchFrame.encode · StreamBatchFrame.compressed · appendBatch · fetch · commitOffset · lag · fetchGroup · joinConsumerSession · heartbeatConsumerSession · leaveConsumerSession · maintainConsumerSession · consumerSession · configureRetention · maintainRetention · retention",
     python:
-      "RegionalStreamClient · stream_shard_for · append_keyed · append · fetch · commit_offset · lag · fetch_group · join_consumer_session · heartbeat_consumer_session · leave_consumer_session · maintain_consumer_session · consumer_session · configure_retention · maintain_retention · retention",
+      "RegionalStreamClient · stream_shard_for · append_keyed · append · StreamBatchFrame.encode · StreamBatchFrame.from_compressed · append_batch · fetch · commit_offset · lag · fetch_group · join_consumer_session · heartbeat_consumer_session · leave_consumer_session · maintain_consumer_session · consumer_session · configure_retention · maintain_retention · retention",
   },
   {
     area: "Regional Queue",
@@ -1045,7 +1045,8 @@ export function DocsPage({ section }: DocsPageProps) {
                     This path is separate from the standalone quickstart. It uses a fully qualified tenant
                     scope, discovers the versioned UTF-8 partitioner and current leader, carries the observed
                     resource generation and tablet epoch, and keeps the caller&apos;s idempotency key
-                    unchanged across a bounded rediscovery retry.
+                    unchanged across a bounded rediscovery retry. The same route accepts client-framed atomic
+                    batches without turning this bounded HTTP operation into a streaming Produce claim.
                   </p>
                 </div>
               </div>
@@ -1130,6 +1131,15 @@ export function DocsPage({ section }: DocsPageProps) {
                   </p>
                 </article>
                 <article>
+                  <span>ATOMIC BATCHES</span>
+                  <strong>Client-framed atomic batches preserve exact bytes.</strong>
+                  <p>
+                    Every SDK builds canonical <code>none</code> or gzip frames and accepts exact
+                    caller-produced LZ4, Snappy, or Zstd frames. One explicit shard receives all records as a
+                    single transition; retry reuses the same frame and idempotency key.
+                  </p>
+                </article>
+                <article>
                   <span>CONSUMER SESSIONS</span>
                   <strong>Shard zero owns one durable membership generation.</strong>
                   <p>
@@ -1143,11 +1153,11 @@ export function DocsPage({ section }: DocsPageProps) {
               <aside className="docs-access-note">
                 <strong>Current boundary</strong>
                 <span>
-                  Regional v1 covers keyed append, direct per-shard operations, and shard-zero coordinated
-                  membership/assignment. Each shard&apos;s record command remains physical partition 0 for
-                  compatibility. Background expiry, cooperative revoke, atomic assignment-plus-offset handoff,
-                  online expansion/remapping, automatic producer batching, cross-shard transactions, and
-                  package-registry releases remain open.
+                  Regional v1 covers keyed append, direct per-shard operations, explicit-shard atomic batches,
+                  and shard-zero coordinated membership/assignment. Each shard&apos;s record command remains
+                  physical partition 0 for compatibility. Background expiry, cooperative revoke, atomic
+                  assignment-plus-offset handoff, online expansion/remapping, automatic producer batching,
+                  cross-shard transactions, and package-registry releases remain open.
                 </span>
               </aside>
             </section>
@@ -1658,8 +1668,14 @@ export function DocsPage({ section }: DocsPageProps) {
                 <ReferenceCard
                   eyebrow="STREAM DESIGN"
                   title="Batch compression decision"
-                  description="Canonical framing, all required codecs, atomicity, decompression limits, compatibility rules, and explicit native/SDK non-claims."
+                  description="Canonical framing, all required codecs, atomicity, decompression limits, compatibility rules, and stable-native non-claims."
                   href={`${repositoryDocsUrl}/adr/0015-stream-batch-compression.md`}
+                />
+                <ReferenceCard
+                  eyebrow="SDK BATCH DESIGN"
+                  title="Regional atomic batch clients"
+                  description="Canonical none/gzip encoders, exact caller frames for every required codec, fenced routing, exact retry identity, and explicit streaming non-claims."
+                  href={`${repositoryDocsUrl}/adr/0026-regional-stream-batch-sdks.md`}
                 />
                 <ReferenceCard
                   eyebrow="CONSUMER GROUPS"
