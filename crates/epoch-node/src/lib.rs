@@ -8,6 +8,7 @@ pub mod consensus;
 pub mod consensus_groups;
 pub mod queue_tablet;
 pub mod regional_auth;
+pub mod regional_checkpoint;
 pub mod regional_maintenance;
 pub mod regional_router;
 pub mod regional_runtime;

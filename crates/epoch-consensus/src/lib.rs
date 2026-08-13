@@ -1010,6 +1010,25 @@ impl InMemoryRaftAdapter {
         checkpoint_retry_suffix(&self.applied)
     }
 
+    /// Reports whether a node-local checkpoint may run now and the applied
+    /// index has advanced by the configured threshold. Pending Raft `Ready`
+    /// work is a transient busy state, so automatic schedulers skip it.
+    pub fn checkpoint_is_due(&self, min_applied_entries: u64) -> ConsensusResult<bool> {
+        self.ensure_healthy()?;
+        if min_applied_entries == 0 {
+            return Err(ConsensusError::InvalidState(
+                "checkpoint applied-entry threshold must be non-zero".into(),
+            ));
+        }
+        Ok(!self.raw_node.has_ready()
+            && self.applied_index != LogIndex::ZERO
+            && self
+                .applied_index
+                .get()
+                .saturating_sub(self.raw_node.store().checkpoint_index().get())
+                >= min_applied_entries)
+    }
+
     fn application_snapshot(&self) -> ConsensusResult<Option<ApplicationSnapshot>> {
         self.raw_node
             .store()
@@ -2131,6 +2150,10 @@ impl PersistentRaftAdapter {
 
     pub fn checkpoint_retry_proposals(&self) -> ConsensusResult<Vec<CommittedProposal>> {
         self.inner.checkpoint_retry_proposals()
+    }
+
+    pub fn checkpoint_is_due(&self, min_applied_entries: u64) -> ConsensusResult<bool> {
+        self.inner.checkpoint_is_due(min_applied_entries)
     }
 
     pub fn application_snapshot(&self) -> ConsensusResult<Option<ApplicationSnapshot>> {

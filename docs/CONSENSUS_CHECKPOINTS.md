@@ -68,12 +68,22 @@ A successful response is `201 Created`:
 }
 ```
 
-Creation is local and explicit; Epoch does not yet schedule checkpoints. The
-operation rejects an empty history, pending Ready work, inconsistent term or
+Creation is local. The regional runtime also schedules it automatically for
+catalog and every materialized profile group after 1,024 new applied entries by
+default; every healthy voter owns its local recovery layout independently. The
+explicit diagnostic trigger remains available. The operation rejects an empty
+history, pending Ready work, inconsistent term or
 digest state, a profile payload above 4 MiB, or a complete v2 image above 6
 MiB. V2 retains at most 1,024 retry records and 1 MiB of encoded retry data.
 Retrying the exact checkpoint is idempotent and does not append another EPRS
 generation.
+
+Configure the regional scheduler with
+`EPOCH_REGIONAL_CHECKPOINT_INTERVAL_MS` (default 1,000; range 1–600,000) and
+`EPOCH_REGIONAL_CHECKPOINT_MIN_APPLIED_ENTRIES` (default 1,024; nonzero).
+Eligibility and creation run atomically on the consensus actor. A group with
+pending Raft `Ready` work is skipped until another tick. See
+[ADR-0028](adr/0028-automatic-regional-consensus-checkpoints.md).
 
 ## Persistence and catch-up order
 

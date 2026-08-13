@@ -71,7 +71,10 @@ single-file journals remain on the legacy writer and are not migrated. The
 replicated core separately supplies a bounded canonical consensus checkpoint,
 logical Raft-prefix compaction, checkpoint-plus-tail reopen, fixed-voter
 snapshot catch-up, native state images for all five profiles, and atomic
-physical EPRS reclamation. G2 remains open because durable derived-index
+physical EPRS reclamation. The regional runtime now schedules those local
+checkpoints independently on every healthy catalog/profile voter after
+configurable applied-index growth and publishes durable per-group boundaries.
+G2 remains open because durable derived-index
 rebuild, retention, tiering, backup/PITR, scheduled restore campaigns, and
 general production replica recovery are not implemented. Stream logical
 time/size/combined retention now advances through a separate replicated v4
@@ -132,7 +135,9 @@ downgrade. Compatible EPSN v1/v2 checkpoints now fsync before local or received
 installation. V2 binds canonical native state, rolling EPDG state, and a bounded
 retry suffix; EPRS kind 4 atomically reclaims obsolete generations. The runtime
 reopens with a committed tail and installs a lagging voter's typed state before
-tail application. G3 remains open for the exhaustive crash matrix,
+tail application. Automatic actor-serialized checkpointing now runs on every
+healthy regional voter and is exercised across all 24 voter/group copies,
+leader loss, catch-up, and all-node restart. G3 remains open for the exhaustive crash matrix,
 membership and authoritative epoch transitions, follower read routing,
 authenticated transport, dynamic placement/repair, model and chaos reports,
 density, and performance. See [Consensus Feasibility Spike](CONSENSUS_SPIKE.md),
@@ -143,6 +148,7 @@ density, and performance. See [Consensus Feasibility Spike](CONSENSUS_SPIKE.md),
 [ADR-0024](adr/0024-stream-multishard-key-routing.md),
 [ADR-0021](adr/0021-consensus-checkpoint-and-snapshot-installation.md),
 [ADR-0022](adr/0022-profile-native-checkpoints-and-physical-reclamation.md),
+[ADR-0028](adr/0028-automatic-regional-consensus-checkpoints.md),
 [Consensus Checkpoints](CONSENSUS_CHECKPOINTS.md),
 [Experimental Stream Tablet](STREAM_TABLET.md), and
 [Experimental Replicated Queue Tablet](QUEUE_TABLET.md), and

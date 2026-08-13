@@ -366,7 +366,12 @@ creation at `POST /experimental/v1/consensus/checkpoints`; status reports
 `checkpoint_index` and `retained_log_first_index`. See
 [Consensus Checkpoints and Snapshot Catch-up](CONSENSUS_CHECKPOINTS.md). The
 checkpoint is bounded and fsynced before logical Raft-prefix compaction. It is
-not a profile backup, PITR artifact, or physical EPRS cleanup operation.
+not a profile backup or PITR artifact. EPSN v2 checkpoints atomically reclaim
+obsolete EPRS generations. The regional runtime schedules the same operation
+for catalog and all materialized profile groups on every healthy voter with
+`EPOCH_REGIONAL_CHECKPOINT_INTERVAL_MS` and
+`EPOCH_REGIONAL_CHECKPOINT_MIN_APPLIED_ENTRIES`; see
+[ADR-0028](adr/0028-automatic-regional-consensus-checkpoints.md).
 
 Validate or run the regional multi-tablet topology:
 
@@ -423,7 +428,9 @@ identity/TLS, user-exportable backups/PITR, follower read routing, and
 transactional assignment-plus-offset handoff, background session maintenance,
 and cooperative revoke remain subsequent slices. Internal native voter
 checkpoints and physical EPRS reclamation are documented in
-[ADR-0022](adr/0022-profile-native-checkpoints-and-physical-reclamation.md). See
+[ADR-0022](adr/0022-profile-native-checkpoints-and-physical-reclamation.md),
+and automatic local scheduling is documented in
+[ADR-0028](adr/0028-automatic-regional-consensus-checkpoints.md). See
 [ADR-0009](adr/0009-regional-tablet-catalog.md) and
 [ADR-0010](adr/0010-durable-managed-metadata.md), the bootstrap security
 boundary in [ADR-0011](adr/0011-bootstrap-authz-audit-baseline.md), and

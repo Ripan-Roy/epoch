@@ -36,6 +36,8 @@ const DEFAULT_CONSENSUS_TICK_MS: u64 = 100;
 const DEFAULT_REGIONAL_MAX_GROUPS: usize = 4_096;
 const DEFAULT_REGIONAL_READ_BARRIER_TIMEOUT_MS: u64 = 2_000;
 const DEFAULT_REGIONAL_MAINTENANCE_INTERVAL_MS: u64 = 100;
+const DEFAULT_REGIONAL_CHECKPOINT_INTERVAL_MS: u64 = 1_000;
+const DEFAULT_REGIONAL_CHECKPOINT_MIN_APPLIED_ENTRIES: u64 = 1_024;
 const SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
@@ -89,6 +91,20 @@ struct Args {
         value_parser = clap::value_parser!(u64).range(1..=60_000)
     )]
     regional_maintenance_interval_ms: u64,
+    #[arg(
+        long,
+        env = "EPOCH_REGIONAL_CHECKPOINT_INTERVAL_MS",
+        default_value_t = DEFAULT_REGIONAL_CHECKPOINT_INTERVAL_MS,
+        value_parser = clap::value_parser!(u64).range(1..=600_000)
+    )]
+    regional_checkpoint_interval_ms: u64,
+    #[arg(
+        long,
+        env = "EPOCH_REGIONAL_CHECKPOINT_MIN_APPLIED_ENTRIES",
+        default_value_t = DEFAULT_REGIONAL_CHECKPOINT_MIN_APPLIED_ENTRIES,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    regional_checkpoint_min_applied_entries: u64,
     #[arg(long, env = "EPOCH_REGIONAL_REGION", default_value = "local")]
     regional_region: String,
     #[arg(long, env = "EPOCH_REGIONAL_ZONE", default_value = "local")]
@@ -192,6 +208,8 @@ struct RegionalRuntimeLaunch {
     max_groups: usize,
     read_barrier_timeout: Duration,
     maintenance_interval: Duration,
+    checkpoint_interval: Duration,
+    checkpoint_min_applied_entries: u64,
     topology: NodeTopology,
 }
 
@@ -300,7 +318,11 @@ async fn serve_regional_mode(
         RegionalRuntimeConfig::new(launch.config, &launch.data_dir, launch.max_groups, clock)
             .with_topology(launch.topology.clone())
             .with_read_barrier_timeout(launch.read_barrier_timeout)
-            .with_maintenance_interval(launch.maintenance_interval),
+            .with_maintenance_interval(launch.maintenance_interval)
+            .with_checkpoint_policy(
+                launch.checkpoint_interval,
+                launch.checkpoint_min_applied_entries,
+            ),
     )
     .await?;
     let regional_public = with_public_http_layers(
@@ -317,6 +339,8 @@ async fn serve_regional_mode(
         max_groups = launch.max_groups,
         read_barrier_timeout_ms = launch.read_barrier_timeout.as_millis(),
         maintenance_interval_ms = launch.maintenance_interval.as_millis(),
+        checkpoint_interval_ms = launch.checkpoint_interval.as_millis(),
+        checkpoint_min_applied_entries = launch.checkpoint_min_applied_entries,
         region = launch.topology.region(),
         zone = launch.topology.zone(),
         node_class = launch.topology.node_class(),
@@ -547,6 +571,8 @@ fn regional_runtime_launch(
         max_groups: args.regional_max_groups,
         read_barrier_timeout: Duration::from_millis(args.regional_read_barrier_timeout_ms),
         maintenance_interval: Duration::from_millis(args.regional_maintenance_interval_ms),
+        checkpoint_interval: Duration::from_millis(args.regional_checkpoint_interval_ms),
+        checkpoint_min_applied_entries: args.regional_checkpoint_min_applied_entries,
         topology,
     }))
 }
@@ -971,6 +997,10 @@ mod tests {
             "750",
             "--regional-maintenance-interval-ms",
             "250",
+            "--regional-checkpoint-interval-ms",
+            "500",
+            "--regional-checkpoint-min-applied-entries",
+            "64",
             "--regional-region",
             "ap-south",
             "--regional-zone",
@@ -996,6 +1026,8 @@ mod tests {
         assert_eq!(launch.max_groups, 64);
         assert_eq!(launch.read_barrier_timeout, Duration::from_millis(750));
         assert_eq!(launch.maintenance_interval, Duration::from_millis(250));
+        assert_eq!(launch.checkpoint_interval, Duration::from_millis(500));
+        assert_eq!(launch.checkpoint_min_applied_entries, 64);
         assert_eq!(launch.topology.node_id(), 2);
         assert_eq!(launch.topology.region(), "ap-south");
         assert_eq!(launch.topology.zone(), "ap-south-1b");

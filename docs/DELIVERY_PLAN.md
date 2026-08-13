@@ -32,7 +32,10 @@ none/gzip encoders, exact caller frames for every required codec, bounded
 rediscovery, executable docs, and real recovery evidence. The current feature
 adds leader-owned automatic regional maintenance across all four profiles,
 with exact due-time proposals, topology counters, and a no-manual-maintenance
-three-node recovery campaign. Stable streaming Produce and atomic
+three-node recovery campaign. The next recovery increment adds automatic
+node-local checkpoints for catalog and every profile group on all voters,
+actor-atomic threshold eligibility, physical reclamation, topology evidence,
+and full failover/reopen proof. Stable streaming Produce and atomic
 assignment-plus-offset handoff remain later slices.
 Replicated multi-instance hosted metadata, production identity, follower
 routing, dynamic membership/voter selection, repair/rebalance, and the broader
@@ -173,13 +176,17 @@ durable-before-memory ordering, logical Raft-prefix compaction,
 checkpoint-plus-tail reopen, and lagging-voter snapshot catch-up. EPSN v2
 captures Catalog, Stream, Queue, Cache, or Event Bus state, retains a bounded
 exact-retry suffix, and kind 4 physically reclaims obsolete EPRS generations.
-Local operator status and an experimental trigger expose the
-checkpoint/retained range. This advances G2/G3, but it does not implement
-downloadable backups/PITR, scheduled checkpoints, automatic repair, or
+Local operator status, an experimental trigger, and the regional scheduler
+expose and advance the checkpoint/retained range. Every healthy voter
+automatically checkpoints catalog and all profile groups after configurable
+applied-index growth. This advances G2/G3, but it does not implement
+downloadable backups/PITR, scheduled restore campaigns, automatic repair, or
 membership. See
 [Consensus Checkpoints and Snapshot Catch-up](CONSENSUS_CHECKPOINTS.md) and
 [ADR-0021](adr/0021-consensus-checkpoint-and-snapshot-installation.md) plus
 [ADR-0022](adr/0022-profile-native-checkpoints-and-physical-reclamation.md).
+The scheduling policy is frozen in
+[ADR-0028](adr/0028-automatic-regional-consensus-checkpoints.md).
 
 The Stream application core accepts a version-two atomic batch command
 without changing the canonical version-one single append. A batch carries
@@ -311,7 +318,7 @@ fenced locks, explicit expiry controls, lookup, observation, and status with exa
 Real-runtime and container gates exercise the Python client after leader loss,
 automatic leader-owned TTL reclamation, catch-up, convergence, and all-node
 recovery. Concurrent history checking, multi-shard routing, eviction, exported backup/PITR,
-automatic checkpoint scheduling, and production durability evidence remain
+coordinated backup/PITR and production durability evidence remain
 open. See
 [Regional Cache SDK](REGIONAL_CACHE_SDK.md),
 [ADR-0019](adr/0019-regional-cache-v1-and-sdk-routing.md), and

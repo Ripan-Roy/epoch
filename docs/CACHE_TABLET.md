@@ -293,6 +293,6 @@ follower-served linearizable reads, multi-shard routing, exported backups/PITR,
 production identity/TLS, placement, and the exhaustive fault
 matrix remain required. A native checkpoint retains only the newest bounded
 consensus retry suffix, but no public idempotency horizon is advertised and the
-map can grow between explicit checkpoints. A product retry-window contract and
-automatic checkpoint policy are required before this can become a long-running
-service.
+map can grow until the regional runtime's automatic applied-growth checkpoint.
+A public idempotency horizon and byte/time-aware checkpoint policy are still
+required before this can become a long-running production service.

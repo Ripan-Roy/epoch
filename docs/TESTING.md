@@ -463,10 +463,13 @@ strict values, CAS, transaction, fenced locks, automatic expiry, mutation
 lookup, observation, and status. Finally, the real Python `RegionalBusClient`
 proves exact publish, archive replay, acquire/automatic-timeout/reacquire/ack,
 acknowledged-delivery query, subscription removal, and linearizable status
-after Event Bus leader loss. Each old voter catches up before the campaign then
+after Event Bus leader loss. Before faulting the cluster, the campaign waits
+for catalog plus all seven profile groups to checkpoint and physically compact
+on every voter: 24 local voter/group copies. Each old voter catches up before
+the campaign verifies durable applied/checkpoint/retained-first boundaries,
 kills every node, verifies Go clears stale placement while authority is
-unavailable, and reopens the same volumes before comparing catalog/profile
-digests and the increased applied-command index. CI captures control logs,
+unavailable, and reopens the same volumes before comparing those boundaries,
+catalog/profile digests, and the increased applied-command index. CI captures control logs,
 container logs, port assignments, and scoped state evidence on failure.
 
 `tests/integration/docs-quickstarts.sh` separately executes the exact Go, Java,

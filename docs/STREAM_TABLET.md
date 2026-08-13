@@ -402,7 +402,8 @@ voter, so this is not durable-majority proof under a hostile network. Do not
 expose it to an untrusted network.
 
 It also has static Raft membership, one consensus group per logical partition,
-no automatic checkpoint schedule on the direct profile route,
+no automatic checkpoint schedule on the direct profile route (the regional
+wrapper now schedules local voter checkpoints),
 user-exportable backup/PITR, follower
 read routing, catalog-authorized epoch
 transition, placement, authenticated peer identity, bounded idempotency

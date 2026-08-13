@@ -364,6 +364,35 @@ The same response includes node-local regional maintenance observations:
 These cumulative counters reset with the node process and require
 `topology.read`; they are operational evidence, not replicated product state.
 
+The response also exposes automatic local consensus checkpoint observations:
+
+```json
+{
+  "checkpoints": {
+    "enabled": true,
+    "interval_ms": 1000,
+    "min_applied_entries": 1024,
+    "passes": 42,
+    "groups_examined": 336,
+    "eligible_groups": 8,
+    "checkpoints_created": 8,
+    "compacted_log_entries": 8192,
+    "errors": 0,
+    "last_pass_at_ms": 1786630000000,
+    "groups": [{
+      "group_id": "1",
+      "group_epoch": "1",
+      "applied_index": "2048",
+      "checkpoint_index": "2048",
+      "retained_log_first_index": "2049"
+    }]
+  }
+}
+```
+
+Counters are process-local. Group/index observations come from each durable
+local consensus actor and remain decimal strings. See ADR-0028.
+
 The TypeScript console calls this Go endpoint only. Browser CORS is granted to
 exact HTTP(S) origins configured by `EPOCH_CONTROL_ALLOWED_ORIGINS`; wildcards,
 paths, query strings, opaque origins, and credentials are rejected. Requests
@@ -685,6 +714,21 @@ not run on follower authority, mutate through reads, or depend on Go or an SDK.
 The interval is configured by `EPOCH_REGIONAL_MAINTENANCE_INTERVAL_MS`, defaults
 to 100, and must be 1–60,000. Explicit maintenance routes remain supported.
 See [ADR-0027](adr/0027-regional-leader-maintenance.md).
+
+### 12.2 Regional automatic consensus checkpoints
+
+Every regional node evaluates catalog plus all local profile groups on a
+configured interval. Every healthy voter may checkpoint its own recovery
+layout once applied growth reaches the configured nonzero threshold. The
+eligibility check and checkpoint execute as one actor command; pending Raft
+`Ready` work skips the tick. This path reuses EPSN v2 capture, durable EPRS
+replacement, Raft-prefix compaction, and native restore without proposing a
+business-state mutation.
+
+`EPOCH_REGIONAL_CHECKPOINT_INTERVAL_MS` defaults to 1,000 and accepts
+1–600,000. `EPOCH_REGIONAL_CHECKPOINT_MIN_APPLIED_ENTRIES` defaults to 1,024.
+This is not a cluster-wide checkpoint, downloadable backup, or PITR contract.
+See [ADR-0028](adr/0028-automatic-regional-consensus-checkpoints.md).
 
 Catalog mutations require a bounded `request_token`, expected generation,
 shard count, and the currently fixed replica count of three. The exact token
