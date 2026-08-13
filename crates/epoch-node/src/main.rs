@@ -35,6 +35,7 @@ const DEFAULT_CONSENSUS_LISTEN: &str = "127.0.0.1:7701";
 const DEFAULT_CONSENSUS_TICK_MS: u64 = 100;
 const DEFAULT_REGIONAL_MAX_GROUPS: usize = 4_096;
 const DEFAULT_REGIONAL_READ_BARRIER_TIMEOUT_MS: u64 = 2_000;
+const DEFAULT_REGIONAL_MAINTENANCE_INTERVAL_MS: u64 = 100;
 const SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
@@ -81,6 +82,13 @@ struct Args {
         value_parser = clap::value_parser!(u64).range(1..=60_000)
     )]
     regional_read_barrier_timeout_ms: u64,
+    #[arg(
+        long,
+        env = "EPOCH_REGIONAL_MAINTENANCE_INTERVAL_MS",
+        default_value_t = DEFAULT_REGIONAL_MAINTENANCE_INTERVAL_MS,
+        value_parser = clap::value_parser!(u64).range(1..=60_000)
+    )]
+    regional_maintenance_interval_ms: u64,
     #[arg(long, env = "EPOCH_REGIONAL_REGION", default_value = "local")]
     regional_region: String,
     #[arg(long, env = "EPOCH_REGIONAL_ZONE", default_value = "local")]
@@ -183,6 +191,7 @@ struct RegionalRuntimeLaunch {
     auth_policy_path: PathBuf,
     max_groups: usize,
     read_barrier_timeout: Duration,
+    maintenance_interval: Duration,
     topology: NodeTopology,
 }
 
@@ -290,7 +299,8 @@ async fn serve_regional_mode(
     let mut runtime = RegionalNodeRuntime::start(
         RegionalRuntimeConfig::new(launch.config, &launch.data_dir, launch.max_groups, clock)
             .with_topology(launch.topology.clone())
-            .with_read_barrier_timeout(launch.read_barrier_timeout),
+            .with_read_barrier_timeout(launch.read_barrier_timeout)
+            .with_maintenance_interval(launch.maintenance_interval),
     )
     .await?;
     let regional_public = with_public_http_layers(
@@ -306,6 +316,7 @@ async fn serve_regional_mode(
         tick_ms = tick_interval.as_millis(),
         max_groups = launch.max_groups,
         read_barrier_timeout_ms = launch.read_barrier_timeout.as_millis(),
+        maintenance_interval_ms = launch.maintenance_interval.as_millis(),
         region = launch.topology.region(),
         zone = launch.topology.zone(),
         node_class = launch.topology.node_class(),
@@ -535,6 +546,7 @@ fn regional_runtime_launch(
         auth_policy_path,
         max_groups: args.regional_max_groups,
         read_barrier_timeout: Duration::from_millis(args.regional_read_barrier_timeout_ms),
+        maintenance_interval: Duration::from_millis(args.regional_maintenance_interval_ms),
         topology,
     }))
 }
@@ -957,6 +969,8 @@ mod tests {
             "64",
             "--regional-read-barrier-timeout-ms",
             "750",
+            "--regional-maintenance-interval-ms",
+            "250",
             "--regional-region",
             "ap-south",
             "--regional-zone",
@@ -981,6 +995,7 @@ mod tests {
         );
         assert_eq!(launch.max_groups, 64);
         assert_eq!(launch.read_barrier_timeout, Duration::from_millis(750));
+        assert_eq!(launch.maintenance_interval, Duration::from_millis(250));
         assert_eq!(launch.topology.node_id(), 2);
         assert_eq!(launch.topology.region(), "ap-south");
         assert_eq!(launch.topology.zone(), "ap-south-1b");

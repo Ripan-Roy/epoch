@@ -479,9 +479,11 @@ advance the base without renumbering offsets, and persist the policy and
 watermark in the native checkpoint. A consumer checkpoint below the retained
 base remains visible as `checkpoint_out_of_range`; replay fails until an
 explicit generation-fenced reset. Go, Java, and Python expose configure,
-maintain, and quorum-confirmed observe methods on the regional v1 route. This
-does not add automatic periodic maintenance, compaction/tombstones, object
-tiering, legal hold, or a resource-wide retention coordinator. See
+maintain, and quorum-confirmed observe methods on the regional v1 route. The
+current regional leader also proposes due idle maintenance automatically from
+the earliest replicated record deadline. This does not add
+compaction/tombstones, object tiering, legal hold, or a resource-wide retention
+coordinator. See
 [ADR-0023](adr/0023-stream-retention-policies.md).
 
 The regional Stream resource may contain several independently replicated
@@ -500,11 +502,21 @@ shard 0. New joins, leaves, and inclusive deadline expiry advance one
 resource-wide generation; valid rejoin and heartbeat only renew the deadline.
 Committed time is monotonic across leader changes. Lexically ordered members
 own shard `s` by `s mod member_count`, so every voter reproduces the same
-balanced assignment. Idle expiry requires explicit maintenance. Session
+balanced assignment. The regional shard-zero leader automatically proposes the
+same expiry command at the first member deadline; explicit maintenance remains
+available. Session
 generation does not atomically replace the independent v3 checkpoint-owner
 generation on each shard; applications must stop revoked work and hand off
 offsets explicitly. See
 [ADR-0025](adr/0025-stream-consumer-sessions.md).
+
+Regional Queue, Cache, and Event Bus timers follow the same authority rule.
+Only the current Raft leader proposes an existing canonical maintenance command
+at the exact earliest replicated deadline. Reads remain pure, retries use
+deterministic proposal identities, and bounded sweeps can continue at the same
+deadline after their prior command applies. Scheduler delay may delay
+visibility but never changes the command's logical time. See
+[ADR-0027](adr/0027-regional-leader-maintenance.md).
 
 The same persistent actor can instead mount a separate, single-partition Queue
 state machine over the shared committed-command substrate. Given the same

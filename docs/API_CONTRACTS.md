@@ -342,6 +342,28 @@ any mutation. Capacity failures use `consensus_group_capacity` and retain the
 limiting node, required groups, and available groups in the internal admission
 error; the current public status exposes the stable reason in its message.
 
+The same response includes node-local regional maintenance observations:
+
+```json
+{
+  "maintenance": {
+    "enabled": true,
+    "interval_ms": 100,
+    "passes": 42,
+    "tablets_examined": 210,
+    "leader_passes": 70,
+    "due_operations": 5,
+    "proposals_submitted": 5,
+    "pending_operations": 0,
+    "errors": 0,
+    "last_pass_at_ms": 1786630000000
+  }
+}
+```
+
+These cumulative counters reset with the node process and require
+`topology.read`; they are operational evidence, not replicated product state.
+
 The TypeScript console calls this Go endpoint only. Browser CORS is granted to
 exact HTTP(S) origins configured by `EPOCH_CONTROL_ALLOWED_ORIGINS`; wildcards,
 paths, query strings, opaque origins, and credentials are rejected. Requests
@@ -646,6 +668,24 @@ POST reads: they require `data.read` and a linearizable barrier, not
 the adapter delegates to the replicated Event Bus tablet and owns no bus state
 or target executor.
 
+### 12.1 Regional automatic maintenance
+
+When the regional runtime is enabled, every materialized profile exposes a pure
+earliest-deadline query. On each interval only the local current,
+non-fail-stopped Raft leader may submit the corresponding existing maintenance
+command. The command uses the exact due deadline as replicated applied time and
+a deterministic idempotency identity; committed and pending proposals are not
+resubmitted. Queue, Cache, and Event Bus include the prior profile index in the
+identity so bounded work remaining at one deadline can continue safely.
+
+The scheduler covers Stream age retention per shard, Stream consumer-session
+expiry on shard 0, Queue scheduled/TTL/max-age/dedupe/lease transitions, Cache
+value and lock expiry, and Event Bus in-flight delivery-lease expiry. It does
+not run on follower authority, mutate through reads, or depend on Go or an SDK.
+The interval is configured by `EPOCH_REGIONAL_MAINTENANCE_INTERVAL_MS`, defaults
+to 100, and must be 1–60,000. Explicit maintenance routes remain supported.
+See [ADR-0027](adr/0027-regional-leader-maintenance.md).
+
 Catalog mutations require a bounded `request_token`, expected generation,
 shard count, and the currently fixed replica count of three. The exact token
 and semantic request replay their committed result; token rebinding conflicts.
@@ -834,8 +874,9 @@ rejection with no partial member update or phantom group.
 Session command v5 and native Stream snapshot v2 preserve v1–v4 command bytes
 and accept legacy snapshot v1 with an empty session map. This coordinator
 assigns logical shards but does not atomically replace each shard's independent
-v3 checkpoint-owner generation. Background maintenance, cooperative revoke,
-server-push consumption, and transactional offset handoff remain open. See
+v3 checkpoint-owner generation. Regional leader-owned deadline maintenance now
+expires idle members; cooperative revoke, server-push consumption, and
+transactional offset handoff remain open. See
 [ADR-0025](adr/0025-stream-consumer-sessions.md).
 A bounded unresolved wait returns `202`, preserving local `unknown` versus
 `pending` state while keeping outcome certainty unknown. Exact retries return

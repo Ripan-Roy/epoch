@@ -81,7 +81,7 @@ request/response acquire is the future bidirectional receive protocol.
   counts/flow/history, voter catch-up, and all-voter reopen.
 - This route does not claim native bidirectional receive, connection-scoped
   replenishment, automatic prefetch, cross-consumer fairness, multi-partition
-  routing, automatic timer proposals, indexed backlog-scale counts, dynamic
+  routing, timer precision/load evidence, indexed backlog-scale counts, dynamic
   membership, TLS/OIDC/mTLS, generated response types, or package publication.
 
 ## Rejected alternatives

@@ -237,8 +237,9 @@ shard-zero routing, encoded identifiers, decimal generations, whole-millisecond
 timeout bounds, and linearizable observation. The regional container campaign
 creates two members after Stream leader loss, heartbeats one, expires the other,
 checks the generation-3 all-shard assignment, catches up the old voter, then
-reopens every node and observes the same session. This does not prove
-background maintenance, cooperative revoke, atomic per-shard offset handoff,
+reopens every node and observes the same session. The regional campaign now
+waits for the shard-zero leader to propose expiry instead of calling
+maintenance. This does not prove cooperative revoke, atomic per-shard offset handoff,
 transactions, scale fairness, or a production fault matrix.
 
 Regional adapter tests cover the fully qualified Stream v1 route and its strict
@@ -411,7 +412,7 @@ apply failure.
 `test-cache-tablet` selects the third typed mode. It exercises strict decimal
 inputs, follower and stale-term admission, exact retry and rebinding conflict,
 CAS including missing-state ABA protection, atomic transaction rollback,
-checked increment, TTL plus explicit maintenance, and advisory lock token
+checked increment, TTL plus committed maintenance, and advisory lock token
 rotation/fencing. It kills the leader, proves the replacement term rejects the
 old lock token as a committed outcome, catches the old voter up, compares every
 profile digest/observation, then kills and reopens all voters from their EPRS
@@ -453,13 +454,14 @@ endpoints to append, repeat the exact idempotency key, perform a linearizable
 fetch, commit a generation-fenced checkpoint, and verify lag. The campaign then
 kills the active Queue leader and runs the real Python `RegionalQueueClient`
 through enqueue/exact replay, credit acquire, lease extension, acknowledge,
-release/reacquire, terminal reject, immutable dead-letter observation, redrive,
-final settlement, and linearizable counts/flow/redrive reads. It waits for 11
+release, automatic scheduled-retry promotion, reacquire, terminal reject,
+immutable dead-letter observation, redrive, final settlement, and linearizable
+counts/flow/redrive reads. It waits for 12
 Queue commands to converge on the survivors and catches up the old voter. It
 repeats the leader-loss proof with the real Python `RegionalCacheClient` across
-strict values, CAS, transaction, fenced locks, expiry maintenance, mutation
+strict values, CAS, transaction, fenced locks, automatic expiry, mutation
 lookup, observation, and status. Finally, the real Python `RegionalBusClient`
-proves exact publish, archive replay, acquire/fail/maintenance/reacquire/ack,
+proves exact publish, archive replay, acquire/automatic-timeout/reacquire/ack,
 acknowledged-delivery query, subscription removal, and linearizable status
 after Event Bus leader loss. Each old voter catches up before the campaign then
 kills every node, verifies Go clears stale placement while authority is

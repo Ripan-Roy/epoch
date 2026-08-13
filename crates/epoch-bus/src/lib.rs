@@ -573,6 +573,12 @@ impl EventBus {
         Ok(result)
     }
 
+    /// Returns the earliest in-flight delivery lease that requires a
+    /// committed maintenance transition.
+    pub fn next_delivery_maintenance_deadline_ms(&self) -> Option<u64> {
+        self.delivery_ledger.next_maintenance_deadline_ms()
+    }
+
     pub fn delivery(&self, delivery_id: &str) -> Option<DeliveryRecord> {
         self.delivery_ledger.get(delivery_id)
     }
@@ -1410,6 +1416,7 @@ mod tests {
         bus.acquire_deliveries("audit", "dispatcher", 1, 100, fence)
             .unwrap();
 
+        assert_eq!(bus.next_delivery_maintenance_deadline_ms(), Some(110));
         assert_eq!(bus.maintain_deliveries(109, 1).unwrap().processed, 0);
         let maintained = bus.maintain_deliveries(110, 1).unwrap();
         assert_eq!(maintained.processed, 1);
@@ -1420,6 +1427,7 @@ mod tests {
                 eligible_at_ms: 115
             }
         ));
+        assert_eq!(bus.next_delivery_maintenance_deadline_ms(), None);
     }
 
     #[test]

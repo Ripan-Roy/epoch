@@ -209,6 +209,10 @@ impl QueueTablet {
         self.state.queue.config()
     }
 
+    pub fn next_maintenance_deadline_ms(&self) -> Option<u64> {
+        self.state.queue.next_maintenance_deadline_ms()
+    }
+
     pub fn consumer_epoch(&self, consumer: &str) -> Option<u64> {
         self.state.consumer_epochs.get(consumer).copied()
     }

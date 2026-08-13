@@ -8,6 +8,17 @@ notes explicitly list additional verified artifacts.
 
 ### Added
 
+- Leader-owned automatic maintenance in the regional runtime. Pure deadline
+  queries drive consensus proposals for Stream age retention and shard-zero
+  consumer-session expiry, Queue timers and leases, Cache values and locks, and
+  Event Bus delivery leases without turning reads into mutations.
+- Deterministic due-time proposal identities, pending/committed suppression,
+  bounded repeat sweeps, a configurable 1–60,000 ms interval (100 ms default),
+  and authorized topology counters for passes, leaders, due/submitted/pending
+  work, and errors.
+- ADR-0027 plus a real three-node Python/Compose campaign that removes manual
+  maintenance calls, proves every profile's idle transition after leader loss,
+  catches up the old voter, and reopens all nodes from the same volumes.
 - Regional Go, Java, and Python Stream clients now expose a single-shard atomic
   batch operation over the existing authenticated and fenced v1 route. Exact
   frame bytes and caller idempotency survive one bounded leader rediscovery.
@@ -212,19 +223,20 @@ notes explicitly list additional verified artifacts.
   remain unimplemented.
 - Replicated Stream consumer groups provide independent per-shard checkpoint
   storage plus a shard-zero session coordinator for join, heartbeat, leave,
-  explicit dead-member expiry, automatic membership generations, and
-  deterministic resource-wide assignment. Background expiry, cooperative
+  dead-member expiry, automatic membership generations, and deterministic
+  resource-wide assignment. Regional leader-owned expiry is now implemented;
+  cooperative
   revoke acknowledgement, sticky/rack-aware strategies, native streaming
   consumption, atomic assignment-plus-offset handoff, transactional offsets,
   scale/fairness evidence, generated response types, and production fault
   coverage remain unimplemented. Regional retention policy is independent per
-  logical shard; automatic maintenance scheduling, keyed
+  logical shard; leader-owned maintenance is implemented, while keyed
   compaction/tombstones, object-tier retention, and legal-hold governance
   remain open. Standalone offset helpers keep their local contract.
 - The regional SDKs remain repository-local alpha source. Package publication,
   generated response models, Event Bus
-  external webhook/HTTP/push execution and signing, Cache background
-  expiry/eviction/multi-shard routing, Stream online expansion/remapping and
+  external webhook/HTTP/push execution and signing, Cache
+  eviction/multi-shard routing, Stream online expansion/remapping and
   virtual shards, TLS/OIDC/mTLS, dynamic membership, and live-cluster execution
   for every language remain open.
 

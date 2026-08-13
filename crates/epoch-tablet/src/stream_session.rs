@@ -328,6 +328,10 @@ impl StreamConsumerSessionGroup {
         }
     }
 
+    pub(crate) fn next_deadline_ms(&self) -> Option<u64> {
+        self.members.values().map(|member| member.deadline_ms).min()
+    }
+
     pub(crate) fn members_with_assignments(&self) -> Vec<StreamTabletSessionMember> {
         self.members
             .iter()

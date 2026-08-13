@@ -161,6 +161,14 @@ materialized tablet. A capacity rejection uses the stable
 `Apply` is not called. This counter does not claim CPU, memory, disk, network,
 or workload-specific sizing.
 
+The response also contains `maintenance`. `enabled`, the configured
+`interval_ms`, cumulative `passes`, `tablets_examined`, `leader_passes`,
+`due_operations`, `proposals_submitted`, `pending_operations`, `errors`, and
+the last pass/error make automatic timer ownership inspectable without
+exposing it as product state. These counters are node-local and reset on
+restart. Configure the scan with `EPOCH_REGIONAL_MAINTENANCE_INTERVAL_MS`; the
+default is 100 ms and the accepted range is 1–60,000 ms.
+
 ## Route and fence a data operation
 
 Discover a shard independently on each node:
@@ -271,7 +279,9 @@ Go, Java, and Python expose `RegionalCacheClient` over the same authenticated
 discovery, fencing, linearizable-read, and one-rediscovery core. The typed value
 surface covers string, blob, signed counter, hash, list, unique set, and
 finite-score sorted set. Mutations cover set, delete, CAS, increment, atomic
-transaction, lock acquire/renew/release, and explicit expiry maintenance.
+transaction, lock acquire/renew/release, and expiry maintenance. The regional
+leader schedules due expiry automatically; explicit SDK maintenance remains
+available.
 Reads cover mutation lookup, key observation, and tablet status.
 
 The exact compiled examples, value/transaction/lock guidance, and retry
@@ -366,8 +376,11 @@ and live capacity responses, creates a three-zone resource through Go, proves
 an over-capacity request never reaches the catalog, verifies the
 BFF/CORS/placement contract, kills and reopens Go against the same metadata
 file, proves exact replay, creates and mutates all four profiles, routes keyed
-Python appends/checkpoints across a three-shard Stream, configures and observes
-retention, kills a leader, catches it up, kills all nodes, reopens the same
+Python appends/checkpoints across a three-shard Stream, configures retention,
+then waits for leader-proposed Stream retention/session expiry, Queue retry
+promotion, Cache TTL reclamation, and Event Bus delivery-lease timeout without
+calling explicit maintenance. It checks topology submission/error counters,
+kills and catches up each profile leader, kills all nodes, reopens the same
 volumes, compares per-shard state and digests, and deletes only its scoped
 containers/network/volumes.
 
@@ -378,13 +391,13 @@ containers/network/volumes.
   solver.
 - Membership changes, online rebalance, repair, split/merge, user-exportable
   backups/PITR, and automatic checkpoint scheduling are absent. Internal
-  native voter checkpoints, physical EPRS reclamation, and replicated Stream
-  time/size/combined logical retention are implemented. Retention still lacks
-  automatic idle maintenance, keyed compaction, object-tier deletion, and
-  legal-hold governance. Multi-shard Stream routing and a replicated shard-zero
+  native voter checkpoints, physical EPRS reclamation, replicated Stream
+  time/size/combined logical retention, and leader-owned regional maintenance
+  are implemented. Retention still lacks keyed compaction, object-tier
+  deletion, and legal-hold governance. Multi-shard Stream routing and a replicated shard-zero
   session coordinator are implemented for a fixed resource generation. Safe
-  online expansion/remapping, virtual shards, hot-key mitigation, background
-  expiry, cooperative revoke, and atomic checkpoint handoff are not. Read
+  online expansion/remapping, virtual shards, hot-key mitigation, cooperative
+  revoke, and atomic checkpoint handoff are not. Read
   barriers are leader-only and regional-only;
   follower forwarding remains absent.
 - Rust regional HTTP and Go management enforce the bootstrap policy, and the

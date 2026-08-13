@@ -561,6 +561,18 @@ impl DeliveryLedger {
         Ok(result)
     }
 
+    pub(crate) fn next_maintenance_deadline_ms(&self) -> Option<u64> {
+        self.records
+            .values()
+            .filter_map(|record| match record.state {
+                DeliveryState::InFlight {
+                    lease_deadline_ms, ..
+                } => Some(lease_deadline_ms),
+                _ => None,
+            })
+            .min()
+    }
+
     pub(crate) fn get(&self, delivery_id: &str) -> Option<DeliveryRecord> {
         self.records.get(delivery_id).cloned()
     }

@@ -163,7 +163,8 @@ bash tests/integration/docs-quickstarts.sh
 ```
 
 The Docker campaign kills the active Queue leader before using the Python SDK,
-waits for all 11 Queue commands to converge on the two survivors, catches up the
+waits for all 12 Queue commands—including automatic delayed-retry promotion—to
+converge on the two survivors, catches up the
 old voter, kills every voter, reopens the same EPRS volumes, and verifies the
 same applied state. Go and Java exercise the identical request contract in unit
 tests and compile their exact public-docs programs.
@@ -173,7 +174,7 @@ tests and compile their exact public-docs programs.
 This alpha is a complete SDK surface over the implemented single-partition
 tablet, not the final Queue protocol. Native bidirectional receive,
 connection-scoped credit replenishment, automatic prefetch and fairness,
-multi-partition routing, automatic timer proposal, generated response types,
+multi-partition routing, timer precision/load SLO evidence, generated response types,
 backlog-scale indexed counting, TLS/OIDC/mTLS, package-registry publication,
 dynamic membership, and the production fault/scale matrix remain open. See
 [ADR-0018](adr/0018-regional-queue-v1-and-sdk-routing.md).

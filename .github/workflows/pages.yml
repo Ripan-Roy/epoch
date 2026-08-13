@@ -80,6 +80,8 @@ jobs:
           grep -Rq 'Client-framed atomic batches preserve exact bytes' console/dist/assets
           grep -Rq 'Replicated membership and assignment' console/dist/assets
           grep -Rq 'Regional atomic batch clients' console/dist/assets
+          grep -Rq 'Only the current Raft leader owns each due timer' console/dist/assets
+          grep -Rq 'Leader-owned automatic maintenance' console/dist/assets
           grep -Rq 'Replicated time and size retention' console/dist/assets
           grep -Rq 'Regional Stream SDK' console/dist/assets
           grep -Rq 'Regional Queue SDK' console/dist/assets

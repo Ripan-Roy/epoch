@@ -55,6 +55,34 @@ fn set_counter(key: &str, value: i64, applied_at_ms: u64, index: u64) -> Committ
 }
 
 #[test]
+fn automatic_cache_maintenance_uses_the_earliest_value_or_lock_deadline() {
+    let service = CacheTabletService::with_default_config(scope()).unwrap();
+    service
+        .apply(&committed(
+            "ttl",
+            CacheTabletOperation::Set(CacheSetCommand {
+                shard: 0,
+                key: "ephemeral".into(),
+                value: CacheValue::String("value".into()),
+                ttl_ms: Some(10),
+                lock_guard: None,
+            }),
+            100,
+            2,
+            1,
+        ))
+        .unwrap();
+
+    assert!(service.maintenance_proposals(109).unwrap().is_empty());
+    let due = service.maintenance_proposals(500).unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].operation, RegionalMaintenanceOperation::CacheExpiry);
+    assert_eq!(due[0].due_at_ms, 110);
+    let decoded = CacheTabletCommand::decode(&due[0].payload, &scope()).unwrap();
+    assert_eq!(decoded.applied_at_ms, 110);
+}
+
+#[test]
 fn recovery_rebuilds_cache_profile_in_commit_order_before_exposing_it() {
     let set = set_counter("set-1", 1, 1_000, 4);
     let increment = committed(

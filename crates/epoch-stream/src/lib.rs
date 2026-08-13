@@ -177,6 +177,18 @@ impl Stream {
         self.retention_watermark_ms
     }
 
+    /// Returns the first wall-clock deadline at which age retention can
+    /// remove a currently retained record. `None` means no retained record is
+    /// governed by an age policy within the representable clock range.
+    pub fn next_retention_deadline_ms(&self) -> Option<u64> {
+        let max_age_ms = self.config.max_age_ms?;
+        self.partitions
+            .iter()
+            .filter_map(|partition| partition.records.front())
+            .filter_map(|record| record.appended_at_ms.checked_add(max_age_ms))
+            .min()
+    }
+
     pub fn append(
         &mut self,
         envelope: EventEnvelope,
@@ -906,6 +918,24 @@ mod tests {
         assert_eq!(report.partitions[0].previous_base_offset, 0);
         assert_eq!(report.partitions[0].base_offset, 1);
         assert_eq!(stream.fetch(0, 1, 10).unwrap()[0].envelope.id, "two");
+    }
+
+    #[test]
+    fn next_retention_deadline_tracks_the_oldest_retained_partition_head() {
+        let mut stream = Stream::new(StreamConfig {
+            partitions: 2,
+            max_age_ms: Some(10),
+            ..StreamConfig::default()
+        })
+        .unwrap();
+        stream.append(event("first", None), Some(1), 100).unwrap();
+        stream.append(event("later", None), Some(0), 105).unwrap();
+
+        assert_eq!(stream.next_retention_deadline_ms(), Some(110));
+        stream.maintain_retention(110).unwrap();
+        assert_eq!(stream.next_retention_deadline_ms(), Some(115));
+        stream.maintain_retention(115).unwrap();
+        assert_eq!(stream.next_retention_deadline_ms(), None);
     }
 
     #[test]

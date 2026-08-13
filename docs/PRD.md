@@ -8,14 +8,17 @@
 **Status:** Product concept with approved brand and implementation direction  
 **Audience:** Founders, product, distributed-systems engineering, infrastructure, security, and design
 
-**Implementation note (13 August 2026):** The repository now exposes the
-existing bounded, single-shard atomic STREAM-006 batch command through the Go,
-Java, and Python regional SDKs. All three build canonical uncompressed or gzip
-frames and accept caller-supplied standard LZ4, Snappy, or Zstandard frames;
-the Rust authority enforces exact framing, decompression, bounds, and atomic
-application. This advances the P0 batching/compression path but does not claim
-the later bidirectional Produce stream, automatic batching/codec negotiation,
-cross-shard planning, or independent per-record partial success. See ADR-0026.
+**Implementation note (13 August 2026):** The fixed-three-voter regional Rust
+runtime now owns automatic maintenance for the implemented time-driven profile
+semantics. Only the current Raft leader proposes deterministic commands at the
+first replicated deadline for Stream age retention and consumer-session
+expiry, Queue scheduling/TTL/max-age/dedupe/lease transitions, Cache value and
+lock expiry, and Event Bus delivery-lease timeout. Passive reads remain pure,
+explicit maintenance APIs remain available, and topology exposes node-local
+scheduler counters. This closes the client-triggered timer gap for the regional
+alpha; it does not claim a real-time deadline SLA, dynamic or cross-region
+ownership, automatic checkpointing, Stream compaction/tiering, Cache eviction,
+Queue streaming receive, or Event Bus target execution. See ADR-0027.
 
 ---
 

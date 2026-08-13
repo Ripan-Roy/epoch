@@ -60,6 +60,33 @@ fn enqueue(key: &str, message_id: &str, applied_at_ms: u64, index: u64) -> Commi
 }
 
 #[test]
+fn automatic_queue_maintenance_uses_the_replicated_due_deadline() {
+    let service = QueueTabletService::with_default_config(scope()).unwrap();
+    let mut scheduled = event("scheduled");
+    scheduled.deliver_at_ms = Some(200);
+    service
+        .apply(&committed(
+            "enqueue-scheduled",
+            QueueTabletOperation::Enqueue(Box::new(QueueEnqueueCommand {
+                partition: 0,
+                envelope: scheduled,
+            })),
+            100,
+            2,
+            1,
+        ))
+        .unwrap();
+
+    assert!(service.maintenance_proposals(199).unwrap().is_empty());
+    let due = service.maintenance_proposals(500).unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].operation, RegionalMaintenanceOperation::QueueTimers);
+    assert_eq!(due[0].due_at_ms, 200);
+    let decoded = QueueTabletCommand::decode(&due[0].payload, &scope()).unwrap();
+    assert_eq!(decoded.applied_at_ms, 200);
+}
+
+#[test]
 fn recovery_rebuilds_queue_profile_before_exposing_it() {
     let service = QueueTabletService::with_default_config(scope()).unwrap();
     let acquire = committed(

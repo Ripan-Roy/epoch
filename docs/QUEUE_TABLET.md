@@ -365,7 +365,7 @@ The versioned regional Queue v1 route and repository-local Go, Java, and Python
 SDKs now expose this complete implemented lifecycle through authenticated,
 generation/tablet-fenced, leader-discovered calls with linearizable reads. It
 still has no gRPC service, CLI, native bidirectional receive stream, connection-scoped credit
-replenishment, automatic prefetch/fairness, automatic timer proposal, or
+replenishment, automatic prefetch/fairness, timer precision/load evidence, or
 production durability claim. It has one resource, one tablet, partition `0`,
 static configuration, no automatic checkpoint schedule, no advertised product
 idempotency horizon or audit-history retention, no user-exportable backup/PITR,

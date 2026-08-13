@@ -214,6 +214,36 @@ impl Queue {
         &self.config
     }
 
+    /// Returns the earliest replicated deadline that can make explicit queue
+    /// maintenance change state.
+    pub fn next_maintenance_deadline_ms(&self) -> Option<u64> {
+        let message_deadline = self.messages.values().filter_map(|message| {
+            if matches!(
+                message.state,
+                QueueState::Acknowledged | QueueState::Expired | QueueState::DeadLettered { .. }
+            ) {
+                return None;
+            }
+            let ttl = message
+                .envelope
+                .ttl_ms
+                .and_then(|ttl_ms| message.enqueued_at_ms.checked_add(ttl_ms));
+            let max_age = self
+                .config
+                .retry
+                .max_age_ms
+                .and_then(|max_age_ms| message.enqueued_at_ms.checked_add(max_age_ms));
+            let state = match message.state {
+                QueueState::Scheduled { eligible_at_ms } => Some(eligible_at_ms),
+                QueueState::Leased { deadline_ms, .. } => Some(deadline_ms),
+                _ => None,
+            };
+            [ttl, max_age, state].into_iter().flatten().min()
+        });
+        let dedupe_deadline = self.dedupe.values().map(|entry| entry.expires_at_ms);
+        message_deadline.chain(dedupe_deadline).min()
+    }
+
     /// Returns the deterministic checksum persisted after durable queue commands.
     ///
     /// The checksum is a replay-drift guard, not a cryptographic integrity or
@@ -2214,6 +2244,31 @@ mod tests {
         queue.enqueue(scheduled, 0).unwrap();
         assert!(queue.acquire("worker", 1, None, 99).unwrap().is_empty());
         assert_eq!(queue.acquire("worker", 1, None, 100).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn next_maintenance_deadline_covers_schedule_ttl_lease_and_dedupe() {
+        let mut queue = Queue::new(QueueConfig {
+            visibility_timeout_ms: 20,
+            dedupe_window_ms: Some(50),
+            ..QueueConfig::default()
+        })
+        .unwrap();
+        let mut scheduled = event("later");
+        scheduled.deliver_at_ms = Some(130);
+        scheduled.ttl_ms = Some(100);
+        scheduled.dedupe_id = Some("later-request".into());
+        queue.enqueue(scheduled, 100).unwrap();
+        queue.enqueue(event("leased"), 100).unwrap();
+        queue
+            .acquire("worker", 1, Some(20), 100)
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        assert_eq!(queue.next_maintenance_deadline_ms(), Some(120));
+        queue.maintain_fenced(120).unwrap();
+        assert_eq!(queue.next_maintenance_deadline_ms(), Some(130));
     }
 
     #[test]

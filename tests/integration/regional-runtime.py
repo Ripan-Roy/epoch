@@ -412,6 +412,7 @@ def wait_for_topology(cluster: RegionalCluster, expected_used_groups: int) -> No
             if response.status != 200:
                 return False
             capacity = response.document.get("capacity")
+            maintenance = response.document.get("maintenance")
             if (
                 response.document.get("node_id") != str(node)
                 or response.document.get("region") != "ap-south"
@@ -423,6 +424,11 @@ def wait_for_topology(cluster: RegionalCluster, expected_used_groups: int) -> No
                 or capacity.get("used_consensus_groups") != expected_used_groups
                 or capacity.get("available_consensus_groups")
                 != 16 - expected_used_groups
+                or not isinstance(maintenance, dict)
+                or maintenance.get("enabled") is not True
+                or maintenance.get("interval_ms") != 100
+                or exact_int(maintenance.get("passes")) is None
+                or exact_int(maintenance.get("errors")) != 0
             ):
                 return False
         return True
@@ -430,6 +436,45 @@ def wait_for_topology(cluster: RegionalCluster, expected_used_groups: int) -> No
     wait_until(
         f"regional topology to report {expected_used_groups} used groups",
         observed,
+    )
+
+
+def current_maintenance_submissions(cluster: RegionalCluster) -> int:
+    total = 0
+    responding_nodes = 0
+    for node in NODES:
+        try:
+            response = cluster.request(
+                node, "GET", "/experimental/v1/regional/topology"
+            )
+        except OSError:
+            continue
+        if response.status != 200:
+            continue
+        maintenance = response.document.get("maintenance")
+        assert isinstance(maintenance, dict), response.document
+        assert maintenance.get("enabled") is True, maintenance
+        assert maintenance.get("interval_ms") == 100, maintenance
+        assert exact_int(maintenance.get("errors")) == 0, maintenance
+        submissions = exact_int(maintenance.get("proposals_submitted"))
+        assert submissions is not None, maintenance
+        total += submissions
+        responding_nodes += 1
+    assert responding_nodes >= 2, responding_nodes
+    return total
+
+
+def wait_for_maintenance_submission(
+    cluster: RegionalCluster, previous_submissions: int
+) -> int:
+    return wait_until(
+        "a leader-proposed regional maintenance command",
+        lambda: (
+            current
+            if (current := current_maintenance_submissions(cluster))
+            > previous_submissions
+            else None
+        ),
     )
 
 
@@ -805,7 +850,7 @@ def python_stream_client(cluster: RegionalCluster) -> Any:
 def assert_python_sdk_consumer_session(
     cluster: RegionalCluster,
     resource: Resource,
-) -> None:
+) -> dict[str, Any]:
     observed = python_stream_client(cluster).consumer_session(resource.name, "billing")
     assert observed.get("shard_index") == 0, observed
     session = observed.get("session")
@@ -818,6 +863,7 @@ def assert_python_sdk_consumer_session(
     assert isinstance(members, list) and len(members) == 1, observed
     assert members[0].get("member_id") == "python-worker-b", observed
     assert members[0].get("assigned_shards") == [0, 1, 2], observed
+    return observed
 
 
 def assert_python_sdk_stream_batch(
@@ -887,6 +933,7 @@ def prove_python_sdk_native_stream_after_failover(
     assert observation.get("committed_offset") == "2", lag
     assert observation.get("lag") == "0", lag
 
+    retention_submissions = current_maintenance_submissions(cluster)
     configured = client.configure_retention(
         resource.name,
         0,
@@ -894,7 +941,7 @@ def prove_python_sdk_native_stream_after_failover(
         epoch_sdk.StreamRetentionPolicy(
             max_records_per_partition=1,
             max_bytes_per_partition=1_048_576,
-            max_age_ms=86_400_000,
+            max_age_ms=2_000,
         ),
     )
     assert configured.get("state") == "committed", configured
@@ -903,16 +950,21 @@ def prove_python_sdk_native_stream_after_failover(
     assert retention_receipt.get("base_offset") == "1", configured
     assert retention_receipt.get("retained_records") == 1, configured
 
-    maintained = client.maintain_retention(
-        resource.name, 0, "python-sdk-retention-maintenance-1"
-    )
-    assert maintained.get("state") == "committed", maintained
-    retention = client.retention(resource.name, 0)
-    observation = retention.get("retention")
-    assert isinstance(observation, dict), retention
-    assert observation.get("base_offset") == "1", retention
-    assert observation.get("end_offset") == "2", retention
-    assert observation.get("retained_records") == 1, retention
+    def retention_expired() -> dict[str, Any] | None:
+        retention = client.retention(resource.name, 0)
+        observation = retention.get("retention")
+        if not isinstance(observation, dict):
+            return None
+        if (
+            observation.get("base_offset") != "2"
+            or observation.get("end_offset") != "2"
+            or observation.get("retained_records") != 0
+        ):
+            return None
+        return retention
+
+    wait_until("automatic Stream age retention", retention_expired)
+    wait_for_maintenance_submission(cluster, retention_submissions)
 
     for shard, key in ((1, "customer-0"), (2, "customer-1")):
         keyed_event = epoch_sdk.EventEnvelope(
@@ -1023,7 +1075,7 @@ def prove_python_sdk_native_stream_after_failover(
         resource.name,
         "billing",
         "python-worker-a",
-        1_000,
+        2_000,
         idempotency_key="python-sdk-session-join-a",
     )
     receipt_a = joined_a.get("receipt")
@@ -1063,21 +1115,12 @@ def prove_python_sdk_native_stream_after_failover(
     assert heartbeat_receipt.get("outcome") == "applied", heartbeat
     assert heartbeat_receipt.get("group_generation") == "2", heartbeat
 
-    time.sleep(1.2)
-    maintained_session = client.maintain_consumer_session(
-        resource.name,
-        "billing",
-        idempotency_key="python-sdk-session-maintain-1",
+    session_submissions = current_maintenance_submissions(cluster)
+    wait_until(
+        "automatic Stream consumer-session expiry",
+        lambda: assert_python_sdk_consumer_session(cluster, resource),
     )
-    maintenance_receipt = maintained_session.get("receipt")
-    assert isinstance(maintenance_receipt, dict), maintained_session
-    assert maintenance_receipt.get("outcome") == "applied", maintained_session
-    assert maintenance_receipt.get("group_generation") == "3", maintained_session
-    assert maintenance_receipt.get("expired_members") == ["python-worker-a"], (
-        maintained_session
-    )
-    assert maintenance_receipt.get("assigned_shards") == [], maintained_session
-    assert_python_sdk_consumer_session(cluster, resource)
+    wait_for_maintenance_submission(cluster, session_submissions)
 
 
 def queue_result(document: dict[str, Any], expected_kind: str) -> dict[str, Any]:
@@ -1129,7 +1172,7 @@ def prove_python_sdk_native_bus_after_failover(
         epoch_sdk.SubscriptionTarget.pull(),
         filter=epoch_sdk.EventFilter(event_type_patterns=["order.*"]),
         delivery_policy=epoch_sdk.DeliveryPolicy(
-            timeout_ms=60_000,
+            timeout_ms=1_000,
             max_in_flight=2,
             retry=epoch_sdk.DeliveryRetryPolicy(
                 strategy="fixed",
@@ -1187,32 +1230,25 @@ def prove_python_sdk_native_bus_after_failover(
     assert isinstance(deliveries, list) and len(deliveries) == 1, acquired
     first = deliveries[0]
     delivery_id = first.get("delivery_id")
-    first_token = first.get("lease_token")
-    assert isinstance(delivery_id, str) and isinstance(first_token, str), first
+    assert isinstance(delivery_id, str), first
+    delivery_submissions = current_maintenance_submissions(cluster)
 
-    failed = bus_result(
-        client.fail_delivery(
+    def lease_expired() -> list[dict[str, Any]] | None:
+        records = client.query_deliveries(
             resource.name,
             0,
-            "python-bus-fail-order-2",
-            delivery_id,
-            "python-dispatcher",
-            1,
-            first_token,
-            "retry once",
-        ),
-        "delivery_failed",
-    )
-    assert failed.get("state") == "pending", failed
-    bus_result(
-        client.maintain_deliveries(
-            resource.name,
-            0,
-            "python-bus-maintain-order-2",
-            max_deliveries=100,
-        ),
-        "deliveries_maintained",
-    )
+            subscription="orders",
+            state="pending",
+            limit=10,
+        ).get("records")
+        if not isinstance(records, list) or len(records) != 1:
+            return None
+        if records[0].get("delivery_id") != delivery_id:
+            return None
+        return records
+
+    wait_until("automatic Event Bus delivery-lease expiry", lease_expired)
+    wait_for_maintenance_submission(cluster, delivery_submissions)
     reacquired = bus_result(
         client.acquire_deliveries(
             resource.name,
@@ -1436,6 +1472,7 @@ def prove_python_sdk_native_cache_after_failover(
         "lock_released",
     )
 
+    expiry_submissions = current_maintenance_submissions(cluster)
     cache_result(
         client.set(
             resource.name,
@@ -1443,22 +1480,22 @@ def prove_python_sdk_native_cache_after_failover(
             "python-cache-set-ephemeral",
             "ephemeral",
             epoch_sdk.RegionalCacheValue.string("short"),
-            ttl_ms=1,
+            ttl_ms=250,
         ),
         "set",
     )
-    time.sleep(0.02)
-    maintained = cache_result(
-        client.maintain(
-            resource.name,
-            0,
-            "python-cache-maintain-expiry",
-            max_expirations=100,
+    final = wait_until(
+        "automatic Cache value expiry",
+        lambda: (
+            observed
+            if (observed := client.observe(resource.name, 0, "ephemeral"))
+            .get("observation", {})
+            .get("item")
+            is None
+            else None
         ),
-        "maintained",
     )
-    assert "ephemeral" in maintained.get("expired_keys", []), maintained
-    final = client.observe(resource.name, 0, "ephemeral")
+    wait_for_maintenance_submission(cluster, expiry_submissions)
     assert final.get("read_consistency") == "linearizable", final
     assert final.get("observation", {}).get("item") is None, final
 
@@ -1530,6 +1567,7 @@ def prove_python_sdk_native_queue_after_failover(
         ),
         "acknowledged",
     )
+    timer_submissions = current_maintenance_submissions(cluster)
     queue_result(
         client.release(
             resource.name,
@@ -1538,11 +1576,22 @@ def prove_python_sdk_native_queue_after_failover(
             "python-worker",
             1,
             by_message["jobs-2"]["lease_token"],
-            0,
+            500,
             "retry once",
         ),
         "released",
     )
+
+    def retry_ready() -> dict[str, Any] | None:
+        counts = client.counts(resource.name, 0).get("counts")
+        if not isinstance(counts, dict):
+            return None
+        if counts.get("scheduled") != "0" or counts.get("ready") != "1":
+            return None
+        return counts
+
+    wait_until("automatic Queue retry scheduling", retry_ready)
+    wait_for_maintenance_submission(cluster, timer_submissions)
 
     reacquired = client.acquire(
         resource.name,
@@ -1673,10 +1722,10 @@ def run_campaign(cluster: RegionalCluster) -> None:
     assert queue_new_leader != queue_old_leader
     assert queue_new_term > queue_old_term
     prove_python_sdk_native_queue_after_failover(cluster, queue)
-    wait_for_profile_apply(cluster, queue, 11, queue_survivors)
+    wait_for_profile_apply(cluster, queue, 12, queue_survivors)
     cluster.start_node(queue_old_leader)
     wait_for_nodes(cluster)
-    wait_for_profile_apply(cluster, queue, 11)
+    wait_for_profile_apply(cluster, queue, 12)
 
     cache = next(resource for resource in RESOURCES if resource.kind == "cache")
     cache_old_leader, cache_old_term = wait_for_routes(cluster, cache)
@@ -1699,10 +1748,10 @@ def run_campaign(cluster: RegionalCluster) -> None:
     assert bus_new_leader != bus_old_leader
     assert bus_new_term > bus_old_term
     prove_python_sdk_native_bus_after_failover(cluster, bus)
-    wait_for_profile_apply(cluster, bus, 9, bus_survivors)
+    wait_for_profile_apply(cluster, bus, 8, bus_survivors)
     cluster.start_node(bus_old_leader)
     wait_for_nodes(cluster)
-    wait_for_profile_apply(cluster, bus, 9)
+    wait_for_profile_apply(cluster, bus, 8)
 
     cluster.crash_all()
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "pending", 0)
@@ -1720,11 +1769,11 @@ def run_campaign(cluster: RegionalCluster) -> None:
     assert_python_sdk_stream_batch(cluster, stream)
     for resource in RESOURCES:
         expected = (
-            11
+            12
             if resource == queue
             else 12
             if resource == cache
-            else 9
+            else 8
             if resource == bus
             else 1
         )

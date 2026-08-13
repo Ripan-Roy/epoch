@@ -12,7 +12,9 @@ use axum::{
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::tablet_materializer::TabletDirectory;
+use crate::{
+    regional_maintenance::RegionalMaintenanceStatus, tablet_materializer::TabletDirectory,
+};
 
 pub const REGIONAL_TOPOLOGY_PATH: &str = "/experimental/v1/regional/topology";
 const MAX_TOPOLOGY_LABEL_BYTES: usize = 63;
@@ -107,6 +109,7 @@ impl NodeTopology {
 struct TopologyState {
     topology: NodeTopology,
     directory: TabletDirectory,
+    maintenance: std::sync::Arc<RegionalMaintenanceStatus>,
 }
 
 #[derive(Debug, Serialize)]
@@ -117,6 +120,7 @@ struct TopologyResponse {
     node_class: String,
     consensus_voter_node_ids: Vec<String>,
     capacity: CapacityResponse,
+    maintenance: crate::regional_maintenance::RegionalMaintenanceStatusSnapshot,
 }
 
 #[derive(Debug, Serialize)]
@@ -137,12 +141,17 @@ struct TopologyErrorResponse {
 }
 
 /// Exposes immutable node identity plus a live count of supervised groups.
-pub fn regional_topology_router(topology: NodeTopology, directory: TabletDirectory) -> Router {
+pub fn regional_topology_router(
+    topology: NodeTopology,
+    directory: TabletDirectory,
+    maintenance: std::sync::Arc<RegionalMaintenanceStatus>,
+) -> Router {
     Router::new()
         .route(REGIONAL_TOPOLOGY_PATH, get(get_topology))
         .with_state(TopologyState {
             topology,
             directory,
+            maintenance,
         })
 }
 
@@ -177,6 +186,7 @@ async fn get_topology(State(state): State<TopologyState>) -> Response {
             used,
             available: maximum.saturating_sub(used),
         },
+        maintenance: state.maintenance.snapshot(),
     })
     .into_response()
 }
