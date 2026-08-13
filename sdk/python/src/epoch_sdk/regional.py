@@ -20,6 +20,7 @@ _MAX_FETCH_RECORDS = 1_000
 _MAX_RETENTION_RECORDS = 100_000
 _MAX_RETENTION_BYTES = 3 * 1024 * 1024
 _MAX_RETENTION_AGE_MS = 10 * 365 * 24 * 60 * 60 * 1_000
+_STREAM_PARTITIONER = "fnv1a64_utf8_mod_n_v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +73,47 @@ class RegionalStreamClient(RegionalClient):
         return self._stream_call(
             stream,
             shard,
+            lambda route: (
+                "POST",
+                "/records",
+                {
+                    "idempotency_key": idempotency_key,
+                    "expected_term": route.term,
+                    "partition": 0,
+                    "envelope": event.to_dict(),
+                },
+                None,
+                {},
+            ),
+        )
+
+    def append_keyed(
+        self,
+        stream: str,
+        idempotency_key: str,
+        event: EventEnvelope,
+    ) -> dict[str, Any]:
+        """Discover routing and append by event key, falling back to event ID."""
+        _required(idempotency_key, "idempotency key")
+        if not isinstance(event, EventEnvelope):
+            raise TypeError("event must be an EventEnvelope")
+        routing = self.discover_route("streams", "Stream", stream, 0)
+        partitioning = routing.stream_partitioning
+        if (
+            partitioning is None
+            or partitioning.algorithm != _STREAM_PARTITIONER
+            or partitioning.key_encoding != "utf8"
+            or partitioning.missing_key_fallback != "event_id"
+            or partitioning.shard_count <= 0
+        ):
+            raise ValueError("regional Stream partitioning metadata is unsupported or incomplete")
+        shard = stream_shard_for(event.key or event.id, partitioning.shard_count)
+        return self.call_at_generation(
+            "streams",
+            "Stream",
+            stream,
+            shard,
+            routing.resource_generation,
             lambda route: (
                 "POST",
                 "/records",
@@ -234,6 +276,18 @@ def _fetch_limit(limit: int) -> None:
         raise ValueError(f"fetch limit must be between 1 and {_MAX_FETCH_RECORDS}")
 
 
+def stream_shard_for(partition_value: str, shard_count: int) -> int:
+    """Map UTF-8 bytes with the versioned unsigned FNV-1a Stream partitioner."""
+    if not isinstance(partition_value, str):
+        raise TypeError("partition value must be a string")
+    if isinstance(shard_count, bool) or not isinstance(shard_count, int) or shard_count <= 0:
+        raise ValueError("Stream shard count must be greater than zero")
+    hash_value = 0xCBF29CE484222325
+    for value in partition_value.encode("utf-8"):
+        hash_value = ((hash_value ^ value) * 0x100000001B3) & ((1 << 64) - 1)
+    return hash_value % shard_count
+
+
 def _optional_bound(value: int | None, name: str, maximum: int) -> None:
     if value is None:
         return
@@ -241,4 +295,10 @@ def _optional_bound(value: int | None, name: str, maximum: int) -> None:
         raise ValueError(f"{name} must be between 1 and {maximum} when set")
 
 
-__all__ = ["RegionalScope", "RegionalStreamClient", "Route", "StreamRetentionPolicy"]
+__all__ = [
+    "RegionalScope",
+    "RegionalStreamClient",
+    "Route",
+    "StreamRetentionPolicy",
+    "stream_shard_for",
+]

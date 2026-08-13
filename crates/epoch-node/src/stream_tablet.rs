@@ -69,15 +69,24 @@ type StreamTabletApiError = TabletApiError;
 #[derive(Debug)]
 pub struct StreamTabletService {
     scope: StreamTabletScope,
+    shard_index: u32,
     tablet: RwLock<StreamTablet>,
     failure: RwLock<Option<String>>,
 }
 
 impl StreamTabletService {
     pub fn new(scope: StreamTabletScope) -> Result<Arc<Self>, TabletError> {
+        Self::new_for_shard(scope, 0)
+    }
+
+    pub fn new_for_shard(
+        scope: StreamTabletScope,
+        shard_index: u32,
+    ) -> Result<Arc<Self>, TabletError> {
         let tablet = StreamTablet::new(scope.clone())?;
         Ok(Arc::new(Self {
             scope,
+            shard_index,
             tablet: RwLock::new(tablet),
             failure: RwLock::new(None),
         }))
@@ -85,6 +94,10 @@ impl StreamTabletService {
 
     pub fn scope(&self) -> &StreamTabletScope {
         &self.scope
+    }
+
+    pub const fn shard_index(&self) -> u32 {
+        self.shard_index
     }
 
     pub fn last_profile_mutation_index(&self) -> Result<u64, String> {
@@ -850,17 +863,24 @@ async fn wait_for_committed_response(
                 {
                     return Ok((committed_http_status(replayed), Json(response)));
                 }
-                let unresolved = unresolved_response(proposal_id, &lookup);
+                let unresolved =
+                    unresolved_response(proposal_id, &lookup, state.service.shard_index());
                 return Ok((StatusCode::ACCEPTED, Json(unresolved)));
             }
         }
     }
 }
 
-fn unresolved_response(proposal_id: u64, lookup: &ProposalLookup) -> StreamTabletMutationResponse {
+fn unresolved_response(
+    proposal_id: u64,
+    lookup: &ProposalLookup,
+    shard_index: u32,
+) -> StreamTabletMutationResponse {
     match lookup {
-        ProposalLookup::Unknown => StreamTabletMutationResponse::unknown(proposal_id),
-        ProposalLookup::Pending { .. } => StreamTabletMutationResponse::pending(proposal_id),
+        ProposalLookup::Unknown => StreamTabletMutationResponse::unknown(proposal_id, shard_index),
+        ProposalLookup::Pending { .. } => {
+            StreamTabletMutationResponse::pending(proposal_id, shard_index)
+        }
         ProposalLookup::Committed(_) => unreachable!("committed lookups return a response"),
     }
 }
@@ -905,7 +925,8 @@ fn committed_response(
         ProposalLookup::Committed(committed) => {
             let receipt = service.committed_receipt(committed)?;
             Ok(Some(StreamTabletMutationResponse::committed(
-                receipt_for_response(receipt, replayed),
+                receipt_for_response(receipt, replayed, service.shard_index()),
+                service.shard_index(),
             )))
         }
         ProposalLookup::Unknown | ProposalLookup::Pending { .. } => Ok(None),
@@ -915,9 +936,22 @@ fn committed_response(
 fn receipt_for_response(
     mut receipt: StreamTabletMutationReceipt,
     replayed: bool,
+    shard_index: u32,
 ) -> StreamTabletMutationReceipt {
     if replayed {
         receipt.mark_replayed();
+    }
+    match &mut receipt {
+        StreamTabletMutationReceipt::Append(receipt) => {
+            receipt.partition = shard_index;
+            if let Some(batch) = &mut receipt.batch {
+                for record in &mut batch.records {
+                    record.partition = shard_index;
+                }
+            }
+        }
+        StreamTabletMutationReceipt::Group(receipt) => receipt.partition = shard_index,
+        StreamTabletMutationReceipt::Retention(_) => {}
     }
     receipt
 }
@@ -927,12 +961,18 @@ async fn lookup_mutation(
     Path(proposal_id): Path<u64>,
 ) -> TabletApiResult<Json<StreamTabletMutationResponse>> {
     let lookup = state.consensus.lookup(proposal_id).await?;
+    let shard_index = state.service.shard_index();
     let response = match lookup {
-        ProposalLookup::Unknown => StreamTabletMutationResponse::unknown(proposal_id),
-        ProposalLookup::Pending { .. } => StreamTabletMutationResponse::pending(proposal_id),
+        ProposalLookup::Unknown => StreamTabletMutationResponse::unknown(proposal_id, shard_index),
+        ProposalLookup::Pending { .. } => {
+            StreamTabletMutationResponse::pending(proposal_id, shard_index)
+        }
         ProposalLookup::Committed(committed) => {
             let receipt = state.service.committed_receipt(&committed)?;
-            StreamTabletMutationResponse::committed(receipt)
+            StreamTabletMutationResponse::committed(
+                receipt_for_response(receipt, false, shard_index),
+                shard_index,
+            )
         }
     };
     Ok(Json(response))
@@ -977,13 +1017,15 @@ async fn fetch_records(
             "limit must be between 1 and {MAX_FETCH_RECORDS}"
         )));
     }
+    let shard_index = state.service.shard_index();
     Ok(Json(StreamTabletFetchResponse {
         read: tablet_read_metadata(read),
+        shard_index,
         records: state
             .service
             .fetch(query.offset, query.limit)?
             .into_iter()
-            .map(StreamTabletRecordResponse::from)
+            .map(|record| StreamTabletRecordResponse::with_partition(record, shard_index))
             .collect(),
     }))
 }
@@ -996,9 +1038,13 @@ async fn group_lag(
 ) -> TabletApiResult<Json<StreamTabletGroupObservationResponse>> {
     validate_partition(query.partition)?;
     validate_stream_consumer_group(&group)?;
+    let shard_index = state.service.shard_index();
+    let mut checkpoint = state.service.group_observation(&group)?;
+    checkpoint.partition = shard_index;
     Ok(Json(StreamTabletGroupObservationResponse {
         read: tablet_read_metadata(read),
-        checkpoint: state.service.group_observation(&group)?,
+        shard_index,
+        checkpoint,
     }))
 }
 
@@ -1011,15 +1057,18 @@ async fn fetch_group_records(
     validate_partition(query.partition)?;
     validate_fetch_limit(query.limit)?;
     validate_stream_consumer_group(&group)?;
-    let checkpoint = state.service.group_observation(&group)?;
+    let shard_index = state.service.shard_index();
+    let mut checkpoint = state.service.group_observation(&group)?;
+    checkpoint.partition = shard_index;
     let records = state
         .service
         .fetch_for_group(&group, query.limit)?
         .into_iter()
-        .map(StreamTabletRecordResponse::from)
+        .map(|record| StreamTabletRecordResponse::with_partition(record, shard_index))
         .collect();
     Ok(Json(StreamTabletGroupFetchResponse {
         read: tablet_read_metadata(read),
+        shard_index,
         checkpoint,
         records,
     }))
@@ -1029,9 +1078,13 @@ async fn get_retention(
     State(state): State<StreamTabletApiState>,
     read: Option<Extension<TabletReadMetadata>>,
 ) -> TabletApiResult<Json<StreamTabletRetentionResponse>> {
+    let shard_index = state.service.shard_index();
+    let mut retention = state.service.retention_observation()?;
+    retention.partition = shard_index;
     Ok(Json(StreamTabletRetentionResponse {
         read: tablet_read_metadata(read),
-        retention: state.service.retention_observation()?,
+        shard_index,
+        retention,
     }))
 }
 
@@ -1055,6 +1108,7 @@ async fn tablet_status(
     let consensus = state.consensus.status().await?;
     Ok(Json(StreamTabletStatus::new_with_read(
         state.service.scope(),
+        state.service.shard_index(),
         &consensus,
         profile,
         tablet_read_metadata(read),
@@ -1093,6 +1147,7 @@ struct StreamTabletStatus {
     tablet_id: u64,
     #[serde(serialize_with = "serialize_u64_as_decimal")]
     tablet_epoch: u64,
+    shard_index: u32,
     resource: String,
     #[serde(serialize_with = "serialize_u64_as_decimal")]
     node_id: u64,
@@ -1121,11 +1176,18 @@ impl StreamTabletStatus {
         consensus: &ConsensusStatus,
         profile: StreamTabletSnapshot,
     ) -> Result<Self, String> {
-        Self::new_with_read(scope, consensus, profile, TabletReadMetadata::local_stale())
+        Self::new_with_read(
+            scope,
+            0,
+            consensus,
+            profile,
+            TabletReadMetadata::local_stale(),
+        )
     }
 
     fn new_with_read(
         scope: &StreamTabletScope,
+        shard_index: u32,
         consensus: &ConsensusStatus,
         profile: StreamTabletSnapshot,
         read: TabletReadMetadata,
@@ -1163,6 +1225,7 @@ impl StreamTabletStatus {
             max_retention_age_ms: MAX_STREAM_RETENTION_AGE_MS,
             tablet_id: scope.tablet_id,
             tablet_epoch: scope.tablet_epoch,
+            shard_index,
             resource: scope.resource.clone(),
             node_id: consensus.node_id.get(),
             role: match consensus.role {
@@ -1188,6 +1251,7 @@ impl StreamTabletStatus {
 struct StreamTabletFetchResponse {
     #[serde(flatten)]
     read: TabletReadMetadata,
+    shard_index: u32,
     records: Vec<StreamTabletRecordResponse>,
 }
 
@@ -1195,6 +1259,7 @@ struct StreamTabletFetchResponse {
 struct StreamTabletGroupObservationResponse {
     #[serde(flatten)]
     read: TabletReadMetadata,
+    shard_index: u32,
     checkpoint: StreamTabletGroupObservation,
 }
 
@@ -1202,6 +1267,7 @@ struct StreamTabletGroupObservationResponse {
 struct StreamTabletGroupFetchResponse {
     #[serde(flatten)]
     read: TabletReadMetadata,
+    shard_index: u32,
     checkpoint: StreamTabletGroupObservation,
     records: Vec<StreamTabletRecordResponse>,
 }
@@ -1210,6 +1276,7 @@ struct StreamTabletGroupFetchResponse {
 struct StreamTabletRetentionResponse {
     #[serde(flatten)]
     read: TabletReadMetadata,
+    shard_index: u32,
     retention: StreamTabletRetentionObservation,
 }
 
@@ -1223,10 +1290,10 @@ struct StreamTabletRecordResponse {
     envelope: StrictEventEnvelope,
 }
 
-impl From<StreamRecord> for StreamTabletRecordResponse {
-    fn from(record: StreamRecord) -> Self {
+impl StreamTabletRecordResponse {
+    fn with_partition(record: StreamRecord, partition: u32) -> Self {
         Self {
-            partition: record.partition,
+            partition,
             offset: record.offset,
             appended_at_ms: record.appended_at_ms,
             envelope: record.envelope.into(),
@@ -1256,37 +1323,41 @@ struct StreamTabletMutationResponse {
     state: MutationState,
     outcome_certainty: OutcomeCertainty,
     observation_scope: &'static str,
+    shard_index: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     receipt: Option<StreamTabletMutationReceipt>,
 }
 
 impl StreamTabletMutationResponse {
-    fn unknown(proposal_id: u64) -> Self {
+    fn unknown(proposal_id: u64, shard_index: u32) -> Self {
         Self {
             proposal_id,
             state: MutationState::Unknown,
             outcome_certainty: OutcomeCertainty::Unknown,
             observation_scope: "local",
+            shard_index,
             receipt: None,
         }
     }
 
-    fn pending(proposal_id: u64) -> Self {
+    fn pending(proposal_id: u64, shard_index: u32) -> Self {
         Self {
             proposal_id,
             state: MutationState::Pending,
             outcome_certainty: OutcomeCertainty::Unknown,
             observation_scope: "local",
+            shard_index,
             receipt: None,
         }
     }
 
-    fn committed(receipt: StreamTabletMutationReceipt) -> Self {
+    fn committed(receipt: StreamTabletMutationReceipt, shard_index: u32) -> Self {
         Self {
             proposal_id: receipt.proposal_id(),
             state: MutationState::Committed,
             outcome_certainty: OutcomeCertainty::Committed,
             observation_scope: "local",
+            shard_index,
             receipt: Some(receipt),
         }
     }
@@ -1315,19 +1386,134 @@ mod tests {
 
     fn committed(key: &str, event_id: &str, index: u64) -> CommittedProposal {
         let scope = scope();
+        committed_for_scope(&scope, key, event_id, index)
+    }
+
+    fn committed_for_scope(
+        scope: &StreamTabletScope,
+        key: &str,
+        event_id: &str,
+        index: u64,
+    ) -> CommittedProposal {
         let mut envelope = EventEnvelope::new("tests", "order.created", json!({"id": event_id}), 1);
         envelope.id = event_id.into();
-        let command = StreamTabletCommand::append(&scope, key, envelope, 10 + index).unwrap();
+        let command = StreamTabletCommand::append(scope, key, envelope, 10 + index).unwrap();
+        committed_command_for_scope(scope, &command, index)
+    }
+
+    fn committed_command_for_scope(
+        scope: &StreamTabletScope,
+        command: &StreamTabletCommand,
+        index: u64,
+    ) -> CommittedProposal {
         CommittedProposal {
             receipt: CommitReceipt {
-                group_id: GroupId::new(7).unwrap(),
-                group_epoch: GroupEpoch::new(3).unwrap(),
-                proposal_id: ProposalId::new(command.proposal_id(&scope).unwrap()).unwrap(),
+                group_id: GroupId::new(scope.consensus_group_id).unwrap(),
+                group_epoch: GroupEpoch::new(scope.tablet_epoch).unwrap(),
+                proposal_id: ProposalId::new(command.proposal_id(scope).unwrap()).unwrap(),
                 term: Term::new(2),
                 log_index: LogIndex::new(index),
             },
-            payload: command.encode(&scope).unwrap(),
+            payload: command.encode(scope).unwrap(),
         }
+    }
+
+    #[test]
+    fn sharded_service_externalizes_the_logical_partition_and_restores_its_scope() {
+        let scope = StreamTabletScope::new_with_consensus_group(21, 31, 3, "orders").unwrap();
+        let service = StreamTabletService::new_for_shard(scope.clone(), 14).unwrap();
+        let append = committed_for_scope(&scope, "one", "order-1", 4);
+        service.apply(&append).unwrap();
+
+        let receipt = receipt_for_response(
+            service.committed_receipt(&append).unwrap(),
+            false,
+            service.shard_index(),
+        );
+        let StreamTabletMutationReceipt::Append(receipt) = receipt else {
+            panic!("append must return an append receipt");
+        };
+        assert_eq!(receipt.partition, 14);
+        let record = StreamTabletRecordResponse::with_partition(
+            service.fetch(0, 1).unwrap().remove(0),
+            service.shard_index(),
+        );
+        assert_eq!(record.partition, 14);
+
+        let records = [2, 3].map(|client_sequence| StreamBatchRecord {
+            client_sequence,
+            envelope: EventEnvelope::new(
+                "tests",
+                "order.created",
+                json!({"id": client_sequence}),
+                20 + u64::from(client_sequence),
+            ),
+        });
+        let batch = committed_command_for_scope(
+            &scope,
+            &StreamTabletCommand::append_batch(
+                &scope,
+                "batch",
+                StreamCompression::None,
+                &records,
+                15,
+            )
+            .unwrap(),
+            5,
+        );
+        service.apply(&batch).unwrap();
+        let batch_receipt = receipt_for_response(
+            service.committed_receipt(&batch).unwrap(),
+            false,
+            service.shard_index(),
+        );
+        let StreamTabletMutationReceipt::Append(batch_receipt) = batch_receipt else {
+            panic!("batch must return an append receipt");
+        };
+        assert_eq!(batch_receipt.partition, 14);
+        assert!(
+            batch_receipt
+                .batch
+                .unwrap()
+                .records
+                .iter()
+                .all(|record| record.partition == 14)
+        );
+
+        let checkpoint = committed_command_for_scope(
+            &scope,
+            &StreamTabletCommand::group_offset(
+                &scope,
+                "checkpoint",
+                "billing",
+                "worker-a",
+                1,
+                0,
+                3,
+                StreamGroupOffsetMode::Commit,
+                16,
+            )
+            .unwrap(),
+            6,
+        );
+        service.apply(&checkpoint).unwrap();
+        let checkpoint_receipt = receipt_for_response(
+            service.committed_receipt(&checkpoint).unwrap(),
+            false,
+            service.shard_index(),
+        );
+        let StreamTabletMutationReceipt::Group(checkpoint_receipt) = checkpoint_receipt else {
+            panic!("checkpoint must return a group receipt");
+        };
+        assert_eq!(checkpoint_receipt.partition, 14);
+
+        let image = service
+            .capture_snapshot(LogIndex::new(6), &[append, batch, checkpoint])
+            .unwrap();
+        let restored = StreamTabletService::new_for_shard(scope, 14).unwrap();
+        restored.install_snapshot(&image).unwrap();
+        assert_eq!(restored.shard_index(), 14);
+        assert_eq!(restored.fetch(0, 10).unwrap().len(), 3);
     }
 
     #[test]
@@ -1416,7 +1602,7 @@ mod tests {
     fn mutation_ids_are_decimal_strings_in_json() {
         let proposal_id = u64::MAX - 1;
         let document =
-            serde_json::to_value(StreamTabletMutationResponse::pending(proposal_id)).unwrap();
+            serde_json::to_value(StreamTabletMutationResponse::pending(proposal_id, 0)).unwrap();
 
         assert_eq!(document["proposal_id"], proposal_id.to_string());
     }
@@ -1517,12 +1703,13 @@ mod tests {
     #[test]
     fn timeout_response_preserves_unknown_versus_pending_local_state() {
         let unknown =
-            serde_json::to_value(unresolved_response(9, &ProposalLookup::Unknown)).unwrap();
+            serde_json::to_value(unresolved_response(9, &ProposalLookup::Unknown, 0)).unwrap();
         let pending = serde_json::to_value(unresolved_response(
             9,
             &ProposalLookup::Pending {
                 payload: b"pending".to_vec(),
             },
+            0,
         ))
         .unwrap();
 

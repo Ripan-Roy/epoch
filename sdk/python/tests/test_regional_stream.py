@@ -9,14 +9,19 @@ from epoch_sdk import (
     RegionalScope,
     RegionalStreamClient,
     StreamRetentionPolicy,
+    stream_shard_for,
 )
 
 
 class RegionalFakeTransport:
     def __init__(
-        self, route: dict[str, Any], operation_errors: list[EpochAPIError] | None = None
+        self,
+        route: dict[str, Any],
+        operation_errors: list[EpochAPIError] | None = None,
+        routes: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.route = route
+        self.routes = dict(routes or {})
         self.requests: list[dict[str, Any]] = []
         self.operation_errors = list(operation_errors or [])
 
@@ -32,8 +37,9 @@ class RegionalFakeTransport:
         self.requests.append(
             {"method": method, "path": path, "body": body, "query": query, "headers": headers}
         )
-        if method == "GET" and path.endswith("/shards/0"):
-            return self.route
+        shard_suffix = path.rsplit("/shards/", maxsplit=1)[-1]
+        if method == "GET" and shard_suffix.isascii() and shard_suffix.isdigit():
+            return self.routes.get(shard_suffix, self.route)
         if self.operation_errors:
             raise self.operation_errors.pop(0)
         return {"state": "committed", "outcome_certainty": "committed"}
@@ -82,6 +88,84 @@ class RegionalStreamClientTests(unittest.TestCase):
             token="secret-token",
             scope=RegionalScope("acme", "shop", "dev", "core"),
         )
+
+    def test_keyed_append_uses_the_published_utf8_partitioner(self) -> None:
+        leader = RegionalFakeTransport(
+            {
+                "resource_generation": "5",
+                "tablet_epoch": "3",
+                "term": "8",
+                "accepts_writes": True,
+                "stream_partitioning": {
+                    "algorithm": "fnv1a64_utf8_mod_n_v1",
+                    "key_encoding": "utf8",
+                    "missing_key_fallback": "event_id",
+                    "shard_count": 16,
+                },
+            }
+        )
+        client = RegionalStreamClient.with_transports(
+            [leader],
+            token="secret-token",
+            scope=RegionalScope("acme", "shop", "dev", "core"),
+        )
+        event = EventEnvelope(
+            id="order-1",
+            key="customer-42",
+            source="checkout",
+            event_type="order.created",
+            payload={"id": "42"},
+            time_ms=42,
+        )
+
+        self.assertEqual(stream_shard_for("customer-42", 16), 14)
+        self.assertEqual(stream_shard_for("order-1", 16), 13)
+        self.assertEqual(stream_shard_for("café", 16), 9)
+        self.assertEqual(stream_shard_for("東京", 16), 15)
+        client.append_keyed("orders", "append-42", event)
+
+        self.assertEqual(len(leader.requests), 3)
+        self.assertTrue(leader.requests[0]["path"].endswith("/shards/0"))
+        self.assertTrue(leader.requests[1]["path"].endswith("/shards/14"))
+        self.assertTrue(leader.requests[2]["path"].endswith("/shards/14/records"))
+
+    def test_keyed_append_fails_closed_when_routing_generation_changes(self) -> None:
+        partitioning = {
+            "algorithm": "fnv1a64_utf8_mod_n_v1",
+            "key_encoding": "utf8",
+            "missing_key_fallback": "event_id",
+            "shard_count": 16,
+        }
+        bootstrap = {
+            "resource_generation": "5",
+            "tablet_epoch": "3",
+            "term": "8",
+            "accepts_writes": True,
+            "stream_partitioning": partitioning,
+        }
+        target = {
+            **bootstrap,
+            "resource_generation": "6",
+            "term": "9",
+        }
+        transport = RegionalFakeTransport(bootstrap, routes={"0": bootstrap, "14": target})
+        client = RegionalStreamClient.with_transports(
+            [transport],
+            token="secret-token",
+            scope=RegionalScope("acme", "shop", "dev", "core"),
+        )
+        event = EventEnvelope(
+            id="order-1",
+            key="customer-42",
+            source="checkout",
+            event_type="order.created",
+            payload={},
+        )
+
+        with self.assertRaisesRegex(ValueError, "generation changed"):
+            client.append_keyed("orders", "append-42", event)
+
+        self.assertEqual(len(transport.requests), 2)
 
     def test_append_discovers_leader_and_carries_auth_fences_and_term(self) -> None:
         event = EventEnvelope(

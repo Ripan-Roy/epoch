@@ -59,6 +59,17 @@ final class RegionalClientCore {
       int shard,
       RequestFactory requestFactory)
       throws IOException, InterruptedException {
+    return callAtGeneration(collection, resourceLabel, resource, shard, null, requestFactory);
+  }
+
+  JsonNode callAtGeneration(
+      String collection,
+      String resourceLabel,
+      String resource,
+      int shard,
+      String expectedGeneration,
+      RequestFactory requestFactory)
+      throws IOException, InterruptedException {
     String basePath = resourcePath(collection, resourceLabel, resource, shard);
     IOException lastError = null;
     for (int attempt = 0; attempt < 2; attempt++) {
@@ -74,6 +85,15 @@ final class RegionalClientCore {
       } catch (IOException error) {
         lastError = error;
         continue;
+      }
+      if (expectedGeneration != null
+          && !expectedGeneration.equals(leader.route().resourceGeneration())) {
+        throw new IOException(
+            "Stream routing generation changed from "
+                + expectedGeneration
+                + " to "
+                + leader.route().resourceGeneration()
+                + " before the keyed append; no write was attempted");
       }
       RequestSpec request = requestFactory.create(leader.route());
       try {
@@ -96,6 +116,35 @@ final class RegionalClientCore {
         0,
         "unavailable",
         "regional " + resourceLabel + " operation could not reach a current leader: " + lastError,
+        MAPPER.nullNode(),
+        lastError);
+  }
+
+  Route discoverRoute(String collection, String resourceLabel, String resource, int shard)
+      throws IOException, InterruptedException {
+    String path = resourcePath(collection, resourceLabel, resource, shard);
+    IOException lastError = null;
+    for (Transport transport : transports) {
+      try {
+        JsonNode document =
+            transport.request(
+                "GET", path, null, Map.of(), Map.of("authorization", "Bearer " + token));
+        return route(document);
+      } catch (EpochApiException error) {
+        if (!rediscover(error)) {
+          throw error;
+        }
+        lastError = error;
+      } catch (IOException error) {
+        lastError = error;
+      } catch (IllegalArgumentException error) {
+        lastError = new IOException("regional route response is invalid", error);
+      }
+    }
+    throw new EpochApiException(
+        0,
+        "unavailable",
+        "no configured endpoint reported Stream routing metadata",
         MAPPER.nullNode(),
         lastError);
   }
@@ -152,10 +201,22 @@ final class RegionalClientCore {
     if (document == null || !document.isObject()) {
       throw new IllegalArgumentException("regional route response must be an object");
     }
+    StreamPartitioning partitioning = null;
+    JsonNode streamPartitioning = document.path("stream_partitioning");
+    if (streamPartitioning.isObject()) {
+      int shardCount = streamPartitioning.path("shard_count").asInt(0);
+      partitioning =
+          new StreamPartitioning(
+              streamPartitioning.path("algorithm").asText(""),
+              streamPartitioning.path("key_encoding").asText(""),
+              streamPartitioning.path("missing_key_fallback").asText(""),
+              shardCount);
+    }
     return new Route(
         decimal(document, "resource_generation"),
         decimal(document, "tablet_epoch"),
-        decimal(document, "term"));
+        decimal(document, "term"),
+        partitioning);
   }
 
   private static String decimal(JsonNode document, String field) {
@@ -241,7 +302,14 @@ final class RegionalClientCore {
     RequestSpec create(Route route);
   }
 
-  record Route(String resourceGeneration, String tabletEpoch, String term) {}
+  record Route(
+      String resourceGeneration,
+      String tabletEpoch,
+      String term,
+      StreamPartitioning streamPartitioning) {}
+
+  record StreamPartitioning(
+      String algorithm, String keyEncoding, String missingKeyFallback, int shardCount) {}
 
   private record Leader(Transport transport, Route route) {}
 

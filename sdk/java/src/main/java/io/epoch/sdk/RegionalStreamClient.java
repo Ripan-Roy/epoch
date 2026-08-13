@@ -50,6 +50,44 @@ public final class RegionalStreamClient {
         });
   }
 
+  /**
+   * Discovers the Stream partitioning contract and appends by event key, falling back to event ID.
+   * The target generation is pinned so an expansion race cannot silently remap an uncertain write.
+   */
+  public JsonNode appendKeyed(String stream, String idempotencyKey, EventEnvelope event)
+      throws IOException, InterruptedException {
+    RegionalClientCore.required(idempotencyKey, "idempotency key");
+    Objects.requireNonNull(event, "event");
+    RegionalClientCore.Route routing = regional.discoverRoute("streams", "Stream", stream, 0);
+    RegionalClientCore.StreamPartitioning partitioning = routing.streamPartitioning();
+    if (partitioning == null
+        || !StreamPartitioner.ALGORITHM.equals(partitioning.algorithm())
+        || !"utf8".equals(partitioning.keyEncoding())
+        || !"event_id".equals(partitioning.missingKeyFallback())
+        || partitioning.shardCount() <= 0) {
+      throw new IOException("regional Stream partitioning metadata is unsupported or incomplete");
+    }
+    String partitionValue = event.key();
+    if (partitionValue == null || partitionValue.isEmpty()) {
+      partitionValue = event.id();
+    }
+    int shard = StreamPartitioner.shardFor(partitionValue, partitioning.shardCount());
+    return regional.callAtGeneration(
+        "streams",
+        "Stream",
+        stream,
+        shard,
+        routing.resourceGeneration(),
+        route -> {
+          ObjectNode body = RegionalClientCore.MAPPER.createObjectNode();
+          body.put("idempotency_key", idempotencyKey);
+          body.put("expected_term", route.term());
+          body.put("partition", 0);
+          body.set("envelope", event.toJson());
+          return new RegionalClientCore.RequestSpec("POST", "/records", body, Map.of(), Map.of());
+        });
+  }
+
   /** Performs a linearizable bounded fetch. */
   public JsonNode fetch(String stream, int shard, long offset, int limit)
       throws IOException, InterruptedException {

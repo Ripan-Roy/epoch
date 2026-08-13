@@ -105,7 +105,7 @@ curl --fail-with-body \
   -H 'authorization: Bearer epoch-dev-admin-v1' \
   -H 'content-type: application/json' \
   --data '{
-    "request_token": "docs-create-orders-v1",
+    "request_token": "docs-create-orders-3-shards-v1",
     "expected_generation": 0,
     "resource": {
       "organization": "acme",
@@ -115,7 +115,7 @@ curl --fail-with-body \
       "kind": "stream",
       "name": "orders",
       "spec": {
-        "shard_count": 1,
+        "shard_count": 3,
         "replica_count": 3,
         "placement": {
           "allowed_regions": ["ap-south"],
@@ -201,7 +201,8 @@ LZ4-frame, Snappy-framed, or Zstd-frame base64 plus exact count and byte
 metadata. The handler enforces 1–1,000 records, 360 KiB compressed, 4 MiB
 expanded, and an 8 MiB Zstd window before proposal; its receipt maps each unique
 client sequence to an exact decimal offset. The whole batch is one atomic
-single-partition transition. Stable streaming Produce, automatic client
+single-shard transition and its regional receipt reports the outer logical
+shard. Stable streaming Produce, cross-shard batching, automatic client
 batching/negotiation, partial non-atomic results, and regional SDK batch helpers
 remain open.
 
@@ -211,20 +212,22 @@ Applications should use the fully qualified versioned shard route rather than
 constructing the generic experimental `kind/data/operation` adapter:
 
 ```text
-/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/streams/orders/shards/0
+/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/streams/orders/shards/{shard}
 ```
 
-Go, Java, and Python expose `RegionalScope` and `RegionalStreamClient`. The
-client queries the configured Rust endpoints before every call, selects only
-`accepts_writes: true`, copies the observed resource generation and tablet
-epoch, and supplies the observed term for mutations. Append and checkpoint
-calls require a caller-owned idempotency key; a bounded route retry reuses it
-unchanged. Fetch, checkpoint replay, and lag explicitly select `linearizable`
-and never downgrade to stale reads.
+Go, Java, and Python expose `RegionalScope` and `RegionalStreamClient`. Keyed
+append discovers `fnv1a64_utf8_mod_n_v1`, hashes the UTF-8 event key or ID,
+selects a logical shard, and requires the target to retain the initially
+observed resource generation before sending a write. Every operation then
+queries the configured Rust endpoints, selects only `accepts_writes: true`,
+copies the resource generation and tablet epoch, and supplies the observed term
+for mutations. Append and checkpoint calls require a caller-owned idempotency
+key; a bounded route retry reuses it unchanged. Fetch, checkpoint replay, and
+lag explicitly select `linearizable` and never downgrade to stale reads.
 
-The current SDK methods cover single-record append, bounded offset fetch,
-partition-0 checkpoint commit/reset, lag, and fetch from the durable
-checkpoint. The complete executable Go, Java, and Python examples plus setup
+The current SDK methods cover keyed and explicit-shard single-record append,
+bounded offset fetch, per-shard checkpoint commit/reset, lag, retention, and
+fetch from the durable checkpoint. The complete executable Go, Java, and Python examples plus setup
 commands are in [Regional Stream SDK](REGIONAL_STREAM_SDK.md) and embedded on
 the published documentation page.
 
@@ -357,10 +360,11 @@ It builds the real Go control binary, verifies the three node-local topology
 and live capacity responses, creates a three-zone resource through Go, proves
 an over-capacity request never reaches the catalog, verifies the
 BFF/CORS/placement contract, kills and reopens Go against the same metadata
-file, proves exact replay, creates and mutates all four profiles, configures and
-observes Stream retention through the Python SDK, kills a leader, catches it
-up, kills all nodes, reopens the same volumes, compares retained boundaries and
-digests, and deletes only its scoped containers/network/volumes.
+file, proves exact replay, creates and mutates all four profiles, routes keyed
+Python appends/checkpoints across a three-shard Stream, configures and observes
+retention, kills a leader, catches it up, kills all nodes, reopens the same
+volumes, compares per-shard state and digests, and deletes only its scoped
+containers/network/volumes.
 
 ## Current boundaries
 
@@ -372,7 +376,9 @@ digests, and deletes only its scoped containers/network/volumes.
   native voter checkpoints, physical EPRS reclamation, and replicated Stream
   time/size/combined logical retention are implemented. Retention still lacks
   automatic idle maintenance, keyed compaction, object-tier deletion, and
-  legal-hold governance. Read barriers are leader-only and regional-only;
+  legal-hold governance. Multi-shard Stream routing is implemented for a fixed
+  resource generation; safe online expansion/remapping, virtual shards, and
+  hot-key mitigation are not. Read barriers are leader-only and regional-only;
   follower forwarding remains absent.
 - Rust regional HTTP and Go management enforce the bootstrap policy, and the
   console supplies a session-only credential. They still have no TLS/OIDC/mTLS,
@@ -383,10 +389,10 @@ digests, and deletes only its scoped containers/network/volumes.
   protected by management leader election.
 - Go, Java, and Python now share the regional Stream, Queue, Cache, and Event
   Bus v1 route/retry/fence contract, including Stream retention
-  configure/maintain/observe. They remain repository-local alpha source and
-  cover only the partition-0 methods documented above; package publication,
-  generated models, coordinated membership/sessions, multi-partition routing,
-  and production transport remain open.
+  configure/maintain/observe and generation-pinned key routing. They remain
+  repository-local alpha source; package publication, generated models,
+  coordinated multi-shard membership/sessions, safe remapping, and production
+  transport remain open.
 - The BFF reports policy-protected configured-endpoint region/zone/class and
   group-capacity evidence. Plain HTTP still lacks Rust server identity.
   Rack separation, dynamic membership, and online rebalancing remain

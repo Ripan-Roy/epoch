@@ -202,6 +202,19 @@ the retained range through leader loss and same-volume recovery. This is not
 automatic retention scheduling, keyed compaction, or a production scale/fault
 matrix.
 
+The multi-shard Stream corpus pins `fnv1a64_utf8_mod_n_v1` with the same ASCII
+and non-ASCII vectors in Rust, Go, Java, and Python, including empty-key
+event-ID fallback and zero-shard rejection. Materializer/router tests create
+three tablets, advertise the complete resource shard count, externalize logical
+partition identities, and reopen expanded catalog state without changing
+canonical Stream scope or snapshot bytes. SDK tests prove target-shard
+selection and a generation-change failure before any write. The regional
+container campaign creates a three-shard Stream, routes real Python keyed
+appends to shards 0, 1, and 2, checks logical receipts/records/checkpoints, then
+proves per-shard convergence after leader loss, voter return, all-node
+`SIGKILL`, and same-volume reopen. This is not an online-expansion, split/merge,
+hot-key, coordinated multi-shard group, or cross-shard transaction campaign.
+
 Regional adapter tests cover the fully qualified Stream v1 route and its strict
 authorization actions/scope. A handler-level regression sends a group lag read
 through both router layers: it first reproduced a real HTTP 500 caused by

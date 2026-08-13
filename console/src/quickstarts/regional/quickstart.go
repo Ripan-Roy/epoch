@@ -24,35 +24,38 @@ func main() {
 
 	event := epoch.NewEventEnvelope("docs-go", "order.created", map[string]any{"order_id": "go-42"})
 	event.ID = "docs-go-order-42"
+	event.Key = "customer-0"
 	event.TimeMS = 42
+	shard, err := epoch.StreamShardFor(event.Key, 3)
+	must(err)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	appended, err := client.Append(ctx, "orders", 0, "docs-go-append-v1", event)
+	appended, err := client.AppendKeyed(ctx, "orders", "docs-go-keyed-stream-v1", event)
 	must(err)
-	replayed, err := client.Append(ctx, "orders", 0, "docs-go-append-v1", event)
+	replayed, err := client.AppendKeyed(ctx, "orders", "docs-go-keyed-stream-v1", event)
 	must(err)
-	fetched, err := client.Fetch(ctx, "orders", 0, appendOffset(appended), 10)
+	fetched, err := client.Fetch(ctx, "orders", shard, appendOffset(appended), 10)
 	must(err)
-	groupRecords, err := client.FetchGroup(ctx, "orders", 0, "docs-go", 100)
+	groupRecords, err := client.FetchGroup(ctx, "orders", shard, "docs-go", 100)
 	must(err)
-	checkpoint, err := client.CommitOffset(ctx, "orders", 0, "docs-go", "docs-go-worker", 1, appendOffset(appended)+1, false, "docs-go-checkpoint-v1")
+	checkpoint, err := client.CommitOffset(ctx, "orders", shard, "docs-go", "docs-go-worker", 1, appendOffset(appended)+1, false, "docs-go-checkpoint-v1")
 	must(err)
-	lag, err := client.Lag(ctx, "orders", 0, "docs-go")
+	lag, err := client.Lag(ctx, "orders", shard, "docs-go")
 	must(err)
-	configured, err := client.ConfigureRetention(ctx, "orders", 0, "docs-go-retention-v1", epoch.StreamRetentionPolicy{
+	configured, err := client.ConfigureRetention(ctx, "orders", shard, "docs-go-retention-v1", epoch.StreamRetentionPolicy{
 		MaxRecordsPerPartition: 10_000,
 		MaxBytesPerPartition:   3 * 1024 * 1024,
 		MaxAgeMS:               7 * 24 * 60 * 60 * 1_000,
 	})
 	must(err)
-	maintained, err := client.MaintainRetention(ctx, "orders", 0, "docs-go-retention-sweep-v1")
+	maintained, err := client.MaintainRetention(ctx, "orders", shard, "docs-go-retention-sweep-v1")
 	must(err)
-	retention, err := client.Retention(ctx, "orders", 0)
+	retention, err := client.Retention(ctx, "orders", shard)
 	must(err)
 
 	output, err := json.MarshalIndent(map[string]any{
-		"append": appended, "exact_retry": replayed, "fetch": fetched,
+		"selected_shard": shard, "append": appended, "exact_retry": replayed, "fetch": fetched,
 		"group_fetch": groupRecords, "checkpoint": checkpoint, "lag": lag,
 		"retention_configure": configured, "retention_maintenance": maintained,
 		"retention": retention,

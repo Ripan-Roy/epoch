@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 pub const STREAM_SNAPSHOT_FORMAT_VERSION: u16 = 1;
 pub const MAX_STREAM_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
+/// Stable cross-language partitioner advertised by the regional Stream API.
+pub const STREAM_PARTITIONER: &str = "fnv1a64_utf8_mod_n_v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamConfig {
@@ -196,11 +198,14 @@ impl Stream {
                     "partition {partition} does not exist"
                 )));
             }
-            None => select_partition(
-                envelope.key.as_deref(),
-                &envelope.id,
+            None => stream_partition_for(
+                envelope
+                    .key
+                    .as_deref()
+                    .filter(|key| !key.is_empty())
+                    .unwrap_or(&envelope.id),
                 self.config.partitions,
-            ),
+            )?,
         };
         let effective_now_ms = self.retention_watermark_ms.unwrap_or(now_ms).max(now_ms);
         let partition = &mut self.partitions[partition_id as usize];
@@ -775,12 +780,19 @@ fn retained_record_for_receipt<'a>(
         .filter(|record| record.partition == receipt.partition && record.offset == receipt.offset)
 }
 
-fn select_partition(key: Option<&str>, fallback: &str, partitions: u32) -> u32 {
-    let value = key.unwrap_or(fallback);
+/// Maps UTF-8 bytes to a logical Stream partition with unsigned FNV-1a 64-bit
+/// arithmetic. The identifier in [`STREAM_PARTITIONER`] versions this exact
+/// algorithm for first-party and external clients.
+pub fn stream_partition_for(value: &str, partitions: u32) -> EpochResult<u32> {
+    if partitions == 0 {
+        return Err(EpochError::InvalidArgument(
+            "stream partition count must be greater than zero".into(),
+        ));
+    }
     let hash = value.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
     });
-    u32::try_from(hash % u64::from(partitions)).expect("modulo fits u32")
+    Ok(u32::try_from(hash % u64::from(partitions)).expect("modulo fits u32"))
 }
 
 #[cfg(test)]
@@ -830,6 +842,27 @@ mod tests {
             .append(event("two", Some("customer-42")), None, 2)
             .unwrap();
         assert_eq!(a.partition, b.partition);
+    }
+
+    #[test]
+    fn published_partitioning_vectors_are_stable_across_utf8_clients() {
+        assert_eq!(STREAM_PARTITIONER, "fnv1a64_utf8_mod_n_v1");
+        assert_eq!(stream_partition_for("customer-42", 16).unwrap(), 14);
+        assert_eq!(stream_partition_for("order-1", 16).unwrap(), 13);
+        assert_eq!(stream_partition_for("café", 16).unwrap(), 9);
+        assert_eq!(stream_partition_for("東京", 16).unwrap(), 15);
+        assert!(stream_partition_for("customer-42", 0).is_err());
+    }
+
+    #[test]
+    fn empty_partition_key_falls_back_to_the_event_id() {
+        let mut stream = Stream::new(StreamConfig {
+            partitions: 16,
+            ..StreamConfig::default()
+        })
+        .unwrap();
+        let receipt = stream.append(event("order-1", Some("")), None, 1).unwrap();
+        assert_eq!(receipt.partition, 13);
     }
 
     #[test]

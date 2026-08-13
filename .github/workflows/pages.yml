@@ -64,7 +64,11 @@ jobs:
           grep -Rq 'per-subscription outbox leases' console/dist/assets
           grep -Rq 'One catalog materializes four profile-specific groups' console/dist/assets
           grep -Rq 'Checkpoint progress and ownership fences survive leader and process loss' console/dist/assets
-          grep -Rq 'Run one authenticated client across three voters' console/dist/assets
+          grep -Rq 'Route one key across three replicated partitions' console/dist/assets
+          grep -Rq 'fnv1a64_utf8_mod_n_v1' console/dist/assets
+          grep -Rq 'docs-go-keyed-stream-v1' console/dist/assets
+          grep -Rq 'docs-java-keyed-stream-v1' console/dist/assets
+          grep -Rq 'docs-python-keyed-stream-v1' console/dist/assets
           grep -Rq 'docs-python-checkpoint-v1' console/dist/assets
           grep -Rq 'docs-python-retention-v1' console/dist/assets
           grep -Rq 'Replicated time and size retention' console/dist/assets

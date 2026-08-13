@@ -62,17 +62,17 @@ EPOCH_AUTH_POLICY_PATH=spec/auth/bootstrap-policy-v1.example.json \
 EPOCH_CONTROL_REGIONAL_TOKEN=epoch-dev-control-v1 \
 go run ./control/cmd/epoch-control`;
 
-const regionalResource = `# Terminal C · create one replicated Stream
+const regionalResource = `# Terminal C · create one three-shard replicated Stream
 curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
   --header 'authorization: Bearer epoch-dev-admin-v1' \
   --header 'content-type: application/json' \
   --data '{
-    "request_token":"docs-create-orders-v1",
+    "request_token":"docs-create-orders-3-shards-v1",
     "expected_generation":0,
     "resource":{
       "organization":"acme","project":"shop","environment":"dev","namespace":"core",
       "kind":"stream","name":"orders",
-      "spec":{"shard_count":1,"replica_count":3,"placement":{
+      "spec":{"shard_count":3,"replica_count":3,"placement":{
         "allowed_regions":["ap-south"],"minimum_zones":3,
         "required_node_class":"general-purpose"
       }}
@@ -333,10 +333,10 @@ const sdkSurface = [
   },
   {
     area: "Regional Stream",
-    go: "RegionalStreamClient · Append · Fetch · CommitOffset · Lag · FetchGroup · ConfigureRetention · MaintainRetention · Retention",
-    java: "RegionalStreamClient · append · fetch · commitOffset · lag · fetchGroup · configureRetention · maintainRetention · retention",
+    go: "RegionalStreamClient · StreamShardFor · AppendKeyed · Append · Fetch · CommitOffset · Lag · FetchGroup · ConfigureRetention · MaintainRetention · Retention",
+    java: "RegionalStreamClient · StreamPartitioner.shardFor · appendKeyed · append · fetch · commitOffset · lag · fetchGroup · configureRetention · maintainRetention · retention",
     python:
-      "RegionalStreamClient · append · fetch · commit_offset · lag · fetch_group · configure_retention · maintain_retention · retention",
+      "RegionalStreamClient · stream_shard_for · append_keyed · append · fetch · commit_offset · lag · fetch_group · configure_retention · maintain_retention · retention",
   },
   {
     area: "Regional Queue",
@@ -848,12 +848,14 @@ export function DocsPage({ section }: DocsPageProps) {
                     stale-checkpoint signal through checkpoint restore. These are experimental HTTP/tablet
                     slices, not yet coordinated join, heartbeat, assignment, rebalance, native bidirectional
                     streaming, automatic client batching, or compression negotiation. The separate regional
-                    Stream, Queue, Cache, and Event Bus v1 clients below expose the implemented
-                    partition-0/shard-0 operations with leader/fence-aware Go, Java, and Python routing.
-                    Stream remains uncoordinated; Queue and Event Bus delivery are request/response rather
-                    than managed streaming sessions; Cache expiry is explicit and single-shard. Managed
-                    HTTP/gRPC and regional HTTP require a shared deny-by-default bootstrap bearer policy, but
-                    that is not OIDC, TLS/mTLS, credential expiry/revocation, or immutable audit export.
+                    Stream, Queue, Cache, and Event Bus v1 clients below expose the implemented operations
+                    with leader/fence-aware Go, Java, and Python routing. Stream resources can now route one
+                    versioned UTF-8 key across several independently replicated shards while failing closed on
+                    a concurrent generation change. Stream remains uncoordinated; Queue and Event Bus delivery
+                    are request/response rather than managed streaming sessions; Cache expiry is explicit and
+                    single-shard. Managed HTTP/gRPC and regional HTTP require a shared deny-by-default
+                    bootstrap bearer policy, but that is not OIDC, TLS/mTLS, credential expiry/revocation, or
+                    immutable audit export.
                   </p>
                 </div>
               </div>
@@ -1032,13 +1034,13 @@ export function DocsPage({ section }: DocsPageProps) {
               <div className="docs-section__heading">
                 <span>06</span>
                 <div>
-                  <p className="eyebrow">VERSIONED REGIONAL STREAM V1</p>
-                  <h2 id="regional-stream-title">Run one authenticated client across three voters.</h2>
+                  <p className="eyebrow">MULTI-SHARD REGIONAL STREAM V1</p>
+                  <h2 id="regional-stream-title">Route one key across three replicated partitions.</h2>
                   <p>
                     This path is separate from the standalone quickstart. It uses a fully qualified tenant
-                    scope, discovers the current leader before every operation, carries the observed resource
-                    generation and tablet epoch, and keeps the caller&apos;s idempotency key unchanged across
-                    a bounded rediscovery retry.
+                    scope, discovers the versioned UTF-8 partitioner and current leader, carries the observed
+                    resource generation and tablet epoch, and keeps the caller&apos;s idempotency key
+                    unchanged across a bounded rediscovery retry.
                   </p>
                 </div>
               </div>
@@ -1046,7 +1048,7 @@ export function DocsPage({ section }: DocsPageProps) {
               <div className="guide-intro">
                 <span className="step-badge">A</span>
                 <div>
-                  <h3>Start the voters and provision the Stream</h3>
+                  <h3>Start the voters and provision three Stream shards</h3>
                   <p>
                     The credentials below are public development fixtures. Use them only with this disposable
                     local topology. The Go bridge is needed to create the resource; once materialized, the SDK
@@ -1096,20 +1098,21 @@ export function DocsPage({ section }: DocsPageProps) {
 
               <div className="sdk-notes" aria-label="Regional SDK guarantees">
                 <article>
-                  <span>ROUTING</span>
-                  <strong>Discovery is part of every call.</strong>
+                  <span>KEY ROUTING</span>
+                  <strong>The server publishes one cross-language partitioner.</strong>
                   <p>
-                    Configure every node endpoint. The client selects only a response with{" "}
-                    <code>accepts_writes: true</code> and sends the observed term and fences to that node.
+                    <code>fnv1a64_utf8_mod_n_v1</code> hashes the event key, or its ID when the key is empty.
+                    Go, Java, and Python calculate the same shard and report that logical partition in every
+                    receipt, record, checkpoint, retention observation, and status response.
                   </p>
                 </article>
                 <article>
-                  <span>UNKNOWN OUTCOME</span>
-                  <strong>Mutation identity stays with the caller.</strong>
+                  <span>EXPANSION RACE</span>
+                  <strong>A keyed append pins the discovered generation.</strong>
                   <p>
-                    Append and checkpoint calls require an idempotency key. A routing retry reuses that exact
-                    key; retention configuration and maintenance use the same rule. Changing the key or
-                    request creates a different mutation or a conflict.
+                    If the target shard reports a different resource generation, the client fails before
+                    sending the record. It never silently remaps an uncertain mutation after the shard count
+                    changes. Ordinary bounded leader rediscovery still reuses the exact idempotency key.
                   </p>
                 </article>
                 <article>
@@ -1126,10 +1129,11 @@ export function DocsPage({ section }: DocsPageProps) {
               <aside className="docs-access-note">
                 <strong>Current boundary</strong>
                 <span>
-                  Regional v1 covers single-record append, bounded fetch, checkpoint commit/reset, lag, and
-                  checkpoint replay for partition 0. The caller still supplies member generations. Join,
-                  heartbeat, assignment, rebalance, multi-partition ownership, transactional offsets,
-                  automatic batching/compression, and public package-registry releases remain open.
+                  Regional v1 covers keyed append and direct operations on independently replicated logical
+                  shards. Each shard&apos;s internal tablet command remains physical partition 0 for snapshot
+                  and command compatibility. Online expansion/remapping, automatic producer batching,
+                  coordinated multi-shard group ownership, cross-shard transactions, and package-registry
+                  releases remain open.
                 </span>
               </aside>
             </section>
@@ -1654,6 +1658,12 @@ export function DocsPage({ section }: DocsPageProps) {
                   title="Replicated time and size retention"
                   description="Canonical byte accounting, inclusive age boundaries, combined policies, committed maintenance, checkpoint interaction, SDK routes, recovery evidence, and explicit non-claims."
                   href={`${repositoryDocsUrl}/adr/0023-stream-retention-policies.md`}
+                />
+                <ReferenceCard
+                  eyebrow="STREAM ROUTING"
+                  title="Multi-shard key routing"
+                  description="Logical-to-physical partition identity, versioned FNV-1a UTF-8 vectors, generation-pinned keyed append, compatibility, recovery evidence, and online-expansion non-claims."
+                  href={`${repositoryDocsUrl}/adr/0024-stream-multishard-key-routing.md`}
                 />
                 <ReferenceCard
                   eyebrow="QUEUE TABLET"

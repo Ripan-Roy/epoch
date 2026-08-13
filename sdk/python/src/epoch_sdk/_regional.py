@@ -46,6 +46,15 @@ class Route:
     resource_generation: str
     tablet_epoch: str
     term: str
+    stream_partitioning: StreamPartitioning | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StreamPartitioning:
+    algorithm: str
+    key_encoding: str
+    missing_key_fallback: str
+    shard_count: int
 
 
 RequestFactory = Callable[[Route], tuple[str, str, Any, dict[str, Any] | None, dict[str, str]]]
@@ -100,11 +109,38 @@ class RegionalClient:
         shard: int,
         request_for: RequestFactory,
     ) -> Any:
+        return self.call_at_generation(
+            collection,
+            resource_label,
+            resource,
+            shard,
+            None,
+            request_for,
+        )
+
+    def call_at_generation(
+        self,
+        collection: str,
+        resource_label: str,
+        resource: str,
+        shard: int,
+        expected_generation: str | None,
+        request_for: RequestFactory,
+    ) -> Any:
         base_path = self._resource_path(collection, resource_label, resource, shard)
         last_error: Exception | None = None
         for _attempt in range(2):
             try:
                 transport, route = self._discover_leader(base_path)
+                if (
+                    expected_generation is not None
+                    and route.resource_generation != expected_generation
+                ):
+                    raise ValueError(
+                        "Stream routing generation changed from "
+                        f"{expected_generation} to {route.resource_generation} before the keyed "
+                        "append; no write was attempted"
+                    )
                 method, suffix, body, query, headers = request_for(route)
                 return transport.request(
                     method,
@@ -121,6 +157,29 @@ class RegionalClient:
             0,
             "unavailable",
             f"regional {resource_label} operation could not reach a current leader: {last_error}",
+        ) from last_error
+
+    def discover_route(
+        self, collection: str, resource_label: str, resource: str, shard: int
+    ) -> Route:
+        path = self._resource_path(collection, resource_label, resource, shard)
+        last_error: Exception | None = None
+        for transport in self._transports:
+            try:
+                document = transport.request(
+                    "GET", path, headers={"authorization": f"Bearer {self._token}"}
+                )
+                return _parse_route(document)
+            except EpochAPIError as error:
+                if not _rediscover(error):
+                    raise
+                last_error = error
+            except (TypeError, ValueError) as error:
+                last_error = error
+        raise EpochAPIError(
+            0,
+            "unavailable",
+            "no configured endpoint reported Stream routing metadata",
         ) from last_error
 
     def _discover_leader(self, path: str) -> tuple[Transport, Route]:
@@ -176,7 +235,19 @@ def _parse_route(document: Any) -> Route:
         ):
             raise ValueError(f"regional route {field} must be a non-zero decimal string")
         values.append(value)
-    return Route(*values)
+    partitioning_document = document.get("stream_partitioning")
+    partitioning = None
+    if isinstance(partitioning_document, dict):
+        shard_count = partitioning_document.get("shard_count")
+        if isinstance(shard_count, bool) or not isinstance(shard_count, int):
+            shard_count = 0
+        partitioning = StreamPartitioning(
+            algorithm=partitioning_document.get("algorithm", ""),
+            key_encoding=partitioning_document.get("key_encoding", ""),
+            missing_key_fallback=partitioning_document.get("missing_key_fallback", ""),
+            shard_count=shard_count,
+        )
+    return Route(*values, stream_partitioning=partitioning)
 
 
 def _rediscover(error: EpochAPIError) -> bool:

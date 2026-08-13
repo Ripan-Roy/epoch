@@ -27,8 +27,11 @@ and performs no hidden retries for standalone operations.
 with every Rust node endpoint, a `RegionalScope`, and a bearer token. It
 discovers the current leader before every call, copies generation/tablet
 fences, preserves caller-owned append/checkpoint/retention idempotency across
-one bounded rediscovery, exposes time/size/combined retention configuration and
-explicit idle maintenance, and requests linearizable fetch/lag/retention reads. See the
+one bounded rediscovery, and requests linearizable fetch/lag/retention reads.
+`stream_shard_for` implements the advertised FNV-1a UTF-8 contract, while
+`append_keyed` selects that shard from the event key or ID and fails before
+writing if the resource generation changes. The client also exposes
+time/size/combined retention configuration and explicit idle maintenance. See the
 [complete regional example](../../console/src/quickstarts/regional/quickstart.py)
 and [contract guide](../../docs/REGIONAL_STREAM_SDK.md).
 

@@ -634,6 +634,13 @@ The following catalog is the product contract for scope planning.
 | STREAM-014 | Cross-cluster/region replication with loop prevention and checkpoint mapping | P1 |
 | STREAM-015 | Superstream/logical stream over physical partitions | P1 |
 
+STREAM-001 requires one documented, versioned cross-language key partitioner
+for every supported SDK. A fixed resource generation must map the same UTF-8
+key to the same logical partition in Go, Java, Python, and the Rust data plane.
+An absent key uses the event ID. Clients must not silently remap an uncertain
+append if the resource generation or partition count changes; safe online
+expansion remains the separate STREAM-011 contract.
+
 ### 10.3 Work Queue
 
 | ID | Requirement | Priority |

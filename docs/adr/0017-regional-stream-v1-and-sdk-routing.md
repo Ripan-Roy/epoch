@@ -86,7 +86,10 @@ Rust when Go is unavailable.
   generated response models, and package-registry publication remain open.
   ADR-0023 subsequently adds retention configure, maintain, and observe methods
   to this route and all three clients without changing its discovery/retry
-  contract.
+  contract. ADR-0024 subsequently extends the resource to several independent
+  shard tablets, publishes versioned key-partition metadata, and adds
+  generation-pinned keyed append while preserving explicit-shard methods and
+  the original inner partition-0 tablet contract.
 
 ## Rejected alternatives
 

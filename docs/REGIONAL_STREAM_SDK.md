@@ -1,6 +1,6 @@
 # Regional Stream SDK
 
-**Status:** Versioned partition-0 alpha
+**Status:** Versioned multi-shard alpha
 
 **Languages:** Go, Java, and Python
 
@@ -12,18 +12,20 @@ the Go control plane.
 
 See [ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md) for the binding
 decision, [ADR-0023](adr/0023-stream-retention-policies.md) for retention, and
+[ADR-0024](adr/0024-stream-multishard-key-routing.md) for keyed routing, and
 [Regional runtime](REGIONAL_RUNTIME.md) for provisioning and operations.
 
 ## End-to-end flow
 
 ```text
-application SDK
+application SDK append-by-key
    |
-   | 1. authenticated GET of the fully qualified shard
+   | 1. authenticated discovery of shard 0 partition metadata
+   | 2. FNV-1a UTF-8 key (or event ID) modulo shard count
    v
-configured Rust endpoints ---- selects accepts_writes=true
+target logical shard ---- generation must still match step 1
    |
-   | 2. operation + observed generation/tablet epoch
+   | 3. current-leader discovery + observed generation/tablet epoch
    |    mutation also carries observed term + caller idempotency key
    v
 current Stream tablet leader
@@ -33,9 +35,13 @@ current Stream tablet leader
 application
 ```
 
-Discovery occurs before every operation. A leader or fence race triggers one
-bounded rediscovery attempt only when the error is retryable. The mutation's
-idempotency key never changes.
+Discovery occurs before every operation. `AppendKeyed`, `appendKeyed`, and
+`append_keyed` first discover the Stream partitioning contract, choose the
+logical shard, then pin the initial resource generation while discovering that
+shard's leader. A generation mismatch fails before any write; the client never
+silently remaps an uncertain mutation across expansion. A leader or fence race
+triggers one bounded rediscovery attempt only when the error is retryable. The
+mutation's idempotency key never changes.
 
 ## Provision the local three-node region
 
@@ -55,7 +61,7 @@ EPOCH_CONTROL_REGIONAL_TOKEN=epoch-dev-control-v1 \
 go run ./control/cmd/epoch-control
 ```
 
-Apply the `acme/shop/dev/core` Stream named `orders` using the exact request in
+Apply the three-shard `acme/shop/dev/core` Stream named `orders` using the exact request in
 [Apply one managed resource](REGIONAL_RUNTIME.md#apply-one-managed-resource).
 The development admin token is `epoch-dev-admin-v1`. These checked-in
 credentials are public fixtures and must never be reused outside a disposable
@@ -77,6 +83,8 @@ available for tests in all three SDKs.
 
 | Semantics | Go | Java | Python |
 |---|---|---|---|
+| Published shard selection | `StreamShardFor` | `StreamPartitioner.shardFor` | `stream_shard_for` |
+| Keyed append | `AppendKeyed` | `appendKeyed` | `append_keyed` |
 | Single append | `Append` | `append` | `append` |
 | Offset fetch | `Fetch` | `fetch` | `fetch` |
 | Commit or reset checkpoint | `CommitOffset` | `commitOffset` | `commit_offset` |
@@ -85,6 +93,19 @@ available for tests in all three SDKs.
 | Configure retention | `ConfigureRetention` | `configureRetention` | `configure_retention` |
 | Commit idle maintenance | `MaintainRetention` | `maintainRetention` | `maintain_retention` |
 | Observe retention | `Retention` | `retention` | `retention` |
+
+Keyed append reads `EventEnvelope.key`; an empty or absent key falls back to
+`EventEnvelope.id`. The algorithm identifier is
+`fnv1a64_utf8_mod_n_v1`: unsigned FNV-1a 64 over the exact UTF-8 bytes, modulo
+the advertised nonzero shard count. These contract vectors are pinned in Rust,
+Go, Java, and Python:
+
+| Value | Shards | Result |
+|---|---:|---:|
+| `customer-42` | 16 | 14 |
+| `order-1` | 16 | 13 |
+| `café` | 16 | 9 |
+| `東京` | 16 | 15 |
 
 Append and checkpoint operations require an explicit idempotency key. A
 checkpoint also requires the caller's nonzero member generation. `reset` is the
@@ -105,7 +126,8 @@ retained record count, and retained canonical bytes.
 
 ## Executable examples
 
-The complete examples append, repeat the exact append, fetch by offset, fetch
+The complete examples select a shard from `customer-0`, perform a keyed append,
+repeat the exact append, fetch by offset, fetch
 from a group checkpoint, commit that checkpoint, observe lag, configure a
 combined retention policy, commit idle maintenance, and inspect retention:
 
@@ -164,6 +186,27 @@ The base route is:
 /retention/maintenance
 ```
 
+Stream discovery includes:
+
+```json
+{
+  "stream_partitioning": {
+    "algorithm": "fnv1a64_utf8_mod_n_v1",
+    "key_encoding": "utf8",
+    "missing_key_fallback": "event_id",
+    "shard_count": 3
+  }
+}
+```
+
+The outer `{shard}` is the logical Stream partition. Each independently
+replicated tablet still accepts canonical physical `partition: 0` commands;
+the regional response layer externalizes the logical shard in mutation
+responses, receipts, batch record receipts, fetched records, checkpoints,
+retention observations, and status. This preserves existing command and
+snapshot bytes while preventing callers from seeing every shard as partition
+zero.
+
 Every data request carries:
 
 ```text
@@ -187,6 +230,9 @@ silently downgrades these calls to a stale follower.
   rediscovery cycle.
 - A timeout can leave a mutation outcome unknown. Retry the same semantic
   request with the same idempotency key.
+- Keyed append treats a resource-generation change between partition discovery
+  and target discovery as definitive for that attempt and sends no mutation.
+  Rediscover intentionally after resolving the resource change.
 - After two unsuccessful discovery/operation cycles the SDK returns its typed
   unavailable/API error with the final cause. It does not loop indefinitely.
 
@@ -204,10 +250,12 @@ cd sdk/java && ./mvnw verify
 cargo test -p epoch-node regional_router::tests
 ```
 
-The real recovery gate builds the node image, kills the active leader, runs the
-Python regional SDK through append/exact-retry/fetch/checkpoint/lag and
-retention configure/maintenance/observation, restarts the old voter, kills
-every voter, reopens the same volumes, and verifies convergence:
+The real recovery gate builds the node image, creates three independently
+replicated Stream shards, kills the active leader, routes Python keyed appends
+to shards 0, 1, and 2, verifies logical receipt/record/checkpoint identities,
+runs retention configure/maintenance/observation, restarts the old voter,
+kills every voter, reopens the same volumes, and verifies per-shard
+convergence:
 
 ```shell
 make test-regional-runtime
@@ -215,12 +263,14 @@ make test-regional-runtime
 
 ## Current boundaries
 
-This versioned alpha covers one Stream shard/partition, caller-supplied
-consumer generations, and replicated time/size/combined retention. It is not
-coordinated membership. Join, heartbeat,
-assignment, revoke, dead-member detection, rebalance, multi-partition
-ownership, automatic idle-retention scheduling, keyed compaction, legal hold,
-atomic produce-and-offset transactions,
-automatic batching/compression, generated response models, package-registry
-publication, TLS/OIDC/mTLS, dynamic membership, and the production fault/scale
-matrix remain open.
+This versioned alpha covers several independently replicated Stream shards,
+stable key routing for the current resource generation, direct per-shard
+operations, caller-supplied consumer generations, and replicated
+time/size/combined retention. It is not safe online expansion or coordinated
+membership. Automatic split/merge/remapping, virtual shards, join, heartbeat,
+assignment, revoke, dead-member detection, rebalance, one group owning several
+partitions, automatic idle-retention scheduling, keyed compaction, legal hold,
+atomic cross-shard produce-and-offset transactions, automatic
+batching/compression, generated response models, package-registry publication,
+TLS/OIDC/mTLS, dynamic membership, and the production fault/scale matrix remain
+open.

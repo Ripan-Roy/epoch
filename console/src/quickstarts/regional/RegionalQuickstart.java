@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.epoch.sdk.EventEnvelope;
 import io.epoch.sdk.RegionalScope;
 import io.epoch.sdk.RegionalStreamClient;
+import io.epoch.sdk.StreamPartitioner;
 import io.epoch.sdk.StreamRetentionPolicy;
 import java.math.BigInteger;
 import java.net.URI;
@@ -34,39 +35,42 @@ public final class RegionalQuickstart {
     EventEnvelope event =
         EventEnvelope.builder("docs-java", "order.created", Map.of("order_id", "java-42"))
             .id("docs-java-order-42")
+            .key("customer-0")
             .timeMs(42)
             .build();
+    int shard = StreamPartitioner.shardFor(event.key(), 3);
 
-    JsonNode appended = client.append("orders", 0, "docs-java-append-v1", event);
-    JsonNode replayed = client.append("orders", 0, "docs-java-append-v1", event);
+    JsonNode appended = client.appendKeyed("orders", "docs-java-keyed-stream-v1", event);
+    JsonNode replayed = client.appendKeyed("orders", "docs-java-keyed-stream-v1", event);
     long offset = appended.path("receipt").path("offset").asLong();
-    JsonNode fetched = client.fetch("orders", 0, offset, 10);
-    JsonNode groupRecords = client.fetchGroup("orders", 0, "docs-java", 100);
+    JsonNode fetched = client.fetch("orders", shard, offset, 10);
+    JsonNode groupRecords = client.fetchGroup("orders", shard, "docs-java", 100);
     JsonNode checkpoint =
         client.commitOffset(
             "orders",
-            0,
+            shard,
             "docs-java",
             "docs-java-worker",
             1,
             offset + 1,
             false,
             "docs-java-checkpoint-v1");
-    JsonNode lag = client.lag("orders", 0, "docs-java");
+    JsonNode lag = client.lag("orders", shard, "docs-java");
     JsonNode configured =
         client.configureRetention(
             "orders",
-            0,
+            shard,
             "docs-java-retention-v1",
             new StreamRetentionPolicy(
                 10_000,
                 BigInteger.valueOf(3L * 1024 * 1024),
                 BigInteger.valueOf(7L * 24 * 60 * 60 * 1_000)));
     JsonNode maintained =
-        client.maintainRetention("orders", 0, "docs-java-retention-sweep-v1");
-    JsonNode retention = client.retention("orders", 0);
+        client.maintainRetention("orders", shard, "docs-java-retention-sweep-v1");
+    JsonNode retention = client.retention("orders", shard);
 
     ObjectNode output = MAPPER.createObjectNode();
+    output.put("selected_shard", shard);
     output.set("append", appended);
     output.set("exact_retry", replayed);
     output.set("fetch", fetched);

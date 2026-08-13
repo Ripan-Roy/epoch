@@ -120,6 +120,14 @@ state such as consumer groups, transaction coordinators, schema revisions, and
 subscription ledgers. High-volume coordination data does not live in the
 regional catalog.
 
+For the current regional Stream implementation, the resource's logical shard
+index is the public partition identity and each shard maps to its own tablet and
+consensus group. Inside that tablet the existing canonical Stream state machine
+still uses physical partition 0. The runtime externalizes the catalog shard in
+responses and rebinds it after recovery; it does not change command or native
+snapshot bytes. Keyed clients discover the versioned resource-wide partitioner
+before selecting one of those independent groups.
+
 ## 5. Rust data-node boundary
 
 One `epoch-node` executable supports role selection. Standalone mode enables all
@@ -278,6 +286,16 @@ canonical Stream image installed before retained-tail replay. Regional
 configure and maintain use the ordinary leader/fence/idempotency path;
 observation uses the ordinary leader ReadIndex barrier. See
 [ADR-0023](adr/0023-stream-retention-policies.md).
+
+Regional Stream discovery additionally advertises
+`fnv1a64_utf8_mod_n_v1`, UTF-8 key encoding, event-ID fallback, and the
+resource shard count. Repository-local Go, Java, and Python clients hash the
+event key (or ID) identically, discover the selected logical shard, and pin the
+initial resource generation. If expansion races target discovery, they fail
+before writing instead of silently remapping an uncertain append. Logical
+shard identity is attached by the node response layer, while the persisted
+single-partition tablet scope remains compatible. See
+[ADR-0024](adr/0024-stream-multishard-key-routing.md).
 
 The regional multi-tablet alpha composes that adapter with `epoch-catalog`.
 Catalog group 1 commits canonical resource commands through three EPRS-backed
@@ -463,6 +481,12 @@ Producer sequence state supports idempotence. Consumer offsets and group
 coordination live in sharded system tablets. Read-committed fetch hides prepared
 and aborted transaction records. Partition order is the only default ordering
 claim.
+
+The current regional slice implements that partition-to-tablet boundary for
+several shards of one Stream. Partition order, offsets, checkpoints, retention,
+leadership, and recovery are independent per shard. The versioned FNV-1a UTF-8
+partitioner is stable only for a fixed resource generation and shard count;
+safe online expansion and key remapping remain separate work.
 
 The current single-partition tablet batch is one atomic command: every record
 is validated and appended to a cloned state before the clone becomes visible.
@@ -917,3 +941,4 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0021: Consensus Checkpoint and Snapshot Installation](adr/0021-consensus-checkpoint-and-snapshot-installation.md)
 - [ADR-0022: Profile-Native Checkpoints and Physical EPRS Reclamation](adr/0022-profile-native-checkpoints-and-physical-reclamation.md)
 - [ADR-0023: Replicated Stream Time and Size Retention](adr/0023-stream-retention-policies.md)
+- [ADR-0024: Multi-Shard Stream Key Routing](adr/0024-stream-multishard-key-routing.md)
