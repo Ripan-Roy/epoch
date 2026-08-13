@@ -156,10 +156,12 @@ safe downstream fence.
 ## TTL and maintenance
 
 Observations are pure reads. A logically expired value is not removed by a
-read, and v1 has no hidden background timer. Submit `maintain` with a bound from
-one to 1,000 to remove due keys and locks through consensus. This makes expiry
-ordering deterministic and recoverable, but applications or an operator must
-schedule maintenance explicitly.
+read. In the regional runtime the current Raft leader automatically submits the
+same bounded `maintain` command at the earliest value or lock deadline; each
+command removes at most 1,000 due entries through consensus. Applications may
+still submit explicit maintenance for diagnostics or recovery. The scheduler
+uses the exact due time, so expiry ordering remains deterministic and
+recoverable across leader loss.
 
 ## HTTP contract
 

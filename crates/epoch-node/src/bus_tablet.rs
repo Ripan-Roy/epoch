@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 
 use crate::consensus::{CommittedProposalApplier, ConsensusProbeError, ConsensusProbeHandle};
+use crate::regional_maintenance::{RegionalMaintenanceOperation, RegionalMaintenanceProposal};
 use crate::tablet_http::{
     StrictEventEnvelope, TabletApiError, TabletApiResult, TabletReadMetadata,
     deserialize_u64_from_number_or_decimal, hex_digest, serialize_optional_u64_as_decimal,
@@ -77,6 +78,48 @@ impl BusTabletService {
 
     pub fn scope(&self) -> &BusTabletScope {
         &self.scope
+    }
+
+    pub fn maintenance_proposals(
+        &self,
+        now_ms: u64,
+    ) -> Result<Vec<RegionalMaintenanceProposal>, String> {
+        self.ensure_healthy()?;
+        let tablet = self
+            .tablet
+            .read()
+            .map_err(|_| "Event Bus tablet read lock was poisoned".to_owned())?;
+        let Some(due_at_ms) = tablet
+            .next_maintenance_deadline_ms()
+            .filter(|deadline_ms| *deadline_ms <= now_ms)
+        else {
+            return Ok(Vec::new());
+        };
+        let key = format!(
+            "epoch-auto-{}-{due_at_ms}-{}",
+            RegionalMaintenanceOperation::BusDeliveryLease.as_str(),
+            tablet.last_applied_command_index()
+        );
+        let command = BusTabletCommand::new(
+            &self.scope,
+            key,
+            due_at_ms,
+            BusTabletOperation::MaintainDeliveries {
+                max_deliveries: u16::try_from(epoch_bus::MAX_DELIVERY_ACQUIRE_BATCH)
+                    .expect("delivery batch limit fits u16"),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(vec![RegionalMaintenanceProposal {
+            operation: RegionalMaintenanceOperation::BusDeliveryLease,
+            due_at_ms,
+            proposal_id: command
+                .proposal_id(&self.scope)
+                .map_err(|error| error.to_string())?,
+            payload: command
+                .encode(&self.scope)
+                .map_err(|error| error.to_string())?,
+        }])
     }
 
     pub fn last_profile_mutation_index(&self) -> Result<u64, String> {
@@ -1311,6 +1354,58 @@ mod tests {
             2,
             index,
         )
+    }
+
+    #[test]
+    fn automatic_bus_maintenance_targets_the_first_expired_lease() {
+        let service = BusTabletService::with_default_config(scope()).unwrap();
+        let subscription = Subscription {
+            name: "audit".into(),
+            filter: EventFilter::default(),
+            target: SubscriptionTarget::Pull,
+            transform: epoch_bus::EventTransform::default(),
+            delivery_policy: epoch_bus::DeliveryPolicy {
+                timeout_ms: 10,
+                ..epoch_bus::DeliveryPolicy::default()
+            },
+        };
+        service
+            .apply(&committed(
+                "subscription",
+                BusTabletOperation::UpsertSubscription { subscription },
+                100,
+                2,
+                1,
+            ))
+            .unwrap();
+        service
+            .apply(&publish("publish", "event-1", 100, 2))
+            .unwrap();
+        service
+            .apply(&committed(
+                "acquire",
+                BusTabletOperation::AcquireDeliveries {
+                    subscription: "audit".into(),
+                    dispatcher: "worker".into(),
+                    dispatcher_epoch: 1,
+                    max_deliveries: 1,
+                },
+                100,
+                2,
+                3,
+            ))
+            .unwrap();
+
+        assert!(service.maintenance_proposals(109).unwrap().is_empty());
+        let due = service.maintenance_proposals(500).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(
+            due[0].operation,
+            RegionalMaintenanceOperation::BusDeliveryLease
+        );
+        assert_eq!(due[0].due_at_ms, 110);
+        let decoded = BusTabletCommand::decode(&due[0].payload, &scope()).unwrap();
+        assert_eq!(decoded.applied_at_ms, 110);
     }
 
     #[test]

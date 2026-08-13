@@ -301,13 +301,25 @@ Additive command v5 makes logical shard 0 the resource-wide consumer-session
 coordinator. Its deterministic state contains the captured shard count,
 lexically ordered bounded members, inclusive deadlines, a monotonic committed
 time watermark, and one membership generation. Join, fenced heartbeat, leave,
-and explicit expiry maintenance run through the same majority/apply/checkpoint
+and expiry maintenance run through the same majority/apply/checkpoint
 path as records. Assignment is `shard mod live-member-count`, so voters recover
 the same complete plan without client or Go-control-plane authority. Native
 Stream snapshot v2 adds this map and still accepts v1 snapshots. The
 coordinator does not atomically write the independent v3 checkpoint on each
-shard, push revoke events, or schedule maintenance in the background. See
+shard or push revoke events. The regional runtime schedules the existing
+maintenance command through the current shard-zero leader. See
 [ADR-0025](adr/0025-stream-consumer-sessions.md).
+
+The regional runtime also runs one bounded maintenance scan per configured
+interval. Every profile state machine supplies a pure earliest replicated
+deadline; only a route whose local consensus actor is the current leader may
+propose. The exact due deadline, rather than scheduler wake time, becomes the
+command's applied time. Deterministic identities suppress overlapping ticks,
+while bounded Queue, Cache, and Event Bus sweeps include the current profile
+index to continue residual work safely. Stream retention is per shard and
+consumer-session expiry is shard-zero-only. This keeps time-driven mutations
+inside Raft and keeps Go, SDKs, and reads out of the authority path. See
+[ADR-0027](adr/0027-regional-leader-maintenance.md).
 
 The regional multi-tablet alpha composes that adapter with `epoch-catalog`.
 Catalog group 1 commits canonical resource commands through three EPRS-backed
@@ -558,7 +570,9 @@ The first replicated Cache tablet intentionally supports only shard `0`,
 `no-eviction`, and bounded distinct-key transactions. Item versions are drawn
 from a checked shard-global revision so delete/recreate and expiry/recreate do
 not repeat versions. Reads treat an expired value as absent without mutating
-state; explicit maintenance reclaims values in `(deadline, key)` order.
+state; maintenance reclaims values in `(deadline, key)` order. In the regional
+profile, the current leader automatically proposes that existing bounded
+command at the earliest value or lock deadline; explicit calls remain valid.
 Committed Cache commands clamp candidate time to the prior effective time.
 Advisory locks use `(tablet_epoch, acquisition_log_index)` as their downstream
 fence, rotate opaque lease tokens on renewal, and reject tokens on commands
@@ -957,3 +971,5 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0023: Replicated Stream Time and Size Retention](adr/0023-stream-retention-policies.md)
 - [ADR-0024: Multi-Shard Stream Key Routing](adr/0024-stream-multishard-key-routing.md)
 - [ADR-0025: Replicated Stream Consumer Sessions and Shard Assignment](adr/0025-stream-consumer-sessions.md)
+- [ADR-0026: Regional Stream Atomic Batch SDKs](adr/0026-regional-stream-batch-sdks.md)
+- [ADR-0027: Leader-Owned Regional Maintenance](adr/0027-regional-leader-maintenance.md)

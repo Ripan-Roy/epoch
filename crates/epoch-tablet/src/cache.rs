@@ -254,6 +254,15 @@ impl CacheTablet {
             .count()
     }
 
+    pub fn next_maintenance_deadline_ms(&self) -> Option<u64> {
+        self.state
+            .shard
+            .next_expiry_deadline_ms()
+            .into_iter()
+            .chain(self.state.locks.values().map(|lock| lock.lease_deadline_ms))
+            .min()
+    }
+
     pub const fn last_applied_command_index(&self) -> u64 {
         self.last_applied_command_index
     }

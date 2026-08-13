@@ -246,9 +246,10 @@ Status samples the profile before the later actor-owned consensus snapshot, so
 it rejects an impossible profile index ahead of the reported consensus-applied
 index. Cache observations never advance time or reclaim storage. Expired values
 are logically absent, while `retained_entry_count` includes their physical
-storage until a committed `Maintain` command reclaims them. There is no
-background expiry loop. The regional wrapper provides leader ReadIndex
-ordering, but the direct profile route remains stale-capable.
+storage until a committed `Maintain` command reclaims them. The regional
+wrapper's current leader automatically proposes that command at the first due
+value or lock deadline and provides leader ReadIndex ordering; the direct
+profile route remains stale-capable and has no scheduler.
 
 ## Verification scope
 

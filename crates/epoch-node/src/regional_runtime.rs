@@ -27,6 +27,7 @@ use crate::{
         ConsensusGroupSupervisor, ConsensusGroupSupervisorError, SupervisedConsensusGroupFailure,
         shared_internal_peer_router,
     },
+    regional_maintenance::{RegionalMaintenanceStatus, run_regional_maintenance_pass},
     regional_router::{
         DEFAULT_REGIONAL_READ_BARRIER_TIMEOUT, MAX_REGIONAL_READ_BARRIER_TIMEOUT,
         regional_tablet_router_with_read_timeout,
@@ -36,6 +37,8 @@ use crate::{
 };
 
 const DEFAULT_PROFILE_COMMIT_WAIT: Duration = Duration::from_secs(5);
+pub const DEFAULT_REGIONAL_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(100);
+pub const MAX_REGIONAL_MAINTENANCE_INTERVAL: Duration = Duration::from_mins(1);
 
 #[derive(Clone)]
 pub struct RegionalRuntimeConfig {
@@ -47,6 +50,7 @@ pub struct RegionalRuntimeConfig {
     pub catalog_commit_wait: Duration,
     pub profile_commit_wait: Duration,
     pub read_barrier_timeout: Duration,
+    pub maintenance_interval: Duration,
 }
 
 impl fmt::Debug for RegionalRuntimeConfig {
@@ -60,6 +64,7 @@ impl fmt::Debug for RegionalRuntimeConfig {
             .field("catalog_commit_wait", &self.catalog_commit_wait)
             .field("profile_commit_wait", &self.profile_commit_wait)
             .field("read_barrier_timeout", &self.read_barrier_timeout)
+            .field("maintenance_interval", &self.maintenance_interval)
             .finish_non_exhaustive()
     }
 }
@@ -89,6 +94,7 @@ impl RegionalRuntimeConfig {
             catalog_commit_wait: DEFAULT_CATALOG_COMMIT_WAIT,
             profile_commit_wait: DEFAULT_PROFILE_COMMIT_WAIT,
             read_barrier_timeout: DEFAULT_REGIONAL_READ_BARRIER_TIMEOUT,
+            maintenance_interval: DEFAULT_REGIONAL_MAINTENANCE_INTERVAL,
         }
     }
 
@@ -101,6 +107,12 @@ impl RegionalRuntimeConfig {
     #[must_use]
     pub fn with_read_barrier_timeout(mut self, timeout: Duration) -> Self {
         self.read_barrier_timeout = timeout;
+        self
+    }
+
+    #[must_use]
+    pub fn with_maintenance_interval(mut self, interval: Duration) -> Self {
+        self.maintenance_interval = interval;
         self
     }
 }
@@ -163,9 +175,11 @@ impl RegionalNodeRuntime {
             || config.profile_commit_wait.is_zero()
             || config.read_barrier_timeout.is_zero()
             || config.read_barrier_timeout > MAX_REGIONAL_READ_BARRIER_TIMEOUT
+            || config.maintenance_interval.is_zero()
+            || config.maintenance_interval > MAX_REGIONAL_MAINTENANCE_INTERVAL
         {
             return Err(RegionalRuntimeError::InvalidConfiguration(
-                "catalog/profile waits must be non-zero and the read barrier wait must be between 1 ms and 60 seconds".into(),
+                "catalog/profile waits must be non-zero and read-barrier/maintenance intervals must be between 1 ms and 60 seconds".into(),
             ));
         }
         let catalog_scope = CatalogTabletScope::new(
@@ -209,14 +223,32 @@ impl RegionalNodeRuntime {
         let catalog_commits = catalog_state.subscribe_commits();
         catalog_state.reconcile_latest().await?;
 
+        let maintenance_interval_ms = u64::try_from(config.maintenance_interval.as_millis())
+            .map_err(|_| {
+                RegionalRuntimeError::InvalidConfiguration(
+                    "maintenance interval cannot be represented in milliseconds".into(),
+                )
+            })?;
+        let maintenance_status = RegionalMaintenanceStatus::new(maintenance_interval_ms);
         let public_router = regional_catalog_router(catalog_state.clone())
             .merge(regional_tablet_router_with_read_timeout(
                 directory.clone(),
                 config.read_barrier_timeout,
             ))
-            .merge(regional_topology_router(config.topology, directory));
-        let (stop, failure, background) =
-            spawn_background(catalog_state.clone(), catalog_commits, group_failures);
+            .merge(regional_topology_router(
+                config.topology,
+                directory.clone(),
+                Arc::clone(&maintenance_status),
+            ));
+        let (stop, failure, background) = spawn_background(
+            catalog_state.clone(),
+            catalog_commits,
+            group_failures,
+            directory,
+            config.clock,
+            config.maintenance_interval,
+            maintenance_status,
+        );
 
         Ok(Self {
             public_router,
@@ -269,6 +301,10 @@ fn spawn_background(
     reconcile_state: RegionalCatalogState,
     mut catalog_commits: tokio::sync::broadcast::Receiver<CommittedProposal>,
     mut group_failures: tokio::sync::broadcast::Receiver<SupervisedConsensusGroupFailure>,
+    directory: crate::tablet_materializer::TabletDirectory,
+    clock: Arc<dyn Clock>,
+    maintenance_interval: Duration,
+    maintenance_status: Arc<RegionalMaintenanceStatus>,
 ) -> (
     watch::Sender<bool>,
     watch::Receiver<Option<RegionalRuntimeFailure>>,
@@ -277,6 +313,8 @@ fn spawn_background(
     let (stop, mut stopped) = watch::channel(false);
     let (failure_tx, failure) = watch::channel(None);
     let background = tokio::spawn(async move {
+        let mut maintenance = tokio::time::interval(maintenance_interval);
+        maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 biased;
@@ -292,6 +330,11 @@ fn spawn_background(
                     };
                     failure_tx.send_replace(Some(failure));
                     return;
+                }
+                _ = maintenance.tick() => {
+                    let now_ms = clock.wall_time_ms();
+                    let (pass, error) = run_regional_maintenance_pass(&directory, now_ms).await;
+                    maintenance_status.record(now_ms, pass, error);
                 }
                 commit = catalog_commits.recv() => {
                     match commit {

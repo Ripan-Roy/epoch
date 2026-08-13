@@ -1,5 +1,6 @@
 use axum::{body::Body, http::Request};
 use epoch_node::{
+    regional_maintenance::RegionalMaintenanceStatus,
     regional_topology::{NodeTopology, regional_topology_router},
     tablet_materializer::TabletDirectory,
 };
@@ -18,14 +19,18 @@ async fn topology_reports_fixed_voters_and_live_group_capacity() {
         16,
     )
     .expect("topology should be valid");
-    let response = regional_topology_router(topology, TabletDirectory::default())
-        .oneshot(
-            Request::get("/experimental/v1/regional/topology")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let response = regional_topology_router(
+        topology,
+        TabletDirectory::default(),
+        RegionalMaintenanceStatus::new(100),
+    )
+    .oneshot(
+        Request::get("/experimental/v1/regional/topology")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     assert!(response.status().is_success());
     let encoded = response.into_body().collect().await.unwrap().to_bytes();
     let body: Value = serde_json::from_slice(&encoded).unwrap();
@@ -41,6 +46,9 @@ async fn topology_reports_fixed_voters_and_live_group_capacity() {
     assert_eq!(body["capacity"]["max_consensus_groups"], 16);
     assert_eq!(body["capacity"]["used_consensus_groups"], 1);
     assert_eq!(body["capacity"]["available_consensus_groups"], 15);
+    assert_eq!(body["maintenance"]["enabled"], true);
+    assert_eq!(body["maintenance"]["interval_ms"], 100);
+    assert_eq!(body["maintenance"]["passes"], 0);
 }
 
 #[test]

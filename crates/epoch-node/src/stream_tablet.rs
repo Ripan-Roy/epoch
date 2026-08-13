@@ -34,9 +34,11 @@ use epoch_tablet::{
 #[cfg(test)]
 use epoch_tablet::{StreamBatchRecord, encode_stream_batch_payload};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, broadcast};
 
 use crate::consensus::{CommittedProposalApplier, ConsensusProbeError, ConsensusProbeHandle};
+use crate::regional_maintenance::{RegionalMaintenanceOperation, RegionalMaintenanceProposal};
 use crate::tablet_http::{
     StrictEventEnvelope, TabletApiError, TabletApiResult, TabletReadMetadata,
     deserialize_optional_u64_from_number_or_decimal, deserialize_strict_event_envelope,
@@ -128,6 +130,77 @@ impl StreamTabletService {
             .read()
             .map_err(|_| "Stream tablet read lock was poisoned".to_owned())
             .map(|tablet| tablet.last_applied_command_index())
+    }
+
+    pub fn maintenance_proposals(
+        &self,
+        now_ms: u64,
+    ) -> Result<Vec<RegionalMaintenanceProposal>, String> {
+        self.ensure_healthy()?;
+        let tablet = self
+            .tablet
+            .read()
+            .map_err(|_| "Stream tablet read lock was poisoned".to_owned())?;
+        let mut proposals = Vec::new();
+        if let Some(due_at_ms) = tablet
+            .next_retention_maintenance_deadline_ms()
+            .filter(|deadline_ms| *deadline_ms <= now_ms)
+        {
+            let key = maintenance_key(
+                RegionalMaintenanceOperation::StreamRetention,
+                due_at_ms,
+                None,
+                None,
+            );
+            let command = StreamTabletCommand::maintain_retention(&self.scope, key, due_at_ms)
+                .map_err(|error| error.to_string())?;
+            proposals.push(RegionalMaintenanceProposal {
+                operation: RegionalMaintenanceOperation::StreamRetention,
+                due_at_ms,
+                proposal_id: command
+                    .proposal_id(&self.scope)
+                    .map_err(|error| error.to_string())?,
+                payload: command
+                    .encode(&self.scope)
+                    .map_err(|error| error.to_string())?,
+            });
+        }
+        if self.shard_index == 0 {
+            for (due_at_ms, group, shard_count) in tablet.due_session_maintenance(now_ms) {
+                let key = maintenance_key(
+                    RegionalMaintenanceOperation::StreamConsumerSession,
+                    due_at_ms,
+                    None,
+                    Some(&group),
+                );
+                let command = StreamTabletCommand::maintain_group_sessions(
+                    &self.scope,
+                    key,
+                    group,
+                    shard_count,
+                    due_at_ms,
+                )
+                .map_err(|error| error.to_string())?;
+                proposals.push(RegionalMaintenanceProposal {
+                    operation: RegionalMaintenanceOperation::StreamConsumerSession,
+                    due_at_ms,
+                    proposal_id: command
+                        .proposal_id(&self.scope)
+                        .map_err(|error| error.to_string())?,
+                    payload: command
+                        .encode(&self.scope)
+                        .map_err(|error| error.to_string())?,
+                });
+            }
+        }
+        proposals.sort_by(|left, right| {
+            (left.due_at_ms, left.operation, left.proposal_id).cmp(&(
+                right.due_at_ms,
+                right.operation,
+                right.proposal_id,
+            ))
+        });
+        Ok(proposals)
     }
 
     fn ensure_healthy(&self) -> Result<(), String> {
@@ -257,6 +330,33 @@ impl StreamTabletService {
             state_digest: hex_digest(tablet.state_digest()),
         })
     }
+}
+
+fn maintenance_key(
+    operation: RegionalMaintenanceOperation,
+    due_at_ms: u64,
+    applied_index: Option<u64>,
+    group: Option<&str>,
+) -> String {
+    let suffix = group.map_or_else(String::new, |group| {
+        let digest = Sha256::digest(group.as_bytes());
+        format!("-{}", hex_digest_prefix(&digest))
+    });
+    let sweep = applied_index.map_or_else(String::new, |index| format!("-{index}"));
+    format!(
+        "epoch-auto-{}-{due_at_ms}{sweep}{suffix}",
+        operation.as_str()
+    )
+}
+
+fn hex_digest_prefix(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 impl CommittedProposalApplier for StreamTabletService {
@@ -1715,6 +1815,54 @@ mod tests {
             },
             payload: command.encode(scope).unwrap(),
         }
+    }
+
+    #[test]
+    fn automatic_maintenance_proposals_are_due_only_and_stable_until_apply() {
+        let scope = scope();
+        let service = StreamTabletService::new_for_shard(scope.clone(), 0, 3).unwrap();
+        let retention = StreamTabletCommand::configure_retention(
+            &scope,
+            "retention",
+            StreamRetentionPolicy {
+                max_age_ms: Some(10),
+                ..StreamRetentionPolicy::default()
+            },
+            100,
+        )
+        .unwrap();
+        service
+            .apply(&committed_command_for_scope(&scope, &retention, 1))
+            .unwrap();
+        let append = committed_for_scope(&scope, "append", "order-1", 2);
+        service.apply(&append).unwrap();
+        let join = StreamTabletCommand::join_group_session(
+            &scope, "join", "billing", "worker-a", 3, 1_000, 100,
+        )
+        .unwrap();
+        service
+            .apply(&committed_command_for_scope(&scope, &join, 3))
+            .unwrap();
+
+        assert!(service.maintenance_proposals(109).unwrap().is_empty());
+        let retention_due = service.maintenance_proposals(110).unwrap();
+        assert_eq!(retention_due.len(), 1);
+        assert_eq!(
+            retention_due[0].operation,
+            RegionalMaintenanceOperation::StreamRetention
+        );
+        let due = service.maintenance_proposals(1_100).unwrap();
+        assert_eq!(due.len(), 2);
+        assert_eq!(
+            due.iter()
+                .map(|proposal| proposal.operation)
+                .collect::<Vec<_>>(),
+            [
+                RegionalMaintenanceOperation::StreamRetention,
+                RegionalMaintenanceOperation::StreamConsumerSession
+            ]
+        );
+        assert_eq!(due, service.maintenance_proposals(2_000).unwrap());
     }
 
     #[test]

@@ -843,22 +843,24 @@ export function DocsPage({ section }: DocsPageProps) {
                     Stream consumer group can now replicate its next offset, commit forward, reset explicitly,
                     observe lag, and replay from that checkpoint; caller-supplied generations fence an old or
                     conflicting member across failover and EPRS rebuild. Canonical command v4 now commits
-                    per-partition time, persisted-byte, and record bounds plus explicit idle-stream
-                    maintenance; every voter preserves the same base offset, retention watermark, and
-                    stale-checkpoint signal through checkpoint restore. Logical shard 0 now also replicates
-                    bounded join, heartbeat, leave, explicit dead-member expiry, one membership generation,
-                    and deterministic assignment of every Stream shard. These are experimental HTTP/tablet
-                    slices, not yet background expiry, cooperative revoke, atomic checkpoint handoff, native
-                    bidirectional streaming, automatic client batching, or compression negotiation. The
-                    separate regional Stream, Queue, Cache, and Event Bus v1 clients below expose the
-                    implemented operations with leader/fence-aware Go, Java, and Python routing. Stream
-                    resources can now route one versioned UTF-8 key across several independently replicated
-                    shards while failing closed on a concurrent generation change. Stream session assignment
-                    is coordinated but remains separate from each shard&apos;s checkpoint-owner fence; Queue
-                    and Event Bus delivery are request/response rather than managed streaming sessions; Cache
-                    expiry is explicit and single-shard. Managed HTTP/gRPC and regional HTTP require a shared
-                    deny-by-default bootstrap bearer policy, but that is not OIDC, TLS/mTLS, credential
-                    expiry/revocation, or immutable audit export.
+                    per-partition time, persisted-byte, and record bounds; the regional leader proposes
+                    idle-stream maintenance at the first replicated deadline, and every voter preserves the
+                    same base offset, retention watermark, and stale-checkpoint signal through checkpoint
+                    restore. Logical shard 0 now also replicates bounded join, heartbeat, leave, leader-owned
+                    dead-member expiry, one membership generation, and deterministic assignment of every
+                    Stream shard. These are experimental HTTP/tablet slices, not yet cooperative revoke,
+                    atomic checkpoint handoff, native bidirectional streaming, automatic client batching, or
+                    compression negotiation. The separate regional Stream, Queue, Cache, and Event Bus v1
+                    clients below expose the implemented operations with leader/fence-aware Go, Java, and
+                    Python routing. Stream resources can now route one versioned UTF-8 key across several
+                    independently replicated shards while failing closed on a concurrent generation change.
+                    Stream session assignment is coordinated but remains separate from each shard&apos;s
+                    checkpoint-owner fence; Queue and Event Bus delivery are request/response rather than
+                    managed streaming sessions. The current regional leaders automatically propose Stream
+                    retention/session, Queue timer, Cache value/lock, and Event Bus lease-timeout commands at
+                    exact replicated deadlines; topology reports node-local scheduler counters. Managed
+                    HTTP/gRPC and regional HTTP require a shared deny-by-default bootstrap bearer policy, but
+                    that is not OIDC, TLS/mTLS, credential expiry/revocation, or immutable audit export.
                   </p>
                 </div>
               </div>
@@ -927,9 +929,9 @@ export function DocsPage({ section }: DocsPageProps) {
                   <span>STREAM RETENTION</span>
                   <strong>Time, byte, and combined deletion advances through one committed boundary.</strong>
                   <p>
-                    Configure, maintenance, append-triggered expiry, out-of-range checkpoint signaling, exact
-                    retry, three-voter convergence, and native snapshot restore are covered without
-                    renumbering offsets.
+                    Configure, leader-owned idle maintenance, append-triggered expiry, out-of-range checkpoint
+                    signaling, exact retry, three-voter convergence, and native snapshot restore are covered
+                    without renumbering offsets.
                   </p>
                 </article>
                 <article>
@@ -1143,9 +1145,19 @@ export function DocsPage({ section }: DocsPageProps) {
                   <span>CONSUMER SESSIONS</span>
                   <strong>Shard zero owns one durable membership generation.</strong>
                   <p>
-                    Join, heartbeat, leave, and explicit expiry maintenance replicate with the Stream.
+                    Join, heartbeat, and leave replicate with the Stream. The shard-zero leader proposes
+                    expiry at the first replicated member deadline; explicit maintenance remains available.
                     Lexically ordered members receive deterministic round-robin shard assignments that survive
                     leader loss and full-node reopen. The exact examples above exercise this lifecycle.
+                  </p>
+                </article>
+                <article>
+                  <span>AUTOMATIC MAINTENANCE</span>
+                  <strong>Only the current Raft leader owns each due timer.</strong>
+                  <p>
+                    Stream, Queue, Cache, and Event Bus publish pure earliest deadlines. A deterministic
+                    consensus proposal carries the exact due time, while authorized topology counters expose
+                    passes, due work, submissions, pending proposals, and errors.
                   </p>
                 </article>
               </div>
@@ -1155,9 +1167,9 @@ export function DocsPage({ section }: DocsPageProps) {
                 <span>
                   Regional v1 covers keyed append, direct per-shard operations, explicit-shard atomic batches,
                   and shard-zero coordinated membership/assignment. Each shard&apos;s record command remains
-                  physical partition 0 for compatibility. Background expiry, cooperative revoke, atomic
-                  assignment-plus-offset handoff, online expansion/remapping, automatic producer batching,
-                  cross-shard transactions, and package-registry releases remain open.
+                  physical partition 0 for compatibility. Cooperative revoke, atomic assignment-plus-offset
+                  handoff, online expansion/remapping, automatic producer batching, cross-shard transactions,
+                  and package-registry releases remain open.
                 </span>
               </aside>
             </section>
@@ -1368,8 +1380,9 @@ export function DocsPage({ section }: DocsPageProps) {
                   <span>DETERMINISTIC EXPIRY</span>
                   <strong>Reads stay pure; maintenance is a replicated command.</strong>
                   <p>
-                    TTL never causes a hidden read mutation. Submit bounded maintenance to reclaim due keys
-                    and locks; observation, lookup, and status explicitly request <code>linearizable</code>.
+                    TTL never causes a hidden read mutation. The regional leader submits bounded maintenance
+                    at the earliest value or lock deadline; explicit maintenance remains available, and
+                    observation, lookup, and status explicitly request <code>linearizable</code>.
                   </p>
                 </article>
               </div>
@@ -1377,9 +1390,9 @@ export function DocsPage({ section }: DocsPageProps) {
               <aside className="docs-access-note">
                 <strong>Current boundary</strong>
                 <span>
-                  Regional Cache v1 is a repository-local, single-shard alpha. Background active expiry,
-                  eviction families, multi-shard transactions, snapshots, Pub/Sub, generated response models,
-                  and public package-registry releases remain open.
+                  Regional Cache v1 is a repository-local, single-shard alpha. Eviction families, multi-shard
+                  transactions, snapshots, Pub/Sub, generated response models, and public package-registry
+                  releases remain open.
                 </span>
               </aside>
             </section>
@@ -1676,6 +1689,12 @@ export function DocsPage({ section }: DocsPageProps) {
                   title="Regional atomic batch clients"
                   description="Canonical none/gzip encoders, exact caller frames for every required codec, fenced routing, exact retry identity, and explicit streaming non-claims."
                   href={`${repositoryDocsUrl}/adr/0026-regional-stream-batch-sdks.md`}
+                />
+                <ReferenceCard
+                  eyebrow="REGIONAL TIMERS"
+                  title="Leader-owned automatic maintenance"
+                  description="Pure profile deadlines, current-leader proposal ownership, exact due-time commands, deterministic retry identity, topology counters, recovery proof, and operational non-claims."
+                  href={`${repositoryDocsUrl}/adr/0027-regional-leader-maintenance.md`}
                 />
                 <ReferenceCard
                   eyebrow="CONSUMER GROUPS"

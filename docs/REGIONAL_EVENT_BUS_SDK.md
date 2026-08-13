@@ -128,7 +128,7 @@ The exact executable source is [quickstart.py](../console/src/quickstarts/region
 2. Perform the external operation using the delivery ID as downstream idempotency metadata where supported.
 3. Acknowledge with the exact delivery ID, dispatcher identity/epoch, and opaque lease token.
 4. On a failed side effect, commit `fail_delivery` with a bounded reason instead.
-5. Run explicit maintenance to recover expired leases and apply due retry/dead-letter transitions.
+5. Let the regional leader recover an expired lease automatically; use explicit maintenance only when an operator needs an immediate bounded sweep.
 
 Do not acknowledge before the downstream operation is durably accepted. Epoch proves the delivery ledger transition; it cannot prove an arbitrary external system's business side effect.
 

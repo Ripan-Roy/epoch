@@ -119,8 +119,9 @@ canonical-encoding invariants before installation.
   installation, and all-voter restart.
 - The exact byte definition is stable and testable across machines.
 - Consumers can distinguish an empty in-range result from retention data loss.
-- Idle age deletion requires a committed maintenance call until managed
-  scheduling is implemented.
+- Idle age deletion requires a committed maintenance command. The regional
+  runtime now proposes it automatically through the current shard leader; the
+  direct tablet route still requires an explicit caller.
 
 ## Rejected alternatives
 
@@ -152,6 +153,7 @@ Required evidence includes:
 
 This decision does not provide keyed compaction, tombstones, delete retention,
 object-tier retention, legal hold, namespace policy guardrails, dynamic
-partition expansion/remapping, resource-wide policy coordination, or a managed
-periodic maintenance scheduler. Those remain
+partition expansion/remapping, or resource-wide policy coordination. ADR-0027
+separately owns the regional leader scheduler; cross-region ownership,
+deadline SLOs, and timer scale evidence remain
 separate requirements and must not be inferred from a v4 retention receipt.

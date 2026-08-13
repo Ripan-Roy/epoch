@@ -18,7 +18,7 @@ bootstrap authorization, topology admission, quorum-confirmed leader ReadIndex
 barriers, Queue credit flow, Stream batches and consumer checkpoints, all four
 regional profile SDKs, profile-native checkpoint restore with physical EPRS
 reclamation, replicated Stream time/size/combined retention, and multi-shard
-Stream routing and consumer sessions. PR #62 proves
+Stream routing, consumer sessions, and regional atomic batch SDKs. PR #62 proves
 independently replicated ordered partitions, versioned FNV-1a UTF-8 discovery,
 generation-pinned Go/Java/Python keyed append, logical response identities,
 fail-closed expansion races, and a real three-shard Python recovery campaign.
@@ -26,11 +26,13 @@ PR #63, exact-main CI, main-only Pages, and the live docs prove a replicated
 shard-zero consumer-session coordinator with bounded
 join/heartbeat/leave/expiry, monotonic generations and time, deterministic
 resource-wide assignment, snapshot recovery, matching Go/Java/Python methods,
-and a real post-failover recovery campaign. The current feature exposes the
-already-replicated single-shard atomic batch command through those three SDKs,
-with canonical none/gzip encoders, exact caller frames for every required
-codec, bounded rediscovery, executable docs, and real recovery evidence.
-Stable streaming Produce, background session maintenance, and atomic
+and a real post-failover recovery campaign. PR #64 proves the existing
+single-shard atomic batch command through all three SDKs with canonical
+none/gzip encoders, exact caller frames for every required codec, bounded
+rediscovery, executable docs, and real recovery evidence. The current feature
+adds leader-owned automatic regional maintenance across all four profiles,
+with exact due-time proposals, topology counters, and a no-manual-maintenance
+three-node recovery campaign. Stable streaming Produce and atomic
 assignment-plus-offset handoff remain later slices.
 Replicated multi-instance hosted metadata, production identity, follower
 routing, dynamic membership/voter selection, repair/rebalance, and the broader
@@ -222,15 +224,16 @@ The Stream tablet now also accepts a version-four retention mutation without
 changing v1 single-append, v2 batch, or v3 checkpoint bytes. A complete policy
 may combine record-count, compact canonical JSON byte, and inclusive age
 bounds. Configure enforces immediately; append enforces at its committed time;
-and explicit maintenance advances idle age deletion through the same Raft
+and maintenance advances idle age deletion through the same Raft
 history. Retained offsets are never renumbered, the monotonic time watermark
 survives checkpoints, and a consumer checkpoint below the retained base is
 preserved and flagged out of range until an explicit fenced reset. Direct and
 authenticated regional routes plus Go, Java, and Python clients configure,
 maintain, and linearly observe the policy. Deterministic core/tablet tests and
 a real three-voter checkpoint/reopen test are executable; the regional
-container campaign exercises the same SDK path. This advances STREAM-002 but
-does not provide automatic periodic maintenance, a resource-wide policy
+container campaign exercises the same SDK path. The regional leader now
+proposes the existing command automatically at the first replicated deadline.
+This advances STREAM-002 but does not provide a resource-wide policy
 coordinator, keyed compaction/tombstones, object-tier retention,
 namespace/legal-hold governance, or production scale evidence. See
 [ADR-0023](adr/0023-stream-retention-policies.md) and
@@ -262,9 +265,10 @@ the coordinator and accepts legacy v1 images. Direct and authenticated regional
 routes plus Go, Java, and Python clients expose join, heartbeat, leave,
 maintenance, and linearizable observation. Core/SDK tests and a real
 three-voter checkpoint/reopen test are executable; the regional container
-campaign exercises two members after leader replacement and verifies the
-surviving assignment after voter catch-up and all-node reopen. This advances
-STREAM-003 but does not provide background expiry, cooperative revoke,
+campaign exercises two members after leader replacement; regional shard-zero
+leadership now expires the idle member without a client maintenance call and
+verifies the surviving assignment after voter catch-up and all-node reopen.
+This advances STREAM-003 but does not provide cooperative revoke,
 server-push consumption, sticky/rack-aware assignment, or atomic coupling to
 each shard's v3 checkpoint owner. See
 [ADR-0025](adr/0025-stream-consumer-sessions.md).
@@ -281,7 +285,9 @@ the leader before each operation, carry generation/tablet/term fences, preserve
 caller idempotency across one bounded rediscovery, and explicitly request
 linearizable reads. Contract tests, exact compiled Pages examples, and a real
 Python lifecycle after Queue-leader `SIGKILL` plus all-node recovery are
-executable. Committed-order time normalization also prevents a retained pending
+executable. The current regional leader automatically promotes scheduled work
+and expires due TTL/max-age/dedupe/leases with exact due-time commands.
+Committed-order time normalization also prevents a retained pending
 entry followed by a lower-clock leader from fail-stopping live apply or
 recovery. This advances QUEUE-001/002/004/005/006/011 but does not complete
 native bidirectional receive, connection-level credit, fairness/load proof,
@@ -301,10 +307,10 @@ committed outcomes, exact replay, time normalization, and convergence digests.
 rebuilds from EPRS before readiness, and exposes the authenticated Cache v1
 route with leader ReadIndex observations. Repository-local Go, Java, and Python
 clients cover all seven values, set/delete/CAS/increment, atomic transaction,
-fenced locks, explicit expiry, lookup, observation, and status with exact retry.
+fenced locks, explicit expiry controls, lookup, observation, and status with exact retry.
 Real-runtime and container gates exercise the Python client after leader loss,
-catch-up, convergence, and all-node recovery. Concurrent history checking,
-multi-shard routing, background expiry, eviction, exported backup/PITR,
+automatic leader-owned TTL reclamation, catch-up, convergence, and all-node
+recovery. Concurrent history checking, multi-shard routing, eviction, exported backup/PITR,
 automatic checkpoint scheduling, and production durability evidence remain
 open. See
 [Regional Cache SDK](REGIONAL_CACHE_SDK.md),
@@ -325,13 +331,22 @@ that same tablet. Repository-local Go, Java, and Python clients cover
 subscription policy/removal, publish, acquire/ack/fail/maintenance, mutation
 lookup, archive replay, delivery query, and status with exact same-key retry and
 linearizable observations. Contract tests, exact compiled Pages examples, and
-a real Python lifecycle after Event Bus leader loss are executable. This
+a real Python lifecycle after Event Bus leader loss automatically time out an
+in-flight delivery before retry without client maintenance. This
 advances BUS-001, BUS-003, BUS-004, BUS-006, and DX-001, but target executors,
 rate limiting, redrive/retention, generated models, package publication,
 snapshots, and production placement remain open. See
 [Regional Event Bus SDK](REGIONAL_EVENT_BUS_SDK.md),
 [ADR-0020](adr/0020-regional-event-bus-v1-and-sdk-routing.md), and
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
+
+ADR-0027 unifies those profile timers in the regional node. State machines
+publish pure earliest deadlines, only the local current Raft leader proposes,
+the command carries the exact due time, and deterministic proposal identities
+make overlapping ticks idempotent. The authenticated topology response exposes
+node-local pass/leader/due/submission/pending/error observations. Explicit
+maintenance APIs remain available; dynamic/cross-region ownership, timer load
+SLOs, and production metrics/alerts remain open.
 
 The segmented-WAL work package is implemented as the single-node storage
 sub-slice at `$EPOCH_DATA_DIR/engine-wal/segment-*.wal`. The implementation has

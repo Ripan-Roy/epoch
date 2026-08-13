@@ -323,6 +323,15 @@ impl CacheShard {
         })
     }
 
+    /// Returns the earliest physical value-expiry deadline still retained by
+    /// this shard.
+    pub fn next_expiry_deadline_ms(&self) -> Option<u64> {
+        self.entries
+            .values()
+            .filter_map(|entry| entry.expires_at_ms)
+            .min()
+    }
+
     /// Returns a deterministic replay-drift checksum of the complete shard.
     pub fn recovery_state_checksum(&self) -> u32 {
         let mut checksum = CanonicalChecksum::new();
@@ -1450,6 +1459,38 @@ mod tests {
         let final_expiry = shard.maintain_expiry(15, 2).unwrap();
         assert_eq!(final_expiry.revision, 3);
         assert_eq!(final_expiry.expired_keys, ["b"]);
+    }
+
+    #[test]
+    fn next_expiry_deadline_tracks_retained_values() {
+        let mut shard = CacheShard::new(10, None).unwrap();
+        shard
+            .transact(
+                transaction(vec![
+                    CacheMutation::Set {
+                        key: "later".into(),
+                        value: CacheValue::Counter(1),
+                        options: SetOptions {
+                            ttl_ms: Some(10),
+                            ..SetOptions::default()
+                        },
+                    },
+                    CacheMutation::Set {
+                        key: "first".into(),
+                        value: CacheValue::Counter(2),
+                        options: SetOptions {
+                            ttl_ms: Some(5),
+                            ..SetOptions::default()
+                        },
+                    },
+                ]),
+                100,
+            )
+            .unwrap();
+
+        assert_eq!(shard.next_expiry_deadline_ms(), Some(105));
+        shard.maintain_expiry(105, 1).unwrap();
+        assert_eq!(shard.next_expiry_deadline_ms(), Some(110));
     }
 
     #[test]

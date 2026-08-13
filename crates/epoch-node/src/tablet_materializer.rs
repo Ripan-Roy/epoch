@@ -26,6 +26,7 @@ use crate::{
     },
     consensus_groups::{ConsensusGroupSupervisor, ConsensusGroupSupervisorError},
     queue_tablet::{self, QueueTabletService},
+    regional_maintenance::RegionalMaintenanceProposal,
     stream_tablet::{self, StreamTabletService},
 };
 
@@ -43,6 +44,7 @@ pub struct MaterializedTabletRoute {
     metadata: MaterializedTabletMetadata,
     router: Router,
     consensus: ConsensusProbeHandle,
+    service: PendingTabletService,
 }
 
 impl fmt::Debug for MaterializedTabletRoute {
@@ -65,6 +67,13 @@ impl MaterializedTabletRoute {
 
     pub fn consensus(&self) -> ConsensusProbeHandle {
         self.consensus.clone()
+    }
+
+    pub fn maintenance_proposals(
+        &self,
+        now_ms: u64,
+    ) -> Result<Vec<RegionalMaintenanceProposal>, String> {
+        self.service.maintenance_proposals(now_ms)
     }
 }
 
@@ -119,6 +128,13 @@ impl TabletDirectory {
                     .map(|route| route.metadata.clone())
                     .collect()
             })
+    }
+
+    pub fn routes(&self) -> Result<Vec<MaterializedTabletRoute>, TabletDirectoryError> {
+        self.routes
+            .read()
+            .map_err(|_| TabletDirectoryError::Unavailable)
+            .map(|routes| routes.values().cloned().collect())
     }
 
     fn snapshot(&self) -> Result<BTreeMap<u64, MaterializedTabletRoute>, TabletDirectoryError> {
@@ -203,6 +219,7 @@ pub enum TabletMaterializerError {
 
 pub type TabletMaterializerResult<T> = Result<T, TabletMaterializerError>;
 
+#[derive(Clone)]
 enum PendingTabletService {
     Cache(Arc<CacheTabletService>),
     Stream(Arc<StreamTabletService>),
@@ -239,6 +256,18 @@ impl PendingTabletService {
             Self::Bus(service) => {
                 bus_tablet::router(Arc::clone(service), consensus, clock, commit_wait)
             }
+        }
+    }
+
+    fn maintenance_proposals(
+        &self,
+        now_ms: u64,
+    ) -> Result<Vec<RegionalMaintenanceProposal>, String> {
+        match self {
+            Self::Cache(service) => service.maintenance_proposals(now_ms),
+            Self::Stream(service) => service.maintenance_proposals(now_ms),
+            Self::Queue(service) => service.maintenance_proposals(now_ms),
+            Self::Bus(service) => service.maintenance_proposals(now_ms),
         }
     }
 }
@@ -414,6 +443,7 @@ impl RegionalTabletMaterializer {
             metadata,
             router: service.router(consensus.clone(), Arc::clone(&self.clock), self.commit_wait),
             consensus,
+            service,
         };
         let group_id = route.metadata.descriptor.consensus_group_id;
         let group_epoch = route.metadata.descriptor.tablet_epoch;

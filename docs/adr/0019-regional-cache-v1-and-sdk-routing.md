@@ -61,9 +61,10 @@ leader change.
    revision, contain one to 128 distinct-key mutations, and either commit as one
    revision or reject without partial state. SDK mutation helpers cannot embed
    transaction or lock-management operations inside a transaction.
-10. TTL is relative at proposal time. Expired entries remain observable until a
-    replicated `maintain` command removes them; v1 performs no background expiry
-    or implicit mutation during reads. `maintain` accepts one to 1,000
+10. TTL is relative at proposal time. Expired entries remain physically retained until a
+    replicated `maintain` command removes them; reads never mutate. The regional
+    current leader schedules that command at the first due deadline under
+    ADR-0027. `maintain` accepts one to 1,000
     expirations per command.
 11. Lock owner epochs are caller-monotonic unsigned integers. Lease tokens are
     opaque and rotated on renewal. Downstream systems compare the returned
@@ -78,12 +79,12 @@ leader change.
   leader replacement without depending on the Go management process.
 - Exact retry can resolve a lost response, while reusing a key with different
   semantics produces a deterministic idempotency conflict.
-- Cache observations after successful mutation are linearizable, but expiry is
-  deliberately command-driven and therefore testable without hidden timers.
+- Cache observations after successful mutation are linearizable, while expiry
+  remains command-driven and consensus-visible even when scheduled automatically.
 - The real three-voter campaign can kill the Cache leader before driving typed
   Python SDK values, CAS, transaction, increment, fenced lock, expiry
   maintenance, voter catch-up, and all-voter reopen.
-- This route does not claim active background expiry, LRU/LFU eviction,
+- This route does not claim LRU/LFU eviction,
   multi-shard transactions, snapshots, Pub/Sub, multi-key command pipelining,
   connection pooling policy, dynamic membership, TLS/OIDC/mTLS, generated
   response types, package publication, or the production fault/scale matrix.

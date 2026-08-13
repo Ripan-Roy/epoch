@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 
 use crate::consensus::{CommittedProposalApplier, ConsensusProbeError, ConsensusProbeHandle};
+use crate::regional_maintenance::{RegionalMaintenanceOperation, RegionalMaintenanceProposal};
 use crate::tablet_http::{
     StrictEventEnvelope, TabletApiError, TabletApiResult, TabletReadMetadata,
     deserialize_optional_u64_from_number_or_decimal, deserialize_u64_from_number_or_decimal,
@@ -80,6 +81,45 @@ impl QueueTabletService {
 
     pub fn scope(&self) -> &QueueTabletScope {
         &self.scope
+    }
+
+    pub fn maintenance_proposals(
+        &self,
+        now_ms: u64,
+    ) -> Result<Vec<RegionalMaintenanceProposal>, String> {
+        self.ensure_healthy()?;
+        let tablet = self
+            .tablet
+            .read()
+            .map_err(|_| "Queue tablet read lock was poisoned".to_owned())?;
+        let Some(due_at_ms) = tablet
+            .next_maintenance_deadline_ms()
+            .filter(|deadline_ms| *deadline_ms <= now_ms)
+        else {
+            return Ok(Vec::new());
+        };
+        let key = format!(
+            "epoch-auto-{}-{due_at_ms}-{}",
+            RegionalMaintenanceOperation::QueueTimers.as_str(),
+            tablet.last_applied_command_index()
+        );
+        let command = QueueTabletCommand::new(
+            &self.scope,
+            key,
+            due_at_ms,
+            QueueTabletOperation::Maintain(QueueMaintainCommand { partition: 0 }),
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(vec![RegionalMaintenanceProposal {
+            operation: RegionalMaintenanceOperation::QueueTimers,
+            due_at_ms,
+            proposal_id: command
+                .proposal_id(&self.scope)
+                .map_err(|error| error.to_string())?,
+            payload: command
+                .encode(&self.scope)
+                .map_err(|error| error.to_string())?,
+        }])
     }
 
     pub fn last_profile_mutation_index(&self) -> Result<u64, String> {

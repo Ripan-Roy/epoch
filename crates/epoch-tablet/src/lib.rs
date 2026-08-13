@@ -844,6 +844,28 @@ impl StreamTablet {
         })
     }
 
+    /// Returns the next age-retention deadline for the local logical shard.
+    pub fn next_retention_maintenance_deadline_ms(&self) -> Option<u64> {
+        self.stream.next_retention_deadline_ms()
+    }
+
+    /// Returns consumer-session groups whose first member deadline is due,
+    /// ordered by deadline and then group name.
+    pub fn due_session_maintenance(&self, now_ms: u64) -> Vec<(u64, String, u32)> {
+        let mut due = self
+            .session_groups
+            .iter()
+            .filter_map(|(group, session)| {
+                session
+                    .next_deadline_ms()
+                    .filter(|deadline_ms| *deadline_ms <= now_ms)
+                    .map(|deadline_ms| (deadline_ms, group.clone(), session.shard_count))
+            })
+            .collect::<Vec<_>>();
+        due.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+        due
+    }
+
     /// Latest consensus index containing a unique command applied to this
     /// profile. Raft no-ops are intentionally outside this state machine.
     pub fn last_applied_command_index(&self) -> u64 {
@@ -1757,6 +1779,48 @@ mod tests {
         assert_eq!(document["durable_voter_acks"], 2);
         assert!(document.get("configured_durability").is_none());
         assert!(document.get("achieved_durability").is_none());
+    }
+
+    #[test]
+    fn due_session_maintenance_is_deadline_then_name_ordered() {
+        let scope = scope();
+        let mut tablet = StreamTablet::new(scope.clone()).unwrap();
+        for (position, (group, member, applied_at_ms)) in
+            [("beta", "b", 100_u64), ("alpha", "a", 90_u64)]
+                .into_iter()
+                .enumerate()
+        {
+            let key = format!("join-{group}");
+            let command = StreamTabletCommand::join_group_session(
+                &scope,
+                key,
+                group,
+                member,
+                3,
+                1_000,
+                applied_at_ms,
+            )
+            .unwrap();
+            let proposal_id = command.proposal_id(&scope).unwrap();
+            let payload = command.encode(&scope).unwrap();
+            tablet
+                .apply_mutation(committed(
+                    proposal_id,
+                    2,
+                    u64::try_from(position).unwrap() + 1,
+                    &payload,
+                ))
+                .unwrap();
+        }
+
+        assert!(tablet.due_session_maintenance(1_089).is_empty());
+        assert_eq!(
+            tablet.due_session_maintenance(1_100),
+            [
+                (1_090, "alpha".to_owned(), 3),
+                (1_100, "beta".to_owned(), 3)
+            ]
+        );
     }
 
     #[test]

@@ -42,6 +42,7 @@ use serde::{
 use tokio::sync::{Mutex, broadcast};
 
 use crate::consensus::{CommittedProposalApplier, ConsensusProbeError, ConsensusProbeHandle};
+use crate::regional_maintenance::{RegionalMaintenanceOperation, RegionalMaintenanceProposal};
 use crate::tablet_http::{
     TabletApiError, TabletApiResult, TabletReadMetadata, deserialize_i64_from_number_or_decimal,
     deserialize_optional_u64_from_number_or_decimal, deserialize_u64_from_number_or_decimal,
@@ -86,6 +87,48 @@ impl CacheTabletService {
 
     pub fn scope(&self) -> &CacheTabletScope {
         &self.scope
+    }
+
+    pub fn maintenance_proposals(
+        &self,
+        now_ms: u64,
+    ) -> Result<Vec<RegionalMaintenanceProposal>, String> {
+        self.ensure_healthy()?;
+        let tablet = self
+            .tablet
+            .read()
+            .map_err(|_| "Cache tablet read lock was poisoned".to_owned())?;
+        let Some(due_at_ms) = tablet
+            .next_maintenance_deadline_ms()
+            .filter(|deadline_ms| *deadline_ms <= now_ms)
+        else {
+            return Ok(Vec::new());
+        };
+        let key = format!(
+            "epoch-auto-{}-{due_at_ms}-{}",
+            RegionalMaintenanceOperation::CacheExpiry.as_str(),
+            tablet.last_applied_command_index()
+        );
+        let command = CacheTabletCommand::new(
+            &self.scope,
+            key,
+            due_at_ms,
+            CacheTabletOperation::Maintain(CacheMaintainCommand {
+                shard: 0,
+                max_expirations: epoch_tablet::MAX_CACHE_MAINTENANCE_EXPIRATIONS,
+            }),
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(vec![RegionalMaintenanceProposal {
+            operation: RegionalMaintenanceOperation::CacheExpiry,
+            due_at_ms,
+            proposal_id: command
+                .proposal_id(&self.scope)
+                .map_err(|error| error.to_string())?,
+            payload: command
+                .encode(&self.scope)
+                .map_err(|error| error.to_string())?,
+        }])
     }
 
     pub fn last_profile_mutation_index(&self) -> Result<u64, String> {

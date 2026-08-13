@@ -402,14 +402,15 @@ voter, so this is not durable-majority proof under a hostile network. Do not
 expose it to an untrusted network.
 
 It also has static Raft membership, one consensus group per logical partition,
-no automatic checkpoint, session-expiry, or idle-retention schedule,
+no automatic checkpoint schedule on the direct profile route,
 user-exportable backup/PITR, follower
 read routing, catalog-authorized epoch
 transition, placement, authenticated peer identity, bounded idempotency
 retention, replica-progress/ISR contract, or exhaustive crash/I/O matrix.
-Consumer sessions provide replicated join, heartbeat, leave, explicit
+Consumer sessions provide replicated join, heartbeat, leave,
 dead-member expiry, automatic membership generations, and deterministic
-resource-wide assignment. They do not add background expiry, server-push
+resource-wide assignment. The regional runtime schedules expiry through the
+shard-zero leader; the direct route remains explicit. They do not add server-push
 assignment, cooperative revoke acknowledgement, sticky/rack-aware strategies,
 streaming fetch, atomic checkpoint handoff, transactional offset commit, or
 exactly-once processing.

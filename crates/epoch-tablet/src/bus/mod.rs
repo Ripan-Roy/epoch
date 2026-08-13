@@ -242,6 +242,10 @@ impl BusTablet {
         self.bus.delivery_counts()
     }
 
+    pub fn next_maintenance_deadline_ms(&self) -> Option<u64> {
+        self.bus.next_delivery_maintenance_deadline_ms()
+    }
+
     pub const fn business_state_digest(&self) -> [u8; 32] {
         self.business_state_digest
     }
