@@ -43,7 +43,8 @@ typed append, compressed batch, checkpoint, retention, or session request
 The historical single append remains canonical command v1 byte-for-byte. A
 batch alone emits v2, a consumer-group offset mutation alone emits v3, and a
 retention configuration or maintenance mutation alone emits v4. Consumer
-session join, heartbeat, leave, and maintenance alone emit v5. All
+session join, heartbeat, leave, and maintenance alone emit v5. A per-shard
+session claim alone emits v6. All
 accept only partition `0`, reject unknown fields and
 version/kind mismatches, are limited to the consensus proposal ceiling, and
 must match canonical JSON exactly. A batch contains 1–1,000 unique client
@@ -419,7 +420,12 @@ Retention does not add keyed compaction, tombstones, legal hold, object-tier
 deletion, namespace policy guardrails, or a resource-wide policy coordinator.
 The regional Stream v1 SDK exposes both the per-shard checkpoint primitive and
 the shard-zero session coordinator, but their generations remain separate
-fences rather than one atomic cross-shard protocol.
+replicated states. Command v6 installs a monotonic offset-preserving session
+claim in one shard; claimed fetch and later commit require that exact member
+and generation. First-party SDKs bridge bounded generation gaps and revalidate
+the shard-zero plan after every assigned shard is claimed. Partial claims are
+safe but the protocol is not one atomic cross-shard transaction. See
+[ADR-0029](adr/0029-stream-session-fenced-consumption.md).
 The batch route is whole-command atomic and client-framed; it does not provide
 the future bidirectional Produce stream, connection credit, automatic producer
 batching, codec negotiation, non-atomic per-record rejection, compression
@@ -443,4 +449,5 @@ Checkpoint details are recorded in
 SDK behavior are recorded in
 [ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md), and session
 coordination is recorded in
-[ADR-0025](adr/0025-stream-consumer-sessions.md).
+[ADR-0025](adr/0025-stream-consumer-sessions.md), and fenced consumption is
+recorded in [ADR-0029](adr/0029-stream-session-fenced-consumption.md).

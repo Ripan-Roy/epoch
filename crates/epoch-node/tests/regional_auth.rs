@@ -197,6 +197,24 @@ async fn native_stream_v1_uses_the_same_fail_closed_scope_and_data_actions() {
     .await;
     assert_eq!(denied_session_join.status(), StatusCode::FORBIDDEN);
 
+    let claimed_read = call(
+        router.clone(),
+        Method::GET,
+        &format!("{route}/groups/billing/claimed-records?member_id=member-a&group_generation=3"),
+        Some("epoch-dev-reader-v1"),
+    )
+    .await;
+    assert_eq!(claimed_read.status(), StatusCode::NO_CONTENT);
+
+    let denied_claim = call(
+        router.clone(),
+        Method::PUT,
+        &format!("{route}/groups/billing/claim"),
+        Some("epoch-dev-reader-v1"),
+    )
+    .await;
+    assert_eq!(denied_claim.status(), StatusCode::FORBIDDEN);
+
     let cross_tenant = call(
         router.clone(),
         Method::GET,

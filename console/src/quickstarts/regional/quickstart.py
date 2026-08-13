@@ -86,6 +86,21 @@ heartbeat = client.heartbeat_consumer_session(
     idempotency_key="docs-python-session-heartbeat-v1",
 )
 session = client.consumer_session("orders", "docs-python-session")
+claimed_shards = client.claim_consumer_session(
+    "orders",
+    "docs-python-session",
+    "docs-python-worker",
+    1,
+    idempotency_key_prefix="docs-python-session-claim-v1",
+)
+claimed_records = client.fetch_claimed_group(
+    "orders",
+    claimed_shards[0],
+    "docs-python-session",
+    "docs-python-worker",
+    1,
+    limit=100,
+)
 left = client.leave_consumer_session(
     "orders",
     "docs-python-session",
@@ -122,6 +137,8 @@ print(
             "session_join": joined,
             "session_heartbeat": heartbeat,
             "session": session,
+            "claimed_shards": claimed_shards,
+            "claimed_records": claimed_records,
             "session_leave": left,
             "retention_configure": configured,
             "retention_maintenance": maintained,

@@ -334,6 +334,9 @@ directories and allocated ports. They cover:
 - committed write recovery from snapshot plus log tail;
 - queue lease, redelivery, retry, schedule, dead letter, and redrive;
 - stream append, fetch, offset commit, rewind, consumer sessions, and retention;
+- Stream session-fenced per-shard claim, exact-member/generation bounded fetch,
+  stale-member rejection, offset preservation, coordinator revalidation, and
+  claim recovery across leader loss, voter catch-up, and all-node reopen;
 - cross-language calls over generated Protobuf contracts;
 - OpenTelemetry/metrics and immutable audit event emission.
 

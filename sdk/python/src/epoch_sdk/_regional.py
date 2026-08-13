@@ -139,7 +139,7 @@ class RegionalClient:
                     raise ValueError(
                         "Stream routing generation changed from "
                         f"{expected_generation} to {route.resource_generation} before the keyed "
-                        "append; no write was attempted"
+                        "operation; no request was attempted"
                     )
                 method, suffix, body, query, headers = request_for(route)
                 return transport.request(
@@ -251,9 +251,12 @@ def _parse_route(document: Any) -> Route:
 
 
 def _rediscover(error: EpochAPIError) -> bool:
-    return error.retryable or error.code in {
+    if error.retryable:
+        return True
+    if error.code == "fenced":
+        return isinstance(error.body, dict) and error.body.get("retryable") is True
+    return error.code in {
         "not_leader",
-        "fenced",
         "route_not_found",
         "route_unavailable",
         "read_barrier_timeout",

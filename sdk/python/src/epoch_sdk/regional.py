@@ -25,6 +25,7 @@ _MAX_RETENTION_BYTES = 3 * 1024 * 1024
 _MAX_RETENTION_AGE_MS = 10 * 365 * 24 * 60 * 60 * 1_000
 _MIN_SESSION_TIMEOUT_MS = 1_000
 _MAX_SESSION_TIMEOUT_MS = 300_000
+_MAX_CLAIM_TRANSITIONS = 4_096
 _STREAM_PARTITIONER = "fnv1a64_utf8_mod_n_v1"
 _MAX_BATCH_RECORDS = 1_000
 _MAX_BATCH_COMPRESSED_BYTES = 360 * 1024
@@ -380,10 +381,22 @@ class RegionalStreamClient(RegionalClient):
         )
 
     def lag(self, stream: str, shard: int, group: str) -> dict[str, Any]:
+        return self._lag_at_generation(stream, shard, group, None)
+
+    def _lag_at_generation(
+        self,
+        stream: str,
+        shard: int,
+        group: str,
+        resource_generation: str | None,
+    ) -> dict[str, Any]:
         group_segment = _segment(group, "consumer group")
-        return self._stream_call(
+        return self.call_at_generation(
+            "streams",
+            "Stream",
             stream,
             shard,
+            resource_generation,
             lambda _route: (
                 "GET",
                 f"/groups/{group_segment}/lag",
@@ -409,6 +422,150 @@ class RegionalStreamClient(RegionalClient):
                 {"x-epoch-read-consistency": "linearizable"},
             ),
         )
+
+    def claim_group(
+        self,
+        stream: str,
+        shard: int,
+        group: str,
+        member_id: str,
+        generation: int,
+        *,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Install one coordinated-session generation as a shard checkpoint fence."""
+        return self._claim_group_at_generation(
+            stream,
+            shard,
+            group,
+            member_id,
+            generation,
+            idempotency_key,
+            None,
+        )
+
+    def _claim_group_at_generation(
+        self,
+        stream: str,
+        shard: int,
+        group: str,
+        member_id: str,
+        generation: int,
+        idempotency_key: str,
+        resource_generation: str | None,
+    ) -> dict[str, Any]:
+        group_segment = _segment(group, "consumer group")
+        _required(member_id, "consumer member")
+        _positive(generation, "consumer group generation")
+        _required(idempotency_key, "idempotency key")
+        return self.call_at_generation(
+            "streams",
+            "Stream",
+            stream,
+            shard,
+            resource_generation,
+            lambda route: (
+                "PUT",
+                f"/groups/{group_segment}/claim",
+                {
+                    "idempotency_key": idempotency_key,
+                    "expected_term": route.term,
+                    "member_id": member_id,
+                    "group_generation": str(generation),
+                    "partition": 0,
+                },
+                None,
+                {},
+            ),
+        )
+
+    def fetch_claimed_group(
+        self,
+        stream: str,
+        shard: int,
+        group: str,
+        member_id: str,
+        generation: int,
+        *,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Fetch only while the exact member and session generation own the shard."""
+        _fetch_limit(limit)
+        group_segment = _segment(group, "consumer group")
+        _required(member_id, "consumer member")
+        _positive(generation, "consumer group generation")
+        return self._stream_call(
+            stream,
+            shard,
+            lambda _route: (
+                "GET",
+                f"/groups/{group_segment}/claimed-records",
+                None,
+                {
+                    "member_id": member_id,
+                    "group_generation": str(generation),
+                    "limit": limit,
+                },
+                {"x-epoch-read-consistency": "linearizable"},
+            ),
+        )
+
+    def claim_consumer_session(
+        self,
+        stream: str,
+        group: str,
+        member_id: str,
+        generation: int,
+        *,
+        idempotency_key_prefix: str,
+    ) -> tuple[int, ...]:
+        """Claim all assigned shards and reject a concurrent coordinator rebalance."""
+        _segment(group, "consumer group")
+        _required(member_id, "consumer member")
+        _positive(generation, "consumer group generation")
+        _required(idempotency_key_prefix, "idempotency key prefix")
+        coordinator = self.discover_route("streams", "Stream", stream, 0)
+        resource_generation = coordinator.resource_generation
+        assigned = _coordinated_assignment(
+            self._consumer_session_at_generation(stream, group, resource_generation),
+            group,
+            member_id,
+            generation,
+        )
+        claims: list[tuple[int, int, str]] = []
+        for shard in assigned:
+            lag = self._lag_at_generation(stream, shard, group, resource_generation)
+            for claim_generation in _claim_generations(lag, generation):
+                key = f"{idempotency_key_prefix}-shard-{shard}-generation-{claim_generation}"
+                if len(key.encode()) > 128:
+                    raise ValueError("derived consumer claim idempotency key exceeds 128 bytes")
+                claims.append((shard, claim_generation, key))
+        for shard, claim_generation, key in claims:
+            result = self._claim_group_at_generation(
+                stream,
+                shard,
+                group,
+                member_id,
+                claim_generation,
+                key,
+                resource_generation,
+            )
+            receipt = result.get("receipt") if isinstance(result, dict) else None
+            if (
+                not isinstance(receipt, dict)
+                or receipt.get("outcome") != "applied"
+                or receipt.get("session_fenced") is not True
+            ):
+                raise ValueError(f"shard {shard} rejected the coordinated consumer claim")
+        revalidated = _coordinated_assignment(
+            self._consumer_session_at_generation(stream, group, resource_generation),
+            group,
+            member_id,
+            generation,
+        )
+        if revalidated != assigned:
+            raise ValueError("consumer session rebalanced while shard claims were being installed")
+        return assigned
 
     def join_consumer_session(
         self,
@@ -495,10 +652,18 @@ class RegionalStreamClient(RegionalClient):
 
     def consumer_session(self, stream: str, group: str) -> dict[str, Any]:
         """Return linearizable membership, generation, deadlines, and assignments."""
+        return self._consumer_session_at_generation(stream, group, None)
+
+    def _consumer_session_at_generation(
+        self, stream: str, group: str, resource_generation: str | None
+    ) -> dict[str, Any]:
         group_segment = _segment(group, "consumer group")
-        return self._stream_call(
+        return self.call_at_generation(
+            "streams",
+            "Stream",
             stream,
             0,
+            resource_generation,
             lambda _route: (
                 "GET",
                 f"/groups/{group_segment}/sessions",
@@ -613,6 +778,63 @@ def _bounded_session_timeout(session_timeout_ms: int) -> None:
             "consumer session timeout must be between "
             f"{_MIN_SESSION_TIMEOUT_MS} and {_MAX_SESSION_TIMEOUT_MS} milliseconds"
         )
+
+
+def _coordinated_assignment(
+    document: dict[str, Any], group: str, member_id: str, generation: int
+) -> tuple[int, ...]:
+    session = document.get("session") if isinstance(document, dict) else None
+    if not isinstance(session, dict):
+        raise ValueError("consumer session response omitted session state")
+    if (
+        session.get("exists") is not True
+        or session.get("group") != group
+        or session.get("group_generation") != str(generation)
+    ):
+        raise ValueError("consumer session generation is absent or fenced")
+    members = session.get("members")
+    if not isinstance(members, list):
+        raise ValueError("consumer session response omitted members")
+    for member in members:
+        if not isinstance(member, dict) or member.get("member_id") != member_id:
+            continue
+        shards = member.get("assigned_shards")
+        if not isinstance(shards, list) or not shards:
+            raise ValueError("consumer member has no assigned shards")
+        if any(
+            isinstance(shard, bool) or not isinstance(shard, int) or not 0 <= shard <= 0xFFFF_FFFF
+            for shard in shards
+        ):
+            raise ValueError("consumer session returned an invalid shard assignment")
+        if shards != sorted(set(shards)):
+            raise ValueError("consumer session returned an invalid shard assignment")
+        return tuple(shards)
+    raise ValueError("consumer member is not active in the requested session generation")
+
+
+def _claim_generations(document: dict[str, Any], target: int) -> tuple[int, ...]:
+    checkpoint = document.get("checkpoint") if isinstance(document, dict) else None
+    if not isinstance(checkpoint, dict):
+        raise ValueError("checkpoint observation is missing")
+    current = 0
+    if checkpoint.get("exists") is True:
+        raw = checkpoint.get("group_generation")
+        if (
+            not isinstance(raw, str)
+            or not raw.isascii()
+            or not raw.isdigit()
+            or not 0 < int(raw) <= (1 << 64) - 1
+            or str(int(raw)) != raw
+        ):
+            raise ValueError("checkpoint generation is invalid")
+        current = int(raw)
+    if current > target:
+        raise ValueError(f"checkpoint generation {current} is ahead of session generation {target}")
+    start = current if current == target else current + 1
+    count = target - start + 1
+    if count > _MAX_CLAIM_TRANSITIONS:
+        raise ValueError(f"claim requires {count} transitions; maximum is {_MAX_CLAIM_TRANSITIONS}")
+    return tuple(range(start, target + 1))
 
 
 def stream_shard_for(partition_value: str, shard_count: int) -> int:

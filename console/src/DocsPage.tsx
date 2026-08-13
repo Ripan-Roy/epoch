@@ -333,10 +333,10 @@ const sdkSurface = [
   },
   {
     area: "Regional Stream",
-    go: "RegionalStreamClient · StreamShardFor · AppendKeyed · Append · EncodeStreamBatch · NewStreamBatchFrame · AppendBatch · Fetch · CommitOffset · Lag · FetchGroup · JoinConsumerSession · HeartbeatConsumerSession · LeaveConsumerSession · MaintainConsumerSession · ConsumerSession · ConfigureRetention · MaintainRetention · Retention",
-    java: "RegionalStreamClient · StreamPartitioner.shardFor · appendKeyed · append · StreamBatchFrame.encode · StreamBatchFrame.compressed · appendBatch · fetch · commitOffset · lag · fetchGroup · joinConsumerSession · heartbeatConsumerSession · leaveConsumerSession · maintainConsumerSession · consumerSession · configureRetention · maintainRetention · retention",
+    go: "RegionalStreamClient · StreamShardFor · AppendKeyed · Append · EncodeStreamBatch · NewStreamBatchFrame · AppendBatch · Fetch · CommitOffset · Lag · FetchGroup · ClaimGroup · FetchClaimedGroup · ClaimConsumerSession · JoinConsumerSession · HeartbeatConsumerSession · LeaveConsumerSession · MaintainConsumerSession · ConsumerSession · ConfigureRetention · MaintainRetention · Retention",
+    java: "RegionalStreamClient · StreamPartitioner.shardFor · appendKeyed · append · StreamBatchFrame.encode · StreamBatchFrame.compressed · appendBatch · fetch · commitOffset · lag · fetchGroup · claimGroup · fetchClaimedGroup · claimConsumerSession · joinConsumerSession · heartbeatConsumerSession · leaveConsumerSession · maintainConsumerSession · consumerSession · configureRetention · maintainRetention · retention",
     python:
-      "RegionalStreamClient · stream_shard_for · append_keyed · append · StreamBatchFrame.encode · StreamBatchFrame.from_compressed · append_batch · fetch · commit_offset · lag · fetch_group · join_consumer_session · heartbeat_consumer_session · leave_consumer_session · maintain_consumer_session · consumer_session · configure_retention · maintain_retention · retention",
+      "RegionalStreamClient · stream_shard_for · append_keyed · append · StreamBatchFrame.encode · StreamBatchFrame.from_compressed · append_batch · fetch · commit_offset · lag · fetch_group · claim_group · fetch_claimed_group · claim_consumer_session · join_consumer_session · heartbeat_consumer_session · leave_consumer_session · maintain_consumer_session · consumer_session · configure_retention · maintain_retention · retention",
   },
   {
     area: "Regional Queue",
@@ -1725,6 +1725,12 @@ export function DocsPage({ section }: DocsPageProps) {
                   title="Replicated membership and assignment"
                   description="Shard-zero authority, bounded join/heartbeat/leave, monotonic generations and deadlines, deterministic assignment, checkpoint recovery, SDK routes, and atomic-handoff non-claims."
                   href={`${repositoryDocsUrl}/adr/0025-stream-consumer-sessions.md`}
+                />
+                <ReferenceCard
+                  eyebrow="FENCED CONSUMPTION"
+                  title="Claim, revalidate, then consume"
+                  description="Monotonic per-shard session claims, offset-preserving owner fences, bounded pull credit, SDK assignment revalidation, recovery evidence, and cross-shard atomicity non-claims."
+                  href={`${repositoryDocsUrl}/adr/0029-stream-session-fenced-consumption.md`}
                 />
                 <ReferenceCard
                   eyebrow="QUEUE TABLET"

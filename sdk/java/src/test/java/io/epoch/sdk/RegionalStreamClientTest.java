@@ -9,6 +9,7 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.math.BigInteger;
 import java.time.Duration;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -197,6 +198,127 @@ final class RegionalStreamClientTest {
     for (int index : List.of(0, 2, 4, 6, 8)) {
       assertEquals(true, leader.requests.get(index).path().endsWith("/shards/0"));
     }
+  }
+
+  @Test
+  void claimsAndRevalidatesAssignedShardsBeforeFencedFetch() throws Exception {
+    JsonNode session =
+        MAPPER.readTree(
+            """
+            {"session":{"exists":true,"group":"billing/eu","shard_count":3,
+             "group_generation":"1","members":[
+               {"member_id":"member-a","assigned_shards":[0,2]}]}}
+            """);
+    JsonNode claim =
+        MAPPER.readTree("{\"receipt\":{\"outcome\":\"applied\",\"session_fenced\":true}}");
+    JsonNode unclaimed = MAPPER.readTree("{\"checkpoint\":{\"exists\":false}}");
+    RecordingRegionalTransport leader =
+        new RecordingRegionalTransport(
+            MAPPER.readTree(
+                """
+                {"resource_generation":"2","tablet_epoch":"4","term":"9","accepts_writes":true}
+                """),
+            List.of(
+                session,
+                unclaimed,
+                unclaimed,
+                claim,
+                claim,
+                session,
+                MAPPER.readTree("{\"records\":[]}")));
+    RegionalStreamClient client =
+        RegionalStreamClient.withTransports(
+            List.of(leader), "secret-token", new RegionalScope("acme", "shop", "dev", "core"));
+
+    assertEquals(
+        List.of(0, 2),
+        client.claimConsumerSession("orders", "billing/eu", "member-a", 1, "claim-cycle-a"));
+    client.fetchClaimedGroup("orders", 2, "billing/eu", "member-a", 1, 25);
+
+    List<Request> requests = leader.requests;
+    assertEquals(true, requests.get(2).path().endsWith("/groups/billing%2Feu/sessions"));
+    assertEquals(true, requests.get(4).path().endsWith("/groups/billing%2Feu/lag"));
+    assertEquals(true, requests.get(6).path().endsWith("/groups/billing%2Feu/lag"));
+    assertEquals(true, requests.get(8).path().endsWith("/groups/billing%2Feu/claim"));
+    assertEquals(true, requests.get(10).path().endsWith("/groups/billing%2Feu/claim"));
+    assertEquals(true, requests.get(12).path().endsWith("/groups/billing%2Feu/sessions"));
+    assertEquals(true, requests.get(14).path().endsWith("/groups/billing%2Feu/claimed-records"));
+    assertEquals(
+        "claim-cycle-a-shard-0-generation-1",
+        requests.get(8).body().path("idempotency_key").asText());
+    assertEquals("member-a", requests.get(14).query().get("member_id"));
+    assertEquals("1", requests.get(14).query().get("group_generation"));
+    assertEquals(25, requests.get(14).query().get("limit"));
+  }
+
+  @Test
+  void claimConsumerSessionBridgesAnOlderCheckpointGeneration() throws Exception {
+    JsonNode session =
+        MAPPER.readTree(
+            """
+            {"session":{"exists":true,"group":"billing","shard_count":1,
+             "group_generation":"3","members":[
+               {"member_id":"member-a","assigned_shards":[0]}]}}
+            """);
+    JsonNode lag =
+        MAPPER.readTree(
+            """
+            {"checkpoint":{"exists":true,"group_generation":"1"}}
+            """);
+    JsonNode claim =
+        MAPPER.readTree("{\"receipt\":{\"outcome\":\"applied\",\"session_fenced\":true}}");
+    RecordingRegionalTransport leader =
+        new RecordingRegionalTransport(
+            MAPPER.readTree(
+                """
+                {"resource_generation":"2","tablet_epoch":"4","term":"9","accepts_writes":true}
+                """),
+            List.of(session, lag, claim, claim, session));
+    RegionalStreamClient client =
+        RegionalStreamClient.withTransports(
+            List.of(leader), "secret-token", new RegionalScope("acme", "shop", "dev", "core"));
+
+    assertEquals(
+        List.of(0), client.claimConsumerSession("orders", "billing", "member-a", 3, "bridge-a"));
+    assertEquals("2", leader.requests.get(6).body().path("group_generation").asText());
+    assertEquals("3", leader.requests.get(8).body().path("group_generation").asText());
+    assertEquals(
+        "bridge-a-shard-0-generation-2",
+        leader.requests.get(6).body().path("idempotency_key").asText());
+    assertEquals(
+        "bridge-a-shard-0-generation-3",
+        leader.requests.get(8).body().path("idempotency_key").asText());
+  }
+
+  @Test
+  void consumerFenceIsPreservedWithoutRoutingRediscovery() throws Exception {
+    EpochApiException fenced =
+        new EpochApiException(
+            409,
+            "fenced",
+            "consumer member or session generation is fenced",
+            MAPPER.readTree(
+                """
+                {"error":{"code":"fenced","outcome_certainty":"definite_not_committed"}}
+                """));
+    RecordingRegionalTransport leader =
+        new RecordingRegionalTransport(
+            MAPPER.readTree(
+                """
+                {"resource_generation":"2","tablet_epoch":"4","term":"9","accepts_writes":true}
+                """),
+            fenced);
+    RegionalStreamClient client =
+        RegionalStreamClient.withTransports(
+            List.of(leader), "secret-token", new RegionalScope("acme", "shop", "dev", "core"));
+
+    EpochApiException failure =
+        assertThrows(
+            EpochApiException.class,
+            () -> client.fetchClaimedGroup("orders", 0, "billing", "member-old", 2, 1));
+
+    assertEquals(fenced, failure);
+    assertEquals(2, leader.requests.size());
   }
 
   @Test
@@ -444,20 +566,29 @@ final class RegionalStreamClientTest {
     private final Map<String, JsonNode> routes;
     private final List<Request> requests = new ArrayList<>();
     private IOException nextOperationError;
+    private final ArrayDeque<JsonNode> operationResponses;
 
     private RecordingRegionalTransport(JsonNode route) {
-      this(route, null);
+      this(route, (IOException) null);
     }
 
     private RecordingRegionalTransport(Map<String, JsonNode> routes) {
       this.route = MAPPER.nullNode();
       this.routes = Map.copyOf(routes);
+      this.operationResponses = new ArrayDeque<>();
     }
 
     private RecordingRegionalTransport(JsonNode route, IOException nextOperationError) {
       this.route = route;
       this.routes = Map.of();
       this.nextOperationError = nextOperationError;
+      this.operationResponses = new ArrayDeque<>();
+    }
+
+    private RecordingRegionalTransport(JsonNode route, List<JsonNode> operationResponses) {
+      this.route = route;
+      this.routes = Map.of();
+      this.operationResponses = new ArrayDeque<>(operationResponses);
     }
 
     @Override
@@ -482,6 +613,9 @@ final class RegionalStreamClientTest {
         IOException error = nextOperationError;
         nextOperationError = null;
         throw error;
+      }
+      if (!operationResponses.isEmpty()) {
+        return operationResponses.removeFirst();
       }
       return MAPPER
           .createObjectNode()

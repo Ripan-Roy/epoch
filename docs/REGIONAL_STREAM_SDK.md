@@ -95,6 +95,9 @@ available for tests in all three SDKs.
 | Commit or reset checkpoint | `CommitOffset` | `commitOffset` | `commit_offset` |
 | Observe checkpoint and lag | `Lag` | `lag` | `lag` |
 | Fetch from checkpoint | `FetchGroup` | `fetchGroup` | `fetch_group` |
+| Claim one shard fence | `ClaimGroup` | `claimGroup` | `claim_group` |
+| Fetch behind exact claim | `FetchClaimedGroup` | `fetchClaimedGroup` | `fetch_claimed_group` |
+| Claim and revalidate assignment | `ClaimConsumerSession` | `claimConsumerSession` | `claim_consumer_session` |
 | Join/renew consumer session | `JoinConsumerSession` | `joinConsumerSession` | `join_consumer_session` |
 | Heartbeat session member | `HeartbeatConsumerSession` | `heartbeatConsumerSession` | `heartbeat_consumer_session` |
 | Leave consumer session | `LeaveConsumerSession` | `leaveConsumerSession` | `leave_consumer_session` |
@@ -189,12 +192,23 @@ while `MaintainConsumerSession`, `maintainConsumerSession`, and
 `maintain_consumer_session` provide an explicit sweep for idle groups. There is
 no background timer in this alpha.
 
-Membership generation and the pre-existing per-shard checkpoint-owner
-generation are separate fences. Assignment tells an application which logical
-shards it should process; the application must still perform an explicit
-checkpoint handoff on each shard and stop processing revoked assignments. This
-release does not claim atomic assignment-plus-offset commit, cooperative revoke
-acknowledgement, or exactly-once processing.
+Membership and per-shard checkpoint ownership remain separate replicated
+states, but the SDKs provide an offset-preserving claim–revalidate handoff. The
+resource helper pins resource generation, verifies the exact member,
+generation, and sorted assignment on shard 0, reads every assigned checkpoint,
+plans no more than 4,096 monotonic transitions, claims every shard with
+deterministic idempotency keys, then re-reads shard 0. It returns no assignment
+if a rebalance occurred. Partial claims are safe because they never move the
+next offset; a newer session can advance the fence.
+
+After claiming, use exact-member/generation claimed fetch. Each request is a
+linearizable bounded pull of 1–1,000 records from the durable next offset.
+Process records, then commit with the same member and generation. A stale member
+receives `409 fenced` for fetch and a committed typed rejection for mutation.
+Namespace authorization currently permits a writer to call the low-level
+claim; member-bound identity remains future G5 work. This release does not
+claim atomic assignment-plus-offset commit, cooperative revoke acknowledgement,
+exactly-once processing, or a persistent streaming transport.
 
 Minimal Python lifecycle:
 
@@ -210,6 +224,13 @@ heartbeat = client.heartbeat_consumer_session(
     idempotency_key="billing-heartbeat-worker-a-1",
 )
 observed = client.consumer_session("orders", "billing")
+claimed = client.claim_consumer_session(
+    "orders", "billing", "worker-a", generation,
+    idempotency_key_prefix="billing-claim-worker-a-v1",
+)
+records = client.fetch_claimed_group(
+    "orders", claimed[0], "billing", "worker-a", generation, limit=100,
+)
 left = client.leave_consumer_session(
     "orders", "billing", "worker-a", generation,
     idempotency_key="billing-leave-worker-a",
@@ -220,8 +241,9 @@ left = client.leave_consumer_session(
 
 The complete examples select a shard from `customer-0`, perform a keyed append,
 repeat the exact append, submit a two-record gzip batch, fetch by offset, fetch from a group checkpoint, commit
-that checkpoint, observe lag, join/heartbeat/observe/leave a coordinated
-consumer session, configure a combined retention policy, commit idle
+that checkpoint, observe lag, join/heartbeat/observe, claim the assignment,
+perform an exact-member/generation bounded fetch, and leave a coordinated
+consumer session, then configure a combined retention policy, commit idle
 maintenance, and inspect retention:
 
 - [Go regional quickstart](../console/src/quickstarts/regional/quickstart.go)
@@ -330,9 +352,11 @@ silently downgrades these calls to a stale follower.
 - Authentication, scope denial, validation, idempotency conflict, and committed
   business rejection are definitive and are not rewritten as availability
   failures.
-- `not_leader`, `fenced`, `route_not_found`, `route_unavailable`,
-  `read_barrier_timeout`, and retryable transport/server failures allow one
-  rediscovery cycle.
+- `not_leader`, `route_not_found`, `route_unavailable`,
+  `read_barrier_timeout`, retryable transport/server failures, and a routing
+  `fenced` envelope with top-level `retryable: true` allow one rediscovery
+  cycle. An application `409 fenced` such as a stale consumer member/generation
+  is returned unchanged and never rewritten as `unavailable`.
 - A timeout can leave a mutation outcome unknown. Retry the same semantic
   request with the same idempotency key.
 - Keyed append treats a resource-generation change between partition discovery

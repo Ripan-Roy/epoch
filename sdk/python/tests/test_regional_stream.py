@@ -15,6 +15,7 @@ from epoch_sdk import (
     StreamRetentionPolicy,
     stream_shard_for,
 )
+from epoch_sdk.regional import _claim_generations
 
 
 class RegionalFakeTransport:
@@ -23,11 +24,13 @@ class RegionalFakeTransport:
         route: dict[str, Any],
         operation_errors: list[EpochAPIError] | None = None,
         routes: dict[str, dict[str, Any]] | None = None,
+        operation_responses: list[dict[str, Any]] | None = None,
     ) -> None:
         self.route = route
         self.routes = dict(routes or {})
         self.requests: list[dict[str, Any]] = []
         self.operation_errors = list(operation_errors or [])
+        self.operation_responses = list(operation_responses or [])
 
     def request(
         self,
@@ -46,6 +49,8 @@ class RegionalFakeTransport:
             return self.routes.get(shard_suffix, self.route)
         if self.operation_errors:
             raise self.operation_errors.pop(0)
+        if self.operation_responses:
+            return self.operation_responses.pop(0)
         return {"state": "committed", "outcome_certainty": "committed"}
 
 
@@ -239,6 +244,119 @@ class RegionalStreamClientTests(unittest.TestCase):
         )
         for index in (0, 2, 4, 6, 8):
             self.assertTrue(self.leader.requests[index]["path"].endswith("/shards/0"))
+
+    def test_claims_and_revalidates_assigned_shards_before_fenced_fetch(self) -> None:
+        session = {
+            "session": {
+                "exists": True,
+                "group": "billing/eu",
+                "shard_count": 3,
+                "group_generation": "1",
+                "members": [{"member_id": "member-a", "assigned_shards": [0, 2]}],
+            }
+        }
+        claim = {"receipt": {"outcome": "applied", "session_fenced": True}}
+        unclaimed = {"checkpoint": {"exists": False}}
+        leader = RegionalFakeTransport(
+            {
+                "resource_generation": "2",
+                "tablet_epoch": "4",
+                "term": "9",
+                "accepts_writes": True,
+            },
+            operation_responses=[
+                session,
+                unclaimed,
+                unclaimed,
+                claim,
+                claim,
+                session,
+                {"records": []},
+            ],
+        )
+        client = RegionalStreamClient.with_transports(
+            [leader],
+            token="secret-token",
+            scope=RegionalScope("acme", "shop", "dev", "core"),
+        )
+
+        self.assertEqual(
+            client.claim_consumer_session(
+                "orders", "billing/eu", "member-a", 1, idempotency_key_prefix="claim-cycle-a"
+            ),
+            (0, 2),
+        )
+        client.fetch_claimed_group("orders", 2, "billing/eu", "member-a", 1, limit=25)
+
+        expected = [
+            (2, "GET", "/groups/billing%2Feu/sessions"),
+            (4, "GET", "/groups/billing%2Feu/lag"),
+            (6, "GET", "/groups/billing%2Feu/lag"),
+            (8, "PUT", "/groups/billing%2Feu/claim"),
+            (10, "PUT", "/groups/billing%2Feu/claim"),
+            (12, "GET", "/groups/billing%2Feu/sessions"),
+            (14, "GET", "/groups/billing%2Feu/claimed-records"),
+        ]
+        for index, method, suffix in expected:
+            request = leader.requests[index]
+            self.assertEqual(request["method"], method)
+            self.assertTrue(request["path"].endswith(suffix))
+        self.assertEqual(
+            leader.requests[8]["body"]["idempotency_key"],
+            "claim-cycle-a-shard-0-generation-1",
+        )
+        self.assertEqual(
+            leader.requests[14]["query"],
+            {"member_id": "member-a", "group_generation": "1", "limit": 25},
+        )
+
+    def test_consumer_claim_planner_bridges_only_bounded_monotonic_generations(self) -> None:
+        self.assertEqual(
+            _claim_generations({"checkpoint": {"exists": True, "group_generation": "1"}}, 3),
+            (2, 3),
+        )
+        self.assertEqual(
+            _claim_generations({"checkpoint": {"exists": True, "group_generation": "3"}}, 3),
+            (3,),
+        )
+        with self.assertRaisesRegex(ValueError, "ahead"):
+            _claim_generations({"checkpoint": {"exists": True, "group_generation": "4"}}, 3)
+        with self.assertRaisesRegex(ValueError, "maximum"):
+            _claim_generations({"checkpoint": {"exists": False}}, 4_097)
+
+    def test_consumer_fence_is_preserved_without_routing_rediscovery(self) -> None:
+        fenced = EpochAPIError(
+            409,
+            "fenced",
+            "consumer member or session generation is fenced",
+            {
+                "error": {
+                    "code": "fenced",
+                    "outcome_certainty": "definite_not_committed",
+                }
+            },
+        )
+        leader = RegionalFakeTransport(
+            {
+                "resource_generation": "2",
+                "tablet_epoch": "4",
+                "term": "9",
+                "accepts_writes": True,
+            },
+            [fenced],
+        )
+        client = RegionalStreamClient.with_transports(
+            [leader],
+            token="secret-token",
+            scope=RegionalScope("acme", "shop", "dev", "core"),
+        )
+
+        with self.assertRaises(EpochAPIError) as caught:
+            client.fetch_claimed_group("orders", 0, "billing", "member-old", 2, limit=1)
+
+        self.assertIs(caught.exception, fenced)
+        self.assertEqual((caught.exception.status, caught.exception.code), (409, "fenced"))
+        self.assertEqual(len(leader.requests), 2)
 
     def test_canonical_gzip_batch_keeps_exact_frame_and_identity_across_retry(self) -> None:
         leader = RegionalFakeTransport(

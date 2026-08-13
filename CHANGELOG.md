@@ -8,6 +8,25 @@ notes explicitly list additional verified artifacts.
 
 ### Added
 
+- Session-fenced Stream consumption through canonical command v6 and native
+  snapshot v3. Per-shard claims preserve the durable next offset, accept only
+  bounded monotonic generations, and require exact member/generation ownership
+  for claimed fetch plus later commit/reset.
+- Go, Java, and Python expose low-level claim/fetch operations and a
+  resource-level claim–revalidate helper that pins resource generation, plans
+  every bounded bridge before mutation, uses deterministic per-generation
+  idempotency keys, and detects concurrent rebalances. Executable Pages
+  quickstarts and the real three-shard Python recovery campaign exercise the
+  complete path.
+- Regional SDK rediscovery now distinguishes an explicitly retryable routing
+  fence from a definitive Stream consumer-session fence, preserving stale
+  member/generation failures as typed `409 fenced` responses in all three
+  languages.
+- ADR-0029 and aligned PRD/API/architecture/semantics/runtime/testing/SDK/
+  traceability/checklist documentation describe at-least-once behavior,
+  namespace-level authorization, and the atomic-handoff/streaming/transaction
+  non-claims.
+
 - Automatic node-local consensus checkpoints for regional catalog, Stream,
   Queue, Cache, and Event Bus groups. Every healthy voter uses an
   actor-serialized applied-growth threshold, skips transient pending Raft work,

@@ -671,6 +671,17 @@ closed. Offset handoff, revoke acknowledgement, and transactions must state
 their cross-shard atomicity explicitly; a client-local member list is not a
 consumer-group implementation.
 
+The first native handoff increment must let an assigned member install the
+coordinator generation as an offset-preserving owner fence on every assigned
+shard, fetch only while that exact member and generation still own the shard,
+and commit only behind the same fence. Because shards are independent
+consensus groups, the client must pin resource generation, bound any monotonic
+generation bridge, and revalidate the coordinator after claims. Partial claims
+must never move an offset or be described as an atomic cross-shard handoff.
+Member-bound authorization, cooperative revoke acknowledgement, persistent
+streaming transport, and atomic offset-plus-output transactions remain
+separate requirements.
+
 ### 10.3 Work Queue
 
 | ID | Requirement | Priority |

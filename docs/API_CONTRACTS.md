@@ -613,7 +613,7 @@ GET /v1/organizations/{org}/projects/{project}/environments/{environment}/namesp
 ```
 
 `GET` on the shard base performs discovery. The current Go, Java, and Python
-SDK contract maps `records`, `groups/{group}/{offsets|lag|records}`,
+SDK contract maps `records`, `groups/{group}/{offsets|lag|records|claim|claimed-records}`,
 shard-zero `groups/{group}/sessions[...]`, and `retention[/maintenance]` to the
 replicated tablet owned by the selected logical shard.
 Retention reads use the same default leader ReadIndex barrier. The stable
@@ -770,10 +770,12 @@ generation/tablet epoch, use the discovered term for mutations, and request
 `linearizable` for profile reads. Stream append/checkpoint and every Queue,
 Cache, and Event Bus mutation require a caller-owned idempotency key. Event Bus
 settlement also carries the exact opaque lease token returned by acquisition.
-Retryable transport, leader, fence,
-route, or barrier outcomes permit at most one rediscovery, always with the same
-key; definitive validation, authorization, idempotency, or committed business
-outcomes return immediately.
+Retryable transport, leader, route-fence, route, or barrier outcomes permit at
+most one rediscovery, always with the same key. A route fence is identified by
+the regional error envelope's explicit top-level `retryable: true`; an
+application-level `409 fenced`, including a stale Stream consumer member or
+generation, returns immediately. Definitive validation, authorization,
+idempotency, or committed business outcomes also return immediately.
 
 Stream keyed append adds one resource-wide discovery step. Once it selects a
 shard, bounded rediscovery is pinned to that shard and the originally observed
@@ -922,6 +924,38 @@ v3 checkpoint-owner generation. Regional leader-owned deadline maintenance now
 expires idle members; cooperative revoke, server-push consumption, and
 transactional offset handoff remain open. See
 [ADR-0025](adr/0025-stream-consumer-sessions.md).
+
+Canonical Stream command v6 adds an offset-preserving per-shard claim:
+
+```text
+PUT /groups/{group}/claim
+GET /groups/{group}/claimed-records?member_id={member}&group_generation={generation}&limit={1..1000}
+```
+
+The claim body carries `idempotency_key`, discovered `expected_term`,
+`member_id`, positive decimal `group_generation`, and physical `partition: 0`.
+An unowned checkpoint accepts generation 1; an existing checkpoint accepts its
+current or exactly next generation. A successful claim returns `mode: claim`,
+unchanged `previous_offset`/`committed_offset`, and
+`session_fenced: true`. Lower, skipped, and conflicting claims are committed
+typed rejections. Snapshot v3 persists the fence and still decodes legitimate
+v1/v2 images.
+
+Claimed fetch is a linearizable bounded pull. It validates the exact stored
+member/generation and reads its checkpoint plus records under one profile read
+guard. A mismatch returns `409 fenced` and
+`outcome_certainty: definite_not_committed`; an unavailable profile remains
+`503 profile_unavailable`. Once claimed, a higher-generation commit/reset is a
+`session_claim_required` rejection until that generation is claimed.
+
+First-party SDK resource helpers pin the shard-zero resource generation, read
+the coordinator and every assigned checkpoint, plan at most 4,096 monotonic
+claim transitions before writing, use deterministic per-shard/per-generation
+idempotency keys, and re-read shard zero afterward. Partial claims preserve
+offsets and do not prove assignment. Low-level claims use namespace
+`data.write`; claimed reads use `data.read`. Bootstrap authorization is not yet
+member-bound. See
+[ADR-0029](adr/0029-stream-session-fenced-consumption.md).
 A bounded unresolved wait returns `202`, preserving local `unknown` versus
 `pending` state while keeping outcome certainty unknown. Exact retries return
 the original offset; changed input under the same key is a conflict, and every

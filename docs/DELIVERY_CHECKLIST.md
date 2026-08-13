@@ -2,7 +2,7 @@
 
 **Last reviewed:** 13 August 2026
 **Current release:** `v0.1.0-alpha.3`
-**Current core target:** Leader-owned automatic regional maintenance
+**Current core target:** Session-fenced Stream consumption
 
 This is the operational checklist for turning PRD scope into verified,
 releasable increments. [PRD.md](PRD.md) owns product scope,
@@ -73,7 +73,7 @@ complete.
 | MT-11 | Reconcile hosted desired state through the Rust authority | Go control plane | MT-06, MT-10 | 🟡 | Real authenticated gRPC lifecycle, transactional bbolt desired/status/token/tombstone state, exact replay and generation continuity across restart, corruption/version/exclusive-owner rejection, complete topology inventory, incremental capacity admission, generation-fenced status, and Go-to-Rust container reconciliation pass locally; multi-instance consistency, transactional reservations, OIDC/mTLS, and replicated policy remain open |
 | MT-12 | Show achieved placement and risk without overclaiming | TypeScript console | MT-10, MT-11 | 🟡 | The console reads only the Go BFF with a session-only interactive credential, preserves decimal 64-bit IDs, distinguishes pending/ready/degraded/failed, and lists observed voters/leaders plus consistent configured zone/class/group-capacity evidence and remaining server-identity/rack/dynamic-membership non-claims; OIDC exchange and browser visual/accessibility automation remain open |
 | MT-13 | Real-process and container fault campaign | Test infrastructure | MT-06–MT-12 | 🟡 | Three policy-protected regional containers cover topology/capacity, catalog plus seven tablets/four profiles including a three-shard Stream, authenticated Go recovery, and separate active-leader losses followed by real Python Stream sessions plus Stream, Queue, Cache, and Event Bus lifecycles. The local campaign now proves all five maintenance classes without client-triggered sweeps, automatic checkpoint/compaction on all 24 voter/group copies, voter catch-up, all-node `SIGKILL`, same-volume reopen, and digest convergence; this increment's protected-branch CI and broader crash/I/O/auth-abuse faults remain |
-| MT-14 | Documentation, traceability, changelog, and release notes | Cross-cutting | MT-13 | 🟡 | ADR-0010–0028, architecture, security, APIs, testing, development, SDK/runtime guides, traceability, checklist, published docs content, and `Unreleased` notes describe the implemented boundaries and non-claims; final version notes and release follow merge and green `main` |
+| MT-14 | Documentation, traceability, changelog, and release notes | Cross-cutting | MT-13 | 🟡 | ADR-0010–0029, architecture, security, APIs, testing, development, SDK/runtime guides, traceability, checklist, published docs content, and `Unreleased` notes describe the implemented boundaries and non-claims; final version notes and release follow merge and green `main` |
 
 ## Current placement delivery: topology-aware fixed-voter admission
 
@@ -295,15 +295,28 @@ complete.
 
 | ID | Checklist item | Boundary | State | Evidence / acceptance |
 |---|---|---|---:|---|
-| AC-01 | Freeze local ownership and non-claims | Semantics + ADR | 🟡 | ADR-0028 distinguishes every-voter local recovery from leader-owned replicated timers and excludes backup/PITR, cluster-wide barriers, byte/time policy, and production I/O budgeting; protected review is pending |
-| AC-02 | Make eligibility and creation actor-atomic | Rust consensus actor | 🟡 | `checkpoint_if_applied_growth` validates a nonzero threshold, skips pending `Ready` work, and conditionally creates one native checkpoint as one actor command; focused real-voter tests pass locally |
-| AC-03 | Schedule catalog and every profile group | Rust regional runtime | 🟡 | Configurable 1–600,000 ms interval and nonzero applied-entry threshold scan catalog plus all materialized routes on every voter; defaults are 1,000 ms and 1,024 entries |
-| AC-04 | Preserve durable ordering and failure semantics | Rust consensus + storage | 🟡 | The scheduler reuses EPSN v2 capture, fsync-before-install, atomic kind-4 EPRS replacement, native restore, and supervised fatal storage/profile failures without changing canonical formats |
-| AC-05 | Expose authorized operational evidence | Rust topology | 🟡 | `checkpoints` reports configuration, cumulative local counters, last error/pass, and decimal-string applied/checkpoint/retained-first boundaries for each hosted group |
-| AC-06 | Prove all-voter compaction, failover, and reopen | Compose integration | 🟡 | The local campaign observes creation and prefix compaction on all 24 voter/group copies, then proves sequential leader catch-up and durable boundaries after all-node `SIGKILL`/same-volume reopen |
-| AC-07 | Align contracts, traceability, changelog, and Pages | Docs + console | 🟡 | PRD, ADR-0028, API/checkpoint/runtime/architecture/semantics/plan/traceability/checklist/changelog and public docs content describe the implementation and exact non-claims locally; publication is pending |
-| AC-08 | Pass complete local quality gates | Quality | 🟡 | `make check`, `make build`, focused node/consensus/topology tests, all-target Clippy, docs-only bundle assertions, Compose validation, and the final rebuilt-image regional Docker campaign pass locally; protected execution is pending |
-| AC-09 | Pass protected pull-request and exact-main evidence | GitHub | ⬜ | Feature PR, merge SHA, exact-main CI, main-only Pages, and live-bundle verification are pending |
+| AC-01 | Freeze local ownership and non-claims | Semantics + ADR | ✅ | ADR-0028 distinguishes every-voter local recovery from leader-owned replicated timers and excludes backup/PITR, cluster-wide barriers, byte/time policy, and production I/O budgeting; accepted through PR #67 |
+| AC-02 | Make eligibility and creation actor-atomic | Rust consensus actor | ✅ | `checkpoint_if_applied_growth` validates a nonzero threshold, skips pending `Ready` work, and conditionally creates one native checkpoint as one actor command |
+| AC-03 | Schedule catalog and every profile group | Rust regional runtime | ✅ | Configurable 1–600,000 ms interval and nonzero applied-entry threshold scan catalog plus all materialized routes on every voter; defaults are 1,000 ms and 1,024 entries |
+| AC-04 | Preserve durable ordering and failure semantics | Rust consensus + storage | ✅ | The scheduler reuses EPSN v2 capture, fsync-before-install, atomic kind-4 EPRS replacement, native restore, and supervised fatal storage/profile failures without changing canonical formats |
+| AC-05 | Expose authorized operational evidence | Rust topology | ✅ | `checkpoints` reports configuration, cumulative local counters, last error/pass, and decimal-string applied/checkpoint/retained-first boundaries for each hosted group |
+| AC-06 | Prove all-voter compaction, failover, and reopen | Compose integration | ✅ | Exact-main CI observes creation and prefix compaction on all 24 voter/group copies, then proves sequential leader catch-up and durable boundaries after all-node `SIGKILL`/same-volume reopen |
+| AC-07 | Align contracts, traceability, changelog, and Pages | Docs + console | ✅ | PRD, ADR-0028, API/checkpoint/runtime/architecture/semantics/plan/traceability/checklist/changelog and public docs content are published |
+| AC-08 | Pass complete local quality gates | Quality | ✅ | `make check`, `make build`, focused node/consensus/topology tests, all-target Clippy, docs-only bundle assertions, Compose validation, and the rebuilt-image regional Docker campaign passed locally and in exact-main CI `31717722384` |
+| AC-09 | Pass protected pull-request and exact-main evidence | GitHub | ✅ | [PR #67](https://github.com/Ripan-Roy/epoch/pull/67) squash-merged as `3f41804`; exact-main CI `31717722384`, main-only Pages `31717722351`, and live-bundle verification passed |
+
+## Current Stream delivery: session-fenced consumption
+
+| ID | Checklist item | Boundary | State | Evidence / acceptance |
+|---|---|---|---:|---|
+| FC-01 | Freeze claim, fetch, retry, and non-claim semantics | Semantics + ADR | 🟡 | ADR-0029 defines offset preservation, monotonic claim bounds, exact-member/generation fetch, SDK revalidation, namespace auth, at-least-once behavior, and atomic/streaming non-claims locally; protected review pending |
+| FC-02 | Preserve historical command and snapshot compatibility | Rust tablet | 🟡 | Public goldens pin v6 claim; v1–v5 commands remain unchanged; snapshot v3 records the fence, accepts legitimate v1/v2 images, and rejects a v3 fence mislabeled as legacy |
+| FC-03 | Replicate an offset-preserving owner fence | Rust tablet | 🟡 | Deterministic tests cover unowned/current/next generations, stale/conflicting/gap rejection, exact retry, unchanged next offset, replacement fencing, and state digest convergence |
+| FC-04 | Expose strict claim and claimed-fetch routes | Rust node + regional router | 🟡 | Direct and authenticated regional v1 routes separate `data.write` claim from `data.read` linearizable fetch; wrong owner/generation returns typed 409 and profile failure remains 503 |
+| FC-05 | Implement one bounded protocol in three SDKs | Go + Java + Python | 🟡 | All SDKs expose low-level claim/fetch and a resource helper that pins generation, validates sorted assignment, pre-plans at most 4,096 transitions, derives bounded keys, and revalidates shard 0 |
+| FC-06 | Prove real voter recovery and stale fencing | Rust + Compose | 🟡 | Real three-voter tests converge and reopen the fence; the rebuilt Python/Compose campaign locally claims all three shards after leader loss, preserves typed stale-fetch fencing, catches up the old voter, and repeats after all-node reopen; protected CI pending |
+| FC-07 | Publish executable end-to-end documentation | Docs + Pages | 🟡 | Go/Java/Python quickstarts now join, claim, fenced-fetch, and leave; PRD/API/runtime/SDK/semantics/testing/traceability/changelog/ADR/console are aligned locally; Pages pending |
+| FC-08 | Pass local and protected quality evidence | Quality + GitHub | 🟡 | `make check`, `make build`, all-target Clippy/Rustdoc, exact displayed quickstarts, docs-only Pages assertions, and the rebuilt regional Docker campaign pass locally; feature PR, exact-main CI, main-only Pages, and live-bundle verification remain pending |
 
 ## Current security delivery: bootstrap trust baseline
 

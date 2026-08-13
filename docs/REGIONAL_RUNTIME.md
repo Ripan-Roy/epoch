@@ -249,9 +249,11 @@ downgrade to stale reads.
 The current SDK methods cover keyed and explicit-shard single-record append,
 bounded offset fetch, per-shard checkpoint commit/reset, lag, shard-zero
 join/heartbeat/leave/expiry-maintenance and assignment observation, retention,
-and fetch from the durable checkpoint. Session assignment is resource-wide;
-its generation is not atomically coupled to each shard's checkpoint-owner
-generation. The complete executable Go, Java, and Python examples plus setup
+fetch from the durable checkpoint, per-shard session claim, exact-claim fetch,
+and a resource-level bounded claim–revalidate helper. The helper pins resource
+generation and returns no assignment after a concurrent rebalance; claims
+preserve offsets but are not an atomic cross-shard transaction. The complete
+executable Go, Java, and Python examples plus setup
 commands are in [Regional Stream SDK](REGIONAL_STREAM_SDK.md) and embedded on
 the published documentation page.
 

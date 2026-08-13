@@ -510,6 +510,19 @@ generation on each shard; applications must stop revoked work and hand off
 offsets explicitly. See
 [ADR-0025](adr/0025-stream-consumer-sessions.md).
 
+Command v6 supplies the first offset-preserving handoff primitive. A `claim`
+installs an exact session member/generation in one shard without changing its
+durable next offset. An unowned shard starts at generation 1; an existing
+owner accepts the current or exactly next generation, never an arbitrary jump.
+Once session-fenced, fetch, commit, and reset require the exact member and
+generation. The first-party SDKs pin resource generation, read every assigned
+checkpoint, bridge at most 4,096 missing generations with deterministic
+per-shard keys, claim the shards, and re-read shard 0 before returning the
+assignment. A rebalance can leave safe partial claims but returns no usable
+assignment; this remains at-least-once bounded pull rather than an atomic
+cross-shard transaction or streaming transport. See
+[ADR-0029](adr/0029-stream-session-fenced-consumption.md).
+
 Regional Queue, Cache, and Event Bus timers follow the same authority rule.
 Only the current Raft leader proposes an existing canonical maintenance command
 at the exact earliest replicated deadline. Reads remain pure, retries use

@@ -86,6 +86,12 @@ public final class RegionalQuickstart {
             1,
             "docs-java-session-heartbeat-v1");
     JsonNode session = client.consumerSession("orders", "docs-java-session");
+    List<Integer> claimedShards =
+        client.claimConsumerSession(
+            "orders", "docs-java-session", "docs-java-worker", 1, "docs-java-session-claim-v1");
+    JsonNode claimedRecords =
+        client.fetchClaimedGroup(
+            "orders", claimedShards.getFirst(), "docs-java-session", "docs-java-worker", 1, 100);
     JsonNode left =
         client.leaveConsumerSession(
             "orders",
@@ -118,6 +124,8 @@ public final class RegionalQuickstart {
     output.set("session_join", joined);
     output.set("session_heartbeat", heartbeat);
     output.set("session", session);
+    output.set("claimed_shards", MAPPER.valueToTree(claimedShards));
+    output.set("claimed_records", claimedRecords);
     output.set("session_leave", left);
     output.set("retention_configure", configured);
     output.set("retention_maintenance", maintained);

@@ -14,10 +14,11 @@ import (
 )
 
 type regionalFakeTransport struct {
-	route           Document
-	routes          map[string]Document
-	requests        []Request
-	operationErrors []error
+	route              Document
+	routes             map[string]Document
+	requests           []Request
+	operationErrors    []error
+	operationResponses []Document
 }
 
 func (transport *regionalFakeTransport) Do(_ context.Context, request Request, result any) error {
@@ -35,7 +36,12 @@ func (transport *regionalFakeTransport) Do(_ context.Context, request Request, r
 		return err
 	}
 	if !isDiscovery {
-		response = Document{"state": "committed", "outcome_certainty": "committed"}
+		if len(transport.operationResponses) > 0 {
+			response = transport.operationResponses[0]
+			transport.operationResponses = transport.operationResponses[1:]
+		} else {
+			response = Document{"state": "committed", "outcome_certainty": "committed"}
+		}
 	}
 	payload, err := json.Marshal(response)
 	if err != nil {
@@ -369,6 +375,134 @@ func TestRegionalStreamClientBuildsCoordinatedConsumerSessionContracts(t *testin
 		if want.method == "GET" && request.Headers[regionalReadHeader] != "linearizable" {
 			t.Fatalf("session observation must be linearizable: %#v", request)
 		}
+	}
+}
+
+func TestRegionalStreamClientClaimsAndRevalidatesAssignedShardsBeforeFencedFetch(t *testing.T) {
+	session := Document{"session": Document{
+		"exists": true, "group": "billing/eu", "shard_count": float64(3),
+		"group_generation": "1", "members": []any{
+			map[string]any{"member_id": "member-a", "assigned_shards": []any{float64(0), float64(2)}},
+		},
+	}}
+	claim := Document{"receipt": Document{"outcome": "applied", "session_fenced": true}}
+	unclaimed := Document{"checkpoint": Document{"exists": false}}
+	leader := &regionalFakeTransport{
+		route:              Document{"resource_generation": "2", "tablet_epoch": "4", "term": "9", "accepts_writes": true},
+		operationResponses: []Document{session, unclaimed, unclaimed, claim, claim, session, Document{"records": []any{}}},
+	}
+	client, err := NewRegionalStreamClientWithTransports(
+		[]Transport{leader}, "secret-token",
+		RegionalScope{Organization: "acme", Project: "shop", Environment: "dev", Namespace: "core"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	shards, err := client.ClaimConsumerSession(
+		context.Background(), "orders", "billing/eu", "member-a", 1, "claim-cycle-a",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shards) != 2 || shards[0] != 0 || shards[1] != 2 {
+		t.Fatalf("unexpected claimed assignment: %v", shards)
+	}
+	if _, err := client.FetchClaimedGroup(
+		context.Background(), "orders", 2, "billing/eu", "member-a", 1, 25,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	wants := []struct {
+		index  int
+		method string
+		suffix string
+	}{
+		{2, "GET", "/groups/billing%2Feu/sessions"},
+		{4, "GET", "/groups/billing%2Feu/lag"},
+		{6, "GET", "/groups/billing%2Feu/lag"},
+		{8, "PUT", "/groups/billing%2Feu/claim"},
+		{10, "PUT", "/groups/billing%2Feu/claim"},
+		{12, "GET", "/groups/billing%2Feu/sessions"},
+		{14, "GET", "/groups/billing%2Feu/claimed-records"},
+	}
+	for _, want := range wants {
+		request := leader.requests[want.index]
+		if request.Method != want.method || !strings.HasSuffix(request.Path, want.suffix) {
+			t.Fatalf("unexpected fenced-consumption request %d: %#v", want.index, request)
+		}
+	}
+	if leader.requests[8].Body.(struct {
+		IdempotencyKey string `json:"idempotency_key"`
+		ExpectedTerm   string `json:"expected_term"`
+		MemberID       string `json:"member_id"`
+		Generation     string `json:"group_generation"`
+		Partition      uint32 `json:"partition"`
+	}).IdempotencyKey != "claim-cycle-a-shard-0-generation-1" {
+		t.Fatal("claim must derive a stable per-shard idempotency key")
+	}
+	fetch := leader.requests[14]
+	if fetch.Query.Get("member_id") != "member-a" || fetch.Query.Get("group_generation") != "1" || fetch.Query.Get("limit") != "25" {
+		t.Fatalf("unexpected claimed fetch query: %v", fetch.Query)
+	}
+}
+
+func TestConsumerClaimPlannerBridgesOnlyBoundedMonotonicGenerations(t *testing.T) {
+	bridged, err := claimGenerations(Document{"checkpoint": Document{
+		"exists": true, "group_generation": "1",
+	}}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bridged) != 2 || bridged[0] != 2 || bridged[1] != 3 {
+		t.Fatalf("unexpected generation bridge: %v", bridged)
+	}
+	retry, err := claimGenerations(Document{"checkpoint": Document{
+		"exists": true, "group_generation": "3",
+	}}, 3)
+	if err != nil || len(retry) != 1 || retry[0] != 3 {
+		t.Fatalf("exact generation must be reclaimed idempotently: %v %v", retry, err)
+	}
+	if _, err := claimGenerations(Document{"checkpoint": Document{
+		"exists": true, "group_generation": "4",
+	}}, 3); err == nil {
+		t.Fatal("checkpoint ahead of the coordinator must fail closed")
+	}
+	if _, err := claimGenerations(Document{"checkpoint": Document{"exists": false}}, 4_097); err == nil {
+		t.Fatal("unbounded generation bridge must fail closed")
+	}
+}
+
+func TestRegionalStreamClientPreservesConsumerFenceWithoutRoutingRediscovery(t *testing.T) {
+	fenced := &APIError{
+		StatusCode: 409,
+		Code:       "fenced",
+		Detail:     "consumer member or session generation is fenced",
+		Body:       json.RawMessage(`{"error":{"code":"fenced","outcome_certainty":"definite_not_committed"}}`),
+	}
+	leader := &regionalFakeTransport{
+		route: Document{
+			"resource_generation": "2", "tablet_epoch": "4", "term": "9", "accepts_writes": true,
+		},
+		operationErrors: []error{fenced},
+	}
+	client, err := NewRegionalStreamClientWithTransports(
+		[]Transport{leader}, "secret-token",
+		RegionalScope{Organization: "acme", Project: "shop", Environment: "dev", Namespace: "core"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = client.FetchClaimedGroup(
+		context.Background(), "orders", 0, "billing", "member-old", 2, 1,
+	)
+	if !errors.Is(err, fenced) {
+		t.Fatalf("consumer fence must be preserved, got %v", err)
+	}
+	if len(leader.requests) != 2 {
+		t.Fatalf("consumer fence must not trigger route rediscovery: %#v", leader.requests)
 	}
 }
 

@@ -1077,6 +1077,30 @@ mod tests {
         .expect("response should be JSON")
     }
 
+    async fn assert_unclaimed_native_stream_fetch_is_fenced(router: &Router) {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::get(native_stream_data_path(
+                    "groups/billing/claimed-records?member_id=worker-a&group_generation=3&limit=1",
+                ))
+                .header(RESOURCE_GENERATION_HEADER, "5")
+                .header(TABLET_EPOCH_HEADER, "3")
+                .header(READ_CONSISTENCY_HEADER, "local_stale")
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let response = json(response).await;
+        assert_eq!(response["error"]["code"], "fenced");
+        assert_eq!(
+            response["error"]["outcome_certainty"],
+            "definite_not_committed"
+        );
+    }
+
     #[test]
     fn read_consistency_is_semantic_and_never_downgrades_implicitly() {
         assert!(is_read_operation(
@@ -1111,6 +1135,26 @@ mod tests {
             &Method::GET,
             WorkloadProfile::StreamLog,
             "groups/billing/records"
+        ));
+        assert_eq!(
+            profile_uri(
+                WorkloadProfile::StreamLog,
+                "groups/billing/claimed-records",
+                Some("member_id=worker-a&group_generation=3&limit=10")
+            )
+            .unwrap()
+            .path(),
+            "/experimental/v1/tablets/stream/groups/billing/claimed-records"
+        );
+        assert!(is_read_operation(
+            &Method::GET,
+            WorkloadProfile::StreamLog,
+            "groups/billing/claimed-records"
+        ));
+        assert!(!is_read_operation(
+            &Method::PUT,
+            WorkloadProfile::StreamLog,
+            "groups/billing/claim"
         ));
         assert!(!is_read_operation(
             &Method::PUT,
@@ -1357,6 +1401,8 @@ mod tests {
         let group_read = json(group_read).await;
         assert_eq!(group_read["checkpoint"]["group"], "billing");
         assert_eq!(group_read["checkpoint"]["exists"], false);
+
+        assert_unclaimed_native_stream_fetch_is_fenced(&router).await;
 
         let wrong_profile = router
             .oneshot(

@@ -8,6 +8,7 @@ use crate::{
 };
 
 pub const STREAM_TABLET_GROUP_COMMAND_FORMAT_VERSION: u16 = 3;
+pub const STREAM_TABLET_GROUP_CLAIM_COMMAND_FORMAT_VERSION: u16 = 6;
 pub const MAX_STREAM_CONSUMER_GROUP_BYTES: usize = 256;
 pub const MAX_STREAM_CONSUMER_MEMBER_BYTES: usize = 256;
 pub const MAX_STREAM_CONSUMER_GROUPS: usize = 10_000;
@@ -28,6 +29,7 @@ pub struct StreamGroupOffsetCommand {
 pub enum StreamGroupOffsetMode {
     Commit,
     Reset,
+    Claim,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +56,7 @@ pub enum StreamTabletGroupRejection {
     OffsetBeforeRetained,
     OffsetBeyondEnd,
     GroupCapacityReached,
+    SessionClaimRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +131,8 @@ pub struct StreamTabletGroupReceipt {
     pub write_evidence: StreamTabletWriteEvidence,
     pub durable_voter_acks: u16,
     pub disposition: StreamTabletGroupDisposition,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub session_fenced: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -151,12 +156,24 @@ pub struct StreamTabletGroupObservation {
     #[serde(serialize_with = "serialize_u64_as_decimal")]
     pub lag: u64,
     pub checkpoint_out_of_range: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub session_fenced: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct StreamConsumerGroupOwner {
     pub member_id: String,
     pub generation: u64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub session_fenced: bool,
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if requires the field's shared-reference signature"
+)]
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 pub(crate) fn validate_group_offset_command(
@@ -167,11 +184,7 @@ pub(crate) fn validate_group_offset_command(
         &command.group,
         MAX_STREAM_CONSUMER_GROUP_BYTES,
     )?;
-    validate_bounded_identifier(
-        "consumer member_id",
-        &command.member_id,
-        MAX_STREAM_CONSUMER_MEMBER_BYTES,
-    )?;
+    validate_stream_consumer_member(&command.member_id)?;
     if command.group_generation == 0 {
         return Err(TabletError::InvalidCommand(
             "consumer group_generation must be non-zero".into(),
@@ -187,6 +200,14 @@ pub(crate) fn validate_group_offset_command(
 
 pub fn validate_stream_consumer_group(group: &str) -> TabletResult<()> {
     validate_bounded_identifier("consumer group", group, MAX_STREAM_CONSUMER_GROUP_BYTES)
+}
+
+pub fn validate_stream_consumer_member(member_id: &str) -> TabletResult<()> {
+    validate_bounded_identifier(
+        "consumer member_id",
+        member_id,
+        MAX_STREAM_CONSUMER_MEMBER_BYTES,
+    )
 }
 
 pub(crate) fn validate_bounded_identifier(

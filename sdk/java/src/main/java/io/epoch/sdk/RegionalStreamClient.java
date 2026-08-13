@@ -5,7 +5,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.math.BigInteger;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -15,6 +17,7 @@ public final class RegionalStreamClient {
   private static final int MAX_FETCH_RECORDS = 1_000;
   private static final Duration MIN_SESSION_TIMEOUT = Duration.ofSeconds(1);
   private static final Duration MAX_SESSION_TIMEOUT = Duration.ofMinutes(5);
+  private static final int MAX_CLAIM_TRANSITIONS = 4_096;
 
   private final RegionalClientCore regional;
 
@@ -185,10 +188,19 @@ public final class RegionalStreamClient {
   /** Returns a linearizable checkpoint and lag observation. */
   public JsonNode lag(String stream, int shard, String group)
       throws IOException, InterruptedException {
+    return lagAtGeneration(stream, shard, group, null);
+  }
+
+  private JsonNode lagAtGeneration(
+      String stream, int shard, String group, String resourceGeneration)
+      throws IOException, InterruptedException {
     String groupSegment = RegionalClientCore.segment(group, "consumer group");
-    return call(
+    return regional.callAtGeneration(
+        "streams",
+        "Stream",
         stream,
         shard,
+        resourceGeneration,
         route ->
             new RegionalClientCore.RequestSpec(
                 "GET", "/groups/" + groupSegment + "/lag", null, Map.of(), linearizable()));
@@ -209,6 +221,161 @@ public final class RegionalStreamClient {
                 null,
                 Map.of("limit", limit),
                 linearizable()));
+  }
+
+  /** Installs a coordinated-session generation as the durable owner fence on one shard. */
+  public JsonNode claimGroup(
+      String stream,
+      int shard,
+      String group,
+      String memberId,
+      long generation,
+      String idempotencyKey)
+      throws IOException, InterruptedException {
+    return claimGroupAtGeneration(
+        stream, shard, group, memberId, BigInteger.valueOf(generation), idempotencyKey, null);
+  }
+
+  private JsonNode claimGroupAtGeneration(
+      String stream,
+      int shard,
+      String group,
+      String memberId,
+      BigInteger generation,
+      String idempotencyKey,
+      String resourceGeneration)
+      throws IOException, InterruptedException {
+    String groupSegment = RegionalClientCore.segment(group, "consumer group");
+    RegionalClientCore.required(memberId, "consumer member");
+    RegionalClientCore.positiveU64(generation, "consumer group generation");
+    RegionalClientCore.required(idempotencyKey, "idempotency key");
+    return regional.callAtGeneration(
+        "streams",
+        "Stream",
+        stream,
+        shard,
+        resourceGeneration,
+        route -> {
+          ObjectNode body = RegionalClientCore.MAPPER.createObjectNode();
+          body.put("idempotency_key", idempotencyKey);
+          body.put("expected_term", route.term());
+          body.put("member_id", memberId);
+          body.put("group_generation", generation.toString());
+          body.put("partition", 0);
+          return new RegionalClientCore.RequestSpec(
+              "PUT", "/groups/" + groupSegment + "/claim", body, Map.of(), Map.of());
+        });
+  }
+
+  /** Installs a shard checkpoint fence over the complete unsigned generation range. */
+  public JsonNode claimGroup(
+      String stream,
+      int shard,
+      String group,
+      String memberId,
+      BigInteger generation,
+      String idempotencyKey)
+      throws IOException, InterruptedException {
+    return claimGroupAtGeneration(stream, shard, group, memberId, generation, idempotencyKey, null);
+  }
+
+  /** Fetches only while the exact member and session generation own this shard. */
+  public JsonNode fetchClaimedGroup(
+      String stream, int shard, String group, String memberId, long generation, int limit)
+      throws IOException, InterruptedException {
+    return fetchClaimedGroup(stream, shard, group, memberId, BigInteger.valueOf(generation), limit);
+  }
+
+  /** Fetches with an unsigned session-generation fence. */
+  public JsonNode fetchClaimedGroup(
+      String stream, int shard, String group, String memberId, BigInteger generation, int limit)
+      throws IOException, InterruptedException {
+    fetchLimit(limit);
+    String groupSegment = RegionalClientCore.segment(group, "consumer group");
+    RegionalClientCore.required(memberId, "consumer member");
+    RegionalClientCore.positiveU64(generation, "consumer group generation");
+    return call(
+        stream,
+        shard,
+        route ->
+            new RegionalClientCore.RequestSpec(
+                "GET",
+                "/groups/" + groupSegment + "/claimed-records",
+                null,
+                Map.of(
+                    "member_id", memberId,
+                    "group_generation", generation.toString(),
+                    "limit", limit),
+                linearizable()));
+  }
+
+  /** Claims every assigned shard and rejects a concurrent coordinator rebalance. */
+  public List<Integer> claimConsumerSession(
+      String stream, String group, String memberId, long generation, String idempotencyKeyPrefix)
+      throws IOException, InterruptedException {
+    return claimConsumerSession(
+        stream, group, memberId, BigInteger.valueOf(generation), idempotencyKeyPrefix);
+  }
+
+  /** Claims every assigned shard over the complete unsigned generation range. */
+  public List<Integer> claimConsumerSession(
+      String stream,
+      String group,
+      String memberId,
+      BigInteger generation,
+      String idempotencyKeyPrefix)
+      throws IOException, InterruptedException {
+    RegionalClientCore.segment(group, "consumer group");
+    RegionalClientCore.required(memberId, "consumer member");
+    RegionalClientCore.positiveU64(generation, "consumer group generation");
+    RegionalClientCore.required(idempotencyKeyPrefix, "idempotency key prefix");
+    String resourceGeneration =
+        regional.discoverRoute("streams", "Stream", stream, 0).resourceGeneration();
+    List<Integer> assigned =
+        coordinatedAssignment(
+            consumerSessionAtGeneration(stream, group, resourceGeneration),
+            group,
+            memberId,
+            generation);
+    List<PlannedClaim> claims = new ArrayList<>();
+    for (int shard : assigned) {
+      JsonNode lag = lagAtGeneration(stream, shard, group, resourceGeneration);
+      for (BigInteger claimGeneration : claimGenerations(lag, generation)) {
+        String key = idempotencyKeyPrefix + "-shard-" + shard + "-generation-" + claimGeneration;
+        if (key.getBytes(StandardCharsets.UTF_8).length > 128) {
+          throw new IllegalArgumentException(
+              "derived consumer claim idempotency key exceeds 128 bytes");
+        }
+        claims.add(new PlannedClaim(shard, claimGeneration, key));
+      }
+    }
+    for (PlannedClaim claim : claims) {
+      JsonNode result =
+          claimGroupAtGeneration(
+              stream,
+              claim.shard(),
+              group,
+              memberId,
+              claim.generation(),
+              claim.key(),
+              resourceGeneration);
+      JsonNode receipt = result.path("receipt");
+      if (!"applied".equals(receipt.path("outcome").asText())
+          || !receipt.path("session_fenced").asBoolean(false)) {
+        throw new IOException(
+            "shard " + claim.shard() + " rejected the coordinated consumer claim");
+      }
+    }
+    List<Integer> revalidated =
+        coordinatedAssignment(
+            consumerSessionAtGeneration(stream, group, resourceGeneration),
+            group,
+            memberId,
+            generation);
+    if (!assigned.equals(revalidated)) {
+      throw new IOException("consumer session rebalanced while shard claims were being installed");
+    }
+    return List.copyOf(assigned);
   }
 
   /** Joins or renews a coordinated consumer member and returns its shard assignment. */
@@ -294,10 +461,19 @@ public final class RegionalStreamClient {
   /** Returns linearizable coordinated membership, deadlines, generation, and assignments. */
   public JsonNode consumerSession(String stream, String group)
       throws IOException, InterruptedException {
+    return consumerSessionAtGeneration(stream, group, null);
+  }
+
+  private JsonNode consumerSessionAtGeneration(
+      String stream, String group, String resourceGeneration)
+      throws IOException, InterruptedException {
     String groupSegment = RegionalClientCore.segment(group, "consumer group");
-    return call(
+    return regional.callAtGeneration(
+        "streams",
+        "Stream",
         stream,
         0,
+        resourceGeneration,
         route ->
             new RegionalClientCore.RequestSpec(
                 "GET", "/groups/" + groupSegment + "/sessions", null, Map.of(), linearizable()));
@@ -332,6 +508,83 @@ public final class RegionalStreamClient {
               Map.of());
         });
   }
+
+  private static List<Integer> coordinatedAssignment(
+      JsonNode document, String group, String memberId, BigInteger generation) throws IOException {
+    JsonNode session = document.path("session");
+    if (!session.isObject()) {
+      throw new IOException("consumer session response omitted session state");
+    }
+    if (!session.path("exists").asBoolean(false)
+        || !group.equals(session.path("group").asText())
+        || !generation.toString().equals(session.path("group_generation").asText())) {
+      throw new IOException("consumer session generation is absent or fenced");
+    }
+    JsonNode members = session.path("members");
+    if (!members.isArray()) {
+      throw new IOException("consumer session response omitted members");
+    }
+    for (JsonNode member : members) {
+      if (!memberId.equals(member.path("member_id").asText())) {
+        continue;
+      }
+      JsonNode shards = member.path("assigned_shards");
+      if (!shards.isArray() || shards.isEmpty()) {
+        throw new IOException("consumer member has no assigned shards");
+      }
+      List<Integer> assigned = new ArrayList<>(shards.size());
+      int previous = -1;
+      for (JsonNode shard : shards) {
+        if (!shard.canConvertToInt() || shard.intValue() < 0 || shard.intValue() <= previous) {
+          throw new IOException("consumer session returned an invalid shard assignment");
+        }
+        previous = shard.intValue();
+        assigned.add(previous);
+      }
+      return assigned;
+    }
+    throw new IOException("consumer member is not active in the requested session generation");
+  }
+
+  private static List<BigInteger> claimGenerations(JsonNode document, BigInteger target)
+      throws IOException {
+    JsonNode checkpoint = document.path("checkpoint");
+    if (!checkpoint.isObject()) {
+      throw new IOException("checkpoint observation is missing");
+    }
+    BigInteger current = BigInteger.ZERO;
+    if (checkpoint.path("exists").asBoolean(false)) {
+      String raw = checkpoint.path("group_generation").asText();
+      try {
+        current = new BigInteger(raw);
+        RegionalClientCore.positiveU64(current, "checkpoint generation");
+        if (!current.toString().equals(raw)) {
+          throw new NumberFormatException("non-canonical decimal");
+        }
+      } catch (IllegalArgumentException error) {
+        throw new IOException("checkpoint generation is invalid", error);
+      }
+    }
+    if (current.compareTo(target) > 0) {
+      throw new IOException(
+          "checkpoint generation " + current + " is ahead of session generation " + target);
+    }
+    BigInteger start = current.equals(target) ? current : current.add(BigInteger.ONE);
+    BigInteger count = target.subtract(start).add(BigInteger.ONE);
+    if (count.compareTo(BigInteger.valueOf(MAX_CLAIM_TRANSITIONS)) > 0) {
+      throw new IOException(
+          "claim requires " + count + " transitions; maximum is " + MAX_CLAIM_TRANSITIONS);
+    }
+    List<BigInteger> generations = new ArrayList<>(count.intValueExact());
+    for (BigInteger value = start;
+        value.compareTo(target) <= 0;
+        value = value.add(BigInteger.ONE)) {
+      generations.add(value);
+    }
+    return generations;
+  }
+
+  private record PlannedClaim(int shard, BigInteger generation, String key) {}
 
   /** Commits a replacement time/size/count policy and immediately applies it. */
   public JsonNode configureRetention(
