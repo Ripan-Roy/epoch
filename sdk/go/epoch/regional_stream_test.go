@@ -1,9 +1,13 @@
 package epoch
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -366,6 +370,138 @@ func TestRegionalStreamClientBuildsCoordinatedConsumerSessionContracts(t *testin
 			t.Fatalf("session observation must be linearizable: %#v", request)
 		}
 	}
+}
+
+func TestRegionalStreamClientBuildsCanonicalGzipBatchAndKeepsItAcrossRetry(t *testing.T) {
+	leader := &regionalFakeTransport{
+		route: Document{
+			"resource_generation": "2", "tablet_epoch": "4", "term": "9", "accepts_writes": true,
+		},
+		operationErrors: []error{&APIError{StatusCode: 409, Code: "not_leader", Detail: "leadership changed"}},
+	}
+	client, err := NewRegionalStreamClientWithTransports(
+		[]Transport{leader}, "secret-token",
+		RegionalScope{Organization: "acme", Project: "shop", Environment: "dev", Namespace: "core"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := []StreamBatchRecord{
+		{ClientSequence: 7, Envelope: batchEvent("order-7", "customer-7")},
+		{ClientSequence: 8, Envelope: batchEvent("order-8", "customer-8")},
+	}
+	frame, err := EncodeStreamBatch(records, StreamCompressionGzip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppendBatch(context.Background(), "orders", 2, "batch-7", frame); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(leader.requests) != 4 {
+		t.Fatalf("expected discover/write/discover/write, got %d requests", len(leader.requests))
+	}
+	first := batchRequestDocument(t, leader.requests[1])
+	second := batchRequestDocument(t, leader.requests[3])
+	if !bytes.Equal(first, second) {
+		t.Fatalf("retry changed the exact batch body:\n%s\n%s", first, second)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(first, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["idempotency_key"] != "batch-7" || body["compression"] != "gzip" ||
+		body["record_count"] != float64(2) || body["partition"] != float64(0) {
+		t.Fatalf("unexpected batch body: %#v", body)
+	}
+	payload, err := base64.StdEncoding.DecodeString(body["payload_base64"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[{"client_sequence":7,"envelope":{"id":"order-7","source":"checkout","type":"order.created","time_ms":42,"key":"customer-7","headers":{"a":"first","z":"last"},"content_type":"application/json","payload":{"a":7,"z":[{"a":1,"y":2}]},"priority":0,"extensions":{"a":true,"z":{"a":1,"b":2}}}},{"client_sequence":8,"envelope":{"id":"order-8","source":"checkout","type":"order.created","time_ms":42,"key":"customer-8","headers":{"a":"first","z":"last"},"content_type":"application/json","payload":{"a":7,"z":[{"a":1,"y":2}]},"priority":0,"extensions":{"a":true,"z":{"a":1,"b":2}}}}]`
+	if string(plain) != want {
+		t.Fatalf("batch JSON is not the canonical cross-language contract:\n%s", plain)
+	}
+}
+
+func TestStreamBatchRejectsDuplicateSequencesAndBadFramesBeforeNetwork(t *testing.T) {
+	event := batchEvent("order-7", "customer-7")
+	if _, err := EncodeStreamBatch([]StreamBatchRecord{
+		{ClientSequence: 7, Envelope: event},
+		{ClientSequence: 7, Envelope: event},
+	}, StreamCompressionNone); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("expected duplicate sequence rejection, got %v", err)
+	}
+	for _, compression := range []StreamCompression{
+		StreamCompressionNone,
+		StreamCompressionGzip,
+		StreamCompressionLZ4,
+		StreamCompressionSnappy,
+		StreamCompressionZstd,
+	} {
+		if _, err := NewStreamBatchFrame(compression, 1, 1, []byte("x")); err != nil {
+			t.Fatalf("valid %s frame metadata was rejected: %v", compression, err)
+		}
+	}
+	if _, err := NewStreamBatchFrame(StreamCompression("brotli"), 1, 2, []byte("x")); err == nil {
+		t.Fatal("unsupported compression must be rejected")
+	}
+}
+
+func TestStreamBatchCanonicalJSONKeepsSerdeCompatibleUnicode(t *testing.T) {
+	event := batchEvent("订单\u2028七", "東京")
+	event.Payload = map[string]any{"message": "<paid>&\u2029"}
+	frame, err := EncodeStreamBatch(
+		[]StreamBatchRecord{{ClientSequence: 1, Envelope: event}},
+		StreamCompressionNone,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := base64.StdEncoding.DecodeString(frame.PayloadBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, escaped := range [][]byte{[]byte(`\u2028`), []byte(`\u2029`), []byte(`\u003c`), []byte(`\u003e`), []byte(`\u0026`)} {
+		if bytes.Contains(plain, escaped) {
+			t.Fatalf("canonical batch JSON contains Go-only escape %q: %s", escaped, plain)
+		}
+	}
+	if !bytes.Contains(plain, []byte("订单\u2028七")) || !bytes.Contains(plain, []byte("<paid>&\u2029")) {
+		t.Fatalf("canonical batch JSON lost Unicode: %s", plain)
+	}
+}
+
+func batchEvent(id, key string) EventEnvelope {
+	event := NewEventEnvelope("checkout", "order.created", map[string]any{
+		"z": []any{map[string]any{"y": 2, "a": 1}}, "a": 7,
+	})
+	event.ID = id
+	event.Key = key
+	event.TimeMS = 42
+	event.Headers = map[string]string{"z": "last", "a": "first"}
+	event.Extensions = map[string]any{"z": map[string]any{"b": 2, "a": 1}, "a": true}
+	return event
+}
+
+func batchRequestDocument(t *testing.T, request Request) []byte {
+	t.Helper()
+	if request.Method != "POST" || !strings.HasSuffix(request.Path, "/records/batches") {
+		t.Fatalf("unexpected batch request: %#v", request)
+	}
+	document, err := json.Marshal(request.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return document
 }
 
 func TestRegionalStreamClientBuildsRetentionMutationAndReadContracts(t *testing.T) {

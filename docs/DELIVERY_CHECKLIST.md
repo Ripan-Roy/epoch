@@ -2,7 +2,7 @@
 
 **Last reviewed:** 13 August 2026
 **Current release:** `v0.1.0-alpha.3`
-**Current core target:** Multi-shard Stream key routing and recovery
+**Current core target:** Regional atomic Stream batch SDKs and recovery
 
 This is the operational checklist for turning PRD scope into verified,
 releasable increments. [PRD.md](PRD.md) owns product scope,
@@ -253,15 +253,28 @@ complete.
 
 | ID | Checklist item | Boundary | State | Evidence / acceptance |
 |---|---|---|---:|---|
-| CS-01 | Freeze coordinator, generation, time, assignment, and non-claims | Semantics + ADR | 🟡 | ADR-0025 defines shard-zero authority, canonical v5 commands, monotonic committed time, inclusive deadlines, lexical round-robin assignment, separate checkpoint fences, and explicit non-claims; protected review remains pending |
-| CS-02 | Preserve historical Stream compatibility | Rust tablet contract | 🟡 | v1–v4 commands remain pinned; snapshot v2 stores sessions while legacy snapshot v1 restores with an empty session map; focused compatibility tests pass locally |
-| CS-03 | Apply bounded membership and expiry deterministically | Rust Stream/tablet | 🟡 | Tests cover join/rejoin, heartbeat, leave, stale/unknown fences, shard/member/timeout bounds, checked deadline overflow without phantom state, single-bump rebalance, monotonic time, inclusive expiry, exact retry, and canonical assignment |
-| CS-04 | Expose strict direct and authenticated regional routes | Rust node + gateway | 🟡 | Join/observe/heartbeat/leave/maintenance exist only on logical shard 0, inherit leader/term/generation/tablet/auth fences, and use a linearizable observation barrier |
-| CS-05 | Implement one coordinator contract in three SDKs | Go + Java + Python | 🟡 | All clients select shard 0 and expose join, heartbeat, leave, maintenance, and observation with pre-network timeout/generation/identifier validation and same-key bounded rediscovery |
-| CS-06 | Prove convergence, checkpoint, and restore | Rust real-voter tests | 🟡 | A three-voter test joins two members, fences heartbeat, expires/rebalances, compares every voter, installs a native checkpoint, and reopens the same state locally |
-| CS-07 | Prove real SDK failover and all-node recovery | Compose integration | 🟡 | The regional Python campaign performs two-member coordination after leader replacement and asserts generation-3 assignment after old-voter catch-up and all-node reopen; the complete Docker campaign passes locally and protected execution remains pending |
-| CS-08 | Publish executable end-to-end documentation | Docs + Pages | 🟡 | PRD, ADR, API, architecture, semantics, runtime, SDK guide, traceability, checklist, changelog, and exact Go/Java/Python lifecycle examples are updated locally; Pages publication remains pending |
-| CS-09 | Pass full local and protected evidence | Quality + GitHub | 🟡 | `make check`, `make build`, exact displayed-source compilation/restart quickstarts, the docs-only Pages artifact assertions, focused compatibility tests, and the complete regional Docker campaign pass locally; PR checks, merge SHA, exact-main CI, and Pages evidence remain pending |
+| CS-01 | Freeze coordinator, generation, time, assignment, and non-claims | Semantics + ADR | ✅ | ADR-0025 defines shard-zero authority, canonical v5 commands, monotonic committed time, inclusive deadlines, lexical round-robin assignment, separate checkpoint fences, and explicit non-claims; accepted through PR #63 |
+| CS-02 | Preserve historical Stream compatibility | Rust tablet contract | ✅ | v1–v4 commands remain pinned; snapshot v2 stores sessions while legacy snapshot v1 restores with an empty session map on protected `main` |
+| CS-03 | Apply bounded membership and expiry deterministically | Rust Stream/tablet | ✅ | Tests cover join/rejoin, heartbeat, leave, stale/unknown fences, shard/member/timeout bounds, checked deadline overflow without phantom state, single-bump rebalance, monotonic time, inclusive expiry, exact retry, and canonical assignment |
+| CS-04 | Expose strict direct and authenticated regional routes | Rust node + gateway | ✅ | Join/observe/heartbeat/leave/maintenance exist only on logical shard 0, inherit leader/term/generation/tablet/auth fences, and use a linearizable observation barrier |
+| CS-05 | Implement one coordinator contract in three SDKs | Go + Java + Python | ✅ | All clients select shard 0 and expose join, heartbeat, leave, maintenance, and observation with pre-network timeout/generation/identifier validation and same-key bounded rediscovery |
+| CS-06 | Prove convergence, checkpoint, and restore | Rust real-voter tests | ✅ | A three-voter test joins two members, fences heartbeat, expires/rebalances, compares every voter, installs a native checkpoint, and reopens the same state |
+| CS-07 | Prove real SDK failover and all-node recovery | Compose integration | ✅ | Exact-main [CI run 31699302841](https://github.com/Ripan-Roy/epoch/actions/runs/31699302841) coordinates two Python members after leader replacement and preserves generation-3 assignment through voter catch-up and all-node reopen |
+| CS-08 | Publish executable end-to-end documentation | Docs + Pages | ✅ | Main-only [Pages run 31699302769](https://github.com/Ripan-Roy/epoch/actions/runs/31699302769) published ADR/API/runtime/SDK guidance and exact Go/Java/Python lifecycle examples to the [live site](https://ripan-roy.github.io/epoch/) |
+| CS-09 | Pass full local and protected evidence | Quality + GitHub | ✅ | [PR #63](https://github.com/Ripan-Roy/epoch/pull/63) squash-merged as `ec163008`; exact-main CI and Pages are green |
+
+## Current Stream delivery: regional atomic batch SDKs
+
+| ID | Checklist item | Boundary | State | Evidence / acceptance |
+|---|---|---|---:|---|
+| AB-01 | Freeze the first-party frame and retry contract | Semantics + ADR | 🟡 | ADR-0026 defines canonical input, exact-frame identity, single-shard atomicity, built-in/caller-frame codec ownership, limits, and explicit native-streaming non-claims; protected review is pending |
+| AB-02 | Encode canonical none and gzip frames in every SDK | Go + Java + Python | 🟡 | Cross-language tests pin Rust/Serde field order, compact UTF-8 JSON, recursively sorted object maps, Unicode, unique sequences, counts, and size ceilings locally |
+| AB-03 | Accept caller-produced frames for every required codec | Go + Java + Python | 🟡 | Typed frame constructors preserve exact none/gzip/LZ4/Snappy/Zstd bytes and reject unsupported codecs or inconsistent metadata before network I/O |
+| AB-04 | Route and retry one atomic regional operation | Go + Java + Python | 🟡 | `AppendBatch`/`appendBatch`/`append_batch` use the existing authenticated leader discovery and fences, preserve exact frame plus idempotency key across one bounded rediscovery, and target one explicit logical shard |
+| AB-05 | Prove real failover and recovery | Compose integration | 🟡 | The complete local Docker campaign submits and exactly replays a two-record gzip SDK batch after leader loss, then verifies both correlated offsets after voter catch-up and all-node same-volume reopen; protected execution is pending |
+| AB-06 | Publish executable end-to-end documentation | Docs + Pages | 🟡 | SDK READMEs, PRD/API/semantics/runtime/testing/plan/traceability, ADR-0026, and exact Go/Java/Python gzip examples are updated locally; Pages publication is pending |
+| AB-07 | Pass complete local quality gates | Quality | 🟡 | `make check`, `make build`, focused SDK tests, exact displayed-source compilation/restart, docs-only Pages assertions, and the complete regional Docker campaign pass on the final local diff; protected execution is pending |
+| AB-08 | Pass protected pull-request and exact-main evidence | GitHub | ⬜ | Feature PR, merge SHA, exact-main CI, main-only Pages run, and live-bundle evidence are pending |
 
 ## Current security delivery: bootstrap trust baseline
 

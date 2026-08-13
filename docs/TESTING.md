@@ -221,6 +221,16 @@ goldens and validates join/rejoin, fenced heartbeat/leave, lexical round-robin
 assignment, bounds, monotonic time, inclusive expiry, multi-member single-bump
 rebalance, checked deadline overflow without phantom state, exact retry, legacy
 snapshot v1 restore, and snapshot v2 recovery.
+
+The regional Stream batch SDK corpus builds identical canonical record bytes in
+Go, Java, and Python, including Unicode and sorted nested maps; rejects empty,
+duplicate-sequence, unsupported-codec, inconsistent-size, and oversized input
+before network I/O; and preserves exact frame plus idempotency key across one
+leader rediscovery. Exact published sources compile in all three languages.
+The Python regional campaign sends a two-record gzip batch after active Stream
+leader loss, checks logical-partition correlated receipts and exact replay,
+then fetches the same ordered offsets after old-voter catch-up and all-node
+same-volume reopen. Rust remains the authoritative decoder for every frame.
 A real three-voter node test compares all member plans, installs a native
 checkpoint, and reopens every voter. Go, Java, and Python contract tests prove
 shard-zero routing, encoded identifiers, decimal generations, whole-millisecond

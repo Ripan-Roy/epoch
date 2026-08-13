@@ -202,9 +202,10 @@ metadata. The handler enforces 1–1,000 records, 360 KiB compressed, 4 MiB
 expanded, and an 8 MiB Zstd window before proposal; its receipt maps each unique
 client sequence to an exact decimal offset. The whole batch is one atomic
 single-shard transition and its regional receipt reports the outer logical
-shard. Stable streaming Produce, cross-shard batching, automatic client
-batching/negotiation, partial non-atomic results, and regional SDK batch helpers
-remain open.
+shard. Regional Go, Java, and Python clients expose this exact operation with
+built-in canonical none/gzip framing and typed caller frames for every
+supported codec. Stable streaming Produce, cross-shard batching, automatic
+client batching/negotiation, and partial non-atomic results remain open.
 
 ## Use the regional Stream v1 SDK
 
@@ -394,7 +395,8 @@ containers/network/volumes.
   not replicated, multi-instance linearizable, backed up automatically, or
   protected by management leader election.
 - Go, Java, and Python now share the regional Stream, Queue, Cache, and Event
-  Bus v1 route/retry/fence contract, including Stream retention
+  Bus v1 route/retry/fence contract, including Stream atomic caller-framed
+  batches, retention
   configure/maintain/observe, generation-pinned key routing, and coordinated
   session membership/assignment. They remain repository-local alpha source;
   package publication, generated models, transactional assignment/offset

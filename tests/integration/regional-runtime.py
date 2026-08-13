@@ -820,6 +820,22 @@ def assert_python_sdk_consumer_session(
     assert members[0].get("assigned_shards") == [0, 1, 2], observed
 
 
+def assert_python_sdk_stream_batch(
+    cluster: RegionalCluster,
+    resource: Resource,
+) -> None:
+    fetched = python_stream_client(cluster).fetch(resource.name, 1, 0, limit=10)
+    records = fetched.get("records")
+    assert fetched.get("shard_index") == 1, fetched
+    assert isinstance(records, list), fetched
+    assert [record.get("envelope", {}).get("id") for record in records] == [
+        "managed-orders-shard-1",
+        "managed-orders-batch-1",
+        "managed-orders-batch-2",
+    ], fetched
+    assert all(record.get("partition") == 1 for record in records), fetched
+
+
 def prove_python_sdk_native_stream_after_failover(
     cluster: RegionalCluster,
     resource: Resource,
@@ -941,6 +957,68 @@ def prove_python_sdk_native_stream_after_failover(
         assert observation.get("partition") == shard, lag
         assert observation.get("lag") == "0", lag
 
+        if shard == 1:
+            batch = epoch_sdk.StreamBatchFrame.encode(
+                [
+                    epoch_sdk.StreamBatchRecord(
+                        101,
+                        epoch_sdk.EventEnvelope(
+                            id="managed-orders-batch-1",
+                            key="customer-0",
+                            source="python-regional-sdk",
+                            event_type="order.created",
+                            payload={"batch": 1},
+                            time_ms=21,
+                        ),
+                    ),
+                    epoch_sdk.StreamBatchRecord(
+                        102,
+                        epoch_sdk.EventEnvelope(
+                            id="managed-orders-batch-2",
+                            key="customer-0",
+                            source="python-regional-sdk",
+                            event_type="order.created",
+                            payload={"batch": 2},
+                            time_ms=22,
+                        ),
+                    ),
+                ],
+                "gzip",
+            )
+            committed_batch = client.append_batch(
+                resource.name,
+                shard,
+                "python-sdk-gzip-batch-1",
+                batch,
+            )
+            assert committed_batch.get("state") == "committed", committed_batch
+            batch_receipt = committed_batch.get("receipt", {}).get("batch")
+            assert isinstance(batch_receipt, dict), committed_batch
+            assert batch_receipt.get("compression") == "gzip", committed_batch
+            assert batch_receipt.get("record_count") == 2, committed_batch
+            correlated = batch_receipt.get("records")
+            assert isinstance(correlated, list), committed_batch
+            assert [record.get("client_sequence") for record in correlated] == [
+                101,
+                102,
+            ], committed_batch
+            assert all(record.get("partition") == shard for record in correlated), (
+                committed_batch
+            )
+            replayed_batch = client.append_batch(
+                resource.name,
+                shard,
+                "python-sdk-gzip-batch-1",
+                batch,
+            )
+            assert replayed_batch.get("receipt", {}).get("disposition") == "replayed", (
+                replayed_batch
+            )
+            assert replayed_batch.get("receipt", {}).get("batch") == batch_receipt, (
+                replayed_batch
+            )
+            assert_python_sdk_stream_batch(cluster, resource)
+
     joined_a = client.join_consumer_session(
         resource.name,
         "billing",
@@ -966,7 +1044,9 @@ def prove_python_sdk_native_stream_after_failover(
     assert receipt_b.get("outcome") == "applied", joined_b
     assert receipt_b.get("group_generation") == "2", joined_b
     assert receipt_b.get("assigned_shards") == [1], joined_b
-    assert [member.get("assigned_shards") for member in receipt_b.get("members", [])] == [
+    assert [
+        member.get("assigned_shards") for member in receipt_b.get("members", [])
+    ] == [
         [0, 2],
         [1],
     ], joined_b
@@ -1571,15 +1651,16 @@ def run_campaign(cluster: RegionalCluster) -> None:
     assert new_term > old_term
     prove_python_sdk_native_stream_after_failover(cluster, stream)
     wait_for_profile_apply(cluster, stream, 9, survivors)
-    wait_for_profile_apply(cluster, stream, 2, survivors, shard=1)
+    wait_for_profile_apply(cluster, stream, 3, survivors, shard=1)
     wait_for_profile_apply(cluster, stream, 2, survivors, shard=2)
 
     cluster.start_node(old_leader)
     wait_for_nodes(cluster)
     wait_for_profile_apply(cluster, stream, 9)
-    wait_for_profile_apply(cluster, stream, 2, shard=1)
+    wait_for_profile_apply(cluster, stream, 3, shard=1)
     wait_for_profile_apply(cluster, stream, 2, shard=2)
     assert_python_sdk_consumer_session(cluster, stream)
+    assert_python_sdk_stream_batch(cluster, stream)
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
     for resource in RESOURCES:
         wait_for_profile_apply(cluster, resource, 1)
@@ -1633,9 +1714,10 @@ def run_campaign(cluster: RegionalCluster) -> None:
     )
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
     wait_for_profile_apply(cluster, stream, 9)
-    wait_for_profile_apply(cluster, stream, 2, shard=1)
+    wait_for_profile_apply(cluster, stream, 3, shard=1)
     wait_for_profile_apply(cluster, stream, 2, shard=2)
     assert_python_sdk_consumer_session(cluster, stream)
+    assert_python_sdk_stream_batch(cluster, stream)
     for resource in RESOURCES:
         expected = (
             11
@@ -1663,7 +1745,8 @@ def main() -> int:
     if not failed:
         print(
             "Epoch Go-to-Rust regional catalog/BFF/four-profile/failover/"
-            "Stream-session-Queue-Cache-and-Bus-SDK/control-SIGKILL/all-node recovery container campaign passed."
+            "Stream-batch-session-Queue-Cache-and-Bus-SDK/control-SIGKILL/"
+            "all-node recovery container campaign passed."
         )
     return 0
 

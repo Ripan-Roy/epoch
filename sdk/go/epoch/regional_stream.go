@@ -1,7 +1,11 @@
 package epoch
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -21,8 +25,201 @@ const (
 	maxStreamRetentionAgeMS     = 10 * 365 * 24 * 60 * 60 * 1_000
 	minStreamSessionTimeout     = time.Second
 	maxStreamSessionTimeout     = 5 * time.Minute
+	maxStreamBatchRecords       = 1_000
+	maxStreamBatchCompressed    = 360 * 1024
+	maxStreamBatchUncompressed  = 4 * 1024 * 1024
 	streamPartitioner           = "fnv1a64_utf8_mod_n_v1"
 )
+
+// StreamCompression names one wire-compatible Stream batch frame encoding.
+type StreamCompression string
+
+const (
+	StreamCompressionNone   StreamCompression = "none"
+	StreamCompressionGzip   StreamCompression = "gzip"
+	StreamCompressionLZ4    StreamCompression = "lz4"
+	StreamCompressionSnappy StreamCompression = "snappy"
+	StreamCompressionZstd   StreamCompression = "zstd"
+)
+
+// StreamBatchRecord correlates one batch record with its caller sequence.
+type StreamBatchRecord struct {
+	ClientSequence uint32
+	Envelope       EventEnvelope
+}
+
+// StreamBatchFrame is one bounded, client-framed atomic Stream batch.
+// Use EncodeStreamBatch for none/gzip, or NewStreamBatchFrame for an LZ4,
+// Snappy, or Zstd frame produced by the caller's preferred codec library.
+type StreamBatchFrame struct {
+	Compression       StreamCompression
+	RecordCount       uint16
+	UncompressedBytes uint32
+	CompressedBytes   uint32
+	PayloadBase64     string
+}
+
+// NewStreamBatchFrame validates bounded metadata and wraps exact compressed bytes.
+func NewStreamBatchFrame(compression StreamCompression, recordCount uint16, uncompressedBytes uint32, compressed []byte) (StreamBatchFrame, error) {
+	if err := validateStreamCompression(compression); err != nil {
+		return StreamBatchFrame{}, err
+	}
+	if recordCount == 0 || recordCount > maxStreamBatchRecords {
+		return StreamBatchFrame{}, fmt.Errorf("epoch: Stream batch record count must be between 1 and %d", maxStreamBatchRecords)
+	}
+	if uncompressedBytes == 0 || uncompressedBytes > maxStreamBatchUncompressed {
+		return StreamBatchFrame{}, fmt.Errorf("epoch: Stream batch uncompressed bytes must be between 1 and %d", maxStreamBatchUncompressed)
+	}
+	if len(compressed) == 0 || len(compressed) > maxStreamBatchCompressed {
+		return StreamBatchFrame{}, fmt.Errorf("epoch: Stream batch compressed bytes must be between 1 and %d", maxStreamBatchCompressed)
+	}
+	if compression == StreamCompressionNone && uint32(len(compressed)) != uncompressedBytes {
+		return StreamBatchFrame{}, fmt.Errorf("epoch: uncompressed Stream batch frame size must match uncompressed bytes")
+	}
+	return StreamBatchFrame{
+		Compression:       compression,
+		RecordCount:       recordCount,
+		UncompressedBytes: uncompressedBytes,
+		CompressedBytes:   uint32(len(compressed)),
+		PayloadBase64:     base64.StdEncoding.EncodeToString(compressed),
+	}, nil
+}
+
+// EncodeStreamBatch validates records and produces canonical none or gzip bytes.
+// The other advertised codecs remain available through NewStreamBatchFrame.
+func EncodeStreamBatch(records []StreamBatchRecord, compression StreamCompression) (StreamBatchFrame, error) {
+	if len(records) == 0 || len(records) > maxStreamBatchRecords {
+		return StreamBatchFrame{}, fmt.Errorf("epoch: Stream batch must contain between 1 and %d records", maxStreamBatchRecords)
+	}
+	seen := make(map[uint32]struct{}, len(records))
+	canonical := make([]canonicalStreamBatchRecord, 0, len(records))
+	for _, record := range records {
+		if _, duplicate := seen[record.ClientSequence]; duplicate {
+			return StreamBatchFrame{}, fmt.Errorf("epoch: duplicate Stream batch client sequence %d", record.ClientSequence)
+		}
+		seen[record.ClientSequence] = struct{}{}
+		event, err := record.Envelope.normalized()
+		if err != nil {
+			return StreamBatchFrame{}, err
+		}
+		canonical = append(canonical, canonicalStreamBatchRecord{
+			ClientSequence: record.ClientSequence,
+			Envelope:       canonicalStreamEnvelopeFrom(event),
+		})
+	}
+	plain, err := marshalCanonicalStreamBatch(canonical)
+	if err != nil {
+		return StreamBatchFrame{}, fmt.Errorf("epoch: encode Stream batch: %w", err)
+	}
+	if len(plain) > maxStreamBatchUncompressed {
+		return StreamBatchFrame{}, fmt.Errorf("epoch: Stream batch uncompressed bytes must be between 1 and %d", maxStreamBatchUncompressed)
+	}
+	var compressed []byte
+	switch compression {
+	case StreamCompressionNone:
+		compressed = plain
+	case StreamCompressionGzip:
+		var output bytes.Buffer
+		writer := gzip.NewWriter(&output)
+		writer.Header.ModTime = time.Unix(0, 0)
+		writer.Header.OS = 255
+		if _, err := writer.Write(plain); err != nil {
+			return StreamBatchFrame{}, fmt.Errorf("epoch: gzip Stream batch: %w", err)
+		}
+		if err := writer.Close(); err != nil {
+			return StreamBatchFrame{}, fmt.Errorf("epoch: finish gzip Stream batch: %w", err)
+		}
+		compressed = output.Bytes()
+	case StreamCompressionLZ4, StreamCompressionSnappy, StreamCompressionZstd:
+		return StreamBatchFrame{}, fmt.Errorf("epoch: %s Stream batches require a caller-supplied standard frame", compression)
+	default:
+		return StreamBatchFrame{}, validateStreamCompression(compression)
+	}
+	return NewStreamBatchFrame(compression, uint16(len(records)), uint32(len(plain)), compressed)
+}
+
+type canonicalStreamBatchRecord struct {
+	ClientSequence uint32                  `json:"client_sequence"`
+	Envelope       canonicalStreamEnvelope `json:"envelope"`
+}
+
+type canonicalStreamEnvelope struct {
+	ID            string            `json:"id"`
+	Source        string            `json:"source"`
+	Type          string            `json:"type"`
+	Subject       string            `json:"subject,omitempty"`
+	TimeMS        uint64            `json:"time_ms"`
+	Key           string            `json:"key,omitempty"`
+	Headers       map[string]string `json:"headers"`
+	ContentType   string            `json:"content_type"`
+	SchemaRef     string            `json:"schema_ref,omitempty"`
+	Traceparent   string            `json:"traceparent,omitempty"`
+	Payload       any               `json:"payload"`
+	DeliverAtMS   *uint64           `json:"deliver_at_ms,omitempty"`
+	TTLMS         *uint64           `json:"ttl_ms,omitempty"`
+	Priority      uint8             `json:"priority"`
+	DedupeID      string            `json:"dedupe_id,omitempty"`
+	TransactionID string            `json:"transaction_id,omitempty"`
+	Extensions    map[string]any    `json:"extensions"`
+}
+
+func canonicalStreamEnvelopeFrom(event EventEnvelope) canonicalStreamEnvelope {
+	return canonicalStreamEnvelope{
+		ID: event.ID, Source: event.Source, Type: event.Type, Subject: event.Subject,
+		TimeMS: event.TimeMS, Key: event.Key, Headers: event.Headers, ContentType: event.ContentType,
+		SchemaRef: event.SchemaRef, Traceparent: event.Traceparent, Payload: event.Payload,
+		DeliverAtMS: event.DeliverAtMS, TTLMS: event.TTLMS, Priority: event.Priority,
+		DedupeID: event.DedupeID, TransactionID: event.TransactionID, Extensions: event.Extensions,
+	}
+}
+
+func marshalCanonicalStreamBatch(records []canonicalStreamBatchRecord) ([]byte, error) {
+	var output bytes.Buffer
+	encoder := json.NewEncoder(&output)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(records); err != nil {
+		return nil, err
+	}
+	encoded := bytes.TrimSuffix(output.Bytes(), []byte{'\n'})
+	encoded = bytes.ReplaceAll(encoded, []byte(`\u2028`), []byte("\u2028"))
+	encoded = bytes.ReplaceAll(encoded, []byte(`\u2029`), []byte("\u2029"))
+	return encoded, nil
+}
+
+func validateStreamCompression(compression StreamCompression) error {
+	switch compression {
+	case StreamCompressionNone, StreamCompressionGzip, StreamCompressionLZ4, StreamCompressionSnappy, StreamCompressionZstd:
+		return nil
+	default:
+		return fmt.Errorf("epoch: unsupported Stream batch compression %q", compression)
+	}
+}
+
+func (frame StreamBatchFrame) validate() error {
+	if err := validateStreamCompression(frame.Compression); err != nil {
+		return err
+	}
+	if frame.RecordCount == 0 || frame.RecordCount > maxStreamBatchRecords {
+		return fmt.Errorf("epoch: Stream batch record count must be between 1 and %d", maxStreamBatchRecords)
+	}
+	if frame.UncompressedBytes == 0 || frame.UncompressedBytes > maxStreamBatchUncompressed {
+		return fmt.Errorf("epoch: Stream batch uncompressed bytes must be between 1 and %d", maxStreamBatchUncompressed)
+	}
+	if frame.CompressedBytes == 0 || frame.CompressedBytes > maxStreamBatchCompressed {
+		return fmt.Errorf("epoch: Stream batch compressed bytes must be between 1 and %d", maxStreamBatchCompressed)
+	}
+	compressed, err := base64.StdEncoding.DecodeString(frame.PayloadBase64)
+	if err != nil || base64.StdEncoding.EncodeToString(compressed) != frame.PayloadBase64 {
+		return fmt.Errorf("epoch: Stream batch payload must be canonical standard base64")
+	}
+	if uint32(len(compressed)) != frame.CompressedBytes {
+		return fmt.Errorf("epoch: Stream batch compressed byte declaration does not match payload")
+	}
+	if frame.Compression == StreamCompressionNone && frame.CompressedBytes != frame.UncompressedBytes {
+		return fmt.Errorf("epoch: uncompressed Stream batch frame sizes must match")
+	}
+	return nil
+}
 
 // RegionalScope identifies one fully-qualified Epoch namespace.
 type RegionalScope struct {
@@ -153,6 +350,36 @@ func (client *RegionalStreamClient) Append(ctx context.Context, stream string, s
 				Partition      uint32        `json:"partition"`
 				Envelope       EventEnvelope `json:"envelope"`
 			}{idempotencyKey, route.Term, 0, event},
+		}
+	})
+}
+
+// AppendBatch atomically appends one caller-framed batch to a single Stream shard.
+// The exact frame and idempotency key are retained across one bounded rediscovery.
+func (client *RegionalStreamClient) AppendBatch(ctx context.Context, stream string, shard uint32, idempotencyKey string, frame StreamBatchFrame) (Document, error) {
+	if strings.TrimSpace(idempotencyKey) == "" {
+		return nil, fmt.Errorf("epoch: idempotency key is required")
+	}
+	if err := frame.validate(); err != nil {
+		return nil, err
+	}
+	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, func(route regionalRoute) Request {
+		return Request{
+			Method: "POST",
+			Path:   "/records/batches",
+			Body: struct {
+				IdempotencyKey string            `json:"idempotency_key"`
+				ExpectedTerm   string            `json:"expected_term"`
+				Partition      uint32            `json:"partition"`
+				Compression    StreamCompression `json:"compression"`
+				RecordCount    uint16            `json:"record_count"`
+				Uncompressed   uint32            `json:"uncompressed_bytes"`
+				Compressed     uint32            `json:"compressed_bytes"`
+				PayloadBase64  string            `json:"payload_base64"`
+			}{
+				idempotencyKey, route.Term, 0, frame.Compression, frame.RecordCount,
+				frame.UncompressedBytes, frame.CompressedBytes, frame.PayloadBase64,
+			},
 		}
 	})
 }

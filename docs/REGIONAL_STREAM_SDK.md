@@ -1,6 +1,6 @@
 # Regional Stream SDK
 
-**Status:** Versioned multi-shard and coordinated-session alpha
+**Status:** Versioned multi-shard, atomic-batch, and coordinated-session alpha
 
 **Languages:** Go, Java, and Python
 
@@ -13,7 +13,8 @@ the Go control plane.
 See [ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md) for the binding
 decision, [ADR-0023](adr/0023-stream-retention-policies.md) for retention,
 [ADR-0024](adr/0024-stream-multishard-key-routing.md) for keyed routing,
-[ADR-0025](adr/0025-stream-consumer-sessions.md) for consumer coordination, and
+[ADR-0025](adr/0025-stream-consumer-sessions.md) for consumer coordination,
+[ADR-0026](adr/0026-regional-stream-batch-sdks.md) for SDK batch framing, and
 [Regional runtime](REGIONAL_RUNTIME.md) for provisioning and operations.
 
 ## End-to-end flow
@@ -87,6 +88,9 @@ available for tests in all three SDKs.
 | Published shard selection | `StreamShardFor` | `StreamPartitioner.shardFor` | `stream_shard_for` |
 | Keyed append | `AppendKeyed` | `appendKeyed` | `append_keyed` |
 | Single append | `Append` | `append` | `append` |
+| Atomic framed batch | `AppendBatch` | `appendBatch` | `append_batch` |
+| Encode none/gzip batch | `EncodeStreamBatch` | `StreamBatchFrame.encode` | `StreamBatchFrame.encode` |
+| Wrap any supported frame | `NewStreamBatchFrame` | `StreamBatchFrame.compressed` | `StreamBatchFrame.from_compressed` |
 | Offset fetch | `Fetch` | `fetch` | `fetch` |
 | Commit or reset checkpoint | `CommitOffset` | `commitOffset` | `commit_offset` |
 | Observe checkpoint and lag | `Lag` | `lag` | `lag` |
@@ -112,6 +116,45 @@ Go, Java, and Python:
 | `order-1` | 16 | 13 |
 | `café` | 16 | 9 |
 | `東京` | 16 | 15 |
+
+## Atomic framed batches
+
+One batch targets one explicit logical shard and becomes visible as one atomic
+tablet transition. Every record has a unique unsigned 32-bit
+`client_sequence`; the response correlates that sequence with an exact decimal
+offset and the outer logical partition. Batches contain 1–1,000 records, at
+most 4 MiB of canonical expanded JSON, and at most 360 KiB of compressed frame
+bytes.
+
+Go `EncodeStreamBatch`, Java `StreamBatchFrame.encode`, and Python
+`StreamBatchFrame.encode` build compact Rust/Serde-compatible JSON and provide
+dependency-free `none` and RFC 1952 gzip framing. `NewStreamBatchFrame`,
+`StreamBatchFrame.compressed`, and `StreamBatchFrame.from_compressed` wrap exact
+caller-produced standard LZ4, Snappy, Zstandard, gzip, or uncompressed bytes.
+The Rust server still decompresses and validates the full canonical document,
+declared sizes/count, unique sequences, envelope validity, output ceiling, and
+Zstandard window before proposing anything.
+
+Retry an unknown outcome using the same `StreamBatchFrame` and idempotency key.
+Do not recompress equivalent records under that key: exact frame bytes and
+metadata are semantic identity. The SDK never splits a batch across keys or
+shards and does not provide automatic batching, compression negotiation,
+connection credit, or non-atomic partial success.
+
+Minimal Python gzip batch:
+
+```python
+frame = StreamBatchFrame.encode(
+    [
+        StreamBatchRecord(101, first_event),
+        StreamBatchRecord(102, second_event),
+    ],
+    "gzip",
+)
+receipt = client.append_batch(
+    "orders", shard, "orders-gzip-batch-1", frame,
+)
+```
 
 Append and checkpoint operations require an explicit idempotency key. A
 checkpoint also requires the caller's nonzero member generation. `reset` is the
@@ -176,7 +219,7 @@ left = client.leave_consumer_session(
 ## Executable examples
 
 The complete examples select a shard from `customer-0`, perform a keyed append,
-repeat the exact append, fetch by offset, fetch from a group checkpoint, commit
+repeat the exact append, submit a two-record gzip batch, fetch by offset, fetch from a group checkpoint, commit
 that checkpoint, observe lag, join/heartbeat/observe/leave a coordinated
 consumer session, configure a combined retention policy, commit idle
 maintenance, and inspect retention:
@@ -229,6 +272,7 @@ The base route is:
 
 ```text
 /records
+/records/batches
 /groups/{group}/offsets
 /groups/{group}/lag
 /groups/{group}/records
@@ -314,7 +358,7 @@ cargo test -p epoch-node regional_router::tests
 The real recovery gate builds the node image, creates three independently
 replicated Stream shards, kills the active leader, routes Python keyed appends
 to shards 0, 1, and 2, verifies logical receipt/record/checkpoint identities,
-runs two-member join/rebalance/heartbeat/inclusive expiry plus retention
+runs a correlated gzip SDK batch plus two-member join/rebalance/heartbeat/inclusive expiry and retention
 configure/maintenance/observation, restarts and catches up the old voter, kills
 every voter, reopens the same volumes, and verifies the session plus per-shard
 state converged:
@@ -329,10 +373,12 @@ This versioned alpha covers several independently replicated Stream shards,
 stable key routing for the current resource generation, direct per-shard
 operations, replicated deterministic join/heartbeat/leave/dead-member expiry
 and resource-wide assignment, caller-supplied checkpoint generations, and
-replicated time/size/combined retention. Automatic split/merge/remapping,
+replicated time/size/combined retention, and bounded caller-framed atomic
+batches in every first-party SDK. Automatic split/merge/remapping,
 virtual shards, background session or retention scheduling, cooperative revoke
 handshake, sticky/rack-aware assignment, server-push consumption, atomic
 assignment-plus-offset handoff, keyed compaction, legal hold, cross-shard
-produce-and-offset transactions, automatic batching/compression, generated
+produce-and-offset transactions, streaming Produce, automatic batching or
+compression selection, generated
 response models, package-registry publication, TLS/OIDC/mTLS, dynamic voter
 membership, and the production fault/scale matrix remain open.

@@ -8,6 +8,15 @@
 **Status:** Product concept with approved brand and implementation direction  
 **Audience:** Founders, product, distributed-systems engineering, infrastructure, security, and design
 
+**Implementation note (13 August 2026):** The repository now exposes the
+existing bounded, single-shard atomic STREAM-006 batch command through the Go,
+Java, and Python regional SDKs. All three build canonical uncompressed or gzip
+frames and accept caller-supplied standard LZ4, Snappy, or Zstandard frames;
+the Rust authority enforces exact framing, decompression, bounds, and atomic
+application. This advances the P0 batching/compression path but does not claim
+the later bidirectional Produce stream, automatic batching/codec negotiation,
+cross-shard planning, or independent per-record partial success. See ADR-0026.
+
 ---
 
 ## 0. Executive decision

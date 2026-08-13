@@ -8,6 +8,17 @@ notes explicitly list additional verified artifacts.
 
 ### Added
 
+- Regional Go, Java, and Python Stream clients now expose a single-shard atomic
+  batch operation over the existing authenticated and fenced v1 route. Exact
+  frame bytes and caller idempotency survive one bounded leader rediscovery.
+- Dependency-free canonical none/gzip batch encoders plus typed exact-frame
+  constructors for LZ4, Snappy, and Zstd. Cross-language tests cover canonical
+  field order, recursively sorted object maps, Unicode, sequence uniqueness,
+  metadata consistency, and size bounds before network I/O.
+- ADR-0026, end-to-end SDK/API/runtime/testing guidance, exact published
+  Go/Java/Python gzip examples, and a real Python post-leader-loss batch
+  campaign that proves correlated replay through voter catch-up and all-node
+  same-volume reopen.
 - Additive Stream command v5 and native snapshot v2 for a shard-zero consumer
   coordinator. Bounded join/rejoin, generation-fenced heartbeat/leave,
   monotonic committed time, inclusive dead-member expiry, and lexical
@@ -194,9 +205,10 @@ notes explicitly list additional verified artifacts.
   cross-consumer fairness, indexed backlog-scale counting, generated response
   models, and package publication remain unimplemented.
 - Stream batching/compression is currently an experimental single-partition,
-  whole-command-atomic HTTP/tablet slice. Stable bidirectional Produce,
+  whole-command-atomic HTTP/tablet and repository-local regional SDK slice.
+  Stable bidirectional Produce,
   automatic producer batching and codec negotiation, non-atomic partial
-  results, compression dictionaries, fuzz/load benchmarks, and SDK exposure
+  results, compression dictionaries, and fuzz/load benchmarks
   remain unimplemented.
 - Replicated Stream consumer groups provide independent per-shard checkpoint
   storage plus a shard-zero session coordinator for join, heartbeat, leave,
@@ -210,7 +222,7 @@ notes explicitly list additional verified artifacts.
   compaction/tombstones, object-tier retention, and legal-hold governance
   remain open. Standalone offset helpers keep their local contract.
 - The regional SDKs remain repository-local alpha source. Package publication,
-  generated response models, Stream batch/compression helpers, Event Bus
+  generated response models, Event Bus
   external webhook/HTTP/push execution and signing, Cache background
   expiry/eviction/multi-shard routing, Stream online expansion/remapping and
   virtual shards, TLS/OIDC/mTLS, dynamic membership, and live-cluster execution

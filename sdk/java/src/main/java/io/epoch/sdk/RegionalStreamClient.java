@@ -52,6 +52,24 @@ public final class RegionalStreamClient {
         });
   }
 
+  /** Atomically appends one caller-framed batch to a single Stream shard. */
+  public JsonNode appendBatch(
+      String stream, int shard, String idempotencyKey, StreamBatchFrame frame)
+      throws IOException, InterruptedException {
+    RegionalClientCore.required(idempotencyKey, "idempotency key");
+    Objects.requireNonNull(frame, "frame");
+    return call(
+        stream,
+        shard,
+        route ->
+            new RegionalClientCore.RequestSpec(
+                "POST",
+                "/records/batches",
+                frame.toRequest(idempotencyKey, route.term()),
+                Map.of(),
+                Map.of()));
+  }
+
   /**
    * Discovers the Stream partitioning contract and appends by event key, falling back to event ID.
    * The target generation is pinned so an expansion race cannot silently remap an uncertain write.

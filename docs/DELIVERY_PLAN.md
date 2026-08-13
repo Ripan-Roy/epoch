@@ -18,16 +18,20 @@ bootstrap authorization, topology admission, quorum-confirmed leader ReadIndex
 barriers, Queue credit flow, Stream batches and consumer checkpoints, all four
 regional profile SDKs, profile-native checkpoint restore with physical EPRS
 reclamation, replicated Stream time/size/combined retention, and multi-shard
-Stream routing. PR #62, exact-main CI, Pages, and the live docs prove
+Stream routing and consumer sessions. PR #62 proves
 independently replicated ordered partitions, versioned FNV-1a UTF-8 discovery,
 generation-pinned Go/Java/Python keyed append, logical response identities,
 fail-closed expansion races, and a real three-shard Python recovery campaign.
-The current feature adds a replicated shard-zero consumer-session coordinator
-with bounded join/heartbeat/leave/expiry, monotonic generations and time,
-deterministic resource-wide assignment, snapshot recovery, and matching
-Go/Java/Python methods. Local protected-feature evidence is being completed;
-background maintenance and atomic assignment-plus-offset handoff remain later
-slices.
+PR #63, exact-main CI, main-only Pages, and the live docs prove a replicated
+shard-zero consumer-session coordinator with bounded
+join/heartbeat/leave/expiry, monotonic generations and time, deterministic
+resource-wide assignment, snapshot recovery, matching Go/Java/Python methods,
+and a real post-failover recovery campaign. The current feature exposes the
+already-replicated single-shard atomic batch command through those three SDKs,
+with canonical none/gzip encoders, exact caller frames for every required
+codec, bounded rediscovery, executable docs, and real recovery evidence.
+Stable streaming Produce, background session maintenance, and atomic
+assignment-plus-offset handoff remain later slices.
 Replicated multi-instance hosted metadata, production identity, follower
 routing, dynamic membership/voter selection, repair/rebalance, and the broader
 M2 profile/security/performance gates remain open.
@@ -175,7 +179,7 @@ membership. See
 [ADR-0021](adr/0021-consensus-checkpoint-and-snapshot-installation.md) plus
 [ADR-0022](adr/0022-profile-native-checkpoints-and-physical-reclamation.md).
 
-The Stream application core now accepts a version-two atomic batch command
+The Stream application core accepts a version-two atomic batch command
 without changing the canonical version-one single append. A batch carries
 1–1,000 unique client sequences as canonical JSON inside none, gzip, LZ4-frame,
 Snappy-framed, or Zstd-frame encoding. Exact compressed/uncompressed sizes, a
@@ -183,10 +187,18 @@ Snappy-framed, or Zstd-frame encoding. Exact compressed/uncompressed sizes, a
 validated before proposal and voter application. The cloned transition returns
 one exact offset per sequence and cannot expose a prefix. Unit/golden/bomb
 tests, every-codec real-runtime commits, EPRS reopen, and a Python-produced gzip
-container frame are executable. This advances STREAM-006 but does not complete
-stable bidirectional Produce, automatic producer batching/negotiation,
-cross-shard batch planning, non-atomic partial results, fuzz/load evidence, or
-SDK batch support. See [ADR-0015](adr/0015-stream-batch-compression.md) and
+container frame are executable. Repository-local Go, Java, and Python regional
+clients now expose one explicit-shard atomic batch operation. They build
+canonical `none` and gzip frames without optional dependencies, accept exact
+caller-produced LZ4/Snappy/Zstd frames, and preserve the frame plus idempotency
+key across bounded leader rediscovery. Exact published examples and a real
+post-leader-loss Python SDK batch followed by voter catch-up and same-volume
+reopen are executable. This advances STREAM-006 but does not complete stable
+bidirectional Produce, automatic batching/codec negotiation, cross-shard batch
+planning, non-atomic partial results, fuzz/load evidence, or matched
+compression benchmarks. See
+[ADR-0015](adr/0015-stream-batch-compression.md),
+[ADR-0026](adr/0026-regional-stream-batch-sdks.md), and
 [Experimental Stream Tablet](STREAM_TABLET.md).
 
 The same Stream tablet now accepts a version-three consumer-group checkpoint
