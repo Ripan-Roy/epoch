@@ -45,12 +45,14 @@ redirects, and performs no hidden retries for standalone operations.
 `RegionalStreamClient` is the explicit replicated alternative. It accepts every
 Rust node endpoint plus a `RegionalScope` and bearer token, discovers the
 current leader before each call, carries generation/tablet fences, reuses the
-caller's append/checkpoint/retention idempotency key across one bounded
-rediscovery, and requests linearizable fetch/lag/retention reads.
+caller's append/checkpoint/session/retention idempotency key across one bounded
+rediscovery, and requests linearizable fetch/lag/session/retention reads.
 `StreamShardFor` implements the advertised FNV-1a UTF-8 contract, while
 `AppendKeyed` selects that shard from the event key or ID and fails before
 writing if the resource generation changes. The client also exposes
-time/size/combined retention configuration and explicit idle maintenance. See the
+time/size/combined retention configuration and explicit idle maintenance. Its
+shard-zero session methods cover join, heartbeat, leave, expiry maintenance,
+and deterministic resource-wide assignment observation. See the
 [complete regional example](../../console/src/quickstarts/regional/quickstart.go)
 and [contract guide](../../docs/REGIONAL_STREAM_SDK.md).
 
@@ -76,8 +78,9 @@ delivery settlement also preserves the opaque lease token. See the
 and [Event Bus contract guide](../../docs/REGIONAL_EVENT_BUS_SDK.md).
 
 The provisional module path is not a publishable compatibility promise. Native
-gRPC streaming, coordinated consumer sessions, generated response types, and
-package publication remain future work.
+gRPC streaming, background/cooperative consumer sessions, atomic
+assignment-plus-offset handoff, generated response types, and package
+publication remain future work.
 
 Run the package gate from the repository root:
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 type regionalFakeTransport struct {
@@ -314,6 +315,56 @@ func TestRegionalStreamClientBuildsGroupAndLinearizableReadContracts(t *testing.
 	}
 	if read.Query.Get("offset") != "11" || read.Query.Get("limit") != "25" {
 		t.Fatalf("unexpected fetch query: %v", read.Query)
+	}
+}
+
+func TestRegionalStreamClientBuildsCoordinatedConsumerSessionContracts(t *testing.T) {
+	leader := &regionalFakeTransport{route: Document{
+		"resource_generation": "2", "tablet_epoch": "4", "term": "9", "accepts_writes": true,
+	}}
+	client, err := NewRegionalStreamClientWithTransports(
+		[]Transport{leader}, "secret-token",
+		RegionalScope{Organization: "acme", Project: "shop", Environment: "dev", Namespace: "core"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := client.JoinConsumerSession(ctx, "orders", "billing/eu", "member-a", 30*time.Second, "join-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.HeartbeatConsumerSession(ctx, "orders", "billing/eu", "member-a", 3, "heartbeat-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ConsumerSession(ctx, "orders", "billing/eu"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.MaintainConsumerSession(ctx, "orders", "billing/eu", "maintain-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.LeaveConsumerSession(ctx, "orders", "billing/eu", "member-a", 3, "leave-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	expected := []struct {
+		index  int
+		method string
+		suffix string
+	}{
+		{1, "POST", "/groups/billing%2Feu/sessions"},
+		{3, "PUT", "/groups/billing%2Feu/sessions/member-a/heartbeat"},
+		{5, "GET", "/groups/billing%2Feu/sessions"},
+		{7, "POST", "/groups/billing%2Feu/sessions/maintenance"},
+		{9, "DELETE", "/groups/billing%2Feu/sessions/member-a"},
+	}
+	for _, want := range expected {
+		request := leader.requests[want.index]
+		if request.Method != want.method || !strings.HasSuffix(request.Path, want.suffix) {
+			t.Fatalf("unexpected session request %d: %#v", want.index, request)
+		}
+		if want.method == "GET" && request.Headers[regionalReadHeader] != "linearizable" {
+			t.Fatalf("session observation must be linearizable: %#v", request)
+		}
 	}
 }
 

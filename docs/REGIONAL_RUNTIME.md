@@ -221,13 +221,17 @@ selects a logical shard, and requires the target to retain the initially
 observed resource generation before sending a write. Every operation then
 queries the configured Rust endpoints, selects only `accepts_writes: true`,
 copies the resource generation and tablet epoch, and supplies the observed term
-for mutations. Append and checkpoint calls require a caller-owned idempotency
-key; a bounded route retry reuses it unchanged. Fetch, checkpoint replay, and
-lag explicitly select `linearizable` and never downgrade to stale reads.
+for mutations. Append, checkpoint, and session calls require a caller-owned
+idempotency key; a bounded route retry reuses it unchanged. Fetch, checkpoint
+replay, lag, and session observation explicitly select `linearizable` and never
+downgrade to stale reads.
 
 The current SDK methods cover keyed and explicit-shard single-record append,
-bounded offset fetch, per-shard checkpoint commit/reset, lag, retention, and
-fetch from the durable checkpoint. The complete executable Go, Java, and Python examples plus setup
+bounded offset fetch, per-shard checkpoint commit/reset, lag, shard-zero
+join/heartbeat/leave/expiry-maintenance and assignment observation, retention,
+and fetch from the durable checkpoint. Session assignment is resource-wide;
+its generation is not atomically coupled to each shard's checkpoint-owner
+generation. The complete executable Go, Java, and Python examples plus setup
 commands are in [Regional Stream SDK](REGIONAL_STREAM_SDK.md) and embedded on
 the published documentation page.
 
@@ -376,9 +380,11 @@ containers/network/volumes.
   native voter checkpoints, physical EPRS reclamation, and replicated Stream
   time/size/combined logical retention are implemented. Retention still lacks
   automatic idle maintenance, keyed compaction, object-tier deletion, and
-  legal-hold governance. Multi-shard Stream routing is implemented for a fixed
-  resource generation; safe online expansion/remapping, virtual shards, and
-  hot-key mitigation are not. Read barriers are leader-only and regional-only;
+  legal-hold governance. Multi-shard Stream routing and a replicated shard-zero
+  session coordinator are implemented for a fixed resource generation. Safe
+  online expansion/remapping, virtual shards, hot-key mitigation, background
+  expiry, cooperative revoke, and atomic checkpoint handoff are not. Read
+  barriers are leader-only and regional-only;
   follower forwarding remains absent.
 - Rust regional HTTP and Go management enforce the bootstrap policy, and the
   console supplies a session-only credential. They still have no TLS/OIDC/mTLS,
@@ -389,10 +395,10 @@ containers/network/volumes.
   protected by management leader election.
 - Go, Java, and Python now share the regional Stream, Queue, Cache, and Event
   Bus v1 route/retry/fence contract, including Stream retention
-  configure/maintain/observe and generation-pinned key routing. They remain
-  repository-local alpha source; package publication, generated models,
-  coordinated multi-shard membership/sessions, safe remapping, and production
-  transport remain open.
+  configure/maintain/observe, generation-pinned key routing, and coordinated
+  session membership/assignment. They remain repository-local alpha source;
+  package publication, generated models, transactional assignment/offset
+  handoff, safe remapping, and production transport remain open.
 - The BFF reports policy-protected configured-endpoint region/zone/class and
   group-capacity evidence. Plain HTTP still lacks Rust server identity.
   Rack separation, dynamic membership, and online rebalancing remain

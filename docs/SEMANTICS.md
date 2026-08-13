@@ -216,8 +216,12 @@ normal commit is monotonic. Only an explicit reset may rewind, and either
 operation must remain between the earliest retained and end offsets. Rejected
 business outcomes do not change ownership/checkpoint state but remain in the
 replicated history and digest. Automatic join, heartbeat, assignment, revoke,
-generation allocation, and rebalance remain future `ConsumerSession` work; see
-[ADR-0016](adr/0016-stream-consumer-group-checkpoints.md).
+generation allocation, and rebalance are deliberately outside this v3
+checkpoint primitive. The separate shard-zero v5 `ConsumerSession` implements
+join, heartbeat, leave, explicit expiry, generation allocation, and eager
+assignment, but does not atomically install its fence in every checkpoint; see
+[ADR-0016](adr/0016-stream-consumer-group-checkpoints.md) and
+[ADR-0025](adr/0025-stream-consumer-sessions.md).
 
 Read-committed consumers skip prepared and aborted transactional entries. They
 may wait behind an unresolved transaction up to a documented bound.
@@ -483,6 +487,17 @@ used to choose the shard and sends no write if target discovery reports another
 generation. Therefore Epoch makes no ordering or exactly-once claim across an
 online remap. See [ADR-0024](adr/0024-stream-multishard-key-routing.md).
 
+Consumer-session membership is a separate replicated command stream on logical
+shard 0. New joins, leaves, and inclusive deadline expiry advance one
+resource-wide generation; valid rejoin and heartbeat only renew the deadline.
+Committed time is monotonic across leader changes. Lexically ordered members
+own shard `s` by `s mod member_count`, so every voter reproduces the same
+balanced assignment. Idle expiry requires explicit maintenance. Session
+generation does not atomically replace the independent v3 checkpoint-owner
+generation on each shard; applications must stop revoked work and hand off
+offsets explicitly. See
+[ADR-0025](adr/0025-stream-consumer-sessions.md).
+
 The same persistent actor can instead mount a separate, single-partition Queue
 state machine over the shared committed-command substrate. Given the same
 ordered history, independent voters reproduce fenced acquire/settlement,
@@ -539,9 +554,10 @@ idempotency retention. The regional resource/shard wrapper supplies several
 independent Stream tablets and a leader ReadIndex by default; it does not change
 the direct-route contract. The
 regional Stream, Queue, Cache, and Event Bus v1 SDKs make those explicit
-wrappers callable from Go, Java, and Python, including Stream keyed routing and
-retention policy operations, but do not turn fixed-voter evidence into a production
-durability claim, add consumer/session coordination, or execute external Bus
+wrappers callable from Go, Java, and Python, including Stream keyed routing,
+retention policy operations, and shard-zero consumer-session coordination.
+They do not turn fixed-voter evidence into a production durability claim,
+atomically couple assignment with per-shard offsets, or execute external Bus
 targets. See
 [REGIONAL_STREAM_SDK.md](REGIONAL_STREAM_SDK.md),
 [REGIONAL_QUEUE_SDK.md](REGIONAL_QUEUE_SDK.md),

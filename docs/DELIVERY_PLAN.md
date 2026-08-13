@@ -17,15 +17,17 @@ The active M1/M2 boundary is the regional multi-tablet feature. Protected
 bootstrap authorization, topology admission, quorum-confirmed leader ReadIndex
 barriers, Queue credit flow, Stream batches and consumer checkpoints, all four
 regional profile SDKs, profile-native checkpoint restore with physical EPRS
-reclamation, and replicated Stream time/size/combined retention. The current
-feature implements multi-shard Stream routing: each catalog shard is an
-independently replicated ordered partition, route discovery publishes a
-versioned FNV-1a UTF-8 contract, and Go, Java, and Python keyed append methods
-pin the resource generation. Local evidence covers shared vectors,
-three-shard materialization/reopen, logical response identities, fail-closed
-expansion races, and a real Python SDK container campaign through leader loss
-and all-node recovery. Protected-branch evidence for this increment remains
-pending.
+reclamation, replicated Stream time/size/combined retention, and multi-shard
+Stream routing. PR #62, exact-main CI, Pages, and the live docs prove
+independently replicated ordered partitions, versioned FNV-1a UTF-8 discovery,
+generation-pinned Go/Java/Python keyed append, logical response identities,
+fail-closed expansion races, and a real three-shard Python recovery campaign.
+The current feature adds a replicated shard-zero consumer-session coordinator
+with bounded join/heartbeat/leave/expiry, monotonic generations and time,
+deterministic resource-wide assignment, snapshot recovery, and matching
+Go/Java/Python methods. Local protected-feature evidence is being completed;
+background maintenance and atomic assignment-plus-offset handoff remain later
+slices.
 Replicated multi-instance hosted metadata, production identity, follower
 routing, dynamic membership/voter selection, repair/rebalance, and the broader
 M2 profile/security/performance gates remain open.
@@ -88,8 +90,9 @@ The traceability register marks the following as **Slice**. A Slice entry can be
 
 - Cache: CACHE-001–CACHE-005 and CACHE-007. CACHE-008 snapshots remain M3;
   the M1 segmented WAL is only a prerequisite and is not Cache restore evidence.
-- Stream: STREAM-001, STREAM-002 basic retention, the replicated checkpoint
-  slice of STREAM-003, STREAM-004, STREAM-005, and the replicated bounded
+- Stream: STREAM-001, STREAM-002 basic retention, the replicated checkpoint and
+  consumer-session coordinator slices of STREAM-003, STREAM-004, STREAM-005,
+  and the replicated bounded
   batch/compression slice of STREAM-006.
 - Queue: QUEUE-001–QUEUE-006 and native credit flow for QUEUE-011.
 - Bus: bounded deterministic direct/fan-out routing for BUS-001,
@@ -190,17 +193,16 @@ The same Stream tablet now accepts a version-three consumer-group checkpoint
 command. Commit advances a durable next offset; reset is the only rewind;
 caller-supplied generations fence an old or conflicting member. Typed
 committed rejections, exact retry, lag/replay observations, real-three-runtime
-convergence, and container `SIGKILL` rebuild are executable. This advances
-STREAM-003 without claiming automatic group membership, heartbeat, assignment,
-rebalance, multi-partition ownership, or transactional offsets. A fully
+convergence, and container `SIGKILL` rebuild are executable. This advances the
+per-shard checkpoint boundary of STREAM-003. A fully
 qualified authenticated regional Stream v1 route now maps to that same tablet.
 Repository-local Go, Java, and Python clients discover a current leader before
 each operation, copy generation/tablet fences, preserve caller idempotency
 across bounded rediscovery, and request linearizable fetch/lag reads. All three
 have contract tests and exact compiled Pages examples; Python additionally
 runs after leader loss in the container recovery campaign. Generated response
-types, coordinated sessions, all-language live-cluster execution, package
-publication, and production scale/fault evidence remain open. See
+types, atomic coordinated checkpoint handoff, all-language live-cluster
+execution, package publication, and production scale/fault evidence remain open. See
 [ADR-0016](adr/0016-stream-consumer-group-checkpoints.md) and
 [ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md).
 
@@ -237,6 +239,23 @@ multi-partition consumer coordination, cross-shard transactions, and hot-key
 automation remain open. See
 [ADR-0024](adr/0024-stream-multishard-key-routing.md) and
 [Regional Stream SDK](REGIONAL_STREAM_SDK.md).
+
+The Stream tablet now also accepts canonical command v5 on logical shard 0.
+It replicates resource-wide consumer membership, inclusive deadlines, a
+monotonic committed-time watermark, and deterministic lexical round-robin
+assignment across the captured shard count. New joins, leave, and one-or-more
+expirations advance the group generation once; heartbeat and leave reject stale
+generations as typed committed outcomes. Native Stream snapshot v2 preserves
+the coordinator and accepts legacy v1 images. Direct and authenticated regional
+routes plus Go, Java, and Python clients expose join, heartbeat, leave,
+maintenance, and linearizable observation. Core/SDK tests and a real
+three-voter checkpoint/reopen test are executable; the regional container
+campaign exercises two members after leader replacement and verifies the
+surviving assignment after voter catch-up and all-node reopen. This advances
+STREAM-003 but does not provide background expiry, cooperative revoke,
+server-push consumption, sticky/rack-aware assignment, or atomic coupling to
+each shard's v3 checkpoint owner. See
+[ADR-0025](adr/0025-stream-consumer-sessions.md).
 
 The Queue application core now runs behind the same profile-neutral persistent
 actor boundary. It deterministically applies strict single-partition commands,

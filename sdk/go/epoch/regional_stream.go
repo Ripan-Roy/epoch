@@ -19,6 +19,8 @@ const (
 	maxStreamRetentionRecords   = 100_000
 	maxStreamRetentionBytes     = 3 * 1024 * 1024
 	maxStreamRetentionAgeMS     = 10 * 365 * 24 * 60 * 60 * 1_000
+	minStreamSessionTimeout     = time.Second
+	maxStreamSessionTimeout     = 5 * time.Minute
 	streamPartitioner           = "fnv1a64_utf8_mod_n_v1"
 )
 
@@ -284,6 +286,105 @@ func (client *RegionalStreamClient) FetchGroup(ctx context.Context, stream strin
 	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, func(_ regionalRoute) Request {
 		return Request{Method: "GET", Path: "/groups/" + groupSegment + "/records", Query: url.Values{"limit": {strconv.FormatUint(uint64(limit), 10)}}, Headers: map[string]string{regionalReadHeader: "linearizable"}}
 	})
+}
+
+// JoinConsumerSession creates or renews a member and returns its generation-fenced shard assignment.
+func (client *RegionalStreamClient) JoinConsumerSession(ctx context.Context, stream, group, member string, sessionTimeout time.Duration, idempotencyKey string) (Document, error) {
+	groupSegment, _, err := consumerSessionSegments(group, member)
+	if err != nil {
+		return nil, err
+	}
+	if sessionTimeout < minStreamSessionTimeout || sessionTimeout > maxStreamSessionTimeout || sessionTimeout%time.Millisecond != 0 {
+		return nil, fmt.Errorf("epoch: consumer session timeout must be a whole millisecond between %s and %s", minStreamSessionTimeout, maxStreamSessionTimeout)
+	}
+	if err := validateRegionalIdempotencyKey(idempotencyKey); err != nil {
+		return nil, err
+	}
+	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, 0, func(route regionalRoute) Request {
+		return Request{Method: "POST", Path: "/groups/" + groupSegment + "/sessions", Body: struct {
+			IdempotencyKey string `json:"idempotency_key"`
+			ExpectedTerm   string `json:"expected_term"`
+			MemberID       string `json:"member_id"`
+			SessionTimeout string `json:"session_timeout_ms"`
+		}{idempotencyKey, route.Term, member, strconv.FormatInt(sessionTimeout.Milliseconds(), 10)}}
+	})
+}
+
+// HeartbeatConsumerSession renews one member using the current group generation fence.
+func (client *RegionalStreamClient) HeartbeatConsumerSession(ctx context.Context, stream, group, member string, generation uint64, idempotencyKey string) (Document, error) {
+	return client.mutateConsumerSession(ctx, "PUT", stream, group, member, generation, idempotencyKey, "/heartbeat")
+}
+
+// LeaveConsumerSession revokes a member and deterministically reassigns its shards.
+func (client *RegionalStreamClient) LeaveConsumerSession(ctx context.Context, stream, group, member string, generation uint64, idempotencyKey string) (Document, error) {
+	return client.mutateConsumerSession(ctx, "DELETE", stream, group, member, generation, idempotencyKey, "")
+}
+
+// MaintainConsumerSession expires members whose inclusive deadlines have passed.
+func (client *RegionalStreamClient) MaintainConsumerSession(ctx context.Context, stream, group, idempotencyKey string) (Document, error) {
+	groupSegment, err := segment(group, "consumer group")
+	if err != nil {
+		return nil, err
+	}
+	if err := validateRegionalIdempotencyKey(idempotencyKey); err != nil {
+		return nil, err
+	}
+	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, 0, func(route regionalRoute) Request {
+		return Request{Method: "POST", Path: "/groups/" + groupSegment + "/sessions/maintenance", Body: struct {
+			IdempotencyKey string `json:"idempotency_key"`
+			ExpectedTerm   string `json:"expected_term"`
+		}{idempotencyKey, route.Term}}
+	})
+}
+
+// ConsumerSession returns the linearizable membership, generation, deadlines, and assignments.
+func (client *RegionalStreamClient) ConsumerSession(ctx context.Context, stream, group string) (Document, error) {
+	groupSegment, err := segment(group, "consumer group")
+	if err != nil {
+		return nil, err
+	}
+	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, 0, func(_ regionalRoute) Request {
+		return Request{Method: "GET", Path: "/groups/" + groupSegment + "/sessions", Headers: map[string]string{regionalReadHeader: "linearizable"}}
+	})
+}
+
+func consumerSessionSegments(group, member string) (string, string, error) {
+	groupSegment, err := segment(group, "consumer group")
+	if err != nil {
+		return "", "", err
+	}
+	memberSegment, err := segment(member, "consumer member")
+	if err != nil {
+		return "", "", err
+	}
+	return groupSegment, memberSegment, nil
+}
+
+func (client *RegionalStreamClient) mutateConsumerSession(ctx context.Context, method, stream, group, member string, generation uint64, idempotencyKey, suffix string) (Document, error) {
+	groupSegment, memberSegment, err := consumerSessionSegments(group, member)
+	if err != nil {
+		return nil, err
+	}
+	if generation == 0 {
+		return nil, fmt.Errorf("epoch: consumer group generation must be non-zero")
+	}
+	if err := validateRegionalIdempotencyKey(idempotencyKey); err != nil {
+		return nil, err
+	}
+	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, 0, func(route regionalRoute) Request {
+		return Request{Method: method, Path: "/groups/" + groupSegment + "/sessions/" + memberSegment + suffix, Body: struct {
+			IdempotencyKey string `json:"idempotency_key"`
+			ExpectedTerm   string `json:"expected_term"`
+			Generation     string `json:"group_generation"`
+		}{idempotencyKey, route.Term, strconv.FormatUint(generation, 10)}}
+	})
+}
+
+func validateRegionalIdempotencyKey(idempotencyKey string) error {
+	if strings.TrimSpace(idempotencyKey) == "" {
+		return fmt.Errorf("epoch: idempotency key is required")
+	}
+	return nil
 }
 
 // ConfigureRetention commits a replacement time/size/count policy and immediately applies it.

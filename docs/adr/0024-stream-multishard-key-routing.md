@@ -144,7 +144,7 @@ Required evidence includes:
 ## Non-claims
 
 This decision does not provide online partition expansion, virtual shards,
-split/merge, automatic hot-key mitigation, coordinated multi-partition group
-ownership, cross-shard transactions, producer auto-batching, or a transparent
-remapping protocol. STREAM-011 and the remaining coordinator/transaction work
-stay separate.
+split/merge, automatic hot-key mitigation, cross-shard transactions, producer
+auto-batching, or a transparent remapping protocol. ADR-0025 subsequently adds
+resource-wide session assignment for a fixed shard count, while atomic
+assignment-plus-offset handoff and STREAM-011 remapping remain separate.

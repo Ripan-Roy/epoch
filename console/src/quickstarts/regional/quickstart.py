@@ -47,6 +47,28 @@ checkpoint = client.commit_offset(
     idempotency_key="docs-python-checkpoint-v1",
 )
 lag = client.lag("orders", shard, "docs-python")
+joined = client.join_consumer_session(
+    "orders",
+    "docs-python-session",
+    "docs-python-worker",
+    30_000,
+    idempotency_key="docs-python-session-join-v1",
+)
+heartbeat = client.heartbeat_consumer_session(
+    "orders",
+    "docs-python-session",
+    "docs-python-worker",
+    1,
+    idempotency_key="docs-python-session-heartbeat-v1",
+)
+session = client.consumer_session("orders", "docs-python-session")
+left = client.leave_consumer_session(
+    "orders",
+    "docs-python-session",
+    "docs-python-worker",
+    1,
+    idempotency_key="docs-python-session-leave-v1",
+)
 configured = client.configure_retention(
     "orders",
     shard,
@@ -72,6 +94,10 @@ print(
             "group_fetch": group_records,
             "checkpoint": checkpoint,
             "lag": lag,
+            "session_join": joined,
+            "session_heartbeat": heartbeat,
+            "session": session,
+            "session_leave": left,
             "retention_configure": configured,
             "retention_maintenance": maintained,
             "retention": retention,

@@ -16,6 +16,7 @@ mod queue;
 mod stream_batch;
 mod stream_group;
 mod stream_retention;
+mod stream_session;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -41,6 +42,7 @@ pub use queue::*;
 pub use stream_batch::*;
 pub use stream_group::*;
 pub use stream_retention::*;
+pub use stream_session::*;
 
 pub const STREAM_TABLET_COMMAND_FORMAT_VERSION: u16 = 1;
 pub const STREAM_TABLET_BATCH_COMMAND_FORMAT_VERSION: u16 = 2;
@@ -48,7 +50,8 @@ pub const STREAM_TABLET_BATCH_COMMAND_FORMAT_VERSION: u16 = 2;
 // boundary repeats the check so a command can never validate here and then be
 // rejected only after it reaches Raft.
 pub const MAX_STREAM_TABLET_COMMAND_BYTES: usize = 512 * 1024;
-pub const STREAM_TABLET_SNAPSHOT_FORMAT_VERSION: u16 = 1;
+pub const STREAM_TABLET_SNAPSHOT_FORMAT_VERSION: u16 = 2;
+const LEGACY_STREAM_TABLET_SNAPSHOT_FORMAT_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -73,6 +76,7 @@ pub enum StreamTabletOperation {
     AppendBatch(StreamAppendBatchCommand),
     GroupOffset(StreamGroupOffsetCommand),
     Retention(StreamRetentionCommand),
+    GroupSession(StreamGroupSessionCommand),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -220,6 +224,117 @@ impl StreamTabletCommand {
         Ok(command)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn join_group_session(
+        scope: &StreamTabletScope,
+        idempotency_key: impl Into<String>,
+        group: impl Into<String>,
+        member_id: impl Into<String>,
+        shard_count: u32,
+        session_timeout_ms: u64,
+        applied_at_ms: u64,
+    ) -> TabletResult<Self> {
+        Self::group_session(
+            scope,
+            idempotency_key,
+            group,
+            shard_count,
+            StreamGroupSessionAction::Join {
+                member_id: member_id.into(),
+                session_timeout_ms,
+            },
+            applied_at_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn heartbeat_group_session(
+        scope: &StreamTabletScope,
+        idempotency_key: impl Into<String>,
+        group: impl Into<String>,
+        member_id: impl Into<String>,
+        shard_count: u32,
+        group_generation: u64,
+        applied_at_ms: u64,
+    ) -> TabletResult<Self> {
+        Self::group_session(
+            scope,
+            idempotency_key,
+            group,
+            shard_count,
+            StreamGroupSessionAction::Heartbeat {
+                member_id: member_id.into(),
+                group_generation,
+            },
+            applied_at_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn leave_group_session(
+        scope: &StreamTabletScope,
+        idempotency_key: impl Into<String>,
+        group: impl Into<String>,
+        member_id: impl Into<String>,
+        shard_count: u32,
+        group_generation: u64,
+        applied_at_ms: u64,
+    ) -> TabletResult<Self> {
+        Self::group_session(
+            scope,
+            idempotency_key,
+            group,
+            shard_count,
+            StreamGroupSessionAction::Leave {
+                member_id: member_id.into(),
+                group_generation,
+            },
+            applied_at_ms,
+        )
+    }
+
+    pub fn maintain_group_sessions(
+        scope: &StreamTabletScope,
+        idempotency_key: impl Into<String>,
+        group: impl Into<String>,
+        shard_count: u32,
+        applied_at_ms: u64,
+    ) -> TabletResult<Self> {
+        Self::group_session(
+            scope,
+            idempotency_key,
+            group,
+            shard_count,
+            StreamGroupSessionAction::Maintain,
+            applied_at_ms,
+        )
+    }
+
+    fn group_session(
+        scope: &StreamTabletScope,
+        idempotency_key: impl Into<String>,
+        group: impl Into<String>,
+        shard_count: u32,
+        action: StreamGroupSessionAction,
+        applied_at_ms: u64,
+    ) -> TabletResult<Self> {
+        let command = Self {
+            format_version: STREAM_TABLET_SESSION_COMMAND_FORMAT_VERSION,
+            tablet_id: scope.tablet_id,
+            tablet_epoch: scope.tablet_epoch,
+            resource: scope.resource.clone(),
+            idempotency_key: idempotency_key.into(),
+            applied_at_ms,
+            operation: StreamTabletOperation::GroupSession(StreamGroupSessionCommand {
+                group: group.into(),
+                shard_count,
+                action,
+            }),
+        };
+        command.validate(scope)?;
+        Ok(command)
+    }
+
     pub fn encode(&self, scope: &StreamTabletScope) -> TabletResult<Vec<u8>> {
         self.validate(scope)?;
         let encoded =
@@ -272,6 +387,9 @@ impl StreamTabletCommand {
             )),
             StreamTabletOperation::Retention(_) => Err(TabletError::InvalidCommand(
                 "retention command has no batch payload".into(),
+            )),
+            StreamTabletOperation::GroupSession(_) => Err(TabletError::InvalidCommand(
+                "consumer-session command has no batch payload".into(),
             )),
         }
     }
@@ -343,6 +461,15 @@ impl StreamTabletCommand {
                     )));
                 }
                 validate_retention_command(retention)?;
+            }
+            StreamTabletOperation::GroupSession(session) => {
+                if self.format_version != STREAM_TABLET_SESSION_COMMAND_FORMAT_VERSION {
+                    return Err(TabletError::InvalidCommand(format!(
+                        "consumer-session mutation requires format_version {STREAM_TABLET_SESSION_COMMAND_FORMAT_VERSION}; observed {}",
+                        self.format_version
+                    )));
+                }
+                validate_session_command(session)?;
             }
         }
         Ok(())
@@ -437,6 +564,7 @@ pub enum StreamTabletMutationReceipt {
     Append(StreamTabletAppendReceipt),
     Group(StreamTabletGroupReceipt),
     Retention(StreamTabletRetentionReceipt),
+    Session(StreamTabletSessionReceipt),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -446,6 +574,8 @@ struct VersionedStreamTabletSnapshot {
     scope: StreamTabletScope,
     stream_base64: String,
     consumer_groups: BTreeMap<String, StreamConsumerGroupOwner>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    session_groups: BTreeMap<String, StreamConsumerSessionGroup>,
     applied: Vec<StreamTabletAppliedSnapshot>,
     last_applied_command_index: u64,
     state_digest: [u8; 32],
@@ -464,6 +594,7 @@ impl StreamTabletMutationReceipt {
             Self::Append(receipt) => receipt.proposal_id,
             Self::Group(receipt) => receipt.proposal_id,
             Self::Retention(receipt) => receipt.proposal_id,
+            Self::Session(receipt) => receipt.proposal_id,
         }
     }
 
@@ -478,6 +609,9 @@ impl StreamTabletMutationReceipt {
             Self::Retention(receipt) => {
                 receipt.disposition = StreamTabletRetentionDisposition::Replayed;
             }
+            Self::Session(receipt) => {
+                receipt.disposition = StreamTabletSessionDisposition::Replayed;
+            }
         }
     }
 }
@@ -487,6 +621,7 @@ pub struct StreamTablet {
     scope: StreamTabletScope,
     stream: Stream,
     consumer_groups: BTreeMap<String, StreamConsumerGroupOwner>,
+    session_groups: BTreeMap<String, StreamConsumerSessionGroup>,
     applied: BTreeMap<u64, AppliedCommand<StreamTabletMutationReceipt>>,
     last_applied_command_index: u64,
     state_digest: [u8; 32],
@@ -515,6 +650,7 @@ impl StreamTablet {
             scope,
             stream,
             consumer_groups: BTreeMap::new(),
+            session_groups: BTreeMap::new(),
             applied: BTreeMap::new(),
             last_applied_command_index: 0,
             state_digest,
@@ -540,9 +676,9 @@ impl StreamTablet {
         }
         match self.apply_mutation(committed)? {
             StreamTabletMutationReceipt::Append(receipt) => Ok(receipt),
-            StreamTabletMutationReceipt::Group(_) | StreamTabletMutationReceipt::Retention(_) => {
-                unreachable!("operation checked above")
-            }
+            StreamTabletMutationReceipt::Group(_)
+            | StreamTabletMutationReceipt::Retention(_)
+            | StreamTabletMutationReceipt::Session(_) => unreachable!("operation checked above"),
         }
     }
 
@@ -588,6 +724,10 @@ impl StreamTablet {
                 let receipt = self.apply_retention(committed, command.applied_at_ms, &retention)?;
                 StreamTabletMutationReceipt::Retention(receipt)
             }
+            StreamTabletOperation::GroupSession(session) => {
+                let receipt = self.apply_group_session(committed, command.applied_at_ms, &session);
+                StreamTabletMutationReceipt::Session(receipt)
+            }
         };
         match &receipt {
             StreamTabletMutationReceipt::Append(receipt) => {
@@ -598,6 +738,9 @@ impl StreamTablet {
             }
             StreamTabletMutationReceipt::Retention(receipt) => {
                 self.advance_retention_digest(committed, metadata.payload_digest, receipt);
+            }
+            StreamTabletMutationReceipt::Session(receipt) => {
+                self.advance_session_digest(committed, metadata.payload_digest, receipt);
             }
         }
         self.last_applied_command_index = committed.log_index;
@@ -617,7 +760,8 @@ impl StreamTablet {
             .and_then(|applied| match &applied.receipt {
                 StreamTabletMutationReceipt::Append(receipt) => Some(receipt.clone()),
                 StreamTabletMutationReceipt::Group(_)
-                | StreamTabletMutationReceipt::Retention(_) => None,
+                | StreamTabletMutationReceipt::Retention(_)
+                | StreamTabletMutationReceipt::Session(_) => None,
             })
     }
 
@@ -630,7 +774,9 @@ impl StreamTablet {
         Ok(match self.mutation_receipt_for_committed(committed)? {
             Some(StreamTabletMutationReceipt::Append(receipt)) => Some(receipt),
             Some(
-                StreamTabletMutationReceipt::Group(_) | StreamTabletMutationReceipt::Retention(_),
+                StreamTabletMutationReceipt::Group(_)
+                | StreamTabletMutationReceipt::Retention(_)
+                | StreamTabletMutationReceipt::Session(_),
             )
             | None => None,
         })
@@ -674,6 +820,14 @@ impl StreamTablet {
             lag: lag.lag,
             checkpoint_out_of_range: lag.checkpoint_out_of_range,
         })
+    }
+
+    pub fn session_observation(&self, group: &str) -> TabletResult<StreamTabletSessionObservation> {
+        validate_stream_consumer_group(group)?;
+        Ok(self.session_groups.get(group).map_or_else(
+            || absent_session_observation(group),
+            |session| session.observation(group),
+        ))
     }
 
     pub fn retention_observation(&self) -> TabletResult<StreamTabletRetentionObservation> {
@@ -726,6 +880,7 @@ impl StreamTablet {
             scope: self.scope.clone(),
             stream_base64: STANDARD_NO_PAD.encode(stream),
             consumer_groups: self.consumer_groups.clone(),
+            session_groups: self.session_groups.clone(),
             applied,
             last_applied_command_index: self.last_applied_command_index,
             state_digest: self.state_digest,
@@ -739,11 +894,20 @@ impl StreamTablet {
     ) -> TabletResult<Self> {
         let snapshot: VersionedStreamTabletSnapshot = serde_json::from_slice(encoded)
             .map_err(|error| TabletError::Decoding(error.to_string()))?;
-        if snapshot.format_version != STREAM_TABLET_SNAPSHOT_FORMAT_VERSION {
+        if snapshot.format_version != STREAM_TABLET_SNAPSHOT_FORMAT_VERSION
+            && snapshot.format_version != LEGACY_STREAM_TABLET_SNAPSHOT_FORMAT_VERSION
+        {
             return Err(TabletError::InvalidCommand(format!(
                 "unsupported Stream tablet snapshot version {}",
                 snapshot.format_version
             )));
+        }
+        if snapshot.format_version == LEGACY_STREAM_TABLET_SNAPSHOT_FORMAT_VERSION
+            && !snapshot.session_groups.is_empty()
+        {
+            return Err(TabletError::InvalidCommand(
+                "legacy Stream tablet snapshot contains consumer-session state".into(),
+            ));
         }
         if &snapshot.scope != expected_scope {
             return Err(TabletError::InvalidCommand(
@@ -788,6 +952,11 @@ impl StreamTablet {
                 ));
             }
         }
+        validate_session_group_count(snapshot.session_groups.len())?;
+        for (group, session) in &snapshot.session_groups {
+            validate_stream_consumer_group(group)?;
+            session.validate()?;
+        }
 
         let mut applied = BTreeMap::new();
         let mut previous_index = 0_u64;
@@ -816,6 +985,7 @@ impl StreamTablet {
             scope: snapshot.scope,
             stream,
             consumer_groups: snapshot.consumer_groups,
+            session_groups: snapshot.session_groups,
             applied,
             last_applied_command_index: snapshot.last_applied_command_index,
             state_digest: snapshot.state_digest,
@@ -970,6 +1140,91 @@ impl StreamTablet {
         })
     }
 
+    fn apply_group_session(
+        &mut self,
+        committed: CommittedCommand<'_>,
+        applied_at_ms: u64,
+        command: &StreamGroupSessionCommand,
+    ) -> StreamTabletSessionReceipt {
+        let member_id = command.action.member_id().map(str::to_owned);
+        let operation = command.action.operation();
+        let existing = self.session_groups.get(&command.group).cloned();
+        let group_exists = existing.is_some();
+        let can_create = matches!(command.action, StreamGroupSessionAction::Join { .. });
+        let capacity_rejection = existing.is_none()
+            && can_create
+            && self.session_groups.len() >= MAX_STREAM_CONSUMER_GROUPS;
+
+        let (group_generation, watermark_ms, members, assigned_shards, transition) =
+            if capacity_rejection {
+                (
+                    0,
+                    0,
+                    Vec::new(),
+                    Vec::new(),
+                    StreamSessionTransition {
+                        outcome: StreamTabletSessionOutcome::Rejected,
+                        rejection: Some(StreamTabletSessionRejection::GroupCapacityReached),
+                        expired_members: Vec::new(),
+                    },
+                )
+            } else if let Some(mut session) = existing.or_else(|| {
+                can_create.then(|| StreamConsumerSessionGroup::new(command.shard_count))
+            }) {
+                let transition = session.apply(command, applied_at_ms);
+                let assigned_shards = member_id
+                    .as_deref()
+                    .map_or_else(Vec::new, |member| session.assigned_shards(member));
+                let members = session.members_with_assignments();
+                let group_generation = session.generation;
+                let watermark_ms = session.watermark_ms;
+                if group_exists || session.generation > 0 {
+                    self.session_groups.insert(command.group.clone(), session);
+                }
+                (
+                    group_generation,
+                    watermark_ms,
+                    members,
+                    assigned_shards,
+                    transition,
+                )
+            } else {
+                (
+                    0,
+                    0,
+                    Vec::new(),
+                    Vec::new(),
+                    StreamSessionTransition {
+                        outcome: StreamTabletSessionOutcome::Rejected,
+                        rejection: Some(StreamTabletSessionRejection::UnknownGroup),
+                        expired_members: Vec::new(),
+                    },
+                )
+            };
+
+        StreamTabletSessionReceipt {
+            proposal_id: committed.proposal_id,
+            tablet_id: self.scope.tablet_id,
+            tablet_epoch: self.scope.tablet_epoch,
+            term: committed.term,
+            commit_index: committed.log_index,
+            group: command.group.clone(),
+            member_id,
+            operation,
+            shard_count: command.shard_count,
+            group_generation,
+            watermark_ms,
+            members,
+            assigned_shards,
+            expired_members: transition.expired_members,
+            outcome: transition.outcome,
+            rejection: transition.rejection,
+            write_evidence: StreamTabletWriteEvidence::FixedVoterMajorityPersisted,
+            durable_voter_acks: 2,
+            disposition: StreamTabletSessionDisposition::New,
+        }
+    }
+
     fn apply_retention(
         &mut self,
         committed: CommittedCommand<'_>,
@@ -1100,6 +1355,43 @@ impl StreamTablet {
         hasher.update(receipt.retained_bytes.to_be_bytes());
         self.state_digest = hasher.finalize().into();
     }
+
+    fn advance_session_digest(
+        &mut self,
+        committed: CommittedCommand<'_>,
+        payload_digest: [u8; 32],
+        receipt: &StreamTabletSessionReceipt,
+    ) {
+        let mut hasher = Sha256::new();
+        hasher.update(b"epoch/stream-tablet/state-transition/group-session/v5\0");
+        hasher.update(self.state_digest);
+        hasher.update(committed.proposal_id.to_be_bytes());
+        hasher.update(committed.term.to_be_bytes());
+        hasher.update(committed.log_index.to_be_bytes());
+        hasher.update(payload_digest);
+        hash_length_prefixed(&mut hasher, receipt.group.as_bytes());
+        hash_length_prefixed(
+            &mut hasher,
+            receipt.member_id.as_deref().unwrap_or_default().as_bytes(),
+        );
+        hasher.update([session_operation_code(receipt.operation)]);
+        hasher.update(receipt.shard_count.to_be_bytes());
+        hasher.update(receipt.group_generation.to_be_bytes());
+        hasher.update(receipt.watermark_ms.to_be_bytes());
+        for member in &receipt.members {
+            hash_length_prefixed(&mut hasher, member.member_id.as_bytes());
+            hasher.update(member.session_timeout_ms.to_be_bytes());
+            hasher.update(member.deadline_ms.to_be_bytes());
+            for shard in &member.assigned_shards {
+                hasher.update(shard.to_be_bytes());
+            }
+        }
+        for member in &receipt.expired_members {
+            hash_length_prefixed(&mut hasher, member.as_bytes());
+        }
+        hasher.update([session_outcome_code(receipt)]);
+        self.state_digest = hasher.finalize().into();
+    }
 }
 
 fn stream_receipt_matches_metadata(
@@ -1121,6 +1413,12 @@ fn stream_receipt_matches_metadata(
                 && receipt.commit_index == metadata.log_index
         }
         StreamTabletMutationReceipt::Retention(receipt) => {
+            receipt.tablet_id == scope.tablet_id
+                && receipt.tablet_epoch == scope.tablet_epoch
+                && receipt.term == metadata.term
+                && receipt.commit_index == metadata.log_index
+        }
+        StreamTabletMutationReceipt::Session(receipt) => {
             receipt.tablet_id == scope.tablet_id
                 && receipt.tablet_epoch == scope.tablet_epoch
                 && receipt.term == metadata.term
@@ -1193,6 +1491,28 @@ fn group_outcome_code(receipt: &StreamTabletGroupReceipt) -> u8 {
         Some(StreamTabletGroupRejection::OffsetBeforeRetained) => 5,
         Some(StreamTabletGroupRejection::OffsetBeyondEnd) => 6,
         Some(StreamTabletGroupRejection::GroupCapacityReached) => 7,
+    }
+}
+
+const fn session_operation_code(operation: StreamGroupSessionOperation) -> u8 {
+    match operation {
+        StreamGroupSessionOperation::Join => 0,
+        StreamGroupSessionOperation::Heartbeat => 1,
+        StreamGroupSessionOperation::Leave => 2,
+        StreamGroupSessionOperation::Maintain => 3,
+    }
+}
+
+fn session_outcome_code(receipt: &StreamTabletSessionReceipt) -> u8 {
+    match receipt.rejection {
+        None => 0,
+        Some(StreamTabletSessionRejection::UnknownGroup) => 1,
+        Some(StreamTabletSessionRejection::UnknownMember) => 2,
+        Some(StreamTabletSessionRejection::StaleGeneration) => 3,
+        Some(StreamTabletSessionRejection::ShardCountMismatch) => 4,
+        Some(StreamTabletSessionRejection::GroupCapacityReached) => 5,
+        Some(StreamTabletSessionRejection::MemberCapacityReached) => 6,
+        Some(StreamTabletSessionRejection::DeadlineOverflow) => 7,
     }
 }
 

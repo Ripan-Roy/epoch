@@ -13,6 +13,8 @@ import java.util.Objects;
 /** Authenticated, leader- and fence-aware client for regional Stream shards. */
 public final class RegionalStreamClient {
   private static final int MAX_FETCH_RECORDS = 1_000;
+  private static final Duration MIN_SESSION_TIMEOUT = Duration.ofSeconds(1);
+  private static final Duration MAX_SESSION_TIMEOUT = Duration.ofMinutes(5);
 
   private final RegionalClientCore regional;
 
@@ -189,6 +191,128 @@ public final class RegionalStreamClient {
                 null,
                 Map.of("limit", limit),
                 linearizable()));
+  }
+
+  /** Joins or renews a coordinated consumer member and returns its shard assignment. */
+  public JsonNode joinConsumerSession(
+      String stream, String group, String memberId, Duration sessionTimeout, String idempotencyKey)
+      throws IOException, InterruptedException {
+    String groupSegment = RegionalClientCore.segment(group, "consumer group");
+    RegionalClientCore.required(memberId, "consumer member");
+    Objects.requireNonNull(sessionTimeout, "sessionTimeout");
+    if (sessionTimeout.compareTo(MIN_SESSION_TIMEOUT) < 0
+        || sessionTimeout.compareTo(MAX_SESSION_TIMEOUT) > 0
+        || sessionTimeout.getNano() % 1_000_000 != 0) {
+      throw new IllegalArgumentException(
+          "consumer session timeout must be a whole millisecond between 1 second and 5 minutes");
+    }
+    RegionalClientCore.required(idempotencyKey, "idempotency key");
+    return call(
+        stream,
+        0,
+        route -> {
+          ObjectNode body = RegionalClientCore.MAPPER.createObjectNode();
+          body.put("idempotency_key", idempotencyKey);
+          body.put("expected_term", route.term());
+          body.put("member_id", memberId);
+          body.put("session_timeout_ms", sessionTimeout.toMillis());
+          return new RegionalClientCore.RequestSpec(
+              "POST", "/groups/" + groupSegment + "/sessions", body, Map.of(), Map.of());
+        });
+  }
+
+  /** Renews one coordinated member using the current group-generation fence. */
+  public JsonNode heartbeatConsumerSession(
+      String stream, String group, String memberId, long generation, String idempotencyKey)
+      throws IOException, InterruptedException {
+    return heartbeatConsumerSession(
+        stream, group, memberId, BigInteger.valueOf(generation), idempotencyKey);
+  }
+
+  /** Renews one coordinated member over the complete unsigned generation range. */
+  public JsonNode heartbeatConsumerSession(
+      String stream, String group, String memberId, BigInteger generation, String idempotencyKey)
+      throws IOException, InterruptedException {
+    return mutateConsumerSession(
+        "PUT", stream, group, memberId, generation, idempotencyKey, "/heartbeat");
+  }
+
+  /** Leaves a coordinated group and deterministically reassigns the member's shards. */
+  public JsonNode leaveConsumerSession(
+      String stream, String group, String memberId, long generation, String idempotencyKey)
+      throws IOException, InterruptedException {
+    return leaveConsumerSession(
+        stream, group, memberId, BigInteger.valueOf(generation), idempotencyKey);
+  }
+
+  /** Leaves a coordinated group over the complete unsigned generation range. */
+  public JsonNode leaveConsumerSession(
+      String stream, String group, String memberId, BigInteger generation, String idempotencyKey)
+      throws IOException, InterruptedException {
+    return mutateConsumerSession("DELETE", stream, group, memberId, generation, idempotencyKey, "");
+  }
+
+  /** Commits an inclusive-deadline expiry sweep on the shard-zero coordinator. */
+  public JsonNode maintainConsumerSession(String stream, String group, String idempotencyKey)
+      throws IOException, InterruptedException {
+    String groupSegment = RegionalClientCore.segment(group, "consumer group");
+    RegionalClientCore.required(idempotencyKey, "idempotency key");
+    return call(
+        stream,
+        0,
+        route -> {
+          ObjectNode body = RegionalClientCore.MAPPER.createObjectNode();
+          body.put("idempotency_key", idempotencyKey);
+          body.put("expected_term", route.term());
+          return new RegionalClientCore.RequestSpec(
+              "POST",
+              "/groups/" + groupSegment + "/sessions/maintenance",
+              body,
+              Map.of(),
+              Map.of());
+        });
+  }
+
+  /** Returns linearizable coordinated membership, deadlines, generation, and assignments. */
+  public JsonNode consumerSession(String stream, String group)
+      throws IOException, InterruptedException {
+    String groupSegment = RegionalClientCore.segment(group, "consumer group");
+    return call(
+        stream,
+        0,
+        route ->
+            new RegionalClientCore.RequestSpec(
+                "GET", "/groups/" + groupSegment + "/sessions", null, Map.of(), linearizable()));
+  }
+
+  private JsonNode mutateConsumerSession(
+      String method,
+      String stream,
+      String group,
+      String memberId,
+      BigInteger generation,
+      String idempotencyKey,
+      String suffix)
+      throws IOException, InterruptedException {
+    String groupSegment = RegionalClientCore.segment(group, "consumer group");
+    String memberSegment = RegionalClientCore.segment(memberId, "consumer member");
+    RegionalClientCore.positiveU64(generation, "consumer group generation");
+    RegionalClientCore.required(idempotencyKey, "idempotency key");
+    return call(
+        stream,
+        0,
+        route -> {
+          ObjectNode body = RegionalClientCore.MAPPER.createObjectNode();
+          body.put("idempotency_key", idempotencyKey);
+          body.put("expected_term", route.term());
+          body.put("group_generation", generation.toString());
+          return new RegionalClientCore.RequestSpec(
+              method,
+              "/groups/" + groupSegment + "/sessions/" + memberSegment + suffix,
+              body,
+              Map.of(),
+              Map.of());
+        });
   }
 
   /** Commits a replacement time/size/count policy and immediately applies it. */

@@ -184,9 +184,10 @@ The Stream consumer-group corpus adds canonical command v3, next-offset
 commit/reset, exact replay, generation gaps, wrong/stale owner fencing, rewind
 and end-offset rejection, lag/replay reads, state/digest reconstruction, and
 unchanged v1/v2 compatibility. The real-runtime test applies accepted and
-rejected outcomes across three voters and reopens every EPRS history. This
-proves replicated checkpoints, not automatic join/heartbeat/assignment or a
-complete group-coordinator fault matrix.
+rejected outcomes across three voters and reopens every EPRS history. This v3
+corpus proves replicated checkpoints independently of the later v5
+join/heartbeat/assignment corpus; neither is a complete production coordinator
+fault matrix.
 
 The Stream-retention corpus adds canonical command v4 while pinning v1/v2/v3
 bytes and operation kinds. Core tests cover the inclusive time boundary,
@@ -214,6 +215,21 @@ appends to shards 0, 1, and 2, checks logical receipts/records/checkpoints, then
 proves per-shard convergence after leader loss, voter return, all-node
 `SIGKILL`, and same-volume reopen. This is not an online-expansion, split/merge,
 hot-key, coordinated multi-shard group, or cross-shard transaction campaign.
+
+The consumer-session corpus pins canonical command v5 while retaining v1–v4
+goldens and validates join/rejoin, fenced heartbeat/leave, lexical round-robin
+assignment, bounds, monotonic time, inclusive expiry, multi-member single-bump
+rebalance, checked deadline overflow without phantom state, exact retry, legacy
+snapshot v1 restore, and snapshot v2 recovery.
+A real three-voter node test compares all member plans, installs a native
+checkpoint, and reopens every voter. Go, Java, and Python contract tests prove
+shard-zero routing, encoded identifiers, decimal generations, whole-millisecond
+timeout bounds, and linearizable observation. The regional container campaign
+creates two members after Stream leader loss, heartbeats one, expires the other,
+checks the generation-3 all-shard assignment, catches up the old voter, then
+reopens every node and observes the same session. This does not prove
+background maintenance, cooperative revoke, atomic per-shard offset handoff,
+transactions, scale fairness, or a production fault matrix.
 
 Regional adapter tests cover the fully qualified Stream v1 route and its strict
 authorization actions/scope. A handler-level regression sends a group lag read
@@ -306,7 +322,7 @@ directories and allocated ports. They cover:
 - a three-node cluster, election, replication, and quorum loss;
 - committed write recovery from snapshot plus log tail;
 - queue lease, redelivery, retry, schedule, dead letter, and redrive;
-- stream append, fetch, offset commit, rewind, and retention;
+- stream append, fetch, offset commit, rewind, consumer sessions, and retention;
 - cross-language calls over generated Protobuf contracts;
 - OpenTelemetry/metrics and immutable audit event emission.
 

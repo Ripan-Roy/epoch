@@ -400,7 +400,8 @@ through Go, proves an over-capacity request does not mutate Rust, verifies the
 browser BFF, kills and reopens the Go process against the same metadata file,
 proves exact request replay, exercises all four typed profiles, kills the
 managed Stream leader, and runs the real Python regional client through
-append/exact retry/linearizable fetch/checkpoint/lag before catching up that
+append/exact retry/linearizable fetch/checkpoint/lag, two-member session
+assignment, heartbeat, inclusive expiry, and rebalance before catching up that
 voter. It then kills the Queue leader and runs the Python Queue client through
 enqueue/exact retry, credit acquisition, lease extension, settlement,
 dead-letter inspection, redrive, and final acknowledgement. Finally it kills
@@ -419,7 +420,8 @@ resources. The displayed Go, Java, and Python regional sources are compiled by
 independently testable with `cargo test -p epoch-catalog --all-targets`. Dynamic
 membership, general voter selection, rack placement, production peer
 identity/TLS, user-exportable backups/PITR, follower read routing, and
-coordinated consumer sessions remain subsequent slices. Internal native voter
+transactional assignment-plus-offset handoff, background session maintenance,
+and cooperative revoke remain subsequent slices. Internal native voter
 checkpoints and physical EPRS reclamation are documented in
 [ADR-0022](adr/0022-profile-native-checkpoints-and-physical-reclamation.md). See
 [ADR-0009](adr/0009-regional-tablet-catalog.md) and
@@ -431,6 +433,8 @@ Regional route/SDK behavior is frozen in
 [ADR-0018](adr/0018-regional-queue-v1-and-sdk-routing.md), and
 [ADR-0019](adr/0019-regional-cache-v1-and-sdk-routing.md), and
 [ADR-0020](adr/0020-regional-event-bus-v1-and-sdk-routing.md).
+Consumer-session behavior is frozen in
+[ADR-0025](adr/0025-stream-consumer-sessions.md).
 
 To discard local data, explicitly add `--volumes` to the Compose down command.
 That is destructive and is intentionally not part of the Make target.

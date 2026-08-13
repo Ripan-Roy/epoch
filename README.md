@@ -76,8 +76,8 @@ Go, Java, and Python are the P0 SDK ecosystems. Typed HTTP clients are under
 `sdk/go`, `sdk/java`, and `sdk/python`. Each ecosystem has the standalone
 profile client plus separate authenticated, leader- and fence-aware regional
 Stream, Queue, Cache, and Event Bus v1 clients. Generated response types,
-coordinated streaming sessions, and full native streaming parity remain tracked
-by DX-001.
+background/cooperative streaming sessions, atomic assignment-plus-offset
+handoff, and full native streaming parity remain tracked by DX-001.
 
 `crates/epoch-testkit` is the no-sleep correctness harness for the replicated
 foundation: seeded scheduling, independent wall/monotonic time, scripted fault
@@ -120,7 +120,12 @@ rediscovery, and request linearizable reads without routing application data
 through Go. A regional Stream may materialize several independent ordered
 shards. Discovery publishes `fnv1a64_utf8_mod_n_v1`; all three SDKs route the
 event key or ID identically and pin the observed resource generation before a
-keyed write. Online expansion/remapping remains explicit future work.
+keyed write. Shard 0 also replicates bounded consumer join, heartbeat, leave,
+explicit dead-member expiry, one membership generation, and deterministic
+assignment of every logical shard. All three regional SDKs expose that session
+lifecycle and linearizable observation. Background expiry, cooperative revoke,
+atomic assignment-plus-offset handoff, and online expansion/remapping remain
+explicit future work.
 
 The strict single-partition Queue tablet now runs through that same persistent
 three-node actor boundary. Its internal typed API covers enqueue, acquire,

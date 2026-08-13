@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.math.BigInteger;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -157,6 +158,42 @@ final class RegionalStreamClientTest {
     assertEquals("linearizable", read.headers().get("x-epoch-read-consistency"));
     assertEquals(BigInteger.valueOf(11), read.query().get("offset"));
     assertEquals(25, read.query().get("limit"));
+  }
+
+  @Test
+  void coordinatedConsumerSessionContractsUseShardZero() throws Exception {
+    RecordingRegionalTransport leader =
+        new RecordingRegionalTransport(
+            MAPPER.readTree(
+                """
+                {"resource_generation":"2","tablet_epoch":"4","term":"9","accepts_writes":true}
+                """));
+    RegionalStreamClient client =
+        RegionalStreamClient.withTransports(
+            List.of(leader), "secret-token", new RegionalScope("acme", "shop", "dev", "core"));
+
+    client.joinConsumerSession(
+        "orders", "billing/eu", "member-a", Duration.ofSeconds(30), "join-a");
+    client.heartbeatConsumerSession("orders", "billing/eu", "member-a", 3, "heartbeat-a");
+    client.consumerSession("orders", "billing/eu");
+    client.maintainConsumerSession("orders", "billing/eu", "maintain-a");
+    client.leaveConsumerSession("orders", "billing/eu", "member-a", 3, "leave-a");
+
+    assertEquals(true, leader.requests.get(1).path().endsWith("/groups/billing%2Feu/sessions"));
+    assertEquals("POST", leader.requests.get(1).method());
+    assertEquals(
+        true,
+        leader.requests.get(3).path().endsWith("/groups/billing%2Feu/sessions/member-a/heartbeat"));
+    assertEquals("PUT", leader.requests.get(3).method());
+    assertEquals("linearizable", leader.requests.get(5).headers().get("x-epoch-read-consistency"));
+    assertEquals(
+        true, leader.requests.get(7).path().endsWith("/groups/billing%2Feu/sessions/maintenance"));
+    assertEquals("DELETE", leader.requests.get(9).method());
+    assertEquals(
+        true, leader.requests.get(9).path().endsWith("/groups/billing%2Feu/sessions/member-a"));
+    for (int index : List.of(0, 2, 4, 6, 8)) {
+      assertEquals(true, leader.requests.get(index).path().endsWith("/shards/0"));
+    }
   }
 
   @Test
