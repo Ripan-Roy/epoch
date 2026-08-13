@@ -27,6 +27,7 @@ use crate::{
         ConsensusGroupSupervisor, ConsensusGroupSupervisorError, SupervisedConsensusGroupFailure,
         shared_internal_peer_router,
     },
+    regional_checkpoint::{RegionalCheckpointStatus, run_regional_checkpoint_pass},
     regional_maintenance::{RegionalMaintenanceStatus, run_regional_maintenance_pass},
     regional_router::{
         DEFAULT_REGIONAL_READ_BARRIER_TIMEOUT, MAX_REGIONAL_READ_BARRIER_TIMEOUT,
@@ -39,6 +40,9 @@ use crate::{
 const DEFAULT_PROFILE_COMMIT_WAIT: Duration = Duration::from_secs(5);
 pub const DEFAULT_REGIONAL_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(100);
 pub const MAX_REGIONAL_MAINTENANCE_INTERVAL: Duration = Duration::from_mins(1);
+pub const DEFAULT_REGIONAL_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(1);
+pub const DEFAULT_REGIONAL_CHECKPOINT_MIN_APPLIED_ENTRIES: u64 = 1_024;
+pub const MAX_REGIONAL_CHECKPOINT_INTERVAL: Duration = Duration::from_mins(10);
 
 #[derive(Clone)]
 pub struct RegionalRuntimeConfig {
@@ -51,6 +55,8 @@ pub struct RegionalRuntimeConfig {
     pub profile_commit_wait: Duration,
     pub read_barrier_timeout: Duration,
     pub maintenance_interval: Duration,
+    pub checkpoint_interval: Duration,
+    pub checkpoint_min_applied_entries: u64,
 }
 
 impl fmt::Debug for RegionalRuntimeConfig {
@@ -65,6 +71,11 @@ impl fmt::Debug for RegionalRuntimeConfig {
             .field("profile_commit_wait", &self.profile_commit_wait)
             .field("read_barrier_timeout", &self.read_barrier_timeout)
             .field("maintenance_interval", &self.maintenance_interval)
+            .field("checkpoint_interval", &self.checkpoint_interval)
+            .field(
+                "checkpoint_min_applied_entries",
+                &self.checkpoint_min_applied_entries,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -95,6 +106,8 @@ impl RegionalRuntimeConfig {
             profile_commit_wait: DEFAULT_PROFILE_COMMIT_WAIT,
             read_barrier_timeout: DEFAULT_REGIONAL_READ_BARRIER_TIMEOUT,
             maintenance_interval: DEFAULT_REGIONAL_MAINTENANCE_INTERVAL,
+            checkpoint_interval: DEFAULT_REGIONAL_CHECKPOINT_INTERVAL,
+            checkpoint_min_applied_entries: DEFAULT_REGIONAL_CHECKPOINT_MIN_APPLIED_ENTRIES,
         }
     }
 
@@ -113,6 +126,13 @@ impl RegionalRuntimeConfig {
     #[must_use]
     pub fn with_maintenance_interval(mut self, interval: Duration) -> Self {
         self.maintenance_interval = interval;
+        self
+    }
+
+    #[must_use]
+    pub fn with_checkpoint_policy(mut self, interval: Duration, min_applied_entries: u64) -> Self {
+        self.checkpoint_interval = interval;
+        self.checkpoint_min_applied_entries = min_applied_entries;
         self
     }
 }
@@ -153,6 +173,17 @@ pub struct RegionalNodeRuntime {
     background: Option<JoinHandle<()>>,
 }
 
+struct RegionalBackground {
+    reconcile_state: RegionalCatalogState,
+    directory: crate::tablet_materializer::TabletDirectory,
+    clock: Arc<dyn Clock>,
+    maintenance_interval: Duration,
+    maintenance_status: Arc<RegionalMaintenanceStatus>,
+    checkpoint_interval: Duration,
+    checkpoint_min_applied_entries: u64,
+    checkpoint_status: Arc<RegionalCheckpointStatus>,
+}
+
 impl fmt::Debug for RegionalNodeRuntime {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter
@@ -165,23 +196,7 @@ impl fmt::Debug for RegionalNodeRuntime {
 
 impl RegionalNodeRuntime {
     pub async fn start(config: RegionalRuntimeConfig) -> Result<Self, RegionalRuntimeError> {
-        if config.max_groups < 2 {
-            return Err(RegionalRuntimeError::InvalidConfiguration(
-                "regional mode requires capacity for the catalog and at least one data group"
-                    .into(),
-            ));
-        }
-        if config.catalog_commit_wait.is_zero()
-            || config.profile_commit_wait.is_zero()
-            || config.read_barrier_timeout.is_zero()
-            || config.read_barrier_timeout > MAX_REGIONAL_READ_BARRIER_TIMEOUT
-            || config.maintenance_interval.is_zero()
-            || config.maintenance_interval > MAX_REGIONAL_MAINTENANCE_INTERVAL
-        {
-            return Err(RegionalRuntimeError::InvalidConfiguration(
-                "catalog/profile waits must be non-zero and read-barrier/maintenance intervals must be between 1 ms and 60 seconds".into(),
-            ));
-        }
+        validate_config(&config)?;
         let catalog_scope = CatalogTabletScope::new(
             config.catalog_group.group_id().get(),
             config.catalog_group.group_epoch().get(),
@@ -230,6 +245,16 @@ impl RegionalNodeRuntime {
                 )
             })?;
         let maintenance_status = RegionalMaintenanceStatus::new(maintenance_interval_ms);
+        let checkpoint_interval_ms = u64::try_from(config.checkpoint_interval.as_millis())
+            .map_err(|_| {
+                RegionalRuntimeError::InvalidConfiguration(
+                    "checkpoint interval cannot be represented in milliseconds".into(),
+                )
+            })?;
+        let checkpoint_status = RegionalCheckpointStatus::new(
+            checkpoint_interval_ms,
+            config.checkpoint_min_applied_entries,
+        );
         let public_router = regional_catalog_router(catalog_state.clone())
             .merge(regional_tablet_router_with_read_timeout(
                 directory.clone(),
@@ -239,16 +264,20 @@ impl RegionalNodeRuntime {
                 config.topology,
                 directory.clone(),
                 Arc::clone(&maintenance_status),
+                Arc::clone(&checkpoint_status),
             ));
-        let (stop, failure, background) = spawn_background(
-            catalog_state.clone(),
-            catalog_commits,
-            group_failures,
+        let background_config = RegionalBackground {
+            reconcile_state: catalog_state.clone(),
             directory,
-            config.clock,
-            config.maintenance_interval,
+            clock: config.clock,
+            maintenance_interval: config.maintenance_interval,
             maintenance_status,
-        );
+            checkpoint_interval: config.checkpoint_interval,
+            checkpoint_min_applied_entries: config.checkpoint_min_applied_entries,
+            checkpoint_status,
+        };
+        let (stop, failure, background) =
+            spawn_background(background_config, catalog_commits, group_failures);
 
         Ok(Self {
             public_router,
@@ -297,14 +326,33 @@ impl RegionalNodeRuntime {
     }
 }
 
+fn validate_config(config: &RegionalRuntimeConfig) -> Result<(), RegionalRuntimeError> {
+    if config.max_groups < 2 {
+        return Err(RegionalRuntimeError::InvalidConfiguration(
+            "regional mode requires capacity for the catalog and at least one data group".into(),
+        ));
+    }
+    if config.catalog_commit_wait.is_zero()
+        || config.profile_commit_wait.is_zero()
+        || config.read_barrier_timeout.is_zero()
+        || config.read_barrier_timeout > MAX_REGIONAL_READ_BARRIER_TIMEOUT
+        || config.maintenance_interval.is_zero()
+        || config.maintenance_interval > MAX_REGIONAL_MAINTENANCE_INTERVAL
+        || config.checkpoint_interval.is_zero()
+        || config.checkpoint_interval > MAX_REGIONAL_CHECKPOINT_INTERVAL
+        || config.checkpoint_min_applied_entries == 0
+    {
+        return Err(RegionalRuntimeError::InvalidConfiguration(
+            "catalog/profile waits and checkpoint threshold must be non-zero; read-barrier/maintenance intervals must be at most 60 seconds and checkpoint interval at most 10 minutes".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn spawn_background(
-    reconcile_state: RegionalCatalogState,
+    background: RegionalBackground,
     mut catalog_commits: tokio::sync::broadcast::Receiver<CommittedProposal>,
     mut group_failures: tokio::sync::broadcast::Receiver<SupervisedConsensusGroupFailure>,
-    directory: crate::tablet_materializer::TabletDirectory,
-    clock: Arc<dyn Clock>,
-    maintenance_interval: Duration,
-    maintenance_status: Arc<RegionalMaintenanceStatus>,
 ) -> (
     watch::Sender<bool>,
     watch::Receiver<Option<RegionalRuntimeFailure>>,
@@ -313,8 +361,10 @@ fn spawn_background(
     let (stop, mut stopped) = watch::channel(false);
     let (failure_tx, failure) = watch::channel(None);
     let background = tokio::spawn(async move {
-        let mut maintenance = tokio::time::interval(maintenance_interval);
+        let mut maintenance = tokio::time::interval(background.maintenance_interval);
         maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut checkpoints = tokio::time::interval(background.checkpoint_interval);
+        checkpoints.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 biased;
@@ -332,14 +382,23 @@ fn spawn_background(
                     return;
                 }
                 _ = maintenance.tick() => {
-                    let now_ms = clock.wall_time_ms();
-                    let (pass, error) = run_regional_maintenance_pass(&directory, now_ms).await;
-                    maintenance_status.record(now_ms, pass, error);
+                    let now_ms = background.clock.wall_time_ms();
+                    let (pass, error) = run_regional_maintenance_pass(&background.directory, now_ms).await;
+                    background.maintenance_status.record(now_ms, pass, error);
+                }
+                _ = checkpoints.tick() => {
+                    let now_ms = background.clock.wall_time_ms();
+                    let (pass, groups, error) = run_regional_checkpoint_pass(
+                        &background.reconcile_state.consensus_handle(),
+                        &background.directory,
+                        background.checkpoint_min_applied_entries,
+                    ).await;
+                    background.checkpoint_status.record(now_ms, pass, groups, error);
                 }
                 commit = catalog_commits.recv() => {
                     match commit {
                         Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            if let Err(error) = reconcile_state.reconcile_latest().await {
+                            if let Err(error) = background.reconcile_state.reconcile_latest().await {
                                 failure_tx.send_replace(Some(
                                     RegionalRuntimeFailure::Reconciliation(error.to_string())
                                 ));

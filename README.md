@@ -25,7 +25,10 @@ engineering evidence, not a production or multi-zone guarantee. Its replicated
 core now supports bounded canonical consensus checkpoints, logical Raft-prefix
 compaction, lagging-voter snapshot catch-up, native Catalog/Stream/Queue/Cache/Bus
 state images, checkpoint-plus-tail reopen, and physical EPRS reclamation. These
-are internal voter-recovery primitives, not downloadable backups or PITR.
+are internal voter-recovery primitives, not downloadable backups or PITR. The
+regional runtime automatically applies the checkpoint policy to catalog and
+every profile group on each healthy voter after configurable applied-index
+growth; authorized topology exposes the exact local retained boundaries.
 
 ## Design boundaries
 

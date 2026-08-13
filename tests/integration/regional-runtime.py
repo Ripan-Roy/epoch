@@ -413,6 +413,7 @@ def wait_for_topology(cluster: RegionalCluster, expected_used_groups: int) -> No
                 return False
             capacity = response.document.get("capacity")
             maintenance = response.document.get("maintenance")
+            checkpoints = response.document.get("checkpoints")
             if (
                 response.document.get("node_id") != str(node)
                 or response.document.get("region") != "ap-south"
@@ -429,6 +430,12 @@ def wait_for_topology(cluster: RegionalCluster, expected_used_groups: int) -> No
                 or maintenance.get("interval_ms") != 100
                 or exact_int(maintenance.get("passes")) is None
                 or exact_int(maintenance.get("errors")) != 0
+                or not isinstance(checkpoints, dict)
+                or checkpoints.get("enabled") is not True
+                or checkpoints.get("interval_ms") != 100
+                or checkpoints.get("min_applied_entries") != 1
+                or exact_int(checkpoints.get("passes")) is None
+                or exact_int(checkpoints.get("errors")) != 0
             ):
                 return False
         return True
@@ -436,6 +443,58 @@ def wait_for_topology(cluster: RegionalCluster, expected_used_groups: int) -> No
     wait_until(
         f"regional topology to report {expected_used_groups} used groups",
         observed,
+    )
+
+
+def wait_for_automatic_checkpoints(
+    cluster: RegionalCluster,
+    expected_groups: int,
+    require_local_creation: bool,
+) -> None:
+    def compacted() -> bool:
+        for node in NODES:
+            response = cluster.request(
+                node, "GET", "/experimental/v1/regional/topology"
+            )
+            if response.status != 200:
+                return False
+            checkpoints = response.document.get("checkpoints")
+            if not isinstance(checkpoints, dict):
+                return False
+            groups = checkpoints.get("groups")
+            if (
+                checkpoints.get("enabled") is not True
+                or checkpoints.get("interval_ms") != 100
+                or checkpoints.get("min_applied_entries") != 1
+                or exact_int(checkpoints.get("errors")) != 0
+                or exact_int(checkpoints.get("passes")) is None
+                or not isinstance(groups, list)
+                or len(groups) != expected_groups
+            ):
+                return False
+            if require_local_creation:
+                created = exact_int(checkpoints.get("checkpoints_created"))
+                reclaimed = exact_int(checkpoints.get("compacted_log_entries"))
+                if created is None or created < expected_groups or reclaimed is None or reclaimed == 0:
+                    return False
+            for group in groups:
+                if not isinstance(group, dict):
+                    return False
+                applied = exact_int(group.get("applied_index"))
+                checkpoint = exact_int(group.get("checkpoint_index"))
+                retained = exact_int(group.get("retained_log_first_index"))
+                if (
+                    applied is None
+                    or applied == 0
+                    or checkpoint != applied
+                    or retained != checkpoint + 1
+                ):
+                    return False
+        return True
+
+    wait_until(
+        f"all {expected_groups} local consensus groups to checkpoint and compact",
+        compacted,
     )
 
 
@@ -1689,6 +1748,7 @@ def run_campaign(cluster: RegionalCluster) -> None:
     initial_catalog_digest = wait_for_catalog(
         cluster, expected_resources, expected_tablets
     )
+    wait_for_automatic_checkpoints(cluster, 1 + expected_tablets, True)
 
     stream = MANAGED_RESOURCE
     old_leader, old_term = wait_for_routes(cluster, stream)
@@ -1753,6 +1813,8 @@ def run_campaign(cluster: RegionalCluster) -> None:
     wait_for_nodes(cluster)
     wait_for_profile_apply(cluster, bus, 8)
 
+    wait_for_automatic_checkpoints(cluster, 1 + expected_tablets, False)
+
     cluster.crash_all()
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "pending", 0)
     cluster.restart_all()
@@ -1778,6 +1840,7 @@ def run_campaign(cluster: RegionalCluster) -> None:
             else 1
         )
         wait_for_profile_apply(cluster, resource, expected)
+    wait_for_automatic_checkpoints(cluster, 1 + expected_tablets, False)
 
 
 def main() -> int:

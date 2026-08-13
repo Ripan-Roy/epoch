@@ -1,5 +1,6 @@
 use axum::{body::Body, http::Request};
 use epoch_node::{
+    regional_checkpoint::RegionalCheckpointStatus,
     regional_maintenance::RegionalMaintenanceStatus,
     regional_topology::{NodeTopology, regional_topology_router},
     tablet_materializer::TabletDirectory,
@@ -23,6 +24,7 @@ async fn topology_reports_fixed_voters_and_live_group_capacity() {
         topology,
         TabletDirectory::default(),
         RegionalMaintenanceStatus::new(100),
+        RegionalCheckpointStatus::new(1_000, 1_024),
     )
     .oneshot(
         Request::get("/experimental/v1/regional/topology")
@@ -49,6 +51,11 @@ async fn topology_reports_fixed_voters_and_live_group_capacity() {
     assert_eq!(body["maintenance"]["enabled"], true);
     assert_eq!(body["maintenance"]["interval_ms"], 100);
     assert_eq!(body["maintenance"]["passes"], 0);
+    assert_eq!(body["checkpoints"]["enabled"], true);
+    assert_eq!(body["checkpoints"]["interval_ms"], 1_000);
+    assert_eq!(body["checkpoints"]["min_applied_entries"], 1_024);
+    assert_eq!(body["checkpoints"]["passes"], 0);
+    assert_eq!(body["checkpoints"]["groups"], serde_json::json!([]));
 }
 
 #[test]

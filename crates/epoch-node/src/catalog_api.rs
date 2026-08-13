@@ -72,6 +72,10 @@ impl RegionalCatalogState {
         self.consensus.subscribe_commits()
     }
 
+    pub(crate) fn consensus_handle(&self) -> ConsensusProbeHandle {
+        self.consensus.clone()
+    }
+
     pub async fn reconcile_latest(
         &self,
     ) -> Result<TabletReconcileOutcome, RegionalCatalogApiError> {

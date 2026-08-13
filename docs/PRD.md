@@ -17,8 +17,17 @@ lock expiry, and Event Bus delivery-lease timeout. Passive reads remain pure,
 explicit maintenance APIs remain available, and topology exposes node-local
 scheduler counters. This closes the client-triggered timer gap for the regional
 alpha; it does not claim a real-time deadline SLA, dynamic or cross-region
-ownership, automatic checkpointing, Stream compaction/tiering, Cache eviction,
+ownership, coordinated backups/PITR, Stream compaction/tiering, Cache eviction,
 Queue streaming receive, or Event Bus target execution. See ADR-0027.
+
+**Recovery implementation note (13 August 2026):** Every healthy regional
+voter now schedules its own canonical native checkpoint for catalog and all
+materialized profile groups after configurable applied-index growth. The
+actor-serialized operation fsyncs before installation, physically reclaims
+obsolete EPRS generations, and exposes per-group retained boundaries through
+the authorized topology endpoint. This is automatic local voter recovery, not
+a coordinated backup, PITR artifact, restore campaign, or cluster-wide
+checkpoint. See ADR-0028.
 
 ---
 

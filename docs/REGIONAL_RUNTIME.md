@@ -169,6 +169,17 @@ exposing it as product state. These counters are node-local and reset on
 restart. Configure the scan with `EPOCH_REGIONAL_MAINTENANCE_INTERVAL_MS`; the
 default is 100 ms and the accepted range is 1–60,000 ms.
 
+The same response contains `checkpoints`. Each node evaluates catalog and all
+local profile groups, regardless of Raft role, because checkpointing changes
+only that voter's recovery layout. `interval_ms`, `min_applied_entries`,
+cumulative passes/eligible/created/reclaimed/error counters, and `groups` make
+the behavior inspectable. Each group reports decimal-string `group_id`,
+`group_epoch`, `applied_index`, `checkpoint_index`, and
+`retained_log_first_index`. Counters reset on restart; group boundaries come
+from durable consensus status. Configure
+`EPOCH_REGIONAL_CHECKPOINT_INTERVAL_MS` (default 1,000; 1–600,000) and
+`EPOCH_REGIONAL_CHECKPOINT_MIN_APPLIED_ENTRIES` (default 1,024; nonzero).
+
 ## Route and fence a data operation
 
 Discover a shard independently on each node:
@@ -380,8 +391,10 @@ Python appends/checkpoints across a three-shard Stream, configures retention,
 then waits for leader-proposed Stream retention/session expiry, Queue retry
 promotion, Cache TTL reclamation, and Event Bus delivery-lease timeout without
 calling explicit maintenance. It checks topology submission/error counters,
-kills and catches up each profile leader, kills all nodes, reopens the same
-volumes, compares per-shard state and digests, and deletes only its scoped
+waits for automatic checkpoint creation and retained-prefix compaction on all
+24 voter/group copies, kills and catches up each profile leader, kills all
+nodes, reopens the same volumes, verifies durable per-group checkpoint
+boundaries, compares per-shard state and digests, and deletes only its scoped
 containers/network/volumes.
 
 ## Current boundaries
@@ -390,8 +403,8 @@ containers/network/volumes.
   class are validated, but there is no general voter-selection or rack-aware
   solver.
 - Membership changes, online rebalance, repair, split/merge, user-exportable
-  backups/PITR, and automatic checkpoint scheduling are absent. Internal
-  native voter checkpoints, physical EPRS reclamation, replicated Stream
+  backups/PITR are absent. Automatic local native voter checkpoints, physical
+  EPRS reclamation, replicated Stream
   time/size/combined logical retention, and leader-owned regional maintenance
   are implemented. Retention still lacks keyed compaction, object-tier
   deletion, and legal-hold governance. Multi-shard Stream routing and a replicated shard-zero

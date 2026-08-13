@@ -8,6 +8,17 @@ notes explicitly list additional verified artifacts.
 
 ### Added
 
+- Automatic node-local consensus checkpoints for regional catalog, Stream,
+  Queue, Cache, and Event Bus groups. Every healthy voter uses an
+  actor-serialized applied-growth threshold, skips transient pending Raft work,
+  reuses canonical EPSN v2 plus physical EPRS reclamation, and exposes exact
+  per-group applied/checkpoint/retained boundaries and process-local counters
+  through authorized topology. The Docker campaign proves creation on all 24
+  voter/group copies, leader-failure catch-up, and all-node same-volume reopen.
+- ADR-0028, updated checkpoint/runtime/API/architecture/semantics/traceability
+  documentation, and public docs coverage for the automatic recovery policy
+  and its backup/PITR non-claims.
+
 - Leader-owned automatic maintenance in the regional runtime. Pure deadline
   queries drive consensus proposals for Stream age retention and shard-zero
   consumer-session expiry, Queue timers and leases, Cache values and locks, and

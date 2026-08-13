@@ -13,7 +13,8 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::{
-    regional_maintenance::RegionalMaintenanceStatus, tablet_materializer::TabletDirectory,
+    regional_checkpoint::RegionalCheckpointStatus, regional_maintenance::RegionalMaintenanceStatus,
+    tablet_materializer::TabletDirectory,
 };
 
 pub const REGIONAL_TOPOLOGY_PATH: &str = "/experimental/v1/regional/topology";
@@ -110,6 +111,7 @@ struct TopologyState {
     topology: NodeTopology,
     directory: TabletDirectory,
     maintenance: std::sync::Arc<RegionalMaintenanceStatus>,
+    checkpoints: std::sync::Arc<RegionalCheckpointStatus>,
 }
 
 #[derive(Debug, Serialize)]
@@ -121,6 +123,7 @@ struct TopologyResponse {
     consensus_voter_node_ids: Vec<String>,
     capacity: CapacityResponse,
     maintenance: crate::regional_maintenance::RegionalMaintenanceStatusSnapshot,
+    checkpoints: crate::regional_checkpoint::RegionalCheckpointStatusSnapshot,
 }
 
 #[derive(Debug, Serialize)]
@@ -145,6 +148,7 @@ pub fn regional_topology_router(
     topology: NodeTopology,
     directory: TabletDirectory,
     maintenance: std::sync::Arc<RegionalMaintenanceStatus>,
+    checkpoints: std::sync::Arc<RegionalCheckpointStatus>,
 ) -> Router {
     Router::new()
         .route(REGIONAL_TOPOLOGY_PATH, get(get_topology))
@@ -152,6 +156,7 @@ pub fn regional_topology_router(
             topology,
             directory,
             maintenance,
+            checkpoints,
         })
 }
 
@@ -187,6 +192,7 @@ async fn get_topology(State(state): State<TopologyState>) -> Response {
             available: maximum.saturating_sub(used),
         },
         maintenance: state.maintenance.snapshot(),
+        checkpoints: state.checkpoints.snapshot(),
     })
     .into_response()
 }

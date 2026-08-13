@@ -600,6 +600,15 @@ Stream retention compaction, backup, PITR, or physical EPRS space reclamation.
 See [Consensus Checkpoints](CONSENSUS_CHECKPOINTS.md) and
 [ADR-0021](adr/0021-consensus-checkpoint-and-snapshot-installation.md).
 
+In regional mode, every healthy voter automatically creates that local
+checkpoint after a configured number of newly applied log entries. The
+checkpoint is not a replicated command and does not require leader role. Its
+eligibility check and creation are actor-serialized; pending Raft `Ready` work
+defers the attempt. Different voters may expose different checkpoint indices
+while retaining identical committed business state. This is voter recovery
+layout, not a cluster-wide backup/PITR boundary. See
+[ADR-0028](adr/0028-automatic-regional-consensus-checkpoints.md).
+
 Current JSON-shaped payloads, standalone epochs, HTTP endpoints, and local WAL
 frames are provisional scaffold interfaces. They are not frozen compatibility
 or production durability claims. A feature becomes supported only when its

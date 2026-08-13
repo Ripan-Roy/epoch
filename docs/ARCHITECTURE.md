@@ -321,6 +321,16 @@ consumer-session expiry is shard-zero-only. This keeps time-driven mutations
 inside Raft and keeps Go, SDKs, and reads out of the authority path. See
 [ADR-0027](adr/0027-regional-leader-maintenance.md).
 
+The regional runtime separately schedules node-local consensus checkpoints.
+Catalog and every materialized profile group are eligible on every healthy
+voter after configurable applied-index growth. Role is intentionally
+irrelevant: this operation changes only one voter's recovery layout. The
+eligibility check and EPSN v2 capture/EPRS replacement execute atomically on
+the consensus actor; pending Raft `Ready` work skips the tick. Authorized
+topology reports process-local counters plus durable applied/checkpoint/
+retained-first boundaries for each group. See
+[ADR-0028](adr/0028-automatic-regional-consensus-checkpoints.md).
+
 The regional multi-tablet alpha composes that adapter with `epoch-catalog`.
 Catalog group 1 commits canonical resource commands through three EPRS-backed
 voters. A bounded group supervisor reserves that identity, demultiplexes peer
@@ -426,6 +436,8 @@ in [Experimental Replicated Cache Tablet](CACHE_TABLET.md). Consensus checkpoint
 operation and its non-claims are in
 [Consensus Checkpoints and Snapshot Catch-up](CONSENSUS_CHECKPOINTS.md) and
 [ADR-0022](adr/0022-profile-native-checkpoints-and-physical-reclamation.md).
+Regional automatic ownership is specified by
+[ADR-0028](adr/0028-automatic-regional-consensus-checkpoints.md).
 
 Rust peer replication uses batched, framed, mutually authenticated connections
 with separate priorities for control, append, snapshot, and repair traffic.
@@ -973,3 +985,4 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0025: Replicated Stream Consumer Sessions and Shard Assignment](adr/0025-stream-consumer-sessions.md)
 - [ADR-0026: Regional Stream Atomic Batch SDKs](adr/0026-regional-stream-batch-sdks.md)
 - [ADR-0027: Leader-Owned Regional Maintenance](adr/0027-regional-leader-maintenance.md)
+- [ADR-0028: Automatic Regional Consensus Checkpoints](adr/0028-automatic-regional-consensus-checkpoints.md)

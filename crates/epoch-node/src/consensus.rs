@@ -482,6 +482,10 @@ enum ActorCommand {
     Checkpoint {
         reply: ActorReply<ConsensusCheckpoint>,
     },
+    CheckpointIfAppliedGrowth {
+        min_applied_entries: u64,
+        reply: ActorReply<Option<ConsensusCheckpoint>>,
+    },
     #[cfg(test)]
     InjectFailure {
         error: ConsensusProbeError,
@@ -661,6 +665,26 @@ impl ConsensusProbeHandle {
     pub async fn checkpoint(&self) -> ConsensusProbeResult<ConsensusCheckpoint> {
         self.request(|reply| ActorCommand::Checkpoint { reply })
             .await
+    }
+
+    /// Creates a checkpoint only when the local applied index has advanced by
+    /// at least `min_applied_entries` since the last installed checkpoint.
+    /// Eligibility and creation execute as one actor command, so concurrent
+    /// scheduler ticks cannot create duplicate journal generations.
+    pub async fn checkpoint_if_applied_growth(
+        &self,
+        min_applied_entries: u64,
+    ) -> ConsensusProbeResult<Option<ConsensusCheckpoint>> {
+        if min_applied_entries == 0 {
+            return Err(ConsensusProbeError::InvalidConfiguration(
+                "checkpoint applied-entry threshold must be non-zero".into(),
+            ));
+        }
+        self.request(|reply| ActorCommand::CheckpointIfAppliedGrowth {
+            min_applied_entries,
+            reply,
+        })
+        .await
     }
 
     async fn request<T>(
@@ -1161,20 +1185,18 @@ fn handle_actor_command(
             let _ = reply.send(Ok(adapter.applied_proposals().to_vec()));
         }
         ActorCommand::Checkpoint { reply } => {
-            let result = (|| {
-                let Some(applier) = applier.filter(|applier| applier.supports_native_snapshots())
-                else {
-                    return adapter.checkpoint().map_err(Into::into);
-                };
-                let checkpoint_index = adapter.status().applied_index;
-                let retained = adapter.checkpoint_retry_proposals()?;
-                let snapshot = applier
-                    .capture_snapshot(checkpoint_index, &retained)
-                    .map_err(ConsensusProbeError::ProfileApplication)?;
-                adapter
-                    .checkpoint_with_application(snapshot)
-                    .map_err(Into::into)
-            })();
+            let result = create_consensus_checkpoint(adapter, applier);
+            deliver_actor_result(adapter, reply, result)?;
+        }
+        ActorCommand::CheckpointIfAppliedGrowth {
+            min_applied_entries,
+            reply,
+        } => {
+            let result = if adapter.checkpoint_is_due(min_applied_entries)? {
+                create_consensus_checkpoint(adapter, applier).map(Some)
+            } else {
+                Ok(None)
+            };
             deliver_actor_result(adapter, reply, result)?;
         }
         #[cfg(test)]
@@ -1187,6 +1209,23 @@ fn handle_actor_command(
         }
     }
     Ok(ActorDirective::Continue)
+}
+
+fn create_consensus_checkpoint(
+    adapter: &mut PersistentRaftAdapter,
+    applier: Option<&dyn CommittedProposalApplier>,
+) -> ConsensusProbeResult<ConsensusCheckpoint> {
+    let Some(applier) = applier.filter(|applier| applier.supports_native_snapshots()) else {
+        return adapter.checkpoint().map_err(Into::into);
+    };
+    let checkpoint_index = adapter.status().applied_index;
+    let retained = adapter.checkpoint_retry_proposals()?;
+    let snapshot = applier
+        .capture_snapshot(checkpoint_index, &retained)
+        .map_err(ConsensusProbeError::ProfileApplication)?;
+    adapter
+        .checkpoint_with_application(snapshot)
+        .map_err(Into::into)
 }
 
 fn deliver_actor_result<T>(
@@ -2715,6 +2754,39 @@ mod tests {
             };
             assert_eq!(committed.payload, payload);
         }
+
+        let follower_index = (0..handles.len())
+            .find(|index| *index != leader_index)
+            .expect("cluster should contain a follower");
+        let follower_before = handles[follower_index]
+            .status()
+            .await
+            .expect("follower status should be available");
+        let applied_growth = follower_before
+            .applied_index
+            .get()
+            .saturating_sub(follower_before.checkpoint_index.get());
+        assert!(applied_growth > 0);
+        assert!(
+            handles[follower_index]
+                .checkpoint_if_applied_growth(applied_growth.saturating_add(1))
+                .await
+                .expect("a below-threshold follower checkpoint should be a no-op")
+                .is_none()
+        );
+        let follower_checkpoint = handles[follower_index]
+            .checkpoint_if_applied_growth(applied_growth)
+            .await
+            .expect("a follower should create its own due checkpoint")
+            .expect("the observed applied growth should satisfy the threshold");
+        assert_eq!(follower_checkpoint.index, follower_before.applied_index);
+        assert!(
+            handles[follower_index]
+                .checkpoint_if_applied_growth(1)
+                .await
+                .expect("an unchanged follower checkpoint should be a no-op")
+                .is_none()
+        );
 
         let response = cluster.runtimes[leader_index]
             .experimental_router()

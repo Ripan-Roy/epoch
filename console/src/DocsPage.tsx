@@ -1673,6 +1673,12 @@ export function DocsPage({ section }: DocsPageProps) {
                   href={`${repositoryDocsUrl}/adr/0022-profile-native-checkpoints-and-physical-reclamation.md`}
                 />
                 <ReferenceCard
+                  eyebrow="AUTOMATIC RECOVERY"
+                  title="Every voter bounds its local journal"
+                  description="Actor-atomic applied-growth policy, catalog and profile scheduling, per-group topology evidence, all-voter compaction, and backup/PITR non-claims."
+                  href={`${repositoryDocsUrl}/adr/0028-automatic-regional-consensus-checkpoints.md`}
+                />
+                <ReferenceCard
                   eyebrow="CLUSTER CORE"
                   title="Experimental Stream tablet"
                   description="Typed single and bounded compressed-batch commands, fixed-voter majority, correlated offsets, failover, idempotency, and all-voter recovery."
