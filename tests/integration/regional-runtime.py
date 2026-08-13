@@ -42,9 +42,12 @@ class Resource:
 
     @property
     def route_path(self) -> str:
+        return self.route_path_for(0)
+
+    def route_path_for(self, shard: int) -> str:
         return (
             "/experimental/v1/regional/resources/"
-            f"acme/shop/dev/core/{self.kind}/{self.name}/shards/0"
+            f"acme/shop/dev/core/{self.kind}/{self.name}/shards/{shard}"
         )
 
     @property
@@ -62,6 +65,7 @@ RESOURCES = (
     Resource("event-bus", "events"),
 )
 MANAGED_RESOURCE = Resource("stream", "managed-orders")
+MANAGED_STREAM_SHARDS = 3
 CAPACITY_REJECTED_RESOURCE = Resource("stream", "too-many-shards")
 
 
@@ -171,7 +175,12 @@ class RegionalCluster:
             arguments.insert(1, "--no-build")
         else:
             arguments.insert(1, "--build")
-        result = self.compose(*arguments)
+        try:
+            result = self.compose(*arguments)
+        except subprocess.CalledProcessError as error:
+            if error.stdout:
+                print(error.stdout, end="")
+            raise
         if result.stdout:
             print(result.stdout, end="")
 
@@ -470,7 +479,9 @@ def managed_resource_request(
 
 def create_managed_resource(cluster: RegionalCluster, resource: Resource) -> None:
     response = cluster.control_request(
-        "PUT", "/v1/resources", managed_resource_request(resource)
+        "PUT",
+        "/v1/resources",
+        managed_resource_request(resource, MANAGED_STREAM_SHARDS),
     )
     assert response.status == 201, response
 
@@ -510,7 +521,9 @@ def prove_capacity_rejection(cluster: RegionalCluster) -> None:
 
 def replay_managed_resource(cluster: RegionalCluster, resource: Resource) -> None:
     response = cluster.control_request(
-        "PUT", "/v1/resources", managed_resource_request(resource)
+        "PUT",
+        "/v1/resources",
+        managed_resource_request(resource, MANAGED_STREAM_SHARDS),
     )
     assert response.status == 200, response
     assert response.document.get("replayed") is True, response
@@ -523,6 +536,7 @@ def wait_for_managed_placement(
     resource: Resource,
     phase: str,
     expected_voters: int,
+    expected_shards: int = MANAGED_STREAM_SHARDS,
 ) -> dict[str, Any]:
     canonical_name = f"acme/shop/dev/core/{resource.kind}/{resource.name}"
     last_inventory: dict[str, Any] | None = None
@@ -560,7 +574,7 @@ def wait_for_managed_placement(
             managed.get("phase") != phase
             or managed.get("generation") != "1"
             or managed.get("observed_generation") != "1"
-            or managed.get("shard_count") != 1
+            or managed.get("shard_count") != expected_shards
         ):
             return None
         tablets = managed.get("tablets")
@@ -568,30 +582,35 @@ def wait_for_managed_placement(
             return None
         if expected_voters == 0:
             return managed if len(tablets) == 0 else None
-        if len(tablets) != 1 or not isinstance(tablets[0], dict):
-            return None
-        tablet = tablets[0]
-        for field in (
-            "tablet_id",
-            "consensus_group_id",
-            "tablet_epoch",
-            "resource_generation",
+        if len(tablets) != expected_shards or any(
+            not isinstance(tablet, dict) for tablet in tablets
         ):
-            value = tablet.get(field)
-            if not isinstance(value, str) or not value.isdecimal():
+            return None
+        for shard_index, tablet in enumerate(tablets):
+            if tablet.get("shard_index") != shard_index:
                 return None
-        voters = tablet.get("voter_node_ids")
-        if (
-            not isinstance(voters, list)
-            or len(voters) != expected_voters
-            or any(
-                not isinstance(voter, str) or not voter.isdecimal() for voter in voters
-            )
-        ):
-            return None
-        leader = tablet.get("leader_node_id")
-        if not isinstance(leader, str) or leader not in voters:
-            return None
+            for field in (
+                "tablet_id",
+                "consensus_group_id",
+                "tablet_epoch",
+                "resource_generation",
+            ):
+                value = tablet.get(field)
+                if not isinstance(value, str) or not value.isdecimal():
+                    return None
+            voters = tablet.get("voter_node_ids")
+            if (
+                not isinstance(voters, list)
+                or len(voters) != expected_voters
+                or any(
+                    not isinstance(voter, str) or not voter.isdecimal()
+                    for voter in voters
+                )
+            ):
+                return None
+            leader = tablet.get("leader_node_id")
+            if not isinstance(leader, str) or leader not in voters:
+                return None
         placement = managed.get("placement")
         if not isinstance(placement, dict):
             return None
@@ -621,11 +640,12 @@ def wait_for_routes(
     cluster: RegionalCluster,
     resource: Resource,
     nodes: tuple[int, ...] = NODES,
+    shard: int = 0,
 ) -> tuple[int, int]:
     def converged() -> tuple[int, int] | None:
         routes: list[tuple[int, dict[str, Any]]] = []
         for node in nodes:
-            response = cluster.request(node, "GET", resource.route_path)
+            response = cluster.request(node, "GET", resource.route_path_for(shard))
             if response.status != 200:
                 return None
             routes.append((node, response.document))
@@ -639,7 +659,8 @@ def wait_for_routes(
         return leaders[0][0], leaders[0][1]
 
     return wait_until(
-        f"{resource.kind}/{resource.name} routes on nodes {nodes}", converged
+        f"{resource.kind}/{resource.name} shard {shard} routes on nodes {nodes}",
+        converged,
     )
 
 
@@ -715,6 +736,7 @@ def wait_for_profile_apply(
     resource: Resource,
     expected: int,
     nodes: tuple[int, ...] = NODES,
+    shard: int = 0,
 ) -> str:
     def converged() -> str | None:
         digests: list[str] = []
@@ -722,7 +744,7 @@ def wait_for_profile_apply(
             response = cluster.request(
                 node,
                 "GET",
-                f"{resource.route_path}/data/status",
+                f"{resource.route_path_for(shard)}/data/status",
                 headers=LOCAL_STALE_FENCE_HEADERS,
             )
             if response.status != 200:
@@ -736,12 +758,14 @@ def wait_for_profile_apply(
         return digests[0] if len(set(digests)) == 1 else None
 
     return wait_until(
-        f"{resource.kind}/{resource.name} to apply {expected} commands on {nodes}",
+        f"{resource.kind}/{resource.name} shard {shard} to apply {expected} commands on {nodes}",
         converged,
     )
 
 
-def wait_for_catalog(cluster: RegionalCluster, expected: int) -> str:
+def wait_for_catalog(
+    cluster: RegionalCluster, expected_resources: int, expected_tablets: int
+) -> str:
     def converged() -> str | None:
         digests: list[str] = []
         for node in NODES:
@@ -749,8 +773,8 @@ def wait_for_catalog(cluster: RegionalCluster, expected: int) -> str:
             if response.status != 200:
                 return None
             if (
-                exact_int(response.document.get("resource_count")) != expected
-                or exact_int(response.document.get("tablet_count")) != expected
+                exact_int(response.document.get("resource_count")) != expected_resources
+                or exact_int(response.document.get("tablet_count")) != expected_tablets
             ):
                 return None
             digest = response.document.get("state_digest")
@@ -759,7 +783,10 @@ def wait_for_catalog(cluster: RegionalCluster, expected: int) -> str:
             digests.append(digest)
         return digests[0] if len(set(digests)) == 1 else None
 
-    return wait_until(f"catalog convergence for {expected} resources", converged)
+    return wait_until(
+        f"catalog convergence for {expected_resources} resources and {expected_tablets} tablets",
+        converged,
+    )
 
 
 def prove_python_sdk_native_stream_after_failover(
@@ -778,20 +805,23 @@ def prove_python_sdk_native_stream_after_failover(
     )
     event = epoch_sdk.EventEnvelope(
         id="managed-orders-2",
+        key="customer-2",
         source="python-regional-sdk",
         event_type="order.created",
         payload={"id": 2},
         time_ms=2,
     )
-    committed = client.append(resource.name, 0, "python-sdk-append-2", event)
+    committed = client.append_keyed(resource.name, "python-sdk-append-2", event)
     assert committed.get("state") == "committed", committed
+    assert committed.get("shard_index") == 0, committed
 
-    replayed = client.append(resource.name, 0, "python-sdk-append-2", event)
+    replayed = client.append_keyed(resource.name, "python-sdk-append-2", event)
     assert replayed.get("state") == "committed", replayed
     receipt = replayed.get("receipt")
     assert isinstance(receipt, dict) and receipt.get("disposition") == "replayed", (
         replayed
     )
+    assert receipt.get("partition") == 0, replayed
 
     fetched = client.fetch(resource.name, 0, 0, limit=10)
     records = fetched.get("records")
@@ -841,6 +871,49 @@ def prove_python_sdk_native_stream_after_failover(
     assert observation.get("base_offset") == "1", retention
     assert observation.get("end_offset") == "2", retention
     assert observation.get("retained_records") == 1, retention
+
+    for shard, key in ((1, "customer-0"), (2, "customer-1")):
+        keyed_event = epoch_sdk.EventEnvelope(
+            id=f"managed-orders-shard-{shard}",
+            key=key,
+            source="python-regional-sdk",
+            event_type="order.created",
+            payload={"shard": shard},
+            time_ms=10 + shard,
+        )
+        assert epoch_sdk.stream_shard_for(key, MANAGED_STREAM_SHARDS) == shard
+        keyed = client.append_keyed(
+            resource.name, f"python-sdk-keyed-shard-{shard}", keyed_event
+        )
+        keyed_receipt = keyed.get("receipt")
+        assert keyed.get("shard_index") == shard, keyed
+        assert isinstance(keyed_receipt, dict), keyed
+        assert keyed_receipt.get("partition") == shard, keyed
+        fetched = client.fetch(resource.name, shard, 0, limit=10)
+        records = fetched.get("records")
+        assert fetched.get("shard_index") == shard, fetched
+        assert isinstance(records, list) and [
+            record.get("envelope", {}).get("id") for record in records
+        ] == [keyed_event.id], fetched
+        assert all(record.get("partition") == shard for record in records), fetched
+        checkpoint = client.commit_offset(
+            resource.name,
+            shard,
+            "billing",
+            f"python-worker-{shard}",
+            1,
+            1,
+            idempotency_key=f"python-sdk-checkpoint-shard-{shard}",
+        )
+        checkpoint_receipt = checkpoint.get("receipt")
+        assert isinstance(checkpoint_receipt, dict), checkpoint
+        assert checkpoint_receipt.get("partition") == shard, checkpoint
+        lag = client.lag(resource.name, shard, "billing")
+        observation = lag.get("checkpoint")
+        assert lag.get("shard_index") == shard, lag
+        assert isinstance(observation, dict), lag
+        assert observation.get("partition") == shard, lag
+        assert observation.get("lag") == "0", lag
 
 
 def queue_result(document: dict[str, Any], expected_kind: str) -> dict[str, Any]:
@@ -1384,7 +1457,7 @@ def run_campaign(cluster: RegionalCluster) -> None:
     cluster.start_control()
     create_managed_resource(cluster, MANAGED_RESOURCE)
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
-    wait_for_topology(cluster, 2)
+    wait_for_topology(cluster, 1 + MANAGED_STREAM_SHARDS)
     prove_capacity_rejection(cluster)
     write_profile(cluster, MANAGED_RESOURCE, 1)
     wait_for_profile_apply(cluster, MANAGED_RESOURCE, 1)
@@ -1398,7 +1471,11 @@ def run_campaign(cluster: RegionalCluster) -> None:
         write_profile(cluster, resource, 1)
         wait_for_profile_apply(cluster, resource, 1)
     expected_resources = len(RESOURCES) + 1
-    initial_catalog_digest = wait_for_catalog(cluster, expected_resources)
+    expected_tablets = expected_resources + MANAGED_STREAM_SHARDS - 1
+    wait_for_topology(cluster, 1 + expected_tablets)
+    initial_catalog_digest = wait_for_catalog(
+        cluster, expected_resources, expected_tablets
+    )
 
     stream = MANAGED_RESOURCE
     old_leader, old_term = wait_for_routes(cluster, stream)
@@ -1410,10 +1487,14 @@ def run_campaign(cluster: RegionalCluster) -> None:
     assert new_term > old_term
     prove_python_sdk_native_stream_after_failover(cluster, stream)
     wait_for_profile_apply(cluster, stream, 5, survivors)
+    wait_for_profile_apply(cluster, stream, 2, survivors, shard=1)
+    wait_for_profile_apply(cluster, stream, 2, survivors, shard=2)
 
     cluster.start_node(old_leader)
     wait_for_nodes(cluster)
     wait_for_profile_apply(cluster, stream, 5)
+    wait_for_profile_apply(cluster, stream, 2, shard=1)
+    wait_for_profile_apply(cluster, stream, 2, shard=2)
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
     for resource in RESOURCES:
         wait_for_profile_apply(cluster, resource, 1)
@@ -1461,9 +1542,14 @@ def run_campaign(cluster: RegionalCluster) -> None:
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "pending", 0)
     cluster.restart_all()
     wait_for_nodes(cluster)
-    assert wait_for_catalog(cluster, expected_resources) == initial_catalog_digest
+    assert (
+        wait_for_catalog(cluster, expected_resources, expected_tablets)
+        == initial_catalog_digest
+    )
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
     wait_for_profile_apply(cluster, stream, 5)
+    wait_for_profile_apply(cluster, stream, 2, shard=1)
+    wait_for_profile_apply(cluster, stream, 2, shard=2)
     for resource in RESOURCES:
         expected = (
             11

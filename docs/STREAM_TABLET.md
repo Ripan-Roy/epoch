@@ -6,6 +6,14 @@ exists to prove the command, commit, application, idempotency, failover, and
 recovery boundary before Epoch exposes clustered durability through the public
 API or SDKs.
 
+The regional runtime now materializes several of these tablets for one Stream:
+one logical shard/partition and one independent consensus group per tablet.
+Canonical tablet commands still name physical partition 0. The node binds the
+catalog shard as runtime metadata and externalizes that logical partition in
+regional receipts, records, checkpoints, retention observations, and status.
+This preserves historical command and snapshot bytes; see
+[ADR-0024](adr/0024-stream-multishard-key-routing.md).
+
 ## What is implemented
 
 ```text
@@ -229,7 +237,9 @@ decimal offset, and disposition for each input. Re-run the same bytes and key
 to resolve an unknown outcome; changing the frame or metadata under that key is
 an idempotency conflict. The regional path is the same operation at
 `.../shards/{shard}/data/records/batches` with the normal authorization,
-generation, tablet-epoch, and leader fences.
+generation, tablet-epoch, and leader fences. Its response replaces the inner
+physical partition 0 with the outer logical shard, including every correlated
+batch record receipt.
 
 ### Commit, reset, and replay a consumer-group checkpoint
 
@@ -364,7 +374,7 @@ automatic generation allocation, dead-member detection, rebalance strategy,
 multi-partition ownership, transactional offset commit, or coordinated consumer
 session surface.
 Retention does not add keyed compaction, tombstones, legal hold, object-tier
-deletion, namespace policy guardrails, or multi-partition routing.
+deletion, namespace policy guardrails, or a resource-wide policy coordinator.
 The regional Stream v1 SDK exposes the current checkpoint primitive, but it
 does not turn that primitive into a coordinated consumer session.
 The batch route is whole-command atomic and client-framed; it does not provide

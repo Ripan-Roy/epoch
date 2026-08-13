@@ -8,6 +8,20 @@ notes explicitly list additional verified artifacts.
 
 ### Added
 
+- Regional multi-shard Stream materialization with one independently replicated
+  ordered tablet per logical partition, resource-wide shard-count discovery,
+  truthful logical shard identities in mutation, record, checkpoint, retention,
+  batch, and status responses, and unchanged canonical partition-0
+  command/snapshot bytes.
+- A versioned `fnv1a64_utf8_mod_n_v1` cross-language partition contract over
+  exact UTF-8 bytes with event-ID fallback. Go `StreamShardFor`/`AppendKeyed`,
+  Java `StreamPartitioner`/`appendKeyed`, and Python
+  `stream_shard_for`/`append_keyed` pin the initial resource generation and
+  fail before write if expansion races target discovery.
+- ADR-0024, multi-shard API/architecture/semantics/SDK documentation, exact
+  three-language keyed Pages quickstarts, shared ASCII/non-ASCII vectors, and a
+  real three-node Python campaign that routes shards 0/1/2 through leader loss,
+  voter catch-up, and all-node same-volume recovery.
 - Additive Stream command v4 for deterministic record-count, compact canonical
   JSON byte, inclusive-age, and combined retention. Configure, append, and
   explicit idle maintenance advance one replicated monotonic watermark while
@@ -176,13 +190,16 @@ notes explicitly list additional verified artifacts.
   remain unimplemented. Retention interaction is explicit for the replicated
   partition-0 primitive, but automatic maintenance scheduling, keyed
   compaction/tombstones, object-tier retention, legal-hold governance, and
-  multi-partition policy remain open. Standalone offset helpers keep their
-  local contract.
+  coordinated multi-partition ownership remain open. Regional retention policy
+  is independent per logical shard; automatic maintenance scheduling, keyed
+  compaction/tombstones, object-tier retention, and legal-hold governance
+  remain open. Standalone offset helpers keep their local contract.
 - The regional SDKs remain repository-local alpha source. Package publication,
   generated response models, Stream batch/compression helpers, Event Bus
   external webhook/HTTP/push execution and signing, Cache background
-  expiry/eviction/multi-shard routing, TLS/OIDC/mTLS, dynamic membership, and
-  live-cluster execution for every language remain open.
+  expiry/eviction/multi-shard routing, Stream online expansion/remapping and
+  virtual shards, TLS/OIDC/mTLS, dynamic membership, and live-cluster execution
+  for every language remain open.
 
 ## [0.1.0-alpha.3] - 2026-07-29
 

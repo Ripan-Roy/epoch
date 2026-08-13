@@ -60,6 +60,16 @@ public final class EventEnvelope {
     return new Builder(source, eventType, payload);
   }
 
+  /** Returns the opaque event identifier used when no partition key is present. */
+  public String id() {
+    return id;
+  }
+
+  /** Returns the optional Stream partition key. */
+  public String key() {
+    return key;
+  }
+
   /** Returns the native JSON representation, including the wire field named {@code type}. */
   public ObjectNode toJson() {
     ObjectNode value = MAPPER.createObjectNode();

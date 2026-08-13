@@ -98,8 +98,8 @@ compressed/expanded limits and one exact offset per client sequence. Real
 three-runtime tests exercise every codec; the container campaign sends an
 independently generated Python gzip frame after failover and recovers it after
 all-node `SIGKILL`. Single append remains canonical v1. Stable streaming
-Produce, automatic batching/negotiation, benchmarks, multi-partition routing,
-and regional SDK batch helpers remain open.
+Produce, automatic batching/negotiation, benchmarks, cross-shard batch
+planning, and regional SDK batch helpers remain open.
 
 `crates/epoch-catalog` supplies deterministic multi-resource generations and
 shard/tablet/group routing identity. The regional runtime commits it through
@@ -117,7 +117,10 @@ surfaces map to those same replicated tablets. Go, Java, and Python regional
 clients discover the current leader before every operation, carry
 generation/tablet fences, preserve caller idempotency keys across bounded
 rediscovery, and request linearizable reads without routing application data
-through Go.
+through Go. A regional Stream may materialize several independent ordered
+shards. Discovery publishes `fnv1a64_utf8_mod_n_v1`; all three SDKs route the
+event key or ID identically and pin the observed resource generation before a
+keyed write. Online expansion/remapping remains explicit future work.
 
 The strict single-partition Queue tablet now runs through that same persistent
 three-node actor boundary. Its internal typed API covers enqueue, acquire,

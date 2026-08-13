@@ -16,6 +16,81 @@ final class RegionalStreamClientTest {
   private static final ObjectMapper MAPPER = new ObjectMapper();
 
   @Test
+  void keyedAppendUsesThePublishedUtf8Partitioner() throws Exception {
+    RecordingRegionalTransport leader =
+        new RecordingRegionalTransport(
+            MAPPER.readTree(
+                """
+                {
+                  "resource_generation":"5",
+                  "tablet_epoch":"3",
+                  "term":"8",
+                  "accepts_writes":true,
+                  "stream_partitioning":{
+                    "algorithm":"fnv1a64_utf8_mod_n_v1",
+                    "key_encoding":"utf8",
+                    "missing_key_fallback":"event_id",
+                    "shard_count":16
+                  }
+                }
+                """));
+    RegionalStreamClient client =
+        RegionalStreamClient.withTransports(
+            List.of(leader), "secret-token", new RegionalScope("acme", "shop", "dev", "core"));
+    EventEnvelope event =
+        EventEnvelope.builder("checkout", "order.created", Map.of("id", "42"))
+            .id("order-1")
+            .key("customer-42")
+            .timeMs(42)
+            .build();
+
+    assertEquals(14, StreamPartitioner.shardFor("customer-42", 16));
+    assertEquals(13, StreamPartitioner.shardFor("order-1", 16));
+    assertEquals(9, StreamPartitioner.shardFor("café", 16));
+    assertEquals(15, StreamPartitioner.shardFor("東京", 16));
+    client.appendKeyed("orders", "append-42", event);
+
+    assertEquals(3, leader.requests.size());
+    assertEquals(true, leader.requests.get(0).path().endsWith("/shards/0"));
+    assertEquals(true, leader.requests.get(1).path().endsWith("/shards/14"));
+    assertEquals(true, leader.requests.get(2).path().endsWith("/shards/14/records"));
+  }
+
+  @Test
+  void keyedAppendFailsClosedWhenRoutingGenerationChanges() throws Exception {
+    JsonNode bootstrap =
+        MAPPER.readTree(
+            """
+            {"resource_generation":"5","tablet_epoch":"3","term":"8","accepts_writes":true,
+             "stream_partitioning":{"algorithm":"fnv1a64_utf8_mod_n_v1","key_encoding":"utf8",
+             "missing_key_fallback":"event_id","shard_count":16}}
+            """);
+    JsonNode target =
+        MAPPER.readTree(
+            """
+            {"resource_generation":"6","tablet_epoch":"3","term":"9","accepts_writes":true,
+             "stream_partitioning":{"algorithm":"fnv1a64_utf8_mod_n_v1","key_encoding":"utf8",
+             "missing_key_fallback":"event_id","shard_count":16}}
+            """);
+    RecordingRegionalTransport transport =
+        new RecordingRegionalTransport(Map.of("0", bootstrap, "14", target));
+    RegionalStreamClient client =
+        RegionalStreamClient.withTransports(
+            List.of(transport), "secret-token", new RegionalScope("acme", "shop", "dev", "core"));
+    EventEnvelope event =
+        EventEnvelope.builder("checkout", "order.created", Map.of())
+            .id("order-1")
+            .key("customer-42")
+            .build();
+
+    IOException failure =
+        assertThrows(IOException.class, () -> client.appendKeyed("orders", "append-42", event));
+
+    assertEquals(true, failure.getMessage().contains("generation changed"));
+    assertEquals(2, transport.requests.size());
+  }
+
+  @Test
   void appendDiscoversLeaderAndCarriesAuthenticationFencesAndTerm() throws Exception {
     RecordingRegionalTransport follower =
         new RecordingRegionalTransport(
@@ -216,6 +291,7 @@ final class RegionalStreamClientTest {
 
   private static final class RecordingRegionalTransport implements Transport {
     private final JsonNode route;
+    private final Map<String, JsonNode> routes;
     private final List<Request> requests = new ArrayList<>();
     private IOException nextOperationError;
 
@@ -223,8 +299,14 @@ final class RegionalStreamClientTest {
       this(route, null);
     }
 
+    private RecordingRegionalTransport(Map<String, JsonNode> routes) {
+      this.route = MAPPER.nullNode();
+      this.routes = Map.copyOf(routes);
+    }
+
     private RecordingRegionalTransport(JsonNode route, IOException nextOperationError) {
       this.route = route;
+      this.routes = Map.of();
       this.nextOperationError = nextOperationError;
     }
 
@@ -242,8 +324,9 @@ final class RegionalStreamClientTest {
         Map<String, String> headers)
         throws IOException {
       requests.add(new Request(method, path, body, query, headers));
-      if ("GET".equals(method) && path.endsWith("/shards/0")) {
-        return route;
+      if ("GET".equals(method) && path.matches(".*/shards/[0-9]+")) {
+        String shard = path.substring(path.lastIndexOf('/') + 1);
+        return routes.getOrDefault(shard, route);
       }
       if (nextOperationError != null) {
         IOException error = nextOperationError;

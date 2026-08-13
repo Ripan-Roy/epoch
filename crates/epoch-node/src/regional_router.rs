@@ -13,6 +13,7 @@ use axum::{
 use epoch_catalog::ResourceName;
 use epoch_consensus::{ConsensusError, ConsensusRole, ConsensusStatus};
 use epoch_core::{ResourceKind, WorkloadProfile};
+use epoch_stream::STREAM_PARTITIONER;
 use serde::{Deserialize, Serialize};
 use tower::ServiceExt;
 
@@ -307,6 +308,16 @@ pub struct RegionalRouteResponse {
     pub term: u64,
     pub accepts_writes: bool,
     pub retry_hint: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_partitioning: Option<StreamPartitioningResponse>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct StreamPartitioningResponse {
+    pub algorithm: &'static str,
+    pub key_encoding: &'static str,
+    pub missing_key_fallback: &'static str,
+    pub shard_count: u32,
 }
 
 impl RegionalRouteResponse {
@@ -331,6 +342,13 @@ impl RegionalRouteResponse {
             } else {
                 "refresh routing and retry the current leader with the same idempotency key"
             },
+            stream_partitioning: (descriptor.workload_profile == WorkloadProfile::StreamLog)
+                .then_some(StreamPartitioningResponse {
+                    algorithm: STREAM_PARTITIONER,
+                    key_encoding: "utf8",
+                    missing_key_fallback: "event_id",
+                    shard_count: route.metadata().shard_count,
+                }),
         }
     }
 }
@@ -887,23 +905,35 @@ mod tests {
         name: &str,
         workload_profile: WorkloadProfile,
     ) -> (RegionalTabletMaterializer, Router, ResourceRecord) {
+        routed_resource_with_shards(directory, kind, name, workload_profile, 1).await
+    }
+
+    async fn routed_resource_with_shards(
+        directory: &TempDir,
+        kind: ResourceKind,
+        name: &str,
+        workload_profile: WorkloadProfile,
+        shard_count: u32,
+    ) -> (RegionalTabletMaterializer, Router, ResourceRecord) {
         let resource = ResourceRecord {
             name: ResourceName::new("acme", "shop", "dev", "core", kind, name).unwrap(),
             generation: 5,
             spec: ResourceSpec {
                 workload_profile,
-                shard_count: 1,
+                shard_count,
                 replica_count: 3,
             },
-            tablets: vec![TabletDescriptor {
-                tablet_id: 7,
-                consensus_group_id: 17,
-                shard_index: 0,
-                tablet_epoch: 3,
-                resource_generation: 5,
-                workload_profile,
-                replica_count: 3,
-            }],
+            tablets: (0..shard_count)
+                .map(|shard_index| TabletDescriptor {
+                    tablet_id: 7 + u64::from(shard_index),
+                    consensus_group_id: 17 + u64::from(shard_index),
+                    shard_index,
+                    tablet_epoch: 3,
+                    resource_generation: 5,
+                    workload_profile,
+                    replica_count: 3,
+                })
+                .collect(),
         };
         let template = ConsensusProbeConfig::new(
             2,
@@ -941,6 +971,20 @@ mod tests {
             ResourceKind::Stream,
             "orders",
             WorkloadProfile::StreamLog,
+        )
+        .await
+    }
+
+    async fn routed_stream_with_shards(
+        directory: &TempDir,
+        shard_count: u32,
+    ) -> (RegionalTabletMaterializer, Router, ResourceRecord) {
+        routed_resource_with_shards(
+            directory,
+            ResourceKind::Stream,
+            "orders",
+            WorkloadProfile::StreamLog,
+            shard_count,
         )
         .await
     }
@@ -1254,6 +1298,16 @@ mod tests {
         assert_eq!(discovery["resource_generation"], "5");
         assert_eq!(discovery["tablet_epoch"], "3");
         assert_eq!(discovery["workload_profile"], "stream_log");
+        assert_eq!(discovery["stream_partitioning"]["shard_count"], 1);
+        assert_eq!(
+            discovery["stream_partitioning"]["algorithm"],
+            "fnv1a64_utf8_mod_n_v1"
+        );
+        assert_eq!(discovery["stream_partitioning"]["key_encoding"], "utf8");
+        assert_eq!(
+            discovery["stream_partitioning"]["missing_key_fallback"],
+            "event_id"
+        );
 
         let missing_fence = router
             .clone()
@@ -1315,6 +1369,47 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(wrong_profile.status(), StatusCode::NOT_FOUND);
+
+        materializer.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_stream_routes_every_materialized_shard_with_logical_partition_metadata() {
+        let data_directory = TempDir::new().expect("temp directory should be created");
+        let (mut materializer, router, _resource) =
+            routed_stream_with_shards(&data_directory, 3).await;
+
+        for shard in 0..3 {
+            let base = format!(
+                "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/streams/orders/shards/{shard}"
+            );
+            let discovery = router
+                .clone()
+                .oneshot(Request::get(&base).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(discovery.status(), StatusCode::OK);
+            let discovery = json(discovery).await;
+            assert_eq!(discovery["shard_index"], shard);
+            assert_eq!(discovery["stream_partitioning"]["shard_count"], 3);
+
+            let fetch = router
+                .clone()
+                .oneshot(
+                    Request::get(format!("{base}/records?offset=0&limit=1"))
+                        .header(RESOURCE_GENERATION_HEADER, "5")
+                        .header(TABLET_EPOCH_HEADER, "3")
+                        .header(READ_CONSISTENCY_HEADER, "local_stale")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(fetch.status(), StatusCode::OK);
+            let fetch = json(fetch).await;
+            assert_eq!(fetch["shard_index"], shard);
+            assert_eq!(fetch["records"], serde_json::json!([]));
+        }
 
         materializer.shutdown().await.unwrap();
     }

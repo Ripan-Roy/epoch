@@ -19,6 +19,7 @@ const (
 	maxStreamRetentionRecords   = 100_000
 	maxStreamRetentionBytes     = 3 * 1024 * 1024
 	maxStreamRetentionAgeMS     = 10 * 365 * 24 * 60 * 60 * 1_000
+	streamPartitioner           = "fnv1a64_utf8_mod_n_v1"
 )
 
 // RegionalScope identifies one fully-qualified Epoch namespace.
@@ -43,10 +44,18 @@ type regionalClient struct {
 }
 
 type regionalRoute struct {
-	ResourceGeneration string `json:"resource_generation"`
-	TabletEpoch        string `json:"tablet_epoch"`
-	Term               string `json:"term"`
-	AcceptsWrites      bool   `json:"accepts_writes"`
+	ResourceGeneration string                      `json:"resource_generation"`
+	TabletEpoch        string                      `json:"tablet_epoch"`
+	Term               string                      `json:"term"`
+	AcceptsWrites      bool                        `json:"accepts_writes"`
+	StreamPartitioning *regionalStreamPartitioning `json:"stream_partitioning,omitempty"`
+}
+
+type regionalStreamPartitioning struct {
+	Algorithm          string `json:"algorithm"`
+	KeyEncoding        string `json:"key_encoding"`
+	MissingKeyFallback string `json:"missing_key_fallback"`
+	ShardCount         uint32 `json:"shard_count"`
 }
 
 // StreamRetentionPolicy bounds retained records independently by count, canonical bytes,
@@ -144,6 +153,67 @@ func (client *RegionalStreamClient) Append(ctx context.Context, stream string, s
 			}{idempotencyKey, route.Term, 0, event},
 		}
 	})
+}
+
+// AppendKeyed discovers the current Stream partitioning contract, selects a shard from
+// the event key (or event ID when the key is empty), and pins the write to that routing
+// generation so a concurrent expansion cannot silently remap an uncertain mutation.
+func (client *RegionalStreamClient) AppendKeyed(ctx context.Context, stream, idempotencyKey string, event EventEnvelope) (Document, error) {
+	if strings.TrimSpace(idempotencyKey) == "" {
+		return nil, fmt.Errorf("epoch: idempotency key is required")
+	}
+	event, err := event.normalized()
+	if err != nil {
+		return nil, err
+	}
+	regional := client.regionalClient()
+	if regional == nil {
+		return nil, fmt.Errorf("epoch: regional stream client is not configured")
+	}
+	bootstrapPath, err := regional.resourceShardPath("streams", "stream", stream, 0)
+	if err != nil {
+		return nil, err
+	}
+	route, err := regional.discoverRoute(ctx, bootstrapPath)
+	if err != nil {
+		return nil, err
+	}
+	partitioning, err := validatedStreamPartitioning(route)
+	if err != nil {
+		return nil, err
+	}
+	partitionValue := event.Key
+	if partitionValue == "" {
+		partitionValue = event.ID
+	}
+	shard, err := StreamShardFor(partitionValue, partitioning.ShardCount)
+	if err != nil {
+		return nil, err
+	}
+	return regionalCallAtGeneration[Document](ctx, regional, "streams", "stream", stream, shard, route.ResourceGeneration, func(target regionalRoute) Request {
+		return Request{
+			Method: "POST",
+			Path:   "/records",
+			Body: struct {
+				IdempotencyKey string        `json:"idempotency_key"`
+				ExpectedTerm   string        `json:"expected_term"`
+				Partition      uint32        `json:"partition"`
+				Envelope       EventEnvelope `json:"envelope"`
+			}{idempotencyKey, target.Term, 0, event},
+		}
+	})
+}
+
+// StreamShardFor implements the advertised unsigned FNV-1a UTF-8 partitioner.
+func StreamShardFor(partitionValue string, shardCount uint32) (uint32, error) {
+	if shardCount == 0 {
+		return 0, fmt.Errorf("epoch: Stream shard count must be greater than zero")
+	}
+	hash := uint64(0xcbf29ce484222325)
+	for _, value := range []byte(partitionValue) {
+		hash = (hash ^ uint64(value)) * 0x100000001b3
+	}
+	return uint32(hash % uint64(shardCount)), nil
 }
 
 // Fetch performs a linearizable bounded read from one Stream shard.
@@ -274,6 +344,10 @@ func (client *RegionalStreamClient) regionalClient() *regionalClient {
 }
 
 func regionalCall[T any](ctx context.Context, client *regionalClient, collection, resourceLabel, resource string, shard uint32, requestFor func(regionalRoute) Request) (T, error) {
+	return regionalCallAtGeneration[T](ctx, client, collection, resourceLabel, resource, shard, "", requestFor)
+}
+
+func regionalCallAtGeneration[T any](ctx context.Context, client *regionalClient, collection, resourceLabel, resource string, shard uint32, expectedGeneration string, requestFor func(regionalRoute) Request) (T, error) {
 	var zero T
 	if client == nil {
 		return zero, fmt.Errorf("epoch: regional %s client is not configured", resourceLabel)
@@ -292,6 +366,13 @@ func regionalCall[T any](ctx context.Context, client *regionalClient, collection
 			}
 			continue
 		}
+		if expectedGeneration != "" && route.ResourceGeneration != expectedGeneration {
+			return zero, fmt.Errorf(
+				"epoch: Stream routing generation changed from %s to %s before the keyed append; no write was attempted",
+				expectedGeneration,
+				route.ResourceGeneration,
+			)
+		}
 		request := requestFor(route)
 		request.Path = basePath + request.Path
 		request.Headers = mergedRegionalHeaders(request.Headers, client.token, route)
@@ -306,6 +387,42 @@ func regionalCall[T any](ctx context.Context, client *regionalClient, collection
 		}
 	}
 	return zero, fmt.Errorf("epoch: regional %s operation could not reach a current leader: %w", resourceLabel, lastErr)
+}
+
+func (client *regionalClient) discoverRoute(ctx context.Context, path string) (regionalRoute, error) {
+	var lastErr error
+	for _, transport := range client.transports {
+		var route regionalRoute
+		err := transport.Do(ctx, Request{Method: "GET", Path: path, Headers: map[string]string{regionalAuthorizationHeader: "Bearer " + client.token}}, &route)
+		if err != nil {
+			if !regionalRediscoveryError(err) {
+				return regionalRoute{}, err
+			}
+			lastErr = err
+			continue
+		}
+		if !validRegionalRoute(route) {
+			lastErr = fmt.Errorf("epoch: regional route response is incomplete")
+			continue
+		}
+		return route, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("epoch: no configured endpoint reported Stream routing metadata")
+	}
+	return regionalRoute{}, lastErr
+}
+
+func validatedStreamPartitioning(route regionalRoute) (regionalStreamPartitioning, error) {
+	if route.StreamPartitioning == nil {
+		return regionalStreamPartitioning{}, fmt.Errorf("epoch: regional Stream route omitted partitioning metadata")
+	}
+	partitioning := *route.StreamPartitioning
+	if partitioning.Algorithm != streamPartitioner || partitioning.KeyEncoding != "utf8" ||
+		partitioning.MissingKeyFallback != "event_id" || partitioning.ShardCount == 0 {
+		return regionalStreamPartitioning{}, fmt.Errorf("epoch: regional Stream partitioning metadata is unsupported or incomplete")
+	}
+	return partitioning, nil
 }
 
 func (client *regionalClient) discoverLeader(ctx context.Context, path string) (Transport, regionalRoute, error) {

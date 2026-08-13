@@ -34,6 +34,7 @@ const SUPPORTED_REPLICA_COUNT: u16 = 3;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MaterializedTabletMetadata {
     pub resource: ResourceName,
+    pub shard_count: u32,
     pub descriptor: TabletDescriptor,
 }
 
@@ -377,9 +378,9 @@ impl RegionalTabletMaterializer {
             WorkloadProfile::CacheAndState => PendingTabletService::Cache(
                 CacheTabletService::with_default_config(CacheTabletScope::clone(&scope))?,
             ),
-            WorkloadProfile::StreamLog => {
-                PendingTabletService::Stream(StreamTabletService::new(scope.clone())?)
-            }
+            WorkloadProfile::StreamLog => PendingTabletService::Stream(
+                StreamTabletService::new_for_shard(scope.clone(), descriptor.shard_index)?,
+            ),
             WorkloadProfile::WorkQueue => PendingTabletService::Queue(
                 QueueTabletService::with_default_config(QueueTabletScope::clone(&scope))?,
             ),
@@ -510,6 +511,7 @@ fn validate_desired_tablets(
                     descriptor.tablet_id,
                     MaterializedTabletMetadata {
                         resource: resource.name.clone(),
+                        shard_count: resource.spec.shard_count,
                         descriptor: descriptor.clone(),
                     },
                 )
@@ -748,10 +750,47 @@ mod tests {
         assert_eq!(changed.stopped, 1);
         assert_eq!(changed.unchanged, 2);
         assert_eq!(recovered.directory().tablets().unwrap().len(), 4);
+        assert_stream_shards(&recovered.directory(), 2);
         recovered
             .shutdown()
             .await
             .expect("recovered runtime should stop cleanly");
+
+        let mut expanded_recovery =
+            new_materializer(directory.path()).expect("expanded recovery should be valid");
+        let reopened = expanded_recovery
+            .reconcile(&changed_snapshot.resources)
+            .await
+            .expect("every expanded Stream shard should reopen");
+        assert_eq!(reopened.started, 4);
+        assert_stream_shards(&expanded_recovery.directory(), 2);
+        expanded_recovery
+            .shutdown()
+            .await
+            .expect("expanded recovery should stop cleanly");
+    }
+
+    fn assert_stream_shards(directory: &TabletDirectory, expected: u32) {
+        let mut stream = directory
+            .tablets()
+            .expect("directory should be readable")
+            .into_iter()
+            .filter(|metadata| metadata.descriptor.workload_profile == WorkloadProfile::StreamLog)
+            .collect::<Vec<_>>();
+        stream.sort_by_key(|metadata| metadata.descriptor.shard_index);
+        assert_eq!(stream.len(), usize::try_from(expected).unwrap());
+        assert!(
+            stream
+                .iter()
+                .all(|metadata| metadata.shard_count == expected)
+        );
+        assert_eq!(
+            stream
+                .iter()
+                .map(|metadata| metadata.descriptor.shard_index)
+                .collect::<Vec<_>>(),
+            (0..expected).collect::<Vec<_>>()
+        );
     }
 
     async fn assert_profile_status_routes(directory: &TabletDirectory) {

@@ -10,6 +10,7 @@ import (
 
 type regionalFakeTransport struct {
 	route           Document
+	routes          map[string]Document
 	requests        []Request
 	operationErrors []error
 }
@@ -17,7 +18,12 @@ type regionalFakeTransport struct {
 func (transport *regionalFakeTransport) Do(_ context.Context, request Request, result any) error {
 	transport.requests = append(transport.requests, request)
 	response := transport.route
-	isDiscovery := request.Method == "GET" && strings.HasSuffix(request.Path, "/shards/0")
+	shardMarker := strings.LastIndex(request.Path, "/shards/")
+	isDiscovery := request.Method == "GET" && shardMarker >= 0 &&
+		!strings.Contains(request.Path[shardMarker+len("/shards/"):], "/")
+	if isDiscovery && transport.routes != nil {
+		response = transport.routes[request.Path[shardMarker+len("/shards/"):]]
+	}
 	if !isDiscovery && len(transport.operationErrors) > 0 {
 		err := transport.operationErrors[0]
 		transport.operationErrors = transport.operationErrors[1:]
@@ -31,6 +37,91 @@ func (transport *regionalFakeTransport) Do(_ context.Context, request Request, r
 		return err
 	}
 	return json.Unmarshal(payload, result)
+}
+
+func TestRegionalStreamKeyedAppendUsesPublishedUTF8Partitioning(t *testing.T) {
+	leader := &regionalFakeTransport{route: Document{
+		"resource_generation": "5",
+		"tablet_epoch":        "3",
+		"term":                "8",
+		"accepts_writes":      true,
+		"stream_partitioning": Document{
+			"algorithm":            "fnv1a64_utf8_mod_n_v1",
+			"key_encoding":         "utf8",
+			"missing_key_fallback": "event_id",
+			"shard_count":          float64(16),
+		},
+	}}
+	client, err := NewRegionalStreamClientWithTransports(
+		[]Transport{leader},
+		"secret-token",
+		RegionalScope{Organization: "acme", Project: "shop", Environment: "dev", Namespace: "core"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := NewEventEnvelope("checkout", "order.created", map[string]any{"id": "42"})
+	event.ID = "order-1"
+	event.Key = "customer-42"
+	event.TimeMS = 42
+
+	if shard, err := StreamShardFor("customer-42", 16); err != nil || shard != 14 {
+		t.Fatalf("unexpected published partition: shard=%d err=%v", shard, err)
+	}
+	for value, expected := range map[string]uint32{
+		"order-1": 13,
+		"café":    9,
+		"東京":      15,
+	} {
+		if shard, vectorErr := StreamShardFor(value, 16); vectorErr != nil || shard != expected {
+			t.Fatalf("unexpected vector for %q: shard=%d err=%v", value, shard, vectorErr)
+		}
+	}
+	if _, err := client.AppendKeyed(context.Background(), "orders", "append-42", event); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(leader.requests) != 3 {
+		t.Fatalf("expected routing discovery, shard discovery, and write; got %d requests", len(leader.requests))
+	}
+	if !strings.HasSuffix(leader.requests[0].Path, "/shards/0") ||
+		!strings.HasSuffix(leader.requests[1].Path, "/shards/14") ||
+		!strings.HasSuffix(leader.requests[2].Path, "/shards/14/records") {
+		t.Fatalf("keyed append did not route through shard 14: %#v", leader.requests)
+	}
+}
+
+func TestRegionalStreamKeyedAppendFailsClosedWhenRoutingGenerationChanges(t *testing.T) {
+	bootstrap := Document{
+		"resource_generation": "5", "tablet_epoch": "3", "term": "8", "accepts_writes": true,
+		"stream_partitioning": Document{
+			"algorithm": "fnv1a64_utf8_mod_n_v1", "key_encoding": "utf8",
+			"missing_key_fallback": "event_id", "shard_count": float64(16),
+		},
+	}
+	target := Document{
+		"resource_generation": "6", "tablet_epoch": "3", "term": "9", "accepts_writes": true,
+		"stream_partitioning": bootstrap["stream_partitioning"],
+	}
+	transport := &regionalFakeTransport{routes: map[string]Document{"0": bootstrap, "14": target}}
+	client, err := NewRegionalStreamClientWithTransports(
+		[]Transport{transport}, "secret-token",
+		RegionalScope{Organization: "acme", Project: "shop", Environment: "dev", Namespace: "core"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := NewEventEnvelope("checkout", "order.created", nil)
+	event.ID = "order-1"
+	event.Key = "customer-42"
+
+	_, err = client.AppendKeyed(context.Background(), "orders", "append-42", event)
+	if err == nil || !strings.Contains(err.Error(), "generation changed") {
+		t.Fatalf("expected a fail-closed routing generation error, got %v", err)
+	}
+	if len(transport.requests) != 2 {
+		t.Fatalf("generation mismatch must fail before a write, got %#v", transport.requests)
+	}
 }
 
 func TestRegionalStreamClientRediscoversAndKeepsMutationIdentity(t *testing.T) {

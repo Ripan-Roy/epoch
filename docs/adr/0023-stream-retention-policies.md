@@ -152,5 +152,6 @@ Required evidence includes:
 
 This decision does not provide keyed compaction, tombstones, delete retention,
 object-tier retention, legal hold, namespace policy guardrails, dynamic
-partition routing, or a managed periodic maintenance scheduler. Those remain
+partition expansion/remapping, resource-wide policy coordination, or a managed
+periodic maintenance scheduler. Those remain
 separate requirements and must not be inferred from a v4 retention receipt.

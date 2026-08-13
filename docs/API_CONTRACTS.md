@@ -563,10 +563,38 @@ GET /v1/organizations/{org}/projects/{project}/environments/{environment}/namesp
 
 `GET` on the shard base performs discovery. The current Go, Java, and Python
 SDK contract maps `records`, `groups/{group}/{offsets|lag|records}`, and
-`retention[/maintenance]` to the same replicated partition-0 Stream tablet.
+`retention[/maintenance]` to the replicated single-partition tablet owned by
+that logical shard.
 Retention reads use the same default leader ReadIndex barrier. The stable
 adapter removes the generic `kind` and `data`
 segments but does not introduce another log or state store.
+
+Every Stream discovery response includes the resource-wide partition contract:
+
+```json
+{
+  "stream_partitioning": {
+    "algorithm": "fnv1a64_utf8_mod_n_v1",
+    "key_encoding": "utf8",
+    "missing_key_fallback": "event_id",
+    "shard_count": 3
+  }
+}
+```
+
+The algorithm is unsigned FNV-1a 64 over exact UTF-8 bytes modulo
+`shard_count`. A nonempty event key is used; an empty or missing key falls back
+to the event ID. The SDK keyed-append methods discover this object on shard 0,
+select a target, and require the target route to retain the same resource
+generation before sending a mutation. A mismatch sends no write and requires
+fresh routing intent; an uncertain append is never silently remapped.
+
+The path `{shard}` is the logical partition. The tablet command remains
+physical partition 0 for byte and snapshot compatibility. Regional mutation
+responses and receipts, batch record receipts, fetched records, group
+observations, retention observations, and status externalize the logical shard
+as `shard_index` and/or `partition`. See
+[ADR-0024](adr/0024-stream-multishard-key-routing.md).
 
 The versioned regional Queue application route follows the same discovery and
 fencing boundary:
@@ -663,10 +691,16 @@ route, or barrier outcomes permit at most one rediscovery, always with the same
 key; definitive validation, authorization, idempotency, or committed business
 outcomes return immediately.
 
+Stream keyed append adds one resource-wide discovery step. Once it selects a
+shard, bounded rediscovery is pinned to that shard and the originally observed
+resource generation. This is generation-safe key routing, not online
+partition expansion.
+
 See [ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md),
 [ADR-0018](adr/0018-regional-queue-v1-and-sdk-routing.md),
 [ADR-0019](adr/0019-regional-cache-v1-and-sdk-routing.md),
 [ADR-0020](adr/0020-regional-event-bus-v1-and-sdk-routing.md),
+[ADR-0024](adr/0024-stream-multishard-key-routing.md),
 [Regional Stream SDK](REGIONAL_STREAM_SDK.md), and
 [Regional Queue SDK](REGIONAL_QUEUE_SDK.md), and
 [Regional Cache SDK](REGIONAL_CACHE_SDK.md), and

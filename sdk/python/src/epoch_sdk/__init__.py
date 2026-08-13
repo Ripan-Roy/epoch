@@ -12,7 +12,12 @@ from .models import (
     Subscription,
     SubscriptionTarget,
 )
-from .regional import RegionalScope, RegionalStreamClient, StreamRetentionPolicy
+from .regional import (
+    RegionalScope,
+    RegionalStreamClient,
+    StreamRetentionPolicy,
+    stream_shard_for,
+)
 from .regional_bus import RegionalBusClient
 from .regional_cache import (
     RegionalCacheClient,
@@ -47,4 +52,5 @@ __all__ = [
     "SubscriptionTarget",
     "Transport",
     "UrllibTransport",
+    "stream_shard_for",
 ]

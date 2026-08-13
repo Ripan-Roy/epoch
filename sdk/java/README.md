@@ -32,8 +32,11 @@ volatile in the runnable slice. Standalone calls perform no hidden retries.
 every Rust node endpoint plus a `RegionalScope` and bearer token, discovers the
 current leader before each call, carries generation/tablet fences, reuses the
 caller's append/checkpoint/retention idempotency key across one bounded
-rediscovery, exposes time/size/combined retention configuration and explicit
-idle maintenance, and requests linearizable fetch/lag/retention reads. See the
+rediscovery, and requests linearizable fetch/lag/retention reads.
+`StreamPartitioner.shardFor` implements the advertised FNV-1a UTF-8 contract,
+while `appendKeyed` selects that shard from the event key or ID and fails before
+writing if the resource generation changes. The client also exposes
+time/size/combined retention configuration and explicit idle maintenance. See the
 [complete regional example](../../console/src/quickstarts/regional/RegionalQuickstart.java)
 and [contract guide](../../docs/REGIONAL_STREAM_SDK.md).
 

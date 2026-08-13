@@ -16,14 +16,16 @@ The active M1/M2 boundary is the regional multi-tablet feature. Protected
 `main` evidence now covers the consensus-backed catalog, durable hosted control,
 bootstrap authorization, topology admission, quorum-confirmed leader ReadIndex
 barriers, Queue credit flow, Stream batches and consumer checkpoints, all four
-regional profile SDKs, and profile-native checkpoint restore with physical
-EPRS reclamation. The current feature implements replicated Stream time, size,
-record-count, and combined retention through a canonical v4 mutation, direct
-and regional operations, and shared Go, Java, and Python clients. Focused local
-evidence covers deterministic enforcement, stale-checkpoint interaction,
-three-voter convergence, checkpoint/reopen, SDK request contracts, and the
-regional Python SDK container campaign; the full workspace and
-protected-branch gates remain pending.
+regional profile SDKs, profile-native checkpoint restore with physical EPRS
+reclamation, and replicated Stream time/size/combined retention. The current
+feature implements multi-shard Stream routing: each catalog shard is an
+independently replicated ordered partition, route discovery publishes a
+versioned FNV-1a UTF-8 contract, and Go, Java, and Python keyed append methods
+pin the resource generation. Local evidence covers shared vectors,
+three-shard materialization/reopen, logical response identities, fail-closed
+expansion races, and a real Python SDK container campaign through leader loss
+and all-node recovery. Protected-branch evidence for this increment remains
+pending.
 Replicated multi-instance hosted metadata, production identity, follower
 routing, dynamic membership/voter selection, repair/rebalance, and the broader
 M2 profile/security/performance gates remain open.
@@ -180,8 +182,8 @@ one exact offset per sequence and cannot expose a prefix. Unit/golden/bomb
 tests, every-codec real-runtime commits, EPRS reopen, and a Python-produced gzip
 container frame are executable. This advances STREAM-006 but does not complete
 stable bidirectional Produce, automatic producer batching/negotiation,
-multi-partition routing, non-atomic partial results, fuzz/load evidence, or SDK
-batch support. See [ADR-0015](adr/0015-stream-batch-compression.md) and
+cross-shard batch planning, non-atomic partial results, fuzz/load evidence, or
+SDK batch support. See [ADR-0015](adr/0015-stream-batch-compression.md) and
 [Experimental Stream Tablet](STREAM_TABLET.md).
 
 The same Stream tablet now accepts a version-three consumer-group checkpoint
@@ -214,11 +216,27 @@ authenticated regional routes plus Go, Java, and Python clients configure,
 maintain, and linearly observe the policy. Deterministic core/tablet tests and
 a real three-voter checkpoint/reopen test are executable; the regional
 container campaign exercises the same SDK path. This advances STREAM-002 but
-does not provide automatic periodic maintenance, multiple partitions, keyed
-compaction/tombstones, object-tier retention, namespace/legal-hold governance,
-or production scale evidence. See
+does not provide automatic periodic maintenance, a resource-wide policy
+coordinator, keyed compaction/tombstones, object-tier retention,
+namespace/legal-hold governance, or production scale evidence. See
 [ADR-0023](adr/0023-stream-retention-policies.md) and
 [Experimental Stream Tablet](STREAM_TABLET.md).
+
+The regional Stream resource now materializes several ordered shards, each as
+its own fixed-three-voter tablet. Discovery advertises
+`fnv1a64_utf8_mod_n_v1`, exact UTF-8 encoding, event-ID fallback, and the
+resource shard count. Go, Java, and Python keyed append helpers compute the
+same target and require its resource generation to match the initial routing
+observation before any write. The node externalizes the logical shard in
+records, receipts, checkpoints, retention observations, and status while
+leaving canonical physical partition-0 commands and snapshots unchanged.
+Unit/contract tests and the real regional campaign route keys across three
+shards and recover every shard after leader and all-node loss. This advances
+STREAM-001, but safe online expansion/remapping (STREAM-011), virtual shards,
+multi-partition consumer coordination, cross-shard transactions, and hot-key
+automation remain open. See
+[ADR-0024](adr/0024-stream-multishard-key-routing.md) and
+[Regional Stream SDK](REGIONAL_STREAM_SDK.md).
 
 The Queue application core now runs behind the same profile-neutral persistent
 actor boundary. It deterministically applies strict single-partition commands,

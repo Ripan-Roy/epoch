@@ -469,8 +469,19 @@ base remains visible as `checkpoint_out_of_range`; replay fails until an
 explicit generation-fenced reset. Go, Java, and Python expose configure,
 maintain, and quorum-confirmed observe methods on the regional v1 route. This
 does not add automatic periodic maintenance, compaction/tombstones, object
-tiering, legal hold, or multi-partition routing. See
+tiering, legal hold, or a resource-wide retention coordinator. See
 [ADR-0023](adr/0023-stream-retention-policies.md).
+
+The regional Stream resource may contain several independently replicated
+logical partitions. For a fixed resource generation, nonempty event keys are
+mapped by unsigned FNV-1a 64 over UTF-8 bytes modulo the advertised shard
+count; an empty or missing key uses the event ID. Each selected shard has its
+own offsets, order, checkpoints, retention policy, leader, and recovery
+history. The internal tablet remains physical partition 0, but regional
+responses externalize the logical shard. A keyed SDK append pins the generation
+used to choose the shard and sends no write if target discovery reports another
+generation. Therefore Epoch makes no ordering or exactly-once claim across an
+online remap. See [ADR-0024](adr/0024-stream-multishard-key-routing.md).
 
 The same persistent actor can instead mount a separate, single-partition Queue
 state machine over the shared committed-command substrate. Given the same
@@ -523,12 +534,13 @@ replication, native Protobuf data services, compatibility gateways, durable
 webhook delivery, connector execution, or the production security controls in
 [SECURITY.md](SECURITY.md).
 The direct experimental Stream, Queue, Cache, and Event Bus profile routes also
-lack a read barrier, authenticated transport, multiple partitions/tablets, and
-bounded idempotency retention. The regional resource/shard wrapper supplies a
-leader ReadIndex by default; it does not change the direct-route contract. The
+lack a read barrier, authenticated transport, multiple tablets, and bounded
+idempotency retention. The regional resource/shard wrapper supplies several
+independent Stream tablets and a leader ReadIndex by default; it does not change
+the direct-route contract. The
 regional Stream, Queue, Cache, and Event Bus v1 SDKs make those explicit
-wrappers callable from Go, Java, and Python, including Stream retention policy
-operations, but do not turn fixed-voter evidence into a production
+wrappers callable from Go, Java, and Python, including Stream keyed routing and
+retention policy operations, but do not turn fixed-voter evidence into a production
 durability claim, add consumer/session coordination, or execute external Bus
 targets. See
 [REGIONAL_STREAM_SDK.md](REGIONAL_STREAM_SDK.md),
