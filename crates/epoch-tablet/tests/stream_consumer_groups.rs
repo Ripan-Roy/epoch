@@ -1,9 +1,12 @@
+use std::collections::BTreeSet;
+
 use epoch_core::EventEnvelope;
 use epoch_tablet::{
-    CommittedCommand, STREAM_TABLET_GROUP_COMMAND_FORMAT_VERSION, StreamGroupOffsetMode,
-    StreamTablet, StreamTabletCommand, StreamTabletGroupDisposition, StreamTabletGroupOutcome,
-    StreamTabletGroupReceipt, StreamTabletGroupRejection, StreamTabletMutationReceipt,
-    StreamTabletScope, TabletError,
+    CommittedCommand, STREAM_TABLET_GROUP_CLAIM_COMMAND_FORMAT_VERSION,
+    STREAM_TABLET_GROUP_COMMAND_FORMAT_VERSION, STREAM_TABLET_SNAPSHOT_FORMAT_VERSION,
+    StreamGroupOffsetMode, StreamTablet, StreamTabletCommand, StreamTabletGroupDisposition,
+    StreamTabletGroupOutcome, StreamTabletGroupReceipt, StreamTabletGroupRejection,
+    StreamTabletMutationReceipt, StreamTabletScope, TabletError,
 };
 use serde_json::json;
 
@@ -91,6 +94,100 @@ fn v3_group_offset_command_is_canonical_and_version_kind_locked() {
     wrong_version["format_version"] = json!(2);
     assert!(matches!(
         StreamTabletCommand::decode(&serde_json::to_vec(&wrong_version).unwrap(), &scope()),
+        Err(TabletError::InvalidCommand(_))
+    ));
+}
+
+#[test]
+fn v6_group_claim_is_canonical_preserves_offset_and_requires_v3_snapshot_state() {
+    let append = StreamTabletCommand::append(&scope(), "append", event("one"), 10).unwrap();
+    let append_id = append.proposal_id(&scope()).unwrap();
+    let append_payload = append.encode(&scope()).unwrap();
+    let checkpoint = group_command(
+        "checkpoint",
+        "worker-old",
+        1,
+        1,
+        StreamGroupOffsetMode::Commit,
+    );
+    let checkpoint_id = checkpoint.proposal_id(&scope()).unwrap();
+    let checkpoint_payload = checkpoint.encode(&scope()).unwrap();
+    let claim = StreamTabletCommand::claim_group(
+        &scope(),
+        "claim-golden",
+        "billing",
+        "worker-new",
+        1,
+        0,
+        12,
+    )
+    .unwrap();
+    assert_eq!(
+        claim.format_version,
+        STREAM_TABLET_GROUP_CLAIM_COMMAND_FORMAT_VERSION
+    );
+    let claim_payload = claim.encode(&scope()).unwrap();
+    assert_eq!(
+        String::from_utf8(claim_payload.clone()).unwrap(),
+        r#"{"format_version":6,"tablet_id":7,"tablet_epoch":3,"resource":"orders","idempotency_key":"claim-golden","applied_at_ms":12,"operation":{"kind":"group_offset","group":"billing","member_id":"worker-new","group_generation":1,"partition":0,"next_offset":0,"mode":"claim"}}"#
+    );
+
+    let mut tablet = StreamTablet::new(scope()).unwrap();
+    tablet
+        .apply_mutation(committed(append_id, 1, &append_payload))
+        .unwrap();
+    apply_group(&mut tablet, checkpoint_id, 2, &checkpoint_payload);
+
+    let snapshot_before_claim = tablet.encode_snapshot(&BTreeSet::default()).unwrap();
+    let compatible_v2 = String::from_utf8(snapshot_before_claim)
+        .unwrap()
+        .replacen("\"format_version\":3", "\"format_version\":2", 1)
+        .into_bytes();
+    let restored_v2 = StreamTablet::decode_snapshot(&scope(), &compatible_v2).unwrap();
+    assert_eq!(
+        restored_v2
+            .group_observation("billing")
+            .unwrap()
+            .committed_offset,
+        1
+    );
+
+    let receipt = apply_group(
+        &mut tablet,
+        claim.proposal_id(&scope()).unwrap(),
+        3,
+        &claim_payload,
+    );
+    assert_eq!(receipt.outcome, StreamTabletGroupOutcome::Applied);
+    assert_eq!(receipt.previous_offset, 1);
+    assert_eq!(receipt.committed_offset, 1);
+    assert!(receipt.session_fenced);
+    assert_eq!(
+        tablet
+            .fetch_for_claimed_group("billing", "worker-new", 1, 10)
+            .unwrap()
+            .len(),
+        0
+    );
+
+    let snapshot_v3 = tablet.encode_snapshot(&BTreeSet::default()).unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&snapshot_v3).unwrap();
+    assert_eq!(
+        document["format_version"],
+        json!(STREAM_TABLET_SNAPSHOT_FORMAT_VERSION)
+    );
+    let restored = StreamTablet::decode_snapshot(&scope(), &snapshot_v3).unwrap();
+    let observation = restored.group_observation("billing").unwrap();
+    assert_eq!(observation.member_id.as_deref(), Some("worker-new"));
+    assert_eq!(observation.group_generation, Some(1));
+    assert!(observation.session_fenced);
+
+    let mislabeled_v2 = String::from_utf8(snapshot_v3)
+        .unwrap()
+        .replacen("\"format_version\":3", "\"format_version\":2", 1)
+        .into_bytes();
+    assert!(matches!(
+        StreamTablet::decode_snapshot(&scope(), &mislabeled_v2),
         Err(TabletError::InvalidCommand(_))
     ));
 }

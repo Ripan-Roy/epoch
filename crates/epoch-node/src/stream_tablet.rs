@@ -30,6 +30,7 @@ use epoch_tablet::{
     StreamTabletOperation, StreamTabletRetentionMode, StreamTabletRetentionObservation,
     StreamTabletScope, StreamTabletSessionObservation, TabletError, decode_stream_batch_payload,
     proposal_id_for, validate_retention_policy, validate_stream_consumer_group,
+    validate_stream_consumer_member,
 };
 #[cfg(test)]
 use epoch_tablet::{StreamBatchRecord, encode_stream_batch_payload};
@@ -58,6 +59,10 @@ pub const EXPERIMENTAL_STREAM_TABLET_GROUP_LAG_PATH: &str =
     "/experimental/v1/tablets/stream/groups/{group}/lag";
 pub const EXPERIMENTAL_STREAM_TABLET_GROUP_RECORDS_PATH: &str =
     "/experimental/v1/tablets/stream/groups/{group}/records";
+pub const EXPERIMENTAL_STREAM_TABLET_GROUP_CLAIM_PATH: &str =
+    "/experimental/v1/tablets/stream/groups/{group}/claim";
+pub const EXPERIMENTAL_STREAM_TABLET_GROUP_CLAIMED_RECORDS_PATH: &str =
+    "/experimental/v1/tablets/stream/groups/{group}/claimed-records";
 pub const EXPERIMENTAL_STREAM_TABLET_RETENTION_PATH: &str =
     "/experimental/v1/tablets/stream/retention";
 pub const EXPERIMENTAL_STREAM_TABLET_RETENTION_MAINTENANCE_PATH: &str =
@@ -291,6 +296,27 @@ impl StreamTabletService {
             .map_err(|error| error.to_string())
     }
 
+    fn fetch_for_claimed_group(
+        &self,
+        group: &str,
+        member_id: &str,
+        group_generation: u64,
+        limit: usize,
+    ) -> Result<(StreamTabletGroupObservation, Vec<StreamRecord>), ClaimedGroupFetchError> {
+        self.ensure_healthy()
+            .map_err(ClaimedGroupFetchError::Unavailable)?;
+        let tablet = self.tablet.read().map_err(|_| {
+            ClaimedGroupFetchError::Unavailable("Stream tablet read lock was poisoned".to_owned())
+        })?;
+        let records = tablet
+            .fetch_for_claimed_group(group, member_id, group_generation, limit)
+            .map_err(|error| ClaimedGroupFetchError::Fenced(error.to_string()))?;
+        let observation = tablet
+            .group_observation(group)
+            .map_err(|error| ClaimedGroupFetchError::Unavailable(error.to_string()))?;
+        Ok((observation, records))
+    }
+
     fn group_observation(&self, group: &str) -> Result<StreamTabletGroupObservation, String> {
         self.ensure_healthy()?;
         self.tablet
@@ -330,6 +356,12 @@ impl StreamTabletService {
             state_digest: hex_digest(tablet.state_digest()),
         })
     }
+}
+
+#[derive(Debug)]
+enum ClaimedGroupFetchError {
+    Fenced(String),
+    Unavailable(String),
 }
 
 fn maintenance_key(
@@ -521,6 +553,14 @@ pub fn router(
             get(fetch_group_records),
         )
         .route(
+            EXPERIMENTAL_STREAM_TABLET_GROUP_CLAIM_PATH,
+            axum::routing::put(claim_group),
+        )
+        .route(
+            EXPERIMENTAL_STREAM_TABLET_GROUP_CLAIMED_RECORDS_PATH,
+            get(fetch_claimed_group_records),
+        )
+        .route(
             EXPERIMENTAL_STREAM_TABLET_RETENTION_PATH,
             get(get_retention).put(configure_retention),
         )
@@ -605,6 +645,19 @@ struct GroupOffsetRequestBody {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct GroupClaimRequestBody {
+    idempotency_key: String,
+    #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+    expected_term: u64,
+    member_id: String,
+    #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+    group_generation: u64,
+    #[serde(default)]
+    partition: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RetentionConfigureRequest {
     idempotency_key: String,
     #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
@@ -685,8 +738,20 @@ struct GroupOffsetRequest {
     body: GroupOffsetRequestBody,
 }
 
+#[derive(Debug)]
+struct GroupClaimRequest {
+    group: String,
+    body: GroupClaimRequestBody,
+}
+
 impl GroupOffsetRequest {
     const fn new(group: String, body: GroupOffsetRequestBody) -> Self {
+        Self { group, body }
+    }
+}
+
+impl GroupClaimRequest {
+    const fn new(group: String, body: GroupClaimRequestBody) -> Self {
         Self { group, body }
     }
 }
@@ -898,6 +963,49 @@ impl StreamMutationSemantics for GroupOffsetRequest {
     }
 }
 
+impl StreamMutationSemantics for GroupClaimRequest {
+    fn idempotency_key(&self) -> &str {
+        &self.body.idempotency_key
+    }
+
+    fn expected_term(&self) -> u64 {
+        self.body.expected_term
+    }
+
+    fn validate(&self, scope: &StreamTabletScope) -> TabletApiResult<()> {
+        self.command(scope, 0).map(|_| ()).map_err(Into::into)
+    }
+
+    fn command(
+        &self,
+        scope: &StreamTabletScope,
+        applied_at_ms: u64,
+    ) -> Result<StreamTabletCommand, TabletError> {
+        StreamTabletCommand::claim_group(
+            scope,
+            self.body.idempotency_key.clone(),
+            self.group.clone(),
+            self.body.member_id.clone(),
+            self.body.group_generation,
+            self.body.partition,
+            applied_at_ms,
+        )
+    }
+
+    fn matches_command(&self, command: &StreamTabletCommand) -> bool {
+        matches!(
+            &command.operation,
+            StreamTabletOperation::GroupOffset(group)
+                if command.idempotency_key == self.body.idempotency_key
+                    && group.group == self.group
+                    && group.member_id == self.body.member_id
+                    && group.group_generation == self.body.group_generation
+                    && group.partition == self.body.partition
+                    && group.mode == StreamGroupOffsetMode::Claim
+        )
+    }
+}
+
 impl StreamMutationSemantics for GroupSessionRequest {
     fn idempotency_key(&self) -> &str {
         &self.idempotency_key
@@ -1016,6 +1124,18 @@ async fn update_group_offset(
         message: rejection.body_text(),
     })?;
     submit_mutation(state, GroupOffsetRequest::new(group, request)).await
+}
+
+async fn claim_group(
+    State(state): State<StreamTabletApiState>,
+    Path(group): Path<String>,
+    request: Result<Json<GroupClaimRequestBody>, JsonRejection>,
+) -> TabletApiResult<(StatusCode, Json<StreamTabletMutationResponse>)> {
+    let Json(request) = request.map_err(|rejection| StreamTabletApiError::RequestBody {
+        status: rejection.status(),
+        message: rejection.body_text(),
+    })?;
+    submit_mutation(state, GroupClaimRequest::new(group, request)).await
 }
 
 async fn configure_retention(
@@ -1363,6 +1483,18 @@ struct GroupFetchQuery {
     limit: usize,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClaimedGroupFetchQuery {
+    #[serde(default)]
+    partition: u32,
+    member_id: String,
+    #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+    group_generation: u64,
+    #[serde(default = "default_fetch_limit")]
+    limit: usize,
+}
+
 const fn default_fetch_limit() -> usize {
     100
 }
@@ -1448,6 +1580,47 @@ async fn fetch_group_records(
     }))
 }
 
+async fn fetch_claimed_group_records(
+    State(state): State<StreamTabletApiState>,
+    Path(group): Path<String>,
+    Query(query): Query<ClaimedGroupFetchQuery>,
+    read: Option<Extension<TabletReadMetadata>>,
+) -> TabletApiResult<Json<StreamTabletGroupFetchResponse>> {
+    validate_partition(query.partition)?;
+    validate_fetch_limit(query.limit)?;
+    validate_stream_consumer_group(&group)?;
+    validate_stream_consumer_member(&query.member_id)?;
+    if query.group_generation == 0 {
+        return Err(StreamTabletApiError::InvalidRequest(
+            "consumer group_generation must be non-zero".into(),
+        ));
+    }
+    let shard_index = state.service.shard_index();
+    let (mut checkpoint, records) = state
+        .service
+        .fetch_for_claimed_group(
+            &group,
+            &query.member_id,
+            query.group_generation,
+            query.limit,
+        )
+        .map_err(|error| match error {
+            ClaimedGroupFetchError::Fenced(message) => StreamTabletApiError::Fenced(message),
+            ClaimedGroupFetchError::Unavailable(message) => StreamTabletApiError::Profile(message),
+        })?;
+    checkpoint.partition = shard_index;
+    let records = records
+        .into_iter()
+        .map(|record| StreamTabletRecordResponse::with_partition(record, shard_index))
+        .collect();
+    Ok(Json(StreamTabletGroupFetchResponse {
+        read: tablet_read_metadata(read),
+        shard_index,
+        checkpoint,
+        records,
+    }))
+}
+
 async fn get_retention(
     State(state): State<StreamTabletApiState>,
     read: Option<Extension<TabletReadMetadata>>,
@@ -1511,6 +1684,7 @@ struct StreamTabletStatus {
     consumer_group_ownership_fencing: &'static str,
     consumer_group_sessions: &'static str,
     consumer_group_assignment: &'static str,
+    consumer_group_claims: &'static str,
     max_consumer_groups: usize,
     max_consumer_group_bytes: usize,
     max_consumer_member_bytes: usize,
@@ -1603,6 +1777,7 @@ impl StreamTabletStatus {
             consumer_group_ownership_fencing: "caller_supplied_monotonic_generation",
             consumer_group_sessions: "replicated_join_heartbeat_leave_expiry_and_rebalance",
             consumer_group_assignment: "shard_zero_coordinator_lexical_round_robin",
+            consumer_group_claims: "replicated_session_generation_fence_preserving_offset",
             max_consumer_groups: MAX_STREAM_CONSUMER_GROUPS,
             max_consumer_group_bytes: MAX_STREAM_CONSUMER_GROUP_BYTES,
             max_consumer_member_bytes: MAX_STREAM_CONSUMER_MEMBER_BYTES,
@@ -2546,8 +2721,9 @@ mod tests {
         append_retry_conflict_and_second_record(&cluster, &client).await;
         append_compressed_batches(&cluster, &client).await;
         commit_reset_and_fence_consumer_group(&cluster, &client).await;
+        claim_and_fenced_fetch_consumer_group(&cluster, &client).await;
         assert_all_records(&cluster, &client, 12).await;
-        assert_group_checkpoint_on_every_voter(&cluster, &client).await;
+        assert_group_checkpoint_on_every_voter(&cluster, &client, "worker-c", "3", "2").await;
         let (leader_index, _) = cluster.leader().await;
         cluster.nodes[leader_index]
             .runtime
@@ -2558,8 +2734,8 @@ mod tests {
         cluster.shutdown().await;
 
         let reopened = RunningTabletCluster::start(&paths).await;
-        assert_rebuilt_records(&reopened, &client, 12, 11).await;
-        assert_group_checkpoint_on_every_voter(&reopened, &client).await;
+        assert_rebuilt_records(&reopened, &client, 12, 13).await;
+        assert_group_checkpoint_on_every_voter(&reopened, &client, "worker-c", "3", "2").await;
         reopened.shutdown().await;
     }
 
@@ -2928,9 +3104,80 @@ mod tests {
         assert_eq!(stale_receipt["receipt"]["rejection"], "stale_generation");
     }
 
+    async fn claim_and_fenced_fetch_consumer_group(
+        cluster: &RunningTabletCluster,
+        client: &reqwest::Client,
+    ) {
+        let claim = json!({
+            "idempotency_key": "group-claim-worker-c-3",
+            "expected_term": "0",
+            "member_id": "worker-c",
+            "group_generation": "3",
+            "partition": 0
+        });
+        let (status, receipt) = put_claim_to_current_leader(cluster, client, &claim).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(receipt["receipt"]["outcome"], "applied");
+        assert_eq!(receipt["receipt"]["mode"], "claim");
+        assert_eq!(receipt["receipt"]["previous_offset"], "2");
+        assert_eq!(receipt["receipt"]["committed_offset"], "2");
+        assert_eq!(receipt["receipt"]["session_fenced"], true);
+
+        let (retry_status, retry) = put_claim_to_current_leader(cluster, client, &claim).await;
+        assert_eq!(retry_status, StatusCode::OK);
+        assert_eq!(retry["receipt"]["disposition"], "replayed");
+
+        let (leader, _) = cluster.leader().await;
+        let fetched: Value = client
+            .get(group_claimed_records_url_for(&cluster.nodes[leader]))
+            .query(&[
+                ("member_id", "worker-c"),
+                ("group_generation", "3"),
+                ("limit", "2"),
+            ])
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(fetched["records"].as_array().unwrap().len(), 2);
+        assert_eq!(fetched["records"][0]["offset"], "2");
+        assert_eq!(fetched["checkpoint"]["session_fenced"], true);
+
+        for (member, generation) in [("worker-b", "3"), ("worker-c", "2")] {
+            let response = client
+                .get(group_claimed_records_url_for(&cluster.nodes[leader]))
+                .query(&[
+                    ("member_id", member),
+                    ("group_generation", generation),
+                    ("limit", "2"),
+                ])
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let error: Value = response.json().await.unwrap();
+            assert_eq!(error["error"]["code"], "fenced");
+            assert_eq!(
+                error["error"]["outcome_certainty"],
+                "definite_not_committed"
+            );
+        }
+
+        let stale_commit = group_body("group-stale-after-claim", "worker-b", 2, 3, "commit");
+        let (status, stale) = put_group_to_current_leader(cluster, client, &stale_commit).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(stale["receipt"]["outcome"], "rejected");
+        assert_eq!(stale["receipt"]["rejection"], "stale_generation");
+    }
+
     async fn assert_group_checkpoint_on_every_voter(
         cluster: &RunningTabletCluster,
         client: &reqwest::Client,
+        member_id: &str,
+        generation: &str,
+        committed_offset: &str,
     ) {
         for node in &cluster.nodes {
             tokio::time::timeout(Duration::from_secs(5), async {
@@ -2943,10 +3190,11 @@ mod tests {
                         .json()
                         .await
                         .unwrap();
-                    if lag["checkpoint"]["committed_offset"] == "2"
-                        && lag["checkpoint"]["group_generation"] == "2"
+                    if lag["checkpoint"]["committed_offset"] == committed_offset
+                        && lag["checkpoint"]["group_generation"] == generation
                     {
-                        assert_eq!(lag["checkpoint"]["member_id"], "worker-b");
+                        assert_eq!(lag["checkpoint"]["member_id"], member_id);
+                        assert_eq!(lag["checkpoint"]["session_fenced"], true);
                         assert_eq!(lag["checkpoint"]["end_offset"], "12");
                         assert_eq!(lag["checkpoint"]["lag"], "10");
                         break;
@@ -2966,7 +3214,7 @@ mod tests {
                 .json()
                 .await
                 .unwrap();
-            assert_eq!(replay["checkpoint"]["committed_offset"], "2");
+            assert_eq!(replay["checkpoint"]["committed_offset"], committed_offset);
             assert_eq!(replay["records"].as_array().unwrap().len(), 2);
             assert_eq!(replay["records"][0]["offset"], "2");
             assert_eq!(replay["records"][1]["offset"], "3");
@@ -3059,6 +3307,35 @@ mod tests {
         })
         .await
         .expect("an exact group mutation should resolve under stable leadership")
+    }
+
+    async fn put_claim_to_current_leader(
+        cluster: &RunningTabletCluster,
+        client: &reqwest::Client,
+        request: &Value,
+    ) -> (StatusCode, Value) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let (leader, term) = cluster.leader().await;
+                let mut attempt = request.clone();
+                attempt["expected_term"] = json!(term);
+                let response = client
+                    .put(group_claim_url_for(&cluster.nodes[leader]))
+                    .json(&attempt)
+                    .send()
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let document: Value = response.json().await.unwrap();
+                if is_retryable_leadership_response(status, &document) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    continue;
+                }
+                return (status, document);
+            }
+        })
+        .await
+        .expect("an exact group claim should resolve under stable leadership")
     }
 
     async fn put_retention_to_current_leader(
@@ -3340,6 +3617,18 @@ mod tests {
     fn group_records_url_for(node: &RunningTabletNode) -> Url {
         node.base_url
             .join("experimental/v1/tablets/stream/groups/billing/records")
+            .unwrap()
+    }
+
+    fn group_claim_url_for(node: &RunningTabletNode) -> Url {
+        node.base_url
+            .join("experimental/v1/tablets/stream/groups/billing/claim")
+            .unwrap()
+    }
+
+    fn group_claimed_records_url_for(node: &RunningTabletNode) -> Url {
+        node.base_url
+            .join("experimental/v1/tablets/stream/groups/billing/claimed-records")
             .unwrap()
     }
 

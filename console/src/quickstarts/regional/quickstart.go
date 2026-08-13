@@ -60,6 +60,10 @@ func main() {
 	must(err)
 	session, err := client.ConsumerSession(ctx, "orders", "docs-go-session")
 	must(err)
+	claimedShards, err := client.ClaimConsumerSession(ctx, "orders", "docs-go-session", "docs-go-worker", 1, "docs-go-session-claim-v1")
+	must(err)
+	claimedRecords, err := client.FetchClaimedGroup(ctx, "orders", claimedShards[0], "docs-go-session", "docs-go-worker", 1, 100)
+	must(err)
 	left, err := client.LeaveConsumerSession(ctx, "orders", "docs-go-session", "docs-go-worker", 1, "docs-go-session-leave-v1")
 	must(err)
 	configured, err := client.ConfigureRetention(ctx, "orders", shard, "docs-go-retention-v1", epoch.StreamRetentionPolicy{
@@ -77,7 +81,8 @@ func main() {
 		"selected_shard": shard, "append": appended, "exact_retry": replayed,
 		"gzip_batch": batch, "fetch": fetched,
 		"group_fetch": groupRecords, "checkpoint": checkpoint, "lag": lag,
-		"session_join": joined, "session_heartbeat": heartbeat, "session": session, "session_leave": left,
+		"session_join": joined, "session_heartbeat": heartbeat, "session": session,
+		"claimed_shards": claimedShards, "claimed_records": claimedRecords, "session_leave": left,
 		"retention_configure": configured, "retention_maintenance": maintained,
 		"retention": retention,
 	}, "", "  ")

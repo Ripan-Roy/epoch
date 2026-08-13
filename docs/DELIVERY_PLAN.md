@@ -280,6 +280,18 @@ server-push consumption, sticky/rack-aware assignment, or atomic coupling to
 each shard's v3 checkpoint owner. See
 [ADR-0025](adr/0025-stream-consumer-sessions.md).
 
+The next Stream increment adds canonical command v6 and native snapshot v3 for
+an offset-preserving per-shard session claim. Exact-member/generation fetch,
+commit, and reset are fenced behind that replicated owner. Go, Java, and Python
+pin resource generation, read every assigned checkpoint, bridge at most 4,096
+monotonic generations with deterministic keys, claim every shard, and re-read
+the shard-zero assignment before returning it. The three-shard Python campaign
+proves stale-fetch rejection and recovery after leader loss. This further
+advances STREAM-003 and DX-001 without claiming cooperative revoke,
+member-bound authorization, persistent streaming transport, atomic cross-shard
+handoff, or STREAM-008 transactions. See
+[ADR-0029](adr/0029-stream-session-fenced-consumption.md).
+
 The Queue application core now runs behind the same profile-neutral persistent
 actor boundary. It deterministically applies strict single-partition commands,
 leader/consumer-fenced leases, retry/schedule/expiry, recorded business

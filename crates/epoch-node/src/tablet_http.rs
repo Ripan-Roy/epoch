@@ -256,6 +256,7 @@ fn default_content_type() -> String {
 pub(crate) enum TabletApiError {
     RequestBody { status: StatusCode, message: String },
     InvalidRequest(String),
+    Fenced(String),
     IdempotencyConflict,
     Consensus(ConsensusProbeError),
     Tablet(TabletError),
@@ -308,6 +309,13 @@ impl IntoResponse for TabletApiError {
             Self::InvalidRequest(message) => (
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
+                message,
+                "definite_not_committed",
+                None,
+            ),
+            Self::Fenced(message) => (
+                StatusCode::CONFLICT,
+                "fenced",
                 message,
                 "definite_not_committed",
                 None,

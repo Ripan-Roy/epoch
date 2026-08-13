@@ -126,9 +126,13 @@ event key or ID identically and pin the observed resource generation before a
 keyed write. Shard 0 also replicates bounded consumer join, heartbeat, leave,
 explicit dead-member expiry, one membership generation, and deterministic
 assignment of every logical shard. All three regional SDKs expose that session
-lifecycle and linearizable observation. Background expiry, cooperative revoke,
-atomic assignment-plus-offset handoff, and online expansion/remapping remain
-explicit future work.
+lifecycle and linearizable observation. They now also expose an
+offset-preserving monotonic claim on every assigned shard, exact-member/
+generation bounded fetch, and a resource-generation-pinned claim–revalidate
+helper. Partial claims do not move offsets and do not constitute an atomic
+cross-shard handoff. Cooperative revoke, member-bound authorization, stable
+streaming transport, atomic offset transactions, and online expansion/remapping
+remain explicit future work.
 
 The strict single-partition Queue tablet now runs through that same persistent
 three-node actor boundary. Its internal typed API covers enqueue, acquire,

@@ -83,6 +83,10 @@ jobs:
           grep -Rq 'Only the current Raft leader owns each due timer' console/dist/assets
           grep -Rq 'Leader-owned automatic maintenance' console/dist/assets
           grep -Rq 'Every voter bounds its local journal' console/dist/assets
+          grep -Rq 'Claim, revalidate, then consume' console/dist/assets
+          grep -Rq 'docs-python-session-claim-v1' console/dist/assets
+          grep -Rq 'claim_consumer_session' console/dist/assets
+          grep -Rq 'adr/0029-stream-session-fenced-consumption.md' console/dist/assets
           grep -Rq 'Replicated time and size retention' console/dist/assets
           grep -Rq 'Regional Stream SDK' console/dist/assets
           grep -Rq 'Regional Queue SDK' console/dist/assets

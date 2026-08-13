@@ -93,7 +93,7 @@ final class RegionalClientCore {
                 + expectedGeneration
                 + " to "
                 + leader.route().resourceGeneration()
-                + " before the keyed append; no write was attempted");
+                + " before the operation; no request was attempted");
       }
       RequestSpec request = requestFactory.create(leader.route());
       try {
@@ -234,16 +234,16 @@ final class RegionalClientCore {
   }
 
   private static boolean rediscover(EpochApiException error) {
-    return error.retryable()
-        || switch (error.code()) {
-          case "not_leader",
-              "fenced",
-              "route_not_found",
-              "route_unavailable",
-              "read_barrier_timeout" ->
-              true;
-          default -> false;
-        };
+    if (error.retryable()) {
+      return true;
+    }
+    if ("fenced".equals(error.code())) {
+      return error.body().path("retryable").asBoolean(false);
+    }
+    return switch (error.code()) {
+      case "not_leader", "route_not_found", "route_unavailable", "read_barrier_timeout" -> true;
+      default -> false;
+    };
   }
 
   private static String scopePath(RegionalScope scope) {

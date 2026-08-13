@@ -273,6 +273,16 @@ Python expose the checkpoint primitive through the regional Stream v1 client.
 See
 [ADR-0016](adr/0016-stream-consumer-group-checkpoints.md).
 
+Command v6 connects that checkpoint fence to the shard-zero coordinator
+without creating a second authority. Each assigned shard independently
+replicates an offset-preserving session claim, and claimed fetch plus subsequent
+commit require its exact member/generation. Native snapshot v3 persists the
+new fence bit while retaining v1/v2 decode. Go, Java, and Python orchestrate a
+bounded claim–revalidate protocol across shard groups, pin the resource
+generation, and return no assignment after a concurrent rebalance. This is an
+at-least-once cross-group protocol, not a distributed transaction; see
+[ADR-0029](adr/0029-stream-session-fenced-consumption.md).
+
 Command v4 makes Stream retention another canonical state transition rather
 than a voter-local timer. Configure replaces the complete record-count,
 compact-JSON-byte, and inclusive-age policy and enforces it immediately;
@@ -986,3 +996,4 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0026: Regional Stream Atomic Batch SDKs](adr/0026-regional-stream-batch-sdks.md)
 - [ADR-0027: Leader-Owned Regional Maintenance](adr/0027-regional-leader-maintenance.md)
 - [ADR-0028: Automatic Regional Consensus Checkpoints](adr/0028-automatic-regional-consensus-checkpoints.md)
+- [ADR-0029: Session-Fenced Stream Consumption](adr/0029-stream-session-fenced-consumption.md)

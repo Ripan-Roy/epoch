@@ -28,6 +28,7 @@ const (
 	maxStreamBatchRecords       = 1_000
 	maxStreamBatchCompressed    = 360 * 1024
 	maxStreamBatchUncompressed  = 4 * 1024 * 1024
+	maxStreamClaimTransitions   = 4_096
 	streamPartitioner           = "fnv1a64_utf8_mod_n_v1"
 )
 
@@ -492,11 +493,15 @@ func (client *RegionalStreamClient) CommitOffset(ctx context.Context, stream str
 
 // Lag returns the linearizable checkpoint and lag observation for a group.
 func (client *RegionalStreamClient) Lag(ctx context.Context, stream string, shard uint32, group string) (Document, error) {
+	return client.lagAtGeneration(ctx, stream, shard, group, "")
+}
+
+func (client *RegionalStreamClient) lagAtGeneration(ctx context.Context, stream string, shard uint32, group, resourceGeneration string) (Document, error) {
 	groupSegment, err := segment(group, "consumer group")
 	if err != nil {
 		return nil, err
 	}
-	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, func(_ regionalRoute) Request {
+	return regionalCallAtGeneration[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, resourceGeneration, func(_ regionalRoute) Request {
 		return Request{Method: "GET", Path: "/groups/" + groupSegment + "/lag", Headers: map[string]string{regionalReadHeader: "linearizable"}}
 	})
 }
@@ -513,6 +518,249 @@ func (client *RegionalStreamClient) FetchGroup(ctx context.Context, stream strin
 	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, func(_ regionalRoute) Request {
 		return Request{Method: "GET", Path: "/groups/" + groupSegment + "/records", Query: url.Values{"limit": {strconv.FormatUint(uint64(limit), 10)}}, Headers: map[string]string{regionalReadHeader: "linearizable"}}
 	})
+}
+
+// ClaimGroup installs a coordinated-session generation as the durable owner fence on one shard.
+// The transition preserves the group's committed next offset.
+func (client *RegionalStreamClient) ClaimGroup(ctx context.Context, stream string, shard uint32, group, member string, generation uint64, idempotencyKey string) (Document, error) {
+	return client.claimGroupAtGeneration(ctx, stream, shard, group, member, generation, idempotencyKey, "")
+}
+
+func (client *RegionalStreamClient) claimGroupAtGeneration(ctx context.Context, stream string, shard uint32, group, member string, generation uint64, idempotencyKey, resourceGeneration string) (Document, error) {
+	groupSegment, _, err := consumerSessionSegments(group, member)
+	if err != nil {
+		return nil, err
+	}
+	if generation == 0 {
+		return nil, fmt.Errorf("epoch: consumer group generation must be non-zero")
+	}
+	if err := validateRegionalIdempotencyKey(idempotencyKey); err != nil {
+		return nil, err
+	}
+	return regionalCallAtGeneration[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, resourceGeneration, func(route regionalRoute) Request {
+		return Request{Method: "PUT", Path: "/groups/" + groupSegment + "/claim", Body: struct {
+			IdempotencyKey string `json:"idempotency_key"`
+			ExpectedTerm   string `json:"expected_term"`
+			MemberID       string `json:"member_id"`
+			Generation     string `json:"group_generation"`
+			Partition      uint32 `json:"partition"`
+		}{idempotencyKey, route.Term, member, strconv.FormatUint(generation, 10), 0}}
+	})
+}
+
+// FetchClaimedGroup performs a bounded linearizable fetch only when the exact
+// member and coordinated-session generation own this shard's checkpoint fence.
+func (client *RegionalStreamClient) FetchClaimedGroup(ctx context.Context, stream string, shard uint32, group, member string, generation uint64, limit uint32) (Document, error) {
+	if limit == 0 || limit > maxRegionalFetchRecords {
+		return nil, fmt.Errorf("epoch: fetch limit must be between 1 and %d", maxRegionalFetchRecords)
+	}
+	groupSegment, _, err := consumerSessionSegments(group, member)
+	if err != nil {
+		return nil, err
+	}
+	if generation == 0 {
+		return nil, fmt.Errorf("epoch: consumer group generation must be non-zero")
+	}
+	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, func(_ regionalRoute) Request {
+		return Request{Method: "GET", Path: "/groups/" + groupSegment + "/claimed-records", Query: url.Values{
+			"member_id":        {member},
+			"group_generation": {strconv.FormatUint(generation, 10)},
+			"limit":            {strconv.FormatUint(uint64(limit), 10)},
+		}, Headers: map[string]string{regionalReadHeader: "linearizable"}}
+	})
+}
+
+// ClaimConsumerSession copies one stable shard-zero assignment into every
+// assigned shard's checkpoint fence. It revalidates the coordinator after all
+// claims and returns no assignment if a concurrent rebalance occurred.
+func (client *RegionalStreamClient) ClaimConsumerSession(ctx context.Context, stream, group, member string, generation uint64, idempotencyKeyPrefix string) ([]uint32, error) {
+	if _, _, err := consumerSessionSegments(group, member); err != nil {
+		return nil, err
+	}
+	if generation == 0 {
+		return nil, fmt.Errorf("epoch: consumer group generation must be non-zero")
+	}
+	if err := validateRegionalIdempotencyKey(idempotencyKeyPrefix); err != nil {
+		return nil, err
+	}
+	regional := client.regionalClient()
+	if regional == nil {
+		return nil, fmt.Errorf("epoch: regional stream client is not configured")
+	}
+	coordinatorPath, err := regional.resourceShardPath("streams", "stream", stream, 0)
+	if err != nil {
+		return nil, err
+	}
+	coordinatorRoute, err := regional.discoverRoute(ctx, coordinatorPath)
+	if err != nil {
+		return nil, err
+	}
+	resourceGeneration := coordinatorRoute.ResourceGeneration
+	before, err := client.consumerSessionAtGeneration(ctx, stream, group, resourceGeneration)
+	if err != nil {
+		return nil, err
+	}
+	assigned, err := coordinatedAssignment(before, group, member, generation)
+	if err != nil {
+		return nil, err
+	}
+	type plannedClaim struct {
+		shard      uint32
+		generation uint64
+		key        string
+	}
+	claims := make([]plannedClaim, 0, len(assigned))
+	for _, shard := range assigned {
+		lag, lagErr := client.lagAtGeneration(ctx, stream, shard, group, resourceGeneration)
+		if lagErr != nil {
+			return nil, lagErr
+		}
+		generations, planErr := claimGenerations(lag, generation)
+		if planErr != nil {
+			return nil, fmt.Errorf("epoch: shard %d claim plan: %w", shard, planErr)
+		}
+		for _, claimGeneration := range generations {
+			key := idempotencyKeyPrefix + "-shard-" + strconv.FormatUint(uint64(shard), 10) + "-generation-" + strconv.FormatUint(claimGeneration, 10)
+			if len([]byte(key)) > 128 {
+				return nil, fmt.Errorf("epoch: derived consumer claim idempotency key exceeds 128 bytes")
+			}
+			claims = append(claims, plannedClaim{shard, claimGeneration, key})
+		}
+	}
+	for _, claim := range claims {
+		receipt, claimErr := client.claimGroupAtGeneration(ctx, stream, claim.shard, group, member, claim.generation, claim.key, resourceGeneration)
+		if claimErr != nil {
+			return nil, claimErr
+		}
+		if err := requireAppliedGroupClaim(receipt, claim.shard); err != nil {
+			return nil, err
+		}
+	}
+	after, err := client.consumerSessionAtGeneration(ctx, stream, group, resourceGeneration)
+	if err != nil {
+		return nil, err
+	}
+	revalidated, err := coordinatedAssignment(after, group, member, generation)
+	if err != nil || !sameShards(assigned, revalidated) {
+		return nil, fmt.Errorf("epoch: consumer session rebalanced while shard claims were being installed")
+	}
+	return assigned, nil
+}
+
+func claimGenerations(document Document, target uint64) ([]uint64, error) {
+	checkpoint, ok := document["checkpoint"].(map[string]any)
+	if !ok {
+		if typed, typedOK := document["checkpoint"].(Document); typedOK {
+			checkpoint = map[string]any(typed)
+		} else {
+			return nil, fmt.Errorf("checkpoint observation is missing")
+		}
+	}
+	current := uint64(0)
+	if checkpoint["exists"] == true {
+		raw, ok := checkpoint["group_generation"].(string)
+		if !ok {
+			return nil, fmt.Errorf("checkpoint generation is missing")
+		}
+		parsed, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil || parsed == 0 || strconv.FormatUint(parsed, 10) != raw {
+			return nil, fmt.Errorf("checkpoint generation is invalid")
+		}
+		current = parsed
+	}
+	if current > target {
+		return nil, fmt.Errorf("checkpoint generation %d is ahead of session generation %d", current, target)
+	}
+	start := uint64(1)
+	if current > 0 {
+		start = current
+		if current < target {
+			start++
+		}
+	}
+	count := target - start + 1
+	if count > maxStreamClaimTransitions {
+		return nil, fmt.Errorf("claim requires %d transitions; maximum is %d", count, maxStreamClaimTransitions)
+	}
+	generations := make([]uint64, 0, count)
+	for value := start; ; value++ {
+		generations = append(generations, value)
+		if value == target {
+			break
+		}
+	}
+	return generations, nil
+}
+
+func coordinatedAssignment(document Document, group, member string, generation uint64) ([]uint32, error) {
+	session, ok := document["session"].(map[string]any)
+	if !ok {
+		if typed, typedOK := document["session"].(Document); typedOK {
+			session = map[string]any(typed)
+		} else {
+			return nil, fmt.Errorf("epoch: consumer session response omitted session state")
+		}
+	}
+	if session["exists"] != true || session["group"] != group || session["group_generation"] != strconv.FormatUint(generation, 10) {
+		return nil, fmt.Errorf("epoch: consumer session generation is absent or fenced")
+	}
+	members, ok := session["members"].([]any)
+	if !ok {
+		return nil, fmt.Errorf("epoch: consumer session response omitted members")
+	}
+	for _, rawMember := range members {
+		entry, ok := rawMember.(map[string]any)
+		if !ok || entry["member_id"] != member {
+			continue
+		}
+		rawShards, ok := entry["assigned_shards"].([]any)
+		if !ok || len(rawShards) == 0 {
+			return nil, fmt.Errorf("epoch: consumer member has no assigned shards")
+		}
+		assigned := make([]uint32, 0, len(rawShards))
+		var previous uint32
+		for _, rawShard := range rawShards {
+			value, ok := rawShard.(float64)
+			if !ok || value < 0 || value > float64(^uint32(0)) || value != float64(uint32(value)) {
+				return nil, fmt.Errorf("epoch: consumer session returned an invalid shard assignment")
+			}
+			shard := uint32(value)
+			if len(assigned) > 0 && shard <= previous {
+				return nil, fmt.Errorf("epoch: consumer session returned an invalid shard assignment")
+			}
+			assigned = append(assigned, shard)
+			previous = shard
+		}
+		return assigned, nil
+	}
+	return nil, fmt.Errorf("epoch: consumer member is not active in the requested session generation")
+}
+
+func requireAppliedGroupClaim(document Document, shard uint32) error {
+	receipt, ok := document["receipt"].(map[string]any)
+	if !ok {
+		if typed, typedOK := document["receipt"].(Document); typedOK {
+			receipt = map[string]any(typed)
+		} else {
+			return fmt.Errorf("epoch: shard %d claim response omitted its receipt", shard)
+		}
+	}
+	if receipt["outcome"] != "applied" || receipt["session_fenced"] != true {
+		return fmt.Errorf("epoch: shard %d rejected the coordinated consumer claim", shard)
+	}
+	return nil
+}
+
+func sameShards(left, right []uint32) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 // JoinConsumerSession creates or renews a member and returns its generation-fenced shard assignment.
@@ -566,11 +814,15 @@ func (client *RegionalStreamClient) MaintainConsumerSession(ctx context.Context,
 
 // ConsumerSession returns the linearizable membership, generation, deadlines, and assignments.
 func (client *RegionalStreamClient) ConsumerSession(ctx context.Context, stream, group string) (Document, error) {
+	return client.consumerSessionAtGeneration(ctx, stream, group, "")
+}
+
+func (client *RegionalStreamClient) consumerSessionAtGeneration(ctx context.Context, stream, group, resourceGeneration string) (Document, error) {
 	groupSegment, err := segment(group, "consumer group")
 	if err != nil {
 		return nil, err
 	}
-	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, 0, func(_ regionalRoute) Request {
+	return regionalCallAtGeneration[Document](ctx, client.regionalClient(), "streams", "stream", stream, 0, resourceGeneration, func(_ regionalRoute) Request {
 		return Request{Method: "GET", Path: "/groups/" + groupSegment + "/sessions", Headers: map[string]string{regionalReadHeader: "linearizable"}}
 	})
 }
@@ -696,7 +948,7 @@ func regionalCallAtGeneration[T any](ctx context.Context, client *regionalClient
 		}
 		if expectedGeneration != "" && route.ResourceGeneration != expectedGeneration {
 			return zero, fmt.Errorf(
-				"epoch: Stream routing generation changed from %s to %s before the keyed append; no write was attempted",
+				"epoch: Stream routing generation changed from %s to %s before the operation; no request was attempted",
 				expectedGeneration,
 				route.ResourceGeneration,
 			)
@@ -808,8 +1060,14 @@ func regionalRediscoveryError(err error) bool {
 	if failure.Retryable() {
 		return true
 	}
+	if failure.Code == "fenced" {
+		var routeFence struct {
+			Retryable bool `json:"retryable"`
+		}
+		return json.Unmarshal(failure.Body, &routeFence) == nil && routeFence.Retryable
+	}
 	switch failure.Code {
-	case "not_leader", "fenced", "route_not_found", "route_unavailable", "read_barrier_timeout":
+	case "not_leader", "route_not_found", "route_unavailable", "read_barrier_timeout":
 		return true
 	default:
 		return false

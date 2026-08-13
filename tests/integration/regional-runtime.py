@@ -941,6 +941,38 @@ def assert_python_sdk_stream_batch(
     assert all(record.get("partition") == 1 for record in records), fetched
 
 
+def assert_python_sdk_fenced_consumption(
+    cluster: RegionalCluster,
+    resource: Resource,
+) -> None:
+    client = python_stream_client(cluster)
+    for shard in range(MANAGED_STREAM_SHARDS):
+        lag = client.lag(resource.name, shard, "billing")
+        checkpoint = lag.get("checkpoint")
+        assert isinstance(checkpoint, dict), lag
+        assert checkpoint.get("member_id") == "python-worker-b", lag
+        assert checkpoint.get("group_generation") == "3", lag
+        assert checkpoint.get("session_fenced") is True, lag
+        fetched = client.fetch_claimed_group(
+            resource.name,
+            shard,
+            "billing",
+            "python-worker-b",
+            3,
+            limit=10,
+        )
+        records = fetched.get("records")
+        assert isinstance(records, list), fetched
+        expected = (
+            ["managed-orders-batch-1", "managed-orders-batch-2"]
+            if shard == 1
+            else []
+        )
+        assert [record.get("envelope", {}).get("id") for record in records] == expected, (
+            fetched
+        )
+
+
 def prove_python_sdk_native_stream_after_failover(
     cluster: RegionalCluster,
     resource: Resource,
@@ -1180,6 +1212,29 @@ def prove_python_sdk_native_stream_after_failover(
         lambda: assert_python_sdk_consumer_session(cluster, resource),
     )
     wait_for_maintenance_submission(cluster, session_submissions)
+
+    claimed = client.claim_consumer_session(
+        resource.name,
+        "billing",
+        "python-worker-b",
+        3,
+        idempotency_key_prefix="python-sdk-session-claim-b-3",
+    )
+    assert claimed == (0, 1, 2), claimed
+    assert_python_sdk_fenced_consumption(cluster, resource)
+    try:
+        client.fetch_claimed_group(
+            resource.name,
+            1,
+            "billing",
+            "python-worker-a",
+            2,
+            limit=1,
+        )
+    except epoch_sdk.EpochAPIError as error:
+        assert error.status == 409 and error.code == "fenced", error
+    else:
+        raise AssertionError("stale consumer member unexpectedly fetched claimed records")
 
 
 def queue_result(document: dict[str, Any], expected_kind: str) -> dict[str, Any]:
@@ -1759,17 +1814,18 @@ def run_campaign(cluster: RegionalCluster) -> None:
     assert new_leader != old_leader
     assert new_term > old_term
     prove_python_sdk_native_stream_after_failover(cluster, stream)
-    wait_for_profile_apply(cluster, stream, 9, survivors)
-    wait_for_profile_apply(cluster, stream, 3, survivors, shard=1)
-    wait_for_profile_apply(cluster, stream, 2, survivors, shard=2)
+    wait_for_profile_apply(cluster, stream, 11, survivors)
+    wait_for_profile_apply(cluster, stream, 5, survivors, shard=1)
+    wait_for_profile_apply(cluster, stream, 4, survivors, shard=2)
 
     cluster.start_node(old_leader)
     wait_for_nodes(cluster)
-    wait_for_profile_apply(cluster, stream, 9)
-    wait_for_profile_apply(cluster, stream, 3, shard=1)
-    wait_for_profile_apply(cluster, stream, 2, shard=2)
+    wait_for_profile_apply(cluster, stream, 11)
+    wait_for_profile_apply(cluster, stream, 5, shard=1)
+    wait_for_profile_apply(cluster, stream, 4, shard=2)
     assert_python_sdk_consumer_session(cluster, stream)
     assert_python_sdk_stream_batch(cluster, stream)
+    assert_python_sdk_fenced_consumption(cluster, stream)
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
     for resource in RESOURCES:
         wait_for_profile_apply(cluster, resource, 1)
@@ -1824,11 +1880,12 @@ def run_campaign(cluster: RegionalCluster) -> None:
         == initial_catalog_digest
     )
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
-    wait_for_profile_apply(cluster, stream, 9)
-    wait_for_profile_apply(cluster, stream, 3, shard=1)
-    wait_for_profile_apply(cluster, stream, 2, shard=2)
+    wait_for_profile_apply(cluster, stream, 11)
+    wait_for_profile_apply(cluster, stream, 5, shard=1)
+    wait_for_profile_apply(cluster, stream, 4, shard=2)
     assert_python_sdk_consumer_session(cluster, stream)
     assert_python_sdk_stream_batch(cluster, stream)
+    assert_python_sdk_fenced_consumption(cluster, stream)
     for resource in RESOURCES:
         expected = (
             12

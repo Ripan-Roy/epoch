@@ -50,8 +50,9 @@ pub const STREAM_TABLET_BATCH_COMMAND_FORMAT_VERSION: u16 = 2;
 // boundary repeats the check so a command can never validate here and then be
 // rejected only after it reaches Raft.
 pub const MAX_STREAM_TABLET_COMMAND_BYTES: usize = 512 * 1024;
-pub const STREAM_TABLET_SNAPSHOT_FORMAT_VERSION: u16 = 2;
+pub const STREAM_TABLET_SNAPSHOT_FORMAT_VERSION: u16 = 3;
 const LEGACY_STREAM_TABLET_SNAPSHOT_FORMAT_VERSION: u16 = 1;
+const SESSION_STREAM_TABLET_SNAPSHOT_FORMAT_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -161,6 +162,11 @@ impl StreamTabletCommand {
         mode: StreamGroupOffsetMode,
         applied_at_ms: u64,
     ) -> TabletResult<Self> {
+        if mode == StreamGroupOffsetMode::Claim {
+            return Err(TabletError::InvalidCommand(
+                "session claims must use claim_group".into(),
+            ));
+        }
         let command = Self {
             format_version: STREAM_TABLET_GROUP_COMMAND_FORMAT_VERSION,
             tablet_id: scope.tablet_id,
@@ -175,6 +181,36 @@ impl StreamTabletCommand {
                 partition,
                 next_offset,
                 mode,
+            }),
+        };
+        command.validate(scope)?;
+        Ok(command)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_group(
+        scope: &StreamTabletScope,
+        idempotency_key: impl Into<String>,
+        group: impl Into<String>,
+        member_id: impl Into<String>,
+        group_generation: u64,
+        partition: u32,
+        applied_at_ms: u64,
+    ) -> TabletResult<Self> {
+        let command = Self {
+            format_version: STREAM_TABLET_GROUP_CLAIM_COMMAND_FORMAT_VERSION,
+            tablet_id: scope.tablet_id,
+            tablet_epoch: scope.tablet_epoch,
+            resource: scope.resource.clone(),
+            idempotency_key: idempotency_key.into(),
+            applied_at_ms,
+            operation: StreamTabletOperation::GroupOffset(StreamGroupOffsetCommand {
+                group: group.into(),
+                member_id: member_id.into(),
+                group_generation,
+                partition,
+                next_offset: 0,
+                mode: StreamGroupOffsetMode::Claim,
             }),
         };
         command.validate(scope)?;
@@ -445,10 +481,15 @@ impl StreamTabletCommand {
                 decode_stream_batch_payload(&batch.payload)?;
             }
             StreamTabletOperation::GroupOffset(group) => {
-                if self.format_version != STREAM_TABLET_GROUP_COMMAND_FORMAT_VERSION {
+                let required_version = if group.mode == StreamGroupOffsetMode::Claim {
+                    STREAM_TABLET_GROUP_CLAIM_COMMAND_FORMAT_VERSION
+                } else {
+                    STREAM_TABLET_GROUP_COMMAND_FORMAT_VERSION
+                };
+                if self.format_version != required_version {
                     return Err(TabletError::InvalidCommand(format!(
-                        "consumer-group offset mutation requires format_version {STREAM_TABLET_GROUP_COMMAND_FORMAT_VERSION}; observed {}",
-                        self.format_version
+                        "consumer-group {:?} mutation requires format_version {required_version}; observed {}",
+                        group.mode, self.format_version
                     )));
                 }
                 validate_group_offset_command(group)?;
@@ -803,6 +844,29 @@ impl StreamTablet {
         self.fetch(observation.committed_offset, limit)
     }
 
+    pub fn fetch_for_claimed_group(
+        &self,
+        group: &str,
+        member_id: &str,
+        group_generation: u64,
+        limit: usize,
+    ) -> TabletResult<Vec<StreamRecord>> {
+        validate_stream_consumer_group(group)?;
+        validate_stream_consumer_member(member_id)?;
+        let owner = self.consumer_groups.get(group).ok_or_else(|| {
+            TabletError::InvalidCommand("consumer group has no claimed owner".into())
+        })?;
+        if !owner.session_fenced
+            || owner.member_id != member_id
+            || owner.generation != group_generation
+        {
+            return Err(TabletError::InvalidCommand(
+                "consumer member or session generation is fenced".into(),
+            ));
+        }
+        self.fetch_for_group(group, limit)
+    }
+
     pub fn group_observation(&self, group: &str) -> TabletResult<StreamTabletGroupObservation> {
         validate_stream_consumer_group(group)?;
         let (base_offset, end_offset) = self.stream.offsets(0)?;
@@ -819,6 +883,7 @@ impl StreamTablet {
             end_offset,
             lag: lag.lag,
             checkpoint_out_of_range: lag.checkpoint_out_of_range,
+            session_fenced: owner.is_some_and(|owner| owner.session_fenced),
         })
     }
 
@@ -916,21 +981,7 @@ impl StreamTablet {
     ) -> TabletResult<Self> {
         let snapshot: VersionedStreamTabletSnapshot = serde_json::from_slice(encoded)
             .map_err(|error| TabletError::Decoding(error.to_string()))?;
-        if snapshot.format_version != STREAM_TABLET_SNAPSHOT_FORMAT_VERSION
-            && snapshot.format_version != LEGACY_STREAM_TABLET_SNAPSHOT_FORMAT_VERSION
-        {
-            return Err(TabletError::InvalidCommand(format!(
-                "unsupported Stream tablet snapshot version {}",
-                snapshot.format_version
-            )));
-        }
-        if snapshot.format_version == LEGACY_STREAM_TABLET_SNAPSHOT_FORMAT_VERSION
-            && !snapshot.session_groups.is_empty()
-        {
-            return Err(TabletError::InvalidCommand(
-                "legacy Stream tablet snapshot contains consumer-session state".into(),
-            ));
-        }
+        validate_stream_snapshot_format(&snapshot)?;
         if &snapshot.scope != expected_scope {
             return Err(TabletError::InvalidCommand(
                 "Stream tablet snapshot scope is fenced".into(),
@@ -963,14 +1014,17 @@ impl StreamTablet {
         }
         for (group, owner) in &snapshot.consumer_groups {
             validate_stream_consumer_group(group)?;
-            stream_group::validate_bounded_identifier(
-                "consumer member_id",
-                &owner.member_id,
-                MAX_STREAM_CONSUMER_MEMBER_BYTES,
-            )?;
+            validate_stream_consumer_member(&owner.member_id)?;
             if owner.generation == 0 {
                 return Err(TabletError::InvalidCommand(
                     "Stream tablet snapshot has a zero group generation".into(),
+                ));
+            }
+            if snapshot.format_version < STREAM_TABLET_SNAPSHOT_FORMAT_VERSION
+                && owner.session_fenced
+            {
+                return Err(TabletError::InvalidCommand(
+                    "legacy Stream tablet snapshot contains a session-fenced group owner".into(),
                 ));
             }
         }
@@ -1109,6 +1163,11 @@ impl StreamTablet {
         );
 
         if rejection.is_none() {
+            let session_fenced = command.mode == StreamGroupOffsetMode::Claim
+                || self
+                    .consumer_groups
+                    .get(&command.group)
+                    .is_some_and(|owner| owner.session_fenced);
             let mut next_stream = self.stream.clone();
             match command.mode {
                 StreamGroupOffsetMode::Commit => next_stream.commit_offset(
@@ -1121,18 +1180,24 @@ impl StreamTablet {
                     command.partition,
                     command.next_offset,
                 )?,
+                StreamGroupOffsetMode::Claim => {}
             }
             self.consumer_groups.insert(
                 command.group.clone(),
                 StreamConsumerGroupOwner {
                     member_id: command.member_id.clone(),
                     generation: command.group_generation,
+                    session_fenced,
                 },
             );
             self.stream = next_stream;
         }
 
         let lag = self.stream.lag(&command.group, command.partition)?;
+        let session_fenced = self
+            .consumer_groups
+            .get(&command.group)
+            .is_some_and(|owner| owner.session_fenced);
         Ok(StreamTabletGroupReceipt {
             proposal_id: committed.proposal_id,
             tablet_id: self.scope.tablet_id,
@@ -1159,6 +1224,7 @@ impl StreamTablet {
             write_evidence: StreamTabletWriteEvidence::FixedVoterMajorityPersisted,
             durable_voter_acks: 2,
             disposition: StreamTabletGroupDisposition::New,
+            session_fenced,
         })
     }
 
@@ -1341,7 +1407,11 @@ impl StreamTablet {
         receipt: &StreamTabletGroupReceipt,
     ) {
         let mut hasher = Sha256::new();
-        hasher.update(b"epoch/stream-tablet/state-transition/group-offset/v3\0");
+        if receipt.mode == StreamGroupOffsetMode::Claim {
+            hasher.update(b"epoch/stream-tablet/state-transition/group-claim/v6\0");
+        } else {
+            hasher.update(b"epoch/stream-tablet/state-transition/group-offset/v3\0");
+        }
         hasher.update(self.state_digest);
         hasher.update(committed.proposal_id.to_be_bytes());
         hasher.update(committed.term.to_be_bytes());
@@ -1449,6 +1519,29 @@ fn stream_receipt_matches_metadata(
     }
 }
 
+fn validate_stream_snapshot_format(snapshot: &VersionedStreamTabletSnapshot) -> TabletResult<()> {
+    if ![
+        LEGACY_STREAM_TABLET_SNAPSHOT_FORMAT_VERSION,
+        SESSION_STREAM_TABLET_SNAPSHOT_FORMAT_VERSION,
+        STREAM_TABLET_SNAPSHOT_FORMAT_VERSION,
+    ]
+    .contains(&snapshot.format_version)
+    {
+        return Err(TabletError::InvalidCommand(format!(
+            "unsupported Stream tablet snapshot version {}",
+            snapshot.format_version
+        )));
+    }
+    if snapshot.format_version == LEGACY_STREAM_TABLET_SNAPSHOT_FORMAT_VERSION
+        && !snapshot.session_groups.is_empty()
+    {
+        return Err(TabletError::InvalidCommand(
+            "legacy Stream tablet snapshot contains consumer-session state".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn append_disposition(profile_deduplicated: bool) -> StreamTabletAppendDisposition {
     if profile_deduplicated {
         StreamTabletAppendDisposition::ProfileDeduplicated
@@ -1471,6 +1564,9 @@ fn group_rejection(
     if owner.is_none() && group_count >= MAX_STREAM_CONSUMER_GROUPS {
         return Some(StreamTabletGroupRejection::GroupCapacityReached);
     }
+    if command.mode == StreamGroupOffsetMode::Claim {
+        return None;
+    }
     if command.next_offset < base_offset {
         return Some(StreamTabletGroupRejection::OffsetBeforeRetained);
     }
@@ -1487,10 +1583,35 @@ fn generation_rejection(
     command: &StreamGroupOffsetCommand,
     owner: Option<&StreamConsumerGroupOwner>,
 ) -> Option<StreamTabletGroupRejection> {
+    if command.mode == StreamGroupOffsetMode::Claim {
+        let Some(owner) = owner else {
+            return (command.group_generation != 1)
+                .then_some(StreamTabletGroupRejection::GenerationGap);
+        };
+        if command.group_generation < owner.generation {
+            return Some(StreamTabletGroupRejection::StaleGeneration);
+        }
+        if command.group_generation == owner.generation {
+            return (owner.session_fenced && command.member_id != owner.member_id)
+                .then_some(StreamTabletGroupRejection::OwnerMismatch);
+        }
+        return (command.group_generation > owner.generation.saturating_add(1))
+            .then_some(StreamTabletGroupRejection::GenerationGap);
+    }
     let Some(owner) = owner else {
         return (command.group_generation != 1)
             .then_some(StreamTabletGroupRejection::GenerationGap);
     };
+    if owner.session_fenced {
+        if command.group_generation < owner.generation {
+            return Some(StreamTabletGroupRejection::StaleGeneration);
+        }
+        if command.group_generation == owner.generation && command.member_id != owner.member_id {
+            return Some(StreamTabletGroupRejection::OwnerMismatch);
+        }
+        return (command.group_generation != owner.generation)
+            .then_some(StreamTabletGroupRejection::SessionClaimRequired);
+    }
     if command.group_generation < owner.generation {
         return Some(StreamTabletGroupRejection::StaleGeneration);
     }
@@ -1513,6 +1634,7 @@ fn group_outcome_code(receipt: &StreamTabletGroupReceipt) -> u8 {
         Some(StreamTabletGroupRejection::OffsetBeforeRetained) => 5,
         Some(StreamTabletGroupRejection::OffsetBeyondEnd) => 6,
         Some(StreamTabletGroupRejection::GroupCapacityReached) => 7,
+        Some(StreamTabletGroupRejection::SessionClaimRequired) => 8,
     }
 }
 
@@ -1824,6 +1946,200 @@ mod tests {
     }
 
     #[test]
+    fn group_claims_fence_fetch_and_preserve_the_durable_next_offset() {
+        let scope = scope();
+        let mut tablet = StreamTablet::new(scope.clone()).unwrap();
+        for (position, (key, id)) in [("append-1", "one"), ("append-2", "two")]
+            .into_iter()
+            .enumerate()
+        {
+            let command = StreamTabletCommand::append(&scope, key, event(id), 10).unwrap();
+            let proposal_id = command.proposal_id(&scope).unwrap();
+            let payload = command.encode(&scope).unwrap();
+            tablet
+                .apply_mutation(committed(
+                    proposal_id,
+                    2,
+                    u64::try_from(position).unwrap() + 1,
+                    &payload,
+                ))
+                .unwrap();
+        }
+
+        let claim =
+            StreamTabletCommand::claim_group(&scope, "claim-a-1", "billing", "worker-a", 1, 0, 11)
+                .unwrap();
+        let claim_id = claim.proposal_id(&scope).unwrap();
+        let claim_payload = claim.encode(&scope).unwrap();
+        let StreamTabletMutationReceipt::Group(receipt) = tablet
+            .apply_mutation(committed(claim_id, 2, 3, &claim_payload))
+            .unwrap()
+        else {
+            panic!("claim should produce a group receipt");
+        };
+        assert_eq!(receipt.mode, StreamGroupOffsetMode::Claim);
+        assert_eq!(receipt.previous_offset, 0);
+        assert_eq!(receipt.committed_offset, 0);
+        assert_eq!(receipt.group_generation, 1);
+        let claimed_digest = tablet.state_digest();
+        let StreamTabletMutationReceipt::Group(replayed) = tablet
+            .apply_mutation(committed(claim_id, 2, 3, &claim_payload))
+            .unwrap()
+        else {
+            panic!("claim replay should produce a group receipt");
+        };
+        assert_eq!(replayed.disposition, StreamTabletGroupDisposition::Replayed);
+        assert_eq!(tablet.state_digest(), claimed_digest);
+        assert_eq!(
+            tablet
+                .fetch_for_claimed_group("billing", "worker-a", 1, 10)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            tablet
+                .fetch_for_claimed_group("billing", "worker-b", 1, 10)
+                .is_err()
+        );
+        assert!(
+            tablet
+                .fetch_for_claimed_group("billing", "worker-a", 2, 10)
+                .is_err()
+        );
+
+        let commit = StreamTabletCommand::group_offset(
+            &scope,
+            "commit-a-4",
+            "billing",
+            "worker-a",
+            1,
+            0,
+            1,
+            StreamGroupOffsetMode::Commit,
+            12,
+        )
+        .unwrap();
+        let commit_id = commit.proposal_id(&scope).unwrap();
+        let commit_payload = commit.encode(&scope).unwrap();
+        tablet
+            .apply_mutation(committed(commit_id, 2, 4, &commit_payload))
+            .unwrap();
+
+        let replacement =
+            StreamTabletCommand::claim_group(&scope, "claim-b-2", "billing", "worker-b", 2, 0, 13)
+                .unwrap();
+        let replacement_id = replacement.proposal_id(&scope).unwrap();
+        let replacement_payload = replacement.encode(&scope).unwrap();
+        let StreamTabletMutationReceipt::Group(receipt) = tablet
+            .apply_mutation(committed(replacement_id, 3, 5, &replacement_payload))
+            .unwrap()
+        else {
+            panic!("replacement claim should produce a group receipt");
+        };
+        assert_eq!(receipt.previous_offset, 1);
+        assert_eq!(receipt.committed_offset, 1);
+        assert!(
+            tablet
+                .fetch_for_claimed_group("billing", "worker-a", 1, 10)
+                .is_err()
+        );
+        let records = tablet
+            .fetch_for_claimed_group("billing", "worker-b", 2, 10)
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].offset, 1);
+    }
+
+    #[test]
+    fn group_claims_reject_generation_gaps_without_changing_ownership() {
+        let scope = scope();
+        let mut tablet = StreamTablet::new(scope.clone()).unwrap();
+
+        let unowned_gap = StreamTabletCommand::claim_group(
+            &scope,
+            "claim-gap-2",
+            "billing",
+            "worker-b",
+            2,
+            0,
+            11,
+        )
+        .unwrap();
+        let unowned_gap_id = unowned_gap.proposal_id(&scope).unwrap();
+        let unowned_gap_payload = unowned_gap.encode(&scope).unwrap();
+        let StreamTabletMutationReceipt::Group(receipt) = tablet
+            .apply_mutation(committed(unowned_gap_id, 2, 1, &unowned_gap_payload))
+            .unwrap()
+        else {
+            panic!("claim should produce a group receipt");
+        };
+        assert_eq!(receipt.outcome, StreamTabletGroupOutcome::Rejected);
+        assert_eq!(
+            receipt.rejection,
+            Some(StreamTabletGroupRejection::GenerationGap)
+        );
+        assert!(!tablet.group_observation("billing").unwrap().exists);
+
+        let first =
+            StreamTabletCommand::claim_group(&scope, "claim-a-1", "billing", "worker-a", 1, 0, 12)
+                .unwrap();
+        let first_id = first.proposal_id(&scope).unwrap();
+        let first_payload = first.encode(&scope).unwrap();
+        let StreamTabletMutationReceipt::Group(receipt) = tablet
+            .apply_mutation(committed(first_id, 2, 2, &first_payload))
+            .unwrap()
+        else {
+            panic!("claim should produce a group receipt");
+        };
+        assert_eq!(receipt.outcome, StreamTabletGroupOutcome::Applied);
+        let owner = tablet.group_observation("billing").unwrap();
+
+        let conflicting =
+            StreamTabletCommand::claim_group(&scope, "claim-b-1", "billing", "worker-b", 1, 0, 13)
+                .unwrap();
+        let conflicting_id = conflicting.proposal_id(&scope).unwrap();
+        let conflicting_payload = conflicting.encode(&scope).unwrap();
+        let StreamTabletMutationReceipt::Group(receipt) = tablet
+            .apply_mutation(committed(conflicting_id, 2, 3, &conflicting_payload))
+            .unwrap()
+        else {
+            panic!("claim should produce a group receipt");
+        };
+        assert_eq!(receipt.outcome, StreamTabletGroupOutcome::Rejected);
+        assert_eq!(
+            receipt.rejection,
+            Some(StreamTabletGroupRejection::OwnerMismatch)
+        );
+        assert_eq!(tablet.group_observation("billing").unwrap(), owner);
+
+        let owned_gap = StreamTabletCommand::claim_group(
+            &scope,
+            "claim-gap-3",
+            "billing",
+            "worker-c",
+            3,
+            0,
+            14,
+        )
+        .unwrap();
+        let owned_gap_id = owned_gap.proposal_id(&scope).unwrap();
+        let owned_gap_payload = owned_gap.encode(&scope).unwrap();
+        let StreamTabletMutationReceipt::Group(receipt) = tablet
+            .apply_mutation(committed(owned_gap_id, 2, 4, &owned_gap_payload))
+            .unwrap()
+        else {
+            panic!("claim should produce a group receipt");
+        };
+        assert_eq!(receipt.outcome, StreamTabletGroupOutcome::Rejected);
+        assert_eq!(
+            receipt.rejection,
+            Some(StreamTabletGroupRejection::GenerationGap)
+        );
+        assert_eq!(tablet.group_observation("billing").unwrap(), owner);
+    }
+
+    #[test]
     fn a_conflicting_payload_or_out_of_order_commit_fails_closed() {
         let (proposal_id, payload) = encoded("request-1", "one", 11);
         let (_, conflicting_payload) = encoded("request-1", "different", 11);
@@ -1906,6 +2222,7 @@ mod tests {
                 Some(&StreamConsumerGroupOwner {
                     member_id: "worker-a".into(),
                     generation: 1,
+                    session_fenced: false,
                 }),
                 MAX_STREAM_CONSUMER_GROUPS,
                 0,
