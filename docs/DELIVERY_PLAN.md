@@ -280,13 +280,15 @@ server-push consumption, sticky/rack-aware assignment, or atomic coupling to
 each shard's v3 checkpoint owner. See
 [ADR-0025](adr/0025-stream-consumer-sessions.md).
 
-The next Stream increment adds canonical command v6 and native snapshot v3 for
+The latest Stream increment adds canonical command v6 and native snapshot v3 for
 an offset-preserving per-shard session claim. Exact-member/generation fetch,
 commit, and reset are fenced behind that replicated owner. Go, Java, and Python
 pin resource generation, read every assigned checkpoint, bridge at most 4,096
 monotonic generations with deterministic keys, claim every shard, and re-read
 the shard-zero assignment before returning it. The three-shard Python campaign
-proves stale-fetch rejection and recovery after leader loss. This further
+proves stale-fetch rejection and recovery after leader loss; PR #68,
+exact-main CI `31726157672`, main-only Pages `31726157684`, and live-bundle
+verification are green. This further
 advances STREAM-003 and DX-001 without claiming cooperative revoke,
 member-bound authorization, persistent streaming transport, atomic cross-shard
 handoff, or STREAM-008 transactions. See
