@@ -266,11 +266,11 @@ durable next offset in that same replicated state machine. Caller-supplied
 monotonic generations fence previous owners; forward commit and explicit reset
 produce typed applied or committed-rejected receipts. Lag and replay reads are
 pure observations of actor-applied state, so regional routing can place the
-normal ReadIndex barrier in front of them. This is intentionally a checkpoint
-primitive rather than a full coordinator: join, heartbeat, assignment,
-rebalance, multi-partition ownership, and transactions remain separate layers.
-Go, Java, and Python now expose this primitive through the regional Stream v1
-client without claiming those coordinator behaviors. See
+normal ReadIndex barrier in front of them. This remains a per-shard checkpoint
+primitive; resource-wide membership is the separate v5 layer below, and atomic
+assignment-plus-offset handoff remains later transaction work. Go, Java, and
+Python expose the checkpoint primitive through the regional Stream v1 client.
+See
 [ADR-0016](adr/0016-stream-consumer-group-checkpoints.md).
 
 Command v4 makes Stream retention another canonical state transition rather
@@ -297,6 +297,18 @@ shard identity is attached by the node response layer, while the persisted
 single-partition tablet scope remains compatible. See
 [ADR-0024](adr/0024-stream-multishard-key-routing.md).
 
+Additive command v5 makes logical shard 0 the resource-wide consumer-session
+coordinator. Its deterministic state contains the captured shard count,
+lexically ordered bounded members, inclusive deadlines, a monotonic committed
+time watermark, and one membership generation. Join, fenced heartbeat, leave,
+and explicit expiry maintenance run through the same majority/apply/checkpoint
+path as records. Assignment is `shard mod live-member-count`, so voters recover
+the same complete plan without client or Go-control-plane authority. Native
+Stream snapshot v2 adds this map and still accepts v1 snapshots. The
+coordinator does not atomically write the independent v3 checkpoint on each
+shard, push revoke events, or schedule maintenance in the background. See
+[ADR-0025](adr/0025-stream-consumer-sessions.md).
+
 The regional multi-tablet alpha composes that adapter with `epoch-catalog`.
 Catalog group 1 commits canonical resource commands through three EPRS-backed
 voters. A bounded group supervisor reserves that identity, demultiplexes peer
@@ -317,7 +329,9 @@ They delegate to the same materialized tablets and never proxy through Go.
 Go, Java, and Python clients share a private leader-discovery/fencing core,
 authenticate, copy resource-generation/tablet-epoch fences, preserve explicit
 mutation idempotency keys across one bounded rediscovery, and request
-linearizable reads. Queue exposes its complete implemented lifecycle: enqueue,
+linearizable reads. Stream sessions always select shard 0 and expose
+join/heartbeat/leave/maintenance plus membership/assignment observation. Queue
+exposes its complete implemented lifecycle: enqueue,
 credit acquire, all lease dispositions, maintenance, histories, redrive,
 counts, flow, mutation lookup, and status. Cache exposes every strict value
 kind, set/delete/CAS/increment, atomic transactions, fenced locks, explicit
@@ -942,3 +956,4 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0022: Profile-Native Checkpoints and Physical EPRS Reclamation](adr/0022-profile-native-checkpoints-and-physical-reclamation.md)
 - [ADR-0023: Replicated Stream Time and Size Retention](adr/0023-stream-retention-policies.md)
 - [ADR-0024: Multi-Shard Stream Key Routing](adr/0024-stream-multishard-key-routing.md)
+- [ADR-0025: Replicated Stream Consumer Sessions and Shard Assignment](adr/0025-stream-consumer-sessions.md)

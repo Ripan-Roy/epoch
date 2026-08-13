@@ -8,11 +8,27 @@ notes explicitly list additional verified artifacts.
 
 ### Added
 
+- Additive Stream command v5 and native snapshot v2 for a shard-zero consumer
+  coordinator. Bounded join/rejoin, generation-fenced heartbeat/leave,
+  monotonic committed time, inclusive dead-member expiry, and lexical
+  round-robin assignment over the captured resource shard count survive
+  fixed-voter leader loss, native checkpoint installation, and reopen; legacy
+  snapshot v1 remains readable with no session state.
+- Strict direct and authenticated regional session join, observe, heartbeat,
+  leave, and maintenance routes plus matching Go, Java, and Python
+  `RegionalStreamClient` methods. Contract tests, exact Pages examples, a
+  three-voter convergence/checkpoint test, and a two-member Python failover and
+  all-node-recovery campaign cover the implemented lifecycle. Background
+  expiry, cooperative revoke, and atomic assignment-plus-offset handoff remain
+  explicit non-claims.
+- ADR-0025 and end-to-end PRD, API, architecture, semantics, runtime, testing,
+  traceability, delivery-checklist, SDK, and published-doc updates for
+  coordinated consumer sessions.
 - Regional multi-shard Stream materialization with one independently replicated
   ordered tablet per logical partition, resource-wide shard-count discovery,
   truthful logical shard identities in mutation, record, checkpoint, retention,
-  batch, and status responses, and unchanged canonical partition-0
-  command/snapshot bytes.
+  batch, and status responses while retaining canonical partition-0 command
+  identity.
 - A versioned `fnv1a64_utf8_mod_n_v1` cross-language partition contract over
   exact UTF-8 bytes with event-ID fallback. Go `StreamShardFor`/`AppendKeyed`,
   Java `StreamPartitioner`/`appendKeyed`, and Python
@@ -182,16 +198,15 @@ notes explicitly list additional verified artifacts.
   automatic producer batching and codec negotiation, non-atomic partial
   results, compression dictionaries, fuzz/load benchmarks, and SDK exposure
   remain unimplemented.
-- Replicated Stream consumer groups currently provide checkpoint storage and a
-  caller-supplied generation fence only. Join, heartbeat, assignment, revoke,
-  dead-member detection, automatic generation allocation, rebalance,
-  multi-partition ownership, transactional offset commits, scale/fairness
-  evidence, generated coordinated-session types, and production fault coverage
-  remain unimplemented. Retention interaction is explicit for the replicated
-  partition-0 primitive, but automatic maintenance scheduling, keyed
-  compaction/tombstones, object-tier retention, legal-hold governance, and
-  coordinated multi-partition ownership remain open. Regional retention policy
-  is independent per logical shard; automatic maintenance scheduling, keyed
+- Replicated Stream consumer groups provide independent per-shard checkpoint
+  storage plus a shard-zero session coordinator for join, heartbeat, leave,
+  explicit dead-member expiry, automatic membership generations, and
+  deterministic resource-wide assignment. Background expiry, cooperative
+  revoke acknowledgement, sticky/rack-aware strategies, native streaming
+  consumption, atomic assignment-plus-offset handoff, transactional offsets,
+  scale/fairness evidence, generated response types, and production fault
+  coverage remain unimplemented. Regional retention policy is independent per
+  logical shard; automatic maintenance scheduling, keyed
   compaction/tombstones, object-tier retention, and legal-hold governance
   remain open. Standalone offset helpers keep their local contract.
 - The regional SDKs remain repository-local alpha source. Package publication,

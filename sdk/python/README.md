@@ -26,12 +26,15 @@ and performs no hidden retries for standalone operations.
 `RegionalStreamClient` is the explicit replicated alternative. Configure it
 with every Rust node endpoint, a `RegionalScope`, and a bearer token. It
 discovers the current leader before every call, copies generation/tablet
-fences, preserves caller-owned append/checkpoint/retention idempotency across
-one bounded rediscovery, and requests linearizable fetch/lag/retention reads.
+fences, preserves caller-owned append/checkpoint/session/retention idempotency
+across one bounded rediscovery, and requests linearizable
+fetch/lag/session/retention reads.
 `stream_shard_for` implements the advertised FNV-1a UTF-8 contract, while
 `append_keyed` selects that shard from the event key or ID and fails before
 writing if the resource generation changes. The client also exposes
-time/size/combined retention configuration and explicit idle maintenance. See the
+time/size/combined retention configuration and explicit idle maintenance. Its
+shard-zero session methods cover join, heartbeat, leave, expiry maintenance,
+and deterministic resource-wide assignment observation. See the
 [complete regional example](../../console/src/quickstarts/regional/quickstart.py)
 and [contract guide](../../docs/REGIONAL_STREAM_SDK.md).
 
@@ -56,5 +59,6 @@ lease tokens survive one bounded leader rediscovery. See the
 [complete Event Bus example](../../console/src/quickstarts/regional_bus/quickstart.py)
 and [Event Bus contract guide](../../docs/REGIONAL_EVENT_BUS_SDK.md).
 
-Native gRPC streaming, coordinated consumer sessions, generated response
-models, and package publication remain future work.
+Native gRPC streaming, background/cooperative consumer sessions, atomic
+assignment-plus-offset handoff, generated response models, and package
+publication remain future work.

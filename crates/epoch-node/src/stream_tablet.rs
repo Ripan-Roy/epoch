@@ -21,13 +21,15 @@ use epoch_stream::{StreamRecord, StreamRetentionPolicy};
 use epoch_tablet::{
     CommittedCommand, MAX_STREAM_BATCH_COMPRESSED_BYTES, MAX_STREAM_BATCH_RECORDS,
     MAX_STREAM_BATCH_UNCOMPRESSED_BYTES, MAX_STREAM_CONSUMER_GROUP_BYTES,
-    MAX_STREAM_CONSUMER_GROUPS, MAX_STREAM_CONSUMER_MEMBER_BYTES, MAX_STREAM_RETENTION_AGE_MS,
+    MAX_STREAM_CONSUMER_GROUPS, MAX_STREAM_CONSUMER_MEMBER_BYTES,
+    MAX_STREAM_CONSUMER_MEMBERS_PER_GROUP, MAX_STREAM_RETENTION_AGE_MS,
     MAX_STREAM_RETENTION_BYTES_PER_PARTITION, MAX_STREAM_RETENTION_RECORDS_PER_PARTITION,
-    MAX_STREAM_TABLET_COMMAND_BYTES, StreamBatchPayload, StreamCompression, StreamGroupOffsetMode,
+    MAX_STREAM_SESSION_TIMEOUT_MS, MAX_STREAM_TABLET_COMMAND_BYTES, MIN_STREAM_SESSION_TIMEOUT_MS,
+    StreamBatchPayload, StreamCompression, StreamGroupOffsetMode, StreamGroupSessionAction,
     StreamTablet, StreamTabletCommand, StreamTabletGroupObservation, StreamTabletMutationReceipt,
     StreamTabletOperation, StreamTabletRetentionMode, StreamTabletRetentionObservation,
-    StreamTabletScope, TabletError, decode_stream_batch_payload, proposal_id_for,
-    validate_retention_policy, validate_stream_consumer_group,
+    StreamTabletScope, StreamTabletSessionObservation, TabletError, decode_stream_batch_payload,
+    proposal_id_for, validate_retention_policy, validate_stream_consumer_group,
 };
 #[cfg(test)]
 use epoch_tablet::{StreamBatchRecord, encode_stream_batch_payload};
@@ -58,6 +60,14 @@ pub const EXPERIMENTAL_STREAM_TABLET_RETENTION_PATH: &str =
     "/experimental/v1/tablets/stream/retention";
 pub const EXPERIMENTAL_STREAM_TABLET_RETENTION_MAINTENANCE_PATH: &str =
     "/experimental/v1/tablets/stream/retention/maintenance";
+pub const EXPERIMENTAL_STREAM_TABLET_GROUP_SESSIONS_PATH: &str =
+    "/experimental/v1/tablets/stream/groups/{group}/sessions";
+pub const EXPERIMENTAL_STREAM_TABLET_GROUP_SESSION_HEARTBEAT_PATH: &str =
+    "/experimental/v1/tablets/stream/groups/{group}/sessions/{member}/heartbeat";
+pub const EXPERIMENTAL_STREAM_TABLET_GROUP_SESSION_MEMBER_PATH: &str =
+    "/experimental/v1/tablets/stream/groups/{group}/sessions/{member}";
+pub const EXPERIMENTAL_STREAM_TABLET_GROUP_SESSION_MAINTENANCE_PATH: &str =
+    "/experimental/v1/tablets/stream/groups/{group}/sessions/maintenance";
 pub const DEFAULT_COMMIT_WAIT: Duration = Duration::from_secs(5);
 const MAX_FETCH_RECORDS: usize = 1_000;
 const TABLET_REQUEST_BODY_BYTES: usize = MAX_STREAM_TABLET_COMMAND_BYTES + 16 * 1024;
@@ -70,23 +80,31 @@ type StreamTabletApiError = TabletApiError;
 pub struct StreamTabletService {
     scope: StreamTabletScope,
     shard_index: u32,
+    shard_count: u32,
     tablet: RwLock<StreamTablet>,
     failure: RwLock<Option<String>>,
 }
 
 impl StreamTabletService {
     pub fn new(scope: StreamTabletScope) -> Result<Arc<Self>, TabletError> {
-        Self::new_for_shard(scope, 0)
+        Self::new_for_shard(scope, 0, 1)
     }
 
     pub fn new_for_shard(
         scope: StreamTabletScope,
         shard_index: u32,
+        shard_count: u32,
     ) -> Result<Arc<Self>, TabletError> {
+        if shard_count == 0 || shard_index >= shard_count {
+            return Err(TabletError::InvalidCommand(format!(
+                "Stream logical shard {shard_index} is outside resource shard_count {shard_count}"
+            )));
+        }
         let tablet = StreamTablet::new(scope.clone())?;
         Ok(Arc::new(Self {
             scope,
             shard_index,
+            shard_count,
             tablet: RwLock::new(tablet),
             failure: RwLock::new(None),
         }))
@@ -98,6 +116,10 @@ impl StreamTabletService {
 
     pub const fn shard_index(&self) -> u32 {
         self.shard_index
+    }
+
+    pub const fn shard_count(&self) -> u32 {
+        self.shard_count
     }
 
     pub fn last_profile_mutation_index(&self) -> Result<u64, String> {
@@ -202,6 +224,15 @@ impl StreamTabletService {
             .read()
             .map_err(|_| "Stream tablet read lock was poisoned".to_owned())?
             .group_observation(group)
+            .map_err(|error| error.to_string())
+    }
+
+    fn session_observation(&self, group: &str) -> Result<StreamTabletSessionObservation, String> {
+        self.ensure_healthy()?;
+        self.tablet
+            .read()
+            .map_err(|_| "Stream tablet read lock was poisoned".to_owned())?
+            .session_observation(group)
             .map_err(|error| error.to_string())
     }
 
@@ -397,6 +428,22 @@ pub fn router(
             EXPERIMENTAL_STREAM_TABLET_RETENTION_MAINTENANCE_PATH,
             axum::routing::post(maintain_retention),
         )
+        .route(
+            EXPERIMENTAL_STREAM_TABLET_GROUP_SESSIONS_PATH,
+            get(get_group_session).post(join_group_session),
+        )
+        .route(
+            EXPERIMENTAL_STREAM_TABLET_GROUP_SESSION_HEARTBEAT_PATH,
+            axum::routing::put(heartbeat_group_session),
+        )
+        .route(
+            EXPERIMENTAL_STREAM_TABLET_GROUP_SESSION_MEMBER_PATH,
+            axum::routing::delete(leave_group_session),
+        )
+        .route(
+            EXPERIMENTAL_STREAM_TABLET_GROUP_SESSION_MAINTENANCE_PATH,
+            axum::routing::post(maintain_group_sessions),
+        )
         .layer(DefaultBodyLimit::max(TABLET_REQUEST_BODY_BYTES))
         .with_state(state)
 }
@@ -492,6 +539,44 @@ struct RetentionMaintenanceRequest {
     idempotency_key: String,
     #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
     expected_term: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroupSessionJoinRequest {
+    idempotency_key: String,
+    #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+    expected_term: u64,
+    member_id: String,
+    #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+    session_timeout_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroupSessionGenerationRequest {
+    idempotency_key: String,
+    #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+    expected_term: u64,
+    #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+    group_generation: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroupSessionMaintenanceRequest {
+    idempotency_key: String,
+    #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+    expected_term: u64,
+}
+
+#[derive(Debug)]
+struct GroupSessionRequest {
+    group: String,
+    shard_count: u32,
+    idempotency_key: String,
+    expected_term: u64,
+    action: StreamGroupSessionAction,
 }
 
 #[derive(Debug)]
@@ -713,6 +798,83 @@ impl StreamMutationSemantics for GroupOffsetRequest {
     }
 }
 
+impl StreamMutationSemantics for GroupSessionRequest {
+    fn idempotency_key(&self) -> &str {
+        &self.idempotency_key
+    }
+
+    fn expected_term(&self) -> u64 {
+        self.expected_term
+    }
+
+    fn validate(&self, scope: &StreamTabletScope) -> TabletApiResult<()> {
+        self.command(scope, 0).map(|_| ()).map_err(Into::into)
+    }
+
+    fn command(
+        &self,
+        scope: &StreamTabletScope,
+        applied_at_ms: u64,
+    ) -> Result<StreamTabletCommand, TabletError> {
+        match &self.action {
+            StreamGroupSessionAction::Join {
+                member_id,
+                session_timeout_ms,
+            } => StreamTabletCommand::join_group_session(
+                scope,
+                self.idempotency_key.clone(),
+                self.group.clone(),
+                member_id.clone(),
+                self.shard_count,
+                *session_timeout_ms,
+                applied_at_ms,
+            ),
+            StreamGroupSessionAction::Heartbeat {
+                member_id,
+                group_generation,
+            } => StreamTabletCommand::heartbeat_group_session(
+                scope,
+                self.idempotency_key.clone(),
+                self.group.clone(),
+                member_id.clone(),
+                self.shard_count,
+                *group_generation,
+                applied_at_ms,
+            ),
+            StreamGroupSessionAction::Leave {
+                member_id,
+                group_generation,
+            } => StreamTabletCommand::leave_group_session(
+                scope,
+                self.idempotency_key.clone(),
+                self.group.clone(),
+                member_id.clone(),
+                self.shard_count,
+                *group_generation,
+                applied_at_ms,
+            ),
+            StreamGroupSessionAction::Maintain => StreamTabletCommand::maintain_group_sessions(
+                scope,
+                self.idempotency_key.clone(),
+                self.group.clone(),
+                self.shard_count,
+                applied_at_ms,
+            ),
+        }
+    }
+
+    fn matches_command(&self, command: &StreamTabletCommand) -> bool {
+        matches!(
+            &command.operation,
+            StreamTabletOperation::GroupSession(session)
+                if command.idempotency_key == self.idempotency_key
+                    && session.group == self.group
+                    && session.shard_count == self.shard_count
+                    && session.action == self.action
+        )
+    }
+}
+
 fn validate_partition(partition: u32) -> TabletApiResult<()> {
     if partition != 0 {
         return Err(StreamTabletApiError::InvalidRequest(
@@ -776,6 +938,104 @@ async fn maintain_retention(
         message: rejection.body_text(),
     })?;
     submit_mutation(state, request).await
+}
+
+async fn join_group_session(
+    State(state): State<StreamTabletApiState>,
+    Path(group): Path<String>,
+    request: Result<Json<GroupSessionJoinRequest>, JsonRejection>,
+) -> TabletApiResult<(StatusCode, Json<StreamTabletMutationResponse>)> {
+    ensure_session_coordinator(&state.service)?;
+    let Json(request) = request.map_err(|rejection| StreamTabletApiError::RequestBody {
+        status: rejection.status(),
+        message: rejection.body_text(),
+    })?;
+    let session = GroupSessionRequest {
+        group,
+        shard_count: state.service.shard_count(),
+        idempotency_key: request.idempotency_key,
+        expected_term: request.expected_term,
+        action: StreamGroupSessionAction::Join {
+            member_id: request.member_id,
+            session_timeout_ms: request.session_timeout_ms,
+        },
+    };
+    submit_mutation(state, session).await
+}
+
+async fn heartbeat_group_session(
+    State(state): State<StreamTabletApiState>,
+    Path((group, member)): Path<(String, String)>,
+    request: Result<Json<GroupSessionGenerationRequest>, JsonRejection>,
+) -> TabletApiResult<(StatusCode, Json<StreamTabletMutationResponse>)> {
+    ensure_session_coordinator(&state.service)?;
+    let Json(request) = request.map_err(|rejection| StreamTabletApiError::RequestBody {
+        status: rejection.status(),
+        message: rejection.body_text(),
+    })?;
+    let session = GroupSessionRequest {
+        group,
+        shard_count: state.service.shard_count(),
+        idempotency_key: request.idempotency_key,
+        expected_term: request.expected_term,
+        action: StreamGroupSessionAction::Heartbeat {
+            member_id: member,
+            group_generation: request.group_generation,
+        },
+    };
+    submit_mutation(state, session).await
+}
+
+async fn leave_group_session(
+    State(state): State<StreamTabletApiState>,
+    Path((group, member)): Path<(String, String)>,
+    request: Result<Json<GroupSessionGenerationRequest>, JsonRejection>,
+) -> TabletApiResult<(StatusCode, Json<StreamTabletMutationResponse>)> {
+    ensure_session_coordinator(&state.service)?;
+    let Json(request) = request.map_err(|rejection| StreamTabletApiError::RequestBody {
+        status: rejection.status(),
+        message: rejection.body_text(),
+    })?;
+    let session = GroupSessionRequest {
+        group,
+        shard_count: state.service.shard_count(),
+        idempotency_key: request.idempotency_key,
+        expected_term: request.expected_term,
+        action: StreamGroupSessionAction::Leave {
+            member_id: member,
+            group_generation: request.group_generation,
+        },
+    };
+    submit_mutation(state, session).await
+}
+
+async fn maintain_group_sessions(
+    State(state): State<StreamTabletApiState>,
+    Path(group): Path<String>,
+    request: Result<Json<GroupSessionMaintenanceRequest>, JsonRejection>,
+) -> TabletApiResult<(StatusCode, Json<StreamTabletMutationResponse>)> {
+    ensure_session_coordinator(&state.service)?;
+    let Json(request) = request.map_err(|rejection| StreamTabletApiError::RequestBody {
+        status: rejection.status(),
+        message: rejection.body_text(),
+    })?;
+    let session = GroupSessionRequest {
+        group,
+        shard_count: state.service.shard_count(),
+        idempotency_key: request.idempotency_key,
+        expected_term: request.expected_term,
+        action: StreamGroupSessionAction::Maintain,
+    };
+    submit_mutation(state, session).await
+}
+
+fn ensure_session_coordinator(service: &StreamTabletService) -> TabletApiResult<()> {
+    if service.shard_index() != 0 {
+        return Err(StreamTabletApiError::InvalidRequest(
+            "consumer sessions are coordinated by logical Stream shard 0".into(),
+        ));
+    }
+    Ok(())
 }
 
 async fn submit_mutation<R: StreamMutationSemantics>(
@@ -951,7 +1211,7 @@ fn receipt_for_response(
             }
         }
         StreamTabletMutationReceipt::Group(receipt) => receipt.partition = shard_index,
-        StreamTabletMutationReceipt::Retention(_) => {}
+        StreamTabletMutationReceipt::Retention(_) | StreamTabletMutationReceipt::Session(_) => {}
     }
     receipt
 }
@@ -1048,6 +1308,20 @@ async fn group_lag(
     }))
 }
 
+async fn get_group_session(
+    State(state): State<StreamTabletApiState>,
+    Path(group): Path<String>,
+    read: Option<Extension<TabletReadMetadata>>,
+) -> TabletApiResult<Json<StreamTabletSessionObservationResponse>> {
+    ensure_session_coordinator(&state.service)?;
+    validate_stream_consumer_group(&group)?;
+    Ok(Json(StreamTabletSessionObservationResponse {
+        read: tablet_read_metadata(read),
+        shard_index: state.service.shard_index(),
+        session: state.service.session_observation(&group)?,
+    }))
+}
+
 async fn fetch_group_records(
     State(state): State<StreamTabletApiState>,
     Path(group): Path<String>,
@@ -1109,6 +1383,7 @@ async fn tablet_status(
     Ok(Json(StreamTabletStatus::new_with_read(
         state.service.scope(),
         state.service.shard_index(),
+        state.service.shard_count(),
         &consensus,
         profile,
         tablet_read_metadata(read),
@@ -1134,9 +1409,16 @@ struct StreamTabletStatus {
     max_batch_uncompressed_bytes: usize,
     consumer_group_checkpoints: &'static str,
     consumer_group_ownership_fencing: &'static str,
+    consumer_group_sessions: &'static str,
+    consumer_group_assignment: &'static str,
     max_consumer_groups: usize,
     max_consumer_group_bytes: usize,
     max_consumer_member_bytes: usize,
+    max_consumer_members_per_group: usize,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    min_consumer_session_timeout_ms: u64,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    max_consumer_session_timeout_ms: u64,
     retention_contract: &'static str,
     max_retention_records_per_partition: usize,
     #[serde(serialize_with = "serialize_u64_as_decimal")]
@@ -1148,6 +1430,7 @@ struct StreamTabletStatus {
     #[serde(serialize_with = "serialize_u64_as_decimal")]
     tablet_epoch: u64,
     shard_index: u32,
+    shard_count: u32,
     resource: String,
     #[serde(serialize_with = "serialize_u64_as_decimal")]
     node_id: u64,
@@ -1179,6 +1462,7 @@ impl StreamTabletStatus {
         Self::new_with_read(
             scope,
             0,
+            1,
             consensus,
             profile,
             TabletReadMetadata::local_stale(),
@@ -1188,6 +1472,7 @@ impl StreamTabletStatus {
     fn new_with_read(
         scope: &StreamTabletScope,
         shard_index: u32,
+        shard_count: u32,
         consensus: &ConsensusStatus,
         profile: StreamTabletSnapshot,
         read: TabletReadMetadata,
@@ -1216,9 +1501,14 @@ impl StreamTabletStatus {
             max_batch_uncompressed_bytes: MAX_STREAM_BATCH_UNCOMPRESSED_BYTES,
             consumer_group_checkpoints: "replicated_commit_reset_lag_and_replay",
             consumer_group_ownership_fencing: "caller_supplied_monotonic_generation",
+            consumer_group_sessions: "replicated_join_heartbeat_leave_expiry_and_rebalance",
+            consumer_group_assignment: "shard_zero_coordinator_lexical_round_robin",
             max_consumer_groups: MAX_STREAM_CONSUMER_GROUPS,
             max_consumer_group_bytes: MAX_STREAM_CONSUMER_GROUP_BYTES,
             max_consumer_member_bytes: MAX_STREAM_CONSUMER_MEMBER_BYTES,
+            max_consumer_members_per_group: MAX_STREAM_CONSUMER_MEMBERS_PER_GROUP,
+            min_consumer_session_timeout_ms: MIN_STREAM_SESSION_TIMEOUT_MS,
+            max_consumer_session_timeout_ms: MAX_STREAM_SESSION_TIMEOUT_MS,
             retention_contract: "replicated_v4_time_size_combined_with_explicit_idle_maintenance",
             max_retention_records_per_partition: MAX_STREAM_RETENTION_RECORDS_PER_PARTITION,
             max_retention_bytes_per_partition: MAX_STREAM_RETENTION_BYTES_PER_PARTITION,
@@ -1226,6 +1516,7 @@ impl StreamTabletStatus {
             tablet_id: scope.tablet_id,
             tablet_epoch: scope.tablet_epoch,
             shard_index,
+            shard_count,
             resource: scope.resource.clone(),
             node_id: consensus.node_id.get(),
             role: match consensus.role {
@@ -1270,6 +1561,14 @@ struct StreamTabletGroupFetchResponse {
     shard_index: u32,
     checkpoint: StreamTabletGroupObservation,
     records: Vec<StreamTabletRecordResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamTabletSessionObservationResponse {
+    #[serde(flatten)]
+    read: TabletReadMetadata,
+    shard_index: u32,
+    session: StreamTabletSessionObservation,
 }
 
 #[derive(Debug, Serialize)]
@@ -1421,7 +1720,7 @@ mod tests {
     #[test]
     fn sharded_service_externalizes_the_logical_partition_and_restores_its_scope() {
         let scope = StreamTabletScope::new_with_consensus_group(21, 31, 3, "orders").unwrap();
-        let service = StreamTabletService::new_for_shard(scope.clone(), 14).unwrap();
+        let service = StreamTabletService::new_for_shard(scope.clone(), 14, 16).unwrap();
         let append = committed_for_scope(&scope, "one", "order-1", 4);
         service.apply(&append).unwrap();
 
@@ -1510,7 +1809,7 @@ mod tests {
         let image = service
             .capture_snapshot(LogIndex::new(6), &[append, batch, checkpoint])
             .unwrap();
-        let restored = StreamTabletService::new_for_shard(scope, 14).unwrap();
+        let restored = StreamTabletService::new_for_shard(scope, 14, 16).unwrap();
         restored.install_snapshot(&image).unwrap();
         assert_eq!(restored.shard_index(), 14);
         assert_eq!(restored.fetch(0, 10).unwrap().len(), 3);
@@ -2010,7 +2309,7 @@ mod tests {
                     Duration::from_millis(20),
                 )
                 .unwrap();
-                let service = StreamTabletService::new(scope()).unwrap();
+                let service = StreamTabletService::new_for_shard(scope(), 0, 3).unwrap();
                 let applier: Arc<dyn CommittedProposalApplier> = service.clone();
                 let runtime =
                     ConsensusProbeRuntime::start_with_profile_applier(config, stable_path, applier)
@@ -2165,6 +2464,106 @@ mod tests {
 
         let reopened = RunningTabletCluster::start(&paths).await;
         assert_retention_on_every_voter(&reopened, &client, "1", "1", 0).await;
+        reopened.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn consumer_sessions_rebalance_expire_converge_and_restore() {
+        let temporary = TempDir::new().unwrap();
+        let paths = tablet_paths(temporary.path());
+        let cluster = RunningTabletCluster::start(&paths).await;
+        let client = reqwest::Client::new();
+
+        let (status, first) = submit_session_to_current_leader(
+            &cluster,
+            &client,
+            reqwest::Method::POST,
+            SessionTarget::Group,
+            &json!({
+                "idempotency_key": "join-a",
+                "expected_term": "0",
+                "member_id": "worker-a",
+                "session_timeout_ms": "1000"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(first["receipt"]["group_generation"], "1");
+        assert_eq!(first["receipt"]["assigned_shards"], json!([0, 1, 2]));
+
+        for node in &cluster.nodes {
+            node.clock.set_wall_time_ms(1_500);
+        }
+        let (_, second) = submit_session_to_current_leader(
+            &cluster,
+            &client,
+            reqwest::Method::POST,
+            SessionTarget::Group,
+            &json!({
+                "idempotency_key": "join-b",
+                "expected_term": "0",
+                "member_id": "worker-b",
+                "session_timeout_ms": "5000"
+            }),
+        )
+        .await;
+        assert_eq!(second["receipt"]["group_generation"], "2");
+        assert_eq!(
+            second["receipt"]["members"][0]["assigned_shards"],
+            json!([0, 2])
+        );
+        assert_eq!(
+            second["receipt"]["members"][1]["assigned_shards"],
+            json!([1])
+        );
+
+        let (_, heartbeat) = submit_session_to_current_leader(
+            &cluster,
+            &client,
+            reqwest::Method::PUT,
+            SessionTarget::Heartbeat("worker-a"),
+            &json!({
+                "idempotency_key": "heartbeat-a",
+                "expected_term": "0",
+                "group_generation": "2"
+            }),
+        )
+        .await;
+        assert_eq!(heartbeat["receipt"]["group_generation"], "2");
+
+        for node in &cluster.nodes {
+            node.clock.set_wall_time_ms(2_500);
+        }
+        let (_, maintained) = submit_session_to_current_leader(
+            &cluster,
+            &client,
+            reqwest::Method::POST,
+            SessionTarget::Maintenance,
+            &json!({"idempotency_key": "maintain-2500", "expected_term": "0"}),
+        )
+        .await;
+        assert_eq!(maintained["receipt"]["group_generation"], "3");
+        assert_eq!(
+            maintained["receipt"]["expired_members"],
+            json!(["worker-a"])
+        );
+        assert_eq!(
+            maintained["receipt"]["members"][0]["assigned_shards"],
+            json!([0, 1, 2])
+        );
+
+        assert_session_on_every_voter(&cluster, &client, "3", "2500", 1).await;
+        let (leader, _) = cluster.leader().await;
+        cluster.nodes[leader]
+            .runtime
+            .handle()
+            .checkpoint()
+            .await
+            .expect("consumer session should checkpoint");
+        cluster.shutdown().await;
+
+        let reopened = RunningTabletCluster::start(&paths).await;
+        assert_session_on_every_voter(&reopened, &client, "3", "2500", 1).await;
         reopened.shutdown().await;
     }
 
@@ -2560,6 +2959,88 @@ mod tests {
         .expect("an exact retention mutation should resolve under stable leadership")
     }
 
+    #[derive(Clone, Copy)]
+    enum SessionTarget<'a> {
+        Group,
+        Heartbeat(&'a str),
+        Maintenance,
+    }
+
+    async fn submit_session_to_current_leader(
+        cluster: &RunningTabletCluster,
+        client: &reqwest::Client,
+        method: reqwest::Method,
+        target: SessionTarget<'_>,
+        request: &Value,
+    ) -> (StatusCode, Value) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let (leader, term) = cluster.leader().await;
+                let mut attempt = request.clone();
+                attempt["expected_term"] = json!(term);
+                let url = match target {
+                    SessionTarget::Group => session_url_for(&cluster.nodes[leader]),
+                    SessionTarget::Heartbeat(member) => {
+                        session_heartbeat_url_for(&cluster.nodes[leader], member)
+                    }
+                    SessionTarget::Maintenance => {
+                        session_maintenance_url_for(&cluster.nodes[leader])
+                    }
+                };
+                let response = client
+                    .request(method.clone(), url)
+                    .json(&attempt)
+                    .send()
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let document: Value = response.json().await.unwrap();
+                if is_retryable_leadership_response(status, &document) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    continue;
+                }
+                return (status, document);
+            }
+        })
+        .await
+        .expect("an exact consumer-session mutation should resolve under stable leadership")
+    }
+
+    async fn assert_session_on_every_voter(
+        cluster: &RunningTabletCluster,
+        client: &reqwest::Client,
+        generation: &str,
+        watermark_ms: &str,
+        members: usize,
+    ) {
+        for node in &cluster.nodes {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let document: Value = client
+                        .get(session_url_for(node))
+                        .send()
+                        .await
+                        .unwrap()
+                        .json()
+                        .await
+                        .unwrap();
+                    if document["session"]["group_generation"] == generation
+                        && document["session"]["watermark_ms"] == watermark_ms
+                    {
+                        assert_eq!(
+                            document["session"]["members"].as_array().unwrap().len(),
+                            members
+                        );
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("every voter should expose the coordinated session state");
+        }
+    }
+
     async fn assert_retention_on_every_voter(
         cluster: &RunningTabletCluster,
         client: &reqwest::Client,
@@ -2723,6 +3204,26 @@ mod tests {
     fn retention_maintenance_url_for(node: &RunningTabletNode) -> Url {
         node.base_url
             .join(EXPERIMENTAL_STREAM_TABLET_RETENTION_MAINTENANCE_PATH.trim_start_matches('/'))
+            .unwrap()
+    }
+
+    fn session_url_for(node: &RunningTabletNode) -> Url {
+        node.base_url
+            .join("experimental/v1/tablets/stream/groups/billing/sessions")
+            .unwrap()
+    }
+
+    fn session_heartbeat_url_for(node: &RunningTabletNode, member: &str) -> Url {
+        node.base_url
+            .join(&format!(
+                "experimental/v1/tablets/stream/groups/billing/sessions/{member}/heartbeat"
+            ))
+            .unwrap()
+    }
+
+    fn session_maintenance_url_for(node: &RunningTabletNode) -> Url {
+        node.base_url
+            .join("experimental/v1/tablets/stream/groups/billing/sessions/maintenance")
             .unwrap()
     }
 

@@ -31,12 +31,14 @@ volatile in the runnable slice. Standalone calls perform no hidden retries.
 `RegionalStreamClient` is the explicit replicated alternative. It accepts
 every Rust node endpoint plus a `RegionalScope` and bearer token, discovers the
 current leader before each call, carries generation/tablet fences, reuses the
-caller's append/checkpoint/retention idempotency key across one bounded
-rediscovery, and requests linearizable fetch/lag/retention reads.
+caller's append/checkpoint/session/retention idempotency key across one bounded
+rediscovery, and requests linearizable fetch/lag/session/retention reads.
 `StreamPartitioner.shardFor` implements the advertised FNV-1a UTF-8 contract,
 while `appendKeyed` selects that shard from the event key or ID and fails before
 writing if the resource generation changes. The client also exposes
-time/size/combined retention configuration and explicit idle maintenance. See the
+time/size/combined retention configuration and explicit idle maintenance. Its
+shard-zero session methods cover join, heartbeat, leave, expiry maintenance,
+and deterministic resource-wide assignment observation. See the
 [complete regional example](../../console/src/quickstarts/regional/RegionalQuickstart.java)
 and [contract guide](../../docs/REGIONAL_STREAM_SDK.md).
 
@@ -60,9 +62,9 @@ use `BigInteger`; opaque lease tokens pass through unchanged. See the
 [complete Event Bus example](../../console/src/quickstarts/regional_bus/RegionalBusQuickstart.java)
 and [Event Bus contract guide](../../docs/REGIONAL_EVENT_BUS_SDK.md).
 
-The SDK does not yet provide native gRPC streaming, coordinated consumer
-sessions, generated response types, package publication, or a stable complete
-compatibility promise.
+The SDK does not yet provide native gRPC streaming, background/cooperative
+consumer sessions, atomic assignment-plus-offset handoff, generated response
+types, package publication, or a stable complete compatibility promise.
 
 Run its complete format, compiler-lint, Checkstyle, unit, transport, and package
 gate with the checksum-pinned Maven wrapper:

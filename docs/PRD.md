@@ -641,6 +641,15 @@ An absent key uses the event ID. Clients must not silently remap an uncertain
 append if the resource generation or partition count changes; safe online
 expansion remains the separate STREAM-011 contract.
 
+STREAM-003 requires a durable resource-wide consumer coordinator in addition
+to per-shard checkpoints. The coordinator owns bounded join, heartbeat, leave,
+dead-member expiry, one monotonic membership generation, and deterministic
+exclusive assignment of every logical shard. Membership and assignment must
+survive leader loss and full-cluster recovery, and stale generations must fail
+closed. Offset handoff, revoke acknowledgement, and transactions must state
+their cross-shard atomicity explicitly; a client-local member list is not a
+consumer-group implementation.
+
 ### 10.3 Work Queue
 
 | ID | Requirement | Priority |

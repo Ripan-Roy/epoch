@@ -378,9 +378,13 @@ impl RegionalTabletMaterializer {
             WorkloadProfile::CacheAndState => PendingTabletService::Cache(
                 CacheTabletService::with_default_config(CacheTabletScope::clone(&scope))?,
             ),
-            WorkloadProfile::StreamLog => PendingTabletService::Stream(
-                StreamTabletService::new_for_shard(scope.clone(), descriptor.shard_index)?,
-            ),
+            WorkloadProfile::StreamLog => {
+                PendingTabletService::Stream(StreamTabletService::new_for_shard(
+                    scope.clone(),
+                    descriptor.shard_index,
+                    metadata.shard_count,
+                )?)
+            }
             WorkloadProfile::WorkQueue => PendingTabletService::Queue(
                 QueueTabletService::with_default_config(QueueTabletScope::clone(&scope))?,
             ),

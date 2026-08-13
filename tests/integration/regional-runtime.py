@@ -789,6 +789,37 @@ def wait_for_catalog(
     )
 
 
+def python_stream_client(cluster: RegionalCluster) -> Any:
+    sdk_source = str(REPO_ROOT / "sdk/python/src")
+    if sdk_source not in sys.path:
+        sys.path.insert(0, sdk_source)
+    epoch_sdk = importlib.import_module("epoch_sdk")
+    return epoch_sdk.RegionalStreamClient(
+        [f"http://127.0.0.1:{cluster.http_ports[node]}" for node in NODES],
+        token=ADMIN_TOKEN,
+        scope=epoch_sdk.RegionalScope("acme", "shop", "dev", "core"),
+        timeout=2.0,
+    )
+
+
+def assert_python_sdk_consumer_session(
+    cluster: RegionalCluster,
+    resource: Resource,
+) -> None:
+    observed = python_stream_client(cluster).consumer_session(resource.name, "billing")
+    assert observed.get("shard_index") == 0, observed
+    session = observed.get("session")
+    assert isinstance(session, dict), observed
+    assert session.get("exists") is True, observed
+    assert session.get("group") == "billing", observed
+    assert session.get("shard_count") == 3, observed
+    assert session.get("group_generation") == "3", observed
+    members = session.get("members")
+    assert isinstance(members, list) and len(members) == 1, observed
+    assert members[0].get("member_id") == "python-worker-b", observed
+    assert members[0].get("assigned_shards") == [0, 1, 2], observed
+
+
 def prove_python_sdk_native_stream_after_failover(
     cluster: RegionalCluster,
     resource: Resource,
@@ -797,12 +828,7 @@ def prove_python_sdk_native_stream_after_failover(
     if sdk_source not in sys.path:
         sys.path.insert(0, sdk_source)
     epoch_sdk = importlib.import_module("epoch_sdk")
-    client = epoch_sdk.RegionalStreamClient(
-        [f"http://127.0.0.1:{cluster.http_ports[node]}" for node in NODES],
-        token=ADMIN_TOKEN,
-        scope=epoch_sdk.RegionalScope("acme", "shop", "dev", "core"),
-        timeout=2.0,
-    )
+    client = python_stream_client(cluster)
     event = epoch_sdk.EventEnvelope(
         id="managed-orders-2",
         key="customer-2",
@@ -914,6 +940,64 @@ def prove_python_sdk_native_stream_after_failover(
         assert isinstance(observation, dict), lag
         assert observation.get("partition") == shard, lag
         assert observation.get("lag") == "0", lag
+
+    joined_a = client.join_consumer_session(
+        resource.name,
+        "billing",
+        "python-worker-a",
+        1_000,
+        idempotency_key="python-sdk-session-join-a",
+    )
+    receipt_a = joined_a.get("receipt")
+    assert isinstance(receipt_a, dict), joined_a
+    assert receipt_a.get("outcome") == "applied", joined_a
+    assert receipt_a.get("group_generation") == "1", joined_a
+    assert receipt_a.get("assigned_shards") == [0, 1, 2], joined_a
+
+    joined_b = client.join_consumer_session(
+        resource.name,
+        "billing",
+        "python-worker-b",
+        300_000,
+        idempotency_key="python-sdk-session-join-b",
+    )
+    receipt_b = joined_b.get("receipt")
+    assert isinstance(receipt_b, dict), joined_b
+    assert receipt_b.get("outcome") == "applied", joined_b
+    assert receipt_b.get("group_generation") == "2", joined_b
+    assert receipt_b.get("assigned_shards") == [1], joined_b
+    assert [member.get("assigned_shards") for member in receipt_b.get("members", [])] == [
+        [0, 2],
+        [1],
+    ], joined_b
+
+    heartbeat = client.heartbeat_consumer_session(
+        resource.name,
+        "billing",
+        "python-worker-b",
+        2,
+        idempotency_key="python-sdk-session-heartbeat-b",
+    )
+    heartbeat_receipt = heartbeat.get("receipt")
+    assert isinstance(heartbeat_receipt, dict), heartbeat
+    assert heartbeat_receipt.get("outcome") == "applied", heartbeat
+    assert heartbeat_receipt.get("group_generation") == "2", heartbeat
+
+    time.sleep(1.2)
+    maintained_session = client.maintain_consumer_session(
+        resource.name,
+        "billing",
+        idempotency_key="python-sdk-session-maintain-1",
+    )
+    maintenance_receipt = maintained_session.get("receipt")
+    assert isinstance(maintenance_receipt, dict), maintained_session
+    assert maintenance_receipt.get("outcome") == "applied", maintained_session
+    assert maintenance_receipt.get("group_generation") == "3", maintained_session
+    assert maintenance_receipt.get("expired_members") == ["python-worker-a"], (
+        maintained_session
+    )
+    assert maintenance_receipt.get("assigned_shards") == [], maintained_session
+    assert_python_sdk_consumer_session(cluster, resource)
 
 
 def queue_result(document: dict[str, Any], expected_kind: str) -> dict[str, Any]:
@@ -1486,15 +1570,16 @@ def run_campaign(cluster: RegionalCluster) -> None:
     assert new_leader != old_leader
     assert new_term > old_term
     prove_python_sdk_native_stream_after_failover(cluster, stream)
-    wait_for_profile_apply(cluster, stream, 5, survivors)
+    wait_for_profile_apply(cluster, stream, 9, survivors)
     wait_for_profile_apply(cluster, stream, 2, survivors, shard=1)
     wait_for_profile_apply(cluster, stream, 2, survivors, shard=2)
 
     cluster.start_node(old_leader)
     wait_for_nodes(cluster)
-    wait_for_profile_apply(cluster, stream, 5)
+    wait_for_profile_apply(cluster, stream, 9)
     wait_for_profile_apply(cluster, stream, 2, shard=1)
     wait_for_profile_apply(cluster, stream, 2, shard=2)
+    assert_python_sdk_consumer_session(cluster, stream)
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
     for resource in RESOURCES:
         wait_for_profile_apply(cluster, resource, 1)
@@ -1547,9 +1632,10 @@ def run_campaign(cluster: RegionalCluster) -> None:
         == initial_catalog_digest
     )
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
-    wait_for_profile_apply(cluster, stream, 5)
+    wait_for_profile_apply(cluster, stream, 9)
     wait_for_profile_apply(cluster, stream, 2, shard=1)
     wait_for_profile_apply(cluster, stream, 2, shard=2)
+    assert_python_sdk_consumer_session(cluster, stream)
     for resource in RESOURCES:
         expected = (
             11
@@ -1577,7 +1663,7 @@ def main() -> int:
     if not failed:
         print(
             "Epoch Go-to-Rust regional catalog/BFF/four-profile/failover/"
-            "Stream-Queue-Cache-and-Bus-SDK/control-SIGKILL/all-node recovery container campaign passed."
+            "Stream-session-Queue-Cache-and-Bus-SDK/control-SIGKILL/all-node recovery container campaign passed."
         )
     return 0
 

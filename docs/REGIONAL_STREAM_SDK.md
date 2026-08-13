@@ -1,6 +1,6 @@
 # Regional Stream SDK
 
-**Status:** Versioned multi-shard alpha
+**Status:** Versioned multi-shard and coordinated-session alpha
 
 **Languages:** Go, Java, and Python
 
@@ -11,8 +11,9 @@ and requests quorum-confirmed reads. It does not send application data through
 the Go control plane.
 
 See [ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md) for the binding
-decision, [ADR-0023](adr/0023-stream-retention-policies.md) for retention, and
-[ADR-0024](adr/0024-stream-multishard-key-routing.md) for keyed routing, and
+decision, [ADR-0023](adr/0023-stream-retention-policies.md) for retention,
+[ADR-0024](adr/0024-stream-multishard-key-routing.md) for keyed routing,
+[ADR-0025](adr/0025-stream-consumer-sessions.md) for consumer coordination, and
 [Regional runtime](REGIONAL_RUNTIME.md) for provisioning and operations.
 
 ## End-to-end flow
@@ -90,6 +91,11 @@ available for tests in all three SDKs.
 | Commit or reset checkpoint | `CommitOffset` | `commitOffset` | `commit_offset` |
 | Observe checkpoint and lag | `Lag` | `lag` | `lag` |
 | Fetch from checkpoint | `FetchGroup` | `fetchGroup` | `fetch_group` |
+| Join/renew consumer session | `JoinConsumerSession` | `joinConsumerSession` | `join_consumer_session` |
+| Heartbeat session member | `HeartbeatConsumerSession` | `heartbeatConsumerSession` | `heartbeat_consumer_session` |
+| Leave consumer session | `LeaveConsumerSession` | `leaveConsumerSession` | `leave_consumer_session` |
+| Commit expiry maintenance | `MaintainConsumerSession` | `maintainConsumerSession` | `maintain_consumer_session` |
+| Observe membership/assignment | `ConsumerSession` | `consumerSession` | `consumer_session` |
 | Configure retention | `ConfigureRetention` | `configureRetention` | `configure_retention` |
 | Commit idle maintenance | `MaintainRetention` | `maintainRetention` | `maintain_retention` |
 | Observe retention | `Retention` | `retention` | `retention` |
@@ -124,12 +130,56 @@ Configuration and maintenance require idempotency keys. Retention observation
 is linearizable and reports the active policy, watermark, base/end offsets,
 retained record count, and retained canonical bytes.
 
+## Coordinated consumer sessions
+
+Consumer sessions are resource-wide and always use logical shard 0 as the
+coordinator. A successful join returns the current `group_generation`, complete
+lexically ordered membership, and the joining member's `assigned_shards`.
+Shard `s` belongs to member `s % member_count`, so every live shard has exactly
+one deterministic owner and assignment sizes differ by at most one.
+
+Session timeouts are whole milliseconds from 1,000 through 300,000. Heartbeat
+and leave require the current positive generation; an old generation is a
+committed `stale_generation` business rejection. Deadlines expire inclusively.
+Session commands sweep expired members before applying their requested action,
+while `MaintainConsumerSession`, `maintainConsumerSession`, and
+`maintain_consumer_session` provide an explicit sweep for idle groups. There is
+no background timer in this alpha.
+
+Membership generation and the pre-existing per-shard checkpoint-owner
+generation are separate fences. Assignment tells an application which logical
+shards it should process; the application must still perform an explicit
+checkpoint handoff on each shard and stop processing revoked assignments. This
+release does not claim atomic assignment-plus-offset commit, cooperative revoke
+acknowledgement, or exactly-once processing.
+
+Minimal Python lifecycle:
+
+```python
+joined = client.join_consumer_session(
+    "orders", "billing", "worker-a", 30_000,
+    idempotency_key="billing-join-worker-a",
+)
+generation = int(joined["receipt"]["group_generation"])
+assigned = joined["receipt"]["assigned_shards"]
+heartbeat = client.heartbeat_consumer_session(
+    "orders", "billing", "worker-a", generation,
+    idempotency_key="billing-heartbeat-worker-a-1",
+)
+observed = client.consumer_session("orders", "billing")
+left = client.leave_consumer_session(
+    "orders", "billing", "worker-a", generation,
+    idempotency_key="billing-leave-worker-a",
+)
+```
+
 ## Executable examples
 
 The complete examples select a shard from `customer-0`, perform a keyed append,
-repeat the exact append, fetch by offset, fetch
-from a group checkpoint, commit that checkpoint, observe lag, configure a
-combined retention policy, commit idle maintenance, and inspect retention:
+repeat the exact append, fetch by offset, fetch from a group checkpoint, commit
+that checkpoint, observe lag, join/heartbeat/observe/leave a coordinated
+consumer session, configure a combined retention policy, commit idle
+maintenance, and inspect retention:
 
 - [Go regional quickstart](../console/src/quickstarts/regional/quickstart.go)
 - [Java regional quickstart](../console/src/quickstarts/regional/RegionalQuickstart.java)
@@ -182,6 +232,10 @@ The base route is:
 /groups/{group}/offsets
 /groups/{group}/lag
 /groups/{group}/records
+/groups/{group}/sessions
+/groups/{group}/sessions/{member}/heartbeat
+/groups/{group}/sessions/{member}
+/groups/{group}/sessions/maintenance
 /retention
 /retention/maintenance
 ```
@@ -206,6 +260,13 @@ responses, receipts, batch record receipts, fetched records, checkpoints,
 retention observations, and status. This preserves existing command and
 snapshot bytes while preventing callers from seeing every shard as partition
 zero.
+
+Session suffixes are valid only on shard 0. Join is `POST .../sessions`,
+heartbeat is `PUT .../sessions/{member}/heartbeat`, leave is
+`DELETE .../sessions/{member}`, maintenance is
+`POST .../sessions/maintenance`, and observation is `GET .../sessions`.
+Mutations return browser-safe decimal generation, deadline, and watermark
+values. Observation is linearizable.
 
 Every data request carries:
 
@@ -253,9 +314,10 @@ cargo test -p epoch-node regional_router::tests
 The real recovery gate builds the node image, creates three independently
 replicated Stream shards, kills the active leader, routes Python keyed appends
 to shards 0, 1, and 2, verifies logical receipt/record/checkpoint identities,
-runs retention configure/maintenance/observation, restarts the old voter,
-kills every voter, reopens the same volumes, and verifies per-shard
-convergence:
+runs two-member join/rebalance/heartbeat/inclusive expiry plus retention
+configure/maintenance/observation, restarts and catches up the old voter, kills
+every voter, reopens the same volumes, and verifies the session plus per-shard
+state converged:
 
 ```shell
 make test-regional-runtime
@@ -265,12 +327,12 @@ make test-regional-runtime
 
 This versioned alpha covers several independently replicated Stream shards,
 stable key routing for the current resource generation, direct per-shard
-operations, caller-supplied consumer generations, and replicated
-time/size/combined retention. It is not safe online expansion or coordinated
-membership. Automatic split/merge/remapping, virtual shards, join, heartbeat,
-assignment, revoke, dead-member detection, rebalance, one group owning several
-partitions, automatic idle-retention scheduling, keyed compaction, legal hold,
-atomic cross-shard produce-and-offset transactions, automatic
-batching/compression, generated response models, package-registry publication,
-TLS/OIDC/mTLS, dynamic membership, and the production fault/scale matrix remain
-open.
+operations, replicated deterministic join/heartbeat/leave/dead-member expiry
+and resource-wide assignment, caller-supplied checkpoint generations, and
+replicated time/size/combined retention. Automatic split/merge/remapping,
+virtual shards, background session or retention scheduling, cooperative revoke
+handshake, sticky/rack-aware assignment, server-push consumption, atomic
+assignment-plus-offset handoff, keyed compaction, legal hold, cross-shard
+produce-and-offset transactions, automatic batching/compression, generated
+response models, package-registry publication, TLS/OIDC/mTLS, dynamic voter
+membership, and the production fault/scale matrix remain open.

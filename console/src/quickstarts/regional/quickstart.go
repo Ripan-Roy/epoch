@@ -43,6 +43,14 @@ func main() {
 	must(err)
 	lag, err := client.Lag(ctx, "orders", shard, "docs-go")
 	must(err)
+	joined, err := client.JoinConsumerSession(ctx, "orders", "docs-go-session", "docs-go-worker", 30*time.Second, "docs-go-session-join-v1")
+	must(err)
+	heartbeat, err := client.HeartbeatConsumerSession(ctx, "orders", "docs-go-session", "docs-go-worker", 1, "docs-go-session-heartbeat-v1")
+	must(err)
+	session, err := client.ConsumerSession(ctx, "orders", "docs-go-session")
+	must(err)
+	left, err := client.LeaveConsumerSession(ctx, "orders", "docs-go-session", "docs-go-worker", 1, "docs-go-session-leave-v1")
+	must(err)
 	configured, err := client.ConfigureRetention(ctx, "orders", shard, "docs-go-retention-v1", epoch.StreamRetentionPolicy{
 		MaxRecordsPerPartition: 10_000,
 		MaxBytesPerPartition:   3 * 1024 * 1024,
@@ -57,6 +65,7 @@ func main() {
 	output, err := json.MarshalIndent(map[string]any{
 		"selected_shard": shard, "append": appended, "exact_retry": replayed, "fetch": fetched,
 		"group_fetch": groupRecords, "checkpoint": checkpoint, "lag": lag,
+		"session_join": joined, "session_heartbeat": heartbeat, "session": session, "session_leave": left,
 		"retention_configure": configured, "retention_maintenance": maintained,
 		"retention": retention,
 	}, "", "  ")

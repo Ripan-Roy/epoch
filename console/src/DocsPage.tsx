@@ -333,10 +333,10 @@ const sdkSurface = [
   },
   {
     area: "Regional Stream",
-    go: "RegionalStreamClient · StreamShardFor · AppendKeyed · Append · Fetch · CommitOffset · Lag · FetchGroup · ConfigureRetention · MaintainRetention · Retention",
-    java: "RegionalStreamClient · StreamPartitioner.shardFor · appendKeyed · append · fetch · commitOffset · lag · fetchGroup · configureRetention · maintainRetention · retention",
+    go: "RegionalStreamClient · StreamShardFor · AppendKeyed · Append · Fetch · CommitOffset · Lag · FetchGroup · JoinConsumerSession · HeartbeatConsumerSession · LeaveConsumerSession · MaintainConsumerSession · ConsumerSession · ConfigureRetention · MaintainRetention · Retention",
+    java: "RegionalStreamClient · StreamPartitioner.shardFor · appendKeyed · append · fetch · commitOffset · lag · fetchGroup · joinConsumerSession · heartbeatConsumerSession · leaveConsumerSession · maintainConsumerSession · consumerSession · configureRetention · maintainRetention · retention",
     python:
-      "RegionalStreamClient · stream_shard_for · append_keyed · append · fetch · commit_offset · lag · fetch_group · configure_retention · maintain_retention · retention",
+      "RegionalStreamClient · stream_shard_for · append_keyed · append · fetch · commit_offset · lag · fetch_group · join_consumer_session · heartbeat_consumer_session · leave_consumer_session · maintain_consumer_session · consumer_session · configure_retention · maintain_retention · retention",
   },
   {
     area: "Regional Queue",
@@ -845,17 +845,20 @@ export function DocsPage({ section }: DocsPageProps) {
                     conflicting member across failover and EPRS rebuild. Canonical command v4 now commits
                     per-partition time, persisted-byte, and record bounds plus explicit idle-stream
                     maintenance; every voter preserves the same base offset, retention watermark, and
-                    stale-checkpoint signal through checkpoint restore. These are experimental HTTP/tablet
-                    slices, not yet coordinated join, heartbeat, assignment, rebalance, native bidirectional
-                    streaming, automatic client batching, or compression negotiation. The separate regional
-                    Stream, Queue, Cache, and Event Bus v1 clients below expose the implemented operations
-                    with leader/fence-aware Go, Java, and Python routing. Stream resources can now route one
-                    versioned UTF-8 key across several independently replicated shards while failing closed on
-                    a concurrent generation change. Stream remains uncoordinated; Queue and Event Bus delivery
-                    are request/response rather than managed streaming sessions; Cache expiry is explicit and
-                    single-shard. Managed HTTP/gRPC and regional HTTP require a shared deny-by-default
-                    bootstrap bearer policy, but that is not OIDC, TLS/mTLS, credential expiry/revocation, or
-                    immutable audit export.
+                    stale-checkpoint signal through checkpoint restore. Logical shard 0 now also replicates
+                    bounded join, heartbeat, leave, explicit dead-member expiry, one membership generation,
+                    and deterministic assignment of every Stream shard. These are experimental HTTP/tablet
+                    slices, not yet background expiry, cooperative revoke, atomic checkpoint handoff, native
+                    bidirectional streaming, automatic client batching, or compression negotiation. The
+                    separate regional Stream, Queue, Cache, and Event Bus v1 clients below expose the
+                    implemented operations with leader/fence-aware Go, Java, and Python routing. Stream
+                    resources can now route one versioned UTF-8 key across several independently replicated
+                    shards while failing closed on a concurrent generation change. Stream session assignment
+                    is coordinated but remains separate from each shard&apos;s checkpoint-owner fence; Queue
+                    and Event Bus delivery are request/response rather than managed streaming sessions; Cache
+                    expiry is explicit and single-shard. Managed HTTP/gRPC and regional HTTP require a shared
+                    deny-by-default bootstrap bearer policy, but that is not OIDC, TLS/mTLS, credential
+                    expiry/revocation, or immutable audit export.
                   </p>
                 </div>
               </div>
@@ -1035,7 +1038,9 @@ export function DocsPage({ section }: DocsPageProps) {
                 <span>06</span>
                 <div>
                   <p className="eyebrow">MULTI-SHARD REGIONAL STREAM V1</p>
-                  <h2 id="regional-stream-title">Route one key across three replicated partitions.</h2>
+                  <h2 id="regional-stream-title">
+                    Route keys and coordinate consumers across replicated partitions.
+                  </h2>
                   <p>
                     This path is separate from the standalone quickstart. It uses a fully qualified tenant
                     scope, discovers the versioned UTF-8 partitioner and current leader, carries the observed
@@ -1119,9 +1124,18 @@ export function DocsPage({ section }: DocsPageProps) {
                   <span>CONSISTENCY</span>
                   <strong>Reads require a leader barrier.</strong>
                   <p>
-                    Fetch, group fetch, lag, and retention observation explicitly request{" "}
+                    Fetch, group fetch, lag, session, and retention observation explicitly request{" "}
                     <code>linearizable</code>. They never fall back to a local stale read. A minority returns
                     a retryable unavailability error.
+                  </p>
+                </article>
+                <article>
+                  <span>CONSUMER SESSIONS</span>
+                  <strong>Shard zero owns one durable membership generation.</strong>
+                  <p>
+                    Join, heartbeat, leave, and explicit expiry maintenance replicate with the Stream.
+                    Lexically ordered members receive deterministic round-robin shard assignments that survive
+                    leader loss and full-node reopen. The exact examples above exercise this lifecycle.
                   </p>
                 </article>
               </div>
@@ -1129,11 +1143,11 @@ export function DocsPage({ section }: DocsPageProps) {
               <aside className="docs-access-note">
                 <strong>Current boundary</strong>
                 <span>
-                  Regional v1 covers keyed append and direct operations on independently replicated logical
-                  shards. Each shard&apos;s internal tablet command remains physical partition 0 for snapshot
-                  and command compatibility. Online expansion/remapping, automatic producer batching,
-                  coordinated multi-shard group ownership, cross-shard transactions, and package-registry
-                  releases remain open.
+                  Regional v1 covers keyed append, direct per-shard operations, and shard-zero coordinated
+                  membership/assignment. Each shard&apos;s record command remains physical partition 0 for
+                  compatibility. Background expiry, cooperative revoke, atomic assignment-plus-offset handoff,
+                  online expansion/remapping, automatic producer batching, cross-shard transactions, and
+                  package-registry releases remain open.
                 </span>
               </aside>
             </section>
@@ -1664,6 +1678,12 @@ export function DocsPage({ section }: DocsPageProps) {
                   title="Multi-shard key routing"
                   description="Logical-to-physical partition identity, versioned FNV-1a UTF-8 vectors, generation-pinned keyed append, compatibility, recovery evidence, and online-expansion non-claims."
                   href={`${repositoryDocsUrl}/adr/0024-stream-multishard-key-routing.md`}
+                />
+                <ReferenceCard
+                  eyebrow="CONSUMER SESSIONS"
+                  title="Replicated membership and assignment"
+                  description="Shard-zero authority, bounded join/heartbeat/leave, monotonic generations and deadlines, deterministic assignment, checkpoint recovery, SDK routes, and atomic-handoff non-claims."
+                  href={`${repositoryDocsUrl}/adr/0025-stream-consumer-sessions.md`}
                 />
                 <ReferenceCard
                   eyebrow="QUEUE TABLET"

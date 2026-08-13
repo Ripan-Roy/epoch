@@ -11,13 +11,13 @@ one logical shard/partition and one independent consensus group per tablet.
 Canonical tablet commands still name physical partition 0. The node binds the
 catalog shard as runtime metadata and externalizes that logical partition in
 regional receipts, records, checkpoints, retention observations, and status.
-This preserves historical command and snapshot bytes; see
+This preserves historical command bytes and legacy snapshot decoding; see
 [ADR-0024](adr/0024-stream-multishard-key-routing.md).
 
 ## What is implemented
 
 ```text
-typed append, compressed batch, consumer-checkpoint, or retention request
+typed append, compressed batch, checkpoint, retention, or session request
   -> canonical versioned tablet command
   -> persistent Raft proposal
   -> durable fixed-voter-majority commit
@@ -42,7 +42,8 @@ typed append, compressed batch, consumer-checkpoint, or retention request
 
 The historical single append remains canonical command v1 byte-for-byte. A
 batch alone emits v2, a consumer-group offset mutation alone emits v3, and a
-retention configuration or maintenance mutation alone emits v4. All
+retention configuration or maintenance mutation alone emits v4. Consumer
+session join, heartbeat, leave, and maintenance alone emit v5. All
 accept only partition `0`, reject unknown fields and
 version/kind mismatches, are limited to the consensus proposal ceiling, and
 must match canonical JSON exactly. A batch contains 1–1,000 unique client
@@ -60,6 +61,17 @@ requests are committed as typed fenced rejections. `commit` moves only forward;
 `reset` is the explicit retained-range rewind. A group/member is limited to 256
 bytes and one tablet retains at most 10,000 groups. These are checkpoint and
 fencing semantics, not automatic membership or rebalancing.
+
+Command v5 is coordinated on logical shard 0 and captures the resource shard
+count. It replicates bounded members, 1–300 second deadlines, a monotonic time
+watermark, and one membership generation. New join, leave, or one-or-more
+inclusive deadline expirations advance the generation once. Rejoin and valid
+heartbeat renew a deadline without changing it. Lexically sorted members own
+shard `s` by `s mod member_count`, producing a deterministic resource-wide
+assignment. Heartbeat and leave are generation-fenced typed outcomes; explicit
+maintenance advances idle expiry. Native snapshot v2 persists the session map
+and accepts legacy v1 snapshots as an empty map. See
+[ADR-0025](adr/0025-stream-consumer-sessions.md).
 
 Command v4 replaces or maintains an independent per-partition time, canonical
 persisted-byte, and record-count policy. Age expiry is inclusive, combined
@@ -305,6 +317,31 @@ local contract. The separate Go, Java, and Python `RegionalStreamClient`
 explicitly opts into replicated member/generation fencing and linearizable
 reads.
 
+### Coordinate a multi-shard consumer session
+
+Session operations are accepted only by the service bound to logical shard 0:
+
+```text
+POST   /experimental/v1/tablets/stream/groups/billing/sessions
+GET    /experimental/v1/tablets/stream/groups/billing/sessions
+PUT    /experimental/v1/tablets/stream/groups/billing/sessions/worker-a/heartbeat
+DELETE /experimental/v1/tablets/stream/groups/billing/sessions/worker-a
+POST   /experimental/v1/tablets/stream/groups/billing/sessions/maintenance
+```
+
+Join supplies `idempotency_key`, `expected_term`, `member_id`, and decimal
+`session_timeout_ms`. Heartbeat and leave supply the idempotency key, term, and
+decimal `group_generation`; the member comes from the encoded path. Maintenance
+supplies only the mutation identity and term. Receipts include the operation,
+captured shard count, current generation and watermark, complete member plan,
+the caller's assignment, expired members, and typed applied/rejected outcome.
+
+The authenticated regional v1 route exposes the same suffixes beneath
+`.../streams/{name}/shards/0`; its observation uses a leader ReadIndex barrier.
+Go, Java, and Python clients always select shard 0 automatically. Assignment
+does not automatically transfer or atomically commit each independent shard's
+v3 offset checkpoint.
+
 ### Configure and maintain retention
 
 Configure any combination of time, canonical bytes, and record count on the
@@ -364,19 +401,23 @@ peer endpoints are isolated and trusted; an unauthenticated peer can spoof a
 voter, so this is not durable-majority proof under a hostile network. Do not
 expose it to an untrusted network.
 
-It also has static membership, one group/resource, one partition, no automatic
-checkpoint or idle-retention schedule, user-exportable backup/PITR, follower
+It also has static Raft membership, one consensus group per logical partition,
+no automatic checkpoint, session-expiry, or idle-retention schedule,
+user-exportable backup/PITR, follower
 read routing, catalog-authorized epoch
 transition, placement, authenticated peer identity, bounded idempotency
 retention, replica-progress/ISR contract, or exhaustive crash/I/O matrix.
-Consumer groups add no join, heartbeat, assignment, revoke, session timeout,
-automatic generation allocation, dead-member detection, rebalance strategy,
-multi-partition ownership, transactional offset commit, or coordinated consumer
-session surface.
+Consumer sessions provide replicated join, heartbeat, leave, explicit
+dead-member expiry, automatic membership generations, and deterministic
+resource-wide assignment. They do not add background expiry, server-push
+assignment, cooperative revoke acknowledgement, sticky/rack-aware strategies,
+streaming fetch, atomic checkpoint handoff, transactional offset commit, or
+exactly-once processing.
 Retention does not add keyed compaction, tombstones, legal hold, object-tier
 deletion, namespace policy guardrails, or a resource-wide policy coordinator.
-The regional Stream v1 SDK exposes the current checkpoint primitive, but it
-does not turn that primitive into a coordinated consumer session.
+The regional Stream v1 SDK exposes both the per-shard checkpoint primitive and
+the shard-zero session coordinator, but their generations remain separate
+fences rather than one atomic cross-shard protocol.
 The batch route is whole-command atomic and client-framed; it does not provide
 the future bidirectional Produce stream, connection credit, automatic producer
 batching, codec negotiation, non-atomic per-record rejection, compression
@@ -398,4 +439,6 @@ See [Architecture](ARCHITECTURE.md), [Semantics](SEMANTICS.md),
 Checkpoint details are recorded in
 [ADR-0016](adr/0016-stream-consumer-group-checkpoints.md); versioned route and
 SDK behavior are recorded in
-[ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md).
+[ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md), and session
+coordination is recorded in
+[ADR-0025](adr/0025-stream-consumer-sessions.md).

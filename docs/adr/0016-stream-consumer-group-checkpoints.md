@@ -13,10 +13,10 @@ lag, or fence a former group owner. STREAM-003 requires durable checkpoints,
 lag, reset/rewind, and replay before the later coordinated membership protocol
 can be credible.
 
-This decision covers the experimental single-partition tablet. It establishes
-replicated checkpoint and ownership-fence semantics; it does not claim that
-join, heartbeat, assignment, revoke, session timeout, or automatic rebalance is
-implemented.
+This decision covers the per-partition checkpoint primitive. It establishes
+replicated offset and ownership-fence semantics. ADR-0025 subsequently adds a
+separate shard-zero join/heartbeat/leave/expiry/assignment coordinator without
+changing this v3 checkpoint protocol.
 
 ## Decision
 
@@ -57,9 +57,9 @@ implemented.
 9. The existing Go, Java, and Python SDK offset helpers continue to target the
    standalone API and do not silently replace that stable-local contract.
    [ADR-0017](0017-regional-stream-v1-and-sdk-routing.md) subsequently adds a
-   separate regional client for this explicit checkpoint primitive. A future
-   native `ConsumerSession` surface must still add coordinated membership,
-   assignment, rebalance, and package compatibility.
+   separate regional client for this explicit checkpoint primitive. ADR-0025
+   adds regional `ConsumerSession` membership and assignment methods while
+   deliberately retaining this per-shard owner generation as a separate fence.
 
 ## Consequences
 
@@ -71,18 +71,19 @@ implemented.
 - A timed-out caller can retry the same idempotency key and semantic input; a
   changed member, generation, offset, or mode conflicts with the original
   command.
-- Caller-supplied generations are a fencing primitive, not a membership
-  service. Epoch does not yet discover dead members, assign partitions, revoke
-  ownership, or guarantee cooperative/eager rebalance behavior.
+- Caller-supplied checkpoint generations are a fencing primitive, not the
+  membership service. ADR-0025 can discover dead session members and assign
+  logical shards, but it does not atomically install that generation in every
+  checkpoint or guarantee cooperative revoke behavior.
 - Offset commits are not atomic with record production or transactions in this
   slice. STREAM-008 remains responsible for atomic offsets and read-committed
   transaction semantics.
 - STREAM-003 advances from a local prototype to a replicated slice. ADR-0023
   subsequently defines retention interaction: stale checkpoints are preserved,
-  flagged out of range, and require explicit reset. Coordinated sessions,
-  multi-partition assignment, authorization/audit specificity, generated
-  session contracts, scale/fairness evidence, and the production fault matrix
-  remain incomplete.
+  flagged out of range, and require explicit reset. ADR-0025 subsequently adds
+  coordinated sessions and resource-wide assignment. Atomic checkpoint
+  handoff, authorization/audit specificity, generated response contracts,
+  scale/fairness evidence, and the production fault matrix remain incomplete.
 
 ## Rejected alternatives
 

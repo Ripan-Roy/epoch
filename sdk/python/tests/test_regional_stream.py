@@ -206,6 +206,36 @@ class RegionalStreamClientTests(unittest.TestCase):
         self.assertEqual(read["headers"]["x-epoch-read-consistency"], "linearizable")
         self.assertEqual(read["query"], {"offset": 11, "limit": 25})
 
+    def test_coordinated_consumer_session_contracts_use_shard_zero(self) -> None:
+        self.client.join_consumer_session(
+            "orders", "billing/eu", "member-a", 30_000, idempotency_key="join-a"
+        )
+        self.client.heartbeat_consumer_session(
+            "orders", "billing/eu", "member-a", 3, idempotency_key="heartbeat-a"
+        )
+        self.client.consumer_session("orders", "billing/eu")
+        self.client.maintain_consumer_session("orders", "billing/eu", idempotency_key="maintain-a")
+        self.client.leave_consumer_session(
+            "orders", "billing/eu", "member-a", 3, idempotency_key="leave-a"
+        )
+
+        expected = [
+            (1, "POST", "/groups/billing%2Feu/sessions"),
+            (3, "PUT", "/groups/billing%2Feu/sessions/member-a/heartbeat"),
+            (5, "GET", "/groups/billing%2Feu/sessions"),
+            (7, "POST", "/groups/billing%2Feu/sessions/maintenance"),
+            (9, "DELETE", "/groups/billing%2Feu/sessions/member-a"),
+        ]
+        for index, method, suffix in expected:
+            request = self.leader.requests[index]
+            self.assertEqual(request["method"], method)
+            self.assertTrue(request["path"].endswith(suffix))
+        self.assertEqual(
+            self.leader.requests[5]["headers"]["x-epoch-read-consistency"], "linearizable"
+        )
+        for index in (0, 2, 4, 6, 8):
+            self.assertTrue(self.leader.requests[index]["path"].endswith("/shards/0"))
+
     def test_scope_and_mutation_inputs_fail_before_network(self) -> None:
         with self.assertRaisesRegex(ValueError, "organization"):
             RegionalScope("", "shop", "dev", "core")

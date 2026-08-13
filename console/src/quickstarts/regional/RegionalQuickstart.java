@@ -56,6 +56,28 @@ public final class RegionalQuickstart {
             false,
             "docs-java-checkpoint-v1");
     JsonNode lag = client.lag("orders", shard, "docs-java");
+    JsonNode joined =
+        client.joinConsumerSession(
+            "orders",
+            "docs-java-session",
+            "docs-java-worker",
+            Duration.ofSeconds(30),
+            "docs-java-session-join-v1");
+    JsonNode heartbeat =
+        client.heartbeatConsumerSession(
+            "orders",
+            "docs-java-session",
+            "docs-java-worker",
+            1,
+            "docs-java-session-heartbeat-v1");
+    JsonNode session = client.consumerSession("orders", "docs-java-session");
+    JsonNode left =
+        client.leaveConsumerSession(
+            "orders",
+            "docs-java-session",
+            "docs-java-worker",
+            1,
+            "docs-java-session-leave-v1");
     JsonNode configured =
         client.configureRetention(
             "orders",
@@ -77,6 +99,10 @@ public final class RegionalQuickstart {
     output.set("group_fetch", groupRecords);
     output.set("checkpoint", checkpoint);
     output.set("lag", lag);
+    output.set("session_join", joined);
+    output.set("session_heartbeat", heartbeat);
+    output.set("session", session);
+    output.set("session_leave", left);
     output.set("retention_configure", configured);
     output.set("retention_maintenance", maintained);
     output.set("retention", retention);

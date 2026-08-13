@@ -562,9 +562,9 @@ GET /v1/organizations/{org}/projects/{project}/environments/{environment}/namesp
 ```
 
 `GET` on the shard base performs discovery. The current Go, Java, and Python
-SDK contract maps `records`, `groups/{group}/{offsets|lag|records}`, and
-`retention[/maintenance]` to the replicated single-partition tablet owned by
-that logical shard.
+SDK contract maps `records`, `groups/{group}/{offsets|lag|records}`,
+shard-zero `groups/{group}/sessions[...]`, and `retention[/maintenance]` to the
+replicated tablet owned by the selected logical shard.
 Retention reads use the same default leader ReadIndex barrier. The stable
 adapter removes the generic `kind` and `data`
 segments but does not introduce another log or state store.
@@ -798,8 +798,38 @@ are decimal strings. Command v3 applies and recovers this state from the same
 EPRS history as v1/v2 records without changing their golden bytes or digest
 transitions. The generic regional router maps these operations under
 `data/groups/{group}/...`; regional reads use the normal safe ReadIndex default.
-This is durable checkpoint/fencing evidence, not coordinated join, heartbeat,
-assignment, revoke, rebalance, transactional offsets, or a stable SDK promise.
+This v3 state is durable per-shard checkpoint/fencing evidence; its owner fence
+remains separate from coordinated membership and is not an atomic revoke,
+assignment-plus-offset handoff, or transactional offset promise.
+A separate canonical v5 consumer-session command is coordinated on logical
+shard 0. Its direct and regional suffixes are:
+
+```text
+POST   /groups/{group}/sessions
+GET    /groups/{group}/sessions
+PUT    /groups/{group}/sessions/{member}/heartbeat
+DELETE /groups/{group}/sessions/{member}
+POST   /groups/{group}/sessions/maintenance
+```
+
+Join captures the resource shard count and a 1,000–300,000 ms timeout.
+Heartbeat and leave require the current decimal membership generation. Members
+are sorted lexically and shard `s` is assigned to member
+`s mod member_count`. Every committed command advances a monotonic logical-time
+watermark, expires `deadline <= watermark` inclusively, and increments the
+generation once if membership changed. An expiry may commit even when the
+requested heartbeat is then rejected as unknown or stale, so callers inspect
+the receipt's `outcome`, `rejection`, `expired_members`, generation, and
+complete member plan. GET uses the regional leader ReadIndex barrier.
+Deadline arithmetic is checked; overflow is a committed `deadline_overflow`
+rejection with no partial member update or phantom group.
+
+Session command v5 and native Stream snapshot v2 preserve v1–v4 command bytes
+and accept legacy snapshot v1 with an empty session map. This coordinator
+assigns logical shards but does not atomically replace each shard's independent
+v3 checkpoint-owner generation. Background maintenance, cooperative revoke,
+server-push consumption, and transactional offset handoff remain open. See
+[ADR-0025](adr/0025-stream-consumer-sessions.md).
 A bounded unresolved wait returns `202`, preserving local `unknown` versus
 `pending` state while keeping outcome certainty unknown. Exact retries return
 the original offset; changed input under the same key is a conflict, and every

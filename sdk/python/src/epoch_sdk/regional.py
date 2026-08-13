@@ -20,6 +20,8 @@ _MAX_FETCH_RECORDS = 1_000
 _MAX_RETENTION_RECORDS = 100_000
 _MAX_RETENTION_BYTES = 3 * 1024 * 1024
 _MAX_RETENTION_AGE_MS = 10 * 365 * 24 * 60 * 60 * 1_000
+_MIN_SESSION_TIMEOUT_MS = 1_000
+_MAX_SESSION_TIMEOUT_MS = 300_000
 _STREAM_PARTITIONER = "fnv1a64_utf8_mod_n_v1"
 
 
@@ -211,6 +213,134 @@ class RegionalStreamClient(RegionalClient):
             ),
         )
 
+    def join_consumer_session(
+        self,
+        stream: str,
+        group: str,
+        member_id: str,
+        session_timeout_ms: int,
+        *,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Join or renew a member and return its generation-fenced shard assignment."""
+        group_segment = _segment(group, "consumer group")
+        _required(member_id, "consumer member")
+        _bounded_session_timeout(session_timeout_ms)
+        _required(idempotency_key, "idempotency key")
+        return self._stream_call(
+            stream,
+            0,
+            lambda route: (
+                "POST",
+                f"/groups/{group_segment}/sessions",
+                {
+                    "idempotency_key": idempotency_key,
+                    "expected_term": route.term,
+                    "member_id": member_id,
+                    "session_timeout_ms": str(session_timeout_ms),
+                },
+                None,
+                {},
+            ),
+        )
+
+    def heartbeat_consumer_session(
+        self,
+        stream: str,
+        group: str,
+        member_id: str,
+        generation: int,
+        *,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Renew one member with the current group-generation fence."""
+        return self._mutate_consumer_session(
+            "PUT",
+            stream,
+            group,
+            member_id,
+            generation,
+            idempotency_key,
+            "/heartbeat",
+        )
+
+    def leave_consumer_session(
+        self,
+        stream: str,
+        group: str,
+        member_id: str,
+        generation: int,
+        *,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Leave a group and deterministically reassign this member's shards."""
+        return self._mutate_consumer_session(
+            "DELETE", stream, group, member_id, generation, idempotency_key, ""
+        )
+
+    def maintain_consumer_session(
+        self, stream: str, group: str, *, idempotency_key: str
+    ) -> dict[str, Any]:
+        """Commit an inclusive-deadline member-expiry sweep on shard zero."""
+        group_segment = _segment(group, "consumer group")
+        _required(idempotency_key, "idempotency key")
+        return self._stream_call(
+            stream,
+            0,
+            lambda route: (
+                "POST",
+                f"/groups/{group_segment}/sessions/maintenance",
+                {"idempotency_key": idempotency_key, "expected_term": route.term},
+                None,
+                {},
+            ),
+        )
+
+    def consumer_session(self, stream: str, group: str) -> dict[str, Any]:
+        """Return linearizable membership, generation, deadlines, and assignments."""
+        group_segment = _segment(group, "consumer group")
+        return self._stream_call(
+            stream,
+            0,
+            lambda _route: (
+                "GET",
+                f"/groups/{group_segment}/sessions",
+                None,
+                None,
+                {"x-epoch-read-consistency": "linearizable"},
+            ),
+        )
+
+    def _mutate_consumer_session(
+        self,
+        method: str,
+        stream: str,
+        group: str,
+        member_id: str,
+        generation: int,
+        idempotency_key: str,
+        suffix: str,
+    ) -> dict[str, Any]:
+        group_segment = _segment(group, "consumer group")
+        member_segment = _segment(member_id, "consumer member")
+        _positive(generation, "consumer group generation")
+        _required(idempotency_key, "idempotency key")
+        return self._stream_call(
+            stream,
+            0,
+            lambda route: (
+                method,
+                f"/groups/{group_segment}/sessions/{member_segment}{suffix}",
+                {
+                    "idempotency_key": idempotency_key,
+                    "expected_term": route.term,
+                    "group_generation": str(generation),
+                },
+                None,
+                {},
+            ),
+        )
+
     def configure_retention(
         self,
         stream: str,
@@ -274,6 +404,18 @@ class RegionalStreamClient(RegionalClient):
 def _fetch_limit(limit: int) -> None:
     if isinstance(limit, bool) or not 1 <= limit <= _MAX_FETCH_RECORDS:
         raise ValueError(f"fetch limit must be between 1 and {_MAX_FETCH_RECORDS}")
+
+
+def _bounded_session_timeout(session_timeout_ms: int) -> None:
+    if (
+        isinstance(session_timeout_ms, bool)
+        or not isinstance(session_timeout_ms, int)
+        or not _MIN_SESSION_TIMEOUT_MS <= session_timeout_ms <= _MAX_SESSION_TIMEOUT_MS
+    ):
+        raise ValueError(
+            "consumer session timeout must be between "
+            f"{_MIN_SESSION_TIMEOUT_MS} and {_MAX_SESSION_TIMEOUT_MS} milliseconds"
+        )
 
 
 def stream_shard_for(partition_value: str, shard_count: int) -> int:
