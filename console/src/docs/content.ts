@@ -16,7 +16,7 @@ import regionalBusPythonSource from "../quickstarts/regional_bus/quickstart.py?r
 
 export const repositoryUrl = "https://github.com/Ripan-Roy/epoch";
 export const repositoryDocsUrl = `${repositoryUrl}/blob/main/docs`;
-export const releaseVersion = "0.1.0-alpha.4";
+export const releaseVersion = "0.1.0-alpha.5";
 
 export type LanguageId = "go" | "java" | "python";
 
@@ -73,6 +73,15 @@ EPOCH_AUTH_POLICY_PATH=spec/auth/bootstrap-policy-v1.example.json \
 EPOCH_CONTROL_REGIONAL_TOKEN=epoch-dev-control-v1 \
 go run ./control/cmd/epoch-control`;
 
+export const governanceInventory = `# Filter with exact AND semantics
+curl --fail --get http://127.0.0.1:8080/v1/regional/resources \\
+  --header 'authorization: Bearer epoch-dev-admin-v1' \\
+  --data-urlencode 'owner=team:platform' \\
+  --data-urlencode 'cost_center=cc-1042' \\
+  --data-urlencode 'classification=confidential' \\
+  --data-urlencode 'tag=service=orders' \\
+  --data-urlencode 'tag=profile=stream'`;
+
 export const regionalResource = `# Terminal C · create one three-shard replicated Stream
 curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
   --header 'authorization: Bearer epoch-dev-admin-v1' \
@@ -83,6 +92,7 @@ curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
     "resource":{
       "organization":"acme","project":"shop","environment":"dev","namespace":"core",
       "kind":"stream","name":"orders",
+      "governance":{"owner":"team:platform","cost_center":"cc-1042","classification":"confidential","tags":{"service":"orders","profile":"stream"}},
       "spec":{"shard_count":3,"replica_count":3,"placement":{
         "allowed_regions":["ap-south"],"minimum_zones":3,
         "required_node_class":"general-purpose"
@@ -100,6 +110,7 @@ curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
     "resource":{
       "organization":"acme","project":"shop","environment":"dev","namespace":"core",
       "kind":"queue","name":"jobs",
+      "governance":{"owner":"team:platform","cost_center":"cc-1042","classification":"internal","tags":{"service":"jobs","profile":"queue"}},
       "spec":{"shard_count":1,"replica_count":3,"placement":{
         "allowed_regions":["ap-south"],"minimum_zones":3,
         "required_node_class":"general-purpose"
@@ -117,6 +128,7 @@ curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
     "resource":{
       "organization":"acme","project":"shop","environment":"dev","namespace":"core",
       "kind":"cache","name":"sessions",
+      "governance":{"owner":"team:platform","cost_center":"cc-1042","classification":"confidential","tags":{"service":"sessions","profile":"cache"}},
       "spec":{"shard_count":1,"replica_count":3,"configuration":{
         "shard_count":1,"max_entries":32,"default_ttl_ms":null,
         "eviction":"all_keys_lru"
@@ -137,6 +149,7 @@ curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
     "resource":{
       "organization":"acme","project":"shop","environment":"dev","namespace":"core",
       "kind":"queue","name":"jobs",
+      "governance":{"owner":"team:platform","cost_center":"cc-1042","classification":"internal","tags":{"service":"jobs","profile":"queue"}},
       "spec":{"shard_count":1,"replica_count":3,"placement":{
         "allowed_regions":["ap-south"],"minimum_zones":3,
         "required_node_class":"general-purpose"
@@ -153,6 +166,7 @@ curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
     "resource":{
       "organization":"acme","project":"shop","environment":"dev","namespace":"core",
       "kind":"stream","name":"orders",
+      "governance":{"owner":"team:platform","cost_center":"cc-1042","classification":"confidential","tags":{"service":"orders","profile":"stream"}},
       "spec":{"shard_count":3,"replica_count":3,"placement":{
         "allowed_regions":["ap-south"],"minimum_zones":3,
         "required_node_class":"general-purpose"
@@ -170,6 +184,7 @@ curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
     "resource":{
       "organization":"acme","project":"shop","environment":"dev","namespace":"core",
       "kind":"event-bus","name":"events",
+      "governance":{"owner":"team:platform","cost_center":"cc-1042","classification":"internal","tags":{"service":"events","profile":"event-bus"}},
       "spec":{"shard_count":1,"replica_count":3,"placement":{
         "allowed_regions":["ap-south"],"minimum_zones":3,
         "required_node_class":"general-purpose"

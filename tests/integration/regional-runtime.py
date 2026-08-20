@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -573,6 +574,15 @@ def managed_resource_request(
             "namespace": "core",
             "kind": resource.kind,
             "name": resource.name,
+            "governance": {
+                "owner": "team:platform",
+                "cost_center": "cc-1042",
+                "classification": "confidential",
+                "tags": {
+                    "profile": resource.kind,
+                    "service": resource.name,
+                },
+            },
             "spec": {
                 "shard_count": shard_count,
                 "replica_count": 3,
@@ -584,6 +594,49 @@ def managed_resource_request(
             },
         },
     }
+
+
+def assert_managed_governance(
+    cluster: RegionalCluster, resource: Resource, expected_shards: int
+) -> None:
+    query = urllib.parse.urlencode(
+        [
+            ("owner", "TEAM:PLATFORM"),
+            ("cost_center", "CC-1042"),
+            ("classification", "confidential"),
+            ("tag", f"service={resource.name}"),
+            ("tag", f"profile={resource.kind}"),
+        ]
+    )
+    inventory = cluster.control_request("GET", f"/v1/regional/resources?{query}")
+    assert inventory.status == 200, inventory
+    resources = inventory.document.get("resources")
+    assert isinstance(resources, list) and len(resources) == 1, inventory
+    governed = resources[0]
+    assert isinstance(governed, dict), governed
+    assert governed.get("canonical_name") == (
+        f"acme/shop/dev/core/{resource.kind}/{resource.name}"
+    ), governed
+    assert governed.get("governance") == {
+        "owner": "team:platform",
+        "cost_center": "cc-1042",
+        "classification": "confidential",
+        "tags": {"profile": resource.kind, "service": resource.name},
+    }, governed
+    attribution = inventory.document.get("cost_attribution")
+    assert attribution == [
+        {
+            "cost_center": "cc-1042",
+            "classification": "confidential",
+            "resource_count": 1,
+            "shard_count": expected_shards,
+        }
+    ], attribution
+
+    for node in NODES:
+        catalog = cluster.request(node, "GET", resource.catalog_path)
+        assert catalog.status == 200, catalog
+        assert catalog.document.get("governance") == governed.get("governance"), catalog
 
 
 def create_managed_resource(cluster: RegionalCluster, resource: Resource) -> None:
@@ -1855,6 +1908,7 @@ def run_campaign(cluster: RegionalCluster) -> None:
     cluster.start_control()
     create_managed_resource(cluster, MANAGED_RESOURCE)
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
+    assert_managed_governance(cluster, MANAGED_RESOURCE, MANAGED_STREAM_SHARDS)
     wait_for_topology(cluster, 1 + MANAGED_STREAM_SHARDS)
     prove_capacity_rejection(cluster)
     write_profile(cluster, MANAGED_RESOURCE, 1)
@@ -1863,6 +1917,7 @@ def run_campaign(cluster: RegionalCluster) -> None:
     cluster.start_control()
     replay_managed_resource(cluster, MANAGED_RESOURCE)
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
+    assert_managed_governance(cluster, MANAGED_RESOURCE, MANAGED_STREAM_SHARDS)
     wait_for_profile_apply(cluster, MANAGED_RESOURCE, 1)
     for resource in RESOURCES:
         if resource.kind == "cache":
@@ -1901,6 +1956,7 @@ def run_campaign(cluster: RegionalCluster) -> None:
     assert_python_sdk_stream_batch(cluster, stream)
     assert_python_sdk_fenced_consumption(cluster, stream)
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
+    assert_managed_governance(cluster, MANAGED_RESOURCE, MANAGED_STREAM_SHARDS)
     for resource in RESOURCES:
         wait_for_profile_apply(cluster, resource, 1)
 

@@ -1,6 +1,9 @@
+use std::collections::BTreeMap;
+
 use epoch_catalog::{
-    ApplyResource, CATALOG_COMMAND_FORMAT_VERSION, CATALOG_CONFIG_COMMAND_FORMAT_VERSION, Catalog,
-    CatalogCommand, CatalogError, ResourceName, ResourceSpec, catalog_proposal_id_for,
+    ApplyResource, CATALOG_COMMAND_FORMAT_VERSION, CATALOG_CONFIG_COMMAND_FORMAT_VERSION,
+    CATALOG_GOVERNANCE_COMMAND_FORMAT_VERSION, Catalog, CatalogCommand, CatalogError,
+    DataClassification, ResourceGovernance, ResourceName, ResourceSpec, catalog_proposal_id_for,
 };
 use epoch_core::{ResourceKind, WorkloadProfile};
 
@@ -18,8 +21,21 @@ fn apply(kind: ResourceKind, profile: WorkloadProfile) -> CatalogCommand {
             shard_count: 1,
             replica_count: 3,
             configuration: None,
+            governance: None,
         },
     })
+}
+
+fn governance() -> ResourceGovernance {
+    ResourceGovernance {
+        owner: "team:payments".into(),
+        cost_center: "cc-1042".into(),
+        classification: DataClassification::Confidential,
+        tags: BTreeMap::from([
+            ("service".into(), "checkout".into()),
+            ("tier".into(), "critical".into()),
+        ]),
+    }
 }
 
 #[test]
@@ -151,6 +167,96 @@ fn profile_configuration_is_versioned_persisted_and_immutable() {
         Catalog::new().apply(invalid),
         Err(CatalogError::InvalidSpec(_))
     ));
+}
+
+#[test]
+fn governance_is_versioned_mutable_and_snapshot_persistent() {
+    let mut command = apply(ResourceKind::Stream, WorkloadProfile::StreamLog);
+    let CatalogCommand::Apply(request) = &mut command else {
+        unreachable!();
+    };
+    request.spec.governance = Some(governance());
+    let encoded = command.encode().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&encoded).unwrap()["format_version"],
+        CATALOG_GOVERNANCE_COMMAND_FORMAT_VERSION
+    );
+    assert_eq!(CatalogCommand::decode(&encoded).unwrap(), command);
+
+    let mut catalog = Catalog::new();
+    let created = catalog.apply(command.clone()).unwrap();
+    assert_eq!(
+        created
+            .resource()
+            .unwrap()
+            .spec
+            .governance
+            .as_ref()
+            .unwrap(),
+        &governance()
+    );
+    let snapshot = catalog.encode_snapshot().unwrap();
+    let restored = Catalog::decode_snapshot(&snapshot).unwrap();
+    assert_eq!(
+        restored.state_digest().unwrap(),
+        catalog.state_digest().unwrap()
+    );
+
+    let CatalogCommand::Apply(request) = &mut command else {
+        unreachable!();
+    };
+    request.request_token = "transfer-orders-ownership".into();
+    request.expected_generation = Some(1);
+    request.spec.governance.as_mut().unwrap().owner = "team:platform".into();
+    let updated = catalog.apply(command).unwrap();
+    assert_eq!(updated.resource().unwrap().generation, 2);
+    assert_eq!(
+        updated
+            .resource()
+            .unwrap()
+            .spec
+            .governance
+            .as_ref()
+            .unwrap()
+            .owner,
+        "team:platform"
+    );
+}
+
+#[test]
+fn governance_rejects_noncanonical_or_unbounded_metadata() {
+    let invalid = [
+        ResourceGovernance {
+            owner: " Team:Payments".into(),
+            ..governance()
+        },
+        ResourceGovernance {
+            cost_center: String::new(),
+            ..governance()
+        },
+        ResourceGovernance {
+            tags: BTreeMap::from([("epoch.io/forged".into(), "true".into())]),
+            ..governance()
+        },
+        ResourceGovernance {
+            tags: (0..33)
+                .map(|index| (format!("tag-{index}"), "value".into()))
+                .collect(),
+            ..governance()
+        },
+    ];
+    for (index, governance) in invalid.into_iter().enumerate() {
+        let mut command = apply(ResourceKind::Stream, WorkloadProfile::StreamLog);
+        let CatalogCommand::Apply(request) = &mut command else {
+            unreachable!();
+        };
+        request.request_token = format!("invalid-governance-{index}");
+        request.spec.governance = Some(governance);
+        assert!(matches!(
+            Catalog::new().apply(command),
+            Err(CatalogError::InvalidSpec(_))
+        ));
+    }
 }
 
 #[test]

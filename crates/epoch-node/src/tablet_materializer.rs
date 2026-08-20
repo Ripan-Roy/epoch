@@ -678,6 +678,7 @@ mod tests {
                 shard_count: shards,
                 replica_count: SUPPORTED_REPLICA_COUNT,
                 configuration: None,
+                governance: None,
             },
         })
     }

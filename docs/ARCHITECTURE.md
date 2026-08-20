@@ -814,6 +814,16 @@ second file owner. Health exposes the `bbolt_v1` mode, and the regional campaign
 kills and reopens the real Go process against the same database before proving
 exact replay and reconciliation.
 
+Managed desired state now includes canonical governance metadata. New regional
+resources require owner, cost center, classification, and bounded tags. Go
+persists that value before acknowledgement and sends it through the authority
+adapter; Rust catalog command/snapshot version 3 replicates it with the resource
+spec. Governance participates in desired-state equality and generation fencing,
+while valid legacy v1/v2 catalog and bbolt records without it remain readable.
+The BFF applies tenant authorization and exact governance filters before
+deterministic resource/shard attribution, so aggregation cannot disclose a
+hidden tenant. See [ADR-0033](adr/0033-resource-governance-and-cost-attribution.md).
+
 The managed HTTP/gRPC boundary and Rust regional HTTP boundary now share a
 strict bootstrap identity policy. Go authenticates browser/native management
 callers, authorizes the parsed tenant action before registry access, filters
@@ -1040,3 +1050,4 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0030: Leader-Owned Signed Webhook Delivery](adr/0030-leader-owned-signed-webhook-delivery.md)
 - [ADR-0031: Leader-Owned Epoch Queue and Stream Target Delivery](adr/0031-leader-owned-epoch-target-delivery.md)
 - [ADR-0032: Regional Cache Eviction and Committed Access Batches](adr/0032-regional-cache-eviction-and-access-batches.md)
+- [ADR-0033: Replicated Resource Governance and Authorized Cost Attribution](adr/0033-resource-governance-and-cost-attribution.md)

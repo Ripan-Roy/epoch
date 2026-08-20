@@ -8,6 +8,9 @@ Last synchronized with PRD version 0.3 on 20 August 2026.
 
 Status values are:
 
+- **Complete** — the full requirement named by the row has implementation,
+  tests, documentation, and feature-release evidence; broader related
+  capabilities remain separate requirements.
 - **Slice** — part of the foundational vertical slice. This means it is in the first implementation scope, not that its acceptance evidence already exists.
 - **Planned** — assigned to a later milestone; implementation has not started.
 - **Deferred** — intentionally outside the committed delivery milestones.
@@ -299,7 +302,7 @@ durability.
 | DX-003 | P0 | Deterministic single-binary emulator | M1 → M2 | Slice | G1, G2, G4, G10 | Seeded scheduler, virtual clocks/fault plan/transport, golden EPTR history, fixed-voter consensus, real-process EPRS/SIGKILL, and typed Stream/Queue/Cache/Bus runtimes; pending: executable replay bundle and runnable emulator controls |
 | DX-004 | P0 | Test containers and ephemeral namespaces | M1 → M2 | Slice | G1, G5, G10 | A unique three-node Compose project uses independent volumes, dynamic loopback ports, and mounted policy; it proves Go recovery plus simultaneous four-profile failover/catch-up/all-node recovery. Post-failover Python runs Stream, Queue, Cache, and Event Bus lifecycles. The protected real-process campaign retries a signed receiver and automatically delivers to Queue and a keyed multi-shard Stream across differing group leaders, then reopens every voter without duplicate target records. The current Cache configuration/access/batch/eviction extension is wired but not yet protected. Pending: parallel campaigns, Go/Java live regional execution, broader isolation, and injected disk/network matrices |
 | DX-005 | P1 | Audited/redacted console message browser | M3 → M4 | Planned | G5, G7, G8 | Pending: access/redaction/action audit matrix |
-| DX-006 | P0 | Explain live guarantees and cost drivers | M1 basic → M2 | Slice | G0, G3, G5 | The TypeScript console consumes only the Go BFF with an interactively entered session-only bearer, displays desired versus observed generation, per-shard voters/leader, verified region/zone/class evidence, and per-node group capacity while preserving rack/dynamic-membership non-claims; pending: OIDC/session exchange, achieved durability and broader cost inputs, browser accessibility evidence, and historical topology context |
+| DX-006 | P0 | Explain live guarantees and cost drivers | M1 basic → M2 | Slice | G0, G3, G5 | The TypeScript console consumes only the Go BFF with an interactively entered session-only bearer, displays desired versus observed generation, per-shard voters/leader, verified region/zone/class evidence, per-node group capacity, exact governance filters, and authorized resource/shard attribution by cost center and classification. Pending: OIDC/session exchange, achieved durability, usage/rate/currency inputs, browser accessibility evidence, and historical topology context |
 | DX-007 | P1 | Compatibility usage scanner | M3 | Planned | G0, G6 | Pending: unsupported-feature fixture corpus |
 | DX-008 | P1 | End-to-end event trace | M4 | Planned | G1, G4, G5, G7 | Pending: trace/history reconciliation |
 | DX-009 | P1 | TypeScript, Rust, .NET SDKs | M3 | Planned | G0, G1, G6, G10 | Pending: multi-language client matrix |
@@ -312,7 +315,7 @@ durability.
 | GOV-002 | P2 | Legal hold and retention lock | M6 | Planned | G2, G5, G7 | Pending: non-bypass and audit review |
 | GOV-003 | P1 | Payload/field redaction hooks | M4 | Planned | G5, G8 | Pending: restricted-data leakage corpus |
 | GOV-004 | P1 | Residency policy and region allowlist | M4 | Planned | G3, G5, G9 | Pending: placement/export enforcement suite |
-| GOV-005 | P0 | Ownership, cost, classification, tags | M2 | Planned | G1, G3, G5 | Pending: tag policy/query/cost suite |
+| GOV-005 | P0 | Ownership, cost, classification, tags | M2 | Complete | G1, G3, G5 | New managed resources require canonical owner/cost center/classification/tags; Go durable state, Protobuf/HTTP, Rust catalog command/snapshot v3, exact AND filters, authorized deterministic cost-driver aggregation, console controls, legacy recovery, and the real control/data-plane restart campaign are covered by ADR-0033 and the resource-governance guide. ABAC, metering, rates, and billing are separate requirements |
 | GOV-006 | P0 | Exportable sensitive-action audit trail | M1 basics → M4 | Slice | G2, G5, G8 | Pending: event-matrix/export reconciliation |
 
 ## Packaging and Runtime

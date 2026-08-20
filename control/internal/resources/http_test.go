@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -148,6 +149,7 @@ func TestHTTPRegionalInventoryIsBrowserSafeAndExcludesLocalResources(t *testing.
 		ExpectedGeneration: uint64Pointer(0),
 		Resource: DesiredResource{
 			ResourceKey: regionalKey,
+			Governance:  testGovernance(),
 			Spec: json.RawMessage(
 				`{"workload_profile":"WORKLOAD_PROFILE_STREAM_LOG","replicas":3,"configuration":{"shard_count":1}}`,
 			),
@@ -306,7 +308,8 @@ func TestHTTPRegionalInventoryReportsPendingWithoutInventingPlacement(t *testing
 				Kind:         KindQueue,
 				Name:         "jobs",
 			},
-			Spec: json.RawMessage(`{"shard_count":2,"replica_count":3}`),
+			Governance: testGovernance(),
+			Spec:       json.RawMessage(`{"shard_count":2,"replica_count":3}`),
 		},
 	}); err != nil {
 		t.Fatalf("create pending regional resource: %v", err)
@@ -340,6 +343,93 @@ func TestHTTPRegionalInventoryReportsPendingWithoutInventingPlacement(t *testing
 		resource.Tablets == nil ||
 		len(resource.Tablets) != 0 {
 		t.Fatalf("pending regional resource = %+v", resource)
+	}
+}
+
+func TestHTTPRegionalInventoryFiltersGovernanceAndAggregatesCostAttribution(t *testing.T) {
+	registry := NewRegistry()
+	resourcesToCreate := []struct {
+		name       string
+		costCenter string
+		service    string
+		shards     int
+	}{
+		{name: "orders", costCenter: "cc-1042", service: "checkout", shards: 3},
+		{name: "audit", costCenter: "cc-1042", service: "risk", shards: 2},
+		{name: "search", costCenter: "cc-2000", service: "catalog", shards: 4},
+	}
+	for _, input := range resourcesToCreate {
+		_, err := registry.Apply(ApplyRequest{
+			RequestToken: "create-" + input.name,
+			Resource: DesiredResource{
+				ResourceKey: ResourceKey{
+					Organization: "acme", Project: "shop", Environment: "production",
+					Namespace: "core", Kind: KindStream, Name: input.name,
+				},
+				Spec: json.RawMessage(`{"shard_count":` + strconv.Itoa(input.shards) + `,"replica_count":3}`),
+				Governance: &ResourceGovernance{
+					Owner: "team:platform", CostCenter: input.costCenter,
+					Classification: ClassificationInternal,
+					Tags:           map[string]string{"service": input.service},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Apply(%s) error = %v", input.name, err)
+		}
+	}
+	handler := NewHTTPHandler(registry)
+	response := performRequest(
+		t,
+		handler,
+		http.MethodGet,
+		"/v1/regional/resources?owner=TEAM%3APLATFORM&cost_center=CC-1042&classification=internal&tag=service%3Dcheckout",
+		nil,
+		nil,
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET governance inventory status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Resources []struct {
+			Name        string             `json:"name"`
+			Environment string             `json:"environment"`
+			Governance  ResourceGovernance `json:"governance"`
+		} `json:"resources"`
+		CostAttribution []struct {
+			CostCenter     string `json:"cost_center"`
+			Classification string `json:"classification"`
+			ResourceCount  uint64 `json:"resource_count"`
+			ShardCount     uint64 `json:"shard_count"`
+		} `json:"cost_attribution"`
+	}
+	decodeResponse(t, response, &payload)
+	if len(payload.Resources) != 1 || payload.Resources[0].Name != "orders" ||
+		payload.Resources[0].Environment != "production" ||
+		payload.Resources[0].Governance.Tags["service"] != "checkout" {
+		t.Fatalf("governed resources = %+v", payload.Resources)
+	}
+	if len(payload.CostAttribution) != 1 ||
+		payload.CostAttribution[0].CostCenter != "cc-1042" ||
+		payload.CostAttribution[0].Classification != "internal" ||
+		payload.CostAttribution[0].ResourceCount != 1 ||
+		payload.CostAttribution[0].ShardCount != 3 {
+		t.Fatalf("cost attribution = %+v", payload.CostAttribution)
+	}
+}
+
+func TestHTTPRegionalInventoryRejectsMalformedTagFilter(t *testing.T) {
+	handler := NewHTTPHandler(NewRegistry())
+	response := performRequest(
+		t,
+		handler,
+		http.MethodGet,
+		"/v1/regional/resources?tag=missing-separator",
+		nil,
+		nil,
+	)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("GET malformed tag status = %d, body = %s", response.Code, response.Body.String())
 	}
 }
 

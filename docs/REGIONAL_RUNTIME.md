@@ -114,6 +114,12 @@ curl --fail-with-body \
       "namespace": "core",
       "kind": "stream",
       "name": "orders",
+      "governance": {
+        "owner": "team:platform",
+        "cost_center": "cc-1042",
+        "classification": "confidential",
+        "tags": {"service": "orders", "profile": "stream"}
+      },
       "spec": {
         "shard_count": 3,
         "replica_count": 3,
@@ -407,6 +413,10 @@ same consistency and `data.read` authorization contract.
   the original result. Go desired state, observed status, request outcomes, and
   tombstone generations survive a control-process `SIGKILL`. Rebinding a token
   to different input conflicts.
+- New managed resources require canonical owner, cost center, classification,
+  and bounded tags. The same value survives the Go process and Rust catalog;
+  exact AND filters and authorized cost-driver attribution remain stable after
+  recovery.
 - Delete commits a Rust catalog tombstone before Go removes desired metadata.
   Recreating the name receives new tablet/group identities and a later
   generation.
@@ -436,6 +446,10 @@ nodes, reopens the same volumes, verifies durable per-group checkpoint
 boundaries, compares per-shard state and digests, and deletes only its scoped
 containers/network/volumes.
 
+The campaign checks governance through the filtered Go BFF and every Rust
+catalog voter before and after the Go `SIGKILL`, then repeats it after all-node
+same-volume reopen. See [Resource Governance](RESOURCE_GOVERNANCE.md).
+
 ## Current boundaries
 
 - Placement is exactly three configured voters. Region, zone count, and node
@@ -459,6 +473,9 @@ containers/network/volumes.
 - Go management metadata is durable for one process and one bbolt file. It is
   not replicated, multi-instance linearizable, backed up automatically, or
   protected by management leader election.
+- Governance filters and resource/shard attribution are implemented. ABAC
+  enforcement, usage metering, pricing, billing, redaction, residency, and
+  immutable audit export remain separate requirements.
 - Go, Java, and Python now share the regional Stream, Queue, Cache, and Event
   Bus v1 route/retry/fence contract, including Stream atomic caller-framed
   batches, retention

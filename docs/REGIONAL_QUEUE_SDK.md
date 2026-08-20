@@ -25,6 +25,7 @@ curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
     "resource":{
       "organization":"acme","project":"shop","environment":"dev","namespace":"core",
       "kind":"queue","name":"jobs",
+      "governance":{"owner":"team:platform","cost_center":"cc-1042","classification":"internal","tags":{"service":"jobs","profile":"queue"}},
       "spec":{"shard_count":1,"replica_count":3,"placement":{
         "allowed_regions":["ap-south"],"minimum_zones":3,
         "required_node_class":"general-purpose"

@@ -69,6 +69,7 @@ func TestAuthenticatedHTTPBoundarySeparatesAuthenticationAndAuthorization(t *tes
 			"namespace":"orders",
 			"kind":"stream",
 			"name":"events",
+			"governance":{"owner":"team:platform","cost_center":"cc-1042","classification":"internal","tags":{"service":"events"}},
 			"spec":{"shard_count":1,"replica_count":3}
 		}
 	}`)
@@ -133,7 +134,8 @@ func TestAuthenticatedRegionalInventoryFiltersUnauthorizedTenants(t *testing.T) 
 					Kind:         KindQueue,
 					Name:         "jobs",
 				},
-				Spec: json.RawMessage(`{"shard_count":1,"replica_count":3}`),
+				Spec:       json.RawMessage(`{"shard_count":1,"replica_count":3}`),
+				Governance: testGovernance(),
 				Labels: map[string]string{
 					"index": string(rune('0' + index)),
 				},
@@ -166,7 +168,10 @@ func TestAuthenticatedRegionalInventoryFiltersUnauthorizedTenants(t *testing.T) 
 	decodeResponse(t, response, &inventory)
 	if inventory.Count != 1 ||
 		len(inventory.Resources) != 1 ||
-		inventory.Resources[0].Organization != "acme" {
+		inventory.Resources[0].Organization != "acme" ||
+		len(inventory.CostAttribution) != 1 ||
+		inventory.CostAttribution[0].ResourceCount != 1 ||
+		inventory.CostAttribution[0].ShardCount != 1 {
 		t.Fatalf("inventory leaked unauthorized resources: %+v", inventory)
 	}
 }

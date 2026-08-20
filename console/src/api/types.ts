@@ -30,6 +30,7 @@ export interface ResourceCreated {
 
 export type RegionalResourcePhase = "pending" | "ready" | "degraded" | "failed";
 export type RegionalDataKind = "cache" | "table" | "stream" | "queue" | "event_bus";
+export type DataClassification = "public" | "internal" | "confidential" | "restricted";
 export type CacheEvictionPolicy =
   | "no_eviction"
   | "all_keys_lru"
@@ -44,6 +45,32 @@ export interface RegionalCacheConfiguration {
   maxEntriesPerShard: number;
   defaultTTLMS: number | null;
   eviction: CacheEvictionPolicy;
+}
+
+export interface RegionalGovernance {
+  owner: string;
+  costCenter: string;
+  classification: DataClassification;
+  tags: Record<string, string>;
+}
+
+export interface RegionalCostAttribution {
+  costCenter: string;
+  classification: DataClassification | "unspecified";
+  resourceCount: number;
+  shardCount: number;
+}
+
+export interface RegionalInventory {
+  resources: RegionalResource[];
+  costAttribution: RegionalCostAttribution[];
+}
+
+export interface RegionalGovernanceFilter {
+  owner?: string;
+  costCenter?: string;
+  classification?: DataClassification;
+  tags?: Record<string, string>;
 }
 
 export interface RegionalTabletPlacement {
@@ -70,6 +97,7 @@ export interface RegionalResource {
   risks: string[];
   placement: RegionalPlacementEvidence | null;
   cacheConfiguration: RegionalCacheConfiguration | null;
+  governance: RegionalGovernance | null;
 }
 
 export interface ManagedRegionalTablet {
@@ -142,11 +170,25 @@ export interface ManagedRegionalResource {
     default_ttl_ms: number | null;
     eviction: CacheEvictionPolicy;
   };
+  governance?: {
+    owner: string;
+    cost_center: string;
+    classification: DataClassification;
+    tags: Record<string, string>;
+  };
+}
+
+export interface ManagedRegionalCostAttribution {
+  cost_center: string;
+  classification: DataClassification | "unspecified";
+  resource_count: number;
+  shard_count: number;
 }
 
 export interface ManagedRegionalInventory {
   resources: ManagedRegionalResource[];
   count: number;
+  cost_attribution: ManagedRegionalCostAttribution[];
 }
 
 export interface CacheConfig {

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -184,12 +185,10 @@ func (handler *httpHandler) apply(writer http.ResponseWriter, request *http.Requ
 }
 
 func (handler *httpHandler) list(writer http.ResponseWriter, request *http.Request) {
-	filter := ListFilter{
-		Organization: request.URL.Query().Get("organization"),
-		Project:      request.URL.Query().Get("project"),
-		Environment:  request.URL.Query().Get("environment"),
-		Namespace:    request.URL.Query().Get("namespace"),
-		Kind:         Kind(request.URL.Query().Get("kind")),
+	filter, err := listFilterFromQuery(request.URL.Query())
+	if err != nil {
+		writeError(writer, err)
+		return
 	}
 	principal, authorized := handler.authorizeCollection(
 		writer,
@@ -220,8 +219,9 @@ func (handler *httpHandler) list(writer http.ResponseWriter, request *http.Reque
 }
 
 type regionalInventoryResponse struct {
-	Resources []regionalResourceView `json:"resources"`
-	Count     int                    `json:"count"`
+	Resources       []regionalResourceView        `json:"resources"`
+	Count           int                           `json:"count"`
+	CostAttribution []regionalCostAttributionView `json:"cost_attribution"`
 }
 
 type regionalResourceView struct {
@@ -241,6 +241,21 @@ type regionalResourceView struct {
 	Tablets            []regionalTabletView            `json:"tablets"`
 	Placement          *regionalPlacementView          `json:"placement,omitempty"`
 	CacheConfiguration *regionalCacheConfigurationView `json:"cache_configuration,omitempty"`
+	Governance         *regionalGovernanceView         `json:"governance,omitempty"`
+}
+
+type regionalGovernanceView struct {
+	Owner          string             `json:"owner"`
+	CostCenter     string             `json:"cost_center"`
+	Classification DataClassification `json:"classification"`
+	Tags           map[string]string  `json:"tags"`
+}
+
+type regionalCostAttributionView struct {
+	CostCenter     string             `json:"cost_center"`
+	Classification DataClassification `json:"classification"`
+	ResourceCount  uint64             `json:"resource_count"`
+	ShardCount     uint64             `json:"shard_count"`
 }
 
 type regionalCacheConfigurationView struct {
@@ -292,7 +307,12 @@ func (handler *httpHandler) regionalInventory(writer http.ResponseWriter, reques
 	if !authorized {
 		return
 	}
-	all, err := handler.registry.List(ListFilter{})
+	filter, err := listFilterFromQuery(request.URL.Query())
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	all, err := handler.registry.List(filter)
 	if err != nil {
 		writeError(writer, err)
 		return
@@ -300,6 +320,7 @@ func (handler *httpHandler) regionalInventory(writer http.ResponseWriter, reques
 	response := regionalInventoryResponse{
 		Resources: make([]regionalResourceView, 0, len(all)),
 	}
+	visible := make([]Resource, 0, len(all))
 	for _, resource := range all {
 		if resource.Organization == "" {
 			continue
@@ -311,9 +332,11 @@ func (handler *httpHandler) regionalInventory(writer http.ResponseWriter, reques
 			) {
 			continue
 		}
+		visible = append(visible, resource)
 		response.Resources = append(response.Resources, regionalResourceForBrowser(resource))
 	}
 	response.Count = len(response.Resources)
+	response.CostAttribution = costAttributionFor(visible)
 	writeJSON(writer, http.StatusOK, response)
 }
 
@@ -364,7 +387,80 @@ func regionalResourceForBrowser(resource Resource) regionalResourceView {
 		Tablets:            tablets,
 		Placement:          regionalPlacementForBrowser(resource.Status.Placement),
 		CacheConfiguration: browserCacheConfiguration(resource.Kind, resource.Spec),
+		Governance:         regionalGovernanceForBrowser(resource.Governance),
 	}
+}
+
+func listFilterFromQuery(query url.Values) (ListFilter, error) {
+	tags := make(map[string]string, len(query["tag"]))
+	for _, raw := range query["tag"] {
+		key, value, found := strings.Cut(raw, "=")
+		if !found || strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
+			return ListFilter{}, invalid("tag filters must use tag=key=value")
+		}
+		if _, duplicate := tags[key]; duplicate {
+			return ListFilter{}, invalid("tag filters must not repeat a key")
+		}
+		tags[key] = value
+	}
+	return ListFilter{
+		Organization:   query.Get("organization"),
+		Project:        query.Get("project"),
+		Environment:    query.Get("environment"),
+		Namespace:      query.Get("namespace"),
+		Kind:           Kind(query.Get("kind")),
+		Owner:          query.Get("owner"),
+		CostCenter:     query.Get("cost_center"),
+		Classification: DataClassification(query.Get("classification")),
+		Tags:           tags,
+	}, nil
+}
+
+func regionalGovernanceForBrowser(governance *ResourceGovernance) *regionalGovernanceView {
+	if governance == nil {
+		return nil
+	}
+	return &regionalGovernanceView{
+		Owner:          governance.Owner,
+		CostCenter:     governance.CostCenter,
+		Classification: governance.Classification,
+		Tags:           cloneLabels(governance.Tags),
+	}
+}
+
+func costAttributionFor(resources []Resource) []regionalCostAttributionView {
+	type attributionKey struct {
+		costCenter     string
+		classification DataClassification
+	}
+	entries := make(map[attributionKey]regionalCostAttributionView)
+	for _, resource := range resources {
+		key := attributionKey{
+			costCenter:     "unassigned",
+			classification: ClassificationUnspecified,
+		}
+		if resource.Governance != nil {
+			key.costCenter = resource.Governance.CostCenter
+			key.classification = resource.Governance.Classification
+		}
+		entry := entries[key]
+		entry.CostCenter = key.costCenter
+		entry.Classification = key.classification
+		entry.ResourceCount++
+		entry.ShardCount += uint64(browserShardCount(resource.Spec))
+		entries[key] = entry
+	}
+	result := make([]regionalCostAttributionView, 0, len(entries))
+	for _, entry := range entries {
+		result = append(result, entry)
+	}
+	sort.Slice(result, func(left, right int) bool {
+		if result[left].CostCenter != result[right].CostCenter {
+			return result[left].CostCenter < result[right].CostCenter
+		}
+		return result[left].Classification < result[right].Classification
+	})
+	return result
 }
 
 func regionalPlacementForBrowser(status *PlacementStatus) *regionalPlacementView {

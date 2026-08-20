@@ -847,6 +847,17 @@ separate requirements.
 | GOV-005 | Resource owner, cost center, environment, classification, and custom tags | P0 |
 | GOV-006 | Exportable audit trail for resource, policy, key, replay, redrive, and payload-access actions | P0 |
 
+GOV-005 is implemented for managed regional resources. New desired resources
+require a canonical owner, cost center, one bounded classification, and optional
+bounded custom tags; environment remains authoritative in the fully qualified
+resource name. Metadata is generation-fenced, durably stored by Go, replicated
+in the Rust catalog, exactly filterable through gRPC/HTTP and the console, and
+aggregated into post-authorization resource/shard cost drivers. Legacy records
+without governance remain readable. This does not claim ABAC policy, usage
+metering, currency pricing, invoices, redaction, residency, or audit export.
+See [Resource Governance](RESOURCE_GOVERNANCE.md) and
+[ADR-0033](adr/0033-resource-governance-and-cost-attribution.md).
+
 ### 11.5 Packaging and runtime
 
 | ID | Requirement | Priority |

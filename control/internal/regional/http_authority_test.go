@@ -64,6 +64,12 @@ func TestHTTPAuthorityAppliesThroughAvailableNodeAndObservesPlacement(t *testing
 			"max_entries": 64,
 			"eviction":    "all_keys_lru",
 		},
+		Governance: &resources.ResourceGovernance{
+			Owner:          "team:payments",
+			CostCenter:     "cc-1042",
+			Classification: resources.ClassificationConfidential,
+			Tags:           map[string]string{"service": "checkout"},
+		},
 	})
 	if err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -72,7 +78,9 @@ func TestHTTPAuthorityAppliesThroughAvailableNodeAndObservesPlacement(t *testing
 		received["expected_generation"] != "1" ||
 		received["shard_count"] != float64(2) ||
 		received["replica_count"] != float64(3) ||
-		received["configuration"].(map[string]any)["eviction"] != "all_keys_lru" {
+		received["configuration"].(map[string]any)["eviction"] != "all_keys_lru" ||
+		received["governance"].(map[string]any)["owner"] != "team:payments" ||
+		received["governance"].(map[string]any)["classification"] != "confidential" {
 		t.Fatalf("request body = %#v", received)
 	}
 	if observation.Generation != 2 || len(observation.Tablets) != 2 {

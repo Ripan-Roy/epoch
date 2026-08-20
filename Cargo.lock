@@ -363,7 +363,7 @@ checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 
 [[package]]
 name = "epoch-auth"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-bus"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "epoch-core",
  "serde",
@@ -384,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-cache"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "epoch-core",
  "serde",
@@ -394,7 +394,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-catalog"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "epoch-core",
  "serde",
@@ -405,7 +405,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-cli"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "clap",
  "epoch-core",
@@ -416,7 +416,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-consensus"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "epoch-storage",
  "epoch-testkit",
@@ -431,7 +431,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-core"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -441,7 +441,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-engine"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "epoch-bus",
  "epoch-cache",
@@ -456,7 +456,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-node"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "axum",
  "base64 0.23.0",
@@ -492,7 +492,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-queue"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "crc32fast",
  "epoch-core",
@@ -502,7 +502,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-storage"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "crc32fast",
  "epoch-core",
@@ -515,7 +515,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-stream"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "epoch-core",
  "serde",
@@ -524,7 +524,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-tablet"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "base64 0.23.0",
  "epoch-bus",
@@ -544,7 +544,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-testkit"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 
 [[package]]
 name = "equivalent"

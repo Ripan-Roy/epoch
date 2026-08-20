@@ -450,6 +450,64 @@ func (ResourcePhase) EnumDescriptor() ([]byte, []int) {
 	return file_epoch_v1_common_proto_rawDescGZIP(), []int{6}
 }
 
+// DataClassification is the bounded governance taxonomy used for policy,
+// inventory, and cost-attribution decisions. UNSPECIFIED is never accepted on
+// a newly managed resource.
+type DataClassification int32
+
+const (
+	DataClassification_DATA_CLASSIFICATION_UNSPECIFIED  DataClassification = 0
+	DataClassification_DATA_CLASSIFICATION_PUBLIC       DataClassification = 1
+	DataClassification_DATA_CLASSIFICATION_INTERNAL     DataClassification = 2
+	DataClassification_DATA_CLASSIFICATION_CONFIDENTIAL DataClassification = 3
+	DataClassification_DATA_CLASSIFICATION_RESTRICTED   DataClassification = 4
+)
+
+// Enum value maps for DataClassification.
+var (
+	DataClassification_name = map[int32]string{
+		0: "DATA_CLASSIFICATION_UNSPECIFIED",
+		1: "DATA_CLASSIFICATION_PUBLIC",
+		2: "DATA_CLASSIFICATION_INTERNAL",
+		3: "DATA_CLASSIFICATION_CONFIDENTIAL",
+		4: "DATA_CLASSIFICATION_RESTRICTED",
+	}
+	DataClassification_value = map[string]int32{
+		"DATA_CLASSIFICATION_UNSPECIFIED":  0,
+		"DATA_CLASSIFICATION_PUBLIC":       1,
+		"DATA_CLASSIFICATION_INTERNAL":     2,
+		"DATA_CLASSIFICATION_CONFIDENTIAL": 3,
+		"DATA_CLASSIFICATION_RESTRICTED":   4,
+	}
+)
+
+func (x DataClassification) Enum() *DataClassification {
+	p := new(DataClassification)
+	*p = x
+	return p
+}
+
+func (x DataClassification) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (DataClassification) Descriptor() protoreflect.EnumDescriptor {
+	return file_epoch_v1_common_proto_enumTypes[7].Descriptor()
+}
+
+func (DataClassification) Type() protoreflect.EnumType {
+	return &file_epoch_v1_common_proto_enumTypes[7]
+}
+
+func (x DataClassification) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use DataClassification.Descriptor instead.
+func (DataClassification) EnumDescriptor() ([]byte, []int) {
+	return file_epoch_v1_common_proto_rawDescGZIP(), []int{7}
+}
+
 // ConditionState uses a three-valued status so an unobserved condition is not
 // accidentally interpreted as false.
 type ConditionState int32
@@ -488,11 +546,11 @@ func (x ConditionState) String() string {
 }
 
 func (ConditionState) Descriptor() protoreflect.EnumDescriptor {
-	return file_epoch_v1_common_proto_enumTypes[7].Descriptor()
+	return file_epoch_v1_common_proto_enumTypes[8].Descriptor()
 }
 
 func (ConditionState) Type() protoreflect.EnumType {
-	return &file_epoch_v1_common_proto_enumTypes[7]
+	return &file_epoch_v1_common_proto_enumTypes[8]
 }
 
 func (x ConditionState) Number() protoreflect.EnumNumber {
@@ -501,7 +559,7 @@ func (x ConditionState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ConditionState.Descriptor instead.
 func (ConditionState) EnumDescriptor() ([]byte, []int) {
-	return file_epoch_v1_common_proto_rawDescGZIP(), []int{7}
+	return file_epoch_v1_common_proto_rawDescGZIP(), []int{8}
 }
 
 // TabletPhase reports one physical shard replica group's lifecycle.
@@ -544,11 +602,11 @@ func (x TabletPhase) String() string {
 }
 
 func (TabletPhase) Descriptor() protoreflect.EnumDescriptor {
-	return file_epoch_v1_common_proto_enumTypes[8].Descriptor()
+	return file_epoch_v1_common_proto_enumTypes[9].Descriptor()
 }
 
 func (TabletPhase) Type() protoreflect.EnumType {
-	return &file_epoch_v1_common_proto_enumTypes[8]
+	return &file_epoch_v1_common_proto_enumTypes[9]
 }
 
 func (x TabletPhase) Number() protoreflect.EnumNumber {
@@ -557,7 +615,7 @@ func (x TabletPhase) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use TabletPhase.Descriptor instead.
 func (TabletPhase) EnumDescriptor() ([]byte, []int) {
-	return file_epoch_v1_common_proto_rawDescGZIP(), []int{8}
+	return file_epoch_v1_common_proto_rawDescGZIP(), []int{9}
 }
 
 // Envelope is the common native record accepted across workload profiles.
@@ -966,6 +1024,77 @@ func (x *PlacementPolicy) GetRequiredNodeClass() string {
 	return ""
 }
 
+// ResourceGovernance carries bounded, non-secret ownership and attribution
+// metadata. Environment remains part of ResourceName so it cannot drift from
+// the resource's authorization and placement scope.
+type ResourceGovernance struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Owner          string                 `protobuf:"bytes,1,opt,name=owner,proto3" json:"owner,omitempty"`
+	CostCenter     string                 `protobuf:"bytes,2,opt,name=cost_center,json=costCenter,proto3" json:"cost_center,omitempty"`
+	Classification DataClassification     `protobuf:"varint,3,opt,name=classification,proto3,enum=epoch.v1.DataClassification" json:"classification,omitempty"`
+	Tags           map[string]string      `protobuf:"bytes,4,rep,name=tags,proto3" json:"tags,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *ResourceGovernance) Reset() {
+	*x = ResourceGovernance{}
+	mi := &file_epoch_v1_common_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResourceGovernance) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResourceGovernance) ProtoMessage() {}
+
+func (x *ResourceGovernance) ProtoReflect() protoreflect.Message {
+	mi := &file_epoch_v1_common_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResourceGovernance.ProtoReflect.Descriptor instead.
+func (*ResourceGovernance) Descriptor() ([]byte, []int) {
+	return file_epoch_v1_common_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *ResourceGovernance) GetOwner() string {
+	if x != nil {
+		return x.Owner
+	}
+	return ""
+}
+
+func (x *ResourceGovernance) GetCostCenter() string {
+	if x != nil {
+		return x.CostCenter
+	}
+	return ""
+}
+
+func (x *ResourceGovernance) GetClassification() DataClassification {
+	if x != nil {
+		return x.Classification
+	}
+	return DataClassification_DATA_CLASSIFICATION_UNSPECIFIED
+}
+
+func (x *ResourceGovernance) GetTags() map[string]string {
+	if x != nil {
+		return x.Tags
+	}
+	return nil
+}
+
 // ResourceSpec contains shared guarantees and a typed-by-kind configuration
 // object. Profile-specific messages may replace configuration as contracts
 // stabilize without changing ResourceName or ResourceStatus.
@@ -979,13 +1108,14 @@ type ResourceSpec struct {
 	Labels          map[string]string      `protobuf:"bytes,6,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	Configuration   *structpb.Struct       `protobuf:"bytes,7,opt,name=configuration,proto3" json:"configuration,omitempty"`
 	Placement       *PlacementPolicy       `protobuf:"bytes,8,opt,name=placement,proto3" json:"placement,omitempty"`
+	Governance      *ResourceGovernance    `protobuf:"bytes,9,opt,name=governance,proto3" json:"governance,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ResourceSpec) Reset() {
 	*x = ResourceSpec{}
-	mi := &file_epoch_v1_common_proto_msgTypes[4]
+	mi := &file_epoch_v1_common_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -997,7 +1127,7 @@ func (x *ResourceSpec) String() string {
 func (*ResourceSpec) ProtoMessage() {}
 
 func (x *ResourceSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_epoch_v1_common_proto_msgTypes[4]
+	mi := &file_epoch_v1_common_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1010,7 +1140,7 @@ func (x *ResourceSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceSpec.ProtoReflect.Descriptor instead.
 func (*ResourceSpec) Descriptor() ([]byte, []int) {
-	return file_epoch_v1_common_proto_rawDescGZIP(), []int{4}
+	return file_epoch_v1_common_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ResourceSpec) GetWorkloadProfile() WorkloadProfile {
@@ -1069,6 +1199,13 @@ func (x *ResourceSpec) GetPlacement() *PlacementPolicy {
 	return nil
 }
 
+func (x *ResourceSpec) GetGovernance() *ResourceGovernance {
+	if x != nil {
+		return x.Governance
+	}
+	return nil
+}
+
 // Condition is an observable reconciliation or guarantee condition.
 type Condition struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
@@ -1084,7 +1221,7 @@ type Condition struct {
 
 func (x *Condition) Reset() {
 	*x = Condition{}
-	mi := &file_epoch_v1_common_proto_msgTypes[5]
+	mi := &file_epoch_v1_common_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1096,7 +1233,7 @@ func (x *Condition) String() string {
 func (*Condition) ProtoMessage() {}
 
 func (x *Condition) ProtoReflect() protoreflect.Message {
-	mi := &file_epoch_v1_common_proto_msgTypes[5]
+	mi := &file_epoch_v1_common_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1109,7 +1246,7 @@ func (x *Condition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Condition.ProtoReflect.Descriptor instead.
 func (*Condition) Descriptor() ([]byte, []int) {
-	return file_epoch_v1_common_proto_rawDescGZIP(), []int{5}
+	return file_epoch_v1_common_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Condition) GetType() string {
@@ -1175,7 +1312,7 @@ type TabletDescriptor struct {
 
 func (x *TabletDescriptor) Reset() {
 	*x = TabletDescriptor{}
-	mi := &file_epoch_v1_common_proto_msgTypes[6]
+	mi := &file_epoch_v1_common_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1187,7 +1324,7 @@ func (x *TabletDescriptor) String() string {
 func (*TabletDescriptor) ProtoMessage() {}
 
 func (x *TabletDescriptor) ProtoReflect() protoreflect.Message {
-	mi := &file_epoch_v1_common_proto_msgTypes[6]
+	mi := &file_epoch_v1_common_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1200,7 +1337,7 @@ func (x *TabletDescriptor) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TabletDescriptor.ProtoReflect.Descriptor instead.
 func (*TabletDescriptor) Descriptor() ([]byte, []int) {
-	return file_epoch_v1_common_proto_rawDescGZIP(), []int{6}
+	return file_epoch_v1_common_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *TabletDescriptor) GetTabletId() uint64 {
@@ -1291,7 +1428,7 @@ type RegionalNodeObservation struct {
 
 func (x *RegionalNodeObservation) Reset() {
 	*x = RegionalNodeObservation{}
-	mi := &file_epoch_v1_common_proto_msgTypes[7]
+	mi := &file_epoch_v1_common_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1303,7 +1440,7 @@ func (x *RegionalNodeObservation) String() string {
 func (*RegionalNodeObservation) ProtoMessage() {}
 
 func (x *RegionalNodeObservation) ProtoReflect() protoreflect.Message {
-	mi := &file_epoch_v1_common_proto_msgTypes[7]
+	mi := &file_epoch_v1_common_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1316,7 +1453,7 @@ func (x *RegionalNodeObservation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegionalNodeObservation.ProtoReflect.Descriptor instead.
 func (*RegionalNodeObservation) Descriptor() ([]byte, []int) {
-	return file_epoch_v1_common_proto_rawDescGZIP(), []int{7}
+	return file_epoch_v1_common_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *RegionalNodeObservation) GetNodeId() uint64 {
@@ -1389,7 +1526,7 @@ type PlacementStatus struct {
 
 func (x *PlacementStatus) Reset() {
 	*x = PlacementStatus{}
-	mi := &file_epoch_v1_common_proto_msgTypes[8]
+	mi := &file_epoch_v1_common_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1401,7 +1538,7 @@ func (x *PlacementStatus) String() string {
 func (*PlacementStatus) ProtoMessage() {}
 
 func (x *PlacementStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_epoch_v1_common_proto_msgTypes[8]
+	mi := &file_epoch_v1_common_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1414,7 +1551,7 @@ func (x *PlacementStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlacementStatus.ProtoReflect.Descriptor instead.
 func (*PlacementStatus) Descriptor() ([]byte, []int) {
-	return file_epoch_v1_common_proto_rawDescGZIP(), []int{8}
+	return file_epoch_v1_common_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *PlacementStatus) GetAllowedRegions() []string {
@@ -1469,7 +1606,7 @@ type ResourceStatus struct {
 
 func (x *ResourceStatus) Reset() {
 	*x = ResourceStatus{}
-	mi := &file_epoch_v1_common_proto_msgTypes[9]
+	mi := &file_epoch_v1_common_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1481,7 +1618,7 @@ func (x *ResourceStatus) String() string {
 func (*ResourceStatus) ProtoMessage() {}
 
 func (x *ResourceStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_epoch_v1_common_proto_msgTypes[9]
+	mi := &file_epoch_v1_common_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1494,7 +1631,7 @@ func (x *ResourceStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceStatus.ProtoReflect.Descriptor instead.
 func (*ResourceStatus) Descriptor() ([]byte, []int) {
-	return file_epoch_v1_common_proto_rawDescGZIP(), []int{9}
+	return file_epoch_v1_common_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ResourceStatus) GetPhase() ResourcePhase {
@@ -1568,7 +1705,7 @@ type Resource struct {
 
 func (x *Resource) Reset() {
 	*x = Resource{}
-	mi := &file_epoch_v1_common_proto_msgTypes[10]
+	mi := &file_epoch_v1_common_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1580,7 +1717,7 @@ func (x *Resource) String() string {
 func (*Resource) ProtoMessage() {}
 
 func (x *Resource) ProtoReflect() protoreflect.Message {
-	mi := &file_epoch_v1_common_proto_msgTypes[10]
+	mi := &file_epoch_v1_common_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1593,7 +1730,7 @@ func (x *Resource) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Resource.ProtoReflect.Descriptor instead.
 func (*Resource) Descriptor() ([]byte, []int) {
-	return file_epoch_v1_common_proto_rawDescGZIP(), []int{10}
+	return file_epoch_v1_common_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *Resource) GetName() *ResourceName {
@@ -1690,7 +1827,16 @@ const file_epoch_v1_common_proto_rawDesc = "" +
 	"\x0fPlacementPolicy\x12'\n" +
 	"\x0fallowed_regions\x18\x01 \x03(\tR\x0eallowedRegions\x12#\n" +
 	"\rminimum_zones\x18\x02 \x01(\rR\fminimumZones\x12.\n" +
-	"\x13required_node_class\x18\x03 \x01(\tR\x11requiredNodeClass\"\x8a\x04\n" +
+	"\x13required_node_class\x18\x03 \x01(\tR\x11requiredNodeClass\"\x86\x02\n" +
+	"\x12ResourceGovernance\x12\x14\n" +
+	"\x05owner\x18\x01 \x01(\tR\x05owner\x12\x1f\n" +
+	"\vcost_center\x18\x02 \x01(\tR\n" +
+	"costCenter\x12D\n" +
+	"\x0eclassification\x18\x03 \x01(\x0e2\x1c.epoch.v1.DataClassificationR\x0eclassification\x12:\n" +
+	"\x04tags\x18\x04 \x03(\v2&.epoch.v1.ResourceGovernance.TagsEntryR\x04tags\x1a7\n" +
+	"\tTagsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc8\x04\n" +
 	"\fResourceSpec\x12D\n" +
 	"\x10workload_profile\x18\x01 \x01(\x0e2\x19.epoch.v1.WorkloadProfileR\x0fworkloadProfile\x12;\n" +
 	"\n" +
@@ -1701,7 +1847,10 @@ const file_epoch_v1_common_proto_rawDesc = "" +
 	"\breplicas\x18\x05 \x01(\rR\breplicas\x12:\n" +
 	"\x06labels\x18\x06 \x03(\v2\".epoch.v1.ResourceSpec.LabelsEntryR\x06labels\x12=\n" +
 	"\rconfiguration\x18\a \x01(\v2\x17.google.protobuf.StructR\rconfiguration\x127\n" +
-	"\tplacement\x18\b \x01(\v2\x19.epoch.v1.PlacementPolicyR\tplacement\x1a9\n" +
+	"\tplacement\x18\b \x01(\v2\x19.epoch.v1.PlacementPolicyR\tplacement\x12<\n" +
+	"\n" +
+	"governance\x18\t \x01(\v2\x1c.epoch.v1.ResourceGovernanceR\n" +
+	"governance\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x80\x02\n" +
@@ -1816,7 +1965,13 @@ const file_epoch_v1_common_proto_rawDesc = "" +
 	"\x14RESOURCE_PHASE_READY\x10\x02\x12\x1b\n" +
 	"\x17RESOURCE_PHASE_DEGRADED\x10\x03\x12\x19\n" +
 	"\x15RESOURCE_PHASE_FAILED\x10\x04\x12\x1b\n" +
-	"\x17RESOURCE_PHASE_DELETING\x10\x05*\x83\x01\n" +
+	"\x17RESOURCE_PHASE_DELETING\x10\x05*\xc5\x01\n" +
+	"\x12DataClassification\x12#\n" +
+	"\x1fDATA_CLASSIFICATION_UNSPECIFIED\x10\x00\x12\x1e\n" +
+	"\x1aDATA_CLASSIFICATION_PUBLIC\x10\x01\x12 \n" +
+	"\x1cDATA_CLASSIFICATION_INTERNAL\x10\x02\x12$\n" +
+	" DATA_CLASSIFICATION_CONFIDENTIAL\x10\x03\x12\"\n" +
+	"\x1eDATA_CLASSIFICATION_RESTRICTED\x10\x04*\x83\x01\n" +
 	"\x0eConditionState\x12\x1f\n" +
 	"\x1bCONDITION_STATE_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14CONDITION_STATE_TRUE\x10\x01\x12\x19\n" +
@@ -1842,8 +1997,8 @@ func file_epoch_v1_common_proto_rawDescGZIP() []byte {
 	return file_epoch_v1_common_proto_rawDescData
 }
 
-var file_epoch_v1_common_proto_enumTypes = make([]protoimpl.EnumInfo, 9)
-var file_epoch_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_epoch_v1_common_proto_enumTypes = make([]protoimpl.EnumInfo, 10)
+var file_epoch_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_epoch_v1_common_proto_goTypes = []any{
 	(WorkloadProfile)(0),            // 0: epoch.v1.WorkloadProfile
 	(ResourceKind)(0),               // 1: epoch.v1.ResourceKind
@@ -1852,62 +2007,68 @@ var file_epoch_v1_common_proto_goTypes = []any{
 	(OrderingScope)(0),              // 4: epoch.v1.OrderingScope
 	(DeploymentMode)(0),             // 5: epoch.v1.DeploymentMode
 	(ResourcePhase)(0),              // 6: epoch.v1.ResourcePhase
-	(ConditionState)(0),             // 7: epoch.v1.ConditionState
-	(TabletPhase)(0),                // 8: epoch.v1.TabletPhase
-	(*Envelope)(nil),                // 9: epoch.v1.Envelope
-	(*WriteReceipt)(nil),            // 10: epoch.v1.WriteReceipt
-	(*ResourceName)(nil),            // 11: epoch.v1.ResourceName
-	(*PlacementPolicy)(nil),         // 12: epoch.v1.PlacementPolicy
-	(*ResourceSpec)(nil),            // 13: epoch.v1.ResourceSpec
-	(*Condition)(nil),               // 14: epoch.v1.Condition
-	(*TabletDescriptor)(nil),        // 15: epoch.v1.TabletDescriptor
-	(*RegionalNodeObservation)(nil), // 16: epoch.v1.RegionalNodeObservation
-	(*PlacementStatus)(nil),         // 17: epoch.v1.PlacementStatus
-	(*ResourceStatus)(nil),          // 18: epoch.v1.ResourceStatus
-	(*Resource)(nil),                // 19: epoch.v1.Resource
-	nil,                             // 20: epoch.v1.Envelope.HeadersEntry
-	nil,                             // 21: epoch.v1.Envelope.ExtensionsEntry
-	nil,                             // 22: epoch.v1.ResourceSpec.LabelsEntry
-	(*timestamppb.Timestamp)(nil),   // 23: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),     // 24: google.protobuf.Duration
-	(*structpb.Struct)(nil),         // 25: google.protobuf.Struct
+	(DataClassification)(0),         // 7: epoch.v1.DataClassification
+	(ConditionState)(0),             // 8: epoch.v1.ConditionState
+	(TabletPhase)(0),                // 9: epoch.v1.TabletPhase
+	(*Envelope)(nil),                // 10: epoch.v1.Envelope
+	(*WriteReceipt)(nil),            // 11: epoch.v1.WriteReceipt
+	(*ResourceName)(nil),            // 12: epoch.v1.ResourceName
+	(*PlacementPolicy)(nil),         // 13: epoch.v1.PlacementPolicy
+	(*ResourceGovernance)(nil),      // 14: epoch.v1.ResourceGovernance
+	(*ResourceSpec)(nil),            // 15: epoch.v1.ResourceSpec
+	(*Condition)(nil),               // 16: epoch.v1.Condition
+	(*TabletDescriptor)(nil),        // 17: epoch.v1.TabletDescriptor
+	(*RegionalNodeObservation)(nil), // 18: epoch.v1.RegionalNodeObservation
+	(*PlacementStatus)(nil),         // 19: epoch.v1.PlacementStatus
+	(*ResourceStatus)(nil),          // 20: epoch.v1.ResourceStatus
+	(*Resource)(nil),                // 21: epoch.v1.Resource
+	nil,                             // 22: epoch.v1.Envelope.HeadersEntry
+	nil,                             // 23: epoch.v1.Envelope.ExtensionsEntry
+	nil,                             // 24: epoch.v1.ResourceGovernance.TagsEntry
+	nil,                             // 25: epoch.v1.ResourceSpec.LabelsEntry
+	(*timestamppb.Timestamp)(nil),   // 26: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),     // 27: google.protobuf.Duration
+	(*structpb.Struct)(nil),         // 28: google.protobuf.Struct
 }
 var file_epoch_v1_common_proto_depIdxs = []int32{
-	23, // 0: epoch.v1.Envelope.time:type_name -> google.protobuf.Timestamp
-	20, // 1: epoch.v1.Envelope.headers:type_name -> epoch.v1.Envelope.HeadersEntry
-	23, // 2: epoch.v1.Envelope.deliver_at:type_name -> google.protobuf.Timestamp
-	24, // 3: epoch.v1.Envelope.ttl:type_name -> google.protobuf.Duration
-	21, // 4: epoch.v1.Envelope.extensions:type_name -> epoch.v1.Envelope.ExtensionsEntry
+	26, // 0: epoch.v1.Envelope.time:type_name -> google.protobuf.Timestamp
+	22, // 1: epoch.v1.Envelope.headers:type_name -> epoch.v1.Envelope.HeadersEntry
+	26, // 2: epoch.v1.Envelope.deliver_at:type_name -> google.protobuf.Timestamp
+	27, // 3: epoch.v1.Envelope.ttl:type_name -> google.protobuf.Duration
+	23, // 4: epoch.v1.Envelope.extensions:type_name -> epoch.v1.Envelope.ExtensionsEntry
 	2,  // 5: epoch.v1.WriteReceipt.achieved_durability:type_name -> epoch.v1.DurabilityProfile
 	1,  // 6: epoch.v1.ResourceName.kind:type_name -> epoch.v1.ResourceKind
-	0,  // 7: epoch.v1.ResourceSpec.workload_profile:type_name -> epoch.v1.WorkloadProfile
-	2,  // 8: epoch.v1.ResourceSpec.durability:type_name -> epoch.v1.DurabilityProfile
-	3,  // 9: epoch.v1.ResourceSpec.delivery:type_name -> epoch.v1.DeliverySemantics
-	4,  // 10: epoch.v1.ResourceSpec.ordering:type_name -> epoch.v1.OrderingScope
-	22, // 11: epoch.v1.ResourceSpec.labels:type_name -> epoch.v1.ResourceSpec.LabelsEntry
-	25, // 12: epoch.v1.ResourceSpec.configuration:type_name -> google.protobuf.Struct
-	12, // 13: epoch.v1.ResourceSpec.placement:type_name -> epoch.v1.PlacementPolicy
-	7,  // 14: epoch.v1.Condition.state:type_name -> epoch.v1.ConditionState
-	23, // 15: epoch.v1.Condition.last_transition_time:type_name -> google.protobuf.Timestamp
-	0,  // 16: epoch.v1.TabletDescriptor.workload_profile:type_name -> epoch.v1.WorkloadProfile
-	8,  // 17: epoch.v1.TabletDescriptor.phase:type_name -> epoch.v1.TabletPhase
-	16, // 18: epoch.v1.PlacementStatus.nodes:type_name -> epoch.v1.RegionalNodeObservation
-	6,  // 19: epoch.v1.ResourceStatus.phase:type_name -> epoch.v1.ResourcePhase
-	5,  // 20: epoch.v1.ResourceStatus.deployment_mode:type_name -> epoch.v1.DeploymentMode
-	2,  // 21: epoch.v1.ResourceStatus.achieved_durability:type_name -> epoch.v1.DurabilityProfile
-	14, // 22: epoch.v1.ResourceStatus.conditions:type_name -> epoch.v1.Condition
-	15, // 23: epoch.v1.ResourceStatus.tablets:type_name -> epoch.v1.TabletDescriptor
-	17, // 24: epoch.v1.ResourceStatus.placement:type_name -> epoch.v1.PlacementStatus
-	11, // 25: epoch.v1.Resource.name:type_name -> epoch.v1.ResourceName
-	13, // 26: epoch.v1.Resource.spec:type_name -> epoch.v1.ResourceSpec
-	18, // 27: epoch.v1.Resource.status:type_name -> epoch.v1.ResourceStatus
-	23, // 28: epoch.v1.Resource.create_time:type_name -> google.protobuf.Timestamp
-	23, // 29: epoch.v1.Resource.update_time:type_name -> google.protobuf.Timestamp
-	30, // [30:30] is the sub-list for method output_type
-	30, // [30:30] is the sub-list for method input_type
-	30, // [30:30] is the sub-list for extension type_name
-	30, // [30:30] is the sub-list for extension extendee
-	0,  // [0:30] is the sub-list for field type_name
+	7,  // 7: epoch.v1.ResourceGovernance.classification:type_name -> epoch.v1.DataClassification
+	24, // 8: epoch.v1.ResourceGovernance.tags:type_name -> epoch.v1.ResourceGovernance.TagsEntry
+	0,  // 9: epoch.v1.ResourceSpec.workload_profile:type_name -> epoch.v1.WorkloadProfile
+	2,  // 10: epoch.v1.ResourceSpec.durability:type_name -> epoch.v1.DurabilityProfile
+	3,  // 11: epoch.v1.ResourceSpec.delivery:type_name -> epoch.v1.DeliverySemantics
+	4,  // 12: epoch.v1.ResourceSpec.ordering:type_name -> epoch.v1.OrderingScope
+	25, // 13: epoch.v1.ResourceSpec.labels:type_name -> epoch.v1.ResourceSpec.LabelsEntry
+	28, // 14: epoch.v1.ResourceSpec.configuration:type_name -> google.protobuf.Struct
+	13, // 15: epoch.v1.ResourceSpec.placement:type_name -> epoch.v1.PlacementPolicy
+	14, // 16: epoch.v1.ResourceSpec.governance:type_name -> epoch.v1.ResourceGovernance
+	8,  // 17: epoch.v1.Condition.state:type_name -> epoch.v1.ConditionState
+	26, // 18: epoch.v1.Condition.last_transition_time:type_name -> google.protobuf.Timestamp
+	0,  // 19: epoch.v1.TabletDescriptor.workload_profile:type_name -> epoch.v1.WorkloadProfile
+	9,  // 20: epoch.v1.TabletDescriptor.phase:type_name -> epoch.v1.TabletPhase
+	18, // 21: epoch.v1.PlacementStatus.nodes:type_name -> epoch.v1.RegionalNodeObservation
+	6,  // 22: epoch.v1.ResourceStatus.phase:type_name -> epoch.v1.ResourcePhase
+	5,  // 23: epoch.v1.ResourceStatus.deployment_mode:type_name -> epoch.v1.DeploymentMode
+	2,  // 24: epoch.v1.ResourceStatus.achieved_durability:type_name -> epoch.v1.DurabilityProfile
+	16, // 25: epoch.v1.ResourceStatus.conditions:type_name -> epoch.v1.Condition
+	17, // 26: epoch.v1.ResourceStatus.tablets:type_name -> epoch.v1.TabletDescriptor
+	19, // 27: epoch.v1.ResourceStatus.placement:type_name -> epoch.v1.PlacementStatus
+	12, // 28: epoch.v1.Resource.name:type_name -> epoch.v1.ResourceName
+	15, // 29: epoch.v1.Resource.spec:type_name -> epoch.v1.ResourceSpec
+	20, // 30: epoch.v1.Resource.status:type_name -> epoch.v1.ResourceStatus
+	26, // 31: epoch.v1.Resource.create_time:type_name -> google.protobuf.Timestamp
+	26, // 32: epoch.v1.Resource.update_time:type_name -> google.protobuf.Timestamp
+	33, // [33:33] is the sub-list for method output_type
+	33, // [33:33] is the sub-list for method input_type
+	33, // [33:33] is the sub-list for extension type_name
+	33, // [33:33] is the sub-list for extension extendee
+	0,  // [0:33] is the sub-list for field type_name
 }
 
 func init() { file_epoch_v1_common_proto_init() }
@@ -1920,8 +2081,8 @@ func file_epoch_v1_common_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_epoch_v1_common_proto_rawDesc), len(file_epoch_v1_common_proto_rawDesc)),
-			NumEnums:      9,
-			NumMessages:   14,
+			NumEnums:      10,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

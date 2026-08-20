@@ -4,6 +4,7 @@ import { CodeBlock, CodeTabs, type CodeSample } from "./CodeBlock";
 import {
   consensusCheckpoint,
   epochTargetLanguageGuides,
+  governanceInventory,
   languageGuides,
   nodeRestart,
   nodeStart,
@@ -176,6 +177,12 @@ export function OverviewBody() {
             <span>Concept</span>
             <strong>Guarantees &amp; errors</strong>
             <p>What local durable covers, what it does not, and how to read a typed failure.</p>
+            <em aria-hidden="true">Read →</em>
+          </a>
+          <a className="reference-card" href="#/docs/resource-governance">
+            <span>Concept</span>
+            <strong>Resource governance</strong>
+            <p>Require ownership and classification, filter inventory, and explain cost drivers.</p>
             <em aria-hidden="true">Read →</em>
           </a>
           <a className="reference-card" href="#/docs/sdk-reference">
@@ -582,6 +589,75 @@ export function ConsensusRecoveryBody() {
           trigger is explicit and unauthenticated on the diagnostic listener; do not expose it to an untrusted
           network.
         </Note>
+      </Topic>
+    </>
+  );
+}
+
+export function ResourceGovernanceBody() {
+  return (
+    <>
+      <Topic id="contract" title="Governance is managed desired state">
+        <p>
+          Every newly managed regional resource declares an owner, cost center, classification, and optional
+          bounded custom tags. Environment remains authoritative in the fully qualified resource name, so it
+          cannot drift from authorization or placement scope.
+        </p>
+        <div className="sdk-notes">
+          <EvidenceCard label="Required" claim="New managed resources fail closed without governance.">
+            Owner and cost center are canonical lower-case identifiers. Classification is exactly public,
+            internal, confidential, or restricted. The <code>epoch.io/</code> tag prefix is reserved.
+          </EvidenceCard>
+          <EvidenceCard label="Generation fenced" claim="Metadata changes are real desired-state changes.">
+            Ownership transfer, reclassification, cost-center changes, and tag changes require the current
+            expected generation and participate in idempotency fingerprints.
+          </EvidenceCard>
+          <EvidenceCard label="Compatible" claim="Valid legacy state remains readable.">
+            Existing Go registry and Rust catalog records without governance reopen unchanged. The stricter
+            requirement applies when a new managed regional resource is accepted.
+          </EvidenceCard>
+        </div>
+      </Topic>
+
+      <Topic id="filter" title="Filter the authorized inventory">
+        <p>
+          All supplied filters use AND semantics. Repeat <code>tag=key=value</code> for exact tag matches.
+          Canonical duplicate keys, invalid classifications, reserved prefixes, and oversized values are
+          rejected instead of being ignored.
+        </p>
+        <CodeBlock label="Managed inventory query" value={governanceInventory} />
+      </Topic>
+
+      <Topic id="cost" title="Explain allocation drivers">
+        <p>
+          The Go browser BFF aggregates only resources that passed tenant authorization and the requested
+          filters. Deterministically ordered rows report resource and desired-shard counts by cost center and
+          classification. This is explainability metadata, not currency, usage metering, invoicing, or a
+          billing ledger.
+        </p>
+      </Topic>
+
+      <Topic id="recovery" title="Survive both control and data-plane recovery">
+        <p>
+          Go durably stores the canonical value and forwards it to the Rust regional catalog. Catalog command
+          and snapshot version 3 preserve it through quorum replication. The container campaign compares the
+          Go and Rust views before and after control-process <code>SIGKILL</code>, leader loss, and all-node
+          same-volume reopen.
+        </p>
+        <div className="reference-grid">
+          <ReferenceCard
+            eyebrow="Guide"
+            title="Complete governance contract"
+            description="Validation, query, compatibility, recovery, and non-claims."
+            href={`${repositoryDocsUrl}/RESOURCE_GOVERNANCE.md`}
+          />
+          <ReferenceCard
+            eyebrow="Decision"
+            title="ADR-0033"
+            description="Why environment is not duplicated and aggregation follows authorization."
+            href={`${repositoryDocsUrl}/adr/0033-resource-governance-and-cost-attribution.md`}
+          />
+        </div>
       </Topic>
     </>
   );
@@ -1251,9 +1327,9 @@ export function ReferenceBody() {
           />
           <ReferenceCard
             eyebrow="Release"
-            title="v0.1.0-alpha.4 release notes"
+            title="v0.1.0-alpha.5 release notes"
             description="Verified milestone highlights, source-only artifacts, compatibility guidance, and explicit alpha limitations."
-            href={`${repositoryDocsUrl}/releases/v0.1.0-alpha.4.md`}
+            href={`${repositoryDocsUrl}/releases/v0.1.0-alpha.5.md`}
           />
         </div>
       </Topic>

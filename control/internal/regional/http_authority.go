@@ -116,11 +116,12 @@ func validAuthorityEndpoint(endpoint *url.URL) bool {
 }
 
 type applyAuthorityBody struct {
-	RequestToken       string         `json:"request_token"`
-	ExpectedGeneration string         `json:"expected_generation"`
-	ShardCount         uint32         `json:"shard_count"`
-	ReplicaCount       uint16         `json:"replica_count"`
-	Configuration      map[string]any `json:"configuration,omitempty"`
+	RequestToken       string                        `json:"request_token"`
+	ExpectedGeneration string                        `json:"expected_generation"`
+	ShardCount         uint32                        `json:"shard_count"`
+	ReplicaCount       uint16                        `json:"replica_count"`
+	Configuration      map[string]any                `json:"configuration,omitempty"`
+	Governance         *resources.ResourceGovernance `json:"governance,omitempty"`
 }
 
 type deleteAuthorityBody struct {
@@ -263,6 +264,7 @@ func (authority *HTTPAuthority) Apply(
 		ShardCount:         request.ShardCount,
 		ReplicaCount:       request.ReplicaCount,
 		Configuration:      request.Configuration,
+		Governance:         request.Governance,
 	}
 	encoded, err := json.Marshal(body)
 	if err != nil {

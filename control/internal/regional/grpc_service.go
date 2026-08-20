@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -159,11 +160,15 @@ func (server *RegionalAdminServer) ListResources(
 		return nil, err
 	}
 	listed, err := server.registry.List(resources.ListFilter{
-		Organization: request.GetOrganization(),
-		Project:      request.GetProject(),
-		Environment:  request.GetEnvironment(),
-		Namespace:    request.GetNamespace(),
-		Kind:         kind,
+		Organization:   request.GetOrganization(),
+		Project:        request.GetProject(),
+		Environment:    request.GetEnvironment(),
+		Namespace:      request.GetNamespace(),
+		Kind:           kind,
+		Owner:          request.GetOwner(),
+		CostCenter:     request.GetCostCenter(),
+		Classification: optionalClassificationFromProto(request.GetClassification()),
+		Tags:           cloneStringMap(request.GetTags()),
 	})
 	if err != nil {
 		return nil, registryStatus(err)
@@ -346,6 +351,15 @@ func desiredFromProto(
 			"the current regional runtime requires replicas 3",
 		)
 	}
+	if spec.GetGovernance() == nil {
+		return resources.ResourceKey{}, resources.DesiredResource{}, fmt.Errorf(
+			"spec.governance is required",
+		)
+	}
+	governance, err := governanceFromProto(spec.GetGovernance())
+	if err != nil {
+		return resources.ResourceKey{}, resources.DesiredResource{}, err
+	}
 	configuration := spec.GetConfiguration()
 	if configuration == nil {
 		return resources.ResourceKey{}, resources.DesiredResource{}, fmt.Errorf(
@@ -358,13 +372,16 @@ func desiredFromProto(
 			"configuration.shard_count must be an unsigned 32-bit integer",
 		)
 	}
-	encoded, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(spec)
+	normalizedSpec := proto.Clone(spec).(*epochv1.ResourceSpec)
+	normalizedSpec.Governance = governanceToProto(governance)
+	encoded, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(normalizedSpec)
 	if err != nil {
 		return resources.ResourceKey{}, resources.DesiredResource{}, err
 	}
 	return key, resources.DesiredResource{
 		ResourceKey: key,
 		Labels:      cloneStringMap(spec.GetLabels()),
+		Governance:  governance,
 		Spec:        json.RawMessage(encoded),
 	}, nil
 }
@@ -398,6 +415,7 @@ func resourceToProto(resource resources.Resource) (*epochv1.Resource, error) {
 	if err := protojson.Unmarshal(resource.Spec, spec); err != nil {
 		return nil, fmt.Errorf("stored resource spec is not a RegionalAdmin contract: %w", err)
 	}
+	spec.Governance = governanceToProto(resource.Governance)
 	return &epochv1.Resource{
 		Name: &epochv1.ResourceName{
 			Organization: resource.Organization,
@@ -411,6 +429,76 @@ func resourceToProto(resource resources.Resource) (*epochv1.Resource, error) {
 		Spec:       spec,
 		Status:     statusToProto(resource.Status),
 	}, nil
+}
+
+func governanceFromProto(
+	governance *epochv1.ResourceGovernance,
+) (*resources.ResourceGovernance, error) {
+	if governance == nil {
+		return nil, nil
+	}
+	classification := classificationFromProto(governance.GetClassification())
+	normalized, err := resources.NormalizeGovernance(&resources.ResourceGovernance{
+		Owner:          governance.GetOwner(),
+		CostCenter:     governance.GetCostCenter(),
+		Classification: classification,
+		Tags:           cloneStringMap(governance.GetTags()),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return normalized, nil
+}
+
+func governanceToProto(governance *resources.ResourceGovernance) *epochv1.ResourceGovernance {
+	if governance == nil {
+		return nil
+	}
+	return &epochv1.ResourceGovernance{
+		Owner:          governance.Owner,
+		CostCenter:     governance.CostCenter,
+		Classification: protoClassification(governance.Classification),
+		Tags:           cloneStringMap(governance.Tags),
+	}
+}
+
+func classificationFromProto(classification epochv1.DataClassification) resources.DataClassification {
+	switch classification {
+	case epochv1.DataClassification_DATA_CLASSIFICATION_PUBLIC:
+		return resources.ClassificationPublic
+	case epochv1.DataClassification_DATA_CLASSIFICATION_INTERNAL:
+		return resources.ClassificationInternal
+	case epochv1.DataClassification_DATA_CLASSIFICATION_CONFIDENTIAL:
+		return resources.ClassificationConfidential
+	case epochv1.DataClassification_DATA_CLASSIFICATION_RESTRICTED:
+		return resources.ClassificationRestricted
+	default:
+		return resources.ClassificationUnspecified
+	}
+}
+
+func optionalClassificationFromProto(
+	classification epochv1.DataClassification,
+) resources.DataClassification {
+	if classification == epochv1.DataClassification_DATA_CLASSIFICATION_UNSPECIFIED {
+		return ""
+	}
+	return classificationFromProto(classification)
+}
+
+func protoClassification(classification resources.DataClassification) epochv1.DataClassification {
+	switch classification {
+	case resources.ClassificationPublic:
+		return epochv1.DataClassification_DATA_CLASSIFICATION_PUBLIC
+	case resources.ClassificationInternal:
+		return epochv1.DataClassification_DATA_CLASSIFICATION_INTERNAL
+	case resources.ClassificationConfidential:
+		return epochv1.DataClassification_DATA_CLASSIFICATION_CONFIDENTIAL
+	case resources.ClassificationRestricted:
+		return epochv1.DataClassification_DATA_CLASSIFICATION_RESTRICTED
+	default:
+		return epochv1.DataClassification_DATA_CLASSIFICATION_UNSPECIFIED
+	}
 }
 
 func statusToProto(observed resources.ResourceStatus) *epochv1.ResourceStatus {

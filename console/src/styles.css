@@ -805,6 +805,76 @@ main {
   margin: 0;
 }
 
+.governance-filter {
+  display: grid;
+  grid-template-columns: minmax(13rem, 1.25fr) repeat(4, minmax(9rem, 1fr)) auto auto;
+  align-items: end;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: 1rem;
+  background: var(--surface-sunken);
+}
+
+.governance-filter > div strong,
+.governance-filter > div span,
+.governance-filter label span {
+  display: block;
+}
+
+.governance-filter > div span,
+.governance-filter label span {
+  margin-top: 0.15rem;
+  color: var(--ink-3);
+  font-size: 0.75rem;
+}
+
+.governance-filter input,
+.governance-filter select {
+  width: 100%;
+  min-height: 36px;
+  margin-top: 0.3rem;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  padding: 0.45rem 0.6rem;
+  color: var(--ink);
+  background: var(--surface);
+}
+
+.governance-filter .form-error {
+  grid-column: 1 / -1;
+}
+
+.governance-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.governance-summary article {
+  display: grid;
+  gap: 0.15rem;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 0.8rem;
+  background: var(--surface);
+}
+
+.governance-summary article span,
+.governance-summary article small,
+.governance-cell span {
+  color: var(--ink-3);
+  font-size: 0.75rem;
+}
+
+.governance-cell {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 11rem;
+}
+
 /* --------------------------------------------------------------------------
    Console: profile cards and forms
    -------------------------------------------------------------------------- */
@@ -1191,6 +1261,10 @@ footer {
   .credential-panel {
     grid-template-columns: 1fr minmax(10rem, 1fr) auto auto;
   }
+
+  .governance-filter {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 720px) {
@@ -1227,6 +1301,11 @@ footer {
   }
 
   .credential-panel {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .governance-filter {
     grid-template-columns: 1fr;
     align-items: stretch;
   }

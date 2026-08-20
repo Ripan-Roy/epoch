@@ -201,6 +201,10 @@ Generated output is reviewed and committed. Do not edit it manually. CI runs
 generation and rejects a diff. Before a public API is released, CI must also run
 Buf's breaking check against the default branch or a published registry label.
 
+Managed regional resource fixtures must include the governance object described
+in [Resource Governance](RESOURCE_GOVERNANCE.md). Direct local/legacy fixtures
+may omit it only when the test explicitly covers backward-compatible recovery.
+
 ## Runtime configuration and local ports
 
 The initial standalone development contract is:
@@ -567,6 +571,7 @@ contract tree during the initial scaffold.
 
 - [Architecture](ARCHITECTURE.md)
 - [Testing](TESTING.md)
+- [Resource governance](RESOURCE_GOVERNANCE.md)
 - [Delivery plan](DELIVERY_PLAN.md)
 - [Requirements traceability](REQUIREMENTS_TRACEABILITY.md)
 - [Product requirements](PRD.md)

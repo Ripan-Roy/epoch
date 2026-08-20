@@ -5,7 +5,7 @@ import {
   controlBaseUrl,
   createResource,
   getHealth,
-  listRegionalResources,
+  listRegionalInventory,
   listResources,
 } from "./api/client";
 import {
@@ -17,6 +17,8 @@ import type {
   CreateResourceInput,
   DurabilityProfile,
   EngineHealth,
+  RegionalCostAttribution,
+  RegionalGovernanceFilter,
   RegionalResource,
   ResourceKind,
   ResourceSummary,
@@ -24,11 +26,12 @@ import type {
 import { ProfileCreateCard } from "./components/ProfileCreateCard";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { DocsPage } from "./DocsPage";
+import { parseGovernanceTagFilter } from "./governance";
 import { profileDefinitions } from "./profileDefinitions";
 
 const refreshIntervalMs = 15_000;
 const docsOnly = import.meta.env.VITE_DOCS_ONLY === "true";
-const releaseVersion = "0.1.0-alpha.4";
+const releaseVersion = "0.1.0-alpha.5";
 
 const durabilityRank: Record<DurabilityProfile, number> = {
   volatile: 0,
@@ -44,6 +47,20 @@ interface AppRoute {
   section: string | null;
   heading: string | null;
 }
+
+interface GovernanceFilterDraft {
+  owner: string;
+  costCenter: string;
+  classification: "" | "public" | "internal" | "confidential" | "restricted";
+  tags: string;
+}
+
+const emptyGovernanceFilterDraft: GovernanceFilterDraft = {
+  owner: "",
+  costCenter: "",
+  classification: "",
+  tags: "",
+};
 
 function App() {
   return docsOnly ? <DocumentationApp /> : <EpochApp />;
@@ -87,6 +104,11 @@ function EpochApp() {
   const [health, setHealth] = useState<EngineHealth | null>(null);
   const [resources, setResources] = useState<ResourceSummary[]>([]);
   const [regionalResources, setRegionalResources] = useState<RegionalResource[]>([]);
+  const [regionalCostAttribution, setRegionalCostAttribution] = useState<RegionalCostAttribution[]>([]);
+  const [governanceFilter, setGovernanceFilter] = useState<RegionalGovernanceFilter>({});
+  const [governanceFilterDraft, setGovernanceFilterDraft] =
+    useState<GovernanceFilterDraft>(emptyGovernanceFilterDraft);
+  const [governanceFilterError, setGovernanceFilterError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [regionalError, setRegionalError] = useState<string | null>(null);
@@ -98,44 +120,49 @@ function EpochApp() {
   );
   const [managedCredentialError, setManagedCredentialError] = useState<string | null>(null);
 
-  const loadOverview = useCallback(async (quiet = false) => {
-    if (!quiet) {
-      setLoading(true);
-    }
-    const [nodeResult, regionalResult] = await Promise.allSettled([
-      Promise.all([getHealth(), listResources()]),
-      listRegionalResources(),
-    ]);
-    if (nodeResult.status === "fulfilled") {
-      const [nextHealth, nextResources] = nodeResult.value;
-      setHealth(nextHealth);
-      setResources(nextResources);
-      setLoadError(null);
-    } else {
-      setHealth(null);
-      setResources([]);
-      setLoadError(
-        nodeResult.reason instanceof Error
-          ? nodeResult.reason.message
-          : "The Epoch node could not be reached.",
-      );
-    }
-    if (regionalResult.status === "fulfilled") {
-      setRegionalResources(regionalResult.value);
-      setRegionalError(null);
-    } else {
-      setRegionalResources([]);
-      setRegionalError(
-        regionalResult.reason instanceof Error
-          ? regionalResult.reason.message
-          : "Regional placement could not be observed.",
-      );
-    }
-    setLastChecked(new Date());
-    if (!quiet) {
-      setLoading(false);
-    }
-  }, []);
+  const loadOverview = useCallback(
+    async (quiet = false) => {
+      if (!quiet) {
+        setLoading(true);
+      }
+      const [nodeResult, regionalResult] = await Promise.allSettled([
+        Promise.all([getHealth(), listResources()]),
+        listRegionalInventory(governanceFilter),
+      ]);
+      if (nodeResult.status === "fulfilled") {
+        const [nextHealth, nextResources] = nodeResult.value;
+        setHealth(nextHealth);
+        setResources(nextResources);
+        setLoadError(null);
+      } else {
+        setHealth(null);
+        setResources([]);
+        setLoadError(
+          nodeResult.reason instanceof Error
+            ? nodeResult.reason.message
+            : "The Epoch node could not be reached.",
+        );
+      }
+      if (regionalResult.status === "fulfilled") {
+        setRegionalResources(regionalResult.value.resources);
+        setRegionalCostAttribution(regionalResult.value.costAttribution);
+        setRegionalError(null);
+      } else {
+        setRegionalResources([]);
+        setRegionalCostAttribution([]);
+        setRegionalError(
+          regionalResult.reason instanceof Error
+            ? regionalResult.reason.message
+            : "Regional placement could not be observed.",
+        );
+      }
+      setLastChecked(new Date());
+      if (!quiet) {
+        setLoading(false);
+      }
+    },
+    [governanceFilter],
+  );
 
   useEffect(() => {
     const updateRoute = () => setRoute(readRoute());
@@ -199,7 +226,34 @@ function EpochApp() {
     setManagedCredentialConfigured(false);
     setManagedCredentialError(null);
     setRegionalResources([]);
+    setRegionalCostAttribution([]);
     setRegionalError("A managed-control bearer token is required.");
+  }
+
+  function handleGovernanceFilter(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    try {
+      const tags = parseGovernanceTagFilter(governanceFilterDraft.tags);
+      setGovernanceFilter({
+        ...(governanceFilterDraft.owner.trim() ? { owner: governanceFilterDraft.owner.trim() } : {}),
+        ...(governanceFilterDraft.costCenter.trim()
+          ? { costCenter: governanceFilterDraft.costCenter.trim() }
+          : {}),
+        ...(governanceFilterDraft.classification
+          ? { classification: governanceFilterDraft.classification }
+          : {}),
+        ...(Object.keys(tags).length > 0 ? { tags } : {}),
+      });
+      setGovernanceFilterError(null);
+    } catch (error) {
+      setGovernanceFilterError(error instanceof Error ? error.message : "The governance filter is invalid.");
+    }
+  }
+
+  function handleClearGovernanceFilter() {
+    setGovernanceFilterDraft(emptyGovernanceFilterDraft);
+    setGovernanceFilter({});
+    setGovernanceFilterError(null);
   }
 
   const connectionLabel = health ? formatEnum(health.status) : loading ? "Checking" : "Unavailable";
@@ -339,6 +393,72 @@ function EpochApp() {
                 ) : null}
               </form>
 
+              <form className="governance-filter" onSubmit={handleGovernanceFilter}>
+                <div>
+                  <strong>Governance inventory</strong>
+                  <span>Exact-match owner, cost, classification, and tag filters are combined with AND.</span>
+                </div>
+                <label>
+                  <span>Owner</span>
+                  <input
+                    value={governanceFilterDraft.owner}
+                    placeholder="team:payments"
+                    onChange={(event) =>
+                      setGovernanceFilterDraft((current) => ({ ...current, owner: event.target.value }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>Cost center</span>
+                  <input
+                    value={governanceFilterDraft.costCenter}
+                    placeholder="cc-1042"
+                    onChange={(event) =>
+                      setGovernanceFilterDraft((current) => ({ ...current, costCenter: event.target.value }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>Classification</span>
+                  <select
+                    value={governanceFilterDraft.classification}
+                    onChange={(event) =>
+                      setGovernanceFilterDraft((current) => ({
+                        ...current,
+                        classification: event.target.value as GovernanceFilterDraft["classification"],
+                      }))
+                    }
+                  >
+                    <option value="">Any</option>
+                    <option value="public">Public</option>
+                    <option value="internal">Internal</option>
+                    <option value="confidential">Confidential</option>
+                    <option value="restricted">Restricted</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Tags</span>
+                  <input
+                    value={governanceFilterDraft.tags}
+                    placeholder="service=checkout,tier=critical"
+                    onChange={(event) =>
+                      setGovernanceFilterDraft((current) => ({ ...current, tags: event.target.value }))
+                    }
+                  />
+                </label>
+                <button className="button button--secondary" type="submit">
+                  Apply filters
+                </button>
+                <button className="text-button" type="button" onClick={handleClearGovernanceFilter}>
+                  Clear filters
+                </button>
+                {governanceFilterError ? (
+                  <span className="form-error" role="alert">
+                    {governanceFilterError}
+                  </span>
+                ) : null}
+              </form>
+
               {regionalError ? (
                 <div className="callout callout--warning" role="status">
                   <strong>Regional state unavailable</strong>
@@ -354,6 +474,20 @@ function EpochApp() {
                 </div>
               ) : null}
 
+              {regionalCostAttribution.length > 0 ? (
+                <div className="governance-summary" aria-label="Filtered cost attribution">
+                  {regionalCostAttribution.map((entry) => (
+                    <article key={`${entry.costCenter}:${entry.classification}`}>
+                      <span>{entry.costCenter}</span>
+                      <strong>{entry.resourceCount} resources</strong>
+                      <small>
+                        {entry.shardCount} shards · {formatEnum(entry.classification)}
+                      </small>
+                    </article>
+                  ))}
+                </div>
+              ) : null}
+
               {regionalResources.length > 0 ? (
                 <div className="table-wrap">
                   <table>
@@ -364,6 +498,7 @@ function EpochApp() {
                       <tr>
                         <th scope="col">Resource</th>
                         <th scope="col">Generation</th>
+                        <th scope="col">Governance</th>
                         <th scope="col">State</th>
                         <th scope="col">Observed placement</th>
                         <th scope="col">Remaining risk</th>
@@ -390,6 +525,24 @@ function EpochApp() {
                             <span className="resource-generation-detail">
                               observed {resource.observedGeneration}
                             </span>
+                          </td>
+                          <td>
+                            {resource.governance ? (
+                              <div className="governance-cell">
+                                <strong>{resource.governance.owner}</strong>
+                                <span>
+                                  {resource.governance.costCenter} ·{" "}
+                                  {formatEnum(resource.governance.classification)}
+                                </span>
+                                <span>
+                                  {Object.entries(resource.governance.tags)
+                                    .map(([key, value]) => `${key}=${value}`)
+                                    .join(" · ") || "No custom tags"}
+                                </span>
+                              </div>
+                            ) : (
+                              <span className="risk-copy">Legacy resource: governance unassigned</span>
+                            )}
                           </td>
                           <td>
                             <span className="phase-token" data-phase={resource.phase}>

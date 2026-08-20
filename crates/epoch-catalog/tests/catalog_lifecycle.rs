@@ -22,6 +22,7 @@ fn stream(name: &str, shards: u32) -> CatalogCommand {
             shard_count: shards,
             replica_count: 3,
             configuration: None,
+            governance: None,
         },
     })
 }

@@ -83,6 +83,17 @@ enum ResourcePhase {
   RESOURCE_PHASE_DELETING = 5;
 }
 
+// DataClassification is the bounded governance taxonomy used for policy,
+// inventory, and cost-attribution decisions. UNSPECIFIED is never accepted on
+// a newly managed resource.
+enum DataClassification {
+  DATA_CLASSIFICATION_UNSPECIFIED = 0;
+  DATA_CLASSIFICATION_PUBLIC = 1;
+  DATA_CLASSIFICATION_INTERNAL = 2;
+  DATA_CLASSIFICATION_CONFIDENTIAL = 3;
+  DATA_CLASSIFICATION_RESTRICTED = 4;
+}
+
 // ConditionState uses a three-valued status so an unobserved condition is not
 // accidentally interpreted as false.
 enum ConditionState {
@@ -151,6 +162,16 @@ message PlacementPolicy {
   string required_node_class = 3;
 }
 
+// ResourceGovernance carries bounded, non-secret ownership and attribution
+// metadata. Environment remains part of ResourceName so it cannot drift from
+// the resource's authorization and placement scope.
+message ResourceGovernance {
+  string owner = 1;
+  string cost_center = 2;
+  DataClassification classification = 3;
+  map<string, string> tags = 4;
+}
+
 // ResourceSpec contains shared guarantees and a typed-by-kind configuration
 // object. Profile-specific messages may replace configuration as contracts
 // stabilize without changing ResourceName or ResourceStatus.
@@ -163,6 +184,7 @@ message ResourceSpec {
   map<string, string> labels = 6;
   google.protobuf.Struct configuration = 7;
   PlacementPolicy placement = 8;
+  ResourceGovernance governance = 9;
 }
 
 // Condition is an observable reconciliation or guarantee condition.

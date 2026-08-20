@@ -463,6 +463,10 @@ authorization-protected Rust topology endpoints. It also requests more shards th
 limiting node can host, waits for the stable capacity reason, and proves the
 catalog resource was never created. Every direct regional
 catalog/route/data/topology request also authenticates.
+The managed resource includes canonical governance. The campaign queries it by
+owner, cost center, classification, and two exact tags, checks post-filter cost
+attribution, compares the Go BFF value with every Rust catalog voter, and repeats
+those checks after Go `SIGKILL` and all-node same-volume reopen.
 The process campaign performs a linearizable-by-default Stream read on the
 current leader and verifies the quorum barrier term, read index, applied index,
 and response headers. Polls that intentionally compare every follower opt into
