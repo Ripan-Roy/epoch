@@ -1193,9 +1193,9 @@ export function ReferenceBody() {
           />
           <ReferenceCard
             eyebrow="Release"
-            title="v0.1.0-alpha.3 release notes"
+            title="v0.1.0-alpha.4 release notes"
             description="Verified milestone highlights, source-only artifacts, compatibility guidance, and explicit alpha limitations."
-            href={`${repositoryDocsUrl}/releases/v0.1.0-alpha.3.md`}
+            href={`${repositoryDocsUrl}/releases/v0.1.0-alpha.4.md`}
           />
         </div>
       </Topic>

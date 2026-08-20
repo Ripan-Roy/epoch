@@ -6,6 +6,10 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+_No changes yet._
+
+## [0.1.0-alpha.4] - 2026-08-20
+
 ### Added
 
 - Opt-in leader-owned signed HTTP/webhook delivery for regional Event Bus
@@ -364,6 +368,7 @@ standalone profiles, local durable Stream and Queue storage, repository-local
 Go/Java/Python SDKs, deterministic testkit, fixed-voter consensus probe, CI,
 development containers, and main-only documentation deployment.
 
+[0.1.0-alpha.4]: https://github.com/Ripan-Roy/epoch/compare/v0.1.0-alpha.3...v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/Ripan-Roy/epoch/compare/v0.1.0-alpha.2...v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/Ripan-Roy/epoch/compare/v0.1.0-alpha.1...v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/Ripan-Roy/epoch/releases/tag/v0.1.0-alpha.1
