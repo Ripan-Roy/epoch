@@ -195,7 +195,7 @@ complete.
 | CE-05 | Expose bounded ordered batches in every SDK | Go + Java + Python | ✅ | `AtomicBatch`/`atomicBatch`/`atomic_batch` reuse the one-to-128 transaction wire command; each SDK contract suite covers committed `Get` and the alias |
 | CE-06 | Publish runnable three-language guidance | Docs + Pages | 🟡 | Exact quickstarts and Cache SDK/API/semantics/architecture/runtime/testing docs include configured LRU, committed access, atomic batching, pooling guidance, and non-claims; local formatting/lint/type/build and exact-source compile gates pass, while main-only publication is pending |
 | CE-07 | Prove failover, catch-up, and same-volume reopen | Compose integration | ✅ | The real campaign creates Cache configuration through Go, then proves committed LRU access, atomic batch, sorted eviction receipt, voter convergence, catch-up, and post-restart state |
-| CE-08 | Pass all local and protected gates | CI + GitHub | 🟡 | `make check`, `make build`, exact displayed quickstarts, and the real regional container campaign are green; PR, exact-main CI, and Pages publication remain pending |
+| CE-08 | Pass all local and protected gates | CI + GitHub | 🟡 | `make check`, `make build`, exact displayed quickstarts, and the real regional container campaign are green; PR #78 is open, while exact-main CI and Pages publication remain pending |
 
 ## Current native delivery: regional Event Bus v1 and SDK routing
 
