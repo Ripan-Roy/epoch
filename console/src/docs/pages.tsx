@@ -855,8 +855,8 @@ export function RegionalCacheBody() {
       provisionBody={
         <p>
           Reuse the disposable three-zone topology and development credentials. The Go bridge provisions{" "}
-          <code>sessions</code> with an entry-count LRU policy; application data then travels directly to the
-          discovered Rust Cache leader.
+          <code>sessions</code> with LRU, memory/cold byte caps, and named quorum durability; application data
+          then travels directly to the discovered Rust Cache leader.
         </p>
       }
       provisionLabel="Terminal C · provision"
@@ -878,11 +878,11 @@ export function RegionalCacheBody() {
           </EvidenceCard>
           <EvidenceCard
             label="Deterministic eviction"
-            claim="Committed access produces the same victim everywhere."
+            claim="Entry and byte admission produce the same victim everywhere."
           >
             Managed configuration reaches every voter. <code>Get</code> records LRU/LFU access exactly once;
             pure <code>Observe</code> never changes order. All-key and volatile LRU, LFU, random, and TTL
-            admissions stage eviction with the write and report sorted victims.
+            admissions stage memory/cold byte accounting, eviction, and the write atomically.
           </EvidenceCard>
           <EvidenceCard
             label="Deterministic expiry"
@@ -892,13 +892,37 @@ export function RegionalCacheBody() {
             earliest value or lock deadline; explicit maintenance remains available, and observation, lookup,
             and status explicitly request <code>linearizable</code>.
           </EvidenceCard>
+          <EvidenceCard label="Recovery" claim="Backup, PITR, and changes share the replicated history.">
+            A canonical bounded backup publishes its digest and restorable revision window. Restore is one
+            checked consensus transition with fresh non-ABA versions, while the durable change cursor records
+            mutations, expiry, eviction, and restore.
+          </EvidenceCard>
+          <EvidenceCard label="Advanced state" claim="Transforms and exact queries recover with the tablet.">
+            Collection, bitmap, cardinality, Bloom, Cuckoo, geo, JSON-index, and vector-index operations are
+            bounded state-machine transforms. Exact typed queries use the same leader barrier and canonical
+            state.
+          </EvidenceCard>
+          <EvidenceCard
+            label="Pipeline &amp; signals"
+            claim="Atomic batch and multiplex are different contracts."
+          >
+            Atomic batch is all-or-nothing. Multiplex returns request-ordered outcomes for independently
+            committed identities. Node-affine Pub/Sub is explicitly at-most-once; durable consumers use the
+            change stream.
+          </EvidenceCard>
+          <EvidenceCard label="Cold class" claim="Cold reads use an fsynced local-file path.">
+            Every voter synchronizes cold files after committed apply and integrity-checks them on read.
+            Status exposes retained bytes and observed local-file microseconds as a disclosure—not an SLO or
+            heap offload claim.
+          </EvidenceCard>
         </>
       }
       boundary={
         <p>
-          Regional Cache v1 is a repository-local, single-shard alpha. Byte-pressure capacity and benchmarks,
-          native multiplexing/automatic batch coalescing, multi-shard transactions, exportable backup/PITR,
-          Pub/Sub, generated response models, and public package-registry releases remain open.
+          Regional Cache v1 is a repository-local, fixed-topology single-shard alpha. Multi-shard routing and
+          transactions, automatic client coalescing, RESP compatibility, generated response models, dynamic
+          placement, production scale/SLO evidence, CRDTs, managed backup scheduling, and package-registry
+          releases remain open.
         </p>
       }
     />
@@ -1157,7 +1181,7 @@ export function ReferenceBody() {
           <ReferenceCard
             eyebrow="SDK contract"
             title="Regional Cache SDK"
-            description="Strict values, CAS, atomic transaction, fenced locks, explicit expiry, leader discovery, exact retry, and three-language examples."
+            description="Strict and advanced state, byte/cold admission, atomic batch and multiplex, locks, changes, backup/PITR, lossy Pub/Sub, exact retry, and three-language examples."
             href={`${repositoryDocsUrl}/REGIONAL_CACHE_SDK.md`}
           />
           <ReferenceCard
@@ -1296,6 +1320,12 @@ export function ReferenceBody() {
             href={`${repositoryDocsUrl}/adr/0032-regional-cache-eviction-and-access-batches.md`}
           />
           <ReferenceCard
+            eyebrow="Cache completion"
+            title="State services and cold read tier"
+            description="Typed transforms and queries, byte admission, named durability, change history, backup/PITR, non-atomic multiplex, lossy Pub/Sub, fsynced cold reads, and exact non-claims."
+            href={`${repositoryDocsUrl}/adr/0034-cache-state-services-and-cold-read-tier.md`}
+          />
+          <ReferenceCard
             eyebrow="Event Bus design"
             title="Regional Event Bus routing decision"
             description="Native v1 route shape, complete pull-delivery lifecycle, subscription policy, shared retry contract, recovery evidence, and target boundaries."
@@ -1316,7 +1346,7 @@ export function ReferenceBody() {
           <ReferenceCard
             eyebrow="Cache tablet"
             title="Experimental replicated Cache"
-            description="CAS, atomic transactions, checked expiry, fenced locks, failover, exact EPRS replay, and stale-capable local observations."
+            description="Typed state, deterministic byte admission, atomic and multiplex mutations, changes, backup/PITR, Pub/Sub, cold reads, failover, and exact EPRS replay."
             href={`${repositoryDocsUrl}/CACHE_TABLET.md`}
           />
           <ReferenceCard
@@ -1327,9 +1357,9 @@ export function ReferenceBody() {
           />
           <ReferenceCard
             eyebrow="Release"
-            title="v0.1.0-alpha.5 release notes"
+            title="v0.1.0-alpha.6 release notes"
             description="Verified milestone highlights, source-only artifacts, compatibility guidance, and explicit alpha limitations."
-            href={`${repositoryDocsUrl}/releases/v0.1.0-alpha.5.md`}
+            href={`${repositoryDocsUrl}/releases/v0.1.0-alpha.6.md`}
           />
         </div>
       </Topic>

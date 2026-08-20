@@ -8,7 +8,9 @@ from epoch_sdk import (
     RegionalCacheClient,
     RegionalCacheExpectation,
     RegionalCacheLockGuard,
+    RegionalCacheMultiplexMutation,
     RegionalCacheMutation,
+    RegionalCacheTransform,
     RegionalCacheValue,
     RegionalScope,
 )
@@ -132,6 +134,89 @@ class RegionalCacheClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "between 1 and 128"):
             self.client.transaction("sessions", 0, "tx", 0, [])
         self.assertEqual(self.transport.requests, [])
+
+    def test_advanced_state_backup_query_and_pubsub_routes(self) -> None:
+        transform = RegionalCacheTransform("bitmap_set", {"bit": 7, "value": True})
+
+        self.client.transform("sessions", 0, "transform-1", "flags", transform)
+        self.client.changes("sessions", 0, 1, limit=100)
+        self.client.backup("sessions", 0)
+        self.client.restore("sessions", 0, "restore-1", "artifact", 7)
+        self.client.query("sessions", 0, "bitmap_get", {"key": "flags", "bit": 7})
+        self.client.create_subscription("sessions", 0, channels=["audit"], patterns=["orders.*"])
+        self.client.publish("sessions", 0, "audit", {"id": 1})
+        self.client.poll_subscription("sessions", 0, "cache-7-1", limit=10)
+        self.client.delete_subscription("sessions", 0, "cache-7-1")
+        self.client.multiplex(
+            "sessions",
+            0,
+            [
+                RegionalCacheMultiplexMutation(
+                    "profile",
+                    "multiplex-profile",
+                    RegionalCacheMutation.set("profile", RegionalCacheValue.string("ready")),
+                ),
+                RegionalCacheMultiplexMutation(
+                    "visits",
+                    "multiplex-visits",
+                    RegionalCacheMutation.increment("visits", 1),
+                ),
+            ],
+        )
+
+        operations = self.transport.requests[1::2]
+        self.assertEqual(len(operations), 10)
+        self.assertEqual(
+            [request["path"].rsplit("/shards/0", 1)[1] for request in operations],
+            [
+                "/mutations",
+                "/changes",
+                "/backup",
+                "/mutations",
+                "/query",
+                "/pubsub/subscriptions",
+                "/pubsub/messages",
+                "/pubsub/subscriptions/cache-7-1/messages",
+                "/pubsub/subscriptions/cache-7-1",
+                "/multiplex",
+            ],
+        )
+        self.assertEqual(
+            operations[0]["body"]["operation"]["transform"],
+            {"kind": "bitmap_set", "bit": 7, "value": True},
+        )
+        self.assertEqual(operations[4]["method"], "POST")
+        self.assertEqual(operations[4]["headers"]["x-epoch-read-consistency"], "linearizable")
+        self.assertEqual(operations[8]["method"], "DELETE")
+        self.assertEqual(operations[9]["body"]["mutations"][0]["correlation_id"], "profile")
+
+    def test_transaction_transform_and_cold_storage_class(self) -> None:
+        self.client.set(
+            "sessions",
+            0,
+            "cold-1",
+            "archive",
+            RegionalCacheValue.string("value"),
+            storage_class="cold",
+        )
+        self.client.transaction(
+            "sessions",
+            0,
+            "tx-1",
+            0,
+            [
+                RegionalCacheMutation.transform(
+                    "flags",
+                    RegionalCacheTransform("bitmap_set", {"bit": 1, "value": True}),
+                )
+            ],
+        )
+
+        operations = self.transport.requests[1::2]
+        self.assertEqual(operations[0]["body"]["operation"]["storage_class"], "cold")
+        mutation = operations[1]["body"]["operation"]["mutations"][0]
+        self.assertEqual(mutation["kind"], "transform")
+        self.assertEqual(mutation["transform"]["kind"], "bitmap_set")
 
 
 if __name__ == "__main__":

@@ -1,10 +1,10 @@
-use epoch_cache::{CacheConfig, CacheValue, EvictionPolicy};
+use epoch_cache::{CacheConfig, CacheStorageClass, CacheTransform, CacheValue, EvictionPolicy};
 use epoch_core::DurabilityProfile;
 use epoch_tablet::{
     CACHE_TABLET_COMMAND_FORMAT_VERSION, CacheSetCommand, CacheTablet, CacheTabletCommand,
     CacheTabletDisposition, CacheTabletOperation, CacheTabletOperationResult, CacheTabletOutcome,
-    CacheTabletReceipt, CacheTabletScope, CacheTabletWriteEvidence, CommittedCommand,
-    MAX_CACHE_TABLET_COMMAND_BYTES, cache_proposal_id_for,
+    CacheTabletReceipt, CacheTabletScope, CacheTabletWriteEvidence, CacheTransformCommand,
+    CommittedCommand, MAX_CACHE_TABLET_COMMAND_BYTES, cache_proposal_id_for,
 };
 use serde_json::json;
 
@@ -15,6 +15,8 @@ fn scope() -> CacheTabletScope {
 fn config() -> CacheConfig {
     CacheConfig {
         max_entries: 100,
+        max_memory_bytes: None,
+        max_cold_bytes: Some(1_024),
         default_ttl_ms: None,
         eviction: EvictionPolicy::NoEviction,
         durability: DurabilityProfile::QuorumDurable,
@@ -57,10 +59,8 @@ fn cache_set_is_usable_through_the_public_crate_api() {
         log_index: 23,
         payload: &payload,
     };
-    let receipt: CacheTabletReceipt = CacheTablet::new(scope, config())
-        .unwrap()
-        .apply(committed)
-        .unwrap();
+    let mut tablet = CacheTablet::new(scope.clone(), config()).unwrap();
+    let receipt: CacheTabletReceipt = tablet.apply(committed).unwrap();
 
     assert_eq!(receipt.proposal_id, proposal_id);
     assert_eq!(receipt.tablet_id, 17);
@@ -83,6 +83,7 @@ fn cache_set_is_usable_through_the_public_crate_api() {
                     value: CacheValue::String("ready".into()),
                     version: 1,
                     expires_at_ms: Some(1_700_000_060_123),
+                    storage_class: CacheStorageClass::Memory,
                 },
                 evicted_keys: Vec::new(),
             },
@@ -104,4 +105,45 @@ fn cache_set_is_usable_through_the_public_crate_api() {
 
     assert_eq!(CACHE_TABLET_COMMAND_FORMAT_VERSION, 1);
     assert_eq!(MAX_CACHE_TABLET_COMMAND_BYTES, 512 * 1024);
+}
+
+#[test]
+fn cold_replace_retains_the_public_set_result_contract() {
+    let scope = scope();
+    let mut tablet = CacheTablet::new(scope.clone(), config()).unwrap();
+    let cold_command = CacheTabletCommand::new(
+        &scope,
+        "cold-set-request-1",
+        1_700_000_000_124,
+        CacheTabletOperation::Transform(CacheTransformCommand {
+            shard: 0,
+            key: "user:1".into(),
+            transform: CacheTransform::Replace {
+                value: CacheValue::String("archived".into()),
+                storage_class: CacheStorageClass::Cold,
+            },
+            expected_version: None,
+            ttl_ms: None,
+            lock_guard: None,
+        }),
+    )
+    .unwrap();
+    let cold_payload = cold_command.encode(&scope).unwrap();
+    let cold_receipt = tablet
+        .apply(CommittedCommand {
+            group_id: 17,
+            group_epoch: 5,
+            proposal_id: cold_command.proposal_id(&scope).unwrap(),
+            term: 9,
+            log_index: 1,
+            payload: &cold_payload,
+        })
+        .unwrap();
+    let CacheTabletOutcome::Applied {
+        result: CacheTabletOperationResult::Set { item, .. },
+    } = cold_receipt.outcome
+    else {
+        panic!("a cold Set must retain the public Set result contract");
+    };
+    assert_eq!(item.storage_class, CacheStorageClass::Cold);
 }

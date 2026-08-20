@@ -17,7 +17,7 @@ use epoch_catalog::{
 };
 use epoch_consensus::{CommittedProposal, ConsensusError, ProposalLookup};
 use epoch_core::{DurabilityProfile, ResourceKind, WorkloadProfile};
-use epoch_tablet::{MAX_CACHE_TABLET_ENTRIES, MAX_CACHE_TTL_MS};
+use epoch_tablet::{MAX_CACHE_TABLET_ENTRIES, MAX_CACHE_TABLET_TIER_BYTES, MAX_CACHE_TTL_MS};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{Mutex, broadcast};
@@ -144,13 +144,23 @@ struct CacheCatalogConfiguration {
     #[serde(default = "default_cache_max_entries")]
     max_entries: usize,
     #[serde(default)]
+    max_memory_bytes: Option<usize>,
+    #[serde(default)]
+    max_cold_bytes: Option<usize>,
+    #[serde(default)]
     default_ttl_ms: Option<u64>,
     #[serde(default)]
     eviction: EvictionPolicy,
+    #[serde(default = "default_regional_cache_durability")]
+    durability: DurabilityProfile,
 }
 
 const fn default_cache_max_entries() -> usize {
     10_000
+}
+
+const fn default_regional_cache_durability() -> DurabilityProfile {
+    DurabilityProfile::QuorumDurable
 }
 
 #[derive(Debug, Deserialize)]
@@ -430,11 +440,32 @@ fn normalize_profile_configuration(
             format!("Cache default_ttl_ms must be between 1 and {MAX_CACHE_TTL_MS}"),
         )));
     }
+    if !matches!(
+        configuration.durability,
+        DurabilityProfile::ReplicatedMemory | DurabilityProfile::QuorumDurable
+    ) {
+        return Err(RegionalCatalogApiError::Catalog(CatalogError::InvalidSpec(
+            "regional Cache durability must be replicated_memory or quorum_durable".into(),
+        )));
+    }
+    for (name, capacity) in [
+        ("max_memory_bytes", configuration.max_memory_bytes),
+        ("max_cold_bytes", configuration.max_cold_bytes),
+    ] {
+        if capacity.is_some_and(|capacity| capacity == 0 || capacity > MAX_CACHE_TABLET_TIER_BYTES)
+        {
+            return Err(RegionalCatalogApiError::Catalog(CatalogError::InvalidSpec(
+                format!("Cache {name} must be between 1 and {MAX_CACHE_TABLET_TIER_BYTES}"),
+            )));
+        }
+    }
     serde_json::to_value(CacheConfig {
         max_entries: configuration.max_entries,
+        max_memory_bytes: configuration.max_memory_bytes,
+        max_cold_bytes: configuration.max_cold_bytes,
         default_ttl_ms: configuration.default_ttl_ms,
         eviction: configuration.eviction,
-        durability: DurabilityProfile::QuorumDurable,
+        durability: configuration.durability,
     })
     .map(Some)
     .map_err(|error| RegionalCatalogApiError::Catalog(CatalogError::InvalidSpec(error.to_string())))

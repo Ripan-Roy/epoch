@@ -2,6 +2,7 @@ package io.epoch.sdk;
 
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigInteger;
+import java.util.Map;
 import java.util.Objects;
 
 /** One operation permitted inside an atomic regional Cache transaction. */
@@ -49,6 +50,20 @@ public final class RegionalCacheMutation {
     return new RegionalCacheMutation(key, operation);
   }
 
+  /** Constructs a transactional advanced data-structure transform. */
+  public static RegionalCacheMutation transform(
+      String key,
+      String kind,
+      Map<String, ?> fields,
+      BigInteger expectedVersion,
+      BigInteger ttlMs) {
+    ObjectNode operation = base("transform", key);
+    operation.set("transform", transformJson(kind, fields));
+    optionalNonNegative(operation, "expected_version", expectedVersion);
+    optionalPositive(operation, "ttl_ms", ttlMs);
+    return new RegionalCacheMutation(key, operation);
+  }
+
   String key() {
     return key;
   }
@@ -74,5 +89,18 @@ public final class RegionalCacheMutation {
   private static ObjectNode base(String kind, String key) {
     RegionalClientCore.required(key, "Cache key");
     return RegionalClientCore.MAPPER.createObjectNode().put("kind", kind).put("key", key);
+  }
+
+  static ObjectNode transformJson(String kind, Map<String, ?> fields) {
+    RegionalClientCore.required(kind, "Cache transform kind");
+    ObjectNode transform = RegionalClientCore.MAPPER.createObjectNode().put("kind", kind);
+    for (Map.Entry<String, ?> entry : Objects.requireNonNull(fields, "fields").entrySet()) {
+      RegionalClientCore.required(entry.getKey(), "Cache transform field");
+      if ("kind".equals(entry.getKey())) {
+        throw new IllegalArgumentException("Cache transform fields cannot replace kind");
+      }
+      transform.set(entry.getKey(), RegionalClientCore.MAPPER.valueToTree(entry.getValue()));
+    }
+    return transform;
   }
 }

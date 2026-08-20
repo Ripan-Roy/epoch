@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.math.BigInteger;
 import java.net.URI;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.HashSet;
 import java.util.List;
@@ -46,10 +48,30 @@ public final class RegionalCacheClient {
       BigInteger ttlMs,
       RegionalCacheLockGuard lockGuard)
       throws IOException, InterruptedException {
+    return set(cache, shard, idempotencyKey, key, value, ttlMs, lockGuard, null);
+  }
+
+  /** Writes one strict Cache value to memory or the configured cold tier. */
+  public JsonNode set(
+      String cache,
+      int shard,
+      String idempotencyKey,
+      String key,
+      RegionalCacheValue value,
+      BigInteger ttlMs,
+      RegionalCacheLockGuard lockGuard,
+      String storageClass)
+      throws IOException, InterruptedException {
     ObjectNode operation = keyedOperation("set", key);
     operation.set("value", Objects.requireNonNull(value, "value").toJson());
     RegionalCacheMutation.optionalPositive(operation, "ttl_ms", ttlMs);
     addGuard(operation, lockGuard);
+    if (storageClass != null) {
+      if (!"memory".equals(storageClass) && !"cold".equals(storageClass)) {
+        throw new IllegalArgumentException("Cache storage class must be memory or cold");
+      }
+      operation.put("storage_class", storageClass);
+    }
     return mutate(cache, shard, idempotencyKey, operation);
   }
 
@@ -99,6 +121,26 @@ public final class RegionalCacheClient {
       RegionalCacheLockGuard lockGuard)
       throws IOException, InterruptedException {
     ObjectNode operation = keyedOperation("increment", key).put("delta", Long.toString(delta));
+    RegionalCacheMutation.optionalNonNegative(operation, "expected_version", expectedVersion);
+    RegionalCacheMutation.optionalPositive(operation, "ttl_ms", ttlMs);
+    addGuard(operation, lockGuard);
+    return mutate(cache, shard, idempotencyKey, operation);
+  }
+
+  /** Applies one atomic advanced bitmap, probabilistic, geo, JSON, or vector transform. */
+  public JsonNode transform(
+      String cache,
+      int shard,
+      String idempotencyKey,
+      String key,
+      String kind,
+      Map<String, ?> fields,
+      BigInteger expectedVersion,
+      BigInteger ttlMs,
+      RegionalCacheLockGuard lockGuard)
+      throws IOException, InterruptedException {
+    ObjectNode operation = keyedOperation("transform", key);
+    operation.set("transform", RegionalCacheMutation.transformJson(kind, fields));
     RegionalCacheMutation.optionalNonNegative(operation, "expected_version", expectedVersion);
     RegionalCacheMutation.optionalPositive(operation, "ttl_ms", ttlMs);
     addGuard(operation, lockGuard);
@@ -236,6 +278,130 @@ public final class RegionalCacheClient {
     return read(cache, shard, "/observations", Map.of("key", key));
   }
 
+  /** Returns retained durable Cache changes from one sequence cursor. */
+  public JsonNode changes(String cache, int shard, BigInteger fromSequence, int limit)
+      throws IOException, InterruptedException {
+    RegionalClientCore.positiveU64(fromSequence, "Cache change sequence");
+    if (limit <= 0) {
+      throw new IllegalArgumentException("Cache change limit must be positive");
+    }
+    return read(
+        cache,
+        shard,
+        "/changes",
+        Map.of("from_sequence", fromSequence.toString(), "limit", Integer.toString(limit)));
+  }
+
+  /** Downloads one canonical bounded backup and PITR window. */
+  public JsonNode backup(String cache, int shard) throws IOException, InterruptedException {
+    return read(cache, shard, "/backup", Map.of());
+  }
+
+  /** Atomically restores one backup at a retained revision. */
+  public JsonNode restore(
+      String cache,
+      int shard,
+      String idempotencyKey,
+      String artifactBase64,
+      BigInteger targetRevision)
+      throws IOException, InterruptedException {
+    RegionalClientCore.required(artifactBase64, "Cache backup artifact");
+    RegionalClientCore.positiveU64(targetRevision, "Cache restore revision");
+    return mutate(
+        cache,
+        shard,
+        idempotencyKey,
+        operation("restore")
+            .put("backup_base64", artifactBase64)
+            .put("target_revision", targetRevision.toString()));
+  }
+
+  /** Runs one typed read-only bitmap, probabilistic, geo, JSON, or vector query. */
+  public JsonNode query(String cache, int shard, String kind, Map<String, ?> fields)
+      throws IOException, InterruptedException {
+    return postRead(cache, shard, "/query", RegionalCacheMutation.transformJson(kind, fields));
+  }
+
+  /** Pipelines independently committed, correlated mutations through one HTTP request. */
+  public JsonNode multiplex(String cache, int shard, List<RegionalCacheMultiplexMutation> mutations)
+      throws IOException, InterruptedException {
+    Objects.requireNonNull(mutations, "mutations");
+    if (mutations.isEmpty() || mutations.size() > MAX_TRANSACTION_MUTATIONS) {
+      throw new IllegalArgumentException(
+          "Cache multiplex mutations must be between 1 and " + MAX_TRANSACTION_MUTATIONS);
+    }
+    Set<String> correlations = new HashSet<>();
+    Set<String> identities = new HashSet<>();
+    ArrayNode items = RegionalClientCore.MAPPER.createArrayNode();
+    for (RegionalCacheMultiplexMutation mutation : mutations) {
+      Objects.requireNonNull(mutation, "mutation");
+      if (!correlations.add(mutation.correlationId())) {
+        throw new IllegalArgumentException("Cache multiplex correlation IDs must be unique");
+      }
+      if (!identities.add(mutation.idempotencyKey())) {
+        throw new IllegalArgumentException("Cache multiplex idempotency keys must be unique");
+      }
+      ObjectNode item = items.addObject();
+      item.put("correlation_id", mutation.correlationId());
+      item.put("idempotency_key", mutation.idempotencyKey());
+      item.set("operation", mutation.operation());
+    }
+    return regional.call(
+        "caches",
+        "Cache",
+        cache,
+        shard,
+        route -> {
+          ObjectNode body = RegionalClientCore.MAPPER.createObjectNode();
+          body.put("expected_term", route.term());
+          body.set("mutations", items);
+          return new RegionalClientCore.RequestSpec("POST", "/multiplex", body, Map.of(), Map.of());
+        });
+  }
+
+  /** Creates one node-affine, at-most-once channel/pattern subscription. */
+  public JsonNode createSubscription(
+      String cache, int shard, List<String> channels, List<String> patterns)
+      throws IOException, InterruptedException {
+    if (channels.isEmpty() && patterns.isEmpty()) {
+      throw new IllegalArgumentException("Cache Pub/Sub requires a channel or pattern");
+    }
+    ObjectNode body = RegionalClientCore.MAPPER.createObjectNode();
+    body.set("channels", RegionalClientCore.MAPPER.valueToTree(List.copyOf(channels)));
+    body.set("patterns", RegionalClientCore.MAPPER.valueToTree(List.copyOf(patterns)));
+    return write(cache, shard, "POST", "/pubsub/subscriptions", body);
+  }
+
+  /** Publishes one explicitly lossy, at-most-once Cache message. */
+  public JsonNode publish(String cache, int shard, String channel, Object payload)
+      throws IOException, InterruptedException {
+    RegionalClientCore.required(channel, "Cache Pub/Sub channel");
+    ObjectNode body = RegionalClientCore.MAPPER.createObjectNode().put("channel", channel);
+    body.set("payload", RegionalClientCore.MAPPER.valueToTree(payload));
+    return write(cache, shard, "POST", "/pubsub/messages", body);
+  }
+
+  /** Drains up to limit pending at-most-once messages. */
+  public JsonNode pollSubscription(String cache, int shard, String subscriptionId, int limit)
+      throws IOException, InterruptedException {
+    RegionalClientCore.required(subscriptionId, "Cache Pub/Sub subscription");
+    if (limit <= 0) {
+      throw new IllegalArgumentException("Cache Pub/Sub poll limit must be positive");
+    }
+    return read(
+        cache,
+        shard,
+        "/pubsub/subscriptions/" + segment(subscriptionId) + "/messages",
+        Map.of("limit", Integer.toString(limit)));
+  }
+
+  /** Deletes one node-local Cache Pub/Sub subscription. */
+  public JsonNode deleteSubscription(String cache, int shard, String subscriptionId)
+      throws IOException, InterruptedException {
+    RegionalClientCore.required(subscriptionId, "Cache Pub/Sub subscription");
+    return write(cache, shard, "DELETE", "/pubsub/subscriptions/" + segment(subscriptionId), null);
+  }
+
   /** Returns linearizable Cache tablet status and recovery evidence. */
   public JsonNode status(String cache, int shard) throws IOException, InterruptedException {
     return read(cache, shard, "/status", Map.of());
@@ -251,6 +417,28 @@ public final class RegionalCacheClient {
         route ->
             new RegionalClientCore.RequestSpec(
                 "GET", path, null, query, Map.of("x-epoch-read-consistency", "linearizable")));
+  }
+
+  private JsonNode postRead(String cache, int shard, String path, JsonNode body)
+      throws IOException, InterruptedException {
+    return regional.call(
+        "caches",
+        "Cache",
+        cache,
+        shard,
+        route ->
+            new RegionalClientCore.RequestSpec(
+                "POST", path, body, Map.of(), Map.of("x-epoch-read-consistency", "linearizable")));
+  }
+
+  private JsonNode write(String cache, int shard, String method, String path, JsonNode body)
+      throws IOException, InterruptedException {
+    return regional.call(
+        "caches",
+        "Cache",
+        cache,
+        shard,
+        route -> new RegionalClientCore.RequestSpec(method, path, body, Map.of(), Map.of()));
   }
 
   private JsonNode mutate(String cache, int shard, String idempotencyKey, ObjectNode operation)
@@ -300,5 +488,9 @@ public final class RegionalCacheClient {
         .put("owner", owner)
         .put("owner_epoch", ownerEpoch.toString())
         .put("lease_token", leaseToken);
+  }
+
+  private static String segment(String value) {
+    return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20");
   }
 }

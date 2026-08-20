@@ -492,7 +492,16 @@ async fn start_consensus_mode(
             Ok((runtime, app, true))
         }
         Some(TabletProfileLaunch::Cache(scope)) => {
-            let tablet = CacheTabletService::new(scope, CacheConfig::default())?;
+            let cold_directory = launch
+                .stable_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("cache-cold");
+            let tablet = CacheTabletService::new_with_cold_store(
+                scope,
+                CacheConfig::default(),
+                Some(cold_directory),
+            )?;
             let applier: Arc<dyn CommittedProposalApplier> = tablet.clone();
             let runtime = ConsensusProbeRuntime::start_with_profile_applier(
                 launch.config.clone(),

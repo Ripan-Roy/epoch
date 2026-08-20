@@ -10,13 +10,20 @@ use epoch_core::{EpochError, EpochResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{CacheItem, CacheValue, EvictionPolicy, SetOptions};
+use crate::{CacheItem, CacheStorageClass, CacheValue, EvictionPolicy, SetOptions};
 
 pub const MAX_CACHE_ATOMIC_OPERATIONS: usize = 128;
 pub const MAX_CACHE_MAINTENANCE_KEYS: usize = 1_000;
+pub const MAX_CACHE_CHANGE_RECORDS: usize = 1_024;
+/// Backup artifacts are intentionally bounded below the consensus proposal
+/// ceiling after base64 expansion so a restore remains a single atomic command.
+pub const MAX_CACHE_BACKUP_BYTES: usize = 320 * 1024;
 const CACHE_SHARD_SNAPSHOT_FORMAT_VERSION_V1: u16 = 1;
-pub const CACHE_SHARD_SNAPSHOT_FORMAT_VERSION: u16 = 2;
+const CACHE_SHARD_SNAPSHOT_FORMAT_VERSION_V2: u16 = 2;
+const CACHE_SHARD_SNAPSHOT_FORMAT_VERSION_V3: u16 = 3;
+pub const CACHE_SHARD_SNAPSHOT_FORMAT_VERSION: u16 = 4;
 pub const MAX_CACHE_SHARD_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
+const CACHE_BACKUP_FORMAT_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,6 +63,100 @@ pub enum CacheMutation {
     Access {
         key: String,
     },
+    Transform {
+        key: String,
+        transform: CacheTransform,
+        #[serde(default)]
+        expected_version: Option<u64>,
+        #[serde(default)]
+        ttl_ms: Option<u64>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CacheTransform {
+    Replace {
+        value: CacheValue,
+        storage_class: CacheStorageClass,
+    },
+    HashPut {
+        field: String,
+        value: String,
+    },
+    HashRemove {
+        field: String,
+    },
+    ListPush {
+        value: String,
+        front: bool,
+    },
+    ListPop {
+        front: bool,
+    },
+    SetAdd {
+        member: String,
+    },
+    SetRemove {
+        member: String,
+    },
+    SortedSetAdd {
+        member: String,
+        score: f64,
+    },
+    SortedSetRemove {
+        member: String,
+    },
+    BitmapSet {
+        bit: u32,
+        value: bool,
+    },
+    CardinalityAdd {
+        value: Vec<u8>,
+        precision: u8,
+    },
+    BloomAdd {
+        value: Vec<u8>,
+        bit_count: u32,
+        hashes: u8,
+    },
+    CuckooAdd {
+        value: Vec<u8>,
+        bucket_count: u32,
+        bucket_size: u8,
+    },
+    CuckooDelete {
+        value: Vec<u8>,
+    },
+    GeoUpsert {
+        member: String,
+        point: crate::CacheGeoPoint,
+    },
+    GeoRemove {
+        member: String,
+    },
+    JsonSet {
+        pointer: String,
+        value: serde_json::Value,
+    },
+    JsonRemove {
+        pointer: String,
+    },
+    JsonIndexUpsert {
+        id: String,
+        document: crate::CacheJsonDocument,
+        indexed_pointers: BTreeSet<String>,
+    },
+    JsonIndexRemove {
+        id: String,
+    },
+    VectorUpsert {
+        id: String,
+        document: crate::CacheVectorDocument,
+    },
+    VectorRemove {
+        id: String,
+    },
 }
 
 impl CacheMutation {
@@ -65,7 +166,8 @@ impl CacheMutation {
             | Self::Delete { key, .. }
             | Self::Increment { key, .. }
             | Self::CompareAndSet { key, .. }
-            | Self::Access { key } => key,
+            | Self::Access { key }
+            | Self::Transform { key, .. } => key,
         }
     }
 }
@@ -98,6 +200,11 @@ pub enum CacheMutationResult {
     Access {
         item: Option<CacheItem>,
     },
+    Transform {
+        item: CacheItem,
+        changed: bool,
+        result: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -112,6 +219,45 @@ pub struct CacheExpiryResult {
     pub expired_keys: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheChangeKind {
+    Set,
+    Delete,
+    Increment,
+    Access,
+    Expire,
+    Evict,
+    Transform,
+    Restore,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CacheChange {
+    pub sequence: u64,
+    pub revision: u64,
+    pub at_ms: u64,
+    pub key: String,
+    pub kind: CacheChangeKind,
+    pub before: Option<CacheItem>,
+    pub after: Option<CacheItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheBackupMetadata {
+    pub captured_revision: u64,
+    pub captured_at_ms: u64,
+    pub oldest_restorable_revision: u64,
+    pub state_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CacheRestoreResult {
+    pub revision: u64,
+    pub restored_from_revision: u64,
+    pub restored_keys: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReplicatedEntry {
@@ -122,6 +268,34 @@ struct ReplicatedEntry {
     last_access_revision: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     access_count: u64,
+    #[serde(default, skip_serializing_if = "is_memory_storage")]
+    storage_class: CacheStorageClass,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CacheChangeRecord {
+    sequence: u64,
+    revision: u64,
+    at_ms: u64,
+    key: String,
+    kind: CacheChangeKind,
+    before: Option<ReplicatedEntry>,
+    after: Option<ReplicatedEntry>,
+}
+
+impl CacheChangeRecord {
+    fn public(&self) -> CacheChange {
+        CacheChange {
+            sequence: self.sequence,
+            revision: self.revision,
+            at_ms: self.at_ms,
+            key: self.key.clone(),
+            kind: self.kind,
+            before: self.before.as_ref().map(ReplicatedEntry::item),
+            after: self.after.as_ref().map(ReplicatedEntry::item),
+        }
+    }
 }
 
 impl ReplicatedEntry {
@@ -135,6 +309,7 @@ impl ReplicatedEntry {
             value: self.value.clone(),
             version: self.version,
             expires_at_ms: self.expires_at_ms,
+            storage_class: self.storage_class,
         }
     }
 }
@@ -144,8 +319,13 @@ pub struct CacheShard {
     max_entries: usize,
     default_ttl_ms: Option<u64>,
     eviction: EvictionPolicy,
+    max_memory_bytes: Option<usize>,
+    max_cold_bytes: Option<usize>,
     revision: u64,
     entries: BTreeMap<String, ReplicatedEntry>,
+    history_floor_revision: u64,
+    next_change_sequence: u64,
+    changes: Vec<CacheChangeRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -156,9 +336,140 @@ struct VersionedCacheShardSnapshot {
     default_ttl_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "is_no_eviction")]
     eviction: EvictionPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_memory_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_cold_bytes: Option<usize>,
     revision: u64,
     entries: BTreeMap<String, ReplicatedEntry>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    history_floor_revision: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    next_change_sequence: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    changes: Vec<CacheChangeRecord>,
     state_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VersionedCacheBackup {
+    format_version: u16,
+    captured_revision: u64,
+    captured_at_ms: u64,
+    oldest_restorable_revision: u64,
+    snapshot: Vec<u8>,
+    state_digest: [u8; 32],
+    artifact_digest: [u8; 32],
+}
+
+fn decode_cache_snapshot_document(encoded: &[u8]) -> EpochResult<VersionedCacheShardSnapshot> {
+    if encoded.len() > MAX_CACHE_SHARD_SNAPSHOT_BYTES {
+        return Err(EpochError::Capacity(format!(
+            "Cache shard snapshot is {} bytes; maximum is {MAX_CACHE_SHARD_SNAPSHOT_BYTES}",
+            encoded.len()
+        )));
+    }
+    let snapshot: VersionedCacheShardSnapshot = serde_json::from_slice(encoded)
+        .map_err(|error| EpochError::InvalidArgument(error.to_string()))?;
+    if !matches!(
+        snapshot.format_version,
+        CACHE_SHARD_SNAPSHOT_FORMAT_VERSION_V1
+            | CACHE_SHARD_SNAPSHOT_FORMAT_VERSION_V2
+            | CACHE_SHARD_SNAPSHOT_FORMAT_VERSION_V3
+            | CACHE_SHARD_SNAPSHOT_FORMAT_VERSION
+    ) {
+        return Err(EpochError::InvalidArgument(format!(
+            "unsupported Cache shard snapshot version {}",
+            snapshot.format_version
+        )));
+    }
+    if serde_json::to_vec(&snapshot)
+        .map_err(|error| EpochError::InvalidArgument(error.to_string()))?
+        != encoded
+    {
+        return Err(EpochError::InvalidArgument(
+            "Cache shard snapshot is not canonical".into(),
+        ));
+    }
+    Ok(snapshot)
+}
+
+fn validate_cache_snapshot_compatibility(
+    snapshot: &VersionedCacheShardSnapshot,
+) -> EpochResult<()> {
+    if snapshot.format_version == CACHE_SHARD_SNAPSHOT_FORMAT_VERSION_V1
+        && snapshot.eviction != EvictionPolicy::NoEviction
+    {
+        return Err(EpochError::InvalidArgument(
+            "Cache shard v1 snapshot cannot contain eviction metadata".into(),
+        ));
+    }
+    if snapshot.format_version < CACHE_SHARD_SNAPSHOT_FORMAT_VERSION_V3
+        && (snapshot.history_floor_revision != 0
+            || snapshot.next_change_sequence != 0
+            || !snapshot.changes.is_empty()
+            || snapshot
+                .entries
+                .values()
+                .any(|entry| is_advanced_value(&entry.value)))
+    {
+        return Err(EpochError::InvalidArgument(
+            "legacy Cache snapshot contains v3 state".into(),
+        ));
+    }
+    if snapshot.format_version < CACHE_SHARD_SNAPSHOT_FORMAT_VERSION
+        && (snapshot.max_memory_bytes.is_some()
+            || snapshot.max_cold_bytes.is_some()
+            || snapshot
+                .entries
+                .values()
+                .any(|entry| entry.storage_class == CacheStorageClass::Cold))
+    {
+        return Err(EpochError::InvalidArgument(
+            "legacy Cache snapshot contains v4 byte-tier state".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_cache_snapshot_registry(snapshot: &VersionedCacheShardSnapshot) -> EpochResult<()> {
+    CacheShard::new_with_limits(
+        snapshot.max_entries,
+        snapshot.default_ttl_ms,
+        snapshot.eviction,
+        snapshot.max_memory_bytes,
+        snapshot.max_cold_bytes,
+    )?;
+    if snapshot.entries.len() > snapshot.max_entries {
+        return Err(EpochError::InvalidArgument(
+            "Cache shard snapshot exceeds its configured capacity".into(),
+        ));
+    }
+    for (key, entry) in &snapshot.entries {
+        if key.is_empty()
+            || entry.version == 0
+            || entry.version > snapshot.revision
+            || entry.expires_at_ms == Some(0)
+            || entry.last_access_revision > snapshot.revision
+        {
+            return Err(EpochError::InvalidArgument(
+                "Cache shard snapshot entry registry is invalid".into(),
+            ));
+        }
+        validate_cache_value(&entry.value)?;
+    }
+    validate_byte_capacity(
+        &snapshot.entries,
+        snapshot.max_memory_bytes,
+        snapshot.max_cold_bytes,
+    )?;
+    if snapshot.revision == 0 && !snapshot.entries.is_empty() {
+        return Err(EpochError::InvalidArgument(
+            "Cache shard snapshot revision is invalid".into(),
+        ));
+    }
+    Ok(())
 }
 
 impl CacheShard {
@@ -177,6 +488,16 @@ impl CacheShard {
         default_ttl_ms: Option<u64>,
         eviction: EvictionPolicy,
     ) -> EpochResult<Self> {
+        Self::new_with_limits(max_entries, default_ttl_ms, eviction, None, None)
+    }
+
+    pub fn new_with_limits(
+        max_entries: usize,
+        default_ttl_ms: Option<u64>,
+        eviction: EvictionPolicy,
+        max_memory_bytes: Option<usize>,
+        max_cold_bytes: Option<usize>,
+    ) -> EpochResult<Self> {
         if max_entries == 0 {
             return Err(EpochError::InvalidArgument(
                 "cache shard max_entries must be greater than zero".into(),
@@ -187,12 +508,22 @@ impl CacheShard {
                 "cache shard default TTL must be greater than zero".into(),
             ));
         }
+        if max_memory_bytes == Some(0) || max_cold_bytes == Some(0) {
+            return Err(EpochError::InvalidArgument(
+                "cache shard byte capacities must be greater than zero when configured".into(),
+            ));
+        }
         Ok(Self {
             max_entries,
             default_ttl_ms,
             eviction,
+            max_memory_bytes,
+            max_cold_bytes,
             revision: 0,
             entries: BTreeMap::new(),
+            history_floor_revision: 0,
+            next_change_sequence: 1,
+            changes: Vec::new(),
         })
     }
 
@@ -210,6 +541,27 @@ impl CacheShard {
 
     pub const fn eviction(&self) -> EvictionPolicy {
         self.eviction
+    }
+
+    pub const fn max_memory_bytes(&self) -> Option<usize> {
+        self.max_memory_bytes
+    }
+
+    pub const fn max_cold_bytes(&self) -> Option<usize> {
+        self.max_cold_bytes
+    }
+
+    pub fn retained_bytes(&self, storage_class: CacheStorageClass) -> usize {
+        retained_bytes(&self.entries, storage_class)
+    }
+
+    /// Returns a canonical copy of physically retained entries in one storage class.
+    pub fn retained_items(&self, storage_class: CacheStorageClass) -> Vec<(String, CacheItem)> {
+        self.entries
+            .iter()
+            .filter(|(_, entry)| entry.storage_class == storage_class)
+            .map(|(key, entry)| (key.clone(), entry.item()))
+            .collect()
     }
 
     pub fn len(&self) -> usize {
@@ -233,6 +585,118 @@ impl CacheShard {
         }
     }
 
+    pub fn oldest_restorable_revision(&self) -> u64 {
+        self.history_floor_revision
+    }
+
+    pub fn changes_from(&self, sequence: u64, limit: usize) -> EpochResult<Vec<CacheChange>> {
+        if limit == 0 || limit > MAX_CACHE_CHANGE_RECORDS {
+            return Err(EpochError::InvalidArgument(format!(
+                "Cache change limit must be between 1 and {MAX_CACHE_CHANGE_RECORDS}"
+            )));
+        }
+        Ok(self
+            .changes
+            .iter()
+            .filter(|change| change.sequence >= sequence)
+            .take(limit)
+            .map(CacheChangeRecord::public)
+            .collect())
+    }
+
+    pub fn encode_backup(&self, captured_at_ms: u64) -> EpochResult<Vec<u8>> {
+        let snapshot = self.encode_snapshot()?;
+        let mut backup = VersionedCacheBackup {
+            format_version: CACHE_BACKUP_FORMAT_VERSION,
+            captured_revision: self.revision,
+            captured_at_ms,
+            oldest_restorable_revision: self.history_floor_revision,
+            snapshot,
+            state_digest: self.recovery_state_digest(),
+            artifact_digest: [0; 32],
+        };
+        backup.artifact_digest = backup_digest(&backup)?;
+        let encoded = serde_json::to_vec(&backup)
+            .map_err(|error| EpochError::InvalidArgument(error.to_string()))?;
+        if encoded.len() > MAX_CACHE_BACKUP_BYTES {
+            return Err(EpochError::Capacity(format!(
+                "Cache backup is {} bytes; maximum is {MAX_CACHE_BACKUP_BYTES}",
+                encoded.len()
+            )));
+        }
+        Ok(encoded)
+    }
+
+    pub fn inspect_backup(encoded: &[u8]) -> EpochResult<CacheBackupMetadata> {
+        let (backup, shard) = decode_backup(encoded)?;
+        Ok(CacheBackupMetadata {
+            captured_revision: backup.captured_revision,
+            captured_at_ms: backup.captured_at_ms,
+            oldest_restorable_revision: backup.oldest_restorable_revision,
+            state_digest: shard.recovery_state_digest(),
+        })
+    }
+
+    pub fn restore_backup(
+        &mut self,
+        encoded: &[u8],
+        target_revision: u64,
+        now_ms: u64,
+    ) -> EpochResult<CacheRestoreResult> {
+        let (backup, source) = decode_backup(encoded)?;
+        if source.max_entries != self.max_entries
+            || source.default_ttl_ms != self.default_ttl_ms
+            || source.eviction != self.eviction
+            || source.max_memory_bytes != self.max_memory_bytes
+            || source.max_cold_bytes != self.max_cold_bytes
+        {
+            return Err(EpochError::Conflict(
+                "Cache backup configuration does not match the target shard".into(),
+            ));
+        }
+        if target_revision < backup.oldest_restorable_revision
+            || target_revision > backup.captured_revision
+        {
+            return Err(EpochError::InvalidArgument(format!(
+                "target revision {target_revision} is outside the backup restoration window {}..={}",
+                backup.oldest_restorable_revision, backup.captured_revision
+            )));
+        }
+        let mut restored = source.entries_at_revision(target_revision)?;
+        restored.retain(|_, entry| entry.is_live_at(now_ms));
+        if restored.len() > self.max_entries {
+            return Err(EpochError::Capacity(
+                "restored Cache state exceeds target entry capacity".into(),
+            ));
+        }
+        validate_byte_capacity(&restored, self.max_memory_bytes, self.max_cold_bytes)?;
+        let next_revision = self
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| EpochError::Capacity("cache shard revision is exhausted".into()))?;
+        for entry in restored.values_mut() {
+            entry.version = next_revision;
+            entry.last_access_revision = 0;
+            entry.access_count = 0;
+        }
+        let previous = self.entries.clone();
+        let restored_keys = restored.keys().cloned().collect::<Vec<_>>();
+        self.entries = restored;
+        self.revision = next_revision;
+        let kinds = self
+            .entries
+            .keys()
+            .chain(previous.keys())
+            .map(|key| (key.clone(), CacheChangeKind::Restore))
+            .collect();
+        self.record_changes(&previous, now_ms, next_revision, &kinds);
+        Ok(CacheRestoreResult {
+            revision: next_revision,
+            restored_from_revision: target_revision,
+            restored_keys,
+        })
+    }
+
     pub fn transact(
         &mut self,
         transaction: CacheTransaction,
@@ -250,6 +714,7 @@ impl CacheShard {
 
         // Expired records are logically absent. Reclamation is staged with the
         // mutation, but is not committed for an otherwise no-op transaction.
+        let previous = self.entries.clone();
         let mut candidate: BTreeMap<_, _> = self
             .entries
             .iter()
@@ -278,7 +743,8 @@ impl CacheShard {
                         },
                         CacheMutation::Set { .. }
                         | CacheMutation::Increment { .. }
-                        | CacheMutation::CompareAndSet { .. } => {
+                        | CacheMutation::CompareAndSet { .. }
+                        | CacheMutation::Transform { .. } => {
                             unreachable!("validated non-delete mutations always change state")
                         }
                         CacheMutation::Access { key } => CacheMutationResult::Access {
@@ -294,7 +760,7 @@ impl CacheShard {
             .revision
             .checked_add(1)
             .ok_or_else(|| EpochError::Capacity("cache shard revision is exhausted".into()))?;
-        let evicted_keys = select_eviction_victims(
+        let mut evicted_keys = select_eviction_victims(
             &candidate,
             &transaction.operations,
             resulting_len.saturating_sub(self.max_entries),
@@ -306,6 +772,7 @@ impl CacheShard {
         for key in &evicted_keys {
             candidate.remove(key);
         }
+        let operations_for_admission = transaction.operations.clone();
         let results = apply_operations(
             &mut candidate,
             transaction.operations,
@@ -314,8 +781,25 @@ impl CacheShard {
             now_ms,
             next_revision,
         )?;
+        let byte_victims = select_byte_eviction_victims(
+            &candidate,
+            &operations_for_admission,
+            self.max_memory_bytes,
+            self.max_cold_bytes,
+            self.eviction,
+            next_revision,
+        )?;
+        for key in &byte_victims {
+            candidate.remove(key);
+        }
+        evicted_keys.extend(byte_victims);
+        evicted_keys.sort_unstable();
+        evicted_keys.dedup();
+        let change_kinds =
+            transaction_change_kinds(&operations_for_admission, &previous, now_ms, &evicted_keys);
         self.entries = candidate;
         self.revision = next_revision;
+        self.record_changes(&previous, now_ms, next_revision, &change_kinds);
         Ok(CacheTransactionResult {
             revision: next_revision,
             results,
@@ -356,10 +840,16 @@ impl CacheShard {
             .revision
             .checked_add(1)
             .ok_or_else(|| EpochError::Capacity("cache shard revision is exhausted".into()))?;
+        let previous = self.entries.clone();
         for key in &expired_keys {
             self.entries.remove(key);
         }
         self.revision = next_revision;
+        let change_kinds = expired_keys
+            .iter()
+            .map(|key| (key.clone(), CacheChangeKind::Expire))
+            .collect();
+        self.record_changes(&previous, now_ms, next_revision, &change_kinds);
         Ok(CacheExpiryResult {
             revision: next_revision,
             expired_keys,
@@ -396,18 +886,39 @@ impl CacheShard {
     /// Encodes the complete deterministic shard state as a canonical,
     /// versioned application snapshot.
     pub fn encode_snapshot(&self) -> EpochResult<Vec<u8>> {
-        let format_version = if self.eviction == EvictionPolicy::NoEviction {
+        let format_version = if self.uses_v4_state() {
+            CACHE_SHARD_SNAPSHOT_FORMAT_VERSION
+        } else if self.uses_v3_state() {
+            CACHE_SHARD_SNAPSHOT_FORMAT_VERSION_V3
+        } else if self.eviction == EvictionPolicy::NoEviction {
             CACHE_SHARD_SNAPSHOT_FORMAT_VERSION_V1
         } else {
-            CACHE_SHARD_SNAPSHOT_FORMAT_VERSION
+            CACHE_SHARD_SNAPSHOT_FORMAT_VERSION_V2
         };
         let encoded = serde_json::to_vec(&VersionedCacheShardSnapshot {
             format_version,
             max_entries: self.max_entries,
             default_ttl_ms: self.default_ttl_ms,
             eviction: self.eviction,
+            max_memory_bytes: self.max_memory_bytes,
+            max_cold_bytes: self.max_cold_bytes,
             revision: self.revision,
             entries: self.entries.clone(),
+            history_floor_revision: if format_version >= CACHE_SHARD_SNAPSHOT_FORMAT_VERSION_V3 {
+                self.history_floor_revision
+            } else {
+                0
+            },
+            next_change_sequence: if format_version >= CACHE_SHARD_SNAPSHOT_FORMAT_VERSION_V3 {
+                self.next_change_sequence
+            } else {
+                0
+            },
+            changes: if format_version >= CACHE_SHARD_SNAPSHOT_FORMAT_VERSION_V3 {
+                self.changes.clone()
+            } else {
+                Vec::new()
+            },
             state_digest: self.recovery_state_digest(),
         })
         .map_err(|error| EpochError::InvalidArgument(error.to_string()))?;
@@ -422,74 +933,30 @@ impl CacheShard {
 
     /// Decodes and fully validates a canonical Cache shard snapshot.
     pub fn decode_snapshot(encoded: &[u8]) -> EpochResult<Self> {
-        if encoded.len() > MAX_CACHE_SHARD_SNAPSHOT_BYTES {
-            return Err(EpochError::Capacity(format!(
-                "Cache shard snapshot is {} bytes; maximum is {MAX_CACHE_SHARD_SNAPSHOT_BYTES}",
-                encoded.len()
-            )));
-        }
-        let snapshot: VersionedCacheShardSnapshot = serde_json::from_slice(encoded)
-            .map_err(|error| EpochError::InvalidArgument(error.to_string()))?;
-        if !matches!(
-            snapshot.format_version,
-            CACHE_SHARD_SNAPSHOT_FORMAT_VERSION_V1 | CACHE_SHARD_SNAPSHOT_FORMAT_VERSION
-        ) {
-            return Err(EpochError::InvalidArgument(format!(
-                "unsupported Cache shard snapshot version {}",
-                snapshot.format_version
-            )));
-        }
-        if serde_json::to_vec(&snapshot)
-            .map_err(|error| EpochError::InvalidArgument(error.to_string()))?
-            != encoded
-        {
-            return Err(EpochError::InvalidArgument(
-                "Cache shard snapshot is not canonical".into(),
-            ));
-        }
-        if snapshot.format_version == CACHE_SHARD_SNAPSHOT_FORMAT_VERSION_V1
-            && snapshot.eviction != EvictionPolicy::NoEviction
-        {
-            return Err(EpochError::InvalidArgument(
-                "Cache shard v1 snapshot cannot contain eviction metadata".into(),
-            ));
-        }
-        CacheShard::new_with_eviction(
-            snapshot.max_entries,
-            snapshot.default_ttl_ms,
-            snapshot.eviction,
-        )?;
-        if snapshot.entries.len() > snapshot.max_entries {
-            return Err(EpochError::InvalidArgument(
-                "Cache shard snapshot exceeds its configured capacity".into(),
-            ));
-        }
-        for (key, entry) in &snapshot.entries {
-            if key.is_empty()
-                || entry.version == 0
-                || entry.version > snapshot.revision
-                || entry.expires_at_ms == Some(0)
-                || entry.last_access_revision > snapshot.revision
-            {
-                return Err(EpochError::InvalidArgument(
-                    "Cache shard snapshot entry registry is invalid".into(),
-                ));
-            }
-            validate_cache_value(&entry.value)?;
-        }
-        if snapshot.revision == 0 && !snapshot.entries.is_empty() {
-            return Err(EpochError::InvalidArgument(
-                "Cache shard snapshot revision is invalid".into(),
-            ));
-        }
+        let snapshot = decode_cache_snapshot_document(encoded)?;
+        validate_cache_snapshot_compatibility(&snapshot)?;
+        validate_cache_snapshot_registry(&snapshot)?;
+        let state_digest = snapshot.state_digest;
         let shard = Self {
             max_entries: snapshot.max_entries,
             default_ttl_ms: snapshot.default_ttl_ms,
             eviction: snapshot.eviction,
+            max_memory_bytes: snapshot.max_memory_bytes,
+            max_cold_bytes: snapshot.max_cold_bytes,
             revision: snapshot.revision,
             entries: snapshot.entries,
+            history_floor_revision: snapshot.history_floor_revision,
+            next_change_sequence: if snapshot.format_version
+                >= CACHE_SHARD_SNAPSHOT_FORMAT_VERSION_V3
+            {
+                snapshot.next_change_sequence
+            } else {
+                1
+            },
+            changes: snapshot.changes,
         };
-        if shard.recovery_state_digest() != snapshot.state_digest {
+        shard.validate_change_history()?;
+        if shard.recovery_state_digest() != state_digest {
             return Err(EpochError::InvalidArgument(
                 "Cache shard snapshot state digest is invalid".into(),
             ));
@@ -499,7 +966,23 @@ impl CacheShard {
 
     fn encode_recovery_state(&self, sink: &mut dyn CanonicalSink) {
         let mut encoder = CanonicalEncoder::new(sink);
-        if self.eviction == EvictionPolicy::NoEviction {
+        let v4 = self.uses_v4_state();
+        let v3 = self.uses_v3_state();
+        if v4 {
+            encoder.bytes(b"epoch/cache-shard/recovery/v4\0");
+            encoder.u8(eviction_policy_code(self.eviction));
+            encoder.option_u64(
+                self.max_memory_bytes
+                    .map(|value| u64::try_from(value).unwrap_or(u64::MAX)),
+            );
+            encoder.option_u64(
+                self.max_cold_bytes
+                    .map(|value| u64::try_from(value).unwrap_or(u64::MAX)),
+            );
+        } else if v3 {
+            encoder.bytes(b"epoch/cache-shard/recovery/v3\0");
+            encoder.u8(eviction_policy_code(self.eviction));
+        } else if self.eviction == EvictionPolicy::NoEviction {
             encoder.bytes(b"epoch/cache-shard/recovery/v1\0");
         } else {
             encoder.bytes(b"epoch/cache-shard/recovery/v2\0");
@@ -514,11 +997,161 @@ impl CacheShard {
             encoder.cache_value(&entry.value);
             encoder.u64(entry.version);
             encoder.option_u64(entry.expires_at_ms);
-            if self.eviction != EvictionPolicy::NoEviction {
+            if v3 || v4 || self.eviction != EvictionPolicy::NoEviction {
                 encoder.u64(entry.last_access_revision);
                 encoder.u64(entry.access_count);
             }
+            if v4 {
+                encoder.u8(storage_class_code(entry.storage_class));
+            }
         }
+        if v3 || v4 {
+            encoder.u64(self.history_floor_revision);
+            encoder.u64(self.next_change_sequence);
+            encoder.u64(u64::try_from(self.changes.len()).unwrap_or(u64::MAX));
+            for change in &self.changes {
+                let change_bytes = serde_json::to_vec(change)
+                    .expect("validated Cache change records always serialize");
+                encoder.length_prefixed(&change_bytes);
+            }
+        }
+    }
+
+    fn uses_v3_state(&self) -> bool {
+        !self.changes.is_empty()
+            || self.history_floor_revision != 0
+            || self
+                .entries
+                .values()
+                .any(|entry| is_advanced_value(&entry.value))
+    }
+
+    fn uses_v4_state(&self) -> bool {
+        self.max_memory_bytes.is_some()
+            || self.max_cold_bytes.is_some()
+            || self
+                .entries
+                .values()
+                .any(|entry| entry.storage_class == CacheStorageClass::Cold)
+    }
+
+    fn entries_at_revision(
+        &self,
+        target_revision: u64,
+    ) -> EpochResult<BTreeMap<String, ReplicatedEntry>> {
+        if target_revision < self.history_floor_revision || target_revision > self.revision {
+            return Err(EpochError::InvalidArgument(
+                "target revision is outside retained Cache history".into(),
+            ));
+        }
+        let mut entries = self.entries.clone();
+        for change in self
+            .changes
+            .iter()
+            .rev()
+            .filter(|change| change.revision > target_revision)
+        {
+            match &change.before {
+                Some(before) => {
+                    entries.insert(change.key.clone(), before.clone());
+                }
+                None => {
+                    entries.remove(&change.key);
+                }
+            }
+        }
+        Ok(entries)
+    }
+
+    fn record_changes(
+        &mut self,
+        previous: &BTreeMap<String, ReplicatedEntry>,
+        at_ms: u64,
+        revision: u64,
+        kinds: &BTreeMap<String, CacheChangeKind>,
+    ) {
+        let keys = previous
+            .keys()
+            .chain(self.entries.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for key in keys {
+            let before = previous.get(&key);
+            let after = self.entries.get(&key);
+            if before == after {
+                continue;
+            }
+            self.changes.push(CacheChangeRecord {
+                sequence: self.next_change_sequence,
+                revision,
+                at_ms,
+                key: key.clone(),
+                kind: kinds.get(&key).copied().unwrap_or(CacheChangeKind::Set),
+                before: before.cloned(),
+                after: after.cloned(),
+            });
+            self.next_change_sequence = self.next_change_sequence.saturating_add(1);
+        }
+        while self.changes.len() > MAX_CACHE_CHANGE_RECORDS {
+            let removed_revision = self.changes[0].revision;
+            while self
+                .changes
+                .first()
+                .is_some_and(|change| change.revision == removed_revision)
+            {
+                self.changes.remove(0);
+            }
+            self.history_floor_revision = removed_revision;
+        }
+    }
+
+    fn validate_change_history(&self) -> EpochResult<()> {
+        if self.history_floor_revision > self.revision
+            || self.changes.len() > MAX_CACHE_CHANGE_RECORDS
+            || self.next_change_sequence == 0
+        {
+            return Err(EpochError::InvalidArgument(
+                "Cache change history bounds are invalid".into(),
+            ));
+        }
+        let mut previous_sequence = 0;
+        let mut previous_revision = self.history_floor_revision;
+        for change in &self.changes {
+            if change.sequence <= previous_sequence
+                || change.revision < previous_revision
+                || change.revision <= self.history_floor_revision
+                || change.revision > self.revision
+                || change.key.is_empty()
+                || change.before == change.after
+            {
+                return Err(EpochError::InvalidArgument(
+                    "Cache change history registry is invalid".into(),
+                ));
+            }
+            for entry in [change.before.as_ref(), change.after.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                if entry.version == 0 || entry.version > change.revision {
+                    return Err(EpochError::InvalidArgument(
+                        "Cache change history entry version is invalid".into(),
+                    ));
+                }
+                validate_cache_value(&entry.value)?;
+            }
+            previous_sequence = change.sequence;
+            previous_revision = change.revision;
+        }
+        let expected_next = self
+            .changes
+            .last()
+            .map_or(1, |change| change.sequence.saturating_add(1));
+        if self.next_change_sequence != expected_next {
+            return Err(EpochError::InvalidArgument(
+                "Cache change sequence cursor is invalid".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn validate_transaction(transaction: &CacheTransaction) -> EpochResult<()> {
@@ -557,6 +1190,86 @@ impl CacheShard {
         }
         Ok(())
     }
+}
+
+fn transaction_change_kinds(
+    operations: &[CacheMutation],
+    previous: &BTreeMap<String, ReplicatedEntry>,
+    now_ms: u64,
+    evicted_keys: &[String],
+) -> BTreeMap<String, CacheChangeKind> {
+    let mut kinds = previous
+        .iter()
+        .filter(|(_, entry)| !entry.is_live_at(now_ms))
+        .map(|(key, _)| (key.clone(), CacheChangeKind::Expire))
+        .collect::<BTreeMap<_, _>>();
+    for operation in operations {
+        let kind = match operation {
+            CacheMutation::Set { .. } | CacheMutation::CompareAndSet { .. } => CacheChangeKind::Set,
+            CacheMutation::Delete { .. } => CacheChangeKind::Delete,
+            CacheMutation::Increment { .. } => CacheChangeKind::Increment,
+            CacheMutation::Access { .. } => CacheChangeKind::Access,
+            CacheMutation::Transform { .. } => CacheChangeKind::Transform,
+        };
+        kinds.insert(operation.key().to_owned(), kind);
+    }
+    for key in evicted_keys {
+        kinds.insert(key.clone(), CacheChangeKind::Evict);
+    }
+    kinds
+}
+
+fn is_advanced_value(value: &CacheValue) -> bool {
+    matches!(
+        value,
+        CacheValue::Bitmap(_)
+            | CacheValue::Cardinality(_)
+            | CacheValue::Bloom(_)
+            | CacheValue::Cuckoo(_)
+            | CacheValue::Geo(_)
+            | CacheValue::Json(_)
+            | CacheValue::JsonIndex(_)
+            | CacheValue::Vector(_)
+    )
+}
+
+fn backup_digest(backup: &VersionedCacheBackup) -> EpochResult<[u8; 32]> {
+    let mut unsigned = backup.clone();
+    unsigned.artifact_digest = [0; 32];
+    let encoded = serde_json::to_vec(&unsigned)
+        .map_err(|error| EpochError::InvalidArgument(error.to_string()))?;
+    Ok(Sha256::digest(encoded).into())
+}
+
+fn decode_backup(encoded: &[u8]) -> EpochResult<(VersionedCacheBackup, CacheShard)> {
+    if encoded.len() > MAX_CACHE_BACKUP_BYTES {
+        return Err(EpochError::Capacity(format!(
+            "Cache backup is {} bytes; maximum is {MAX_CACHE_BACKUP_BYTES}",
+            encoded.len()
+        )));
+    }
+    let backup: VersionedCacheBackup = serde_json::from_slice(encoded)
+        .map_err(|error| EpochError::InvalidArgument(error.to_string()))?;
+    if backup.format_version != CACHE_BACKUP_FORMAT_VERSION
+        || serde_json::to_vec(&backup)
+            .map_err(|error| EpochError::InvalidArgument(error.to_string()))?
+            != encoded
+        || backup_digest(&backup)? != backup.artifact_digest
+    {
+        return Err(EpochError::InvalidArgument(
+            "Cache backup version, canonical encoding, or digest is invalid".into(),
+        ));
+    }
+    let shard = CacheShard::decode_snapshot(&backup.snapshot)?;
+    if shard.revision != backup.captured_revision
+        || shard.history_floor_revision != backup.oldest_restorable_revision
+        || shard.recovery_state_digest() != backup.state_digest
+    {
+        return Err(EpochError::InvalidArgument(
+            "Cache backup metadata does not match its snapshot".into(),
+        ));
+    }
+    Ok((backup, shard))
 }
 
 fn validate_operations(
@@ -631,6 +1344,25 @@ fn validate_operations(
             CacheMutation::Access { key } => {
                 changed |= entries.contains_key(key) && tracks_committed_access(eviction);
             }
+            CacheMutation::Transform {
+                key,
+                transform,
+                expected_version,
+                ttl_ms,
+            } => {
+                let current = entries.get(key);
+                validate_expected_version(key, *expected_version, current)?;
+                transform_value(current.map(|entry| &entry.value), transform)?;
+                let effective_ttl = if current.is_some() && ttl_ms.is_none() {
+                    None
+                } else {
+                    ttl_ms.or(default_ttl_ms)
+                };
+                if current.is_none() || ttl_ms.is_some() {
+                    expiry_deadline(effective_ttl, now_ms)?;
+                }
+                changed = true;
+            }
         }
     }
     Ok(changed)
@@ -661,7 +1393,8 @@ fn resulting_len(
         match operation {
             CacheMutation::Set { key, .. }
             | CacheMutation::Increment { key, .. }
-            | CacheMutation::CompareAndSet { key, .. } => {
+            | CacheMutation::CompareAndSet { key, .. }
+            | CacheMutation::Transform { key, .. } => {
                 if !entries.contains_key(key) {
                     len = len.saturating_add(1);
                 }
@@ -718,10 +1451,13 @@ fn apply_operation(
                 entries,
                 key,
                 value,
-                options.ttl_ms.or(default_ttl_ms),
-                eviction,
-                now_ms,
-                revision,
+                EntryUpsert {
+                    ttl_ms: options.ttl_ms.or(default_ttl_ms),
+                    storage_class: Some(options.storage_class),
+                    eviction,
+                    now_ms,
+                    revision,
+                },
             )?,
         },
         CacheMutation::Delete { key, .. } => {
@@ -747,10 +1483,13 @@ fn apply_operation(
                 entries,
                 key,
                 value,
-                ttl_ms.or(default_ttl_ms),
-                eviction,
-                now_ms,
-                revision,
+                EntryUpsert {
+                    ttl_ms: ttl_ms.or(default_ttl_ms),
+                    storage_class: None,
+                    eviction,
+                    now_ms,
+                    revision,
+                },
             )?,
         },
         CacheMutation::Access { key } => {
@@ -760,25 +1499,61 @@ fn apply_operation(
             });
             CacheMutationResult::Access { item }
         }
+        CacheMutation::Transform {
+            key,
+            transform,
+            ttl_ms,
+            ..
+        } => apply_transform(
+            entries,
+            key,
+            &transform,
+            ttl_ms,
+            default_ttl_ms,
+            eviction,
+            now_ms,
+            revision,
+        )?,
     })
 }
 
-fn upsert_entry(
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the deterministic mutation boundary receives every admission input explicitly"
+)]
+fn apply_transform(
     entries: &mut BTreeMap<String, ReplicatedEntry>,
     key: String,
-    value: CacheValue,
+    transform: &CacheTransform,
     ttl_ms: Option<u64>,
+    default_ttl_ms: Option<u64>,
     eviction: EvictionPolicy,
     now_ms: u64,
     revision: u64,
-) -> EpochResult<CacheItem> {
-    let expires_at_ms = expiry_deadline(ttl_ms, now_ms)?;
+) -> EpochResult<CacheMutationResult> {
+    let current = entries.get(&key).cloned();
+    let (value, changed, result) =
+        transform_value(current.as_ref().map(|entry| &entry.value), transform)?;
+    let expires_at_ms = if let Some(ttl_ms) = ttl_ms {
+        expiry_deadline(Some(ttl_ms), now_ms)?
+    } else if let Some(current) = &current {
+        current.expires_at_ms
+    } else {
+        expiry_deadline(default_ttl_ms, now_ms)?
+    };
     let (last_access_revision, access_count) =
-        next_access_metadata(entries.get(&key), eviction, revision);
+        next_access_metadata(current.as_ref(), eviction, revision);
+    let storage_class = match transform {
+        CacheTransform::Replace { storage_class, .. } => *storage_class,
+        _ => current
+            .as_ref()
+            .map_or(CacheStorageClass::Memory, |entry| entry.storage_class),
+    };
     let item = CacheItem {
         value: value.clone(),
         version: revision,
         expires_at_ms,
+        storage_class,
     };
     entries.insert(
         key,
@@ -788,6 +1563,302 @@ fn upsert_entry(
             expires_at_ms,
             last_access_revision,
             access_count,
+            storage_class,
+        },
+    );
+    Ok(CacheMutationResult::Transform {
+        item,
+        changed,
+        result,
+    })
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one exhaustive transform interpreter is the atomic type boundary"
+)]
+fn transform_value(
+    current: Option<&CacheValue>,
+    transform: &CacheTransform,
+) -> EpochResult<(CacheValue, bool, serde_json::Value)> {
+    use serde_json::json;
+
+    macro_rules! existing_or {
+        ($pattern:pat => $value:expr, $initial:expr, $name:literal) => {
+            match current {
+                Some($pattern) => $value.clone(),
+                Some(_) => {
+                    return Err(EpochError::Conflict(format!(
+                        "cache value is not a {}",
+                        $name
+                    )))
+                }
+                None => $initial,
+            }
+        };
+    }
+
+    let transformed = match transform {
+        CacheTransform::Replace {
+            value,
+            storage_class,
+        } => (
+            value.clone(),
+            current != Some(value),
+            json!({"storage_class":storage_class}),
+        ),
+        CacheTransform::HashPut { field, value } => {
+            let mut hash = existing_or!(CacheValue::Hash(hash) => hash, BTreeMap::new(), "hash");
+            let previous = hash.insert(field.clone(), value.clone());
+            (
+                CacheValue::Hash(hash),
+                previous.as_ref() != Some(value),
+                json!({"previous":previous}),
+            )
+        }
+        CacheTransform::HashRemove { field } => {
+            let mut hash = existing_or!(CacheValue::Hash(hash) => hash, BTreeMap::new(), "hash");
+            let previous = hash.remove(field);
+            let changed = previous.is_some();
+            (
+                CacheValue::Hash(hash),
+                changed,
+                json!({"previous":previous}),
+            )
+        }
+        CacheTransform::ListPush { value, front } => {
+            let mut list = existing_or!(CacheValue::List(list) => list, Vec::new(), "list");
+            if *front {
+                list.insert(0, value.clone());
+            } else {
+                list.push(value.clone());
+            }
+            let length = list.len();
+            (CacheValue::List(list), true, json!({"length":length}))
+        }
+        CacheTransform::ListPop { front } => {
+            let mut list = existing_or!(CacheValue::List(list) => list, Vec::new(), "list");
+            let value = if *front {
+                (!list.is_empty()).then(|| list.remove(0))
+            } else {
+                list.pop()
+            };
+            let changed = value.is_some();
+            (CacheValue::List(list), changed, json!({"value":value}))
+        }
+        CacheTransform::SetAdd { member } => {
+            let mut set = existing_or!(CacheValue::Set(set) => set, BTreeSet::new(), "set");
+            let changed = set.insert(member.clone());
+            (CacheValue::Set(set), changed, json!({"added":changed}))
+        }
+        CacheTransform::SetRemove { member } => {
+            let mut set = existing_or!(CacheValue::Set(set) => set, BTreeSet::new(), "set");
+            let changed = set.remove(member);
+            (CacheValue::Set(set), changed, json!({"removed":changed}))
+        }
+        CacheTransform::SortedSetAdd { member, score } => {
+            if !score.is_finite() {
+                return Err(EpochError::InvalidArgument(
+                    "sorted-set score must be finite".into(),
+                ));
+            }
+            let mut set =
+                existing_or!(CacheValue::SortedSet(set) => set, BTreeMap::new(), "sorted set");
+            let previous = set.insert(member.clone(), *score);
+            (
+                CacheValue::SortedSet(set),
+                previous != Some(*score),
+                json!({"previous":previous}),
+            )
+        }
+        CacheTransform::SortedSetRemove { member } => {
+            let mut set =
+                existing_or!(CacheValue::SortedSet(set) => set, BTreeMap::new(), "sorted set");
+            let previous = set.remove(member);
+            let changed = previous.is_some();
+            (
+                CacheValue::SortedSet(set),
+                changed,
+                json!({"previous":previous}),
+            )
+        }
+        CacheTransform::BitmapSet { bit, value } => {
+            let mut bitmap = existing_or!(CacheValue::Bitmap(bitmap) => bitmap, crate::CacheBitmap::default(), "bitmap");
+            let previous = bitmap.set(*bit, *value)?;
+            (
+                CacheValue::Bitmap(bitmap),
+                previous != *value,
+                json!({"previous":previous}),
+            )
+        }
+        CacheTransform::CardinalityAdd { value, precision } => {
+            let mut cardinality = match current {
+                Some(CacheValue::Cardinality(value)) if value.precision() == *precision => {
+                    value.clone()
+                }
+                Some(CacheValue::Cardinality(_)) => {
+                    return Err(EpochError::Conflict(
+                        "cardinality precision cannot change".into(),
+                    ));
+                }
+                Some(_) => {
+                    return Err(EpochError::Conflict(
+                        "cache value is not a cardinality sketch".into(),
+                    ));
+                }
+                None => crate::CacheCardinality::new(*precision)?,
+            };
+            let changed = cardinality.add(value);
+            let estimate = cardinality.estimate();
+            (
+                CacheValue::Cardinality(cardinality),
+                changed,
+                json!({"estimate":estimate.to_string()}),
+            )
+        }
+        CacheTransform::BloomAdd {
+            value,
+            bit_count,
+            hashes,
+        } => {
+            let mut bloom = existing_or!(CacheValue::Bloom(value) => value, crate::CacheBloomFilter::new(*bit_count, *hashes)?, "Bloom filter");
+            let changed = bloom.add(value);
+            (CacheValue::Bloom(bloom), changed, json!({"added":changed}))
+        }
+        CacheTransform::CuckooAdd {
+            value,
+            bucket_count,
+            bucket_size,
+        } => {
+            let mut cuckoo = existing_or!(CacheValue::Cuckoo(value) => value, crate::CacheCuckooFilter::new(*bucket_count, *bucket_size)?, "Cuckoo filter");
+            let changed = cuckoo.add(value)?;
+            (
+                CacheValue::Cuckoo(cuckoo),
+                changed,
+                json!({"added":changed}),
+            )
+        }
+        CacheTransform::CuckooDelete { value } => {
+            let mut cuckoo = existing_or!(CacheValue::Cuckoo(value) => value, return Err(EpochError::NotFound("Cuckoo filter".into())), "Cuckoo filter");
+            let changed = cuckoo.delete(value);
+            (
+                CacheValue::Cuckoo(cuckoo),
+                changed,
+                json!({"removed":changed}),
+            )
+        }
+        CacheTransform::GeoUpsert { member, point } => {
+            let mut geo = existing_or!(CacheValue::Geo(value) => value, crate::CacheGeoIndex::default(), "geospatial index");
+            let added = geo.upsert(member.clone(), *point)?;
+            (CacheValue::Geo(geo), true, json!({"added":added}))
+        }
+        CacheTransform::GeoRemove { member } => {
+            let mut geo = existing_or!(CacheValue::Geo(value) => value, crate::CacheGeoIndex::default(), "geospatial index");
+            let changed = geo.remove(member);
+            (CacheValue::Geo(geo), changed, json!({"removed":changed}))
+        }
+        CacheTransform::JsonSet { pointer, value } => {
+            let mut document = existing_or!(CacheValue::Json(value) => value, crate::CacheJsonDocument::new(serde_json::Value::Object(serde_json::Map::new()))?, "JSON document");
+            let previous = document.set_pointer(pointer, value.clone())?;
+            (
+                CacheValue::Json(document),
+                previous.as_ref() != Some(value),
+                json!({"previous":previous}),
+            )
+        }
+        CacheTransform::JsonRemove { pointer } => {
+            let mut document = existing_or!(CacheValue::Json(value) => value, crate::CacheJsonDocument::new(serde_json::Value::Object(serde_json::Map::new()))?, "JSON document");
+            let previous = document.remove_pointer(pointer)?;
+            let changed = previous.is_some();
+            (
+                CacheValue::Json(document),
+                changed,
+                json!({"previous":previous}),
+            )
+        }
+        CacheTransform::JsonIndexUpsert {
+            id,
+            document,
+            indexed_pointers,
+        } => {
+            let mut index = match current {
+                Some(CacheValue::JsonIndex(index)) => index.clone(),
+                Some(_) => {
+                    return Err(EpochError::Conflict(
+                        "cache value is not a JSON secondary index".into(),
+                    ));
+                }
+                None => crate::CacheJsonIndex::new(indexed_pointers.clone())?,
+            };
+            let added = index.upsert(id.clone(), document.clone())?;
+            (CacheValue::JsonIndex(index), true, json!({"added":added}))
+        }
+        CacheTransform::JsonIndexRemove { id } => {
+            let mut index = existing_or!(CacheValue::JsonIndex(value) => value, return Err(EpochError::NotFound("JSON secondary index".into())), "JSON secondary index");
+            let changed = index.remove(id)?;
+            (
+                CacheValue::JsonIndex(index),
+                changed,
+                json!({"removed":changed}),
+            )
+        }
+        CacheTransform::VectorUpsert { id, document } => {
+            let mut index = existing_or!(CacheValue::Vector(value) => value, crate::CacheVectorIndex::new(document.dimensions())?, "vector index");
+            let added = index.upsert(id.clone(), document.clone())?;
+            (CacheValue::Vector(index), true, json!({"added":added}))
+        }
+        CacheTransform::VectorRemove { id } => {
+            let mut index = existing_or!(CacheValue::Vector(value) => value, return Err(EpochError::NotFound("vector index".into())), "vector index");
+            let changed = index.remove(id);
+            (
+                CacheValue::Vector(index),
+                changed,
+                json!({"removed":changed}),
+            )
+        }
+    };
+    validate_cache_value(&transformed.0)?;
+    Ok(transformed)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EntryUpsert {
+    ttl_ms: Option<u64>,
+    storage_class: Option<CacheStorageClass>,
+    eviction: EvictionPolicy,
+    now_ms: u64,
+    revision: u64,
+}
+
+fn upsert_entry(
+    entries: &mut BTreeMap<String, ReplicatedEntry>,
+    key: String,
+    value: CacheValue,
+    upsert: EntryUpsert,
+) -> EpochResult<CacheItem> {
+    let expires_at_ms = expiry_deadline(upsert.ttl_ms, upsert.now_ms)?;
+    let (last_access_revision, access_count) =
+        next_access_metadata(entries.get(&key), upsert.eviction, upsert.revision);
+    let storage_class = upsert.storage_class.unwrap_or_else(|| {
+        entries
+            .get(&key)
+            .map_or(CacheStorageClass::Memory, |entry| entry.storage_class)
+    });
+    let item = CacheItem {
+        value: value.clone(),
+        version: upsert.revision,
+        expires_at_ms,
+        storage_class,
+    };
+    entries.insert(
+        key,
+        ReplicatedEntry {
+            value,
+            version: upsert.revision,
+            expires_at_ms,
+            last_access_revision,
+            access_count,
+            storage_class,
         },
     );
     Ok(item)
@@ -825,6 +1896,7 @@ fn apply_increment(
                 expires_at_ms,
                 last_access_revision: initial_access_revision(eviction, revision),
                 access_count: 0,
+                storage_class: CacheStorageClass::Memory,
             },
         );
         (delta, expires_at_ms)
@@ -861,6 +1933,7 @@ fn select_eviction_victims(
                 CacheMutation::Set { .. }
                     | CacheMutation::Increment { .. }
                     | CacheMutation::CompareAndSet { .. }
+                    | CacheMutation::Transform { .. }
             )
         })
         .map(CacheMutation::key)
@@ -898,6 +1971,131 @@ fn select_eviction_victims(
         .collect::<Vec<_>>();
     victims.sort_unstable();
     Ok(victims)
+}
+
+fn select_byte_eviction_victims(
+    entries: &BTreeMap<String, ReplicatedEntry>,
+    operations: &[CacheMutation],
+    max_memory_bytes: Option<usize>,
+    max_cold_bytes: Option<usize>,
+    policy: EvictionPolicy,
+    next_revision: u64,
+) -> EpochResult<Vec<String>> {
+    if max_cold_bytes.is_none()
+        && entries
+            .values()
+            .any(|entry| entry.storage_class == CacheStorageClass::Cold)
+    {
+        return Err(EpochError::Capacity(
+            "cache cold tier is disabled for this resource".into(),
+        ));
+    }
+    let protected = operations
+        .iter()
+        .filter(|operation| {
+            matches!(
+                operation,
+                CacheMutation::Set { .. }
+                    | CacheMutation::Increment { .. }
+                    | CacheMutation::CompareAndSet { .. }
+                    | CacheMutation::Transform { .. }
+            )
+        })
+        .map(CacheMutation::key)
+        .collect::<BTreeSet<_>>();
+    let volatile_only = matches!(
+        policy,
+        EvictionPolicy::VolatileLru
+            | EvictionPolicy::VolatileLfu
+            | EvictionPolicy::VolatileRandom
+            | EvictionPolicy::VolatileTtl
+    );
+    let mut retained = entries.clone();
+    let mut victims = Vec::new();
+    for (storage_class, maximum) in [
+        (CacheStorageClass::Memory, max_memory_bytes),
+        (CacheStorageClass::Cold, max_cold_bytes),
+    ] {
+        let Some(maximum) = maximum else {
+            continue;
+        };
+        while retained_bytes(&retained, storage_class) > maximum {
+            if policy == EvictionPolicy::NoEviction {
+                return Err(EpochError::Capacity(format!(
+                    "cache {storage_class:?} byte admission exceeds {maximum}; no-eviction is configured"
+                )));
+            }
+            let candidate = retained
+                .iter()
+                .filter(|(key, entry)| {
+                    entry.storage_class == storage_class
+                        && !protected.contains(key.as_str())
+                        && (!volatile_only || entry.expires_at_ms.is_some())
+                })
+                .map(|(key, entry)| {
+                    (
+                        eviction_rank(policy, next_revision, key, entry),
+                        key.clone(),
+                    )
+                })
+                .min();
+            let Some((_, key)) = candidate else {
+                return Err(EpochError::Capacity(format!(
+                    "cache {storage_class:?} byte admission exceeds {maximum} with no eligible eviction victim"
+                )));
+            };
+            retained.remove(&key);
+            victims.push(key);
+        }
+    }
+    victims.sort_unstable();
+    Ok(victims)
+}
+
+fn validate_byte_capacity(
+    entries: &BTreeMap<String, ReplicatedEntry>,
+    max_memory_bytes: Option<usize>,
+    max_cold_bytes: Option<usize>,
+) -> EpochResult<()> {
+    if max_cold_bytes.is_none()
+        && entries
+            .values()
+            .any(|entry| entry.storage_class == CacheStorageClass::Cold)
+    {
+        return Err(EpochError::Capacity(
+            "cache cold tier is disabled for this resource".into(),
+        ));
+    }
+    for (storage_class, maximum) in [
+        (CacheStorageClass::Memory, max_memory_bytes),
+        (CacheStorageClass::Cold, max_cold_bytes),
+    ] {
+        if let Some(maximum) = maximum {
+            let retained = retained_bytes(entries, storage_class);
+            if retained > maximum {
+                return Err(EpochError::Capacity(format!(
+                    "cache {storage_class:?} retains {retained} bytes; maximum is {maximum}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn retained_bytes(
+    entries: &BTreeMap<String, ReplicatedEntry>,
+    storage_class: CacheStorageClass,
+) -> usize {
+    entries
+        .iter()
+        .filter(|(_, entry)| entry.storage_class == storage_class)
+        .map(|(key, entry)| entry_size_bytes(key, entry))
+        .fold(0_usize, usize::saturating_add)
+}
+
+fn entry_size_bytes(key: &str, entry: &ReplicatedEntry) -> usize {
+    let value_bytes = serde_json::to_vec(&entry.value).map_or(usize::MAX, |encoded| encoded.len());
+    key.len().saturating_add(value_bytes).saturating_add(40)
 }
 
 fn eviction_rank(
@@ -976,10 +2174,22 @@ const fn eviction_policy_code(policy: EvictionPolicy) -> u8 {
     }
 }
 
+const fn storage_class_code(storage_class: CacheStorageClass) -> u8 {
+    match storage_class {
+        CacheStorageClass::Memory => 0,
+        CacheStorageClass::Cold => 1,
+    }
+}
+
 // Serde skip predicates are required to accept a shared reference.
 #[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_zero(value: &u64) -> bool {
     *value == 0
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_memory_storage(value: &CacheStorageClass) -> bool {
+    matches!(value, CacheStorageClass::Memory)
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -1003,12 +2213,27 @@ fn expiry_deadline(ttl_ms: Option<u64>, now_ms: u64) -> EpochResult<Option<u64>>
 }
 
 fn validate_cache_value(value: &CacheValue) -> EpochResult<()> {
-    if let CacheValue::SortedSet(members) = value
-        && members.values().any(|score| !score.is_finite())
-    {
-        return Err(EpochError::InvalidArgument(
-            "sorted-set scores must be finite".into(),
-        ));
+    match value {
+        CacheValue::SortedSet(members) if members.values().any(|score| !score.is_finite()) => {
+            return Err(EpochError::InvalidArgument(
+                "sorted-set scores must be finite".into(),
+            ));
+        }
+        CacheValue::Bitmap(value) => value.validate()?,
+        CacheValue::Cardinality(value) => value.validate()?,
+        CacheValue::Bloom(value) => value.validate()?,
+        CacheValue::Cuckoo(value) => value.validate()?,
+        CacheValue::Geo(value) => value.validate()?,
+        CacheValue::Json(value) => value.validate()?,
+        CacheValue::JsonIndex(value) => value.validate()?,
+        CacheValue::Vector(value) => value.validate()?,
+        CacheValue::String(_)
+        | CacheValue::Blob(_)
+        | CacheValue::Counter(_)
+        | CacheValue::Hash(_)
+        | CacheValue::List(_)
+        | CacheValue::Set(_)
+        | CacheValue::SortedSet(_) => {}
     }
     Ok(())
 }
@@ -1130,7 +2355,22 @@ impl<'a> CanonicalEncoder<'a> {
                     self.u64(score.to_bits());
                 }
             }
+            CacheValue::Bitmap(value) => self.advanced_value(7, value),
+            CacheValue::Cardinality(value) => self.advanced_value(8, value),
+            CacheValue::Bloom(value) => self.advanced_value(9, value),
+            CacheValue::Cuckoo(value) => self.advanced_value(10, value),
+            CacheValue::Geo(value) => self.advanced_value(11, value),
+            CacheValue::Json(value) => self.advanced_value(12, value),
+            CacheValue::Vector(value) => self.advanced_value(13, value),
+            CacheValue::JsonIndex(value) => self.advanced_value(14, value),
         }
+    }
+
+    fn advanced_value<T: Serialize>(&mut self, kind: u8, value: &T) {
+        self.u8(kind);
+        let encoded = serde_json::to_vec(value)
+            .expect("validated advanced Cache values always serialize to canonical JSON");
+        self.length_prefixed(&encoded);
     }
 
     fn bytes(&mut self, value: &[u8]) {
@@ -1307,6 +2547,7 @@ mod tests {
                     value: CacheValue::String("created".into()),
                     version: 1,
                     expires_at_ms: Some(30),
+                    storage_class: CacheStorageClass::Memory,
                 },
             }]
         );
@@ -1329,6 +2570,7 @@ mod tests {
                     value: CacheValue::String("updated".into()),
                     version: 2,
                     expires_at_ms: Some(65),
+                    storage_class: CacheStorageClass::Memory,
                 },
             }]
         );
@@ -1340,6 +2582,7 @@ mod tests {
                     value: CacheValue::String("updated".into()),
                     version: 2,
                     expires_at_ms: Some(65),
+                    storage_class: CacheStorageClass::Memory,
                 }),
             }
         );
@@ -1448,6 +2691,7 @@ mod tests {
                 value: CacheValue::Counter(5),
                 version: 2,
                 expires_at_ms: Some(110),
+                storage_class: CacheStorageClass::Memory,
             })
         );
     }
@@ -1602,6 +2846,7 @@ mod tests {
                 value: CacheValue::String("new".into()),
                 version: 2,
                 expires_at_ms: None,
+                storage_class: CacheStorageClass::Memory,
             })
         );
     }
@@ -2067,14 +3312,14 @@ mod tests {
             .unwrap();
 
         let golden = shard.recovery_state_checksum();
-        assert_eq!(golden, 0x83d9_56e5);
+        assert_eq!(golden, 0xde6c_ff6f);
         let digest = shard.recovery_state_digest();
         assert_eq!(
             digest,
             [
-                0x8b, 0x33, 0x6f, 0xa3, 0x72, 0x03, 0xad, 0xe3, 0x3d, 0x59, 0x9e, 0x46, 0xda, 0x92,
-                0x68, 0xdd, 0x3e, 0x0f, 0x6c, 0x25, 0x84, 0x5d, 0xee, 0x67, 0x6b, 0xac, 0x1a, 0x9c,
-                0x24, 0xdb, 0xfd, 0x56,
+                0xf5, 0x4c, 0x80, 0x03, 0x6b, 0x6e, 0x62, 0xbf, 0xf2, 0xd0, 0xfd, 0x93, 0x42, 0x3f,
+                0xaa, 0xce, 0x56, 0x7a, 0x4c, 0xe9, 0x56, 0x02, 0x49, 0xb3, 0x95, 0xcf, 0xaf, 0x96,
+                0x0a, 0xd5, 0x12, 0x0b,
             ]
         );
 
@@ -2292,6 +3537,7 @@ mod tests {
                         expected_version: Some(0),
                         only_if_absent: true,
                         only_if_present: false,
+                        storage_class: CacheStorageClass::Memory,
                     },
                 },
                 CacheMutation::Delete {
@@ -2433,5 +3679,266 @@ mod tests {
         ));
         assert_eq!(shard.revision(), 0);
         assert!(shard.is_empty());
+    }
+
+    #[test]
+    fn durable_change_stream_covers_mutation_eviction_and_expiry() {
+        let mut shard = CacheShard::new_with_eviction(2, None, EvictionPolicy::AllKeysLru).unwrap();
+        shard
+            .transact(
+                transaction(vec![CacheMutation::Set {
+                    key: "expires".into(),
+                    value: CacheValue::String("v".into()),
+                    options: SetOptions {
+                        ttl_ms: Some(5),
+                        ..SetOptions::default()
+                    },
+                }]),
+                10,
+            )
+            .unwrap();
+        shard
+            .transact(transaction(vec![set("keep", CacheValue::Counter(1))]), 11)
+            .unwrap();
+        shard.maintain_expiry(15, 10).unwrap();
+        shard
+            .transact(transaction(vec![set("other", CacheValue::Counter(2))]), 16)
+            .unwrap();
+        shard
+            .transact(
+                transaction(vec![set("overflow", CacheValue::Counter(3))]),
+                17,
+            )
+            .unwrap();
+
+        let changes = shard.changes_from(1, 10).unwrap();
+        assert_eq!(
+            changes.iter().map(|change| change.kind).collect::<Vec<_>>(),
+            vec![
+                CacheChangeKind::Set,
+                CacheChangeKind::Set,
+                CacheChangeKind::Expire,
+                CacheChangeKind::Set,
+                CacheChangeKind::Evict,
+                CacheChangeKind::Set,
+            ]
+        );
+        let restored = CacheShard::decode_snapshot(&shard.encode_snapshot().unwrap()).unwrap();
+        assert_eq!(restored.changes_from(1, 10).unwrap(), changes);
+        assert_eq!(
+            restored.recovery_state_digest(),
+            shard.recovery_state_digest()
+        );
+    }
+
+    #[test]
+    fn backup_is_canonical_and_pitr_restore_creates_non_aba_versions() {
+        let mut source = CacheShard::new(10, None).unwrap();
+        source
+            .transact(
+                transaction(vec![set("key", CacheValue::String("one".into()))]),
+                10,
+            )
+            .unwrap();
+        source
+            .transact(
+                transaction(vec![set("key", CacheValue::String("two".into()))]),
+                20,
+            )
+            .unwrap();
+        let backup = source.encode_backup(25).unwrap();
+        let metadata = CacheShard::inspect_backup(&backup).unwrap();
+        assert_eq!(metadata.captured_revision, 2);
+        assert_eq!(metadata.oldest_restorable_revision, 0);
+
+        let mut target = source.clone();
+        let result = target.restore_backup(&backup, 1, 30).unwrap();
+        assert_eq!(result.revision, 3);
+        assert_eq!(result.restored_from_revision, 1);
+        let item = target.observe("key", 30).item.unwrap();
+        assert_eq!(item.value, CacheValue::String("one".into()));
+        assert_eq!(item.version, 3);
+        assert_eq!(
+            target.changes_from(1, 10).unwrap().last().unwrap().kind,
+            CacheChangeKind::Restore
+        );
+
+        let mut corrupt = backup;
+        let middle = corrupt.len() / 2;
+        corrupt[middle] ^= 1;
+        assert!(CacheShard::inspect_backup(&corrupt).is_err());
+    }
+
+    fn assert_mismatched_transform_rolls_back(shard: &mut CacheShard) {
+        let checksum = shard.recovery_state_checksum();
+        assert!(
+            shard
+                .transact(
+                    CacheTransaction {
+                        expected_revision: Some(1),
+                        operations: vec![CacheMutation::Transform {
+                            key: "json".into(),
+                            transform: CacheTransform::BitmapSet {
+                                bit: 1,
+                                value: true,
+                            },
+                            expected_version: Some(1),
+                            ttl_ms: None,
+                        }],
+                    },
+                    11,
+                )
+                .is_err()
+        );
+        assert_eq!(shard.recovery_state_checksum(), checksum);
+    }
+
+    #[test]
+    fn typed_transforms_are_atomic_versioned_and_snapshot_safe() {
+        let mut shard = CacheShard::new(32, None).unwrap();
+        let operations = vec![
+            CacheMutation::Transform {
+                key: "hash".into(),
+                transform: CacheTransform::HashPut {
+                    field: "name".into(),
+                    value: "Ada".into(),
+                },
+                expected_version: None,
+                ttl_ms: None,
+            },
+            CacheMutation::Transform {
+                key: "bitmap".into(),
+                transform: CacheTransform::BitmapSet {
+                    bit: 63,
+                    value: true,
+                },
+                expected_version: None,
+                ttl_ms: None,
+            },
+            CacheMutation::Transform {
+                key: "cardinality".into(),
+                transform: CacheTransform::CardinalityAdd {
+                    value: b"member".to_vec(),
+                    precision: 10,
+                },
+                expected_version: None,
+                ttl_ms: None,
+            },
+            CacheMutation::Transform {
+                key: "bloom".into(),
+                transform: CacheTransform::BloomAdd {
+                    value: b"member".to_vec(),
+                    bit_count: 1_024,
+                    hashes: 5,
+                },
+                expected_version: None,
+                ttl_ms: None,
+            },
+            CacheMutation::Transform {
+                key: "geo".into(),
+                transform: CacheTransform::GeoUpsert {
+                    member: "kolkata".into(),
+                    point: crate::CacheGeoPoint::from_degrees(88.3639, 22.5726).unwrap(),
+                },
+                expected_version: None,
+                ttl_ms: None,
+            },
+            CacheMutation::Transform {
+                key: "json".into(),
+                transform: CacheTransform::JsonSet {
+                    pointer: "/user/name".into(),
+                    value: serde_json::Value::String("Ada".into()),
+                },
+                expected_version: None,
+                ttl_ms: None,
+            },
+            CacheMutation::Transform {
+                key: "vector".into(),
+                transform: CacheTransform::VectorUpsert {
+                    id: "doc".into(),
+                    document: crate::CacheVectorDocument::new(
+                        vec![1.0, 0.0],
+                        "epoch",
+                        BTreeMap::new(),
+                    )
+                    .unwrap(),
+                },
+                expected_version: None,
+                ttl_ms: None,
+            },
+        ];
+        let result = shard.transact(transaction(operations), 10).unwrap();
+        assert_eq!(result.results.len(), 7);
+        assert!(result.results.iter().all(|result| matches!(result, CacheMutationResult::Transform { item, .. } if item.version == 1)));
+        let restored = CacheShard::decode_snapshot(&shard.encode_snapshot().unwrap()).unwrap();
+        assert_eq!(
+            restored.recovery_state_digest(),
+            shard.recovery_state_digest()
+        );
+
+        assert_mismatched_transform_rolls_back(&mut shard);
+    }
+
+    #[test]
+    fn byte_admission_evicts_deterministically_and_cold_tier_is_explicit() {
+        let value = CacheValue::String("x".repeat(64));
+        let mut measured = CacheShard::new(10, None).unwrap();
+        measured
+            .transact(transaction(vec![set("a", value.clone())]), 1)
+            .unwrap();
+        let one_item_bytes = measured.retained_bytes(CacheStorageClass::Memory);
+
+        let mut memory = CacheShard::new_with_limits(
+            10,
+            None,
+            EvictionPolicy::AllKeysLru,
+            Some(one_item_bytes),
+            None,
+        )
+        .unwrap();
+        memory
+            .transact(transaction(vec![set("a", value.clone())]), 1)
+            .unwrap();
+        let result = memory
+            .transact(transaction(vec![set("b", value.clone())]), 2)
+            .unwrap();
+        assert_eq!(result.evicted_keys, ["a"]);
+        assert!(memory.observe("a", 2).item.is_none());
+        assert!(memory.retained_bytes(CacheStorageClass::Memory) <= one_item_bytes);
+
+        let cold_write = CacheMutation::Transform {
+            key: "archive".into(),
+            transform: CacheTransform::Replace {
+                value: value.clone(),
+                storage_class: CacheStorageClass::Cold,
+            },
+            expected_version: None,
+            ttl_ms: None,
+        };
+        assert!(
+            memory
+                .transact(transaction(vec![cold_write.clone()]), 3)
+                .is_err()
+        );
+
+        let mut tiered = CacheShard::new_with_limits(
+            10,
+            None,
+            EvictionPolicy::NoEviction,
+            Some(one_item_bytes),
+            Some(one_item_bytes.saturating_add(16)),
+        )
+        .unwrap();
+        tiered.transact(transaction(vec![cold_write]), 1).unwrap();
+        let item = tiered.observe("archive", 1).item.unwrap();
+        assert_eq!(item.storage_class, CacheStorageClass::Cold);
+        assert_eq!(tiered.retained_bytes(CacheStorageClass::Memory), 0);
+        assert!(tiered.retained_bytes(CacheStorageClass::Cold) > 0);
+        let restored = CacheShard::decode_snapshot(&tiered.encode_snapshot().unwrap()).unwrap();
+        assert_eq!(restored.observe("archive", 1).item, Some(item));
+        assert_eq!(
+            restored.recovery_state_digest(),
+            tiered.recovery_state_digest()
+        );
     }
 }

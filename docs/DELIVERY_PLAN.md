@@ -35,7 +35,7 @@ into this train. A large PR can remain in development longer, but it does not
 merge until its whole row is locally working and its acceptance evidence is
 reviewable.
 
-The `v0.1.0-alpha.5` release target extends the authenticated regional
+The published `v0.1.0-alpha.5` release extends the authenticated regional
 multi-tablet M1/M2 boundary. Protected `main` evidence covers the consensus-backed catalog, durable
 single-owner hosted control, topology admission, quorum-confirmed leader reads,
 all four regional profile SDKs, multi-shard Stream routing, atomic batches,
@@ -60,10 +60,12 @@ group leader, committed-target-before-source-Ack ordering, and all-voter reopen
 pass exact-main CI `32377688082` and Pages `32377688018`. PR #78 adds complete
 deterministic Cache policy eviction, committed access, atomic three-language
 batches, and recovery evidence; exact-main CI `32398199013` and Pages
-`32398199351` pass. The current release feature adds required replicated
+`32398199351` pass. PR #79 and `v0.1.0-alpha.5` add required replicated
 resource governance, exact authorized filters, deterministic cost-driver
 attribution, console visibility, legacy recovery, and a real control/data-plane
-restart proof. Stable streaming protocols, replicated multi-instance hosted metadata, production
+restart proof. The current `v0.1.0-alpha.6` feature candidate completes every
+non-deferred Cache row as the second release in the six-PR train. Stable
+streaming protocols, replicated multi-instance hosted metadata, production
 identity, follower routing, dynamic membership/voter selection,
 repair/rebalance, and the broader M2 security/performance gates remain open.
 
@@ -348,24 +350,31 @@ versioned regional application boundary. A
 sorted `CacheShard` provides a pure read path, checked
 non-repeating revision/version allocation, bounded staged transactions, checked
 counters and TTLs, deterministic no-eviction/all-key/volatile LRU, LFU, random,
-and TTL capacity policy, committed access metadata, and ordered expiry. Its typed tablet
+and TTL entry/memory/cold admission, committed access metadata, collection and
+advanced transforms, durable changes, resource-local backup/PITR, and ordered
+expiry. Its typed tablet
 adds absent-state ABA fencing, advisory composite lock fences, canonical
 committed outcomes, exact replay, time normalization, and convergence digests.
 `epoch-node` mounts it as an opt-in profile, rejects stale-term admission,
 rebuilds from EPRS before readiness, and exposes the authenticated Cache v1
 route with leader ReadIndex observations. Repository-local Go, Java, and Python
-clients cover all seven values, set/committed-get/delete/CAS/increment, atomic
-transaction/batch, fenced locks, explicit expiry controls, lookup, pure
-observation, and status with exact retry. Managed configuration is committed
+clients cover all seven ordinary values, set/committed-get/delete/CAS/increment,
+typed transforms/query, atomic transaction/batch, independent correlated
+multiplex, fenced locks, explicit expiry, changes, backup/restore, node-affine
+at-most-once Pub/Sub, lookup, pure observation, and status with exact retry.
+Managed configuration is committed
 through Go and the Rust catalog before every voter materializes the tablet.
-Real-runtime and container gates exercise the Python client after leader loss,
-automatic leader-owned TTL reclamation, catch-up, convergence, and all-node
-recovery. Concurrent history checking, multi-shard routing, byte-pressure
-capacity/SLO evidence, native multiplexing/automatic batch coalescing, exported
-and coordinated backup/PITR, and production durability evidence remain open. See
+Every regional voter synchronizes and reads integrity-checked cold-class files
+after commit and reports observed local-file latency as not an SLO. Real-runtime
+and container gates exercise the complete Python lifecycle after leader loss,
+catch-up, convergence, and all-node recovery. Concurrent history/performance
+reports, multi-shard routing, automatic batch coalescing, managed scheduled and
+encrypted backup, RESP compatibility, and production durability evidence remain
+open under separate requirements. See
 [Regional Cache SDK](REGIONAL_CACHE_SDK.md),
 [ADR-0019](adr/0019-regional-cache-v1-and-sdk-routing.md), and
 [ADR-0032](adr/0032-regional-cache-eviction-and-access-batches.md), and
+[ADR-0034](adr/0034-cache-state-services-and-cold-read-tier.md), and
 [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
 
 The Event Bus application work now runs behind the same actor-owned persistent
@@ -478,7 +487,8 @@ M3 earns migration credibility and data-management depth.
 
 Primary scope:
 
-- Durable cache recovery, lossy Pub/Sub, and change streams: CACHE-008–CACHE-010.
+- CACHE-008–CACHE-010 were pulled forward and completed by the Cache feature
+  release; M3 retains managed backup operations and compatibility work.
 - Stream idempotence prototype, compaction, tiering, expansion, capture, and logical streams: STREAM-009–STREAM-011, STREAM-013, STREAM-015. Transactional completion remains M5.
 - Queue lifecycle limits QUEUE-007.
 - Named RESP3, Kafka producer/consumer/group, and AMQP core subsets under G6.
@@ -540,7 +550,9 @@ GA is blocked until every criterion below has durable evidence:
 
 M6 contains all 14 P2 items:
 
-- CACHE-011–CACHE-014.
+- CACHE-011–CACHE-014 were pulled forward and completed by the Cache feature
+  release; the broader M6 demand/cost/performance gates still apply before any
+  production SLO claim.
 - STREAM-012.
 - QUEUE-013–QUEUE-014.
 - BUS-008, BUS-013, BUS-014.

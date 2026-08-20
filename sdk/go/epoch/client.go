@@ -58,15 +58,26 @@ func (client *Client) CreateCache(ctx context.Context, name string, config Cache
 	if config.Eviction == "" {
 		config.Eviction = DefaultCacheConfig().Eviction
 	}
+	if config.Durability == "" {
+		config.Durability = Volatile
+	}
+	if err := config.Durability.validate(); err != nil {
+		return nil, err
+	}
+	if config.MaxMemoryBytes != nil && *config.MaxMemoryBytes == 0 || config.MaxColdBytes != nil && *config.MaxColdBytes == 0 {
+		return nil, fmt.Errorf("epoch: Cache byte capacities must be greater than zero")
+	}
 	if config.DefaultTTLMS != nil && *config.DefaultTTLMS == 0 {
 		return nil, fmt.Errorf("epoch: default TTL must be greater than zero")
 	}
 	body := struct {
-		MaxEntries   uint64            `json:"max_entries"`
-		DefaultTTLMS *uint64           `json:"default_ttl_ms"`
-		Eviction     string            `json:"eviction"`
-		Durability   DurabilityProfile `json:"durability"`
-	}{config.MaxEntries, config.DefaultTTLMS, config.Eviction, Volatile}
+		MaxEntries     uint64            `json:"max_entries"`
+		MaxMemoryBytes *uint64           `json:"max_memory_bytes"`
+		MaxColdBytes   *uint64           `json:"max_cold_bytes"`
+		DefaultTTLMS   *uint64           `json:"default_ttl_ms"`
+		Eviction       string            `json:"eviction"`
+		Durability     DurabilityProfile `json:"durability"`
+	}{config.MaxEntries, config.MaxMemoryBytes, config.MaxColdBytes, config.DefaultTTLMS, config.Eviction, config.Durability}
 	return execute[Document](ctx, client, Request{Method: "POST", Path: path, Body: body})
 }
 

@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	userAgent        = "epoch-go/0.1.0-alpha.5"
+	userAgent        = "epoch-go/0.1.0-alpha.6"
 	maxResponseBytes = 16 << 20
 )
 

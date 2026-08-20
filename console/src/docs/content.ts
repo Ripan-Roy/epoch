@@ -16,7 +16,7 @@ import regionalBusPythonSource from "../quickstarts/regional_bus/quickstart.py?r
 
 export const repositoryUrl = "https://github.com/Ripan-Roy/epoch";
 export const repositoryDocsUrl = `${repositoryUrl}/blob/main/docs`;
-export const releaseVersion = "0.1.0-alpha.5";
+export const releaseVersion = "0.1.0-alpha.6";
 
 export type LanguageId = "go" | "java" | "python";
 
@@ -130,8 +130,10 @@ curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
       "kind":"cache","name":"sessions",
       "governance":{"owner":"team:platform","cost_center":"cc-1042","classification":"confidential","tags":{"service":"sessions","profile":"cache"}},
       "spec":{"shard_count":1,"replica_count":3,"configuration":{
-        "shard_count":1,"max_entries":32,"default_ttl_ms":null,
-        "eviction":"all_keys_lru"
+        "shard_count":1,"max_entries":10000,
+        "max_memory_bytes":262144,"max_cold_bytes":262144,
+        "default_ttl_ms":null,"eviction":"all_keys_lru",
+        "durability":"quorum_durable"
       },"placement":{
         "allowed_regions":["ap-south"],"minimum_zones":3,
         "required_node_class":"general-purpose"
@@ -525,10 +527,10 @@ export const sdkSurface = [
   },
   {
     area: "Regional Cache",
-    go: "RegionalCacheClient · Set · Get · Delete · CompareAndSet · Increment · Transaction · AtomicBatch · AcquireLock · RenewLock · ReleaseLock · Maintain · Observe",
-    java: "RegionalCacheClient · set · get · delete · compareAndSet · increment · transaction · atomicBatch · acquireLock · renewLock · releaseLock · maintain · observe",
+    go: "RegionalCacheClient · Set · Get · Delete · CompareAndSet · Increment · Transform · Transaction · AtomicBatch · Multiplex · AcquireLock · RenewLock · ReleaseLock · Maintain · Observe · Changes · Backup · Restore · Query · CreateSubscription · Publish · PollSubscription · DeleteSubscription · Status",
+    java: "RegionalCacheClient · set · get · delete · compareAndSet · increment · transform · transaction · atomicBatch · multiplex · acquireLock · renewLock · releaseLock · maintain · observe · changes · backup · restore · query · createSubscription · publish · pollSubscription · deleteSubscription · status",
     python:
-      "RegionalCacheClient · set · get · delete · compare_and_set · increment · transaction · atomic_batch · acquire_lock · renew_lock · release_lock · maintain · observe",
+      "RegionalCacheClient · set · get · delete · compare_and_set · increment · transform · transaction · atomic_batch · multiplex · acquire_lock · renew_lock · release_lock · maintain · observe · changes · backup · restore · query · create_subscription · publish · poll_subscription · delete_subscription · status",
   },
   {
     area: "Regional Event Bus",

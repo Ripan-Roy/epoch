@@ -6,10 +6,18 @@
 
   <groupId>io.epoch</groupId>
   <artifactId>epoch-sdk</artifactId>
-  <version>0.1.0-alpha.5</version>
+  <version>0.1.0-alpha.6</version>
   <name>Epoch Java SDK</name>
   <description>Guarantee-aware Java client for Epoch.</description>
   <url>https://github.com/Ripan-Roy/epoch</url>
+
+  <licenses>
+    <license>
+      <name>MIT License</name>
+      <url>https://opensource.org/license/mit</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>

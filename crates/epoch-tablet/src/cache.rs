@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use epoch_cache::{
-    CacheConfig, CacheMutation, CacheMutationResult, CacheShard, CacheTransaction, CacheValue,
-    EvictionPolicy, SetOptions,
+    CacheChange, CacheConfig, CacheMutation, CacheMutationResult, CacheShard, CacheTransaction,
+    CacheTransform, CacheValue, EvictionPolicy, SetOptions,
 };
 use epoch_core::{EpochError, EpochResult};
 use serde::{Deserialize, Serialize};
@@ -26,7 +26,8 @@ pub use lock::*;
 pub use model::*;
 
 pub const CACHE_TABLET_SNAPSHOT_FORMAT_VERSION: u16 = 1;
-pub const MAX_CACHE_TABLET_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_CACHE_TABLET_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_CACHE_TABLET_TIER_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -102,10 +103,12 @@ impl CacheTablet {
         // Consensus owns persistence evidence for this tablet. CacheShard has
         // no durability path of its own, so the caller's durability label is
         // deliberately normalized away rather than entering state or digest.
-        let shard = CacheShard::new_with_eviction(
+        let shard = CacheShard::new_with_limits(
             config.max_entries,
             config.default_ttl_ms,
             config.eviction,
+            config.max_memory_bytes,
+            config.max_cold_bytes,
         )?;
         let state_digest = initial_state_digest(
             &scope,
@@ -237,6 +240,20 @@ impl CacheTablet {
         }
     }
 
+    pub fn changes_from(&self, sequence: u64, limit: usize) -> TabletResult<Vec<CacheChange>> {
+        self.state
+            .shard
+            .changes_from(sequence, limit)
+            .map_err(TabletError::Profile)
+    }
+
+    pub fn encode_backup(&self) -> TabletResult<Vec<u8>> {
+        self.state
+            .shard
+            .encode_backup(self.last_applied_time_ms)
+            .map_err(TabletError::Profile)
+    }
+
     pub const fn cache_revision(&self) -> u64 {
         self.state.shard.revision()
     }
@@ -251,6 +268,36 @@ impl CacheTablet {
 
     pub const fn eviction(&self) -> EvictionPolicy {
         self.state.shard.eviction()
+    }
+
+    pub const fn max_memory_bytes(&self) -> Option<usize> {
+        self.state.shard.max_memory_bytes()
+    }
+
+    pub const fn max_cold_bytes(&self) -> Option<usize> {
+        self.state.shard.max_cold_bytes()
+    }
+
+    pub fn retained_memory_bytes(&self) -> usize {
+        self.state
+            .shard
+            .retained_bytes(epoch_cache::CacheStorageClass::Memory)
+    }
+
+    pub fn retained_cold_bytes(&self) -> usize {
+        self.state
+            .shard
+            .retained_bytes(epoch_cache::CacheStorageClass::Cold)
+    }
+
+    /// Returns canonical retained cold-class items for the local flash mirror.
+    pub fn retained_cold_items(&self) -> Vec<(String, CacheTabletItem)> {
+        self.state
+            .shard
+            .retained_items(epoch_cache::CacheStorageClass::Cold)
+            .into_iter()
+            .map(|(key, item)| (key, item.into()))
+            .collect()
     }
 
     /// Returns physically retained entries, including expired values that have
@@ -517,6 +564,9 @@ impl CacheTabletBusinessState {
                 self.execute_increment(scope, committed, command, applied_at_ms)
             }
             CacheTabletOperation::Get(command) => self.execute_get(command, applied_at_ms),
+            CacheTabletOperation::Transform(command) => {
+                self.execute_transform(scope, committed, command, applied_at_ms)
+            }
             CacheTabletOperation::Transaction(command) => {
                 self.execute_transaction(scope, committed, command, applied_at_ms)
             }
@@ -532,6 +582,7 @@ impl CacheTabletBusinessState {
             CacheTabletOperation::Maintain(command) => {
                 self.execute_maintain(command, applied_at_ms)
             }
+            CacheTabletOperation::Restore(command) => self.execute_restore(command, applied_at_ms),
         }
     }
 
@@ -769,6 +820,70 @@ impl CacheTabletBusinessState {
         })
     }
 
+    fn execute_transform(
+        &mut self,
+        scope: &CacheTabletScope,
+        committed: CommittedCommand<'_>,
+        command: CacheTransformCommand,
+        applied_at_ms: u64,
+    ) -> EpochResult<CacheTabletOperationResult> {
+        let CacheTransformCommand {
+            shard: _,
+            key,
+            transform,
+            expected_version,
+            ttl_ms,
+            lock_guard,
+        } = command;
+        self.authorize_optional_guard(scope, committed, lock_guard.as_ref(), applied_at_ms)?;
+        if ttl_ms.is_some() || self.shard.observe(&key, applied_at_ms).item.is_none() {
+            ensure_deadline_fits(
+                applied_at_ms,
+                ttl_ms.or(self.default_ttl_ms),
+                "cache TTL deadline",
+            )?;
+        }
+        let is_replace = matches!(transform, CacheTransform::Replace { .. });
+        let result = self.shard.transact(
+            CacheTransaction {
+                expected_revision: None,
+                operations: vec![CacheMutation::Transform {
+                    key: key.clone(),
+                    transform,
+                    expected_version,
+                    ttl_ms,
+                }],
+            },
+            applied_at_ms,
+        )?;
+        let evicted_keys = result.evicted_keys;
+        let CacheMutationResult::Transform {
+            item,
+            changed,
+            result,
+        } = one_result(result.results)?
+        else {
+            return Err(EpochError::Internal(
+                "Cache Transform returned a mismatched engine result".into(),
+            ));
+        };
+        if is_replace {
+            Ok(CacheTabletOperationResult::Set {
+                key,
+                item: item.into(),
+                evicted_keys,
+            })
+        } else {
+            Ok(CacheTabletOperationResult::Transformed {
+                key,
+                item: item.into(),
+                changed,
+                result,
+                evicted_keys,
+            })
+        }
+    }
+
     fn execute_transaction(
         &mut self,
         scope: &CacheTabletScope,
@@ -885,6 +1000,26 @@ impl CacheTabletBusinessState {
                         expected_version: *expected_version,
                     })
                 }
+            }
+            CacheTransactionMutation::Transform {
+                key,
+                transform,
+                expected_version,
+                ttl_ms,
+            } => {
+                if ttl_ms.is_some() || self.shard.observe(key, applied_at_ms).item.is_none() {
+                    ensure_deadline_fits(
+                        applied_at_ms,
+                        ttl_ms.or(self.default_ttl_ms),
+                        "cache TTL deadline",
+                    )?;
+                }
+                Ok(CacheMutation::Transform {
+                    key: key.clone(),
+                    transform: transform.clone(),
+                    expected_version: *expected_version,
+                    ttl_ms: *ttl_ms,
+                })
             }
         }
     }
@@ -1092,6 +1227,26 @@ impl CacheTabletBusinessState {
         })
     }
 
+    fn execute_restore(
+        &mut self,
+        command: CacheRestoreCommand,
+        applied_at_ms: u64,
+    ) -> EpochResult<CacheTabletOperationResult> {
+        let backup = STANDARD_NO_PAD
+            .decode(command.backup_base64)
+            .map_err(|error| {
+                EpochError::InvalidArgument(format!("Cache backup base64 is invalid: {error}"))
+            })?;
+        let restored =
+            self.shard
+                .restore_backup(&backup, command.target_revision, applied_at_ms)?;
+        Ok(CacheTabletOperationResult::Restored {
+            revision: restored.revision,
+            restored_from_revision: restored.restored_from_revision,
+            restored_keys: restored.restored_keys,
+        })
+    }
+
     fn authorize_optional_guard(
         &self,
         scope: &CacheTabletScope,
@@ -1236,6 +1391,30 @@ fn map_transaction_result(
                 expires_at_ms: item.expires_at_ms,
             })
         }
+        (
+            CacheTransactionMutation::Transform {
+                key,
+                transform: CacheTransform::Replace { .. },
+                ..
+            },
+            CacheMutationResult::Transform { item, .. },
+        ) => Ok(CacheTransactionMutationResult::Set {
+            key,
+            item: item.into(),
+        }),
+        (
+            CacheTransactionMutation::Transform { key, .. },
+            CacheMutationResult::Transform {
+                item,
+                changed,
+                result,
+            },
+        ) => Ok(CacheTransactionMutationResult::Transformed {
+            key,
+            item: item.into(),
+            changed,
+            result,
+        }),
         _ => Err(EpochError::Internal(
             "Cache transaction returned a mismatched engine result".into(),
         )),
@@ -1283,6 +1462,17 @@ fn validate_config(config: &CacheConfig) -> TabletResult<()> {
         return Err(TabletError::Profile(EpochError::InvalidArgument(format!(
             "Cache tablet default_ttl_ms must be between 1 and {MAX_CACHE_TTL_MS}"
         ))));
+    }
+    for (name, capacity) in [
+        ("max_memory_bytes", config.max_memory_bytes),
+        ("max_cold_bytes", config.max_cold_bytes),
+    ] {
+        if capacity.is_some_and(|capacity| capacity == 0 || capacity > MAX_CACHE_TABLET_TIER_BYTES)
+        {
+            return Err(TabletError::Profile(EpochError::InvalidArgument(format!(
+                "Cache tablet {name} must be between 1 and {MAX_CACHE_TABLET_TIER_BYTES}"
+            ))));
+        }
     }
     Ok(())
 }

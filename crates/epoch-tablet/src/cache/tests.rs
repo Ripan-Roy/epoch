@@ -12,6 +12,8 @@ fn scope() -> CacheTabletScope {
 fn config() -> CacheConfig {
     CacheConfig {
         max_entries: 100,
+        max_memory_bytes: None,
+        max_cold_bytes: None,
         default_ttl_ms: None,
         eviction: EvictionPolicy::NoEviction,
         durability: DurabilityProfile::QuorumDurable,
@@ -1806,11 +1808,11 @@ fn receipt_and_complete_state_digest_have_golden_vectors() {
     let receipt = apply_command(&mut tablet, &golden, 2, 1);
     assert_eq!(
         serde_json::to_string(&receipt).unwrap(),
-        r#"{"proposal_id":"15848596182136469974","tablet_id":"7","tablet_epoch":"3","term":"2","commit_index":"1","applied_at_ms":"11","write_evidence":"fixed_voter_majority_persisted","durable_voter_acks":2,"disposition":"new","outcome":{"status":"applied","result":{"kind":"set","key":"golden","item":{"value":{"kind":"string","value":"value"},"version":"1","expires_at_ms":"20"}}}}"#
+        r#"{"proposal_id":"15848596182136469974","tablet_id":"7","tablet_epoch":"3","term":"2","commit_index":"1","applied_at_ms":"11","write_evidence":"fixed_voter_majority_persisted","durable_voter_acks":2,"disposition":"new","outcome":{"status":"applied","result":{"kind":"set","key":"golden","item":{"value":{"kind":"string","value":"value"},"version":"1","expires_at_ms":"20","storage_class":"memory"}}}}"#
     );
     assert_eq!(
         hex_digest(tablet.state_digest()),
-        "31d5169383b2c2eb2f0df96d7924f6e965d9eb7dee56314e38db8b88e1e5a134"
+        "d79c6e13ebf9884b2930724de11b5ed3b76bc2258d863eda8c7f0586c17d34b3"
     );
 }
 

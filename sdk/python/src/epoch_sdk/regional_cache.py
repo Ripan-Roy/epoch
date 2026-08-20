@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from typing import Any, ClassVar
+from urllib.parse import quote
 
 from ._regional import RegionalClient, Route, _non_negative, _positive, _required
 
@@ -122,6 +123,25 @@ class RegionalCacheLockGuard:
 
 
 @dataclass(frozen=True, slots=True)
+class RegionalCacheTransform:
+    """One atomic server-side Cache data-structure transform."""
+
+    kind: str
+    fields: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        _required(self.kind, "Cache transform kind")
+        if not isinstance(self.fields, dict):
+            raise TypeError("Cache transform fields must be a dict")
+        if any(not isinstance(key, str) or not key.strip() or key == "kind" for key in self.fields):
+            raise ValueError("Cache transform fields must use non-empty keys other than kind")
+        object.__setattr__(self, "fields", dict(self.fields))
+
+    def to_wire(self) -> dict[str, Any]:
+        return {"kind": self.kind, **self.fields}
+
+
+@dataclass(frozen=True, slots=True)
 class RegionalCacheMutation:
     """One mutation permitted inside an atomic Cache transaction."""
 
@@ -134,9 +154,14 @@ class RegionalCacheMutation:
 
     @classmethod
     def set(
-        cls, key: str, value: RegionalCacheValue, *, ttl_ms: int | None = None
+        cls,
+        key: str,
+        value: RegionalCacheValue,
+        *,
+        ttl_ms: int | None = None,
+        storage_class: str = "memory",
     ) -> RegionalCacheMutation:
-        body = _set_operation(key, value, ttl_ms, None)
+        body = _set_operation(key, value, ttl_ms, storage_class, None)
         body.pop("shard")
         return cls(key, body)
 
@@ -172,8 +197,43 @@ class RegionalCacheMutation:
         body.pop("shard")
         return cls(key, body)
 
+    @classmethod
+    def transform(
+        cls,
+        key: str,
+        transform: RegionalCacheTransform,
+        *,
+        expected_version: int | None = None,
+        ttl_ms: int | None = None,
+    ) -> RegionalCacheMutation:
+        body = _transform_operation(key, transform, expected_version, ttl_ms, None)
+        body.pop("shard")
+        return cls(key, body)
+
     def to_wire(self) -> dict[str, Any]:
         return dict(self.operation)
+
+
+@dataclass(frozen=True, slots=True)
+class RegionalCacheMultiplexMutation:
+    """One independently committed mutation in a correlated multiplex request."""
+
+    correlation_id: str
+    idempotency_key: str
+    mutation: RegionalCacheMutation
+
+    def __post_init__(self) -> None:
+        _required(self.correlation_id, "Cache multiplex correlation ID")
+        _required(self.idempotency_key, "Cache multiplex idempotency key")
+        if not isinstance(self.mutation, RegionalCacheMutation):
+            raise TypeError("Cache multiplex mutation must be RegionalCacheMutation")
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "correlation_id": self.correlation_id,
+            "idempotency_key": self.idempotency_key,
+            "operation": self.mutation.to_wire(),
+        }
 
 
 class RegionalCacheClient(RegionalClient):
@@ -188,10 +248,14 @@ class RegionalCacheClient(RegionalClient):
         value: RegionalCacheValue,
         *,
         ttl_ms: int | None = None,
+        storage_class: str = "memory",
         lock_guard: RegionalCacheLockGuard | None = None,
     ) -> dict[str, Any]:
         return self._mutate(
-            cache, shard, idempotency_key, _set_operation(key, value, ttl_ms, lock_guard)
+            cache,
+            shard,
+            idempotency_key,
+            _set_operation(key, value, ttl_ms, storage_class, lock_guard),
         )
 
     def get(
@@ -263,6 +327,26 @@ class RegionalCacheClient(RegionalClient):
             shard,
             idempotency_key,
             _increment_operation(key, delta, expected_version, ttl_ms, lock_guard),
+        )
+
+    def transform(
+        self,
+        cache: str,
+        shard: int,
+        idempotency_key: str,
+        key: str,
+        transform: RegionalCacheTransform,
+        *,
+        expected_version: int | None = None,
+        ttl_ms: int | None = None,
+        lock_guard: RegionalCacheLockGuard | None = None,
+    ) -> dict[str, Any]:
+        """Apply one atomic bitmap, probabilistic, geo, JSON, or vector transform."""
+        return self._mutate(
+            cache,
+            shard,
+            idempotency_key,
+            _transform_operation(key, transform, expected_version, ttl_ms, lock_guard),
         )
 
     def transaction(
@@ -408,6 +492,152 @@ class RegionalCacheClient(RegionalClient):
     def status(self, cache: str, shard: int) -> dict[str, Any]:
         return self._read(cache, shard, "/status")
 
+    def changes(
+        self, cache: str, shard: int, from_sequence: int, *, limit: int = 100
+    ) -> dict[str, Any]:
+        """Return retained durable Cache changes from a sequence cursor."""
+        _positive(from_sequence, "Cache change sequence")
+        _positive(limit, "Cache change limit")
+        return self._read(
+            cache,
+            shard,
+            "/changes",
+            {"from_sequence": str(from_sequence), "limit": str(limit)},
+        )
+
+    def backup(self, cache: str, shard: int) -> dict[str, Any]:
+        """Download one canonical bounded backup and its PITR window."""
+        return self._read(cache, shard, "/backup")
+
+    def restore(
+        self,
+        cache: str,
+        shard: int,
+        idempotency_key: str,
+        artifact_base64: str,
+        target_revision: int,
+    ) -> dict[str, Any]:
+        """Atomically restore a backup at a retained revision."""
+        _required(artifact_base64, "Cache backup artifact")
+        _positive(target_revision, "Cache restore revision")
+        return self._mutate(
+            cache,
+            shard,
+            idempotency_key,
+            {
+                "kind": "restore",
+                "shard": 0,
+                "backup_base64": artifact_base64,
+                "target_revision": str(target_revision),
+            },
+        )
+
+    def query(
+        self,
+        cache: str,
+        shard: int,
+        kind: str,
+        fields: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Run one typed bitmap, probabilistic, geo, JSON, or vector query."""
+        return self._post_read(cache, shard, "/query", _kinded_document(kind, fields, "query"))
+
+    def multiplex(
+        self,
+        cache: str,
+        shard: int,
+        mutations: list[RegionalCacheMultiplexMutation]
+        | tuple[RegionalCacheMultiplexMutation, ...],
+    ) -> dict[str, Any]:
+        """Pipeline independent, correlated mutations through one HTTP request."""
+        if not 1 <= len(mutations) <= _MAX_TRANSACTION_MUTATIONS:
+            raise ValueError("Cache multiplex mutations must be between 1 and 128")
+        if any(not isinstance(mutation, RegionalCacheMultiplexMutation) for mutation in mutations):
+            raise TypeError(
+                "Cache multiplex mutations must be RegionalCacheMultiplexMutation values"
+            )
+        correlations = [mutation.correlation_id for mutation in mutations]
+        identities = [mutation.idempotency_key for mutation in mutations]
+        if len(correlations) != len(set(correlations)):
+            raise ValueError("Cache multiplex correlation IDs must be unique")
+        if len(identities) != len(set(identities)):
+            raise ValueError("Cache multiplex idempotency keys must be unique")
+        return self.call(
+            "caches",
+            "Cache",
+            cache,
+            shard,
+            lambda route: (
+                "POST",
+                "/multiplex",
+                {
+                    "expected_term": route.term,
+                    "mutations": [mutation.to_wire() for mutation in mutations],
+                },
+                None,
+                {},
+            ),
+        )
+
+    def create_subscription(
+        self,
+        cache: str,
+        shard: int,
+        *,
+        channels: list[str] | tuple[str, ...] = (),
+        patterns: list[str] | tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        """Create one node-affine, at-most-once Pub/Sub subscription."""
+        if not channels and not patterns:
+            raise ValueError("Cache Pub/Sub requires a channel or pattern")
+        return self._write(
+            cache,
+            shard,
+            "POST",
+            "/pubsub/subscriptions",
+            {"channels": list(channels), "patterns": list(patterns)},
+        )
+
+    def publish(self, cache: str, shard: int, channel: str, payload: Any) -> dict[str, Any]:
+        """Publish one explicitly lossy, at-most-once Cache message."""
+        _required(channel, "Cache Pub/Sub channel")
+        return self._write(
+            cache,
+            shard,
+            "POST",
+            "/pubsub/messages",
+            {"channel": channel, "payload": payload},
+        )
+
+    def poll_subscription(
+        self,
+        cache: str,
+        shard: int,
+        subscription_id: str,
+        *,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Drain pending messages from a node-local subscription."""
+        _required(subscription_id, "Cache Pub/Sub subscription")
+        _positive(limit, "Cache Pub/Sub poll limit")
+        return self._read(
+            cache,
+            shard,
+            f"/pubsub/subscriptions/{quote(subscription_id, safe='')}/messages",
+            {"limit": str(limit)},
+        )
+
+    def delete_subscription(self, cache: str, shard: int, subscription_id: str) -> dict[str, Any]:
+        """Delete one node-local Cache Pub/Sub subscription."""
+        _required(subscription_id, "Cache Pub/Sub subscription")
+        return self._write(
+            cache,
+            shard,
+            "DELETE",
+            f"/pubsub/subscriptions/{quote(subscription_id, safe='')}",
+            None,
+        )
+
     def _read(
         self, cache: str, shard: int, path: str, query: dict[str, Any] | None = None
     ) -> dict[str, Any]:
@@ -435,6 +665,31 @@ class RegionalCacheClient(RegionalClient):
             lambda route: _mutation_request(route, idempotency_key, operation),
         )
 
+    def _post_read(self, cache: str, shard: int, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        return self.call(
+            "caches",
+            "Cache",
+            cache,
+            shard,
+            lambda _route: ("POST", path, body, None, _LINEARIZABLE),
+        )
+
+    def _write(
+        self,
+        cache: str,
+        shard: int,
+        method: str,
+        path: str,
+        body: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        return self.call(
+            "caches",
+            "Cache",
+            cache,
+            shard,
+            lambda _route: (method, path, body, None, {}),
+        )
+
 
 def _mutation_request(
     route: Route, idempotency_key: str, operation: dict[str, Any]
@@ -456,6 +711,7 @@ def _set_operation(
     key: str,
     value: RegionalCacheValue,
     ttl_ms: int | None,
+    storage_class: str,
     lock_guard: RegionalCacheLockGuard | None,
 ) -> dict[str, Any]:
     _required(key, "Cache key")
@@ -464,7 +720,30 @@ def _set_operation(
         "shard": 0,
         "key": key,
         "value": _value(value).to_wire(),
+        "storage_class": _storage_class(storage_class),
     }
+    _optional_u64(operation, "ttl_ms", ttl_ms, positive=True)
+    _optional_guard(operation, lock_guard)
+    return operation
+
+
+def _transform_operation(
+    key: str,
+    transform: RegionalCacheTransform,
+    expected_version: int | None,
+    ttl_ms: int | None,
+    lock_guard: RegionalCacheLockGuard | None,
+) -> dict[str, Any]:
+    _required(key, "Cache key")
+    if not isinstance(transform, RegionalCacheTransform):
+        raise TypeError("Cache transform must be RegionalCacheTransform")
+    operation: dict[str, Any] = {
+        "kind": "transform",
+        "shard": 0,
+        "key": key,
+        "transform": transform.to_wire(),
+    }
+    _optional_u64(operation, "expected_version", expected_version)
     _optional_u64(operation, "ttl_ms", ttl_ms, positive=True)
     _optional_guard(operation, lock_guard)
     return operation
@@ -549,6 +828,21 @@ def _guard(guard: RegionalCacheLockGuard) -> RegionalCacheLockGuard:
     return guard
 
 
+def _storage_class(value: str) -> str:
+    if value not in {"memory", "cold"}:
+        raise ValueError("Cache storage class must be memory or cold")
+    return value
+
+
+def _kinded_document(kind: str, fields: dict[str, Any], label: str) -> dict[str, Any]:
+    _required(kind, f"Cache {label} kind")
+    if not isinstance(fields, dict):
+        raise TypeError(f"Cache {label} fields must be a dict")
+    if any(not isinstance(key, str) or not key.strip() or key == "kind" for key in fields):
+        raise ValueError(f"Cache {label} fields must use non-empty keys other than kind")
+    return {"kind": kind, **fields}
+
+
 def _lock_identity(lock_key: str, owner: str, owner_epoch: int) -> None:
     _required(lock_key, "Cache lock key")
     _required(owner, "Cache lock owner")
@@ -623,6 +917,8 @@ __all__ = [
     "RegionalCacheClient",
     "RegionalCacheExpectation",
     "RegionalCacheLockGuard",
+    "RegionalCacheMultiplexMutation",
     "RegionalCacheMutation",
+    "RegionalCacheTransform",
     "RegionalCacheValue",
 ]

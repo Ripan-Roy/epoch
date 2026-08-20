@@ -596,7 +596,8 @@ of silently weakening it.
 
 The first replicated Cache tablet intentionally supports only shard `0` and
 bounded distinct-key transactions. Its catalog-bound immutable configuration
-selects entry capacity, default TTL, and no-eviction or all-key/volatile
+selects entry and memory/cold byte capacity, named durability, default TTL,
+and no-eviction or all-key/volatile
 LRU/LFU/random/TTL eviction. Item versions are drawn
 from a checked shard-global revision so delete/recreate and expiry/recreate do
 not repeat versions. Reads treat an expired value as absent without mutating
@@ -611,24 +612,38 @@ exclusive deadline. Already-appended same-term commands can still commit after
 a leadership change. New writes carry `expected_term`, which the consensus actor
 checks atomically with leader role immediately before proposal; this is a write
 admission fence, not a linearizable read barrier. The profile has an internal
-canonical voter-recovery snapshot and compacted EPRS baseline; downloadable
-Cache backups/PITR, multi-shard routing, and the full concurrency history remain
-open.
+canonical voter-recovery snapshot and compacted EPRS baseline plus a separate
+canonical, checksummed, resource-local backup with a bounded PITR window. A
+restore is an atomic consensus transition with fresh versions. Multi-shard
+routing, managed backup scheduling/encryption, and the full concurrency history
+remain open.
 
 Pure `Observe` retains read-barrier semantics without affecting eviction.
 Version-2 committed `Get` records access for LRU/LFU exactly once and returns
 the prior receipt on retry. Eviction is staged with the mutation, uses canonical
 tie breaking or deterministic SHA-256 ranking for random policies, and reports
 sorted victims. The SDK `AtomicBatch` aliases the existing one-request,
-one-proposal transaction command; native multiplexing and automatic coalescing
-remain open.
+one-proposal transaction command. Native `Multiplex` carries independently
+committed identities in one request and returns request-ordered correlations;
+automatic coalescing remains open. Typed transforms and exact queries cover
+collections, bitmap/cardinality, probabilistic filters, geo, JSON secondary
+indexes, and vector/text hybrid search. A replicated bounded change stream
+tracks mutations, expiry, eviction, and restore. Cache Pub/Sub is separately
+node-local, node-affine, bounded, and explicitly at-most-once.
+
+Memory and cold storage classes have independent deterministic admission caps.
+Each regional voter mirrors cold values to canonical fsynced per-key files
+after committed apply and reads/integrity-checks those files for cold
+observations and queries. Canonical state remains in the tablet image, so the
+alpha does not claim heap offload or production flash capacity relief. Status
+discloses observed local-file read microseconds as not an SLO.
 
 The regional Cache v1 adapter delegates directly to this tablet. SDK reads
 always request a leader ReadIndex; mutations carry discovered generation,
 tablet epoch, term, and a caller-owned idempotency key. The Go, Java, and Python
-clients validate typed values, transaction bounds, owner epochs, opaque lease
-tokens, and maintenance limits before discovery. They reuse their HTTP
-transports and expose committed access plus atomic-batch helpers, but do not add another cache
+clients validate typed values, transforms, transaction/multiplex bounds, owner
+epochs, opaque lease tokens, queries, backup/restore, and Pub/Sub limits before
+discovery. They reuse their HTTP transports and expose the complete lifecycle, but do not add another cache
 state machine or turn the fixed-voter alpha into a production durability claim.
 
 ### 8.4 Event Bus
@@ -1010,7 +1025,7 @@ provisional until their ADR evidence exists:
 - the exact byte layout and compatibility window of every durable format;
 - transaction participant and timeout limits;
 - object-tier request/caching economics and export formats;
-- the open-source/commercial boundary and license;
+- the hosted-service commercial boundary and trademark/package terms;
 - named protocol and client versions in the public compatibility matrix.
 
 None of these gates changes the locked boundary that the Rust regional data node
@@ -1051,3 +1066,4 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0031: Leader-Owned Epoch Queue and Stream Target Delivery](adr/0031-leader-owned-epoch-target-delivery.md)
 - [ADR-0032: Regional Cache Eviction and Committed Access Batches](adr/0032-regional-cache-eviction-and-access-batches.md)
 - [ADR-0033: Replicated Resource Governance and Authorized Cost Attribution](adr/0033-resource-governance-and-cost-attribution.md)
+- [ADR-0034: Cache State Services and Cold Read Tier](adr/0034-cache-state-services-and-cold-read-tier.md)

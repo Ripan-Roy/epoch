@@ -43,8 +43,12 @@ export type CacheEvictionPolicy =
 
 export interface RegionalCacheConfiguration {
   maxEntriesPerShard: number;
+  maxMemoryBytesPerShard: number | null;
+  maxColdBytesPerShard: number | null;
   defaultTTLMS: number | null;
   eviction: CacheEvictionPolicy;
+  durability: "replicated_memory" | "quorum_durable";
+  coldLatencyDisclosure: "disabled" | "observed_local_file_read_micros_not_an_slo";
 }
 
 export interface RegionalGovernance {
@@ -167,8 +171,12 @@ export interface ManagedRegionalResource {
   placement?: ManagedRegionalPlacement;
   cache_configuration?: {
     max_entries_per_shard: number;
+    max_memory_bytes_per_shard: number | null;
+    max_cold_bytes_per_shard: number | null;
     default_ttl_ms: number | null;
     eviction: CacheEvictionPolicy;
+    durability: "replicated_memory" | "quorum_durable";
+    cold_latency_disclosure: "disabled" | "observed_local_file_read_micros_not_an_slo";
   };
   governance?: {
     owner: string;
@@ -193,6 +201,8 @@ export interface ManagedRegionalInventory {
 
 export interface CacheConfig {
   max_entries: number;
+  max_memory_bytes: number | null;
+  max_cold_bytes: number | null;
   default_ttl_ms: number | null;
   durability: "volatile";
   eviction: CacheEvictionPolicy;

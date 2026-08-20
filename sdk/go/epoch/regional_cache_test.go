@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"math"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -145,5 +146,82 @@ func TestRegionalCacheClientRejectsInvalidValuesAndBoundsBeforeNetwork(t *testin
 	}
 	if !reflect.DeepEqual(leader.requests, []Request(nil)) {
 		t.Fatalf("invalid calls reached network: %#v", leader.requests)
+	}
+}
+
+func TestRegionalCacheClientRoutesAdvancedStateBackupQueryAndPubSub(t *testing.T) {
+	leader := &regionalFakeTransport{route: Document{
+		"resource_generation": "6", "tablet_epoch": "4", "term": "11", "accepts_writes": true,
+	}}
+	client, err := NewRegionalCacheClientWithTransports(
+		[]Transport{leader}, "secret-token",
+		RegionalScope{Organization: "acme", Project: "shop", Environment: "dev", Namespace: "core"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transform, err := NewRegionalCacheTransform("bitmap_set", map[string]any{"bit": 7, "value": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err = client.Transform(ctx, "sessions", 0, "transform-1", "flags", transform, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.Changes(ctx, "sessions", 0, 1, 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.Backup(ctx, "sessions", 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.Restore(ctx, "sessions", 0, "restore-1", "artifact", 7); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.Query(ctx, "sessions", 0, map[string]any{"kind": "bitmap_get", "key": "flags", "bit": 7}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.CreateSubscription(ctx, "sessions", 0, []string{"audit"}, []string{"orders.*"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.Publish(ctx, "sessions", 0, "audit", map[string]any{"id": 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.PollSubscription(ctx, "sessions", 0, "cache-7-1", 10); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.DeleteSubscription(ctx, "sessions", 0, "cache-7-1"); err != nil {
+		t.Fatal(err)
+	}
+	multiplexSet, err := NewRegionalCacheMultiplexMutation(
+		"profile", "multiplex-profile", NewRegionalCacheSetMutation("profile", NewRegionalCacheString("ready"), nil),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	multiplexIncrement, err := NewRegionalCacheMultiplexMutation(
+		"visits", "multiplex-visits", NewRegionalCacheIncrementMutation("visits", 1, nil, nil),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.Multiplex(ctx, "sessions", 0, []RegionalCacheMultiplexMutation{multiplexSet, multiplexIncrement}); err != nil {
+		t.Fatal(err)
+	}
+
+	var operations []Request
+	for index := 1; index < len(leader.requests); index += 2 {
+		operations = append(operations, leader.requests[index])
+	}
+	if len(operations) != 10 {
+		t.Fatalf("expected 10 advanced operations, got %d", len(operations))
+	}
+	paths := []string{"/mutations", "/changes", "/backup", "/mutations", "/query", "/pubsub/subscriptions", "/pubsub/messages", "/pubsub/subscriptions/cache-7-1/messages", "/pubsub/subscriptions/cache-7-1", "/multiplex"}
+	for index, suffix := range paths {
+		if !strings.HasSuffix(operations[index].Path, suffix) {
+			t.Fatalf("operation %d path = %q, want suffix %q", index, operations[index].Path, suffix)
+		}
+	}
+	if operations[4].Headers[regionalReadHeader] != "linearizable" || operations[8].Method != "DELETE" {
+		t.Fatalf("advanced read/delete contract was not preserved: %#v", operations)
 	}
 }

@@ -189,14 +189,22 @@ test("managed cache configuration remains visible after browser mapping", () => 
     },
     cache_configuration: {
       max_entries_per_shard: 32,
+      max_memory_bytes_per_shard: 1_048_576,
+      max_cold_bytes_per_shard: 4_194_304,
       default_ttl_ms: null,
       eviction: "all_keys_lru",
+      durability: "quorum_durable",
+      cold_latency_disclosure: "observed_local_file_read_micros_not_an_slo",
     },
   });
 
   assert.deepEqual(mapped.cacheConfiguration, {
     maxEntriesPerShard: 32,
+    maxMemoryBytesPerShard: 1_048_576,
+    maxColdBytesPerShard: 4_194_304,
     defaultTTLMS: null,
     eviction: "all_keys_lru",
+    durability: "quorum_durable",
+    coldLatencyDisclosure: "observed_local_file_read_micros_not_an_slo",
   });
 });

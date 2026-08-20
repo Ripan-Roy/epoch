@@ -3,8 +3,8 @@
 **Status:** Deterministic single-shard profile with authenticated regional v1
 Go/Java/Python clients and real failover evidence; not a production claim
 
-`epoch-cache`, `epoch-tablet`, and `epoch-node` implement the bounded first
-replicated Cache and State slice. A strict internal API proposes canonical
+`epoch-cache`, `epoch-tablet`, and `epoch-node` implement the bounded
+non-deferred regional Cache and State contract. A strict internal API proposes canonical
 single-shard mutations through the same persistent three-voter actor used by
 the Stream and Queue milestones. Every voter rebuilds the Cache from retained
 EPRS history before readiness. This remains engineering evidence, not a
@@ -15,7 +15,7 @@ node's volatile-only Cache guarantee ceiling.
 
 ```text
 strict internal HTTP DTO + idempotency key + expected current term
-  -> leader-role/term validation and canonical CacheTabletCommand v1/v2 proposal
+  -> leader-role/term validation and compatible CacheTabletCommand proposal
   -> fixed-voter majority persistence and consensus commit
   -> tablet scope, size, and operation validation
   -> committed-order effective time
@@ -28,8 +28,9 @@ strict internal HTTP DTO + idempotency key + expected current term
 
 - `epoch-cache::CacheShard` owns deterministic values, a shard-global revision,
   pure observation, committed access metadata, bounded transactions, checked
-  counters and TTLs, capacity/eviction, expiry maintenance, and a canonical
-  recovery checksum.
+  counters and TTLs, byte/entry admission, advanced transforms and indexes,
+  change history, backup/PITR, expiry maintenance, and a canonical recovery
+  checksum.
 - `epoch-tablet::CacheTablet` owns committed-command validation, scoped
   idempotency, advisory fenced locks, committed receipts, exact replay, and the
   complete replicated state digest.
@@ -41,11 +42,12 @@ strict internal HTTP DTO + idempotency key + expected current term
   path. The new shard is additive and does not silently route volatile writes
   through consensus.
 
-The current alpha supports one shard (`shard = 0`), every advertised
-entry-count eviction policy, and at most 128 distinct-key mutations in one
-transaction. Cross-shard transactions,
-downloadable backup/PITR restore, change capture, collection-specific
-mutations, and compatibility protocols remain outside this slice.
+The current alpha supports one shard (`shard = 0`), named regional durability,
+memory and cold byte classes, every advertised eviction policy, one to 128
+distinct-key atomic mutations, and one to 128 independently committed
+multiplex mutations. Cross-shard transactions, automatic client coalescing,
+RESP compatibility, dynamic placement, production SLOs, and CRDTs remain
+outside this slice.
 
 ## Regional v1 application API
 
@@ -55,9 +57,9 @@ The authenticated versioned shard route is:
 /v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}
 ```
 
-`GET` on the base performs route discovery. `mutations`,
-`mutations/{proposal_id}`, `observations?key=...`, and `status` delegate to the
-same typed tablet. Data requests require the discovered resource-generation and
+`GET` on the base performs route discovery. `mutations`, `multiplex`,
+`mutations/{proposal_id}`, `observations`, `changes`, `backup`, `query`,
+`pubsub/...`, and `status` delegate to the same typed tablet. Data requests require the discovered resource-generation and
 tablet-epoch fences; mutations also carry the discovered term and a caller-owned
 idempotency key. Observation, lookup, and status reads request a leader
 ReadIndex. The repository-local Go, Java, and Python `RegionalCacheClient`
@@ -79,8 +81,13 @@ internal listener, which defaults to `127.0.0.1:7701`:
 | --- | --- |
 | `GET /experimental/v1/tablets/cache/status` | Local role, term, consensus/profile positions, revision, retained entries, live locks, and digests. |
 | `POST /experimental/v1/tablets/cache/mutations` | Submit one strict typed mutation with `idempotency_key` and `expected_term`. |
+| `POST /experimental/v1/tablets/cache/multiplex` | Validate and submit one to 128 independently committed mutations with request-ordered correlated outcomes. |
 | `GET /experimental/v1/tablets/cache/mutations/{proposal_id}` | Resolve the local observation as unknown, pending, or committed. |
 | `GET /experimental/v1/tablets/cache/observations?key=...` | Pure local observation with explicitly stale-capable consistency. |
+| `GET /experimental/v1/tablets/cache/changes` | Read the replicated bounded change history from a sequence cursor. |
+| `GET /experimental/v1/tablets/cache/backup` | Export a bounded canonical backup and PITR window. |
+| `POST /experimental/v1/tablets/cache/query` | Execute one typed bitmap, probabilistic, geo, JSON, or vector read. |
+| `/experimental/v1/tablets/cache/pubsub/...` | Create/delete a node-affine subscription, publish, and drain at-most-once messages. |
 
 Mutation success is returned only after the fixed voter majority has persisted
 the entry and the local profile actor has applied it. A new receipt returns
@@ -245,8 +252,10 @@ stored state/receipt; changing any operation input returns
 `idempotency_conflict` without rebinding the proposal ID.
 
 The initial digest commits to the Cache domain, tablet scope, and normalized
-configuration. Snapshot v2 persists eviction/access metadata while the legacy
-no-eviction snapshot and command bytes remain readable and byte-stable. Every
+configuration. Cache shard snapshot v4 persists eviction/access metadata,
+storage classes and byte counts, advanced values, changes, and PITR history;
+v1 through v3 remain readable. Historical command and golden bytes remain
+compatible. Every
 transition chains the previous digest with committed
 metadata, the payload digest, effective time, canonical sorted values, canonical
 sorted locks, shard revision, and the complete applied or rejected outcome.
@@ -272,6 +281,52 @@ wrapper's current leader automatically proposes that command at the first due
 value or lock deadline and provides leader ReadIndex ordering; the direct
 profile route remains stale-capable and has no scheduler.
 
+## Advanced state and query contract
+
+The `Transform` operation performs collection mutation and the bitmap,
+cardinality, Bloom, Cuckoo, geo, JSON, JSON-index, and vector-index mutations
+documented in [Regional Cache SDK](REGIONAL_CACHE_SDK.md). It stages type,
+version, lock, TTL, entry, byte, and eviction checks before replacing state.
+Every transform can be used directly or inside a transaction and has a bounded,
+canonical representation.
+
+Advanced reads use a leader ReadIndex and never mutate access metadata. JSON
+secondary indexes use exact canonical pointer values. Vector search exhaustively
+scores the bounded index with cosine similarity, token overlap, and exact
+metadata filters. These are correctness implementations, not ANN, recall, or
+latency benchmarks.
+
+## Changes, backup, and restore
+
+The state machine retains the newest 1,024 changes, including explicit
+mutations, automatic expiry, eviction, and restore. A read publishes the
+retained floor and fails a stale cursor instead of silently skipping history.
+
+Backup exports a canonical checksummed artifact no larger than 320 KiB. The
+artifact binds configuration, captured revision/time, state digest, snapshot,
+and the retained restoration window. Restore is one committed command: it
+validates the artifact and requested revision, reconstructs state at that
+revision, excludes values expired at restore time, revalidates capacity, and
+assigns fresh versions to prevent ABA. This is not a scheduled/encrypted
+managed backup catalog or an all-cluster disaster-recovery claim.
+
+## Pub/Sub and cold values
+
+Pub/Sub is deliberately outside replicated state. Exact-channel and `*`/`?`
+pattern subscriptions are node-local, at-most-once, drain on poll, and drop new
+messages when a bounded pending queue is full. Subscription creation reports
+node affinity, no persistence, and the pending limit. Process loss or rerouting
+loses subscriptions and pending messages.
+
+Memory and cold classes have separate deterministic byte caps. After every
+committed transition, each regional voter fsyncs canonical cold-value files and
+removes stale files before exposing the transition. Cold observations/queries
+load and integrity-check the file against replicated canonical state. Recovery
+and checkpoint installation rebuild that directory. Status reports observed
+local-file read timing and explicitly labels it as not an SLO. Canonical cold
+values remain in the tablet image, so this alpha does not claim heap offload or
+production flash capacity relief.
+
 ## Verification scope
 
 The deterministic and runtime gates cover:
@@ -287,6 +342,14 @@ The deterministic and runtime gates cover:
   conflicts;
 - atomic multi-key/batch success plus rollback on version, type, counter,
   deadline, revision, and capacity failures;
+- byte admission and deterministic eviction independently for memory/cold
+  classes, compatible snapshot recovery, and fsynced cold-file reads/removal;
+- collection and advanced transforms, exact query behavior, bounds, index
+  consistency, state-digest convergence, and snapshot replay;
+- canonical backup corruption/config/window rejection, PITR rollback,
+  non-ABA restoration, and durable change cursors;
+- non-atomic correlated multiplex validation/replay and explicit node-local
+  at-most-once Pub/Sub matching, draining, and overflow;
 - lock contention, renewal token rotation, release/reacquisition, exclusive
   deadlines, active-owner epoch fencing, corrupt tokens, old terms, and guarded
   writes;
@@ -297,8 +360,9 @@ The deterministic and runtime gates cover:
   truthful local-read/status labels;
 - real three-runtime majority application, fail-stop behavior, convergence, and
   EPRS reopen; and
-- three-container leader replacement, committed access followed by capacity
-  eviction, old-token fencing, voter catch-up, and all-node `SIGKILL` recovery.
+- three-container leader replacement, ordinary/advanced/byte/cold operations,
+  backup/PITR, changes, Pub/Sub, multiplex, voter catch-up, and all-node
+  `SIGKILL` recovery.
 
 Run it with:
 
@@ -310,13 +374,11 @@ make test-cache-tablet
 cargo clippy --locked -p epoch-cache -p epoch-tablet -p epoch-node --all-targets --all-features -- -D warnings
 ```
 
-This advances CACHE-001, CACHE-002, CACHE-004, CACHE-006, and CACHE-007 with a
-tested fixed-voter and three-language application slice. It does not complete
-the parent requirements: a concurrent history checker,
-follower-served linearizable reads, multi-shard routing, exported backups/PITR,
-production identity/TLS, placement, and the exhaustive fault
-matrix remain required. A native checkpoint retains only the newest bounded
-consensus retry suffix, but no public idempotency horizon is advertised and the
-map can grow until the regional runtime's automatic applied-growth checkpoint.
-A public idempotency horizon and byte/time-aware checkpoint policy are still
-required before this can become a long-running production service.
+This closes the alpha implementation contract for CACHE-001 through CACHE-014
+with fixed-voter, three-language, recovery, and executable documentation
+evidence. `CACHE-015` remains explicitly deferred. The closure is scoped to
+the named requirements, not to production readiness: concurrent history and
+performance reports, follower-served reads, multi-shard routing, dynamic
+placement, production identity/TLS, managed backup scheduling/encryption,
+package publication, and the exhaustive fault matrix remain required by their
+separate PRD rows.

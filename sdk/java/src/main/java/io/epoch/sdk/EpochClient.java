@@ -49,9 +49,11 @@ public final class EpochClient {
     Objects.requireNonNull(config, "config");
     ObjectNode body = MAPPER.createObjectNode();
     body.put("max_entries", config.maxEntries());
+    putNullable(body, "max_memory_bytes", config.maxMemoryBytes());
+    putNullable(body, "max_cold_bytes", config.maxColdBytes());
     putNullable(body, "default_ttl_ms", config.defaultTtlMs());
     body.put("eviction", config.eviction());
-    body.put("durability", DurabilityProfile.VOLATILE.wireName());
+    body.put("durability", config.durability().wireName());
     return create("caches", name, body);
   }
 

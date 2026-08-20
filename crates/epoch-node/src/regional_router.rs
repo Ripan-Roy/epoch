@@ -746,11 +746,14 @@ fn is_read_operation(method: &Method, profile: WorkloadProfile, operation: &str)
         return true;
     }
     method == Method::POST
-        && profile == WorkloadProfile::EventBus
-        && matches!(
-            operation.trim_matches('/'),
-            "archive/replay" | "deliveries/query"
-        )
+        && match profile {
+            WorkloadProfile::CacheAndState => operation.trim_matches('/') == "query",
+            WorkloadProfile::EventBus => matches!(
+                operation.trim_matches('/'),
+                "archive/replay" | "deliveries/query"
+            ),
+            WorkloadProfile::StreamLog | WorkloadProfile::WorkQueue => false,
+        }
 }
 
 fn read_barrier_error(
@@ -1103,6 +1106,31 @@ mod tests {
         );
     }
 
+    fn assert_read_consistency_header_rules() {
+        assert_eq!(
+            requested_read_consistency(&HeaderMap::new(), true).unwrap(),
+            Some(RequestedReadConsistency::Linearizable)
+        );
+
+        let mut stale_headers = HeaderMap::new();
+        stale_headers.insert(
+            READ_CONSISTENCY_HEADER,
+            HeaderValue::from_static("local_stale"),
+        );
+        assert_eq!(
+            requested_read_consistency(&stale_headers, true).unwrap(),
+            Some(RequestedReadConsistency::LocalStale)
+        );
+        assert!(requested_read_consistency(&stale_headers, false).is_err());
+
+        let mut invalid_headers = HeaderMap::new();
+        invalid_headers.insert(
+            READ_CONSISTENCY_HEADER,
+            HeaderValue::from_static("eventual"),
+        );
+        assert!(requested_read_consistency(&invalid_headers, true).is_err());
+    }
+
     #[test]
     fn read_consistency_is_semantic_and_never_downgrades_implicitly() {
         assert!(is_read_operation(
@@ -1170,6 +1198,16 @@ mod tests {
         ));
         assert!(is_read_operation(
             &Method::POST,
+            WorkloadProfile::CacheAndState,
+            "query"
+        ));
+        assert!(!is_read_operation(
+            &Method::POST,
+            WorkloadProfile::CacheAndState,
+            "pubsub/messages"
+        ));
+        assert!(is_read_operation(
+            &Method::POST,
             WorkloadProfile::EventBus,
             "archive/replay"
         ));
@@ -1183,28 +1221,7 @@ mod tests {
             WorkloadProfile::EventBus,
             "mutations"
         ));
-        assert_eq!(
-            requested_read_consistency(&HeaderMap::new(), true).unwrap(),
-            Some(RequestedReadConsistency::Linearizable)
-        );
-
-        let mut stale_headers = HeaderMap::new();
-        stale_headers.insert(
-            READ_CONSISTENCY_HEADER,
-            HeaderValue::from_static("local_stale"),
-        );
-        assert_eq!(
-            requested_read_consistency(&stale_headers, true).unwrap(),
-            Some(RequestedReadConsistency::LocalStale)
-        );
-        assert!(requested_read_consistency(&stale_headers, false).is_err());
-
-        let mut invalid_headers = HeaderMap::new();
-        invalid_headers.insert(
-            READ_CONSISTENCY_HEADER,
-            HeaderValue::from_static("eventual"),
-        );
-        assert!(requested_read_consistency(&invalid_headers, true).is_err());
+        assert_read_consistency_header_rules();
     }
 
     #[tokio::test]
