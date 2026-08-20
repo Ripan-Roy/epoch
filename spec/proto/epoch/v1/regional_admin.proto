@@ -49,6 +49,10 @@ message ListResourcesRequest {
   ResourceKind kind = 5;
   int32 page_size = 6;
   string page_token = 7;
+  string owner = 8;
+  string cost_center = 9;
+  DataClassification classification = 10;
+  map<string, string> tags = 11;
 }
 
 message ListResourcesResponse {

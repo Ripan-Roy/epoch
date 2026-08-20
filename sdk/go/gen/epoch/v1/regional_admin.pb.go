@@ -246,16 +246,20 @@ func (x *GetResourceResponse) GetResource() *Resource {
 }
 
 type ListResourcesRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Organization  string                 `protobuf:"bytes,1,opt,name=organization,proto3" json:"organization,omitempty"`
-	Project       string                 `protobuf:"bytes,2,opt,name=project,proto3" json:"project,omitempty"`
-	Environment   string                 `protobuf:"bytes,3,opt,name=environment,proto3" json:"environment,omitempty"`
-	Namespace     string                 `protobuf:"bytes,4,opt,name=namespace,proto3" json:"namespace,omitempty"`
-	Kind          ResourceKind           `protobuf:"varint,5,opt,name=kind,proto3,enum=epoch.v1.ResourceKind" json:"kind,omitempty"`
-	PageSize      int32                  `protobuf:"varint,6,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
-	PageToken     string                 `protobuf:"bytes,7,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Organization   string                 `protobuf:"bytes,1,opt,name=organization,proto3" json:"organization,omitempty"`
+	Project        string                 `protobuf:"bytes,2,opt,name=project,proto3" json:"project,omitempty"`
+	Environment    string                 `protobuf:"bytes,3,opt,name=environment,proto3" json:"environment,omitempty"`
+	Namespace      string                 `protobuf:"bytes,4,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	Kind           ResourceKind           `protobuf:"varint,5,opt,name=kind,proto3,enum=epoch.v1.ResourceKind" json:"kind,omitempty"`
+	PageSize       int32                  `protobuf:"varint,6,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
+	PageToken      string                 `protobuf:"bytes,7,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
+	Owner          string                 `protobuf:"bytes,8,opt,name=owner,proto3" json:"owner,omitempty"`
+	CostCenter     string                 `protobuf:"bytes,9,opt,name=cost_center,json=costCenter,proto3" json:"cost_center,omitempty"`
+	Classification DataClassification     `protobuf:"varint,10,opt,name=classification,proto3,enum=epoch.v1.DataClassification" json:"classification,omitempty"`
+	Tags           map[string]string      `protobuf:"bytes,11,rep,name=tags,proto3" json:"tags,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ListResourcesRequest) Reset() {
@@ -335,6 +339,34 @@ func (x *ListResourcesRequest) GetPageToken() string {
 		return x.PageToken
 	}
 	return ""
+}
+
+func (x *ListResourcesRequest) GetOwner() string {
+	if x != nil {
+		return x.Owner
+	}
+	return ""
+}
+
+func (x *ListResourcesRequest) GetCostCenter() string {
+	if x != nil {
+		return x.CostCenter
+	}
+	return ""
+}
+
+func (x *ListResourcesRequest) GetClassification() DataClassification {
+	if x != nil {
+		return x.Classification
+	}
+	return DataClassification_DATA_CLASSIFICATION_UNSPECIFIED
+}
+
+func (x *ListResourcesRequest) GetTags() map[string]string {
+	if x != nil {
+		return x.Tags
+	}
+	return nil
 }
 
 type ListResourcesResponse struct {
@@ -536,7 +568,7 @@ const file_epoch_v1_regional_admin_proto_rawDesc = "" +
 	"\x12GetResourceRequest\x12*\n" +
 	"\x04name\x18\x01 \x01(\v2\x16.epoch.v1.ResourceNameR\x04name\"E\n" +
 	"\x13GetResourceResponse\x12.\n" +
-	"\bresource\x18\x01 \x01(\v2\x12.epoch.v1.ResourceR\bresource\"\xfc\x01\n" +
+	"\bresource\x18\x01 \x01(\v2\x12.epoch.v1.ResourceR\bresource\"\xf0\x03\n" +
 	"\x14ListResourcesRequest\x12\"\n" +
 	"\forganization\x18\x01 \x01(\tR\forganization\x12\x18\n" +
 	"\aproject\x18\x02 \x01(\tR\aproject\x12 \n" +
@@ -545,7 +577,16 @@ const file_epoch_v1_regional_admin_proto_rawDesc = "" +
 	"\x04kind\x18\x05 \x01(\x0e2\x16.epoch.v1.ResourceKindR\x04kind\x12\x1b\n" +
 	"\tpage_size\x18\x06 \x01(\x05R\bpageSize\x12\x1d\n" +
 	"\n" +
-	"page_token\x18\a \x01(\tR\tpageToken\"q\n" +
+	"page_token\x18\a \x01(\tR\tpageToken\x12\x14\n" +
+	"\x05owner\x18\b \x01(\tR\x05owner\x12\x1f\n" +
+	"\vcost_center\x18\t \x01(\tR\n" +
+	"costCenter\x12D\n" +
+	"\x0eclassification\x18\n" +
+	" \x01(\x0e2\x1c.epoch.v1.DataClassificationR\x0eclassification\x12<\n" +
+	"\x04tags\x18\v \x03(\v2(.epoch.v1.ListResourcesRequest.TagsEntryR\x04tags\x1a7\n" +
+	"\tTagsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"q\n" +
 	"\x15ListResourcesResponse\x120\n" +
 	"\tresources\x18\x01 \x03(\v2\x12.epoch.v1.ResourceR\tresources\x12&\n" +
 	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\xb6\x01\n" +
@@ -580,7 +621,7 @@ func file_epoch_v1_regional_admin_proto_rawDescGZIP() []byte {
 	return file_epoch_v1_regional_admin_proto_rawDescData
 }
 
-var file_epoch_v1_regional_admin_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_epoch_v1_regional_admin_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_epoch_v1_regional_admin_proto_goTypes = []any{
 	(*ApplyResourceRequest)(nil),   // 0: epoch.v1.ApplyResourceRequest
 	(*ApplyResourceResponse)(nil),  // 1: epoch.v1.ApplyResourceResponse
@@ -590,34 +631,38 @@ var file_epoch_v1_regional_admin_proto_goTypes = []any{
 	(*ListResourcesResponse)(nil),  // 5: epoch.v1.ListResourcesResponse
 	(*DeleteResourceRequest)(nil),  // 6: epoch.v1.DeleteResourceRequest
 	(*DeleteResourceResponse)(nil), // 7: epoch.v1.DeleteResourceResponse
-	(*ResourceName)(nil),           // 8: epoch.v1.ResourceName
-	(*ResourceSpec)(nil),           // 9: epoch.v1.ResourceSpec
-	(*Resource)(nil),               // 10: epoch.v1.Resource
-	(ResourceKind)(0),              // 11: epoch.v1.ResourceKind
+	nil,                            // 8: epoch.v1.ListResourcesRequest.TagsEntry
+	(*ResourceName)(nil),           // 9: epoch.v1.ResourceName
+	(*ResourceSpec)(nil),           // 10: epoch.v1.ResourceSpec
+	(*Resource)(nil),               // 11: epoch.v1.Resource
+	(ResourceKind)(0),              // 12: epoch.v1.ResourceKind
+	(DataClassification)(0),        // 13: epoch.v1.DataClassification
 }
 var file_epoch_v1_regional_admin_proto_depIdxs = []int32{
-	8,  // 0: epoch.v1.ApplyResourceRequest.name:type_name -> epoch.v1.ResourceName
-	9,  // 1: epoch.v1.ApplyResourceRequest.spec:type_name -> epoch.v1.ResourceSpec
-	10, // 2: epoch.v1.ApplyResourceResponse.resource:type_name -> epoch.v1.Resource
-	8,  // 3: epoch.v1.GetResourceRequest.name:type_name -> epoch.v1.ResourceName
-	10, // 4: epoch.v1.GetResourceResponse.resource:type_name -> epoch.v1.Resource
-	11, // 5: epoch.v1.ListResourcesRequest.kind:type_name -> epoch.v1.ResourceKind
-	10, // 6: epoch.v1.ListResourcesResponse.resources:type_name -> epoch.v1.Resource
-	8,  // 7: epoch.v1.DeleteResourceRequest.name:type_name -> epoch.v1.ResourceName
-	8,  // 8: epoch.v1.DeleteResourceResponse.name:type_name -> epoch.v1.ResourceName
-	0,  // 9: epoch.v1.RegionalAdminService.ApplyResource:input_type -> epoch.v1.ApplyResourceRequest
-	2,  // 10: epoch.v1.RegionalAdminService.GetResource:input_type -> epoch.v1.GetResourceRequest
-	4,  // 11: epoch.v1.RegionalAdminService.ListResources:input_type -> epoch.v1.ListResourcesRequest
-	6,  // 12: epoch.v1.RegionalAdminService.DeleteResource:input_type -> epoch.v1.DeleteResourceRequest
-	1,  // 13: epoch.v1.RegionalAdminService.ApplyResource:output_type -> epoch.v1.ApplyResourceResponse
-	3,  // 14: epoch.v1.RegionalAdminService.GetResource:output_type -> epoch.v1.GetResourceResponse
-	5,  // 15: epoch.v1.RegionalAdminService.ListResources:output_type -> epoch.v1.ListResourcesResponse
-	7,  // 16: epoch.v1.RegionalAdminService.DeleteResource:output_type -> epoch.v1.DeleteResourceResponse
-	13, // [13:17] is the sub-list for method output_type
-	9,  // [9:13] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	9,  // 0: epoch.v1.ApplyResourceRequest.name:type_name -> epoch.v1.ResourceName
+	10, // 1: epoch.v1.ApplyResourceRequest.spec:type_name -> epoch.v1.ResourceSpec
+	11, // 2: epoch.v1.ApplyResourceResponse.resource:type_name -> epoch.v1.Resource
+	9,  // 3: epoch.v1.GetResourceRequest.name:type_name -> epoch.v1.ResourceName
+	11, // 4: epoch.v1.GetResourceResponse.resource:type_name -> epoch.v1.Resource
+	12, // 5: epoch.v1.ListResourcesRequest.kind:type_name -> epoch.v1.ResourceKind
+	13, // 6: epoch.v1.ListResourcesRequest.classification:type_name -> epoch.v1.DataClassification
+	8,  // 7: epoch.v1.ListResourcesRequest.tags:type_name -> epoch.v1.ListResourcesRequest.TagsEntry
+	11, // 8: epoch.v1.ListResourcesResponse.resources:type_name -> epoch.v1.Resource
+	9,  // 9: epoch.v1.DeleteResourceRequest.name:type_name -> epoch.v1.ResourceName
+	9,  // 10: epoch.v1.DeleteResourceResponse.name:type_name -> epoch.v1.ResourceName
+	0,  // 11: epoch.v1.RegionalAdminService.ApplyResource:input_type -> epoch.v1.ApplyResourceRequest
+	2,  // 12: epoch.v1.RegionalAdminService.GetResource:input_type -> epoch.v1.GetResourceRequest
+	4,  // 13: epoch.v1.RegionalAdminService.ListResources:input_type -> epoch.v1.ListResourcesRequest
+	6,  // 14: epoch.v1.RegionalAdminService.DeleteResource:input_type -> epoch.v1.DeleteResourceRequest
+	1,  // 15: epoch.v1.RegionalAdminService.ApplyResource:output_type -> epoch.v1.ApplyResourceResponse
+	3,  // 16: epoch.v1.RegionalAdminService.GetResource:output_type -> epoch.v1.GetResourceResponse
+	5,  // 17: epoch.v1.RegionalAdminService.ListResources:output_type -> epoch.v1.ListResourcesResponse
+	7,  // 18: epoch.v1.RegionalAdminService.DeleteResource:output_type -> epoch.v1.DeleteResourceResponse
+	15, // [15:19] is the sub-list for method output_type
+	11, // [11:15] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_epoch_v1_regional_admin_proto_init() }
@@ -634,7 +679,7 @@ func file_epoch_v1_regional_admin_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_epoch_v1_regional_admin_proto_rawDesc), len(file_epoch_v1_regional_admin_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   8,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

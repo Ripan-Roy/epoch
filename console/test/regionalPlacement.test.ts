@@ -66,6 +66,12 @@ test("managed inventory maps browser-safe identifiers without contacting data no
     shard_count: 1,
     phase: "ready",
     message: "regional placement converged",
+    governance: {
+      owner: "team:payments",
+      cost_center: "cc-1042",
+      classification: "confidential",
+      tags: { service: "checkout", tier: "critical" },
+    },
     tablets: [
       {
         tablet_id: "9007199254740994",
@@ -124,6 +130,12 @@ test("managed inventory maps browser-safe identifiers without contacting data no
   assert.equal(mapped.tablets[0]?.leaderNodeId, "9007199254740998");
   assert.match(mapped.summary, /3 configured zones observed/);
   assert.equal(mapped.placement?.nodes[1]?.availableConsensusGroups, 14);
+  assert.deepEqual(mapped.governance, {
+    owner: "team:payments",
+    costCenter: "cc-1042",
+    classification: "confidential",
+    tags: { service: "checkout", tier: "critical" },
+  });
 });
 
 test("managed ready state fails closed when placement evidence is incomplete", () => {
@@ -141,6 +153,12 @@ test("managed ready state fails closed when placement evidence is incomplete", (
     shard_count: 1,
     phase: "ready",
     message: "regional placement converged",
+    governance: {
+      owner: "team:workers",
+      cost_center: "cc-1042",
+      classification: "internal",
+      tags: {},
+    },
     tablets: [],
   });
 
@@ -163,6 +181,12 @@ test("managed cache configuration remains visible after browser mapping", () => 
     shard_count: 1,
     phase: "pending",
     tablets: [],
+    governance: {
+      owner: "team:platform",
+      cost_center: "cc-2000",
+      classification: "internal",
+      tags: { service: "sessions" },
+    },
     cache_configuration: {
       max_entries_per_shard: 32,
       default_ttl_ms: null,

@@ -169,5 +169,13 @@ export function mapRegionalInventory(resource: ManagedRegionalResource): Regiona
           eviction: resource.cache_configuration.eviction,
         }
       : null,
+    governance: resource.governance
+      ? {
+          owner: resource.governance.owner,
+          costCenter: resource.governance.cost_center,
+          classification: resource.governance.classification,
+          tags: { ...resource.governance.tags },
+        }
+      : null,
   };
 }

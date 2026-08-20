@@ -172,6 +172,51 @@ func TestRegionalAdminSurfacesConflictAndRetainsFailedStatus(t *testing.T) {
 	}
 }
 
+func TestRegionalAdminRequiresGovernanceAndFiltersByExactMetadata(t *testing.T) {
+	registry := resources.NewRegistry()
+	key := regionalKey(resources.KindStream, "governed-orders")
+	authority := &fakeAuthority{
+		apply: func(request AuthorityApplyRequest) (AuthorityObservation, error) {
+			if request.Governance == nil ||
+				request.Governance.Owner != "team:payments" ||
+				request.Governance.Tags["service"] != "checkout" {
+				t.Fatalf("governance was not forwarded: %+v", request.Governance)
+			}
+			return servingObservation(1, 1, 3), nil
+		},
+	}
+	client := startRegionalAdminClient(t, registry, authority)
+	missing := applyProtoRequest(t, key, "grpc-missing-governance")
+	missing.Spec.Governance = nil
+	if _, err := client.ApplyResource(t.Context(), missing); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("ApplyResource(missing governance) error = %v", err)
+	}
+
+	request := applyProtoRequest(t, key, "grpc-create-governed-orders")
+	if _, err := client.ApplyResource(t.Context(), request); err != nil {
+		t.Fatalf("ApplyResource() error = %v", err)
+	}
+	listed, err := client.ListResources(t.Context(), &epochv1.ListResourcesRequest{
+		Organization:   key.Organization,
+		Environment:    key.Environment,
+		Owner:          "TEAM:PAYMENTS",
+		CostCenter:     "CC-1042",
+		Classification: epochv1.DataClassification_DATA_CLASSIFICATION_CONFIDENTIAL,
+		Tags:           map[string]string{"service": "checkout", "tier": "critical"},
+		PageSize:       10,
+	})
+	if err != nil || len(listed.GetResources()) != 1 {
+		t.Fatalf("ListResources(governance) = %+v, %v", listed, err)
+	}
+	governance := listed.GetResources()[0].GetSpec().GetGovernance()
+	if governance.GetOwner() != "team:payments" ||
+		governance.GetCostCenter() != "cc-1042" ||
+		governance.GetClassification() != epochv1.DataClassification_DATA_CLASSIFICATION_CONFIDENTIAL ||
+		governance.GetTags()["tier"] != "critical" {
+		t.Fatalf("listed governance = %+v", governance)
+	}
+}
+
 func startRegionalAdminClient(
 	t *testing.T,
 	registry *resources.Registry,
@@ -237,6 +282,15 @@ func applyProtoRequest(
 				AllowedRegions:    []string{"ap-south"},
 				MinimumZones:      3,
 				RequiredNodeClass: "general-purpose",
+			},
+			Governance: &epochv1.ResourceGovernance{
+				Owner:          "team:payments",
+				CostCenter:     "cc-1042",
+				Classification: epochv1.DataClassification_DATA_CLASSIFICATION_CONFIDENTIAL,
+				Tags: map[string]string{
+					"service": "checkout",
+					"tier":    "critical",
+				},
 			},
 		},
 		ExpectedGeneration: uint64Pointer(0),

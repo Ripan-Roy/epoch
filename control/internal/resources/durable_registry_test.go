@@ -26,7 +26,13 @@ func TestDurableRegistryRecoversDesiredStatusTokensAndTombstones(t *testing.T) {
 		Resource: DesiredResource{
 			ResourceKey: key,
 			Labels:      map[string]string{"owner": "checkout"},
-			Spec:        json.RawMessage(`{"replica_count":3,"shard_count":1}`),
+			Governance: &ResourceGovernance{
+				Owner:          "team:checkout",
+				CostCenter:     "cc-1042",
+				Classification: ClassificationConfidential,
+				Tags:           map[string]string{"service": "checkout"},
+			},
+			Spec: json.RawMessage(`{"replica_count":3,"shard_count":1}`),
 		},
 	}
 
@@ -70,6 +76,9 @@ func TestDurableRegistryRecoversDesiredStatusTokensAndTombstones(t *testing.T) {
 	}
 	if recovered.Generation != 1 ||
 		recovered.Labels["owner"] != "checkout" ||
+		recovered.Governance == nil ||
+		recovered.Governance.Owner != "team:checkout" ||
+		recovered.Governance.Tags["service"] != "checkout" ||
 		recovered.Status.Phase != PhaseReady ||
 		recovered.Status.ObservedGeneration != 1 ||
 		len(recovered.Status.Tablets) != 1 ||
@@ -141,6 +150,24 @@ func TestDurableRegistryRecoversDesiredStatusTokensAndTombstones(t *testing.T) {
 	}
 	if third.Mode() != "bbolt_v1" {
 		t.Fatalf("Mode() = %q, want bbolt_v1", third.Mode())
+	}
+}
+
+func TestStoredLegacyRegionalResourceWithoutGovernanceRemainsReadable(t *testing.T) {
+	key := ResourceKey{
+		Organization: "acme", Project: "shop", Environment: "dev",
+		Namespace: "core", Kind: KindStream, Name: "legacy-orders",
+	}
+	legacy := Resource{
+		ResourceKey: key,
+		Spec:        json.RawMessage(`{"replica_count":3,"shard_count":1}`),
+		Generation:  1,
+		Status: ResourceStatus{
+			Phase: PhasePending,
+		},
+	}
+	if err := validateStoredResource(key, legacy); err != nil {
+		t.Fatalf("validateStoredResource(legacy) error = %v", err)
 	}
 }
 

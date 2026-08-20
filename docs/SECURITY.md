@@ -488,6 +488,12 @@ baseline at the managed and regional public boundaries:
   credentials. This is same-runtime routing, not a substitute for authenticated
   peer transport or per-target authorization: the current fixed voter set and
   bootstrap trust boundary must remain private.
+- Governance metadata is bounded, non-secret desired state. New managed
+  resources require canonical owner, cost center, classification, and tags;
+  `epoch.io/` tag keys are reserved. The Go BFF filters tenant visibility before
+  computing any cost attribution, preventing cross-tenant aggregation leakage.
+  The bootstrap policy does not yet evaluate classification or tags as ABAC
+  conditions, so they must not be described as an enforcement boundary.
 
 Health and CORS preflight remain public. The stable standalone local-emulator
 HTTP API also remains unauthenticated and must stay on a trusted interface.

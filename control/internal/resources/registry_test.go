@@ -157,6 +157,139 @@ func TestDeleteListAndRecreateKeepMonotonicGeneration(t *testing.T) {
 	}
 }
 
+func TestGovernanceIsCanonicalGenerationFencedAndExactlyFilterable(t *testing.T) {
+	registry := NewRegistry()
+	key := ResourceKey{
+		Organization: "acme", Project: "shop", Environment: "production",
+		Namespace: "checkout", Kind: KindStream, Name: "orders",
+	}
+	created, err := registry.Apply(ApplyRequest{
+		RequestToken: "create-governed-orders",
+		Resource: DesiredResource{
+			ResourceKey: key,
+			Spec:        json.RawMessage(`{"shard_count":1}`),
+			Governance: &ResourceGovernance{
+				Owner:          " TEAM:Payments ",
+				CostCenter:     " CC-1042 ",
+				Classification: ClassificationConfidential,
+				Tags: map[string]string{
+					" Service ": " checkout ",
+					"tier":      "critical",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	want := &ResourceGovernance{
+		Owner:          "team:payments",
+		CostCenter:     "cc-1042",
+		Classification: ClassificationConfidential,
+		Tags: map[string]string{
+			"service": "checkout",
+			"tier":    "critical",
+		},
+	}
+	if !governanceEqual(created.Resource.Governance, want) {
+		t.Fatalf("governance = %+v, want %+v", created.Resource.Governance, want)
+	}
+
+	matched, err := registry.List(ListFilter{
+		Environment:    "production",
+		Owner:          "TEAM:PAYMENTS",
+		CostCenter:     "CC-1042",
+		Classification: ClassificationConfidential,
+		Tags:           map[string]string{"service": "checkout", "tier": "critical"},
+	})
+	if err != nil || len(matched) != 1 || matched[0].Name != "orders" {
+		t.Fatalf("List(governance) = %+v, %v", matched, err)
+	}
+	unmatched, err := registry.List(ListFilter{Tags: map[string]string{"tier": "noncritical"}})
+	if err != nil || len(unmatched) != 0 {
+		t.Fatalf("List(unmatched tags) = %+v, %v", unmatched, err)
+	}
+
+	updatedGovernance := cloneGovernance(want)
+	updatedGovernance.Owner = "team:platform"
+	updated, err := registry.Apply(ApplyRequest{
+		RequestToken:       "transfer-governed-orders",
+		ExpectedGeneration: uint64Pointer(1),
+		Resource: DesiredResource{
+			ResourceKey: key,
+			Spec:        json.RawMessage(`{"shard_count":1}`),
+			Governance:  updatedGovernance,
+		},
+	})
+	if err != nil || updated.Resource.Generation != 2 ||
+		updated.Resource.Governance.Owner != "team:platform" {
+		t.Fatalf("Apply(governance update) = %+v, %v", updated, err)
+	}
+}
+
+func TestGovernanceRejectsReservedDuplicateAndUnboundedTags(t *testing.T) {
+	tests := []ResourceGovernance{
+		{Owner: "team:payments", CostCenter: "cc-1", Classification: ClassificationUnspecified},
+		{
+			Owner: "team:payments", CostCenter: "cc-1", Classification: ClassificationInternal,
+			Tags: map[string]string{"epoch.io/system": "forged"},
+		},
+		{
+			Owner: "team:payments", CostCenter: "cc-1", Classification: ClassificationInternal,
+			Tags: map[string]string{"Service": "one", " service ": "two"},
+		},
+		{
+			Owner: "team:payments", CostCenter: "cc-1", Classification: ClassificationInternal,
+			Tags: func() map[string]string {
+				tags := make(map[string]string, 33)
+				for index := range 33 {
+					tags[fmt.Sprintf("tag-%d", index)] = "value"
+				}
+				return tags
+			}(),
+		},
+	}
+	for index := range tests {
+		_, err := NewRegistry().Apply(ApplyRequest{
+			RequestToken: fmt.Sprintf("invalid-governance-%d", index),
+			Resource: DesiredResource{
+				ResourceKey: ResourceKey{Namespace: "prod", Kind: KindQueue, Name: "jobs"},
+				Spec:        json.RawMessage(`{}`),
+				Governance:  &tests[index],
+			},
+		})
+		assertCode(t, err, CodeInvalidArgument)
+	}
+}
+
+func TestManagedRegionalResourcesRequireGovernanceWhileLegacyLocalResourcesRemainValid(t *testing.T) {
+	registry := NewRegistry()
+	regional := ResourceKey{
+		Organization: "acme", Project: "shop", Environment: "production",
+		Namespace: "core", Kind: KindStream, Name: "orders",
+	}
+	_, err := registry.Apply(ApplyRequest{
+		RequestToken: "missing-managed-governance",
+		Resource: DesiredResource{
+			ResourceKey: regional,
+			Spec:        json.RawMessage(`{"shard_count":1,"replica_count":3}`),
+		},
+	})
+	assertCode(t, err, CodeInvalidArgument)
+
+	local := ResourceKey{Namespace: "core", Kind: KindStream, Name: "legacy-orders"}
+	created, err := registry.Apply(ApplyRequest{
+		RequestToken: "legacy-local-without-governance",
+		Resource: DesiredResource{
+			ResourceKey: local,
+			Spec:        json.RawMessage(`{"shard_count":1,"replica_count":1}`),
+		},
+	})
+	if err != nil || created.Resource.Governance != nil {
+		t.Fatalf("Apply(legacy local) = %+v, %v", created, err)
+	}
+}
+
 func TestApplyDefensivelyCopiesInputsAndOutputs(t *testing.T) {
 	registry := NewRegistry()
 	labels := map[string]string{"owner": "payments"}
@@ -369,7 +502,20 @@ func TestFullyQualifiedResourceKeysAreDistinctAndPartialScopesFailClosed(t *test
 }
 
 func desired(key ResourceKey, spec string) DesiredResource {
-	return DesiredResource{ResourceKey: key, Spec: json.RawMessage(spec)}
+	desired := DesiredResource{ResourceKey: key, Spec: json.RawMessage(spec)}
+	if key.Organization != "" {
+		desired.Governance = testGovernance()
+	}
+	return desired
+}
+
+func testGovernance() *ResourceGovernance {
+	return &ResourceGovernance{
+		Owner:          "team:platform",
+		CostCenter:     "cc-1042",
+		Classification: ClassificationInternal,
+		Tags:           map[string]string{"service": "epoch"},
+	}
 }
 
 func uint64Pointer(value uint64) *uint64 {

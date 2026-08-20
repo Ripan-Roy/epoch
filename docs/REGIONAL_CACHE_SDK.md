@@ -26,6 +26,7 @@ curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
     "resource":{
       "organization":"acme","project":"shop","environment":"dev","namespace":"core",
       "kind":"cache","name":"sessions",
+      "governance":{"owner":"team:platform","cost_center":"cc-1042","classification":"confidential","tags":{"service":"sessions","profile":"cache"}},
       "spec":{"shard_count":1,"replica_count":3,"configuration":{
         "shard_count":1,"max_entries":32,"default_ttl_ms":null,
         "eviction":"all_keys_lru"

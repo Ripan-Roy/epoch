@@ -124,6 +124,7 @@ func TestReconcilerForwardsExactProfileConfiguration(t *testing.T) {
 		Resource: resources.DesiredResource{
 			ResourceKey: key,
 			Spec:        spec,
+			Governance:  testGovernance(),
 		},
 	})
 	if err != nil {
@@ -460,6 +461,7 @@ func applyDesiredWithExpected(
 		Resource: resources.DesiredResource{
 			ResourceKey: key,
 			Spec:        spec,
+			Governance:  testGovernance(),
 		},
 	}
 	if expected > 0 {
@@ -470,6 +472,15 @@ func applyDesiredWithExpected(
 		t.Fatalf("Apply() error = %v", err)
 	}
 	return applied.Resource
+}
+
+func testGovernance() *resources.ResourceGovernance {
+	return &resources.ResourceGovernance{
+		Owner:          "team:platform",
+		CostCenter:     "cc-1042",
+		Classification: resources.ClassificationInternal,
+		Tags:           map[string]string{"service": "epoch"},
+	}
 }
 
 func regionalKey(kind resources.Kind, name string) resources.ResourceKey {

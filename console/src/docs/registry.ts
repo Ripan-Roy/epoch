@@ -8,6 +8,7 @@ import {
   OverviewBody,
   QuickstartBody,
   ReferenceBody,
+  ResourceGovernanceBody,
   RegionalBusBody,
   RegionalCacheBody,
   RegionalQueueBody,
@@ -23,6 +24,7 @@ export type DocsPageId =
   | "guarantees"
   | "cluster-milestone"
   | "consensus-recovery"
+  | "resource-governance"
   | "regional-stream"
   | "regional-queue"
   | "regional-cache"
@@ -142,6 +144,21 @@ export const docsPages: ReadonlyArray<DocsPageMeta> = [
       { id: "inspect", label: "Inspect a local checkpoint" },
     ],
     Body: ConsensusRecoveryBody,
+  },
+  {
+    id: "resource-governance",
+    group: "Core concepts",
+    label: "Resource governance",
+    title: "Resource governance",
+    summary:
+      "Require owner, cost center, classification, and tags; filter authorized inventory and explain allocation drivers.",
+    headings: [
+      { id: "contract", label: "Governance contract" },
+      { id: "filter", label: "Inventory filters" },
+      { id: "cost", label: "Cost attribution" },
+      { id: "recovery", label: "Recovery evidence" },
+    ],
+    Body: ResourceGovernanceBody,
   },
   {
     id: "regional-stream",

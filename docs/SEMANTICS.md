@@ -454,6 +454,16 @@ not authorize a local node to invent placement, policy, or a lower guarantee.
 The current Phase 0 scaffold contains useful semantic prototypes, not the
 distributed contract described above:
 
+Managed regional resource creation now treats owner, cost center,
+classification, and bounded custom tags as canonical desired state. Exact
+request replay is unchanged; a different governance value under the same token
+conflicts, and an accepted change requires the current expected generation.
+Environment remains the immutable resource-name scope. Legacy records without
+governance remain readable, but new managed resources fail closed without the
+complete object. Inventory governance filters are conjunctive and cost-driver
+aggregation occurs only after authorization. See
+[Resource Governance](RESOURCE_GOVERNANCE.md).
+
 - shared envelope, durability, delivery, ordering, deployment, receipt, and
   error types;
 - an injectable `Clock` trait with separate wall and monotonic observations, a

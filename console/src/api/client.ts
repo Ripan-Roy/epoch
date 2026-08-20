@@ -1,9 +1,12 @@
 import { mapRegionalInventory } from "../regionalPlacement";
+import { governanceFilterSearchParams } from "../governance";
 import { loadBrowserManagedToken } from "./managedAuth";
 import type {
   CreateResourceInput,
   EngineHealth,
   ManagedRegionalInventory,
+  RegionalGovernanceFilter,
+  RegionalInventory,
   RegionalResource,
   ResourceCreated,
   ResourceSummary,
@@ -110,13 +113,38 @@ export function createResource(input: CreateResourceInput): Promise<ResourceCrea
 }
 
 export async function listRegionalResources(): Promise<RegionalResource[]> {
-  const inventory = await requestControl<ManagedRegionalInventory>("/v1/regional/resources");
+  return (await listRegionalInventory()).resources;
+}
+
+export async function listRegionalInventory(
+  filter: RegionalGovernanceFilter = {},
+): Promise<RegionalInventory> {
+  const query = governanceFilterSearchParams(filter);
+  const suffix = query.size === 0 ? "" : `?${query.toString()}`;
+  const inventory = await requestControl<ManagedRegionalInventory>(`/v1/regional/resources${suffix}`);
   if (inventory.count !== inventory.resources.length) {
     throw new ManagedApiError("Managed regional inventory count does not match its resource list", 0);
   }
-  return inventory.resources
+  const resources = inventory.resources
     .map(mapRegionalInventory)
     .sort((left, right) => left.canonicalName.localeCompare(right.canonicalName));
+  const costAttribution = inventory.cost_attribution.map((entry) => {
+    if (
+      !Number.isSafeInteger(entry.resource_count) ||
+      entry.resource_count < 0 ||
+      !Number.isSafeInteger(entry.shard_count) ||
+      entry.shard_count < 0
+    ) {
+      throw new ManagedApiError("Managed cost attribution contains an unsafe count", 0);
+    }
+    return {
+      costCenter: entry.cost_center,
+      classification: entry.classification,
+      resourceCount: entry.resource_count,
+      shardCount: entry.shard_count,
+    };
+  });
+  return { resources, costAttribution };
 }
 
 async function requestControl<T>(path: string): Promise<T> {

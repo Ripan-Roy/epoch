@@ -60,8 +60,9 @@ type ResourceKey struct {
 // canonical JSON until generated Protobuf bindings replace this HTTP boundary.
 type DesiredResource struct {
 	ResourceKey
-	Labels map[string]string `json:"labels,omitempty"`
-	Spec   json.RawMessage   `json:"spec"`
+	Labels     map[string]string   `json:"labels,omitempty"`
+	Governance *ResourceGovernance `json:"governance,omitempty"`
+	Spec       json.RawMessage     `json:"spec"`
 }
 
 // ResourcePhase describes reconciliation state. New desired generations remain
@@ -124,10 +125,11 @@ type ResourceStatus struct {
 // Resource is the registry's immutable response value.
 type Resource struct {
 	ResourceKey
-	Labels     map[string]string `json:"labels,omitempty"`
-	Spec       json.RawMessage   `json:"spec"`
-	Generation uint64            `json:"generation"`
-	Status     ResourceStatus    `json:"status"`
+	Labels     map[string]string   `json:"labels,omitempty"`
+	Governance *ResourceGovernance `json:"governance,omitempty"`
+	Spec       json.RawMessage     `json:"spec"`
+	Generation uint64              `json:"generation"`
+	Status     ResourceStatus      `json:"status"`
 }
 
 // ApplyRequest performs a declarative create or update. A nil expected
@@ -168,11 +170,15 @@ type DeleteResult struct {
 
 // ListFilter limits a stable, key-sorted list operation.
 type ListFilter struct {
-	Organization string
-	Project      string
-	Environment  string
-	Namespace    string
-	Kind         Kind
+	Organization   string
+	Project        string
+	Environment    string
+	Namespace      string
+	Kind           Kind
+	Owner          string
+	CostCenter     string
+	Classification DataClassification
+	Tags           map[string]string
 }
 
 // ErrorCode is stable across the Go registry and its HTTP translation.
@@ -298,6 +304,9 @@ func (registry *Registry) Apply(request ApplyRequest) (ApplyResult, error) {
 	}
 
 	key := normalized.Resource.ResourceKey
+	if key.Organization != "" && normalized.Resource.Governance == nil {
+		return ApplyResult{}, invalid("governance is required for a managed regional resource")
+	}
 	current, exists := registry.resources[key]
 	actualGeneration := uint64(0)
 	if exists {
@@ -389,6 +398,11 @@ func (registry *Registry) List(filter ListFilter) ([]Resource, error) {
 	if filter.Kind != "" && !filter.Kind.Valid() {
 		return nil, invalid(fmt.Sprintf("unknown resource kind %q", filter.Kind))
 	}
+	var err error
+	filter, err = normalizeGovernanceFilter(filter)
+	if err != nil {
+		return nil, err
+	}
 
 	registry.mu.RLock()
 	resources := make([]Resource, 0, len(registry.resources))
@@ -406,6 +420,9 @@ func (registry *Registry) List(filter ListFilter) ([]Resource, error) {
 			continue
 		}
 		if filter.Kind != "" && resource.Kind != filter.Kind {
+			continue
+		}
+		if !governanceMatches(resource.Governance, filter) {
 			continue
 		}
 		resources = append(resources, cloneResource(resource))
@@ -628,6 +645,10 @@ func normalizeApply(request ApplyRequest) (ApplyRequest, error) {
 	}
 	request.Resource.ResourceKey = key
 	request.Resource.Labels = cloneLabels(request.Resource.Labels)
+	request.Resource.Governance, err = NormalizeGovernance(request.Resource.Governance)
+	if err != nil {
+		return ApplyRequest{}, err
+	}
 	request.Resource.Spec, err = canonicalJSON(request.Resource.Spec)
 	if err != nil {
 		return ApplyRequest{}, invalid("spec must be one valid JSON object")
@@ -756,6 +777,7 @@ func materialize(
 	return Resource{
 		ResourceKey: desired.ResourceKey,
 		Labels:      cloneLabels(desired.Labels),
+		Governance:  cloneGovernance(desired.Governance),
 		Spec:        cloneJSON(desired.Spec),
 		Generation:  generation,
 		Status:      status,
@@ -763,7 +785,9 @@ func materialize(
 }
 
 func desiredEqual(current Resource, desired DesiredResource) bool {
-	if !bytes.Equal(current.Spec, desired.Spec) || len(current.Labels) != len(desired.Labels) {
+	if !bytes.Equal(current.Spec, desired.Spec) ||
+		len(current.Labels) != len(desired.Labels) ||
+		!governanceEqual(current.Governance, desired.Governance) {
 		return false
 	}
 	for key, value := range current.Labels {
@@ -793,6 +817,7 @@ func cloneTokenRecord(record tokenRecord) tokenRecord {
 
 func cloneResource(resource Resource) Resource {
 	resource.Labels = cloneLabels(resource.Labels)
+	resource.Governance = cloneGovernance(resource.Governance)
 	resource.Spec = cloneJSON(resource.Spec)
 	resource.Status = cloneStatus(resource.Status)
 	return resource

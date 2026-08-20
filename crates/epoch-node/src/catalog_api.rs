@@ -11,8 +11,9 @@ use axum::{
 };
 use epoch_cache::{CacheConfig, EvictionPolicy};
 use epoch_catalog::{
-    ApplyResource, CatalogCommand, CatalogError, CatalogMutation, DeleteResource, ResourceName,
-    ResourceRecord, ResourceSpec, TabletDescriptor, catalog_proposal_id_for,
+    ApplyResource, CatalogCommand, CatalogError, CatalogMutation, DeleteResource,
+    ResourceGovernance, ResourceName, ResourceRecord, ResourceSpec, TabletDescriptor,
+    catalog_proposal_id_for,
 };
 use epoch_consensus::{CommittedProposal, ConsensusError, ProposalLookup};
 use epoch_core::{DurabilityProfile, ResourceKind, WorkloadProfile};
@@ -131,6 +132,8 @@ struct ApplyResourceRequest {
     replica_count: u16,
     #[serde(default)]
     configuration: Option<serde_json::Value>,
+    #[serde(default)]
+    governance: Option<ResourceGovernance>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -200,6 +203,8 @@ pub struct CatalogResourceResponse {
     pub replica_count: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub configuration: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub governance: Option<ResourceGovernance>,
     pub tablets: Vec<CatalogTabletResponse>,
 }
 
@@ -212,6 +217,7 @@ impl From<&ResourceRecord> for CatalogResourceResponse {
             shard_count: resource.spec.shard_count,
             replica_count: resource.spec.replica_count,
             configuration: resource.spec.configuration.clone(),
+            governance: resource.spec.governance.clone(),
             tablets: resource.tablets.iter().map(Into::into).collect(),
         }
     }
@@ -367,6 +373,7 @@ async fn apply_resource(
             shard_count: request.shard_count,
             replica_count: request.replica_count,
             configuration,
+            governance: request.governance,
         },
     });
     let (receipt, request_replayed) = commit_command(&state, command).await?;

@@ -17,10 +17,18 @@ const MAX_SHARDS_PER_RESOURCE: u32 = 4_096;
 const MAX_REPLICAS_PER_TABLET: u16 = 9;
 const MAX_COMMAND_BYTES: usize = 512 * 1024;
 const MAX_PROFILE_CONFIGURATION_BYTES: usize = 64 * 1024;
+const MAX_GOVERNANCE_OWNER_BYTES: usize = 128;
+const MAX_GOVERNANCE_COST_CENTER_BYTES: usize = 64;
+const MAX_GOVERNANCE_TAGS: usize = 32;
+const MAX_GOVERNANCE_TAG_KEY_BYTES: usize = 63;
+const MAX_GOVERNANCE_TAG_VALUE_BYTES: usize = 256;
+const RESERVED_GOVERNANCE_TAG_PREFIX: &str = "epoch.io/";
 pub const CATALOG_COMMAND_FORMAT_VERSION: u16 = 1;
 pub const CATALOG_CONFIG_COMMAND_FORMAT_VERSION: u16 = 2;
+pub const CATALOG_GOVERNANCE_COMMAND_FORMAT_VERSION: u16 = 3;
 pub const CATALOG_SNAPSHOT_FORMAT_VERSION: u16 = 1;
 pub const CATALOG_CONFIG_SNAPSHOT_FORMAT_VERSION: u16 = 2;
+pub const CATALOG_GOVERNANCE_SNAPSHOT_FORMAT_VERSION: u16 = 3;
 pub const MAX_CATALOG_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 
 pub type CatalogResult<T> = Result<T, CatalogError>;
@@ -115,6 +123,50 @@ pub struct ResourceName {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DataClassification {
+    Public,
+    Internal,
+    Confidential,
+    Restricted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceGovernance {
+    pub owner: String,
+    pub cost_center: String,
+    pub classification: DataClassification,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tags: BTreeMap<String, String>,
+}
+
+impl ResourceGovernance {
+    fn validate(&self) -> CatalogResult<()> {
+        validate_governance_identifier(
+            "governance owner",
+            &self.owner,
+            MAX_GOVERNANCE_OWNER_BYTES,
+        )?;
+        validate_governance_identifier(
+            "governance cost center",
+            &self.cost_center,
+            MAX_GOVERNANCE_COST_CENTER_BYTES,
+        )?;
+        if self.tags.len() > MAX_GOVERNANCE_TAGS {
+            return Err(CatalogError::InvalidSpec(format!(
+                "governance supports at most {MAX_GOVERNANCE_TAGS} tags"
+            )));
+        }
+        for (key, value) in &self.tags {
+            validate_governance_tag_key(key)?;
+            validate_governance_tag_value(value)?;
+        }
+        Ok(())
+    }
+}
+
 impl ResourceName {
     pub fn new(
         organization: impl Into<String>,
@@ -160,6 +212,8 @@ pub struct ResourceSpec {
     pub replica_count: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configuration: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governance: Option<ResourceGovernance>,
 }
 
 impl ResourceSpec {
@@ -207,6 +261,9 @@ impl ResourceSpec {
                     "profile configuration exceeds {MAX_PROFILE_CONFIGURATION_BYTES} bytes"
                 )));
             }
+        }
+        if let Some(governance) = &self.governance {
+            governance.validate()?;
         }
         Ok(())
     }
@@ -285,7 +342,9 @@ impl CatalogCommand {
             .map_err(|error| CatalogError::Decoding(error.to_string()))?;
         if !matches!(
             envelope.format_version,
-            CATALOG_COMMAND_FORMAT_VERSION | CATALOG_CONFIG_COMMAND_FORMAT_VERSION
+            CATALOG_COMMAND_FORMAT_VERSION
+                | CATALOG_CONFIG_COMMAND_FORMAT_VERSION
+                | CATALOG_GOVERNANCE_COMMAND_FORMAT_VERSION
         ) {
             return Err(CatalogError::UnsupportedCommandVersion(
                 envelope.format_version,
@@ -305,6 +364,9 @@ impl CatalogCommand {
 
     const fn format_version(&self) -> u16 {
         match self {
+            Self::Apply(request) if request.spec.governance.is_some() => {
+                CATALOG_GOVERNANCE_COMMAND_FORMAT_VERSION
+            }
             Self::Apply(request) if request.spec.configuration.is_some() => {
                 CATALOG_CONFIG_COMMAND_FORMAT_VERSION
             }
@@ -578,7 +640,9 @@ impl Catalog {
             .map_err(|error| CatalogError::Decoding(error.to_string()))?;
         if !matches!(
             envelope.format_version,
-            CATALOG_SNAPSHOT_FORMAT_VERSION | CATALOG_CONFIG_SNAPSHOT_FORMAT_VERSION
+            CATALOG_SNAPSHOT_FORMAT_VERSION
+                | CATALOG_CONFIG_SNAPSHOT_FORMAT_VERSION
+                | CATALOG_GOVERNANCE_SNAPSHOT_FORMAT_VERSION
         ) {
             return Err(CatalogError::UnsupportedSnapshotVersion(
                 envelope.format_version,
@@ -600,6 +664,19 @@ impl Catalog {
     }
 
     fn snapshot_format_version(&self) -> u16 {
+        let governed_resource = self
+            .resources
+            .values()
+            .any(|resource| resource.spec.governance.is_some());
+        let governed_request = self.completed_requests.values().any(|completed| {
+            matches!(
+                &completed.command,
+                CatalogCommand::Apply(request) if request.spec.governance.is_some()
+            )
+        });
+        if governed_resource || governed_request {
+            return CATALOG_GOVERNANCE_SNAPSHOT_FORMAT_VERSION;
+        }
         let configured_resource = self
             .resources
             .values()
@@ -814,6 +891,62 @@ impl Catalog {
             .ok_or(CatalogError::IdentityExhausted)?;
         Ok(allocated)
     }
+}
+
+fn validate_governance_identifier(label: &str, value: &str, maximum: usize) -> CatalogResult<()> {
+    if value.is_empty() || value.trim() != value {
+        return Err(CatalogError::InvalidSpec(format!(
+            "{label} must be non-empty and have no surrounding whitespace"
+        )));
+    }
+    if value.len() > maximum {
+        return Err(CatalogError::InvalidSpec(format!(
+            "{label} must be at most {maximum} bytes"
+        )));
+    }
+    if !value.bytes().all(|byte| {
+        byte.is_ascii_lowercase()
+            || byte.is_ascii_digit()
+            || matches!(byte, b'.' | b'_' | b':' | b'@' | b'/' | b'-')
+    }) || !value
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_alphanumeric)
+    {
+        return Err(CatalogError::InvalidSpec(format!(
+            "{label} must be a canonical lowercase identifier"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_governance_tag_key(key: &str) -> CatalogResult<()> {
+    validate_governance_identifier("governance tag key", key, MAX_GOVERNANCE_TAG_KEY_BYTES)?;
+    if key.starts_with(RESERVED_GOVERNANCE_TAG_PREFIX) {
+        return Err(CatalogError::InvalidSpec(format!(
+            "governance tag prefix {RESERVED_GOVERNANCE_TAG_PREFIX} is reserved"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_governance_tag_value(value: &str) -> CatalogResult<()> {
+    if value.is_empty() || value.trim() != value {
+        return Err(CatalogError::InvalidSpec(
+            "governance tag values must be non-empty and have no surrounding whitespace".into(),
+        ));
+    }
+    if value.len() > MAX_GOVERNANCE_TAG_VALUE_BYTES {
+        return Err(CatalogError::InvalidSpec(format!(
+            "governance tag values must be at most {MAX_GOVERNANCE_TAG_VALUE_BYTES} bytes"
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(CatalogError::InvalidSpec(
+            "governance tag values cannot contain control characters".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_name_component(label: &str, value: &str) -> CatalogResult<()> {

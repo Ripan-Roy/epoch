@@ -324,6 +324,10 @@ func validateStoredResource(key ResourceKey, resource Resource) error {
 	if resource.Generation == 0 {
 		return fmt.Errorf("resource generation must be positive")
 	}
+	normalizedGovernance, err := NormalizeGovernance(resource.Governance)
+	if err != nil || !governanceEqual(normalizedGovernance, resource.Governance) {
+		return fmt.Errorf("resource governance is not canonical")
+	}
 	canonicalSpec, err := canonicalJSON(resource.Spec)
 	if err != nil || !bytes.Equal(canonicalSpec, resource.Spec) {
 		return fmt.Errorf("resource spec is not canonical JSON")

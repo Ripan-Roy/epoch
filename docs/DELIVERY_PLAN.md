@@ -12,8 +12,31 @@ Epoch has 120 catalog requirements: 51 P0, 54 P1, 14 P2, and one explicitly defe
 
 The credible program remains the PRD's 21–26 month route to initial GA for an experienced 12–15 person team. The first 90 days produce a fault-injected vertical slice, not a production broker. Correctness, recovery, and truthful guarantees are schedule gates; protocol and connector breadth are not.
 
-The `v0.1.0-alpha.4` M1/M2 boundary is the authenticated regional multi-tablet
-slice. Protected `main` evidence covers the consensus-backed catalog, durable
+### Six feature-release delivery train
+
+The remaining development is batched into at most six large pull requests. A
+row is one vertical release boundary, not a sequence of scaffolding PRs. Each
+must include the affected Rust and Go paths, public contracts, every applicable
+SDK and console surface, migration compatibility, local unit/integration/E2E
+evidence, documentation, traceability, versioned release notes, and protected
+CI/Pages evidence.
+
+| Release PR | Complete feature boundary | Requirement families closed by the release |
+|---|---|---|
+| 1 | Resource governance and cost explainability | GOV-005 and the governance/cost-driver portion of DX-006 |
+| 2 | Cache and State completion | All non-deferred CACHE requirements and their shared storage/SDK/operations gates |
+| 3 | Stream Log completion | STREAM-001–STREAM-015 and their shared storage/SDK/operations gates |
+| 4 | Work Queue completion | QUEUE-001–QUEUE-015 and their shared storage/SDK/operations gates |
+| 5 | Event and integration platform | BUS requirements plus INT schema, transformation, and connector requirements |
+| 6 | Product and runtime closure | MGD, CTRL, remaining DX/GOV, PKG, compatibility, security, and release-readiness requirements |
+
+`CACHE-015` remains explicitly deferred by the PRD and is not silently pulled
+into this train. A large PR can remain in development longer, but it does not
+merge until its whole row is locally working and its acceptance evidence is
+reviewable.
+
+The `v0.1.0-alpha.5` release target extends the authenticated regional
+multi-tablet M1/M2 boundary. Protected `main` evidence covers the consensus-backed catalog, durable
 single-owner hosted control, topology admission, quorum-confirmed leader reads,
 all four regional profile SDKs, multi-shard Stream routing, atomic batches,
 retention, coordinated and session-fenced consumption, profile-native
@@ -29,16 +52,18 @@ Ack, retry, or rejection state. Exact-main CI `32365193683`, main-only Pages
 and verifier contracts, real 503-to-204 retry, convergence, and all-voter
 same-storage reopen.
 
-The current cohesive P0 data-plane slice implements durable Event Bus Queue and
-Stream target execution. Source-leader ownership, immutable destination
+PR #77 completed durable Event Bus Queue and Stream target execution.
+Source-leader ownership, immutable destination
 generation/tablet binding, shared Stream key routing, target-owned admission and
 ordering, stable destination idempotency, internal forwarding to a different
 group leader, committed-target-before-source-Ack ordering, and all-voter reopen
-are working in the local real-process campaign. Public SDK examples, operator
-status, ADR/API/semantics evidence, and the cross-tablet non-claim are part of
-the same feature-sized delivery; protected CI, Pages, and merge evidence remain
-the exit gate. Stable
-streaming protocols, replicated multi-instance hosted metadata, production
+pass exact-main CI `32377688082` and Pages `32377688018`. PR #78 adds complete
+deterministic Cache policy eviction, committed access, atomic three-language
+batches, and recovery evidence; exact-main CI `32398199013` and Pages
+`32398199351` pass. The current release feature adds required replicated
+resource governance, exact authorized filters, deterministic cost-driver
+attribution, console visibility, legacy recovery, and a real control/data-plane
+restart proof. Stable streaming protocols, replicated multi-instance hosted metadata, production
 identity, follower routing, dynamic membership/voter selection,
 repair/rebalance, and the broader M2 security/performance gates remain open.
 

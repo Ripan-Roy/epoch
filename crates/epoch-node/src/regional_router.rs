@@ -923,6 +923,7 @@ mod tests {
                 shard_count,
                 replica_count: 3,
                 configuration: None,
+                governance: None,
             },
             tablets: (0..shard_count)
                 .map(|shard_index| TabletDescriptor {

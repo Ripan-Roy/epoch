@@ -1,8 +1,8 @@
 # Epoch Delivery Checklist
 
 **Last reviewed:** 20 August 2026
-**Current release target:** `v0.1.0-alpha.4`
-**Current core target:** Source prerelease verification
+**Current release target:** `v0.1.0-alpha.5`
+**Current core target:** Complete resource-governance feature release
 
 This is the operational checklist for turning PRD scope into verified,
 releasable increments. [PRD.md](PRD.md) owns product scope,
@@ -32,13 +32,13 @@ protected-branch evidence agree.
 | G1 | Repository and deterministic foundation | 🟡 | Reproducible toolchains, generated contracts, deterministic clock/fault harness, cross-language build | [Development](DEVELOPMENT.md), [Testing](TESTING.md), CI; broader fuzz/formal harness remains open |
 | G2 | Storage and recovery | 🟡 | Checksummed formats, crash recovery, corruption policy, snapshots, compaction, retention, tiering | Segmented WAL, compatible EPSN v1/v2 checkpoints, native images for all five profiles, checkpoint-plus-tail reopen, fixed-voter catch-up, physical EPRS reclamation, replicated Stream logical time/size/combined retention, automatic local checkpointing across every regional voter, and three-shard recovery pass protected `main`; tiering, backup/PITR, scheduled restore campaigns, and production repair remain open |
 | G3 | Consensus, catalog, and placement | 🟡 | Quorum safety, persistent catalog, multi-group supervision, membership, placement, repair, read barriers | Dedicated catalog consensus, shared multi-group supervision, deterministic multi-shard materialization, authenticated fixed-voter region/zone/class validation, limiting group-capacity admission, fenced routing, safe leader ReadIndex barriers, leader replacement, and per-shard same-volume recovery pass protected `main`; dynamic membership/voter selection, rack placement, transfer/repair, follower reads, and broader model evidence remain open |
-| G4 | Native profile cores | 🟡 | Cache, Stream, Queue, and Bus P0 semantics with truthful public routing and fault evidence | All four typed tablet cores run simultaneously behind resource/shard routing and pass protected process/container recovery; all four have authenticated versioned three-language clients. Signed HTTP/webhook and generation-pinned Queue/Stream target execution are on `main` through PR #77. The current Cache eviction/batch feature passes the complete local failover/reopen campaign; protected evidence and remaining P0 breadth are open |
+| G4 | Native profile cores | 🟡 | Cache, Stream, Queue, and Bus P0 semantics with truthful public routing and fault evidence | All four typed tablet cores run simultaneously behind resource/shard routing and pass protected process/container recovery; all four have authenticated versioned three-language clients. Signed HTTP/webhook and generation-pinned Queue/Stream target execution are on `main` through PR #77. Deterministic Cache eviction, committed access, and atomic SDK batches are on `main` through PR #78; remaining P0 breadth is open |
 | G5 | Trust and observability | 🟡 | Identity, authorization, TLS/mTLS, encryption, audit, telemetry, quotas, explain | Shared Go/Rust bootstrap authentication, scoped action authorization, collection isolation, session-only console credential, credential-free decision logs, and regional scheduler/checkpoint topology evidence pass protected `main`; OIDC, expiry/revocation, TLS/mTLS/peer identity, encryption, replicated policy, immutable audit export, exported telemetry/alerts, and quotas remain open |
 | G6 | Compatibility gateways | ⬜ | Named protocol/client matrix, differential tests, fuzzing, malformed frames, migration evidence | Native APIs only; RESP3, Kafka, AMQP, MQTT compatibility is not claimed |
 | G7 | Data services and integrations | 🟡 | Schemas, pipes, connectors, target execution, checkpoints, transaction boundaries | Bus intent/outbox, public-HTTPS signed webhooks, and pinned Queue/Stream target execution with stable destination idempotency pass protected `main` through PR #77; private egress, schemas, and connectors remain open |
-| G8 | Managed operations | 🟡 | Durable Go reconciliation, operator, autoscaling, backup, metering, billing, private networking | Single-owner bbolt desired/status/token/tombstone transactions, Go `SIGKILL` recovery, RegionalAdmin reconciliation, complete topology inventory, pre-catalog capacity rejection, truthful placement status, exact-origin browser BFF, and real Go-to-Rust recovery pass protected `main`; replicated multi-instance metadata and operator/autoscaling/backup/metering/billing/private networking remain open |
+| G8 | Managed operations | 🟡 | Durable Go reconciliation, operator, autoscaling, backup, metering, billing, private networking | Single-owner bbolt desired/status/token/tombstone transactions, Go `SIGKILL` recovery, RegionalAdmin reconciliation, complete topology inventory, pre-catalog capacity rejection, truthful placement status, exact-origin browser BFF, and real Go-to-Rust recovery pass protected `main`. Canonical governance and authorized cost-driver attribution pass the complete local recovery campaign; protected evidence, replicated multi-instance metadata, operator/autoscaling/backup/metering/billing/private networking remain open |
 | G9 | Geo | ⬜ | Replication, RPO/RTO, promotion, failback, residency, split-brain drills | Not implemented |
-| G10 | Release readiness | 🟡 | Synchronized versions, CI, Pages, notes, verified tag provenance, artifacts, security and compatibility statements | `v0.1.0-alpha.4` is the current published source prerelease; packaged artifacts and GA evidence remain open |
+| G10 | Release readiness | 🟡 | Synchronized versions, CI, Pages, notes, verified tag provenance, artifacts, security and compatibility statements | `v0.1.0-alpha.4` is the current published source prerelease; `v0.1.0-alpha.5` is the current feature-release target. Packaged artifacts and GA evidence remain open |
 
 ## Milestone readiness
 
@@ -73,7 +73,7 @@ complete.
 | MT-11 | Reconcile hosted desired state through the Rust authority | Go control plane | MT-06, MT-10 | 🟡 | Real authenticated gRPC lifecycle, transactional bbolt desired/status/token/tombstone state, exact replay and generation continuity across restart, corruption/version/exclusive-owner rejection, complete topology inventory, incremental capacity admission, generation-fenced status, and Go-to-Rust container reconciliation pass locally; multi-instance consistency, transactional reservations, OIDC/mTLS, and replicated policy remain open |
 | MT-12 | Show achieved placement and risk without overclaiming | TypeScript console | MT-10, MT-11 | 🟡 | The console reads only the Go BFF with a session-only interactive credential, preserves decimal 64-bit IDs, distinguishes pending/ready/degraded/failed, and lists observed voters/leaders plus consistent configured zone/class/group-capacity evidence and remaining server-identity/rack/dynamic-membership non-claims; OIDC exchange and browser visual/accessibility automation remain open |
 | MT-13 | Real-process and container fault campaign | Test infrastructure | MT-06–MT-12 | 🟡 | Three policy-protected regional containers cover topology/capacity, catalog plus seven tablets/four profiles including a three-shard Stream, authenticated Go recovery, and separate active-leader losses followed by real Python Stream sessions plus Stream, Queue, Cache, and Event Bus lifecycles. Protected CI through PR #74 proves all five maintenance classes, automatic checkpoint/compaction on all 24 voter/group copies, session-fenced consumption, signed-webhook retry, voter catch-up, all-node `SIGKILL`, same-volume reopen, and digest convergence; broader crash/I/O/auth-abuse faults remain |
-| MT-14 | Documentation, traceability, changelog, and release notes | Cross-cutting | MT-13 | 🟡 | ADR-0010–0031 plus published `v0.1.0-alpha.4` evidence cover merged `main`; PR #77 published the Queue/Stream target documentation. ADR-0032 and aligned Cache engine/SDK/runtime/Pages documentation are under local verification; protected publication remains open |
+| MT-14 | Documentation, traceability, changelog, and release notes | Cross-cutting | MT-13 | 🟡 | ADR-0010–0032 plus published `v0.1.0-alpha.4` evidence cover merged `main`; PR #78 published the Cache engine/SDK/runtime/Pages documentation. ADR-0033 and the resource-governance guide are under local verification; protected publication remains open |
 
 ## Current placement delivery: topology-aware fixed-voter admission
 
@@ -193,9 +193,23 @@ complete.
 | CE-03 | Implement deterministic policy eviction | Rust Cache engine | ✅ | Engine tests cover LRU, LFU, volatile eligibility/TTL rejection, deterministic random replay, canonical victims, and atomic capacity rollback |
 | CE-04 | Make access metadata a committed replicated transition | Rust tablet + gateway | ✅ | Version-2 `Get` validation, one-time idempotent access, receipts, status policy, digest, snapshot/reopen, and pure `Observe` behavior pass focused tablet/node tests |
 | CE-05 | Expose bounded ordered batches in every SDK | Go + Java + Python | ✅ | `AtomicBatch`/`atomicBatch`/`atomic_batch` reuse the one-to-128 transaction wire command; each SDK contract suite covers committed `Get` and the alias |
-| CE-06 | Publish runnable three-language guidance | Docs + Pages | 🟡 | Exact quickstarts and Cache SDK/API/semantics/architecture/runtime/testing docs include configured LRU, committed access, atomic batching, pooling guidance, and non-claims; local formatting/lint/type/build and exact-source compile gates pass, while main-only publication is pending |
+| CE-06 | Publish runnable three-language guidance | Docs + Pages | ✅ | Exact quickstarts and Cache SDK/API/semantics/architecture/runtime/testing docs include configured LRU, committed access, atomic batching, pooling guidance, and non-claims; main-only Pages run `32398199351` published the bundle |
 | CE-07 | Prove failover, catch-up, and same-volume reopen | Compose integration | ✅ | The real campaign creates Cache configuration through Go, then proves committed LRU access, atomic batch, sorted eviction receipt, voter convergence, catch-up, and post-restart state |
-| CE-08 | Pass all local and protected gates | CI + GitHub | 🟡 | `make check`, `make build`, exact displayed quickstarts, and the real regional container campaign are green; PR #78 is open, while exact-main CI and Pages publication remain pending |
+| CE-08 | Pass all local and protected gates | CI + GitHub | ✅ | [PR #78](https://github.com/Ripan-Roy/epoch/pull/78) merged as `c50db1c`; exact-main [CI run 32398199013](https://github.com/Ripan-Roy/epoch/actions/runs/32398199013), main-only [Pages run 32398199351](https://github.com/Ripan-Roy/epoch/actions/runs/32398199351), and the live Cache bundle marker are green |
+
+## Current governance delivery: ownership, classification, and cost drivers
+
+| ID | Checklist item | Boundary | State | Evidence / acceptance |
+|---|---|---|---:|---|
+| RG-01 | Freeze canonical metadata, compatibility, and non-claims | Contract + ADR | ✅ | ADR-0033 defines required managed fields, authoritative environment identity, bounds, exact matching, legacy readability, authorization ordering, and billing non-claims |
+| RG-02 | Persist governance in management desired state | Go registry | ✅ | Canonical values participate in apply equality, tokens, generation fencing, defensive copies, bbolt validation, recovery, and mandatory managed creation |
+| RG-03 | Replicate governance into the data-plane catalog | Go authority + Rust catalog | ✅ | Protobuf/HTTP forwarding and catalog command/snapshot v3 preserve governance; valid v1/v2 resources remain readable |
+| RG-04 | Filter inventory exactly and safely | Go gRPC + HTTP | ✅ | Owner, cost center, classification, and repeated tags use normalized exact AND matching with strict malformed/duplicate/reserved/bounded rejection |
+| RG-05 | Attribute visible allocation drivers | Go BFF | ✅ | Deterministic post-authorization aggregation reports resource and desired-shard counts by cost center and classification without claiming metering or billing |
+| RG-06 | Expose governance and attribution in the console | TypeScript console | ✅ | Session-authenticated inventory adds explicit filters, governance columns, and attribution cards with safe response validation |
+| RG-07 | Prove control/data-plane recovery | Compose integration | ✅ | The real three-container campaign compares Go and Rust governance before/after Go `SIGKILL`, profile failover, and all-node same-volume reopen |
+| RG-08 | Publish end-to-end documentation | Docs + Pages | 🟡 | Resource-governance guide, ADR-0033, API/security/architecture/semantics/testing docs, and the dedicated Pages route pass local verification; protected publication is pending |
+| RG-09 | Pass full feature and release gates | Quality + GitHub | 🟡 | `make check`, `make build`, release synchronization, docs-only production build/markers, and the complete rebuilt-image regional Docker campaign are green; feature PR, exact-main CI/Pages, and alpha.5 tag verification remain pending |
 
 ## Current native delivery: regional Event Bus v1 and SDK routing
 
@@ -393,19 +407,19 @@ complete.
 
 | Order | Release action | Required evidence | State for next release |
 |---:|---|---|---:|
-| 1 | Select a completed, merged milestone boundary | Traceability and changelog agree with `main` | ✅ |
-| 2 | Choose the next semantic prerelease version | `v0.1.0-alpha.4` is later than alpha.3 and does not already exist | ✅ |
-| 3 | Synchronize Rust, Go, Java, Python, TypeScript, SDK user agents, and lockfiles | `./scripts/check-release-version.sh` passes at `0.1.0-alpha.4` | ✅ |
-| 4 | Write curated, version-controlled release notes | `docs/releases/v0.1.0-alpha.4.md` names highlights, verification, compatibility, limitations, and source-only artifacts | ✅ |
-| 5 | Pass protected `main` CI and main-only Pages | Both workflow runs green at the same commit | ✅ |
-| 6 | Verify the live docs show the release and SDK content | Public Pages bundle assertions | ✅ |
-| 7 | Create an annotated tag at the exact current `main` commit | Local and remote commit IDs match | ✅ |
-| 8 | Pass tag/version/main provenance workflow | Release-tag workflow green | ✅ |
-| 9 | Publish the GitHub release from the checked-in notes | [Published prerelease](https://github.com/Ripan-Roy/epoch/releases/tag/v0.1.0-alpha.4) | ✅ |
-| 10 | Verify downloads and package claims | Source-only artifacts match the notes; package-manager publication remains deferred | ✅ |
+| 1 | Select a completed, merged milestone boundary | Traceability and changelog agree with `main` | ⬜ |
+| 2 | Choose the next semantic prerelease version | `v0.1.0-alpha.5` is later than alpha.4 and does not already exist | ✅ |
+| 3 | Synchronize Rust, Go, Java, Python, TypeScript, SDK user agents, and lockfiles | `./scripts/check-release-version.sh` passes at `0.1.0-alpha.5` | ✅ |
+| 4 | Write curated, version-controlled release notes | `docs/releases/v0.1.0-alpha.5.md` names highlights, verification, compatibility, limitations, and source-only artifacts | ✅ |
+| 5 | Pass protected `main` CI and main-only Pages | Both workflow runs green at the same commit | ⬜ |
+| 6 | Verify the live docs show the release and governance/SDK content | Public Pages bundle assertions | ⬜ |
+| 7 | Create an annotated tag at the exact current `main` commit | Local and remote commit IDs match | ⬜ |
+| 8 | Pass tag/version/main provenance workflow | Release-tag workflow green | ⬜ |
+| 9 | Publish the GitHub release from the checked-in notes | GitHub prerelease targets `v0.1.0-alpha.5` | ⬜ |
+| 10 | Verify downloads and package claims | Source-only artifacts match the notes; package-manager publication remains deferred | ⬜ |
 | 11 | Start the next `Unreleased` section | Changelog prepared for continued delivery | ✅ |
 
-After `v0.1.0-alpha.4` completes this sequence as a source-only prerelease, the
+After `v0.1.0-alpha.5` completes this sequence as a source-only prerelease, the
 table above intentionally resets for the next release.
 
 ## Feature delivery template

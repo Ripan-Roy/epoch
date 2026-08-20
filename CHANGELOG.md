@@ -6,7 +6,23 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+## [0.1.0-alpha.5] - 2026-08-20
+
 ### Added
+
+- Required canonical governance for newly managed regional resources: owner,
+  cost center, public/internal/confidential/restricted classification, and up to
+  32 bounded custom tags. Governance is generation-fenced in durable Go desired
+  state and replicated through Rust catalog command/snapshot v3 while valid
+  legacy records remain readable.
+- Exact AND inventory filtering over owner, cost center, classification, and
+  repeated tags, plus deterministic post-authorization resource/shard
+  attribution by cost center and classification. The console exposes the same
+  filters, governance inventory, and cost-driver summary without claiming usage
+  metering or billing.
+- ADR-0033, a dedicated end-to-end governance guide and Pages route, strict
+  gRPC/HTTP/console contract tests, and a real container proof across Go
+  `SIGKILL`, Rust catalog replication, profile failover, and all-node reopen.
 
 - Deterministic regional Cache eviction for no-eviction, all-key LRU/LFU/random,
   and volatile LRU/LFU/random/TTL policies. The Go management plane now forwards
@@ -394,6 +410,7 @@ standalone profiles, local durable Stream and Queue storage, repository-local
 Go/Java/Python SDKs, deterministic testkit, fixed-voter consensus probe, CI,
 development containers, and main-only documentation deployment.
 
+[0.1.0-alpha.5]: https://github.com/Ripan-Roy/epoch/compare/v0.1.0-alpha.4...v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/Ripan-Roy/epoch/compare/v0.1.0-alpha.3...v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/Ripan-Roy/epoch/compare/v0.1.0-alpha.2...v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/Ripan-Roy/epoch/compare/v0.1.0-alpha.1...v0.1.0-alpha.2

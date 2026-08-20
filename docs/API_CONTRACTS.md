@@ -339,6 +339,22 @@ invent runtime policy from a profile name, and the console renders these values
 next to the managed resource so operators can compare intent with serving
 placement.
 
+Every newly managed regional resource also requires `governance` beside its
+identity and `spec`: canonical owner, cost center, `public`/`internal`/
+`confidential`/`restricted` classification, and at most 32 bounded custom tags.
+Environment remains in `ResourceName`; it is not duplicated as mutable
+governance metadata. Go persists the canonical value and forwards it to the
+Rust catalog. A governance change is generation-fenced desired state.
+
+`GET /v1/resources` and `GET /v1/regional/resources` accept `owner`,
+`cost_center`, `classification`, and repeated `tag=key=value` exact-match
+filters with AND semantics. The browser response includes the governance value
+and a deterministic `cost_attribution` array containing `resource_count` and
+desired `shard_count` grouped by cost center and classification. Authorization
+filters resources before aggregation. Counts are allocation drivers, not
+metering, rates, currency, or billing. See
+[Resource Governance](RESOURCE_GOVERNANCE.md).
+
 The optional `placement` object contains the requested region/zone/class
 constraints, achieved zone count, and policy-protected configured-endpoint topology plus
 maximum/used/available consensus-group counts. Node and voter IDs remain
