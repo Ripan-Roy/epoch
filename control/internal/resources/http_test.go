@@ -343,6 +343,37 @@ func TestHTTPRegionalInventoryReportsPendingWithoutInventingPlacement(t *testing
 	}
 }
 
+func TestRegionalResourceForBrowserExposesSafeCacheConfiguration(t *testing.T) {
+	view := regionalResourceForBrowser(Resource{
+		ResourceKey: ResourceKey{
+			Organization: "acme",
+			Project:      "shop",
+			Environment:  "dev",
+			Namespace:    "core",
+			Kind:         KindCache,
+			Name:         "sessions",
+		},
+		Spec: json.RawMessage(`{
+			"shard_count":1,
+			"replica_count":3,
+			"configuration":{
+				"shard_count":1,
+				"max_entries":32,
+				"default_ttl_ms":60000,
+				"eviction":"all_keys_lru"
+			}
+		}`),
+	})
+
+	if view.CacheConfiguration == nil ||
+		view.CacheConfiguration.MaxEntriesPerShard != 32 ||
+		view.CacheConfiguration.DefaultTTLMS == nil ||
+		*view.CacheConfiguration.DefaultTTLMS != 60_000 ||
+		view.CacheConfiguration.Eviction != "all_keys_lru" {
+		t.Fatalf("cache configuration = %+v", view.CacheConfiguration)
+	}
+}
+
 func TestHTTPCORSRequiresAnExactConfiguredOrigin(t *testing.T) {
 	handler, err := NewHTTPHandlerWithOrigins(
 		NewRegistry(),

@@ -285,6 +285,16 @@ conflicts fail; exact apply and delete retries return their original result
 without applying the Rust mutation twice. Delete commits the Rust tombstone
 before removing Go desired metadata.
 
+For Cache resources, `ResourceSpec.configuration` is a strict object containing
+an optional matching `shard_count`, per-shard `max_entries`, optional
+`default_ttl_ms`, and `eviction`. Go forwards it to the Rust catalog; Rust
+validates and normalizes it, persists it with the catalog resource, and
+materializes every voter from that committed value. Supported eviction values
+are `no_eviction`, all-key LRU/LFU/random, and volatile LRU/LFU/random/TTL.
+Configuration is immutable within one resource generation in the current alpha.
+Omission preserves the legacy unconfigured/default catalog encoding so an
+upgrade cannot turn an exact old retry into a different command.
+
 This subset has bounded list pages but no watch, opaque continuation, plan,
 backup, repair, purge, or long-running operation surface. Its single-owner Go
 registry transactionally persists desired resources, observed status,
@@ -322,6 +332,12 @@ voter node IDs, and optional leader node ID are JSON decimal strings so a
 browser cannot lose 64-bit precision. Desired replicas and observed voters are
 separate fields; an authority outage returns `pending` with no current tablet
 placement rather than retaining a stale leader claim.
+
+Cache rows additionally expose the safe desired `cache_configuration` fields:
+entry capacity, nullable default TTL, and eviction policy. The BFF does not
+invent runtime policy from a profile name, and the console renders these values
+next to the managed resource so operators can compare intent with serving
+placement.
 
 The optional `placement` object contains the requested region/zone/class
 constraints, achieved zone count, and policy-protected configured-endpoint topology plus

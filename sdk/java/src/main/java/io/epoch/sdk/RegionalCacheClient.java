@@ -105,6 +105,12 @@ public final class RegionalCacheClient {
     return mutate(cache, shard, idempotencyKey, operation);
   }
 
+  /** Returns one value and commits its access for deterministic LRU/LFU admission. */
+  public JsonNode get(String cache, int shard, String idempotencyKey, String key)
+      throws IOException, InterruptedException {
+    return mutate(cache, shard, idempotencyKey, keyedOperation("get", key));
+  }
+
   /** Commits one to 128 distinct-key mutations at one shard revision. */
   public JsonNode transaction(
       String cache,
@@ -136,6 +142,18 @@ public final class RegionalCacheClient {
       guardArray.add(Objects.requireNonNull(guard, "lock guard").toJson());
     }
     return mutate(cache, shard, idempotencyKey, operation);
+  }
+
+  /** Sends one ordered atomic batch as one HTTP request and consensus proposal. */
+  public JsonNode atomicBatch(
+      String cache,
+      int shard,
+      String idempotencyKey,
+      BigInteger expectedRevision,
+      List<RegionalCacheMutation> mutations,
+      List<RegionalCacheLockGuard> lockGuards)
+      throws IOException, InterruptedException {
+    return transaction(cache, shard, idempotencyKey, expectedRevision, mutations, lockGuards);
   }
 
   /** Creates or replaces an expired advisory lock lease. */

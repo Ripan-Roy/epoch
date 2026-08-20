@@ -8,6 +8,18 @@ notes explicitly list additional verified artifacts.
 
 ### Added
 
+- Deterministic regional Cache eviction for no-eviction, all-key LRU/LFU/random,
+  and volatile LRU/LFU/random/TTL policies. The Go management plane now forwards
+  strict Cache configuration into the replicated Rust catalog and every voter
+  materializes the same immutable capacity/default-TTL/policy contract.
+- Versioned committed Cache `Get` records LRU/LFU access exactly once across
+  idempotent replay while pure observation stays side-effect free. Staged
+  admission reports canonical evicted keys, and Cache snapshots retain backward
+  compatibility while persisting policy access metadata.
+- Go, Java, and Python add one-request atomic-batch helpers over the existing
+  ordered transaction command. Executable quickstarts, SDK guidance, ADR-0032,
+  and the real failover/reopen campaign cover access, batching, and eviction.
+
 - Leader-owned Event Bus delivery into regional Epoch Queue and Stream targets.
   The source lease pins resource generation, logical shard, tablet ID, and
   tablet epoch before the destination write; Queue uses shard `0` and Stream

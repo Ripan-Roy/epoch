@@ -102,8 +102,17 @@ impl CacheTablet {
         // Consensus owns persistence evidence for this tablet. CacheShard has
         // no durability path of its own, so the caller's durability label is
         // deliberately normalized away rather than entering state or digest.
-        let shard = CacheShard::new(config.max_entries, config.default_ttl_ms)?;
-        let state_digest = initial_state_digest(&scope, config.max_entries, config.default_ttl_ms);
+        let shard = CacheShard::new_with_eviction(
+            config.max_entries,
+            config.default_ttl_ms,
+            config.eviction,
+        )?;
+        let state_digest = initial_state_digest(
+            &scope,
+            config.max_entries,
+            config.default_ttl_ms,
+            config.eviction,
+        );
         Ok(Self {
             scope,
             state: CacheTabletBusinessState {
@@ -238,6 +247,10 @@ impl CacheTablet {
 
     pub const fn default_ttl_ms(&self) -> Option<u64> {
         self.state.default_ttl_ms
+    }
+
+    pub const fn eviction(&self) -> EvictionPolicy {
+        self.state.shard.eviction()
     }
 
     /// Returns physically retained entries, including expired values that have
@@ -503,6 +516,7 @@ impl CacheTabletBusinessState {
             CacheTabletOperation::Increment(command) => {
                 self.execute_increment(scope, committed, command, applied_at_ms)
             }
+            CacheTabletOperation::Get(command) => self.execute_get(command, applied_at_ms),
             CacheTabletOperation::Transaction(command) => {
                 self.execute_transaction(scope, committed, command, applied_at_ms)
             }
@@ -554,6 +568,7 @@ impl CacheTabletBusinessState {
             },
             applied_at_ms,
         )?;
+        let evicted_keys = result.evicted_keys;
         let CacheMutationResult::Set { item } = one_result(result.results)? else {
             return Err(EpochError::Internal(
                 "Cache Set returned a mismatched engine result".into(),
@@ -562,6 +577,7 @@ impl CacheTabletBusinessState {
         Ok(CacheTabletOperationResult::Set {
             key,
             item: item.into(),
+            evicted_keys,
         })
     }
 
@@ -639,6 +655,7 @@ impl CacheTabletBusinessState {
             },
             applied_at_ms,
         )?;
+        let evicted_keys = result.evicted_keys;
         let CacheMutationResult::CompareAndSet { item } = one_result(result.results)? else {
             return Err(EpochError::Internal(
                 "Cache CAS returned a mismatched engine result".into(),
@@ -647,6 +664,7 @@ impl CacheTabletBusinessState {
         Ok(CacheTabletOperationResult::ComparedAndSet {
             key,
             item: item.into(),
+            evicted_keys,
         })
     }
 
@@ -694,6 +712,7 @@ impl CacheTabletBusinessState {
             },
             applied_at_ms,
         )?;
+        let evicted_keys = result.evicted_keys;
         let result = one_result(result.results)?;
         let (value, version, expires_at_ms) = match result {
             CacheMutationResult::Set { item } => {
@@ -720,6 +739,33 @@ impl CacheTabletBusinessState {
             value,
             version,
             expires_at_ms,
+            evicted_keys,
+        })
+    }
+
+    fn execute_get(
+        &mut self,
+        command: CacheGetCommand,
+        applied_at_ms: u64,
+    ) -> EpochResult<CacheTabletOperationResult> {
+        let key = command.key;
+        let result = self.shard.transact(
+            CacheTransaction {
+                expected_revision: None,
+                operations: vec![CacheMutation::Access { key: key.clone() }],
+            },
+            applied_at_ms,
+        )?;
+        let revision = result.revision;
+        let CacheMutationResult::Access { item } = one_result(result.results)? else {
+            return Err(EpochError::Internal(
+                "Cache Get returned a mismatched engine result".into(),
+            ));
+        };
+        Ok(CacheTabletOperationResult::Accessed {
+            key,
+            revision,
+            item: item.map(Into::into),
         })
     }
 
@@ -746,6 +792,7 @@ impl CacheTabletBusinessState {
             applied_at_ms,
         )?;
         let revision = result.revision;
+        let evicted_keys = result.evicted_keys;
         if mutations.len() != result.results.len() {
             return Err(EpochError::Internal(
                 "Cache transaction result count did not match its mutations".into(),
@@ -756,7 +803,11 @@ impl CacheTabletBusinessState {
             .zip(result.results)
             .map(|(mutation, result)| map_transaction_result(mutation, result))
             .collect::<EpochResult<Vec<_>>>()?;
-        Ok(CacheTabletOperationResult::TransactionCommitted { revision, results })
+        Ok(CacheTabletOperationResult::TransactionCommitted {
+            revision,
+            results,
+            evicted_keys,
+        })
     }
 
     fn translate_transaction_mutation(
@@ -1224,11 +1275,6 @@ fn validate_config(config: &CacheConfig) -> TabletResult<()> {
         return Err(TabletError::Profile(EpochError::InvalidArgument(format!(
             "Cache tablet max_entries must be between 1 and {MAX_CACHE_TABLET_ENTRIES}"
         ))));
-    }
-    if config.eviction != EvictionPolicy::NoEviction {
-        return Err(TabletError::Profile(EpochError::InvalidArgument(
-            "Cache tablet v1 supports only no-eviction".into(),
-        )));
     }
     if config
         .default_ttl_ms

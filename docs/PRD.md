@@ -17,8 +17,20 @@ lock expiry, and Event Bus delivery-lease timeout. Passive reads remain pure,
 explicit maintenance APIs remain available, and topology exposes node-local
 scheduler counters. This closes the client-triggered timer gap for the regional
 alpha; it does not claim a real-time deadline SLA, dynamic or cross-region
-ownership, coordinated backups/PITR, Stream compaction/tiering, Cache eviction,
-Queue streaming receive, or Event Bus target execution. See ADR-0027.
+ownership, coordinated backups/PITR, Stream compaction/tiering, Cache
+byte-pressure/SLO evidence, Queue streaming receive, or Event Bus target
+execution. See ADR-0027.
+
+**Cache implementation note (20 August 2026):** Managed Cache configuration now
+flows from the Go desired resource through the replicated Rust catalog into
+every materialized voter. The single-shard regional profile enforces
+deterministic entry-count no-eviction, all-key LRU/LFU/random, and volatile
+LRU/LFU/random/TTL policies. LRU/LFU access is an idempotent committed `Get`;
+pure `Observe` does not affect eviction. Go, Java, and Python expose the
+existing ordered transaction as a one-request atomic-batch API and document
+transport reuse/pooling. Byte-pressure accounting, native multiplexing,
+automatic batch coalescing, and the CACHE-005 throughput target remain open.
+See ADR-0032.
 
 **Recovery implementation note (13 August 2026):** Every healthy regional
 voter now schedules its own canonical native checkpoint for catalog and all
@@ -662,6 +674,13 @@ The following catalog is the product contract for scope planning.
 | CACHE-013 | Vector index and hybrid search | P2 |
 | CACHE-014 | Flash/cold tier with per-resource latency disclosure | P2 |
 | CACHE-015 | Selected CRDT data types for active-active geo use | Explicitly deferred |
+
+For CACHE-003, deterministic regional admission means every voter and a replay
+select the same victim; volatile policies may select only expiring keys, and a
+write rejects atomically if that class cannot make room. For CACHE-005, an
+atomic batch is one ordered, one-to-128-operation same-shard transaction with
+one correlated result per operation. It is not a partial-success pipeline;
+native multiplexing and client-side coalescing require separate evidence.
 
 ### 10.2 Stream Log
 

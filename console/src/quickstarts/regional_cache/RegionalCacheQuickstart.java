@@ -63,14 +63,16 @@ public final class RegionalCacheQuickstart {
             RegionalCacheValue.hash(Map.of("name", "alice", "role", "admin")),
             null,
             null);
+    JsonNode committedGet =
+        client.get("sessions", 0, "docs-java-cache-get-v1", "profile");
     JsonNode observation = client.observe("sessions", 0, "profile");
     BigInteger revision =
         new BigInteger(observation.path("observation").path("shard_revision").asText());
-    JsonNode transaction =
-        client.transaction(
+    JsonNode batch =
+        client.atomicBatch(
             "sessions",
             0,
-            "docs-java-cache-transaction-v1",
+            "docs-java-cache-batch-v1",
             revision,
             List.of(
                 RegionalCacheMutation.set("visits", RegionalCacheValue.counter(1), null),
@@ -130,7 +132,8 @@ public final class RegionalCacheQuickstart {
     output.set("set", written);
     output.set("exact_retry", replayed);
     output.set("cas", compared);
-    output.set("transaction", transaction);
+    output.set("committed_get", committedGet);
+    output.set("atomic_batch", batch);
     output.set("guarded_increment", guarded);
     output.set("release", released);
     output.set("ttl", ephemeral);

@@ -9,12 +9,14 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use epoch_cache::{CacheConfig, EvictionPolicy};
 use epoch_catalog::{
     ApplyResource, CatalogCommand, CatalogError, CatalogMutation, DeleteResource, ResourceName,
     ResourceRecord, ResourceSpec, TabletDescriptor, catalog_proposal_id_for,
 };
 use epoch_consensus::{CommittedProposal, ConsensusError, ProposalLookup};
-use epoch_core::{ResourceKind, WorkloadProfile};
+use epoch_core::{DurabilityProfile, ResourceKind, WorkloadProfile};
+use epoch_tablet::{MAX_CACHE_TABLET_ENTRIES, MAX_CACHE_TTL_MS};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{Mutex, broadcast};
@@ -127,6 +129,25 @@ struct ApplyResourceRequest {
     expected_generation: Option<u64>,
     shard_count: u32,
     replica_count: u16,
+    #[serde(default)]
+    configuration: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CacheCatalogConfiguration {
+    #[serde(default)]
+    shard_count: Option<u32>,
+    #[serde(default = "default_cache_max_entries")]
+    max_entries: usize,
+    #[serde(default)]
+    default_ttl_ms: Option<u64>,
+    #[serde(default)]
+    eviction: EvictionPolicy,
+}
+
+const fn default_cache_max_entries() -> usize {
+    10_000
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,6 +198,8 @@ pub struct CatalogResourceResponse {
     pub workload_profile: WorkloadProfile,
     pub shard_count: u32,
     pub replica_count: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configuration: Option<serde_json::Value>,
     pub tablets: Vec<CatalogTabletResponse>,
 }
 
@@ -188,6 +211,7 @@ impl From<&ResourceRecord> for CatalogResourceResponse {
             workload_profile: resource.spec.workload_profile,
             shard_count: resource.spec.shard_count,
             replica_count: resource.spec.replica_count,
+            configuration: resource.spec.configuration.clone(),
             tablets: resource.tablets.iter().map(Into::into).collect(),
         }
     }
@@ -332,6 +356,8 @@ async fn apply_resource(
     let Json(request) = request.map_err(|rejection| request_body_error(&rejection))?;
     let name = path.resource_name()?;
     let workload_profile = profile_for_kind(name.kind)?;
+    let configuration =
+        normalize_profile_configuration(name.kind, request.shard_count, request.configuration)?;
     let command = CatalogCommand::Apply(ApplyResource {
         request_token: request.request_token,
         expected_generation: request.expected_generation,
@@ -340,6 +366,7 @@ async fn apply_resource(
             workload_profile,
             shard_count: request.shard_count,
             replica_count: request.replica_count,
+            configuration,
         },
     });
     let (receipt, request_replayed) = commit_command(&state, command).await?;
@@ -356,6 +383,54 @@ async fn apply_resource(
             materialization,
         )),
     ))
+}
+
+fn normalize_profile_configuration(
+    kind: ResourceKind,
+    shard_count: u32,
+    configuration: Option<serde_json::Value>,
+) -> Result<Option<serde_json::Value>, RegionalCatalogApiError> {
+    if !matches!(kind, ResourceKind::Cache | ResourceKind::Table) {
+        return Ok(None);
+    }
+    let Some(raw) = configuration else {
+        return Ok(None);
+    };
+    let configuration: CacheCatalogConfiguration =
+        serde_json::from_value(raw).map_err(|error| {
+            RegionalCatalogApiError::Catalog(CatalogError::InvalidSpec(format!(
+                "invalid Cache configuration: {error}"
+            )))
+        })?;
+    if configuration
+        .shard_count
+        .is_some_and(|configured| configured != shard_count)
+    {
+        return Err(RegionalCatalogApiError::Catalog(CatalogError::InvalidSpec(
+            "Cache configuration.shard_count must match shard_count".into(),
+        )));
+    }
+    if configuration.max_entries == 0 || configuration.max_entries > MAX_CACHE_TABLET_ENTRIES {
+        return Err(RegionalCatalogApiError::Catalog(CatalogError::InvalidSpec(
+            format!("Cache max_entries must be between 1 and {MAX_CACHE_TABLET_ENTRIES}"),
+        )));
+    }
+    if configuration
+        .default_ttl_ms
+        .is_some_and(|ttl| ttl == 0 || ttl > MAX_CACHE_TTL_MS)
+    {
+        return Err(RegionalCatalogApiError::Catalog(CatalogError::InvalidSpec(
+            format!("Cache default_ttl_ms must be between 1 and {MAX_CACHE_TTL_MS}"),
+        )));
+    }
+    serde_json::to_value(CacheConfig {
+        max_entries: configuration.max_entries,
+        default_ttl_ms: configuration.default_ttl_ms,
+        eviction: configuration.eviction,
+        durability: DurabilityProfile::QuorumDurable,
+    })
+    .map(Some)
+    .map_err(|error| RegionalCatalogApiError::Catalog(CatalogError::InvalidSpec(error.to_string())))
 }
 
 async fn delete_resource(
@@ -739,6 +814,16 @@ mod tests {
         )
     }
 
+    fn cache_catalog_resource_path() -> &'static str {
+        "/experimental/v1/regional/catalog/resources/acme/shop/dev/core/cache/sessions"
+    }
+
+    fn cache_data_path(operation: &str) -> String {
+        format!(
+            "/experimental/v1/regional/resources/acme/shop/dev/core/cache/sessions/shards/0/data/{operation}"
+        )
+    }
+
     async fn create_stream_resource(nodes: &[RegionalTestNode]) -> Value {
         let catalog_leader = leader_index(nodes).await;
         let response = nodes[catalog_leader]
@@ -803,6 +888,26 @@ mod tests {
         .unwrap()
     }
 
+    fn cache_resource_name() -> ResourceName {
+        ResourceName::new(
+            "acme",
+            "shop",
+            "dev",
+            "core",
+            ResourceKind::Cache,
+            "sessions",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn omitted_cache_configuration_preserves_the_legacy_catalog_contract() {
+        assert_eq!(
+            normalize_profile_configuration(ResourceKind::Cache, 1, None).unwrap(),
+            None
+        );
+    }
+
     async fn data_leader(nodes: &[RegionalTestNode], resource: &ResourceName) -> (usize, u64) {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -861,6 +966,86 @@ mod tests {
             "leader-routed append failed: {}",
             response.status()
         );
+    }
+
+    async fn cache_mutation(
+        nodes: &[RegionalTestNode],
+        leader: usize,
+        term: u64,
+        idempotency_key: &str,
+        operation: Value,
+    ) -> Value {
+        let response = nodes[leader]
+            .app
+            .clone()
+            .oneshot(
+                Request::post(cache_data_path("mutations"))
+                    .header("content-type", "application/json")
+                    .header(RESOURCE_GENERATION_HEADER, "1")
+                    .header(TABLET_EPOCH_HEADER, "1")
+                    .body(Body::from(
+                        json!({
+                            "idempotency_key": idempotency_key,
+                            "expected_term": term.to_string(),
+                            "operation": operation
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "leader-routed Cache mutation failed: {}",
+            response.status()
+        );
+        response_json(response).await
+    }
+
+    async fn assert_cache_values(nodes: &[RegionalTestNode]) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let mut converged = true;
+                for node in nodes {
+                    for (key, expected) in
+                        [("alpha", Some("1")), ("beta", None), ("gamma", Some("3"))]
+                    {
+                        let response = node
+                            .app
+                            .clone()
+                            .oneshot(
+                                Request::get(format!(
+                                    "{}?key={key}",
+                                    cache_data_path("observations")
+                                ))
+                                .header(RESOURCE_GENERATION_HEADER, "1")
+                                .header(TABLET_EPOCH_HEADER, "1")
+                                .header(READ_CONSISTENCY_HEADER, "local_stale")
+                                .body(Body::empty())
+                                .unwrap(),
+                            )
+                            .await
+                            .unwrap();
+                        if response.status() != StatusCode::OK {
+                            converged = false;
+                            continue;
+                        }
+                        let document = response_json(response).await;
+                        let observed = document["observation"]["item"]["value"]["value"].as_str();
+                        if observed != expected {
+                            converged = false;
+                        }
+                    }
+                }
+                if converged {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("evicted Cache state should converge on all voters");
     }
 
     async fn wait_for_stream_convergence(nodes: &[RegionalTestNode]) {
@@ -969,5 +1154,93 @@ mod tests {
             );
         }
         shutdown_cluster(&mut nodes).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn configured_cache_evicts_after_committed_get_and_reopens_on_every_voter() {
+        let root = TempDir::new().expect("temp directory should be created");
+        let mut nodes = start_cluster(&root).await;
+        let catalog_leader = leader_index(&nodes).await;
+        let response = nodes[catalog_leader]
+            .app
+            .clone()
+            .oneshot(
+                Request::put(cache_catalog_resource_path())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "request_token": "create-sessions-v1",
+                            "expected_generation": "0",
+                            "shard_count": 1,
+                            "replica_count": 3,
+                            "configuration": {
+                                "shard_count": 1,
+                                "max_entries": 2,
+                                "default_ttl_ms": null,
+                                "eviction": "all_keys_lru"
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let created = response_json(response).await;
+        assert_eq!(
+            created["mutation"]["resource"]["configuration"]["eviction"],
+            "all_keys_lru"
+        );
+        wait_for_catalog_resource_count(&nodes, 1).await;
+        reconcile_all(&nodes).await;
+
+        let resource = cache_resource_name();
+        let (leader, term) = data_leader(&nodes, &resource).await;
+        cache_mutation(
+            &nodes,
+            leader,
+            term,
+            "set-alpha",
+            json!({"kind": "set", "key": "alpha", "value": {"kind": "counter", "value": "1"}}),
+        )
+        .await;
+        cache_mutation(
+            &nodes,
+            leader,
+            term,
+            "set-beta",
+            json!({"kind": "set", "key": "beta", "value": {"kind": "counter", "value": "2"}}),
+        )
+        .await;
+        let accessed = cache_mutation(
+            &nodes,
+            leader,
+            term,
+            "get-alpha",
+            json!({"kind": "get", "key": "alpha"}),
+        )
+        .await;
+        assert_eq!(accessed["receipt"]["outcome"]["result"]["kind"], "accessed");
+        let admitted = cache_mutation(
+            &nodes,
+            leader,
+            term,
+            "set-gamma",
+            json!({"kind": "set", "key": "gamma", "value": {"kind": "counter", "value": "3"}}),
+        )
+        .await;
+        assert_eq!(
+            admitted["receipt"]["outcome"]["result"]["evicted_keys"],
+            json!(["beta"])
+        );
+        assert_cache_values(&nodes).await;
+
+        shutdown_cluster(&mut nodes).await;
+        let mut reopened = start_cluster(&root).await;
+        wait_for_catalog_resource_count(&reopened, 1).await;
+        reconcile_all(&reopened).await;
+        assert_cache_values(&reopened).await;
+        shutdown_cluster(&mut reopened).await;
     }
 }

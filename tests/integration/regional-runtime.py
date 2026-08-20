@@ -475,7 +475,12 @@ def wait_for_automatic_checkpoints(
             if require_local_creation:
                 created = exact_int(checkpoints.get("checkpoints_created"))
                 reclaimed = exact_int(checkpoints.get("compacted_log_entries"))
-                if created is None or created < expected_groups or reclaimed is None or reclaimed == 0:
+                if (
+                    created is None
+                    or created < expected_groups
+                    or reclaimed is None
+                    or reclaimed == 0
+                ):
                     return False
             for group in groups:
                 if not isinstance(group, dict):
@@ -588,6 +593,28 @@ def create_managed_resource(cluster: RegionalCluster, resource: Resource) -> Non
         managed_resource_request(resource, MANAGED_STREAM_SHARDS),
     )
     assert response.status == 201, response
+
+
+def create_managed_cache(cluster: RegionalCluster, resource: Resource) -> None:
+    request = managed_resource_request(resource)
+    spec = request["resource"]["spec"]
+    assert isinstance(spec, dict)
+    spec["configuration"] = {
+        "shard_count": 1,
+        "max_entries": 12,
+        "default_ttl_ms": None,
+        "eviction": "all_keys_lru",
+    }
+    response = cluster.control_request("PUT", "/v1/resources", request)
+    assert response.status == 201, response
+    managed = wait_for_managed_placement(
+        cluster, resource, "ready", 3, expected_shards=1
+    )
+    assert managed.get("cache_configuration") == {
+        "max_entries_per_shard": 12,
+        "default_ttl_ms": None,
+        "eviction": "all_keys_lru",
+    }, managed
 
 
 def prove_capacity_rejection(cluster: RegionalCluster) -> None:
@@ -964,13 +991,11 @@ def assert_python_sdk_fenced_consumption(
         records = fetched.get("records")
         assert isinstance(records, list), fetched
         expected = (
-            ["managed-orders-batch-1", "managed-orders-batch-2"]
-            if shard == 1
-            else []
+            ["managed-orders-batch-1", "managed-orders-batch-2"] if shard == 1 else []
         )
-        assert [record.get("envelope", {}).get("id") for record in records] == expected, (
-            fetched
-        )
+        assert [
+            record.get("envelope", {}).get("id") for record in records
+        ] == expected, fetched
 
 
 def prove_python_sdk_native_stream_after_failover(
@@ -1234,7 +1259,9 @@ def prove_python_sdk_native_stream_after_failover(
     except epoch_sdk.EpochAPIError as error:
         assert error.status == 409 and error.code == "fenced", error
     else:
-        raise AssertionError("stale consumer member unexpectedly fetched claimed records")
+        raise AssertionError(
+            "stale consumer member unexpectedly fetched claimed records"
+        )
 
 
 def queue_result(document: dict[str, Any], expected_kind: str) -> dict[str, Any]:
@@ -1613,6 +1640,50 @@ def prove_python_sdk_native_cache_after_failover(
     assert final.get("read_consistency") == "linearizable", final
     assert final.get("observation", {}).get("item") is None, final
 
+    status = client.status(resource.name, 0)
+    assert status.get("eviction") == "all_keys_lru", status
+    accessed = cache_result(
+        client.get(resource.name, 0, "python-cache-get-profile", "profile"),
+        "accessed",
+    )
+    assert accessed.get("item", {}).get("value") == {
+        "kind": "string",
+        "value": "v2",
+    }, accessed
+    batch = cache_result(
+        client.atomic_batch(
+            resource.name,
+            0,
+            "python-cache-admission-batch",
+            10,
+            [
+                epoch_sdk.RegionalCacheMutation.set(
+                    "batch-a", epoch_sdk.RegionalCacheValue.string("a")
+                ),
+                epoch_sdk.RegionalCacheMutation.set(
+                    "batch-b", epoch_sdk.RegionalCacheValue.string("b")
+                ),
+            ],
+        ),
+        "transaction_committed",
+    )
+    assert batch.get("revision") == "11", batch
+    admitted = cache_result(
+        client.set(
+            resource.name,
+            0,
+            "python-cache-evict-session",
+            "batch-c",
+            epoch_sdk.RegionalCacheValue.string("c"),
+        ),
+        "set",
+    )
+    assert admitted.get("evicted_keys") == ["session-1"], admitted
+    assert (
+        client.observe(resource.name, 0, "session-1").get("observation", {}).get("item")
+        is None
+    )
+
 
 def prove_python_sdk_native_queue_after_failover(
     cluster: RegionalCluster,
@@ -1794,7 +1865,10 @@ def run_campaign(cluster: RegionalCluster) -> None:
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
     wait_for_profile_apply(cluster, MANAGED_RESOURCE, 1)
     for resource in RESOURCES:
-        create_resource(cluster, resource)
+        if resource.kind == "cache":
+            create_managed_cache(cluster, resource)
+        else:
+            create_resource(cluster, resource)
         write_profile(cluster, resource, 1)
         wait_for_profile_apply(cluster, resource, 1)
     expected_resources = len(RESOURCES) + 1
@@ -1851,10 +1925,10 @@ def run_campaign(cluster: RegionalCluster) -> None:
     assert cache_new_leader != cache_old_leader
     assert cache_new_term > cache_old_term
     prove_python_sdk_native_cache_after_failover(cluster, cache)
-    wait_for_profile_apply(cluster, cache, 12, cache_survivors)
+    wait_for_profile_apply(cluster, cache, 15, cache_survivors)
     cluster.start_node(cache_old_leader)
     wait_for_nodes(cluster)
-    wait_for_profile_apply(cluster, cache, 12)
+    wait_for_profile_apply(cluster, cache, 15)
 
     bus = next(resource for resource in RESOURCES if resource.kind == "event-bus")
     bus_old_leader, bus_old_term = wait_for_routes(cluster, bus)
@@ -1890,7 +1964,7 @@ def run_campaign(cluster: RegionalCluster) -> None:
         expected = (
             12
             if resource == queue
-            else 12
+            else 15
             if resource == cache
             else 8
             if resource == bus

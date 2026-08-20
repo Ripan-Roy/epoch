@@ -297,6 +297,17 @@ func (client *RegionalCacheClient) Increment(ctx context.Context, cache string, 
 	return client.mutate(ctx, cache, shard, idempotencyKey, operation)
 }
 
+// Get returns one value and commits its access for deterministic LRU/LFU admission.
+// Use Observe when the read must remain pure and must not affect eviction order.
+func (client *RegionalCacheClient) Get(ctx context.Context, cache string, shard uint32, idempotencyKey, key string) (Document, error) {
+	if strings.TrimSpace(key) == "" {
+		return nil, fmt.Errorf("epoch: Cache key is required")
+	}
+	return client.mutate(ctx, cache, shard, idempotencyKey, map[string]any{
+		"kind": "get", "shard": uint32(0), "key": key,
+	})
+}
+
 // Transaction commits one to 128 distinct-key mutations at one shard revision.
 func (client *RegionalCacheClient) Transaction(ctx context.Context, cache string, shard uint32, idempotencyKey string, expectedRevision uint64, mutations []RegionalCacheMutation, lockGuards []RegionalCacheLockGuard) (Document, error) {
 	if len(mutations) == 0 || len(mutations) > maxRegionalCacheTransactionMutations {
@@ -330,6 +341,12 @@ func (client *RegionalCacheClient) Transaction(ctx context.Context, cache string
 		"expected_revision": strconv.FormatUint(expectedRevision, 10),
 		"mutations":         operations, "lock_guards": guards,
 	})
+}
+
+// AtomicBatch sends one ordered, distinct-key batch as one HTTP request and consensus proposal.
+// The complete batch commits or rejects together; it does not return partial pipeline results.
+func (client *RegionalCacheClient) AtomicBatch(ctx context.Context, cache string, shard uint32, idempotencyKey string, expectedRevision uint64, mutations []RegionalCacheMutation, lockGuards []RegionalCacheLockGuard) (Document, error) {
+	return client.Transaction(ctx, cache, shard, idempotencyKey, expectedRevision, mutations, lockGuards)
 }
 
 // AcquireLock creates or replaces an expired advisory lock lease.

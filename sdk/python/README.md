@@ -49,10 +49,10 @@ flow, mutation lookup, and status. See the
 [complete Queue example](../../console/src/quickstarts/regional_queue/quickstart.py)
 and [Queue contract guide](../../docs/REGIONAL_QUEUE_SDK.md).
 
-`RegionalCacheClient` exposes typed values, version/missing CAS, atomic
-transactions, fenced lock lifecycle, explicit expiry maintenance, mutation
-lookup, linearizable observation, and status through the same shared regional
-core. See the
+`RegionalCacheClient` exposes typed values, version/missing CAS, committed
+access for LRU/LFU, deterministic eviction receipts, atomic batches, fenced
+lock lifecycle, explicit expiry maintenance, mutation lookup, pure linearizable
+observation, and status through the same shared regional core. See the
 [complete Cache example](../../console/src/quickstarts/regional_cache/quickstart.py)
 and [Cache contract guide](../../docs/REGIONAL_CACHE_SDK.md).
 

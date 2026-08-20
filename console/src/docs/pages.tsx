@@ -779,7 +779,8 @@ export function RegionalCacheBody() {
       provisionBody={
         <p>
           Reuse the disposable three-zone topology and development credentials. The Go bridge provisions{" "}
-          <code>sessions</code>; application data then travels directly to the discovered Rust Cache leader.
+          <code>sessions</code> with an entry-count LRU policy; application data then travels directly to the
+          discovered Rust Cache leader.
         </p>
       }
       provisionLabel="Terminal C · provision"
@@ -795,8 +796,17 @@ export function RegionalCacheBody() {
             label="Atomicity &amp; fencing"
             claim="Revision checks and lock guards survive leader loss."
           >
-            CAS distinguishes exact version from missing-at-revision. Transactions commit one revision, while
-            guarded writes require the newest opaque lease token and expose a downstream fence.
+            CAS distinguishes exact version from missing-at-revision. Atomic batches preserve caller order and
+            commit through one request and proposal, while guarded writes require the newest opaque lease
+            token and expose a downstream fence.
+          </EvidenceCard>
+          <EvidenceCard
+            label="Deterministic eviction"
+            claim="Committed access produces the same victim everywhere."
+          >
+            Managed configuration reaches every voter. <code>Get</code> records LRU/LFU access exactly once;
+            pure <code>Observe</code> never changes order. All-key and volatile LRU, LFU, random, and TTL
+            admissions stage eviction with the write and report sorted victims.
           </EvidenceCard>
           <EvidenceCard
             label="Deterministic expiry"
@@ -810,9 +820,9 @@ export function RegionalCacheBody() {
       }
       boundary={
         <p>
-          Regional Cache v1 is a repository-local, single-shard alpha. Eviction families, multi-shard
-          transactions, snapshots, Pub/Sub, generated response models, and public package-registry releases
-          remain open.
+          Regional Cache v1 is a repository-local, single-shard alpha. Byte-pressure capacity and benchmarks,
+          native multiplexing/automatic batch coalescing, multi-shard transactions, exportable backup/PITR,
+          Pub/Sub, generated response models, and public package-registry releases remain open.
         </p>
       }
     />
@@ -1202,6 +1212,12 @@ export function ReferenceBody() {
             title="Regional Cache routing decision"
             description="Native v1 route shape, strict values and mutations, CAS/transaction/expiry/lock semantics, shared retry contract, and alpha boundaries."
             href={`${repositoryDocsUrl}/adr/0019-regional-cache-v1-and-sdk-routing.md`}
+          />
+          <ReferenceCard
+            eyebrow="Cache eviction"
+            title="Committed access and atomic batches"
+            description="Managed policy materialization, deterministic all-key/volatile victim selection, pure observation, one-request atomic batching, snapshot compatibility, and throughput non-claims."
+            href={`${repositoryDocsUrl}/adr/0032-regional-cache-eviction-and-access-batches.md`}
           />
           <ReferenceCard
             eyebrow="Event Bus design"

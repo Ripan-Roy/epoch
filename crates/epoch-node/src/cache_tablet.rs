@@ -21,7 +21,7 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use epoch_cache::{CacheConfig, CacheValue};
+use epoch_cache::{CacheConfig, CacheValue, EvictionPolicy};
 use epoch_consensus::{
     ApplicationSnapshot, CommittedProposal, ConsensusError, ConsensusRole, ConsensusStatus,
     LogIndex, ProposalLookup,
@@ -29,11 +29,12 @@ use epoch_consensus::{
 use epoch_core::Clock;
 use epoch_tablet::{
     CacheAcquireLockCommand, CacheCasExpectation, CacheCompareAndSetCommand, CacheDeleteCommand,
-    CacheIncrementCommand, CacheLockGuard, CacheMaintainCommand, CacheReleaseLockCommand,
-    CacheRenewLockCommand, CacheSetCommand, CacheTablet, CacheTabletCommand,
-    CacheTabletDisposition, CacheTabletObservation, CacheTabletOperation, CacheTabletReceipt,
-    CacheTabletScope, CacheTransactionCommand, CacheTransactionMutation, CommittedCommand,
-    MAX_CACHE_KEY_BYTES, MAX_CACHE_TABLET_COMMAND_BYTES, TabletError, cache_proposal_id_for,
+    CacheGetCommand, CacheIncrementCommand, CacheLockGuard, CacheMaintainCommand,
+    CacheReleaseLockCommand, CacheRenewLockCommand, CacheSetCommand, CacheTablet,
+    CacheTabletCommand, CacheTabletDisposition, CacheTabletObservation, CacheTabletOperation,
+    CacheTabletReceipt, CacheTabletScope, CacheTransactionCommand, CacheTransactionMutation,
+    CommittedCommand, MAX_CACHE_KEY_BYTES, MAX_CACHE_TABLET_COMMAND_BYTES, TabletError,
+    cache_proposal_id_for,
 };
 use serde::{
     Deserialize, Deserializer, Serialize,
@@ -225,6 +226,7 @@ impl CacheTabletService {
                 "Cache retained-entry count",
             )?,
             active_lock_count: usize_as_u64(tablet.active_lock_count(), "Cache active-lock count")?,
+            eviction: tablet.eviction(),
             cache_recovery_state_digest: hex_digest(tablet.cache_recovery_state_digest()),
             state_digest: hex_digest(tablet.state_digest()),
         })
@@ -327,6 +329,7 @@ impl CommittedProposalApplier for CacheTabletService {
                 || restored.state_digest() != snapshot.state_digest()
                 || restored.max_entries() != self.config.max_entries
                 || restored.default_ttl_ms() != self.config.default_ttl_ms
+                || restored.eviction() != self.config.eviction
             {
                 return Err(
                     "Cache application snapshot index, state digest, or configuration is invalid"
@@ -462,6 +465,11 @@ enum CacheOperationRequest {
         #[serde(default)]
         lock_guard: Option<CacheLockGuardRequest>,
     },
+    Get {
+        #[serde(default)]
+        shard: u32,
+        key: String,
+    },
     Transaction {
         #[serde(default)]
         shard: u32,
@@ -517,13 +525,7 @@ impl CacheOperationRequest {
                 value,
                 ttl_ms,
                 lock_guard,
-            } => CacheTabletOperation::Set(CacheSetCommand {
-                shard: *shard,
-                key: key.clone(),
-                value: value.to_cache_value()?,
-                ttl_ms: *ttl_ms,
-                lock_guard: lock_guard.as_ref().map(CacheLockGuardRequest::to_tablet),
-            }),
+            } => set_operation(*shard, key, value, *ttl_ms, lock_guard.as_ref())?,
             Self::Delete {
                 shard,
                 key,
@@ -542,14 +544,14 @@ impl CacheOperationRequest {
                 value,
                 ttl_ms,
                 lock_guard,
-            } => CacheTabletOperation::CompareAndSet(CacheCompareAndSetCommand {
-                shard: *shard,
-                key: key.clone(),
-                expected: expected.to_tablet(),
-                value: value.to_cache_value()?,
-                ttl_ms: *ttl_ms,
-                lock_guard: lock_guard.as_ref().map(CacheLockGuardRequest::to_tablet),
-            }),
+            } => compare_and_set_operation(
+                *shard,
+                key,
+                expected,
+                value,
+                *ttl_ms,
+                lock_guard.as_ref(),
+            )?,
             Self::Increment {
                 shard,
                 key,
@@ -564,6 +566,10 @@ impl CacheOperationRequest {
                 expected_version: *expected_version,
                 ttl_ms: *ttl_ms,
                 lock_guard: lock_guard.as_ref().map(CacheLockGuardRequest::to_tablet),
+            }),
+            Self::Get { shard, key } => CacheTabletOperation::Get(CacheGetCommand {
+                shard: *shard,
+                key: key.clone(),
             }),
             Self::Transaction {
                 shard,
@@ -609,6 +615,42 @@ impl CacheOperationRequest {
             }),
         })
     }
+}
+
+fn set_operation(
+    shard: u32,
+    key: &str,
+    value: &CacheValueRequest,
+    ttl_ms: Option<u64>,
+    lock_guard: Option<&CacheLockGuardRequest>,
+) -> TabletApiResult<CacheTabletOperation> {
+    Ok(CacheTabletOperation::Set(CacheSetCommand {
+        shard,
+        key: key.to_owned(),
+        value: value.to_cache_value()?,
+        ttl_ms,
+        lock_guard: lock_guard.map(CacheLockGuardRequest::to_tablet),
+    }))
+}
+
+fn compare_and_set_operation(
+    shard: u32,
+    key: &str,
+    expected: &CacheCasExpectationRequest,
+    value: &CacheValueRequest,
+    ttl_ms: Option<u64>,
+    lock_guard: Option<&CacheLockGuardRequest>,
+) -> TabletApiResult<CacheTabletOperation> {
+    Ok(CacheTabletOperation::CompareAndSet(
+        CacheCompareAndSetCommand {
+            shard,
+            key: key.to_owned(),
+            expected: expected.to_tablet(),
+            value: value.to_cache_value()?,
+            ttl_ms,
+            lock_guard: lock_guard.map(CacheLockGuardRequest::to_tablet),
+        },
+    ))
 }
 
 fn transaction_operation(
@@ -1152,6 +1194,7 @@ struct CacheTabletSnapshot {
     cache_revision: u64,
     retained_entry_count: u64,
     active_lock_count: u64,
+    eviction: EvictionPolicy,
     cache_recovery_state_digest: String,
     state_digest: String,
 }
@@ -1189,6 +1232,7 @@ struct CacheTabletStatus {
     retained_entry_count: u64,
     #[serde(serialize_with = "serialize_u64_as_decimal")]
     active_lock_count: u64,
+    eviction: EvictionPolicy,
     cache_recovery_state_digest: String,
     state_digest: String,
     write_guarantee: &'static str,
@@ -1243,6 +1287,7 @@ impl CacheTabletStatus {
             cache_revision: profile.cache_revision,
             retained_entry_count: profile.retained_entry_count,
             active_lock_count: profile.active_lock_count,
+            eviction: profile.eviction,
             cache_recovery_state_digest: profile.cache_recovery_state_digest,
             state_digest: profile.state_digest,
             write_guarantee: "fixed_three_voter_majority_persisted_then_local_profile_applied",

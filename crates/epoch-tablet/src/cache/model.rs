@@ -151,6 +151,8 @@ pub enum CacheTabletOperationResult {
     Set {
         key: String,
         item: CacheTabletItem,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        evicted_keys: Vec<String>,
     },
     Deleted {
         key: String,
@@ -169,6 +171,8 @@ pub enum CacheTabletOperationResult {
     ComparedAndSet {
         key: String,
         item: CacheTabletItem,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        evicted_keys: Vec<String>,
     },
     Incremented {
         key: String,
@@ -187,6 +191,17 @@ pub enum CacheTabletOperationResult {
             deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
         )]
         expires_at_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        evicted_keys: Vec<String>,
+    },
+    Accessed {
+        key: String,
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
+        revision: u64,
+        item: Option<CacheTabletItem>,
     },
     TransactionCommitted {
         #[serde(
@@ -195,6 +210,8 @@ pub enum CacheTabletOperationResult {
         )]
         revision: u64,
         results: Vec<CacheTransactionMutationResult>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        evicted_keys: Vec<String>,
     },
     LockAcquired {
         lock_key: String,

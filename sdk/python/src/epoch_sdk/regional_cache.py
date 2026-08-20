@@ -194,6 +194,22 @@ class RegionalCacheClient(RegionalClient):
             cache, shard, idempotency_key, _set_operation(key, value, ttl_ms, lock_guard)
         )
 
+    def get(
+        self,
+        cache: str,
+        shard: int,
+        idempotency_key: str,
+        key: str,
+    ) -> dict[str, Any]:
+        """Return one value and commit its access for deterministic LRU/LFU admission."""
+        _required(key, "Cache key")
+        return self._mutate(
+            cache,
+            shard,
+            idempotency_key,
+            {"kind": "get", "shard": 0, "key": key},
+        )
+
     def delete(
         self,
         cache: str,
@@ -279,6 +295,26 @@ class RegionalCacheClient(RegionalClient):
                 "mutations": [mutation.to_wire() for mutation in mutations],
                 "lock_guards": guards,
             },
+        )
+
+    def atomic_batch(
+        self,
+        cache: str,
+        shard: int,
+        idempotency_key: str,
+        expected_revision: int,
+        mutations: list[RegionalCacheMutation] | tuple[RegionalCacheMutation, ...],
+        *,
+        lock_guards: list[RegionalCacheLockGuard] | tuple[RegionalCacheLockGuard, ...] = (),
+    ) -> dict[str, Any]:
+        """Send one ordered atomic batch as one HTTP request and consensus proposal."""
+        return self.transaction(
+            cache,
+            shard,
+            idempotency_key,
+            expected_revision,
+            mutations,
+            lock_guards=lock_guards,
         )
 
     def acquire_lock(

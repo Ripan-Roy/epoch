@@ -73,10 +73,11 @@ class RegionalCacheClientTests(unittest.TestCase):
             lock_guard=guard,
         )
         self.client.increment("sessions/eu", 0, "inc-1", "visits", -3, expected_version=0)
-        self.client.transaction(
+        self.client.get("sessions/eu", 0, "get-1", "profile")
+        self.client.atomic_batch(
             "sessions/eu",
             0,
-            "tx-1",
+            "batch-1",
             4,
             [
                 RegionalCacheMutation.set("hash", values[3]),
@@ -106,16 +107,17 @@ class RegionalCacheClientTests(unittest.TestCase):
             "caches/sessions%2Feu/shards/0"
         )
         operations = self.transport.requests[1::2]
-        self.assertEqual(len(operations), 12)
+        self.assertEqual(len(operations), 13)
         self.assertTrue(all(request["path"].startswith(base) for request in operations))
-        tx = operations[4]["body"]["operation"]
+        self.assertEqual(operations[4]["body"]["operation"]["kind"], "get")
+        tx = operations[5]["body"]["operation"]
         self.assertEqual(tx["expected_revision"], "4")
         self.assertEqual(tx["mutations"][3]["value"]["kind"], "sorted_set")
         self.assertEqual(tx["mutations"][4]["expected"]["shard_revision"], "4")
-        self.assertEqual(operations[5]["body"]["operation"]["owner_epoch"], "7")
-        self.assertEqual(operations[9]["path"], f"{base}/mutations/12")
-        self.assertEqual(operations[10]["query"], {"key": "profile"})
-        for request in operations[9:]:
+        self.assertEqual(operations[6]["body"]["operation"]["owner_epoch"], "7")
+        self.assertEqual(operations[10]["path"], f"{base}/mutations/12")
+        self.assertEqual(operations[11]["query"], {"key": "profile"})
+        for request in operations[10:]:
             self.assertEqual(request["headers"]["x-epoch-read-consistency"], "linearizable")
 
     def test_invalid_values_and_bounds_fail_before_network(self) -> None:

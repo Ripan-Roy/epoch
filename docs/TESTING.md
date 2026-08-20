@@ -267,14 +267,17 @@ fairness, complete crash/I/O-fault, or production placement matrix. See
 The Cache suite checks pure observations, checked shard revisions and
 non-repeating item versions, distinct-key transaction bounds, absent-state ABA
 protection, atomic rollback on version/type/counter/deadline/revision/capacity
-failure, deterministic expiry, no-eviction behavior, advisory lock contention,
+failure, deterministic expiry, committed-access exact replay, deterministic
+all-key/volatile LRU, LFU, random, and TTL eviction, snapshot compatibility,
+advisory lock contention,
 token rotation, active-owner epoch and cross-entry-term fencing, bounded
 owner-history reclamation, guarded writes, descending candidate-time clamping,
 exact replay, and independent-tablet digest convergence. Node-service tests add
 strict recursive HTTP decoding, decimal 64-bit boundaries, fail-stop recovery,
 real three-runtime majority application, and EPRS reopen. The container gate
-adds follower/stale-term rejection, exact retry/conflict, CAS/transaction
-rollback, TTL maintenance, lock fencing across leader replacement, catch-up,
+adds follower/stale-term rejection, exact retry/conflict, CAS/atomic-batch
+rollback, committed LRU access and capacity eviction, TTL maintenance, lock
+fencing across leader replacement, catch-up,
 convergence, and all-node `SIGKILL` replay. A concurrent linearizability history,
 read barrier, I/O-fault matrix, and production placement proof remain required;
 see [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
@@ -481,8 +484,9 @@ immutable dead-letter observation, redrive, final settlement, and linearizable
 counts/flow/redrive reads. It waits for 12
 Queue commands to converge on the survivors and catches up the old voter. It
 repeats the leader-loss proof with the real Python `RegionalCacheClient` across
-strict values, CAS, transaction, fenced locks, automatic expiry, mutation
-lookup, observation, and status. Finally, the real Python `RegionalBusClient`
+strict values, CAS, committed LRU access, an atomic batch, deterministic
+capacity eviction, fenced locks, automatic expiry, mutation lookup, pure
+observation, and status. Finally, the real Python `RegionalBusClient`
 proves exact publish, archive replay, acquire/automatic-timeout/reacquire/ack,
 acknowledged-delivery query, subscription removal, and linearizable status
 after Event Bus leader loss. Before faulting the cluster, the campaign waits

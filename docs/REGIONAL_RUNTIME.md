@@ -310,8 +310,10 @@ The Cache client uses the fully qualified versioned shard route:
 Go, Java, and Python expose `RegionalCacheClient` over the same authenticated
 discovery, fencing, linearizable-read, and one-rediscovery core. The typed value
 surface covers string, blob, signed counter, hash, list, unique set, and
-finite-score sorted set. Mutations cover set, delete, CAS, increment, atomic
-transaction, lock acquire/renew/release, and expiry maintenance. The regional
+finite-score sorted set. Mutations cover set, committed access, delete, CAS,
+increment, atomic transaction/batch, lock acquire/renew/release, and expiry
+maintenance. Managed configuration carries entry capacity, default TTL, and
+the deterministic no-eviction/all-key/volatile policy into every voter. The regional
 leader schedules due expiry automatically; explicit SDK maintenance remains
 available.
 Reads cover mutation lookup, key observation, and tablet status.
@@ -319,7 +321,8 @@ Reads cover mutation lookup, key observation, and tablet status.
 The exact compiled examples, value/transaction/lock guidance, and retry
 semantics are in [Regional Cache SDK](REGIONAL_CACHE_SDK.md) and embedded on the
 published docs page. The real campaign kills the Cache leader before running
-the Python client, then catches up the old voter and reopens every EPRS volume.
+the Python client, then proves committed LRU access, atomic batching, capacity
+eviction, catches up the old voter, and reopens every EPRS volume.
 
 ## Use the regional Event Bus v1 SDK
 

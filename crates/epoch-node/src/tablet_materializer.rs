@@ -10,8 +10,9 @@ use std::{
 
 use axum::Router;
 use epoch_bus::BusConfig;
+use epoch_cache::CacheConfig;
 use epoch_catalog::{ResourceName, ResourceRecord, TabletDescriptor};
-use epoch_core::{Clock, WorkloadProfile};
+use epoch_core::{Clock, DurabilityProfile, WorkloadProfile};
 use epoch_tablet::{
     BusTabletScope, CacheTabletScope, QueueTabletScope, StreamTabletScope, TabletError,
 };
@@ -36,6 +37,7 @@ const SUPPORTED_REPLICA_COUNT: u16 = 3;
 pub struct MaterializedTabletMetadata {
     pub resource: ResourceName,
     pub shard_count: u32,
+    pub configuration: Option<serde_json::Value>,
     pub descriptor: TabletDescriptor,
 }
 
@@ -431,9 +433,10 @@ impl RegionalTabletMaterializer {
             metadata.resource.name.clone(),
         )?;
         let service = match descriptor.workload_profile {
-            WorkloadProfile::CacheAndState => PendingTabletService::Cache(
-                CacheTabletService::with_default_config(CacheTabletScope::clone(&scope))?,
-            ),
+            WorkloadProfile::CacheAndState => PendingTabletService::Cache(CacheTabletService::new(
+                CacheTabletScope::clone(&scope),
+                cache_config(&metadata)?,
+            )?),
             WorkloadProfile::StreamLog => {
                 PendingTabletService::Stream(StreamTabletService::new_for_shard(
                     scope.clone(),
@@ -573,6 +576,7 @@ fn validate_desired_tablets(
                     MaterializedTabletMetadata {
                         resource: resource.name.clone(),
                         shard_count: resource.spec.shard_count,
+                        configuration: resource.spec.configuration.clone(),
                         descriptor: descriptor.clone(),
                     },
                 )
@@ -593,6 +597,7 @@ fn same_runtime_identity(
     desired: &MaterializedTabletMetadata,
 ) -> bool {
     current.resource == desired.resource
+        && current.configuration == desired.configuration
         && current.descriptor.tablet_id == desired.descriptor.tablet_id
         && current.descriptor.consensus_group_id == desired.descriptor.consensus_group_id
         && current.descriptor.shard_index == desired.descriptor.shard_index
@@ -600,16 +605,35 @@ fn same_runtime_identity(
         && current.descriptor.workload_profile == desired.descriptor.workload_profile
 }
 
+fn cache_config(metadata: &MaterializedTabletMetadata) -> TabletMaterializerResult<CacheConfig> {
+    match metadata.configuration.clone() {
+        Some(configuration) => serde_json::from_value(configuration).map_err(|error| {
+            TabletMaterializerError::InvalidCatalog(format!(
+                "Cache tablet {} configuration is invalid: {error}",
+                metadata.descriptor.tablet_id
+            ))
+        }),
+        None => Ok(CacheConfig {
+            durability: DurabilityProfile::QuorumDurable,
+            ..CacheConfig::default()
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
-    use axum::{body::Body, http::Request};
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+    };
+    use epoch_cache::{CacheConfig, EvictionPolicy};
     use epoch_catalog::{ApplyResource, CatalogCommand, DeleteResource, ResourceSpec};
     use epoch_consensus::{
         CommitReceipt, CommittedProposal, GroupEpoch, GroupId, LogIndex, ProposalId, Term,
     };
-    use epoch_core::{ManualClock, ResourceKind};
+    use epoch_core::{DurabilityProfile, ManualClock, ResourceKind};
     use tempfile::TempDir;
     use tower::ServiceExt;
     use url::Url;
@@ -653,6 +677,7 @@ mod tests {
                 workload_profile: profile,
                 shard_count: shards,
                 replica_count: SUPPORTED_REPLICA_COUNT,
+                configuration: None,
             },
         })
     }
@@ -672,15 +697,28 @@ mod tests {
 
     fn catalog_with_all_profiles() -> Arc<CatalogTabletService> {
         let catalog = CatalogTabletService::new(CatalogTabletScope::new(900, 1).unwrap());
+        let mut cache = resource_command(
+            "cache-v1",
+            ResourceKind::Cache,
+            "sessions",
+            WorkloadProfile::CacheAndState,
+            1,
+            None,
+        );
+        let CatalogCommand::Apply(request) = &mut cache else {
+            unreachable!();
+        };
+        request.spec.configuration = Some(
+            serde_json::to_value(CacheConfig {
+                max_entries: 2,
+                default_ttl_ms: None,
+                eviction: EvictionPolicy::AllKeysLru,
+                durability: DurabilityProfile::QuorumDurable,
+            })
+            .unwrap(),
+        );
         for (index, command) in [
-            resource_command(
-                "cache-v1",
-                ResourceKind::Cache,
-                "sessions",
-                WorkloadProfile::CacheAndState,
-                1,
-                None,
-            ),
+            cache,
             resource_command(
                 "stream-v1",
                 ResourceKind::Stream,
@@ -886,6 +924,13 @@ mod tests {
                 .await
                 .expect("profile router should answer");
             assert_eq!(response.status(), axum::http::StatusCode::OK);
+            if profile == WorkloadProfile::CacheAndState {
+                let body = to_bytes(response.into_body(), 64 * 1024)
+                    .await
+                    .expect("Cache status body should be bounded");
+                let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(status["eviction"], "all_keys_lru");
+            }
             observed.insert(profile);
         }
         assert_eq!(

@@ -480,6 +480,7 @@ mod tests {
                 workload_profile: WorkloadProfile::StreamLog,
                 shard_count: shards,
                 replica_count: 3,
+                configuration: None,
             },
         })
     }

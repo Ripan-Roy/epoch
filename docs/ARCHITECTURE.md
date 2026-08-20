@@ -366,8 +366,9 @@ join/heartbeat/leave/maintenance plus membership/assignment observation. Queue
 exposes its complete implemented lifecycle: enqueue,
 credit acquire, all lease dispositions, maintenance, histories, redrive,
 counts, flow, mutation lookup, and status. Cache exposes every strict value
-kind, set/delete/CAS/increment, atomic transactions, fenced locks, explicit
-expiry, observation, mutation lookup, and status. The generic regional and direct
+kind, set/committed-get/delete/CAS/increment, atomic transactions/batches,
+deterministic eviction, fenced locks, explicit expiry, pure observation,
+mutation lookup, and status. The generic regional and direct
 tablet routes remain internal verification surfaces. Event Bus exposes
 subscription upsert/removal, publish, delivery acquire/ack/fail/reject/maintenance,
 mutation lookup, archive replay, delivery query, and status. Its regional
@@ -404,8 +405,9 @@ redelivery, immutable history, convergence, and all-node `SIGKILL` replay. See
 
 The Cache profile now has a separate deterministic tablet boundary. An additive
 `epoch-cache::CacheShard` uses sorted state, a checked shard-global revision,
-pure reads, bounded staged transactions, checked counter/TTL arithmetic, and
-deterministic expiry without changing the original volatile `Cache`. The
+pure reads, committed LRU/LFU access metadata, bounded staged transactions,
+checked counter/TTL arithmetic, deterministic policy eviction, and expiry
+without changing the original volatile `Cache`. The
 single-shard `epoch-tablet::CacheTablet` adds canonical committed commands,
 absent-state ABA protection, advisory entry-term-fenced locks, exact replay,
 recorded rejection outcomes, and a chained digest. `epoch-node` attaches it as
@@ -592,8 +594,10 @@ unless an explicitly supported transaction domain is selected. RESP
 compatibility must report unsupported cross-slot or scripting behavior instead
 of silently weakening it.
 
-The first replicated Cache tablet intentionally supports only shard `0`,
-`no-eviction`, and bounded distinct-key transactions. Item versions are drawn
+The first replicated Cache tablet intentionally supports only shard `0` and
+bounded distinct-key transactions. Its catalog-bound immutable configuration
+selects entry capacity, default TTL, and no-eviction or all-key/volatile
+LRU/LFU/random/TTL eviction. Item versions are drawn
 from a checked shard-global revision so delete/recreate and expiry/recreate do
 not repeat versions. Reads treat an expired value as absent without mutating
 state; maintenance reclaims values in `(deadline, key)` order. In the regional
@@ -611,11 +615,20 @@ canonical voter-recovery snapshot and compacted EPRS baseline; downloadable
 Cache backups/PITR, multi-shard routing, and the full concurrency history remain
 open.
 
+Pure `Observe` retains read-barrier semantics without affecting eviction.
+Version-2 committed `Get` records access for LRU/LFU exactly once and returns
+the prior receipt on retry. Eviction is staged with the mutation, uses canonical
+tie breaking or deterministic SHA-256 ranking for random policies, and reports
+sorted victims. The SDK `AtomicBatch` aliases the existing one-request,
+one-proposal transaction command; native multiplexing and automatic coalescing
+remain open.
+
 The regional Cache v1 adapter delegates directly to this tablet. SDK reads
 always request a leader ReadIndex; mutations carry discovered generation,
 tablet epoch, term, and a caller-owned idempotency key. The Go, Java, and Python
 clients validate typed values, transaction bounds, owner epochs, opaque lease
-tokens, and maintenance limits before discovery. They do not add another cache
+tokens, and maintenance limits before discovery. They reuse their HTTP
+transports and expose committed access plus atomic-batch helpers, but do not add another cache
 state machine or turn the fixed-voter alpha into a production durability claim.
 
 ### 8.4 Event Bus
@@ -1026,3 +1039,4 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0029: Session-Fenced Stream Consumption](adr/0029-stream-session-fenced-consumption.md)
 - [ADR-0030: Leader-Owned Signed Webhook Delivery](adr/0030-leader-owned-signed-webhook-delivery.md)
 - [ADR-0031: Leader-Owned Epoch Queue and Stream Target Delivery](adr/0031-leader-owned-epoch-target-delivery.md)
+- [ADR-0032: Regional Cache Eviction and Committed Access Batches](adr/0032-regional-cache-eviction-and-access-batches.md)

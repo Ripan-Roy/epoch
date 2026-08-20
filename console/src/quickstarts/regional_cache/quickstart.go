@@ -30,6 +30,8 @@ func main() {
 	version := decimal(result(written)["item"].(map[string]any)["version"])
 	compared, err := client.CompareAndSet(ctx, "sessions", 0, "docs-go-cache-cas-v1", "profile", epoch.RegionalCacheVersion(version), epoch.NewRegionalCacheHash(map[string]string{"name": "alice", "role": "admin"}), epoch.RegionalCacheWriteOptions{})
 	must(err)
+	committedGet, err := client.Get(ctx, "sessions", 0, "docs-go-cache-get-v1", "profile")
+	must(err)
 	observation, err := client.Observe(ctx, "sessions", 0, "profile")
 	must(err)
 	revision := decimal(observation["observation"].(map[string]any)["shard_revision"])
@@ -37,7 +39,7 @@ func main() {
 	must(err)
 	rank, err := epoch.NewRegionalCacheSortedSet(map[string]float64{"alice": 9.5})
 	must(err)
-	transaction, err := client.Transaction(ctx, "sessions", 0, "docs-go-cache-transaction-v1", revision, []epoch.RegionalCacheMutation{
+	batch, err := client.AtomicBatch(ctx, "sessions", 0, "docs-go-cache-batch-v1", revision, []epoch.RegionalCacheMutation{
 		epoch.NewRegionalCacheSetMutation("visits", epoch.NewRegionalCacheCounter(1), nil),
 		epoch.NewRegionalCacheSetMutation("recent", epoch.NewRegionalCacheList([]string{"home", "checkout"}), nil),
 		epoch.NewRegionalCacheSetMutation("roles", roles, nil),
@@ -63,7 +65,7 @@ func main() {
 	must(err)
 
 	output, err := json.MarshalIndent(map[string]any{
-		"set": written, "exact_retry": replayed, "cas": compared, "transaction": transaction,
+		"set": written, "exact_retry": replayed, "cas": compared, "committed_get": committedGet, "atomic_batch": batch,
 		"guarded_increment": guarded, "release": released, "ttl": ephemeral, "maintain": maintained,
 		"profile": observation, "status": status,
 	}, "", "  ")

@@ -28,6 +28,7 @@ type AuthorityApplyRequest struct {
 	ExpectedGeneration uint64
 	ShardCount         uint32
 	ReplicaCount       uint16
+	Configuration      map[string]any
 }
 
 // AuthorityObservation contains achieved catalog identity and placement.
@@ -171,6 +172,7 @@ func (reconciler *Reconciler) Reconcile(
 			ExpectedGeneration: resource.Status.ObservedGeneration,
 			ShardCount:         spec.ShardCount,
 			ReplicaCount:       spec.ReplicaCount,
+			Configuration:      spec.Configuration,
 		})
 	} else {
 		observation, err = reconciler.authority.Observe(ctx, resource.ResourceKey)

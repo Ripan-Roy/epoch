@@ -67,9 +67,9 @@ DLQ/redrive history, redrive, counts, flow, mutation lookup, and status. See the
 and [Queue contract guide](../../docs/REGIONAL_QUEUE_SDK.md).
 
 `RegionalCacheClient` exposes strict string/blob/counter/hash/list/set/sorted-set
-values, set/delete/CAS/increment, bounded transactions, fenced lock lifecycle,
-explicit expiry maintenance, mutation lookup, observation, and status over the
-same regional core. See the
+values, set/delete/CAS/increment, committed access for deterministic LRU/LFU,
+bounded atomic batches, fenced lock lifecycle, explicit expiry maintenance,
+mutation lookup, pure observation, and status over the same regional core. See the
 [complete Cache example](../../console/src/quickstarts/regional_cache/quickstart.go)
 and [Cache contract guide](../../docs/REGIONAL_CACHE_SDK.md).
 

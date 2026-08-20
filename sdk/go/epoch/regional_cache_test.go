@@ -43,12 +43,15 @@ func TestRegionalCacheClientRoutesCompleteMutationAndReadContracts(t *testing.T)
 	if _, err = client.Increment(ctx, cache, 0, "inc-1", "visits", -3, RegionalCacheIncrementOptions{ExpectedVersion: pointer(uint64(0))}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err = client.Get(ctx, cache, 0, "get-1", "profile"); err != nil {
+		t.Fatal(err)
+	}
 	mutations := []RegionalCacheMutation{
 		NewRegionalCacheSetMutation("set", setValue, nil),
 		NewRegionalCacheSetMutation("rank", sortedValue, nil),
 		NewRegionalCacheCompareAndSetMutation("new", RegionalCacheMissing(4), NewRegionalCacheCounter(-2), nil),
 	}
-	if _, err = client.Transaction(ctx, cache, 0, "tx-1", 4, mutations, []RegionalCacheLockGuard{guard}); err != nil {
+	if _, err = client.AtomicBatch(ctx, cache, 0, "batch-1", 4, mutations, []RegionalCacheLockGuard{guard}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = client.AcquireLock(ctx, cache, 0, "lock-1", "critical", "worker-a", 7, 3_000); err != nil {
@@ -78,14 +81,25 @@ func TestRegionalCacheClientRoutesCompleteMutationAndReadContracts(t *testing.T)
 	for index := 1; index < len(leader.requests); index += 2 {
 		operations = append(operations, leader.requests[index])
 	}
-	if len(operations) != 12 {
-		t.Fatalf("expected 12 operations, got %d", len(operations))
+	if len(operations) != 13 {
+		t.Fatalf("expected 13 operations, got %d", len(operations))
 	}
-	if operations[0].Path != base+"/mutations" || operations[9].Path != base+"/mutations/12" {
+	if operations[0].Path != base+"/mutations" || operations[10].Path != base+"/mutations/12" {
 		t.Fatalf("unexpected Cache paths: %#v", operations)
 	}
 	var transaction map[string]any
-	payload, err := json.Marshal(operations[4].Body)
+	getPayload, err := json.Marshal(operations[4].Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var get map[string]any
+	if err = json.Unmarshal(getPayload, &get); err != nil {
+		t.Fatal(err)
+	}
+	if get["operation"].(map[string]any)["kind"] != "get" {
+		t.Fatalf("unexpected committed Get: %#v", get)
+	}
+	payload, err := json.Marshal(operations[5].Body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,10 +110,10 @@ func TestRegionalCacheClientRoutesCompleteMutationAndReadContracts(t *testing.T)
 	if operation["expected_revision"] != "4" || operation["kind"] != "transaction" {
 		t.Fatalf("unexpected transaction: %#v", operation)
 	}
-	if operations[10].Query.Get("key") != "profile" {
-		t.Fatalf("unexpected observation query: %#v", operations[10].Query)
+	if operations[11].Query.Get("key") != "profile" {
+		t.Fatalf("unexpected observation query: %#v", operations[11].Query)
 	}
-	for _, request := range operations[9:] {
+	for _, request := range operations[10:] {
 		if request.Headers[regionalReadHeader] != "linearizable" {
 			t.Fatalf("read %q was not linearizable", request.Path)
 		}

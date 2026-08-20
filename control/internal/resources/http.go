@@ -225,21 +225,28 @@ type regionalInventoryResponse struct {
 }
 
 type regionalResourceView struct {
-	CanonicalName      string                 `json:"canonical_name"`
-	Organization       string                 `json:"organization"`
-	Project            string                 `json:"project"`
-	Environment        string                 `json:"environment"`
-	Namespace          string                 `json:"namespace"`
-	Kind               Kind                   `json:"kind"`
-	Name               string                 `json:"name"`
-	Generation         string                 `json:"generation"`
-	ObservedGeneration string                 `json:"observed_generation"`
-	WorkloadProfile    string                 `json:"workload_profile"`
-	ShardCount         uint32                 `json:"shard_count"`
-	Phase              ResourcePhase          `json:"phase"`
-	Message            string                 `json:"message,omitempty"`
-	Tablets            []regionalTabletView   `json:"tablets"`
-	Placement          *regionalPlacementView `json:"placement,omitempty"`
+	CanonicalName      string                          `json:"canonical_name"`
+	Organization       string                          `json:"organization"`
+	Project            string                          `json:"project"`
+	Environment        string                          `json:"environment"`
+	Namespace          string                          `json:"namespace"`
+	Kind               Kind                            `json:"kind"`
+	Name               string                          `json:"name"`
+	Generation         string                          `json:"generation"`
+	ObservedGeneration string                          `json:"observed_generation"`
+	WorkloadProfile    string                          `json:"workload_profile"`
+	ShardCount         uint32                          `json:"shard_count"`
+	Phase              ResourcePhase                   `json:"phase"`
+	Message            string                          `json:"message,omitempty"`
+	Tablets            []regionalTabletView            `json:"tablets"`
+	Placement          *regionalPlacementView          `json:"placement,omitempty"`
+	CacheConfiguration *regionalCacheConfigurationView `json:"cache_configuration,omitempty"`
+}
+
+type regionalCacheConfigurationView struct {
+	MaxEntriesPerShard uint64  `json:"max_entries_per_shard"`
+	DefaultTTLMS       *uint64 `json:"default_ttl_ms"`
+	Eviction           string  `json:"eviction"`
 }
 
 type regionalTabletView struct {
@@ -356,6 +363,7 @@ func regionalResourceForBrowser(resource Resource) regionalResourceView {
 		Message:            resource.Status.Message,
 		Tablets:            tablets,
 		Placement:          regionalPlacementForBrowser(resource.Status.Placement),
+		CacheConfiguration: browserCacheConfiguration(resource.Kind, resource.Spec),
 	}
 }
 
@@ -403,6 +411,43 @@ func browserShardCount(raw json.RawMessage) uint32 {
 		return spec.ShardCount
 	}
 	return spec.Configuration.ShardCount
+}
+
+func browserCacheConfiguration(kind Kind, raw json.RawMessage) *regionalCacheConfigurationView {
+	if kind != KindCache {
+		return nil
+	}
+	var spec struct {
+		Configuration *struct {
+			MaxEntries   uint64  `json:"max_entries"`
+			DefaultTTLMS *uint64 `json:"default_ttl_ms"`
+			Eviction     string  `json:"eviction"`
+		} `json:"configuration"`
+	}
+	if err := json.Unmarshal(raw, &spec); err != nil || spec.Configuration == nil {
+		return nil
+	}
+	configuration := spec.Configuration
+	if configuration.MaxEntries == 0 ||
+		(configuration.DefaultTTLMS != nil && *configuration.DefaultTTLMS == 0) ||
+		!browserCacheEviction(configuration.Eviction) {
+		return nil
+	}
+	return &regionalCacheConfigurationView{
+		MaxEntriesPerShard: configuration.MaxEntries,
+		DefaultTTLMS:       configuration.DefaultTTLMS,
+		Eviction:           configuration.Eviction,
+	}
+}
+
+func browserCacheEviction(eviction string) bool {
+	switch eviction {
+	case "no_eviction", "all_keys_lru", "all_keys_lfu", "all_keys_random",
+		"volatile_lru", "volatile_lfu", "volatile_random", "volatile_ttl":
+		return true
+	default:
+		return false
+	}
 }
 
 func browserWorkloadProfile(kind Kind) string {

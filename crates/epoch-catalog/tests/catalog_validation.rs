@@ -1,6 +1,6 @@
 use epoch_catalog::{
-    ApplyResource, CATALOG_COMMAND_FORMAT_VERSION, Catalog, CatalogCommand, CatalogError,
-    ResourceName, ResourceSpec, catalog_proposal_id_for,
+    ApplyResource, CATALOG_COMMAND_FORMAT_VERSION, CATALOG_CONFIG_COMMAND_FORMAT_VERSION, Catalog,
+    CatalogCommand, CatalogError, ResourceName, ResourceSpec, catalog_proposal_id_for,
 };
 use epoch_core::{ResourceKind, WorkloadProfile};
 
@@ -17,6 +17,7 @@ fn apply(kind: ResourceKind, profile: WorkloadProfile) -> CatalogCommand {
             workload_profile: profile,
             shard_count: 1,
             replica_count: 3,
+            configuration: None,
         },
     })
 }
@@ -93,6 +94,62 @@ fn versioned_command_decoder_rejects_unknown_versions_and_unknown_fields() {
     assert!(matches!(
         CatalogCommand::decode(&unknown),
         Err(CatalogError::Decoding(_))
+    ));
+}
+
+#[test]
+fn profile_configuration_is_versioned_persisted_and_immutable() {
+    let mut configured = apply(ResourceKind::Cache, WorkloadProfile::CacheAndState);
+    let CatalogCommand::Apply(request) = &mut configured else {
+        unreachable!();
+    };
+    request.spec.configuration = Some(serde_json::json!({
+        "max_entries": 2,
+        "default_ttl_ms": null,
+        "eviction": "all_keys_lru",
+        "durability": "quorum_durable"
+    }));
+    let expected_configuration = request.spec.configuration.clone();
+    let encoded = configured.encode().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&encoded).unwrap()["format_version"],
+        CATALOG_CONFIG_COMMAND_FORMAT_VERSION
+    );
+    assert_eq!(CatalogCommand::decode(&encoded).unwrap(), configured);
+
+    let mut catalog = Catalog::new();
+    let created = catalog.apply(configured.clone()).unwrap();
+    assert_eq!(
+        created.resource().unwrap().spec.configuration,
+        expected_configuration
+    );
+    let snapshot = catalog.encode_snapshot().unwrap();
+    let restored = Catalog::decode_snapshot(&snapshot).unwrap();
+    assert_eq!(
+        restored.state_digest().unwrap(),
+        catalog.state_digest().unwrap()
+    );
+
+    let mut changed = configured;
+    let CatalogCommand::Apply(request) = &mut changed else {
+        unreachable!();
+    };
+    request.request_token = "change-cache-policy".into();
+    request.expected_generation = Some(1);
+    request.spec.configuration.as_mut().unwrap()["eviction"] = serde_json::json!("all_keys_lfu");
+    assert_eq!(
+        catalog.apply(changed).unwrap_err(),
+        CatalogError::ConfigurationMismatch
+    );
+
+    let mut invalid = apply(ResourceKind::Cache, WorkloadProfile::CacheAndState);
+    let CatalogCommand::Apply(request) = &mut invalid else {
+        unreachable!();
+    };
+    request.spec.configuration = Some(serde_json::json!("not-an-object"));
+    assert!(matches!(
+        Catalog::new().apply(invalid),
+        Err(CatalogError::InvalidSpec(_))
     ));
 }
 

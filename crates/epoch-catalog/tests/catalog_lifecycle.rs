@@ -21,6 +21,7 @@ fn stream(name: &str, shards: u32) -> CatalogCommand {
             workload_profile: WorkloadProfile::StreamLog,
             shard_count: shards,
             replica_count: 3,
+            configuration: None,
         },
     })
 }

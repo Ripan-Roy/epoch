@@ -162,5 +162,12 @@ export function mapRegionalInventory(resource: ManagedRegionalResource): Regiona
     summary,
     risks,
     placement: topology,
+    cacheConfiguration: resource.cache_configuration
+      ? {
+          maxEntriesPerShard: resource.cache_configuration.max_entries_per_shard,
+          defaultTTLMS: resource.cache_configuration.default_ttl_ms,
+          eviction: resource.cache_configuration.eviction,
+        }
+      : null,
   };
 }
