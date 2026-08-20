@@ -12,34 +12,31 @@ Epoch has 120 catalog requirements: 51 P0, 54 P1, 14 P2, and one explicitly defe
 
 The credible program remains the PRD's 21–26 month route to initial GA for an experienced 12–15 person team. The first 90 days produce a fault-injected vertical slice, not a production broker. Correctness, recovery, and truthful guarantees are schedule gates; protocol and connector breadth are not.
 
-The active M1/M2 boundary is the regional multi-tablet feature. Protected
-`main` evidence now covers the consensus-backed catalog, durable hosted control,
-bootstrap authorization, topology admission, quorum-confirmed leader ReadIndex
-barriers, Queue credit flow, Stream batches and consumer checkpoints, all four
-regional profile SDKs, profile-native checkpoint restore with physical EPRS
-reclamation, replicated Stream time/size/combined retention, and multi-shard
-Stream routing, consumer sessions, and regional atomic batch SDKs. PR #62 proves
-independently replicated ordered partitions, versioned FNV-1a UTF-8 discovery,
-generation-pinned Go/Java/Python keyed append, logical response identities,
-fail-closed expansion races, and a real three-shard Python recovery campaign.
-PR #63, exact-main CI, main-only Pages, and the live docs prove a replicated
-shard-zero consumer-session coordinator with bounded
-join/heartbeat/leave/expiry, monotonic generations and time, deterministic
-resource-wide assignment, snapshot recovery, matching Go/Java/Python methods,
-and a real post-failover recovery campaign. PR #64 proves the existing
-single-shard atomic batch command through all three SDKs with canonical
-none/gzip encoders, exact caller frames for every required codec, bounded
-rediscovery, executable docs, and real recovery evidence. The current feature
-adds leader-owned automatic regional maintenance across all four profiles,
-with exact due-time proposals, topology counters, and a no-manual-maintenance
-three-node recovery campaign. The next recovery increment adds automatic
-node-local checkpoints for catalog and every profile group on all voters,
-actor-atomic threshold eligibility, physical reclamation, topology evidence,
-and full failover/reopen proof. Stable streaming Produce and atomic
-assignment-plus-offset handoff remain later slices.
-Replicated multi-instance hosted metadata, production identity, follower
-routing, dynamic membership/voter selection, repair/rebalance, and the broader
-M2 profile/security/performance gates remain open.
+The `v0.1.0-alpha.4` M1/M2 boundary is the authenticated regional multi-tablet
+slice. Protected `main` evidence covers the consensus-backed catalog, durable
+single-owner hosted control, topology admission, quorum-confirmed leader reads,
+all four regional profile SDKs, multi-shard Stream routing, atomic batches,
+retention, coordinated and session-fenced consumption, profile-native
+checkpoints with physical EPRS reclamation, and automatic maintenance and
+checkpoint scheduling through leader and process loss.
+
+PR #74 extends that boundary with leader-owned signed HTTP/webhook execution.
+The Event Bus commits and awaits an exact lease before I/O, emits CloudEvents
+binary-mode headers and a canonical HMAC-SHA-256 signature, applies strict
+public-HTTPS/DNS/redirect/proxy/timeout controls, and commits deterministic
+Ack, retry, or rejection state. Exact-main CI `32365193683`, main-only Pages
+`32365193694`, and the live docs prove the Rust worker, Go/Java/Python target
+and verifier contracts, real 503-to-204 retry, convergence, and all-voter
+same-storage reopen.
+
+After the source release, the next cohesive P0 data-plane slice is durable
+Event Bus Queue and Stream target execution. It must preserve target-owned
+ordering and backpressure, derive deterministic destination idempotency,
+survive ownership races and cross-tablet recovery, and publish truthful SDK and
+operator evidence without claiming atomic cross-tablet transactions. Stable
+streaming protocols, replicated multi-instance hosted metadata, production
+identity, follower routing, dynamic membership/voter selection,
+repair/rebalance, and the broader M2 security/performance gates remain open.
 
 ## Dependency-driven architecture sequence
 
