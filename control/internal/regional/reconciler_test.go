@@ -103,6 +103,50 @@ func TestReconcilerAppliesThenObservesCurrentRegionalState(t *testing.T) {
 	}
 }
 
+func TestReconcilerForwardsExactProfileConfiguration(t *testing.T) {
+	registry := resources.NewRegistry()
+	key := regionalKey(resources.KindCache, "sessions")
+	spec, err := json.Marshal(map[string]any{
+		"shard_count":   1,
+		"replica_count": 3,
+		"configuration": map[string]any{
+			"shard_count":    1,
+			"max_entries":    12,
+			"default_ttl_ms": nil,
+			"eviction":       "all_keys_lru",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied, err := registry.Apply(resources.ApplyRequest{
+		RequestToken: "create-sessions",
+		Resource: resources.DesiredResource{
+			ResourceKey: key,
+			Spec:        spec,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := servingObservation(applied.Resource.Generation, 1, 3)
+	authority := &fakeAuthority{
+		apply: func(request AuthorityApplyRequest) (AuthorityObservation, error) {
+			if request.Configuration["eviction"] != "all_keys_lru" {
+				t.Fatalf("configuration = %#v", request.Configuration)
+			}
+			if number, ok := request.Configuration["max_entries"].(json.Number); !ok || number.String() != "12" {
+				t.Fatalf("max_entries = %#v", request.Configuration["max_entries"])
+			}
+			return observation, nil
+		},
+	}
+	reconciler := NewReconciler(registry, authority)
+	if _, err := reconciler.Reconcile(t.Context(), key); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+}
+
 func TestReconcilerRejectsCapacityBeforeCatalogApply(t *testing.T) {
 	registry := resources.NewRegistry()
 	resource := applyDesired(

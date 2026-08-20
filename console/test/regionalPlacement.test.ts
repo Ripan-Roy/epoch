@@ -147,3 +147,32 @@ test("managed ready state fails closed when placement evidence is incomplete", (
   assert.equal(mapped.phase, "degraded");
   assert.ok(mapped.risks.some((risk) => risk.includes("No serving placement")));
 });
+
+test("managed cache configuration remains visible after browser mapping", () => {
+  const mapped = mapRegionalInventory({
+    canonical_name: "acme/shop/dev/core/cache/sessions",
+    organization: "acme",
+    project: "shop",
+    environment: "dev",
+    namespace: "core",
+    kind: "cache",
+    name: "sessions",
+    generation: "1",
+    observed_generation: "0",
+    workload_profile: "cache_state",
+    shard_count: 1,
+    phase: "pending",
+    tablets: [],
+    cache_configuration: {
+      max_entries_per_shard: 32,
+      default_ttl_ms: null,
+      eviction: "all_keys_lru",
+    },
+  });
+
+  assert.deepEqual(mapped.cacheConfiguration, {
+    maxEntriesPerShard: 32,
+    defaultTTLMS: null,
+    eviction: "all_keys_lru",
+  });
+});

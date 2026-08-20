@@ -362,12 +362,12 @@ fn invalid_cache_configs_fail_before_tablet_construction() {
             Err(TabletError::Profile(EpochError::InvalidArgument(_)))
         ));
     }
-    let mut invalid = config();
-    invalid.eviction = EvictionPolicy::VolatileLru;
-    assert!(matches!(
-        CacheTablet::new(scope(), invalid),
-        Err(TabletError::Profile(EpochError::InvalidArgument(_)))
-    ));
+    let mut eviction = config();
+    eviction.eviction = EvictionPolicy::VolatileLru;
+    assert_ne!(
+        CacheTablet::new(scope(), eviction).unwrap().state_digest(),
+        CacheTablet::new(scope(), config()).unwrap().state_digest()
+    );
 }
 
 #[test]
@@ -690,6 +690,75 @@ fn no_eviction_capacity_failure_rolls_back_the_complete_transaction() {
         CacheValue::String("safe".into())
     );
     assert!(tablet.observe("other").item.is_none());
+}
+
+#[test]
+fn committed_get_drives_replicated_lru_and_replays_exactly_once() {
+    let mut eviction = config();
+    eviction.max_entries = 2;
+    eviction.eviction = EvictionPolicy::AllKeysLru;
+    let mut tablet = CacheTablet::new(scope(), eviction).unwrap();
+    let set_alpha = command("set-alpha", 1, set("alpha", CacheValue::Counter(1)));
+    let set_beta = command("set-beta", 2, set("beta", CacheValue::Counter(2)));
+    apply_command(&mut tablet, &set_alpha, 2, 1);
+    apply_command(&mut tablet, &set_beta, 2, 2);
+
+    let get_alpha = command(
+        "get-alpha",
+        3,
+        CacheTabletOperation::Get(CacheGetCommand {
+            shard: 0,
+            key: "alpha".into(),
+        }),
+    );
+    assert_eq!(
+        get_alpha.format_version,
+        CACHE_TABLET_ACCESS_COMMAND_FORMAT_VERSION
+    );
+    let encoded = get_alpha.encode(&scope()).unwrap();
+    assert_eq!(
+        String::from_utf8(encoded.clone()).unwrap(),
+        r#"{"format_version":2,"tablet_id":7,"tablet_epoch":3,"resource":"sessions","idempotency_key":"get-alpha","applied_at_ms":3,"operation":{"kind":"get","shard":0,"key":"alpha"}}"#
+    );
+    let first = apply_command(&mut tablet, &get_alpha, 2, 3);
+    assert!(matches!(
+        first.outcome,
+        CacheTabletOutcome::Applied {
+            result: CacheTabletOperationResult::Accessed {
+                ref key,
+                revision: 3,
+                item: Some(_),
+            },
+        } if key == "alpha"
+    ));
+    let replay = apply_command(&mut tablet, &get_alpha, 2, 3);
+    assert_eq!(replay.disposition, CacheTabletDisposition::Replayed);
+    assert_eq!(tablet.cache_revision(), 3);
+
+    let admitted = apply_command(
+        &mut tablet,
+        &command("set-gamma", 4, set("gamma", CacheValue::Counter(3))),
+        2,
+        4,
+    );
+    assert!(matches!(
+        admitted.outcome,
+        CacheTabletOutcome::Applied {
+            result: CacheTabletOperationResult::Set { ref evicted_keys, .. },
+        } if evicted_keys == &["beta"]
+    ));
+    assert!(tablet.observe("alpha").item.is_some());
+    assert!(tablet.observe("beta").item.is_none());
+    assert!(tablet.observe("gamma").item.is_some());
+
+    let snapshot = tablet.encode_snapshot(&BTreeSet::new()).unwrap();
+    let restored = CacheTablet::decode_snapshot(&scope(), &snapshot).unwrap();
+    assert_eq!(restored.eviction(), EvictionPolicy::AllKeysLru);
+    assert_eq!(restored.state_digest(), tablet.state_digest());
+    assert_eq!(
+        restored.cache_recovery_state_digest(),
+        tablet.cache_recovery_state_digest()
+    );
 }
 
 #[test]

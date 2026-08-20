@@ -117,7 +117,10 @@ curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
     "resource":{
       "organization":"acme","project":"shop","environment":"dev","namespace":"core",
       "kind":"cache","name":"sessions",
-      "spec":{"shard_count":1,"replica_count":3,"placement":{
+      "spec":{"shard_count":1,"replica_count":3,"configuration":{
+        "shard_count":1,"max_entries":32,"default_ttl_ms":null,
+        "eviction":"all_keys_lru"
+      },"placement":{
         "allowed_regions":["ap-south"],"minimum_zones":3,
         "required_node_class":"general-purpose"
       }}
@@ -507,10 +510,10 @@ export const sdkSurface = [
   },
   {
     area: "Regional Cache",
-    go: "RegionalCacheClient · Set · Delete · CompareAndSet · Increment · Transaction · AcquireLock · RenewLock · ReleaseLock · Maintain · Observe",
-    java: "RegionalCacheClient · set · delete · compareAndSet · increment · transaction · acquireLock · renewLock · releaseLock · maintain · observe",
+    go: "RegionalCacheClient · Set · Get · Delete · CompareAndSet · Increment · Transaction · AtomicBatch · AcquireLock · RenewLock · ReleaseLock · Maintain · Observe",
+    java: "RegionalCacheClient · set · get · delete · compareAndSet · increment · transaction · atomicBatch · acquireLock · renewLock · releaseLock · maintain · observe",
     python:
-      "RegionalCacheClient · set · delete · compare_and_set · increment · transaction · acquire_lock · renew_lock · release_lock · maintain · observe",
+      "RegionalCacheClient · set · get · delete · compare_and_set · increment · transaction · atomic_batch · acquire_lock · renew_lock · release_lock · maintain · observe",
   },
   {
     area: "Regional Event Bus",

@@ -84,6 +84,7 @@ fn cache_set_is_usable_through_the_public_crate_api() {
                     version: 1,
                     expires_at_ms: Some(1_700_000_060_123),
                 },
+                evicted_keys: Vec::new(),
             },
         }
     );

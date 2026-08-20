@@ -10,11 +10,12 @@ use epoch_core::{EpochError, EpochResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{CacheItem, CacheValue, SetOptions};
+use crate::{CacheItem, CacheValue, EvictionPolicy, SetOptions};
 
 pub const MAX_CACHE_ATOMIC_OPERATIONS: usize = 128;
 pub const MAX_CACHE_MAINTENANCE_KEYS: usize = 1_000;
-pub const CACHE_SHARD_SNAPSHOT_FORMAT_VERSION: u16 = 1;
+const CACHE_SHARD_SNAPSHOT_FORMAT_VERSION_V1: u16 = 1;
+pub const CACHE_SHARD_SNAPSHOT_FORMAT_VERSION: u16 = 2;
 pub const MAX_CACHE_SHARD_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -52,6 +53,9 @@ pub enum CacheMutation {
         #[serde(default)]
         ttl_ms: Option<u64>,
     },
+    Access {
+        key: String,
+    },
 }
 
 impl CacheMutation {
@@ -60,7 +64,8 @@ impl CacheMutation {
             Self::Set { key, .. }
             | Self::Delete { key, .. }
             | Self::Increment { key, .. }
-            | Self::CompareAndSet { key, .. } => key,
+            | Self::CompareAndSet { key, .. }
+            | Self::Access { key } => key,
         }
     }
 }
@@ -69,6 +74,7 @@ impl CacheMutation {
 pub struct CacheTransactionResult {
     pub revision: u64,
     pub results: Vec<CacheMutationResult>,
+    pub evicted_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -88,6 +94,9 @@ pub enum CacheMutationResult {
     },
     CompareAndSet {
         item: CacheItem,
+    },
+    Access {
+        item: Option<CacheItem>,
     },
 }
 
@@ -109,6 +118,10 @@ struct ReplicatedEntry {
     value: CacheValue,
     version: u64,
     expires_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    last_access_revision: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    access_count: u64,
 }
 
 impl ReplicatedEntry {
@@ -130,6 +143,7 @@ impl ReplicatedEntry {
 pub struct CacheShard {
     max_entries: usize,
     default_ttl_ms: Option<u64>,
+    eviction: EvictionPolicy,
     revision: u64,
     entries: BTreeMap<String, ReplicatedEntry>,
 }
@@ -140,6 +154,8 @@ struct VersionedCacheShardSnapshot {
     format_version: u16,
     max_entries: usize,
     default_ttl_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_no_eviction")]
+    eviction: EvictionPolicy,
     revision: u64,
     entries: BTreeMap<String, ReplicatedEntry>,
     state_digest: [u8; 32],
@@ -152,6 +168,15 @@ impl CacheShard {
     /// create a logically live value. The legacy [`crate::Cache`] remains
     /// unchanged.
     pub fn new(max_entries: usize, default_ttl_ms: Option<u64>) -> EpochResult<Self> {
+        Self::new_with_eviction(max_entries, default_ttl_ms, EvictionPolicy::NoEviction)
+    }
+
+    /// Creates a deterministic Cache shard with an explicit admission policy.
+    pub fn new_with_eviction(
+        max_entries: usize,
+        default_ttl_ms: Option<u64>,
+        eviction: EvictionPolicy,
+    ) -> EpochResult<Self> {
         if max_entries == 0 {
             return Err(EpochError::InvalidArgument(
                 "cache shard max_entries must be greater than zero".into(),
@@ -165,6 +190,7 @@ impl CacheShard {
         Ok(Self {
             max_entries,
             default_ttl_ms,
+            eviction,
             revision: 0,
             entries: BTreeMap::new(),
         })
@@ -180,6 +206,10 @@ impl CacheShard {
 
     pub const fn default_ttl_ms(&self) -> Option<u64> {
         self.default_ttl_ms
+    }
+
+    pub const fn eviction(&self) -> EvictionPolicy {
+        self.eviction
     }
 
     pub fn len(&self) -> usize {
@@ -230,15 +260,10 @@ impl CacheShard {
             &candidate,
             &transaction.operations,
             self.default_ttl_ms,
+            self.eviction,
             now_ms,
         )?;
         let resulting_len = resulting_len(&candidate, &transaction.operations);
-        if resulting_len > self.max_entries {
-            return Err(EpochError::Capacity(format!(
-                "cache shard would contain {resulting_len} live entries; maximum is {}",
-                self.max_entries
-            )));
-        }
 
         if !changed {
             return Ok(CacheTransactionResult {
@@ -256,8 +281,12 @@ impl CacheShard {
                         | CacheMutation::CompareAndSet { .. } => {
                             unreachable!("validated non-delete mutations always change state")
                         }
+                        CacheMutation::Access { key } => CacheMutationResult::Access {
+                            item: candidate.get(&key).map(ReplicatedEntry::item),
+                        },
                     })
                     .collect(),
+                evicted_keys: Vec::new(),
             });
         }
 
@@ -265,10 +294,23 @@ impl CacheShard {
             .revision
             .checked_add(1)
             .ok_or_else(|| EpochError::Capacity("cache shard revision is exhausted".into()))?;
+        let evicted_keys = select_eviction_victims(
+            &candidate,
+            &transaction.operations,
+            resulting_len.saturating_sub(self.max_entries),
+            self.eviction,
+            next_revision,
+            self.max_entries,
+            resulting_len,
+        )?;
+        for key in &evicted_keys {
+            candidate.remove(key);
+        }
         let results = apply_operations(
             &mut candidate,
             transaction.operations,
             self.default_ttl_ms,
+            self.eviction,
             now_ms,
             next_revision,
         )?;
@@ -277,6 +319,7 @@ impl CacheShard {
         Ok(CacheTransactionResult {
             revision: next_revision,
             results,
+            evicted_keys,
         })
     }
 
@@ -353,10 +396,16 @@ impl CacheShard {
     /// Encodes the complete deterministic shard state as a canonical,
     /// versioned application snapshot.
     pub fn encode_snapshot(&self) -> EpochResult<Vec<u8>> {
+        let format_version = if self.eviction == EvictionPolicy::NoEviction {
+            CACHE_SHARD_SNAPSHOT_FORMAT_VERSION_V1
+        } else {
+            CACHE_SHARD_SNAPSHOT_FORMAT_VERSION
+        };
         let encoded = serde_json::to_vec(&VersionedCacheShardSnapshot {
-            format_version: CACHE_SHARD_SNAPSHOT_FORMAT_VERSION,
+            format_version,
             max_entries: self.max_entries,
             default_ttl_ms: self.default_ttl_ms,
+            eviction: self.eviction,
             revision: self.revision,
             entries: self.entries.clone(),
             state_digest: self.recovery_state_digest(),
@@ -381,7 +430,10 @@ impl CacheShard {
         }
         let snapshot: VersionedCacheShardSnapshot = serde_json::from_slice(encoded)
             .map_err(|error| EpochError::InvalidArgument(error.to_string()))?;
-        if snapshot.format_version != CACHE_SHARD_SNAPSHOT_FORMAT_VERSION {
+        if !matches!(
+            snapshot.format_version,
+            CACHE_SHARD_SNAPSHOT_FORMAT_VERSION_V1 | CACHE_SHARD_SNAPSHOT_FORMAT_VERSION
+        ) {
             return Err(EpochError::InvalidArgument(format!(
                 "unsupported Cache shard snapshot version {}",
                 snapshot.format_version
@@ -395,7 +447,18 @@ impl CacheShard {
                 "Cache shard snapshot is not canonical".into(),
             ));
         }
-        CacheShard::new(snapshot.max_entries, snapshot.default_ttl_ms)?;
+        if snapshot.format_version == CACHE_SHARD_SNAPSHOT_FORMAT_VERSION_V1
+            && snapshot.eviction != EvictionPolicy::NoEviction
+        {
+            return Err(EpochError::InvalidArgument(
+                "Cache shard v1 snapshot cannot contain eviction metadata".into(),
+            ));
+        }
+        CacheShard::new_with_eviction(
+            snapshot.max_entries,
+            snapshot.default_ttl_ms,
+            snapshot.eviction,
+        )?;
         if snapshot.entries.len() > snapshot.max_entries {
             return Err(EpochError::InvalidArgument(
                 "Cache shard snapshot exceeds its configured capacity".into(),
@@ -406,6 +469,7 @@ impl CacheShard {
                 || entry.version == 0
                 || entry.version > snapshot.revision
                 || entry.expires_at_ms == Some(0)
+                || entry.last_access_revision > snapshot.revision
             {
                 return Err(EpochError::InvalidArgument(
                     "Cache shard snapshot entry registry is invalid".into(),
@@ -421,6 +485,7 @@ impl CacheShard {
         let shard = Self {
             max_entries: snapshot.max_entries,
             default_ttl_ms: snapshot.default_ttl_ms,
+            eviction: snapshot.eviction,
             revision: snapshot.revision,
             entries: snapshot.entries,
         };
@@ -434,7 +499,12 @@ impl CacheShard {
 
     fn encode_recovery_state(&self, sink: &mut dyn CanonicalSink) {
         let mut encoder = CanonicalEncoder::new(sink);
-        encoder.bytes(b"epoch/cache-shard/recovery/v1\0");
+        if self.eviction == EvictionPolicy::NoEviction {
+            encoder.bytes(b"epoch/cache-shard/recovery/v1\0");
+        } else {
+            encoder.bytes(b"epoch/cache-shard/recovery/v2\0");
+            encoder.u8(eviction_policy_code(self.eviction));
+        }
         encoder.u64(u64::try_from(self.max_entries).unwrap_or(u64::MAX));
         encoder.option_u64(self.default_ttl_ms);
         encoder.u64(self.revision);
@@ -444,6 +514,10 @@ impl CacheShard {
             encoder.cache_value(&entry.value);
             encoder.u64(entry.version);
             encoder.option_u64(entry.expires_at_ms);
+            if self.eviction != EvictionPolicy::NoEviction {
+                encoder.u64(entry.last_access_revision);
+                encoder.u64(entry.access_count);
+            }
         }
     }
 
@@ -489,6 +563,7 @@ fn validate_operations(
     entries: &BTreeMap<String, ReplicatedEntry>,
     operations: &[CacheMutation],
     default_ttl_ms: Option<u64>,
+    eviction: EvictionPolicy,
     now_ms: u64,
 ) -> EpochResult<bool> {
     let mut changed = false;
@@ -553,6 +628,9 @@ fn validate_operations(
                 expiry_deadline(ttl_ms.or(default_ttl_ms), now_ms)?;
                 changed = true;
             }
+            CacheMutation::Access { key } => {
+                changed |= entries.contains_key(key) && tracks_committed_access(eviction);
+            }
         }
     }
     Ok(changed)
@@ -593,6 +671,7 @@ fn resulting_len(
                     len = len.saturating_sub(1);
                 }
             }
+            CacheMutation::Access { .. } => {}
         }
     }
     len
@@ -602,91 +681,310 @@ fn apply_operations(
     entries: &mut BTreeMap<String, ReplicatedEntry>,
     operations: Vec<CacheMutation>,
     default_ttl_ms: Option<u64>,
+    eviction: EvictionPolicy,
     now_ms: u64,
     revision: u64,
 ) -> EpochResult<Vec<CacheMutationResult>> {
     operations
         .into_iter()
-        .map(|operation| -> EpochResult<CacheMutationResult> {
-            Ok(match operation {
-                CacheMutation::Set {
-                    key,
-                    value,
-                    options,
-                } => {
-                    let expires_at_ms = expiry_deadline(options.ttl_ms.or(default_ttl_ms), now_ms)?;
-                    let item = CacheItem {
-                        value: value.clone(),
-                        version: revision,
-                        expires_at_ms,
-                    };
-                    entries.insert(
-                        key,
-                        ReplicatedEntry {
-                            value,
-                            version: revision,
-                            expires_at_ms,
-                        },
-                    );
-                    CacheMutationResult::Set { item }
-                }
-                CacheMutation::Delete { key, .. } => {
-                    let previous_version = entries.remove(&key).map(|entry| entry.version);
-                    CacheMutationResult::Delete {
-                        deleted: previous_version.is_some(),
-                        previous_version,
-                    }
-                }
-                CacheMutation::Increment { key, delta, .. } => {
-                    let (value, expires_at_ms) = if let Some(entry) = entries.get_mut(&key) {
-                        let CacheValue::Counter(value) = &mut entry.value else {
-                            unreachable!("counter type was validated before application")
-                        };
-                        *value = value
-                            .checked_add(delta)
-                            .expect("counter overflow was validated before application");
-                        entry.version = revision;
-                        (*value, entry.expires_at_ms)
-                    } else {
-                        let expires_at_ms = expiry_deadline(default_ttl_ms, now_ms)?;
-                        entries.insert(
-                            key,
-                            ReplicatedEntry {
-                                value: CacheValue::Counter(delta),
-                                version: revision,
-                                expires_at_ms,
-                            },
-                        );
-                        (delta, expires_at_ms)
-                    };
-                    CacheMutationResult::Increment {
-                        value,
-                        version: revision,
-                        expires_at_ms,
-                    }
-                }
-                CacheMutation::CompareAndSet {
-                    key, value, ttl_ms, ..
-                } => {
-                    let expires_at_ms = expiry_deadline(ttl_ms.or(default_ttl_ms), now_ms)?;
-                    let item = CacheItem {
-                        value: value.clone(),
-                        version: revision,
-                        expires_at_ms,
-                    };
-                    entries.insert(
-                        key,
-                        ReplicatedEntry {
-                            value,
-                            version: revision,
-                            expires_at_ms,
-                        },
-                    );
-                    CacheMutationResult::CompareAndSet { item }
-                }
-            })
+        .map(|operation| {
+            apply_operation(
+                entries,
+                operation,
+                default_ttl_ms,
+                eviction,
+                now_ms,
+                revision,
+            )
         })
         .collect()
+}
+
+fn apply_operation(
+    entries: &mut BTreeMap<String, ReplicatedEntry>,
+    operation: CacheMutation,
+    default_ttl_ms: Option<u64>,
+    eviction: EvictionPolicy,
+    now_ms: u64,
+    revision: u64,
+) -> EpochResult<CacheMutationResult> {
+    Ok(match operation {
+        CacheMutation::Set {
+            key,
+            value,
+            options,
+        } => CacheMutationResult::Set {
+            item: upsert_entry(
+                entries,
+                key,
+                value,
+                options.ttl_ms.or(default_ttl_ms),
+                eviction,
+                now_ms,
+                revision,
+            )?,
+        },
+        CacheMutation::Delete { key, .. } => {
+            let previous_version = entries.remove(&key).map(|entry| entry.version);
+            CacheMutationResult::Delete {
+                deleted: previous_version.is_some(),
+                previous_version,
+            }
+        }
+        CacheMutation::Increment { key, delta, .. } => apply_increment(
+            entries,
+            key,
+            delta,
+            default_ttl_ms,
+            eviction,
+            now_ms,
+            revision,
+        )?,
+        CacheMutation::CompareAndSet {
+            key, value, ttl_ms, ..
+        } => CacheMutationResult::CompareAndSet {
+            item: upsert_entry(
+                entries,
+                key,
+                value,
+                ttl_ms.or(default_ttl_ms),
+                eviction,
+                now_ms,
+                revision,
+            )?,
+        },
+        CacheMutation::Access { key } => {
+            let item = entries.get_mut(&key).map(|entry| {
+                record_committed_access(entry, eviction, revision);
+                entry.item()
+            });
+            CacheMutationResult::Access { item }
+        }
+    })
+}
+
+fn upsert_entry(
+    entries: &mut BTreeMap<String, ReplicatedEntry>,
+    key: String,
+    value: CacheValue,
+    ttl_ms: Option<u64>,
+    eviction: EvictionPolicy,
+    now_ms: u64,
+    revision: u64,
+) -> EpochResult<CacheItem> {
+    let expires_at_ms = expiry_deadline(ttl_ms, now_ms)?;
+    let (last_access_revision, access_count) =
+        next_access_metadata(entries.get(&key), eviction, revision);
+    let item = CacheItem {
+        value: value.clone(),
+        version: revision,
+        expires_at_ms,
+    };
+    entries.insert(
+        key,
+        ReplicatedEntry {
+            value,
+            version: revision,
+            expires_at_ms,
+            last_access_revision,
+            access_count,
+        },
+    );
+    Ok(item)
+}
+
+fn apply_increment(
+    entries: &mut BTreeMap<String, ReplicatedEntry>,
+    key: String,
+    delta: i64,
+    default_ttl_ms: Option<u64>,
+    eviction: EvictionPolicy,
+    now_ms: u64,
+    revision: u64,
+) -> EpochResult<CacheMutationResult> {
+    let (value, expires_at_ms) = if let Some(entry) = entries.get_mut(&key) {
+        let value = {
+            let CacheValue::Counter(value) = &mut entry.value else {
+                unreachable!("counter type was validated before application")
+            };
+            *value = value
+                .checked_add(delta)
+                .expect("counter overflow was validated before application");
+            *value
+        };
+        entry.version = revision;
+        record_committed_access(entry, eviction, revision);
+        (value, entry.expires_at_ms)
+    } else {
+        let expires_at_ms = expiry_deadline(default_ttl_ms, now_ms)?;
+        entries.insert(
+            key,
+            ReplicatedEntry {
+                value: CacheValue::Counter(delta),
+                version: revision,
+                expires_at_ms,
+                last_access_revision: initial_access_revision(eviction, revision),
+                access_count: 0,
+            },
+        );
+        (delta, expires_at_ms)
+    };
+    Ok(CacheMutationResult::Increment {
+        value,
+        version: revision,
+        expires_at_ms,
+    })
+}
+
+fn select_eviction_victims(
+    entries: &BTreeMap<String, ReplicatedEntry>,
+    operations: &[CacheMutation],
+    required: usize,
+    policy: EvictionPolicy,
+    next_revision: u64,
+    maximum: usize,
+    resulting_len: usize,
+) -> EpochResult<Vec<String>> {
+    if required == 0 {
+        return Ok(Vec::new());
+    }
+    if policy == EvictionPolicy::NoEviction {
+        return Err(EpochError::Capacity(format!(
+            "cache shard would contain {resulting_len} live entries; maximum is {maximum}; no-eviction is configured"
+        )));
+    }
+    let protected = operations
+        .iter()
+        .filter(|operation| {
+            matches!(
+                operation,
+                CacheMutation::Set { .. }
+                    | CacheMutation::Increment { .. }
+                    | CacheMutation::CompareAndSet { .. }
+            )
+        })
+        .map(CacheMutation::key)
+        .collect::<BTreeSet<_>>();
+    let volatile_only = matches!(
+        policy,
+        EvictionPolicy::VolatileLru
+            | EvictionPolicy::VolatileLfu
+            | EvictionPolicy::VolatileRandom
+            | EvictionPolicy::VolatileTtl
+    );
+    let mut candidates = entries
+        .iter()
+        .filter(|(key, entry)| {
+            !protected.contains(key.as_str()) && (!volatile_only || entry.expires_at_ms.is_some())
+        })
+        .map(|(key, entry)| {
+            (
+                eviction_rank(policy, next_revision, key, entry),
+                key.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_unstable();
+    if candidates.len() < required {
+        return Err(EpochError::Capacity(format!(
+            "cache eviction policy {policy:?} has {} eligible victims; {required} required",
+            candidates.len()
+        )));
+    }
+    let mut victims = candidates
+        .into_iter()
+        .take(required)
+        .map(|(_, key)| key)
+        .collect::<Vec<_>>();
+    victims.sort_unstable();
+    Ok(victims)
+}
+
+fn eviction_rank(
+    policy: EvictionPolicy,
+    next_revision: u64,
+    key: &str,
+    entry: &ReplicatedEntry,
+) -> (u64, u64, [u8; 32]) {
+    match policy {
+        EvictionPolicy::AllKeysLru | EvictionPolicy::VolatileLru => {
+            (entry.last_access_revision, 0, [0; 32])
+        }
+        EvictionPolicy::AllKeysLfu | EvictionPolicy::VolatileLfu => {
+            (entry.access_count, entry.last_access_revision, [0; 32])
+        }
+        EvictionPolicy::VolatileTtl => (entry.expires_at_ms.unwrap_or(u64::MAX), 0, [0; 32]),
+        EvictionPolicy::AllKeysRandom | EvictionPolicy::VolatileRandom => {
+            let mut hasher = Sha256::new();
+            hasher.update(b"epoch/cache-shard/eviction-rank/v1\0");
+            hasher.update(next_revision.to_be_bytes());
+            hasher.update(key.as_bytes());
+            (0, 0, hasher.finalize().into())
+        }
+        EvictionPolicy::NoEviction => (u64::MAX, u64::MAX, [u8::MAX; 32]),
+    }
+}
+
+const fn tracks_committed_access(policy: EvictionPolicy) -> bool {
+    matches!(
+        policy,
+        EvictionPolicy::AllKeysLru
+            | EvictionPolicy::AllKeysLfu
+            | EvictionPolicy::VolatileLru
+            | EvictionPolicy::VolatileLfu
+    )
+}
+
+const fn initial_access_revision(policy: EvictionPolicy, revision: u64) -> u64 {
+    if tracks_committed_access(policy) {
+        revision
+    } else {
+        0
+    }
+}
+
+fn next_access_metadata(
+    current: Option<&ReplicatedEntry>,
+    policy: EvictionPolicy,
+    revision: u64,
+) -> (u64, u64) {
+    if !tracks_committed_access(policy) {
+        return (0, 0);
+    }
+    current.map_or((revision, 0), |entry| {
+        (revision, entry.access_count.saturating_add(1))
+    })
+}
+
+fn record_committed_access(entry: &mut ReplicatedEntry, policy: EvictionPolicy, revision: u64) {
+    if tracks_committed_access(policy) {
+        entry.last_access_revision = revision;
+        entry.access_count = entry.access_count.saturating_add(1);
+    }
+}
+
+const fn eviction_policy_code(policy: EvictionPolicy) -> u8 {
+    match policy {
+        EvictionPolicy::NoEviction => 0,
+        EvictionPolicy::AllKeysLru => 1,
+        EvictionPolicy::AllKeysLfu => 2,
+        EvictionPolicy::AllKeysRandom => 3,
+        EvictionPolicy::VolatileLru => 4,
+        EvictionPolicy::VolatileLfu => 5,
+        EvictionPolicy::VolatileRandom => 6,
+        EvictionPolicy::VolatileTtl => 7,
+    }
+}
+
+// Serde skip predicates are required to accept a shared reference.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_no_eviction(policy: &EvictionPolicy) -> bool {
+    matches!(policy, EvictionPolicy::NoEviction)
 }
 
 fn expiry_deadline(ttl_ms: Option<u64>, now_ms: u64) -> EpochResult<Option<u64>> {
@@ -847,7 +1145,7 @@ mod tests {
     use epoch_core::EpochError;
 
     use super::*;
-    use crate::{CacheValue, SetOptions};
+    use crate::{CacheValue, EvictionPolicy, SetOptions};
 
     fn set(key: &str, value: CacheValue) -> CacheMutation {
         CacheMutation::Set {
@@ -1522,6 +1820,164 @@ mod tests {
         assert_eq!(
             shard.observe("replacement", 2).item.unwrap().value,
             CacheValue::Counter(2)
+        );
+    }
+
+    #[test]
+    fn committed_access_drives_lru_and_is_reported_in_order() {
+        let mut shard = CacheShard::new_with_eviction(2, None, EvictionPolicy::AllKeysLru).unwrap();
+        shard
+            .transact(
+                transaction(vec![
+                    set("alpha", CacheValue::Counter(1)),
+                    set("beta", CacheValue::Counter(2)),
+                ]),
+                10,
+            )
+            .unwrap();
+
+        let accessed = shard
+            .transact(
+                transaction(vec![CacheMutation::Access {
+                    key: "alpha".into(),
+                }]),
+                11,
+            )
+            .unwrap();
+        assert_eq!(accessed.revision, 2);
+        assert!(matches!(
+            accessed.results.as_slice(),
+            [CacheMutationResult::Access { item: Some(item) }]
+                if item.value == CacheValue::Counter(1)
+        ));
+
+        let admitted = shard
+            .transact(transaction(vec![set("gamma", CacheValue::Counter(3))]), 12)
+            .unwrap();
+        assert_eq!(admitted.evicted_keys, ["beta"]);
+        assert!(shard.observe("alpha", 12).item.is_some());
+        assert!(shard.observe("beta", 12).item.is_none());
+        assert!(shard.observe("gamma", 12).item.is_some());
+    }
+
+    #[test]
+    fn lfu_prefers_the_least_frequently_committed_access() {
+        let mut shard = CacheShard::new_with_eviction(2, None, EvictionPolicy::AllKeysLfu).unwrap();
+        shard
+            .transact(
+                transaction(vec![
+                    set("alpha", CacheValue::Counter(1)),
+                    set("beta", CacheValue::Counter(2)),
+                ]),
+                10,
+            )
+            .unwrap();
+        for _ in 0..2 {
+            shard
+                .transact(
+                    transaction(vec![CacheMutation::Access {
+                        key: "alpha".into(),
+                    }]),
+                    11,
+                )
+                .unwrap();
+        }
+        shard
+            .transact(
+                transaction(vec![CacheMutation::Access { key: "beta".into() }]),
+                11,
+            )
+            .unwrap();
+
+        let admitted = shard
+            .transact(transaction(vec![set("gamma", CacheValue::Counter(3))]), 12)
+            .unwrap();
+        assert_eq!(admitted.evicted_keys, ["beta"]);
+    }
+
+    #[test]
+    fn volatile_ttl_uses_deadline_and_rejects_without_an_eligible_victim() {
+        let mut shard =
+            CacheShard::new_with_eviction(2, None, EvictionPolicy::VolatileTtl).unwrap();
+        shard
+            .transact(
+                transaction(vec![
+                    CacheMutation::Set {
+                        key: "later".into(),
+                        value: CacheValue::Counter(1),
+                        options: SetOptions {
+                            ttl_ms: Some(20),
+                            ..SetOptions::default()
+                        },
+                    },
+                    CacheMutation::Set {
+                        key: "first".into(),
+                        value: CacheValue::Counter(2),
+                        options: SetOptions {
+                            ttl_ms: Some(10),
+                            ..SetOptions::default()
+                        },
+                    },
+                ]),
+                100,
+            )
+            .unwrap();
+        let admitted = shard
+            .transact(
+                transaction(vec![set("permanent", CacheValue::Counter(3))]),
+                101,
+            )
+            .unwrap();
+        assert_eq!(admitted.evicted_keys, ["first"]);
+
+        let mut no_candidate =
+            CacheShard::new_with_eviction(1, None, EvictionPolicy::VolatileLru).unwrap();
+        no_candidate
+            .transact(
+                transaction(vec![set("permanent", CacheValue::Counter(1))]),
+                1,
+            )
+            .unwrap();
+        let before = no_candidate.recovery_state_digest();
+        let error = no_candidate
+            .transact(transaction(vec![set("new", CacheValue::Counter(2))]), 2)
+            .unwrap_err();
+        assert!(matches!(error, EpochError::Capacity(_)));
+        assert_eq!(no_candidate.revision(), 1);
+        assert_eq!(no_candidate.recovery_state_digest(), before);
+    }
+
+    #[test]
+    fn deterministic_random_eviction_replays_and_restores_exactly() {
+        let mut live =
+            CacheShard::new_with_eviction(3, None, EvictionPolicy::AllKeysRandom).unwrap();
+        live.transact(
+            transaction(vec![
+                set("alpha", CacheValue::Counter(1)),
+                set("beta", CacheValue::Counter(2)),
+                set("gamma", CacheValue::Counter(3)),
+            ]),
+            1,
+        )
+        .unwrap();
+        let image = live.encode_snapshot().unwrap();
+        let mut restored = CacheShard::decode_snapshot(&image).unwrap();
+
+        let left = live
+            .transact(transaction(vec![set("delta", CacheValue::Counter(4))]), 2)
+            .unwrap();
+        let right = restored
+            .transact(transaction(vec![set("delta", CacheValue::Counter(4))]), 2)
+            .unwrap();
+
+        assert_eq!(left.evicted_keys, right.evicted_keys);
+        assert_eq!(
+            live.recovery_state_digest(),
+            restored.recovery_state_digest()
+        );
+        assert_eq!(
+            live.encode_snapshot().unwrap(),
+            restored.encode_snapshot().unwrap()
         );
     }
 

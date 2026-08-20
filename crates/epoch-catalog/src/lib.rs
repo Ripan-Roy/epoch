@@ -16,8 +16,11 @@ const MAX_REQUEST_TOKEN_BYTES: usize = 256;
 const MAX_SHARDS_PER_RESOURCE: u32 = 4_096;
 const MAX_REPLICAS_PER_TABLET: u16 = 9;
 const MAX_COMMAND_BYTES: usize = 512 * 1024;
+const MAX_PROFILE_CONFIGURATION_BYTES: usize = 64 * 1024;
 pub const CATALOG_COMMAND_FORMAT_VERSION: u16 = 1;
+pub const CATALOG_CONFIG_COMMAND_FORMAT_VERSION: u16 = 2;
 pub const CATALOG_SNAPSHOT_FORMAT_VERSION: u16 = 1;
+pub const CATALOG_CONFIG_SNAPSHOT_FORMAT_VERSION: u16 = 2;
 pub const MAX_CATALOG_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 
 pub type CatalogResult<T> = Result<T, CatalogError>;
@@ -73,6 +76,8 @@ pub enum CatalogError {
         current: WorkloadProfile,
         requested: WorkloadProfile,
     },
+    #[error("profile configuration is immutable after resource creation")]
+    ConfigurationMismatch,
     #[error("shard count cannot decrease from {current} to {requested}")]
     ShardCountDecrease { current: u32, requested: u32 },
     #[error("request token is already bound to a different catalog command")]
@@ -147,16 +152,18 @@ impl ResourceName {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceSpec {
     pub workload_profile: WorkloadProfile,
     pub shard_count: u32,
     pub replica_count: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration: Option<serde_json::Value>,
 }
 
 impl ResourceSpec {
-    fn validate(self, kind: ResourceKind) -> CatalogResult<()> {
+    fn validate(&self, kind: ResourceKind) -> CatalogResult<()> {
         if self.shard_count == 0 || self.shard_count > MAX_SHARDS_PER_RESOURCE {
             return Err(CatalogError::InvalidSpec(format!(
                 "shard_count must be between 1 and {MAX_SHARDS_PER_RESOURCE}"
@@ -186,6 +193,20 @@ impl ResourceSpec {
             return Err(CatalogError::InvalidSpec(format!(
                 "{kind:?} requires the {expected_profile:?} workload profile"
             )));
+        }
+        if let Some(configuration) = &self.configuration {
+            if !configuration.is_object() {
+                return Err(CatalogError::InvalidSpec(
+                    "profile configuration must be a JSON object".into(),
+                ));
+            }
+            let encoded = serde_json::to_vec(configuration)
+                .map_err(|error| CatalogError::InvalidSpec(error.to_string()))?;
+            if encoded.len() > MAX_PROFILE_CONFIGURATION_BYTES {
+                return Err(CatalogError::InvalidSpec(format!(
+                    "profile configuration exceeds {MAX_PROFILE_CONFIGURATION_BYTES} bytes"
+                )));
+            }
         }
         Ok(())
     }
@@ -246,7 +267,7 @@ struct VersionedCatalogCommand {
 impl CatalogCommand {
     pub fn encode(&self) -> CatalogResult<Vec<u8>> {
         let encoded = serde_json::to_vec(&VersionedCatalogCommand {
-            format_version: CATALOG_COMMAND_FORMAT_VERSION,
+            format_version: self.format_version(),
             command: self.clone(),
         })
         .map_err(|error| CatalogError::Decoding(error.to_string()))?;
@@ -262,16 +283,33 @@ impl CatalogCommand {
         }
         let envelope: VersionedCatalogCommand = serde_json::from_slice(payload)
             .map_err(|error| CatalogError::Decoding(error.to_string()))?;
-        if envelope.format_version != CATALOG_COMMAND_FORMAT_VERSION {
+        if !matches!(
+            envelope.format_version,
+            CATALOG_COMMAND_FORMAT_VERSION | CATALOG_CONFIG_COMMAND_FORMAT_VERSION
+        ) {
             return Err(CatalogError::UnsupportedCommandVersion(
                 envelope.format_version,
             ));
         }
         let command = envelope.command;
+        if envelope.format_version != command.format_version() {
+            return Err(CatalogError::UnsupportedCommandVersion(
+                envelope.format_version,
+            ));
+        }
         if command.encode()?.as_slice() != payload {
             return Err(CatalogError::NonCanonicalCommand);
         }
         Ok(command)
+    }
+
+    const fn format_version(&self) -> u16 {
+        match self {
+            Self::Apply(request) if request.spec.configuration.is_some() => {
+                CATALOG_CONFIG_COMMAND_FORMAT_VERSION
+            }
+            Self::Apply(_) | Self::Delete(_) => CATALOG_COMMAND_FORMAT_VERSION,
+        }
     }
 
     fn request_token(&self) -> &str {
@@ -521,7 +559,7 @@ impl Catalog {
 
     pub fn encode_snapshot(&self) -> CatalogResult<Vec<u8>> {
         let encoded = serde_json::to_vec(&VersionedCatalogSnapshot {
-            format_version: CATALOG_SNAPSHOT_FORMAT_VERSION,
+            format_version: self.snapshot_format_version(),
             state_digest: self.state_digest()?,
             snapshot: self.snapshot(),
         })
@@ -538,12 +576,20 @@ impl Catalog {
         }
         let envelope: VersionedCatalogSnapshot = serde_json::from_slice(encoded)
             .map_err(|error| CatalogError::Decoding(error.to_string()))?;
-        if envelope.format_version != CATALOG_SNAPSHOT_FORMAT_VERSION {
+        if !matches!(
+            envelope.format_version,
+            CATALOG_SNAPSHOT_FORMAT_VERSION | CATALOG_CONFIG_SNAPSHOT_FORMAT_VERSION
+        ) {
             return Err(CatalogError::UnsupportedSnapshotVersion(
                 envelope.format_version,
             ));
         }
         let catalog = Self::from_snapshot(envelope.snapshot)?;
+        if envelope.format_version != catalog.snapshot_format_version() {
+            return Err(CatalogError::UnsupportedSnapshotVersion(
+                envelope.format_version,
+            ));
+        }
         if catalog.state_digest()? != envelope.state_digest {
             return Err(CatalogError::SnapshotDigestMismatch);
         }
@@ -551,6 +597,24 @@ impl Catalog {
             return Err(CatalogError::NonCanonicalSnapshot);
         }
         Ok(catalog)
+    }
+
+    fn snapshot_format_version(&self) -> u16 {
+        let configured_resource = self
+            .resources
+            .values()
+            .any(|resource| resource.spec.configuration.is_some());
+        let configured_request = self.completed_requests.values().any(|completed| {
+            matches!(
+                &completed.command,
+                CatalogCommand::Apply(request) if request.spec.configuration.is_some()
+            )
+        });
+        if configured_resource || configured_request {
+            CATALOG_CONFIG_SNAPSHOT_FORMAT_VERSION
+        } else {
+            CATALOG_SNAPSHOT_FORMAT_VERSION
+        }
     }
 
     fn from_snapshot(snapshot: CatalogSnapshot) -> CatalogResult<Self> {
@@ -600,6 +664,9 @@ impl Catalog {
         request.spec.validate(request.name.kind)?;
 
         if let Some(resource) = current.as_ref() {
+            if resource.spec.configuration != request.spec.configuration {
+                return Err(CatalogError::ConfigurationMismatch);
+            }
             if request.spec.shard_count < resource.spec.shard_count {
                 return Err(CatalogError::ShardCountDecrease {
                     current: resource.spec.shard_count,
@@ -656,7 +723,7 @@ impl Catalog {
         let resource = ResourceRecord {
             name: request.name.clone(),
             generation,
-            spec: request.spec,
+            spec: request.spec.clone(),
             tablets,
         };
         for tablet in &resource.tablets {

@@ -30,6 +30,21 @@ export interface ResourceCreated {
 
 export type RegionalResourcePhase = "pending" | "ready" | "degraded" | "failed";
 export type RegionalDataKind = "cache" | "table" | "stream" | "queue" | "event_bus";
+export type CacheEvictionPolicy =
+  | "no_eviction"
+  | "all_keys_lru"
+  | "all_keys_lfu"
+  | "all_keys_random"
+  | "volatile_lru"
+  | "volatile_lfu"
+  | "volatile_random"
+  | "volatile_ttl";
+
+export interface RegionalCacheConfiguration {
+  maxEntriesPerShard: number;
+  defaultTTLMS: number | null;
+  eviction: CacheEvictionPolicy;
+}
 
 export interface RegionalTabletPlacement {
   tabletId: string;
@@ -54,6 +69,7 @@ export interface RegionalResource {
   summary: string;
   risks: string[];
   placement: RegionalPlacementEvidence | null;
+  cacheConfiguration: RegionalCacheConfiguration | null;
 }
 
 export interface ManagedRegionalTablet {
@@ -121,6 +137,11 @@ export interface ManagedRegionalResource {
   message?: string;
   tablets: ManagedRegionalTablet[];
   placement?: ManagedRegionalPlacement;
+  cache_configuration?: {
+    max_entries_per_shard: number;
+    default_ttl_ms: number | null;
+    eviction: CacheEvictionPolicy;
+  };
 }
 
 export interface ManagedRegionalInventory {
@@ -132,15 +153,7 @@ export interface CacheConfig {
   max_entries: number;
   default_ttl_ms: number | null;
   durability: "volatile";
-  eviction:
-    | "no_eviction"
-    | "all_keys_lru"
-    | "all_keys_lfu"
-    | "all_keys_random"
-    | "volatile_lru"
-    | "volatile_lfu"
-    | "volatile_random"
-    | "volatile_ttl";
+  eviction: CacheEvictionPolicy;
 }
 
 export interface StreamConfig {

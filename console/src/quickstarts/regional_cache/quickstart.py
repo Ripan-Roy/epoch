@@ -54,16 +54,19 @@ compared = client.compare_and_set(
     RegionalCacheExpectation.version(version),
     RegionalCacheValue.hash({"name": "alice", "role": "admin"}),
 )
+committed_get = client.get("sessions", 0, "docs-python-cache-get-v1", "profile")
 observation = client.observe("sessions", 0, "profile")
 revision = int(observation["observation"]["shard_revision"])
-transaction = client.transaction(
+batch = client.atomic_batch(
     "sessions",
     0,
-    "docs-python-cache-transaction-v1",
+    "docs-python-cache-batch-v1",
     revision,
     [
         RegionalCacheMutation.set("visits", RegionalCacheValue.counter(1)),
-        RegionalCacheMutation.set("recent", RegionalCacheValue.list(["home", "checkout"])),
+        RegionalCacheMutation.set(
+            "recent", RegionalCacheValue.list(["home", "checkout"])
+        ),
         RegionalCacheMutation.set("roles", RegionalCacheValue.set(["admin", "buyer"])),
         RegionalCacheMutation.set(
             "rank", RegionalCacheValue.sorted_set({"alice": 9.5})
@@ -112,7 +115,8 @@ print(
             "set": written,
             "exact_retry": replayed,
             "cas": compared,
-            "transaction": transaction,
+            "committed_get": committed_get,
+            "atomic_batch": batch,
             "guarded_increment": guarded,
             "release": released,
             "ttl": ephemeral,

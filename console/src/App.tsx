@@ -375,6 +375,15 @@ function EpochApp() {
                           <th scope="row">
                             <span className="resource-name">{resource.name}</span>
                             <code className="resource-path">{resource.canonicalName}</code>
+                            {resource.cacheConfiguration ? (
+                              <span className="resource-generation-detail">
+                                {formatEnum(resource.cacheConfiguration.eviction)} ·{" "}
+                                {resource.cacheConfiguration.maxEntriesPerShard} entries/shard ·{" "}
+                                {resource.cacheConfiguration.defaultTTLMS === null
+                                  ? "no default TTL"
+                                  : `${resource.cacheConfiguration.defaultTTLMS} ms default TTL`}
+                              </span>
+                            ) : null}
                           </th>
                           <td>
                             {resource.generation}

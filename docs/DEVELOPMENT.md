@@ -433,9 +433,10 @@ assignment, heartbeat, inclusive expiry, and rebalance before catching up that
 voter. It then kills the Queue leader and runs the Python Queue client through
 enqueue/exact retry, credit acquisition, lease extension, settlement,
 dead-letter inspection, redrive, and final acknowledgement. Finally it kills
-the Cache leader and runs typed values, exact retry, CAS, increment, atomic
-transaction, fenced lock renewal/guarded delete, and explicit expiry through the
-Python Cache client. It then kills the Event Bus leader and runs exact publish,
+the Cache leader and runs typed values, exact retry, CAS, committed LRU access,
+increment, an atomic batch, deterministic capacity eviction, fenced lock
+renewal/guarded delete, and explicit expiry through the Python Cache client. It
+then kills the Event Bus leader and runs exact publish,
 archive, delivery failure/retry/settlement, query, subscription removal, and
 status through the Python Event Bus client. Finally it kills every Rust node,
 reopens the same volumes, and removes only its scoped

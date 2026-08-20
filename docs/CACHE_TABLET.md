@@ -15,7 +15,7 @@ node's volatile-only Cache guarantee ceiling.
 
 ```text
 strict internal HTTP DTO + idempotency key + expected current term
-  -> leader-role/term validation and canonical CacheTabletCommand v1 proposal
+  -> leader-role/term validation and canonical CacheTabletCommand v1/v2 proposal
   -> fixed-voter majority persistence and consensus commit
   -> tablet scope, size, and operation validation
   -> committed-order effective time
@@ -27,8 +27,9 @@ strict internal HTTP DTO + idempotency key + expected current term
 ```
 
 - `epoch-cache::CacheShard` owns deterministic values, a shard-global revision,
-  pure observation, bounded transactions, checked counters and TTLs, capacity,
-  expiry maintenance, and a canonical recovery checksum.
+  pure observation, committed access metadata, bounded transactions, checked
+  counters and TTLs, capacity/eviction, expiry maintenance, and a canonical
+  recovery checksum.
 - `epoch-tablet::CacheTablet` owns committed-command validation, scoped
   idempotency, advisory fenced locks, committed receipts, exact replay, and the
   complete replicated state digest.
@@ -40,8 +41,9 @@ strict internal HTTP DTO + idempotency key + expected current term
   path. The new shard is additive and does not silently route volatile writes
   through consensus.
 
-Version 1 supports one shard (`shard = 0`), no eviction, and at most 128
-distinct-key mutations in one transaction. Cross-shard transactions,
+The current alpha supports one shard (`shard = 0`), every advertised
+entry-count eviction policy, and at most 128 distinct-key mutations in one
+transaction. Cross-shard transactions,
 downloadable backup/PITR restore, change capture, collection-specific
 mutations, and compatibility protocols remain outside this slice.
 
@@ -61,7 +63,9 @@ idempotency key. Observation, lookup, and status reads request a leader
 ReadIndex. The repository-local Go, Java, and Python `RegionalCacheClient`
 surfaces cover every command and every strict value kind; see
 [Regional Cache SDK](REGIONAL_CACHE_SDK.md) and
-[ADR-0019](adr/0019-regional-cache-v1-and-sdk-routing.md).
+[ADR-0019](adr/0019-regional-cache-v1-and-sdk-routing.md). The managed Cache
+configuration is committed in the catalog, immutable for one resource
+generation, and used by every voter during tablet materialization.
 
 ## Internal runtime API
 
@@ -105,10 +109,11 @@ idempotency key, server-assigned candidate time, and one typed operation:
 | Operation | Deterministic effect |
 | --- | --- |
 | `Set` | Replace or create one value, optionally with a TTL and lock guard. |
+| `Get` | Return one value through a committed command and record one LRU/LFU access exactly once. |
 | `Delete` | Delete one logically live value, optionally with a lock guard. |
 | `CompareAndSet` | Require absence at a named shard revision or an exact item version, then write. |
 | `Increment` | Checked signed-counter addition; a missing counter is created. |
-| `Transaction` | Atomically stage 1–128 distinct-key mutations against one expected shard revision. |
+| `Transaction` | Atomically stage 1–128 ordered distinct-key mutations against one expected shard revision; SDKs also expose it as `AtomicBatch`. |
 | `AcquireLock` | Acquire an absent or expired advisory lock and return lease and fencing tokens. |
 | `RenewLock` | Validate the current owner, leader term, and lease token, extend the deadline, and rotate the lease token. |
 | `ReleaseLock` | Validate and remove the exact current lock. |
@@ -119,20 +124,34 @@ oversized payloads, invalid values, and operations outside the bounded v1
 surface fail before application. HTTP 64-bit JSON outputs use decimal strings
 so browsers do not lose precision.
 
-## Revisions, CAS, and transactions
+## Revisions, access, CAS, and transactions
 
 The shard begins at revision `0`. Each successful state-changing value batch
 advances the checked `u64` revision exactly once, and every value written by
 that batch receives the same revision as its item version. Rejected batches and
 no-op deletes do not advance it.
 
+`Get` is the version-2 committed-access command. Under LRU/LFU it advances the
+shard revision and updates access metadata once; exact idempotent replay does
+neither again. Under policies that do not consume access metadata it returns a
+committed receipt without changing the engine revision. `Observe` remains a
+pure read and never changes victim order.
+
 An optimistic transaction supplies the exact shard revision it observed. A
 different revision rejects the entire transaction. Each key may appear only
 once, which makes capacity accounting and ordered results unambiguous. The
 engine validates every version condition, counter addition, deadline,
-operation, and final no-eviction capacity limit against cloned state before it
-swaps the result into the live shard. Any error leaves values, expiry state,
-locks, and revision unchanged.
+operation, and final capacity/eviction result against cloned state before it
+swaps the result into the live shard. Any error leaves values, access metadata,
+expiry state, locks, and revision unchanged. A successful receipt includes
+evicted keys in canonical order.
+
+The policy family is `no_eviction`, all-key LRU/LFU/random, and volatile
+LRU/LFU/random/TTL. LRU and LFU consume committed access metadata; TTL selects
+the earliest deadline; random uses a domain-separated SHA-256 rank over the
+next revision and key. Canonical key order breaks ties. Volatile policies may
+choose only expiring keys and reject atomically if the eligible set cannot make
+room. Mutation targets are protected from becoming their own victims.
 
 Item versions are allocated from the shard-global revision rather than from a
 per-key counter. They therefore do not reset when a key is deleted or expires.
@@ -226,7 +245,9 @@ stored state/receipt; changing any operation input returns
 `idempotency_conflict` without rebinding the proposal ID.
 
 The initial digest commits to the Cache domain, tablet scope, and normalized
-configuration. Every transition chains the previous digest with committed
+configuration. Snapshot v2 persists eviction/access metadata while the legacy
+no-eviction snapshot and command bytes remain readable and byte-stable. Every
+transition chains the previous digest with committed
 metadata, the payload digest, effective time, canonical sorted values, canonical
 sorted locks, shard revision, and the complete applied or rejected outcome.
 Independent tablets replaying one committed history must produce identical
@@ -258,11 +279,14 @@ The deterministic and runtime gates cover:
 - strict command decoding, bounds, scope, proposal identity, and browser-safe
   receipt encoding;
 - pure observations and deterministic expiry order;
+- committed access, exact-retry stability, and LRU/LFU ordering;
+- deterministic all-key/volatile LRU, LFU, random, and TTL eviction plus
+  atomic no-eligible-victim rollback;
 - non-repeating versions across delete/recreate and expiry/recreate;
 - CAS success and mismatch, absent-state ABA fencing, and expected-revision
   conflicts;
-- atomic multi-key success plus rollback on version, type, counter, deadline,
-  revision, and capacity failures;
+- atomic multi-key/batch success plus rollback on version, type, counter,
+  deadline, revision, and capacity failures;
 - lock contention, renewal token rotation, release/reacquisition, exclusive
   deadlines, active-owner epoch fencing, corrupt tokens, old terms, and guarded
   writes;
@@ -273,8 +297,8 @@ The deterministic and runtime gates cover:
   truthful local-read/status labels;
 - real three-runtime majority application, fail-stop behavior, convergence, and
   EPRS reopen; and
-- three-container leader replacement, old-token fencing, voter catch-up, and
-  all-node `SIGKILL` recovery.
+- three-container leader replacement, committed access followed by capacity
+  eviction, old-token fencing, voter catch-up, and all-node `SIGKILL` recovery.
 
 Run it with:
 

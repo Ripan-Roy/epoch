@@ -9,6 +9,7 @@ use crate::common::{proposal_id_from_domain, validate_idempotency_key};
 use crate::{TabletError, TabletResult, TabletScope};
 
 pub const CACHE_TABLET_COMMAND_FORMAT_VERSION: u16 = 1;
+pub const CACHE_TABLET_ACCESS_COMMAND_FORMAT_VERSION: u16 = 2;
 pub const MAX_CACHE_TABLET_COMMAND_BYTES: usize = 512 * 1024;
 pub const MAX_CACHE_KEY_BYTES: usize = 1_024;
 pub const MAX_CACHE_OWNER_BYTES: usize = 256;
@@ -44,6 +45,7 @@ pub enum CacheTabletOperation {
     Delete(CacheDeleteCommand),
     CompareAndSet(CacheCompareAndSetCommand),
     Increment(CacheIncrementCommand),
+    Get(CacheGetCommand),
     Transaction(CacheTransactionCommand),
     AcquireLock(CacheAcquireLockCommand),
     RenewLock(CacheRenewLockCommand),
@@ -97,6 +99,13 @@ pub struct CacheIncrementCommand {
     pub expected_version: Option<u64>,
     pub ttl_ms: Option<u64>,
     pub lock_guard: Option<CacheLockGuard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheGetCommand {
+    pub shard: u32,
+    pub key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -189,7 +198,7 @@ impl CacheTabletCommand {
         operation: CacheTabletOperation,
     ) -> TabletResult<Self> {
         let command = Self {
-            format_version: CACHE_TABLET_COMMAND_FORMAT_VERSION,
+            format_version: operation.format_version(),
             tablet_id: scope.tablet_id,
             tablet_epoch: scope.tablet_epoch,
             resource: scope.resource.clone(),
@@ -235,7 +244,7 @@ impl CacheTabletCommand {
 
     fn validate(&self, scope: &CacheTabletScope) -> TabletResult<()> {
         scope.validate()?;
-        if self.format_version != CACHE_TABLET_COMMAND_FORMAT_VERSION {
+        if self.format_version != self.operation.format_version() {
             return Err(TabletError::InvalidCommand(format!(
                 "unsupported format_version {}",
                 self.format_version
@@ -265,6 +274,21 @@ impl CacheTabletCommand {
 }
 
 impl CacheTabletOperation {
+    const fn format_version(&self) -> u16 {
+        match self {
+            Self::Get(_) => CACHE_TABLET_ACCESS_COMMAND_FORMAT_VERSION,
+            Self::Set(_)
+            | Self::Delete(_)
+            | Self::CompareAndSet(_)
+            | Self::Increment(_)
+            | Self::Transaction(_)
+            | Self::AcquireLock(_)
+            | Self::RenewLock(_)
+            | Self::ReleaseLock(_)
+            | Self::Maintain(_) => CACHE_TABLET_COMMAND_FORMAT_VERSION,
+        }
+    }
+
     fn validate(&self) -> TabletResult<()> {
         let shard = match self {
             Self::Set(command) => {
@@ -291,6 +315,10 @@ impl CacheTabletOperation {
                 validate_key(&command.key)?;
                 validate_ttl(command.ttl_ms)?;
                 validate_optional_guard(command.lock_guard.as_ref())?;
+                command.shard
+            }
+            Self::Get(command) => {
+                validate_key(&command.key)?;
                 command.shard
             }
             Self::Transaction(command) => {

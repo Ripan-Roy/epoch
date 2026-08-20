@@ -922,6 +922,7 @@ mod tests {
                 workload_profile,
                 shard_count,
                 replica_count: 3,
+                configuration: None,
             },
             tablets: (0..shard_count)
                 .map(|shard_index| TabletDescriptor {

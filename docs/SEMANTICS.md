@@ -149,6 +149,13 @@ incident. `no-eviction` rejects the mutation that would exceed its limit.
 Eviction policies may use documented approximations, but must not evict keys
 outside the selected volatile/all-key eligibility class.
 
+The current regional Cache makes eviction exact and deterministic for its
+entry-count boundary. `Get` is a committed access that updates LRU/LFU metadata
+once, including across idempotent retry; `Observe` is pure and never changes
+victim order. LRU/LFU/TTL ties use canonical keys and random policies rank
+candidates with a deterministic digest. Admission, eviction, and an ordered
+same-shard batch are one staged transition, so rejection has no partial result.
+
 Snapshots and change logs do not retroactively make a volatile write durable.
 
 ## 6. Stream Log semantics
@@ -578,6 +585,10 @@ revision, non-repeating item versions, staged same-shard transactions,
 deterministic expiry, committed-order effective time, and composite fenced locks
 rebuild from EPRS before readiness. Writes require expected-current-term
 admission and majority persistence before the local profile receipt is returned.
+Its catalog-bound configuration selects entry capacity, default TTL, and one of
+the no-eviction/all-key/volatile LRU, LFU, random, or TTL policies. Committed
+`Get` supplies deterministic access metadata; the atomic-batch SDK aliases the
+existing ordered one-to-128 transaction command.
 Direct profile reads remain explicitly local and stale-capable. The regional
 resource/shard boundary now implements the general rule above: reads default to
 a safe leader ReadIndex and expose barrier term/read/applied evidence, while an
@@ -627,9 +638,10 @@ signed webhook and Epoch Queue/Stream target execution. See
 [REGIONAL_EVENT_BUS_SDK.md](REGIONAL_EVENT_BUS_SDK.md),
 [STREAM_TABLET.md](STREAM_TABLET.md), and
 [QUEUE_TABLET.md](QUEUE_TABLET.md).
-The Cache tablet additionally lacks user-exportable backup/PITR, automatic
-checkpoint scheduling, background active expiry, multi-shard routing, and a
-public idempotency-retention contract; see [CACHE_TABLET.md](CACHE_TABLET.md).
+The Cache tablet additionally lacks user-exportable backup/PITR, byte-pressure
+capacity accounting, automatic client-side batch coalescing/native multiplexing,
+multi-shard routing, and a public idempotency-retention contract; see
+[CACHE_TABLET.md](CACHE_TABLET.md).
 The direct Bus profile additionally lacks target executors. The regional
 workers execute signed HTTP/webhook and Epoch Queue/Stream targets; unsigned
 HTTP/webhook execution, rate

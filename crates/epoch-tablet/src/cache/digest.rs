@@ -1,5 +1,6 @@
 //! Versioned Cache tablet state and outcome digest encoding.
 
+use epoch_cache::EvictionPolicy;
 use sha2::{Digest, Sha256};
 
 use super::CacheTabletBusinessState;
@@ -12,6 +13,7 @@ pub(super) fn initial_state_digest(
     scope: &CacheTabletScope,
     max_entries: usize,
     default_ttl_ms: Option<u64>,
+    eviction: EvictionPolicy,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"epoch/cache-tablet/state/v1\0");
@@ -20,7 +22,28 @@ pub(super) fn initial_state_digest(
     hash_length_prefixed(&mut hasher, scope.resource.as_bytes());
     hasher.update(u64::try_from(max_entries).unwrap_or(u64::MAX).to_be_bytes());
     hash_optional_u64(&mut hasher, default_ttl_ms);
+    let v1: [u8; 32] = hasher.finalize().into();
+    if eviction == EvictionPolicy::NoEviction {
+        return v1;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"epoch/cache-tablet/state/v2\0");
+    hasher.update(v1);
+    hasher.update([eviction_code(eviction)]);
     hasher.finalize().into()
+}
+
+const fn eviction_code(eviction: EvictionPolicy) -> u8 {
+    match eviction {
+        EvictionPolicy::NoEviction => 0,
+        EvictionPolicy::AllKeysLru => 1,
+        EvictionPolicy::AllKeysLfu => 2,
+        EvictionPolicy::AllKeysRandom => 3,
+        EvictionPolicy::VolatileLru => 4,
+        EvictionPolicy::VolatileLfu => 5,
+        EvictionPolicy::VolatileRandom => 6,
+        EvictionPolicy::VolatileTtl => 7,
+    }
 }
 
 pub(super) fn encode_auxiliary_state(

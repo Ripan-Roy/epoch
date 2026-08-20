@@ -43,10 +43,11 @@ final class RegionalCacheClientTest {
         null,
         guard);
     client.increment("sessions/eu", 0, "inc-1", "visits", -3, BigInteger.ZERO, null, null);
-    client.transaction(
+    client.get("sessions/eu", 0, "get-1", "profile");
+    client.atomicBatch(
         "sessions/eu",
         0,
-        "tx-1",
+        "batch-1",
         BigInteger.valueOf(4),
         List.of(
             RegionalCacheMutation.set(
@@ -91,13 +92,14 @@ final class RegionalCacheClientTest {
     for (int index = 1; index < transport.requests.size(); index += 2) {
       operations.add(transport.requests.get(index));
     }
-    assertEquals(12, operations.size());
+    assertEquals(13, operations.size());
     assertEquals(base + "/mutations", operations.get(0).path());
-    assertEquals("transaction", operations.get(4).body().path("operation").path("kind").asText());
+    assertEquals("get", operations.get(4).body().path("operation").path("kind").asText());
+    assertEquals("transaction", operations.get(5).body().path("operation").path("kind").asText());
     assertEquals(
         "sorted_set",
         operations
-            .get(4)
+            .get(5)
             .body()
             .path("operation")
             .path("mutations")
@@ -105,9 +107,9 @@ final class RegionalCacheClientTest {
             .path("value")
             .path("kind")
             .asText());
-    assertEquals(base + "/mutations/12", operations.get(9).path());
-    assertEquals("profile", operations.get(10).query().get("key"));
-    for (Request request : operations.subList(9, operations.size())) {
+    assertEquals(base + "/mutations/12", operations.get(10).path());
+    assertEquals("profile", operations.get(11).query().get("key"));
+    for (Request request : operations.subList(10, operations.size())) {
       assertEquals("linearizable", request.headers().get("x-epoch-read-consistency"));
     }
   }

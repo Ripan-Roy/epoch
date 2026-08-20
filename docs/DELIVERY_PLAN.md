@@ -322,21 +322,25 @@ The Cache application work now has a bounded deterministic tablet runtime and
 versioned regional application boundary. A
 sorted `CacheShard` provides a pure read path, checked
 non-repeating revision/version allocation, bounded staged transactions, checked
-counters and TTLs, no-eviction capacity, and ordered expiry. Its typed tablet
+counters and TTLs, deterministic no-eviction/all-key/volatile LRU, LFU, random,
+and TTL capacity policy, committed access metadata, and ordered expiry. Its typed tablet
 adds absent-state ABA fencing, advisory composite lock fences, canonical
 committed outcomes, exact replay, time normalization, and convergence digests.
 `epoch-node` mounts it as an opt-in profile, rejects stale-term admission,
 rebuilds from EPRS before readiness, and exposes the authenticated Cache v1
 route with leader ReadIndex observations. Repository-local Go, Java, and Python
-clients cover all seven values, set/delete/CAS/increment, atomic transaction,
-fenced locks, explicit expiry controls, lookup, observation, and status with exact retry.
+clients cover all seven values, set/committed-get/delete/CAS/increment, atomic
+transaction/batch, fenced locks, explicit expiry controls, lookup, pure
+observation, and status with exact retry. Managed configuration is committed
+through Go and the Rust catalog before every voter materializes the tablet.
 Real-runtime and container gates exercise the Python client after leader loss,
 automatic leader-owned TTL reclamation, catch-up, convergence, and all-node
-recovery. Concurrent history checking, multi-shard routing, eviction, exported backup/PITR,
-coordinated backup/PITR and production durability evidence remain
-open. See
+recovery. Concurrent history checking, multi-shard routing, byte-pressure
+capacity/SLO evidence, native multiplexing/automatic batch coalescing, exported
+and coordinated backup/PITR, and production durability evidence remain open. See
 [Regional Cache SDK](REGIONAL_CACHE_SDK.md),
 [ADR-0019](adr/0019-regional-cache-v1-and-sdk-routing.md), and
+[ADR-0032](adr/0032-regional-cache-eviction-and-access-batches.md), and
 [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
 
 The Event Bus application work now runs behind the same actor-owned persistent

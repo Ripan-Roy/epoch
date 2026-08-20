@@ -59,6 +59,11 @@ func TestHTTPAuthorityAppliesThroughAvailableNodeAndObservesPlacement(t *testing
 		ExpectedGeneration: 1,
 		ShardCount:         2,
 		ReplicaCount:       3,
+		Configuration: map[string]any{
+			"shard_count": 2,
+			"max_entries": 64,
+			"eviction":    "all_keys_lru",
+		},
 	})
 	if err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -66,7 +71,8 @@ func TestHTTPAuthorityAppliesThroughAvailableNodeAndObservesPlacement(t *testing
 	if received["request_token"] != "apply-orders" ||
 		received["expected_generation"] != "1" ||
 		received["shard_count"] != float64(2) ||
-		received["replica_count"] != float64(3) {
+		received["replica_count"] != float64(3) ||
+		received["configuration"].(map[string]any)["eviction"] != "all_keys_lru" {
 		t.Fatalf("request body = %#v", received)
 	}
 	if observation.Generation != 2 || len(observation.Tablets) != 2 {

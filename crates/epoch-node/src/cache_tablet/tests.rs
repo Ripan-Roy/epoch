@@ -274,6 +274,11 @@ fn request_dtos_accept_decimal_extrema_for_value_mutations() {
                 "expected_version": "2"
             }
         }),
+        json!({
+            "idempotency_key": "get-1",
+            "expected_term": "1",
+            "operation": {"kind": "get", "key": "a"}
+        }),
     ]
     .map(operation_from);
     assert!(matches!(operations[0], CacheTabletOperation::Delete(_)));
@@ -282,6 +287,7 @@ fn request_dtos_accept_decimal_extrema_for_value_mutations() {
         CacheTabletOperation::CompareAndSet(_)
     ));
     assert!(matches!(operations[2], CacheTabletOperation::Increment(_)));
+    assert!(matches!(operations[3], CacheTabletOperation::Get(_)));
 }
 
 #[test]
@@ -495,6 +501,7 @@ fn status_is_browser_safe_and_truthful_about_retained_storage() {
         cache_revision: u64::MAX - 5,
         retained_entry_count: u64::MAX - 6,
         active_lock_count: u64::MAX - 7,
+        eviction: EvictionPolicy::AllKeysLru,
         cache_recovery_state_digest: "11".repeat(32),
         state_digest: "22".repeat(32),
     };
@@ -520,6 +527,7 @@ fn status_is_browser_safe_and_truthful_about_retained_storage() {
     assert_eq!(document["capability"], "single_shard_cache_tablet");
     assert_eq!(document["stability"], "experimental");
     assert_eq!(document["production_readiness"], "not_production_ready");
+    assert_eq!(document["eviction"], "all_keys_lru");
     assert_eq!(
         document["write_guarantee"],
         "fixed_three_voter_majority_persisted_then_local_profile_applied"
@@ -539,6 +547,7 @@ fn status_is_browser_safe_and_truthful_about_retained_storage() {
         cache_revision: 0,
         retained_entry_count: 0,
         active_lock_count: 0,
+        eviction: EvictionPolicy::NoEviction,
         cache_recovery_state_digest: "00".repeat(32),
         state_digest: "00".repeat(32),
     };
