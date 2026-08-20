@@ -711,7 +711,7 @@ mod tests {
     use super::*;
     use crate::{
         catalog_tablet::CatalogTabletScope,
-        consensus::{CommittedProposalApplier, ConsensusProbeConfig},
+        consensus::{CommittedProposalApplier, ConsensusProbeConfig, TEST_CONSENSUS_TICK_INTERVAL},
         consensus_groups::{ConsensusGroupSupervisor, shared_internal_peer_router},
         regional_router::{
             READ_CONSISTENCY_HEADER, RESOURCE_GENERATION_HEADER, TABLET_EPOCH_HEADER,
@@ -745,9 +745,14 @@ mod tests {
         let mut nodes = Vec::new();
         for (index, listener) in listeners.into_iter().enumerate() {
             let node_id = u64::try_from(index + 1).expect("node ID fits");
-            let config =
-                ConsensusProbeConfig::new(node_id, 1, 1, peers.clone(), Duration::from_millis(20))
-                    .expect("catalog config should be valid");
+            let config = ConsensusProbeConfig::new(
+                node_id,
+                1,
+                1,
+                peers.clone(),
+                TEST_CONSENSUS_TICK_INTERVAL,
+            )
+            .expect("catalog config should be valid");
             let catalog = CatalogTabletService::new(CatalogTabletScope::new(1, 1).unwrap());
             let mut supervisor =
                 ConsensusGroupSupervisor::new(node_id, 16).expect("supervisor should be valid");

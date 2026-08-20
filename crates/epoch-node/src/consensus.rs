@@ -62,6 +62,13 @@ const OUTBOUND_ATTEMPTS: usize = 3;
 const OUTBOUND_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_PROPOSAL_JSON_BYTES: usize = MAX_PROPOSAL_PAYLOAD_BYTES * 4 + 16 * 1024;
 
+// Keep real-HTTP unit clusters tolerant of scheduler contention. Raft uses ten
+// ticks as its minimum election timeout, so this yields a one-second window
+// while assertion polling can remain fast. Dedicated failover tests still
+// prove leadership turnover explicitly.
+#[cfg(test)]
+pub(crate) const TEST_CONSENSUS_TICK_INTERVAL: Duration = Duration::from_millis(100);
+
 pub type ConsensusProbeResult<T> = Result<T, ConsensusProbeError>;
 type OutboundSenders = BTreeMap<NodeId, OutboundPeer>;
 type OutboundHealthRegistry = Arc<BTreeMap<NodeId, Arc<OutboundPeerHealth>>>;
@@ -2472,7 +2479,7 @@ mod tests {
                     77,
                     1,
                     peers.clone(),
-                    Duration::from_millis(20),
+                    TEST_CONSENSUS_TICK_INTERVAL,
                 )
                 .expect("cluster config should be valid")
                 .with_queue_capacities(DEFAULT_COMMAND_QUEUE_CAPACITY, outbound_queue_capacity)
@@ -2543,6 +2550,30 @@ mod tests {
             }));
         }
 
+        async fn replace_peer_listener_with_blackhole(&mut self, index: usize) {
+            self.stop_peer_listener(index).await;
+            let address = self.peers[index]
+                .1
+                .socket_addrs(|| None)
+                .expect("peer URL should resolve without DNS")
+                .into_iter()
+                .next()
+                .expect("peer URL should contain a socket address");
+            let listener = tokio::net::TcpListener::bind(address)
+                .await
+                .expect("blackhole peer listener should rebind");
+            self.servers[index] = Some(tokio::spawn(async move {
+                let mut connections = Vec::new();
+                loop {
+                    let (connection, _) = listener
+                        .accept()
+                        .await
+                        .expect("blackhole peer should accept connections");
+                    connections.push(connection);
+                }
+            }));
+        }
+
         async fn stop(&mut self) {
             for server in &mut self.servers {
                 if let Some(server) = server.take() {
@@ -2591,7 +2622,7 @@ mod tests {
                     77,
                     1,
                     self.peers.clone(),
-                    Duration::from_millis(20),
+                    TEST_CONSENSUS_TICK_INTERVAL,
                 )
                 .expect("cluster config should be valid");
                 let stable_path = self.directories[index].path().join("raft.wal");
@@ -3202,23 +3233,52 @@ mod tests {
         let failed_index = follower_indexes[0];
         let healthy_index = follower_indexes[1];
         let failed_peer_id = handles[failed_index].node_id();
-        let baseline_drops =
-            peer_transport_status(&handles[leader_index], failed_peer_id).dropped_queue_full_frames;
+        let baseline = peer_transport_status(&handles[leader_index], failed_peer_id);
 
-        cluster.stop_peer_listener(failed_index).await;
-        let saturated = tokio::time::timeout(Duration::from_secs(5), async {
+        cluster
+            .replace_peer_listener_with_blackhole(failed_index)
+            .await;
+        // Generate a deterministic burst while the failed peer's worker is
+        // retrying its first frame. Queue saturation must not depend on the
+        // heartbeat frequency chosen by the surrounding election tests.
+        for proposal_id in 90..94 {
+            let proposed = propose_through_current_leader(
+                &handles,
+                proposal_id,
+                format!("minority-outage-burst-{proposal_id}").into_bytes(),
+            )
+            .await;
+            assert!(matches!(
+                proposed,
+                ProposalLookup::Pending { .. } | ProposalLookup::Committed(_)
+            ));
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let status = peer_transport_status(&handles[leader_index], failed_peer_id);
-                if status.dropped_queue_full_frames > baseline_drops
-                    && status.exhausted_retry_frames > 0
-                {
-                    break status;
+                if status.dropped_queue_full_frames > baseline.dropped_queue_full_frames {
+                    break;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
         .await
         .expect("failed peer queue should saturate under a sustained outage");
+
+        // Close the blackhole so the in-flight request fails promptly, then
+        // prove the bounded retry policy exhausts while the peer stays down.
+        cluster.stop_peer_listener(failed_index).await;
+        let saturated = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let status = peer_transport_status(&handles[leader_index], failed_peer_id);
+                if status.exhausted_retry_frames > baseline.exhausted_retry_frames {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("failed peer retries should exhaust without blocking the actor");
         assert_eq!(
             saturated.observed_condition,
             ConsensusProbeTransportCondition::Degraded
@@ -3235,9 +3295,9 @@ mod tests {
             handles[leader_index].clone(),
             handles[healthy_index].clone(),
         ];
-        let dropped_before_workload = majority
+        let delivered_before_workload = majority
             .iter()
-            .map(|handle| peer_transport_status(handle, failed_peer_id).dropped_queue_full_frames)
+            .map(|handle| peer_transport_status(handle, failed_peer_id).delivered_frames)
             .sum::<u64>();
         tokio::time::timeout(Duration::from_secs(5), async {
             for proposal_id in 100..108 {
@@ -3257,13 +3317,13 @@ mod tests {
         .await
         .expect("healthy majority should keep committing while one peer stays unavailable");
 
-        let dropped_after_workload = majority
+        let delivered_after_workload = majority
             .iter()
-            .map(|handle| peer_transport_status(handle, failed_peer_id).dropped_queue_full_frames)
+            .map(|handle| peer_transport_status(handle, failed_peer_id).delivered_frames)
             .sum::<u64>();
-        assert!(
-            dropped_after_workload > dropped_before_workload,
-            "the minority outage should remain active throughout the commit workload"
+        assert_eq!(
+            delivered_after_workload, delivered_before_workload,
+            "the unavailable minority must receive no frames during the commit workload"
         );
         cluster.shutdown().await;
     }

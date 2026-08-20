@@ -1939,12 +1939,7 @@ mod tests {
                     urls.iter()
                         .enumerate()
                         .map(|(peer, url)| (u64::try_from(peer).unwrap() + 1, url.clone())),
-                    // A one-second election window keeps this recovery test
-                    // focused on Bus state. Dedicated failover tests exercise
-                    // leadership turnover; an overloaded parallel CI runner
-                    // must not invalidate a term-fenced delivery lease midway
-                    // through acquisition and acknowledgement.
-                    Duration::from_millis(100),
+                    crate::consensus::TEST_CONSENSUS_TICK_INTERVAL,
                 )
                 .unwrap();
                 let service = BusTabletService::with_default_config(scope()).unwrap();
