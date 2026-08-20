@@ -138,7 +138,7 @@ impl BusTabletService {
             .map(|tablet| tablet.last_applied_time_ms())
     }
 
-    fn ensure_healthy(&self) -> Result<(), String> {
+    pub(crate) fn ensure_healthy(&self) -> Result<(), String> {
         let failure = self
             .failure
             .read()
@@ -169,7 +169,10 @@ impl BusTabletService {
         result.map_err(|error| self.fail(error))
     }
 
-    fn committed_receipt(&self, committed: &CommittedProposal) -> Result<BusTabletReceipt, String> {
+    pub(crate) fn committed_receipt(
+        &self,
+        committed: &CommittedProposal,
+    ) -> Result<BusTabletReceipt, String> {
         self.ensure_healthy()?;
         let result = self
             .tablet
@@ -267,6 +270,18 @@ impl BusTabletService {
             }
             Err(error) => Err(BusDeliveryQueryError::Profile(self.fail(error.to_string()))),
         }
+    }
+
+    pub(crate) fn signed_webhook_delivery_candidates(
+        &self,
+        now_ms: u64,
+    ) -> Result<Vec<epoch_bus::SignedWebhookDeliveryCandidate>, String> {
+        self.ensure_healthy()?;
+        self.tablet
+            .read()
+            .map_err(|_| "Event Bus tablet read lock was poisoned".to_owned())?
+            .signed_webhook_delivery_candidates(now_ms)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -471,6 +486,8 @@ enum BusOperationRequest {
         #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
         dispatcher_epoch: u64,
         max_deliveries: u16,
+        #[serde(default)]
+        expected_delivery_id: Option<String>,
     },
     AcknowledgeDelivery {
         delivery_id: String,
@@ -480,6 +497,14 @@ enum BusOperationRequest {
         lease_token: String,
     },
     FailDelivery {
+        delivery_id: String,
+        dispatcher: String,
+        #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+        dispatcher_epoch: u64,
+        lease_token: String,
+        reason: String,
+    },
+    RejectDelivery {
         delivery_id: String,
         dispatcher: String,
         #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
@@ -509,11 +534,13 @@ impl BusOperationRequest {
                 dispatcher,
                 dispatcher_epoch,
                 max_deliveries,
+                expected_delivery_id,
             } => BusTabletOperation::AcquireDeliveries {
                 subscription: subscription.clone(),
                 dispatcher: dispatcher.clone(),
                 dispatcher_epoch: *dispatcher_epoch,
                 max_deliveries: *max_deliveries,
+                expected_delivery_id: expected_delivery_id.clone(),
             },
             Self::AcknowledgeDelivery {
                 delivery_id,
@@ -533,6 +560,19 @@ impl BusOperationRequest {
                 lease_token,
                 reason,
             } => BusTabletOperation::FailDelivery {
+                delivery_id: delivery_id.clone(),
+                dispatcher: dispatcher.clone(),
+                dispatcher_epoch: *dispatcher_epoch,
+                lease_token: lease_token.clone(),
+                reason: reason.clone(),
+            },
+            Self::RejectDelivery {
+                delivery_id,
+                dispatcher,
+                dispatcher_epoch,
+                lease_token,
+                reason,
+            } => BusTabletOperation::RejectDelivery {
                 delivery_id: delivery_id.clone(),
                 dispatcher: dispatcher.clone(),
                 dispatcher_epoch: *dispatcher_epoch,
@@ -1389,6 +1429,7 @@ mod tests {
                     dispatcher: "worker".into(),
                     dispatcher_epoch: 1,
                     max_deliveries: 1,
+                    expected_delivery_id: None,
                 },
                 100,
                 2,

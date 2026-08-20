@@ -631,7 +631,17 @@ and Python clients discover the leader, carry resource-generation/tablet-epoch
 and term fences, preserve every caller-owned mutation key across one bounded
 rediscovery, and request linearizable barriers for archive, delivery, mutation,
 and status reads. Settlement passes through the opaque lease token returned by
-acquire. These clients do not execute webhooks or claim an external side effect.
+acquire.
+
+An optional leader-owned Rust worker executes only signed HTTP/webhook records.
+It reads pure candidates, commits an exact acquisition and awaits its Raft
+receipt before I/O, sends a CloudEvents 1.0 binary-mode request through the
+public-address-only egress boundary, and commits the observed result. Signing
+keys remain external to replicated state; the outbox captures only the key ID.
+Go, Java, and Python expose matching target constructors and exact-body
+verification helpers. This remains an at-least-once observation of an external
+system, not a consensus-backed side effect. See
+[ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md).
 
 The current core slice evaluates immutable in-memory route plans rather than a
 compiled filter bytecode. It bounds a resource to 100,000 subscriptions, each
@@ -997,3 +1007,4 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0027: Leader-Owned Regional Maintenance](adr/0027-regional-leader-maintenance.md)
 - [ADR-0028: Automatic Regional Consensus Checkpoints](adr/0028-automatic-regional-consensus-checkpoints.md)
 - [ADR-0029: Session-Fenced Stream Consumption](adr/0029-stream-session-fenced-consumption.md)
+- [ADR-0030: Leader-Owned Signed Webhook Delivery](adr/0030-leader-owned-signed-webhook-delivery.md)

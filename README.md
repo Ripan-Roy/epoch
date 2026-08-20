@@ -81,6 +81,8 @@ profile client plus separate authenticated, leader- and fence-aware regional
 Stream, Queue, Cache, and Event Bus v1 clients. Generated response types,
 background/cooperative streaming sessions, atomic assignment-plus-offset
 handoff, and full native streaming parity remain tracked by DX-001.
+The Event Bus models now include signed HTTP/webhook targets, and every SDK
+ships the same exact-body HMAC verifier and replay identity.
 
 `crates/epoch-testkit` is the no-sleep correctness harness for the replicated
 foundation: seeded scheduling, independent wall/monotonic time, scripted fault
@@ -163,14 +165,20 @@ The Event Bus ingress/outbox tablet is the fourth opt-in typed profile. It
 replicates subscription changes and publish ingress, atomically creates one
 durable delivery record per matching subscription, and rebuilds route, archive,
 lease, retry, acknowledgement, dead-letter, and attempt-history state from EPRS
-before serving. Strict internal mutations cover fenced acquire/ack/fail and
+before serving. Strict internal mutations cover fenced acquire/ack/fail/reject and
 bounded timeout maintenance; a bounded local query exposes the ledger.
 Real-runtime and container gates prove retry/conflict behavior, target
-isolation, leader failover, convergence, and all-node recovery. No built-in
-Queue, Stream, webhook, HTTP, or network pull executor exists yet, so outbox
-state is not a target-delivery claim. The regional Event Bus v1 adapter and
+isolation, leader failover, convergence, and all-node recovery. An opt-in
+regional worker now executes signed HTTP/webhook targets from the current
+leader after committing and awaiting an exact lease. It emits CloudEvents 1.0
+binary-mode requests with HMAC-SHA-256, enforces public HTTPS (or explicit
+loopback development), revalidates and pins DNS, disables redirects/proxies,
+and records retry/Ack/rejection back into the ledger. A real 503/204 campaign
+proves distinct signed attempts and all-voter reopen. Queue, Stream, unsigned
+HTTP/webhook, and network pull executors remain open, and no arbitrary external
+side effect is exactly-once. The regional Event Bus v1 adapter and
 repository-local Go, Java, and Python clients expose subscription policy,
-publish, archive replay, delivery acquire/ack/fail/maintenance, delivery query,
+publish, archive replay, delivery acquire/ack/fail/reject/maintenance, delivery query,
 mutation lookup, and status through the same authenticated discovery, fencing,
 exact-retry, and linearizable-read contract as the other profiles. See the
 [Cache tablet guide](docs/CACHE_TABLET.md),
@@ -182,6 +190,7 @@ exact-retry, and linearizable-read contract as the other profiles. See the
 [regional Queue SDK guide](docs/REGIONAL_QUEUE_SDK.md),
 [regional Cache SDK guide](docs/REGIONAL_CACHE_SDK.md),
 [regional Event Bus SDK guide](docs/REGIONAL_EVENT_BUS_SDK.md),
+[signed webhook decision](docs/adr/0030-leader-owned-signed-webhook-delivery.md),
 [consensus checkpoint guide](docs/CONSENSUS_CHECKPOINTS.md),
 [probe guide](docs/CONSENSUS_PROBE.md), [spike report](docs/CONSENSUS_SPIKE.md),
 and proposed [ADR-0003](docs/adr/0003-consensus-adapter.md). An exhaustive crash

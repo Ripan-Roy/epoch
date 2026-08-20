@@ -56,58 +56,72 @@ jobs:
 
       - name: Verify Pages base path
         run: |
+          assert_bundle_contains() {
+            local marker="$1"
+            if ! grep -RFq --include='*.js' --include='*.css' -- "$marker" console/dist/assets; then
+              echo "docs bundle missing required marker: ${marker}" >&2
+              exit 1
+            fi
+          }
+
           test -f console/dist/index.html
           grep -Eq '(src|href)="/epoch/' console/dist/index.html
-          grep -Rq 'One lifecycle, three real clients' console/dist/assets
-          grep -Rq 'Experimental replicated Queue' console/dist/assets
-          grep -Rq 'Experimental replicated Event Bus' console/dist/assets
-          grep -Rq 'per-subscription outbox leases' console/dist/assets
-          grep -Rq 'One catalog materializes four profile-specific groups' console/dist/assets
-          grep -Rq 'Checkpoint progress and ownership fences survive leader and process loss' console/dist/assets
-          grep -Rq 'Route keys and coordinate consumers across replicated partitions' console/dist/assets
-          grep -Rq 'fnv1a64_utf8_mod_n_v1' console/dist/assets
-          grep -Rq 'docs-go-keyed-stream-v1' console/dist/assets
-          grep -Rq 'docs-java-keyed-stream-v1' console/dist/assets
-          grep -Rq 'docs-python-keyed-stream-v1' console/dist/assets
-          grep -Rq 'docs-python-checkpoint-v1' console/dist/assets
-          grep -Rq 'docs-python-retention-v1' console/dist/assets
-          grep -Rq 'docs-go-session-join-v1' console/dist/assets
-          grep -Rq 'docs-java-session-join-v1' console/dist/assets
-          grep -Rq 'docs-python-session-join-v1' console/dist/assets
-          grep -Rq 'docs-go-gzip-batch-v1' console/dist/assets
-          grep -Rq 'docs-java-gzip-batch-v1' console/dist/assets
-          grep -Rq 'docs-python-gzip-batch-v1' console/dist/assets
-          grep -Rq 'Client-framed atomic batches preserve exact bytes' console/dist/assets
-          grep -Rq 'Replicated membership and assignment' console/dist/assets
-          grep -Rq 'Regional atomic batch clients' console/dist/assets
-          grep -Rq 'Only the current Raft leader owns each due timer' console/dist/assets
-          grep -Rq 'Leader-owned automatic maintenance' console/dist/assets
-          grep -Rq 'Every voter bounds its local journal' console/dist/assets
-          grep -Rq 'Claim, revalidate, then consume' console/dist/assets
-          grep -Rq 'docs-python-session-claim-v1' console/dist/assets
-          grep -Rq 'claim_consumer_session' console/dist/assets
-          grep -Rq 'adr/0029-stream-session-fenced-consumption.md' console/dist/assets
-          grep -Rq 'Replicated time and size retention' console/dist/assets
-          grep -Rq 'Regional Stream SDK' console/dist/assets
-          grep -Rq 'Regional Queue SDK' console/dist/assets
-          grep -Rq 'Lease, retry, dead-letter, redrive, and settle' console/dist/assets
-          grep -Rq 'docs-python-redrive-v1' console/dist/assets
-          grep -Rq 'Regional Cache SDK' console/dist/assets
-          grep -Rq 'CAS, transaction, fencing, expiry, and recovery' console/dist/assets
-          grep -Rq 'docs-python-cache-maintain-v1' console/dist/assets
-          grep -Rq 'Regional Event Bus SDK' console/dist/assets
-          grep -Rq 'Route, archive, lease, settle, and recover' console/dist/assets
-          grep -Rq 'docs-python-bus-ack-v1' console/dist/assets
-          grep -Rq 'Checkpoint, compact, catch up, and reopen' console/dist/assets
-          grep -Rq 'retained_log_first_index' console/dist/assets
-          grep -Rq 'Multi-tablet operations' console/dist/assets
+          assert_bundle_contains 'Create a durable Stream and Work Queue'
+          assert_bundle_contains 'Experimental replicated Queue'
+          assert_bundle_contains 'Experimental replicated Event Bus'
+          assert_bundle_contains 'per-subscription outbox leases'
+          assert_bundle_contains 'One catalog materializes four profile-specific groups'
+          assert_bundle_contains 'Checkpoint progress and ownership fences survive leader and process loss'
+          assert_bundle_contains 'Route keys and coordinate consumers across replicated partitions'
+          assert_bundle_contains 'fnv1a64_utf8_mod_n_v1'
+          assert_bundle_contains 'docs-go-keyed-stream-v1'
+          assert_bundle_contains 'docs-java-keyed-stream-v1'
+          assert_bundle_contains 'docs-python-keyed-stream-v1'
+          assert_bundle_contains 'docs-python-checkpoint-v1'
+          assert_bundle_contains 'docs-python-retention-v1'
+          assert_bundle_contains 'docs-go-session-join-v1'
+          assert_bundle_contains 'docs-java-session-join-v1'
+          assert_bundle_contains 'docs-python-session-join-v1'
+          assert_bundle_contains 'docs-go-gzip-batch-v1'
+          assert_bundle_contains 'docs-java-gzip-batch-v1'
+          assert_bundle_contains 'docs-python-gzip-batch-v1'
+          assert_bundle_contains 'Client-framed atomic batches preserve exact bytes'
+          assert_bundle_contains 'Replicated membership and assignment'
+          assert_bundle_contains 'Regional atomic batch clients'
+          assert_bundle_contains 'Only the current Raft leader owns each due timer'
+          assert_bundle_contains 'Leader-owned automatic maintenance'
+          assert_bundle_contains 'Every voter bounds its local journal'
+          assert_bundle_contains 'Claim, revalidate, then consume'
+          assert_bundle_contains 'docs-python-session-claim-v1'
+          assert_bundle_contains 'claim_consumer_session'
+          assert_bundle_contains 'adr/0029-stream-session-fenced-consumption.md'
+          assert_bundle_contains 'Replicated time and size retention'
+          assert_bundle_contains 'Regional Stream SDK'
+          assert_bundle_contains 'Regional Queue SDK'
+          assert_bundle_contains 'Lease, retry, dead-letter, redrive, and settle'
+          assert_bundle_contains 'docs-python-redrive-v1'
+          assert_bundle_contains 'Regional Cache SDK'
+          assert_bundle_contains 'Typed values, CAS, transaction, fencing, and expiry survive leader loss.'
+          assert_bundle_contains 'docs-python-cache-maintain-v1'
+          assert_bundle_contains 'Regional Event Bus SDK'
+          assert_bundle_contains 'deliver signed webhooks, verify receivers'
+          assert_bundle_contains 'docs-python-bus-ack-v1'
+          assert_bundle_contains 'Receive and verify a signed webhook'
+          assert_bundle_contains 'VerifyWebhookSignature'
+          assert_bundle_contains 'WebhookSignatures.verify'
+          assert_bundle_contains 'verify_webhook_signature'
+          assert_bundle_contains 'EPOCH_REGIONAL_WEBHOOK_SIGNING_KEYS_PATH'
+          assert_bundle_contains 'adr/0030-leader-owned-signed-webhook-delivery.md'
+          assert_bundle_contains 'Checkpoint, compact, catch up, and reopen'
+          assert_bundle_contains 'retained_log_first_index'
+          assert_bundle_contains 'Multi-tablet operations'
           release_version="$(cat VERSION)"
-          grep -RFq "v${release_version} release notes" console/dist/assets
+          assert_bundle_contains "v${release_version} release notes"
           if grep -Eq '(src|href)="/assets/' console/dist/index.html; then
             echo 'build contains an asset URL outside /epoch/' >&2
             exit 1
           fi
-          if grep -RqE '/healthz|Refresh node' console/dist/assets; then
+          if grep -REq --include='*.js' --include='*.css' '/healthz|Refresh node' console/dist/assets; then
             echo 'docs-only build contains the live console runtime' >&2
             exit 1
           fi

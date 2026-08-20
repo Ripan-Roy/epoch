@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::common::{proposal_id_from_domain, validate_idempotency_key};
 use crate::{TabletError, TabletResult, TabletScope};
 
-pub const BUS_TABLET_COMMAND_FORMAT_VERSION: u16 = 1;
+pub const BUS_TABLET_COMMAND_FORMAT_VERSION: u16 = 2;
+const LEGACY_BUS_TABLET_COMMAND_FORMAT_VERSION: u16 = 1;
 pub const MAX_BUS_TABLET_COMMAND_BYTES: usize = 512 * 1024;
 pub const MAX_BUS_DELIVERY_ID_BYTES: usize = 512;
 pub const MAX_BUS_DELIVERY_LEASE_TOKEN_BYTES: usize = 256;
@@ -43,6 +44,8 @@ pub enum BusTabletOperation {
         dispatcher: String,
         dispatcher_epoch: u64,
         max_deliveries: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_delivery_id: Option<String>,
     },
     AcknowledgeDelivery {
         delivery_id: String,
@@ -51,6 +54,13 @@ pub enum BusTabletOperation {
         lease_token: String,
     },
     FailDelivery {
+        delivery_id: String,
+        dispatcher: String,
+        dispatcher_epoch: u64,
+        lease_token: String,
+        reason: String,
+    },
+    RejectDelivery {
         delivery_id: String,
         dispatcher: String,
         dispatcher_epoch: u64,
@@ -112,7 +122,7 @@ impl BusTabletCommand {
         operation: BusTabletOperation,
     ) -> TabletResult<Self> {
         let command = Self {
-            format_version: BUS_TABLET_COMMAND_FORMAT_VERSION,
+            format_version: operation.format_version(),
             tablet_id: scope.tablet_id,
             tablet_epoch: scope.tablet_epoch,
             resource: scope.resource.clone(),
@@ -158,7 +168,7 @@ impl BusTabletCommand {
 
     fn validate(&self, scope: &BusTabletScope) -> TabletResult<()> {
         scope.validate()?;
-        if self.format_version != BUS_TABLET_COMMAND_FORMAT_VERSION {
+        if self.format_version != self.operation.format_version() {
             return Err(TabletError::InvalidCommand(format!(
                 "unsupported format_version {}",
                 self.format_version
@@ -198,10 +208,23 @@ impl BusTabletCommand {
                 dispatcher,
                 dispatcher_epoch,
                 max_deliveries,
+                expected_delivery_id,
             } => {
                 validate_resource_name(subscription)?;
                 validate_dispatcher(dispatcher, *dispatcher_epoch)?;
                 validate_delivery_batch(*max_deliveries)?;
+                if let Some(expected_delivery_id) = expected_delivery_id {
+                    validate_required_bounded(
+                        "expected_delivery_id",
+                        expected_delivery_id,
+                        MAX_BUS_DELIVERY_ID_BYTES,
+                    )?;
+                    if *max_deliveries != 1 {
+                        return Err(TabletError::InvalidCommand(
+                            "expected_delivery_id requires max_deliveries 1".into(),
+                        ));
+                    }
+                }
             }
             BusTabletOperation::AcknowledgeDelivery {
                 delivery_id,
@@ -222,6 +245,13 @@ impl BusTabletCommand {
                 dispatcher_epoch,
                 lease_token,
                 reason,
+            }
+            | BusTabletOperation::RejectDelivery {
+                delivery_id,
+                dispatcher,
+                dispatcher_epoch,
+                lease_token,
+                reason,
             } => {
                 validate_delivery_settlement(
                     delivery_id,
@@ -236,6 +266,35 @@ impl BusTabletCommand {
             }
         }
         Ok(())
+    }
+}
+
+impl BusTabletOperation {
+    fn format_version(&self) -> u16 {
+        let requires_v2 = match self {
+            Self::RejectDelivery { .. }
+            | Self::AcquireDeliveries {
+                expected_delivery_id: Some(_),
+                ..
+            } => true,
+            Self::UpsertSubscription { subscription } => {
+                subscription.target.signing_key_id().is_some()
+            }
+            Self::RemoveSubscription { .. }
+            | Self::Publish { .. }
+            | Self::AcquireDeliveries {
+                expected_delivery_id: None,
+                ..
+            }
+            | Self::AcknowledgeDelivery { .. }
+            | Self::FailDelivery { .. }
+            | Self::MaintainDeliveries { .. } => false,
+        };
+        if requires_v2 {
+            BUS_TABLET_COMMAND_FORMAT_VERSION
+        } else {
+            LEGACY_BUS_TABLET_COMMAND_FORMAT_VERSION
+        }
     }
 }
 

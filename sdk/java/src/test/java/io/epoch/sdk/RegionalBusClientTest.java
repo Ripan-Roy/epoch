@@ -25,7 +25,7 @@ final class RegionalBusClientTest {
         new Subscription(
             "orders",
             new EventFilter(List.of("order.*"), List.of(), List.of(), Map.of(), Map.of()),
-            SubscriptionTarget.pull(),
+            SubscriptionTarget.signedWebhook("https://example.com/orders", "primary"),
             EventTransform.empty(),
             new DeliveryPolicy(
                 BigInteger.valueOf(30_000),
@@ -58,6 +58,15 @@ final class RegionalBusClientTest {
         BigInteger.valueOf(7),
         "lease-2",
         "downstream timeout");
+    client.rejectDelivery(
+        bus,
+        0,
+        "reject-1",
+        "delivery-3",
+        "worker-a",
+        BigInteger.valueOf(7),
+        "lease-3",
+        "http status 400");
     client.maintainDeliveries(bus, 0, "maintain-1", 100);
     client.removeSubscription(bus, 0, "remove-1", "orders");
     client.mutation(bus, 0, BigInteger.valueOf(12));
@@ -72,7 +81,7 @@ final class RegionalBusClientTest {
     for (int index = 1; index < transport.requests.size(); index += 2) {
       operations.add(transport.requests.get(index));
     }
-    assertEquals(11, operations.size());
+    assertEquals(12, operations.size());
     assertEquals(base + "/mutations", operations.get(0).path());
     assertEquals(
         "fixed",
@@ -85,10 +94,22 @@ final class RegionalBusClientTest {
             .path("retry")
             .path("strategy")
             .asText());
-    assertEquals(base + "/mutations/12", operations.get(7).path());
-    assertEquals("1", operations.get(8).body().path("from_ms").asText());
-    assertEquals("in_flight", operations.get(9).body().path("state").asText());
-    for (Request request : operations.subList(7, operations.size())) {
+    assertEquals(
+        "primary",
+        operations
+            .get(0)
+            .body()
+            .path("operation")
+            .path("subscription")
+            .path("target")
+            .path("signing_key_id")
+            .asText());
+    assertEquals(
+        "reject_delivery", operations.get(5).body().path("operation").path("kind").asText());
+    assertEquals(base + "/mutations/12", operations.get(8).path());
+    assertEquals("1", operations.get(9).body().path("from_ms").asText());
+    assertEquals("in_flight", operations.get(10).body().path("state").asText());
+    for (Request request : operations.subList(8, operations.size())) {
       assertEquals("linearizable", request.headers().get("x-epoch-read-consistency"));
     }
   }
@@ -113,6 +134,9 @@ final class RegionalBusClientTest {
         () ->
             new DeliveryRetryPolicy(
                 DeliveryBackoffStrategy.FIXED, BigInteger.TEN, BigInteger.ONE, 0, 1, null));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> SubscriptionTarget.signedWebhook("https://example.com/orders", "bad/key"));
     assertEquals(List.of(), transport.requests);
   }
 

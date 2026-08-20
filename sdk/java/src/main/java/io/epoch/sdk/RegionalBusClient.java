@@ -118,6 +118,24 @@ public final class RegionalBusClient {
     return mutate(bus, shard, idempotencyKey, operation);
   }
 
+  /** Records a terminal failure and dead-letters one fenced delivery lease. */
+  public JsonNode rejectDelivery(
+      String bus,
+      int shard,
+      String idempotencyKey,
+      String deliveryId,
+      String dispatcher,
+      BigInteger dispatcherEpoch,
+      String leaseToken,
+      String reason)
+      throws IOException, InterruptedException {
+    RegionalClientCore.required(reason, "delivery rejection reason");
+    ObjectNode operation =
+        settlement("reject_delivery", deliveryId, dispatcher, dispatcherEpoch, leaseToken);
+    operation.put("reason", reason);
+    return mutate(bus, shard, idempotencyKey, operation);
+  }
+
   /** Applies due retry and expired-lease transitions explicitly. */
   public JsonNode maintainDeliveries(
       String bus, int shard, String idempotencyKey, int maxDeliveries)

@@ -4,6 +4,7 @@
 - Date: 2026-08-06
 - Owners: Rust regional ingress and tablet runtime; Go, Java, and Python SDKs
 - Related: BUS-001–005, BUS-011, DX-001–002, MT-10, G4, ADR-0011, ADR-0013, ADR-0017–0019
+- Amended by: ADR-0030 for optional leader-owned signed HTTP/webhook execution
 
 ## Context
 
@@ -46,7 +47,7 @@ The Go, Java, and Python clients expose the complete current replicated lifecycl
 1. upsert or remove a typed subscription;
 2. publish one strict event envelope;
 3. acquire bounded delivery leases for one subscription and dispatcher epoch;
-4. acknowledge or fail one fenced lease;
+4. acknowledge, retryably fail, or terminally reject one fenced lease;
 5. explicitly maintain due retries and expired leases;
 6. resolve a mutation by proposal ID;
 7. replay a bounded archive time range with an optional filter;
@@ -61,10 +62,12 @@ Regional materialization enables the existing replicated delivery outbox. This m
 
 ## Explicit non-claims
 
-This increment does not claim:
+ADR-0030 later added a regional worker for signed HTTP/webhook targets while
+preserving this tablet/API boundary. The remaining non-claims are:
 
-- an HTTP, webhook, Queue, or Stream target executor;
-- webhook signing, secret rotation, OAuth, or replay protection;
+- Queue, Stream, unsigned HTTP/webhook, or public pull/long-poll executors;
+- OAuth/API-key destinations, secret-manager/hot reload, or receiver-owned
+  durable replay storage;
 - push streaming, long polling, dispatcher sessions, or automatic lease renewal;
 - archive search indexes or unbounded replay/query;
 - schema validation, enrichment, connectors, MQTT, or geo routing;

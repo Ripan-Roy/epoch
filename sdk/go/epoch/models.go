@@ -196,9 +196,11 @@ const (
 
 // SubscriptionTarget is a typed Event Bus delivery destination.
 type SubscriptionTarget struct {
-	Kind     TargetKind `json:"kind"`
-	Resource string     `json:"resource,omitempty"`
-	URL      string     `json:"url,omitempty"`
+	Kind           TargetKind `json:"kind"`
+	Resource       string     `json:"resource,omitempty"`
+	URL            string     `json:"url,omitempty"`
+	SigningKeyID   string     `json:"signing_key_id,omitempty"`
+	requireSigning bool
 }
 
 // PullTarget creates a subscription consumed through pull delivery.
@@ -221,9 +223,23 @@ func WebhookTarget(targetURL string) SubscriptionTarget {
 	return SubscriptionTarget{Kind: WebhookTargetKind, URL: targetURL}
 }
 
+// SignedWebhookTarget declares the external key ID captured by the outbox.
+func SignedWebhookTarget(targetURL, signingKeyID string) SubscriptionTarget {
+	return SubscriptionTarget{
+		Kind: WebhookTargetKind, URL: targetURL, SigningKeyID: signingKeyID, requireSigning: true,
+	}
+}
+
 // HTTPTarget routes matching events to a generic HTTP endpoint.
 func HTTPTarget(targetURL string) SubscriptionTarget {
 	return SubscriptionTarget{Kind: HTTPTargetKind, URL: targetURL}
+}
+
+// SignedHTTPTarget declares the external key ID captured by the outbox.
+func SignedHTTPTarget(targetURL, signingKeyID string) SubscriptionTarget {
+	return SubscriptionTarget{
+		Kind: HTTPTargetKind, URL: targetURL, SigningKeyID: signingKeyID, requireSigning: true,
+	}
 }
 
 // Subscription is a typed Event Bus routing resource.
@@ -282,21 +298,42 @@ func (event EventEnvelope) normalized() (EventEnvelope, error) {
 func (target SubscriptionTarget) validate() error {
 	switch target.Kind {
 	case PullTargetKind:
-		if target.Resource != "" || target.URL != "" {
+		if target.Resource != "" || target.URL != "" || target.SigningKeyID != "" {
 			return fmt.Errorf("epoch: pull targets do not accept a resource or URL")
 		}
 	case QueueTargetKind, StreamTargetKind:
-		if strings.TrimSpace(target.Resource) == "" || target.URL != "" {
+		if strings.TrimSpace(target.Resource) == "" || target.URL != "" || target.SigningKeyID != "" {
 			return fmt.Errorf("epoch: %s targets require only a resource", target.Kind)
 		}
 	case WebhookTargetKind, HTTPTargetKind:
 		if strings.TrimSpace(target.URL) == "" || target.Resource != "" {
 			return fmt.Errorf("epoch: %s targets require only a URL", target.Kind)
 		}
+		if target.requireSigning && target.SigningKeyID == "" {
+			return fmt.Errorf("epoch: signed %s targets require a signing key ID", target.Kind)
+		}
+		if target.SigningKeyID != "" && !validResourceName(target.SigningKeyID) {
+			return fmt.Errorf("epoch: signing key ID must be a 1-128 byte resource name")
+		}
 	default:
 		return fmt.Errorf("epoch: unsupported subscription target %q", target.Kind)
 	}
 	return nil
+}
+
+func validResourceName(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for _, character := range []byte(value) {
+		if !(character >= 'a' && character <= 'z') &&
+			!(character >= 'A' && character <= 'Z') &&
+			!(character >= '0' && character <= '9') &&
+			character != '-' && character != '_' && character != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 func (subscription Subscription) normalized() (Subscription, error) {

@@ -292,11 +292,19 @@ bounded lease-expiry maintenance, complete business-state digests, and
 three-independent-tablet convergence. Node tests add strict recursive DTOs,
 browser-safe attempt history, semantic retry/conflict, fail-stop behavior,
 committed acquire/ack, bounded delivery queries, three real HTTP runtimes, and
-EPRS reopen. The container gate adds follower rejection,
+EPRS reopen. Signed-delivery tests add deterministic oldest-candidate and exact
+acquire ordering, v1/v2 compatibility, terminal rejection, RFC 4231 and one
+cross-language HMAC vector, CloudEvents binary headers, exact raw body,
+strict/redacted key files, invalid-header rejection, response classification,
+special-address and mixed-DNS denial, DNS pinning, redirect/proxy suppression,
+and a real loopback receiver. The real-process gate returns 503 then 204,
+observes attempts 1/2 with stable identity and distinct signatures, converges
+the failed/Ack history on all voters, and verifies it after all voters reopen.
+The container gate adds follower rejection,
 majority-before-success, acquire/ack replication, leader loss, catch-up,
 archive/outbox/digest agreement, all-node `SIGKILL`, and same-volume recovery.
-Built-in target executors, rate limiting, redrive/retention, and
-crash-at-network-dispatch history remain open; see
+Queue/Stream/unsigned target executors, rate limiting, redrive/retention, and a
+broader crash-at-every-network-boundary matrix remain open; see
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 The `epoch-catalog` unit suite begins at the regional multi-tablet boundary. It
@@ -310,7 +318,9 @@ after command replay.
 Node integration tests extend that state machine through dedicated catalog
 consensus, shared peer-frame group/epoch demultiplexing, bounded multi-group
 supervision, catalog-driven typed tablet materialization, and resource/shard
-routing. They reject unknown group/epoch, stale generation, stale tablet epoch,
+routing. `regional_process` additionally launches a signed-webhook worker on
+every real process, retries through a real receiver, and proves converged
+acknowledgement after all three storage directories reopen. The suites reject unknown group/epoch, stale generation, stale tablet epoch,
 nonleader writes, wrong profile dispatch, missing routes, and inconsistent
 materialization. `regional_process` starts three actual `epoch-node` binaries,
 creates all four profiles in distinct groups, commits through each leader,
@@ -605,7 +615,7 @@ policy-cache expiry, key rotation, audit integrity, payload redaction, webhook
 SSRF, connector egress allowlists, decompression/schema bombs, credential
 replay, resource exhaustion, and object-tier tampering.
 
-The implemented bootstrap slice currently contributes:
+The implemented security slices currently contribute:
 
 - one Go/Rust decision corpus proving identical action/scope results;
 - strict policy parsing, token-fingerprint uniqueness, bounded input, and
@@ -620,12 +630,19 @@ The implemented bootstrap slice currently contributes:
   that cannot confuse route versus data authorization;
 - real Rust multiprocess and Go-to-Rust container recovery campaigns in which
   every regional request is authenticated; and
+- signed-webhook tests for canonical HMAC and constant-time receiver helpers,
+  key-file bounds/redaction, HTTPS-only operation, explicit loopback
+  development, IPv4/IPv6 special-purpose and embedded-address rejection,
+  mixed-answer DNS failure, per-attempt address pinning, disabled redirects and
+  ambient proxies, invalid header values, lease-bounded timeout, and real
+  retry/recovery; and
 - console tests proving the managed credential stays session-scoped and that
   empty, whitespace-bearing, or oversized values are rejected.
 
 This is not yet the cross-protocol production security suite: OIDC, expiry and
-revocation, mTLS/peer identity, TLS, policy replication/cache expiry, immutable
-audit export, quotas, encryption/KMS, and abuse/load campaigns remain open.
+revocation, mTLS/peer identity, policy replication/cache expiry, immutable
+audit export, network-enforced/private egress, secret-manager rotation, quotas,
+encryption/KMS, and abuse/load campaigns remain open.
 
 Dependency and release gates include Cargo advisory/license policy, Go and
 Python vulnerability scanning, JavaScript dependency scanning, secret scanning,

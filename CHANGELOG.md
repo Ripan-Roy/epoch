@@ -8,6 +8,23 @@ notes explicitly list additional verified artifacts.
 
 ### Added
 
+- Opt-in leader-owned signed HTTP/webhook delivery for regional Event Bus
+  tablets. The current leader commits and awaits an exact delivery lease before
+  I/O, sends the supported envelope in CloudEvents 1.0 binary mode, then commits
+  2xx acknowledgement, retryable 429/5xx/network failure, or terminal rejection.
+- Versioned HMAC-SHA-256 signatures over timestamp, delivery ID, attempt, and
+  exact-body digest; strict bounded external multi-key files support overlap
+  rotation without replicating secret bytes. Go, Java, and Python add signed
+  target constructors and constant-time verification helpers with one shared
+  replay vector.
+- HTTPS/public-address-only egress validation with explicit loopback development,
+  per-attempt all-answer DNS validation and pinning, IPv4/IPv6 special-purpose
+  denial, disabled redirects and ambient proxies, strict derived headers,
+  discarded response bodies, and lease-capped request time.
+- ADR-0030, end-to-end receiver/operator/SDK documentation, and a real
+  three-process 503/204 retry campaign that verifies two distinct signatures,
+  converged immutable attempt history, and all-voter same-storage reopen.
+
 - Session-fenced Stream consumption through canonical command v6 and native
   snapshot v3. Per-shard claims preserve the durable next offset, accept only
   bounded monotonic generations, and require exact member/generation ownership
@@ -219,6 +236,10 @@ notes explicitly list additional verified artifacts.
 
 ### Fixed
 
+- Await webhook acquire and settlement proposals through their exact committed
+  receipt. Previously an initially pending acquire could commit after the worker
+  returned, leaving an in-flight record for lease-timeout maintenance without
+  ever attempting HTTP.
 - Regional dispatch now clears cached outer-router path parameters before
   invoking the profile router. Without that request boundary, parameterized
   Stream group routes could fail immediately with HTTP 500 even though

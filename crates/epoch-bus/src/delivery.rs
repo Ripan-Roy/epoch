@@ -266,6 +266,19 @@ pub struct DeliveryLease {
     pub lease_deadline_ms: u64,
 }
 
+/// The next signed HTTP delivery that the built-in dispatcher may lease for a
+/// subscription.
+///
+/// This is a read-only scheduling hint. The replicated acquire command remains
+/// authoritative and rechecks eligibility when it is applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedWebhookDeliveryCandidate {
+    pub delivery_id: String,
+    pub subscription: String,
+    pub next_attempt: u32,
+    pub signing_key_id: String,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliveryCounts {
     pub pending: usize,
@@ -424,56 +437,70 @@ impl DeliveryLedger {
             if effective_in_flight >= usize::from(record.policy.max_in_flight) {
                 break;
             }
-            let attempt = u32::try_from(record.attempts.len())
-                .map_err(|_| EpochError::Capacity("delivery attempt count overflow".into()))?
-                .checked_add(1)
-                .ok_or_else(|| EpochError::Capacity("delivery attempt count overflow".into()))?;
-            if attempt > record.policy.retry.max_attempts {
-                return Err(EpochError::Internal(format!(
-                    "pending delivery {} exceeded its retry policy",
-                    record.delivery_id
-                )));
-            }
-            let lease_deadline_ms = now_ms
-                .checked_add(record.policy.timeout_ms)
-                .ok_or_else(|| EpochError::Capacity("delivery lease deadline overflow".into()))?;
-            let lease_token = lease_token(
-                &record.delivery_id,
-                dispatcher,
-                attempt,
-                lease_deadline_ms,
-                fence,
-            );
-            record.attempts.push(DeliveryAttempt {
-                attempt,
-                dispatcher: dispatcher.to_owned(),
-                dispatcher_epoch: fence.dispatcher_epoch(),
-                leader_term: fence.leader_term,
-                started_at_ms: now_ms,
-                lease_deadline_ms,
-                outcome: DeliveryAttemptOutcome::InFlight,
-            });
-            record.state = DeliveryState::InFlight {
-                dispatcher: dispatcher.to_owned(),
-                dispatcher_epoch: fence.dispatcher_epoch(),
-                attempt,
-                lease_token: lease_token.clone(),
-                lease_deadline_ms,
-                fence,
-            };
-            leases.push(DeliveryLease {
-                delivery_id: record.delivery_id.clone(),
-                publish_position: record.publish_position,
-                subscription: record.subscription.clone(),
-                target: record.target.clone(),
-                envelope: record.envelope.clone(),
-                route_plan_version: record.route_plan_version,
-                attempt,
-                lease_token,
-                lease_deadline_ms,
-            });
+            leases.push(begin_delivery_attempt(record, dispatcher, now_ms, fence)?);
         }
         Ok(leases)
+    }
+
+    pub(crate) fn acquire_specific(
+        &mut self,
+        subscription: &str,
+        delivery_id: &str,
+        dispatcher: &str,
+        now_ms: u64,
+        fence: DeliveryFence,
+    ) -> EpochResult<Option<DeliveryLease>> {
+        ensure_enabled(self.enabled)?;
+        validate_resource_name(subscription)?;
+        validate_dispatcher(dispatcher)?;
+        fence.validate()?;
+        self.accept_dispatcher_epoch(dispatcher, fence.dispatcher_epoch())?;
+        let record = self
+            .records
+            .get(delivery_id)
+            .ok_or_else(|| EpochError::NotFound(delivery_id.to_owned()))?;
+        if record.subscription != subscription {
+            return Err(EpochError::Conflict(
+                "expected delivery does not belong to the requested subscription".into(),
+            ));
+        }
+        if !matches!(
+            record.state,
+            DeliveryState::Pending { eligible_at_ms } if eligible_at_ms <= now_ms
+        ) {
+            return Ok(None);
+        }
+        let oldest_eligible = self
+            .records
+            .values()
+            .filter(|candidate| {
+                candidate.subscription == subscription
+                    && matches!(
+                        candidate.state,
+                        DeliveryState::Pending { eligible_at_ms } if eligible_at_ms <= now_ms
+                    )
+            })
+            .min_by_key(|candidate| (candidate.publish_position, &candidate.delivery_id))
+            .map(|candidate| candidate.delivery_id.as_str());
+        if oldest_eligible != Some(delivery_id) {
+            return Ok(None);
+        }
+        let in_flight = self
+            .records
+            .values()
+            .filter(|candidate| {
+                candidate.subscription == record.subscription
+                    && candidate.state.kind() == DeliveryStateKind::InFlight
+            })
+            .count();
+        if in_flight >= usize::from(record.policy.max_in_flight) {
+            return Ok(None);
+        }
+        let record = self
+            .records
+            .get_mut(delivery_id)
+            .ok_or_else(|| EpochError::Internal("delivery candidate disappeared".into()))?;
+        begin_delivery_attempt(record, dispatcher, now_ms, fence).map(Some)
     }
 
     pub(crate) fn acknowledge(
@@ -519,6 +546,39 @@ impl DeliveryLedger {
         fence.validate()?;
         self.authorize(delivery_id, dispatcher, lease_token, fence)?;
         self.settle_failure(delivery_id, reason, now_ms)
+    }
+
+    pub(crate) fn reject(
+        &mut self,
+        delivery_id: &str,
+        dispatcher: &str,
+        lease_token: &str,
+        fence: DeliveryFence,
+        reason: &str,
+        now_ms: u64,
+    ) -> EpochResult<DeliveryRecord> {
+        ensure_enabled(self.enabled)?;
+        validate_dispatcher(dispatcher)?;
+        validate_reason(reason)?;
+        fence.validate()?;
+        self.authorize(delivery_id, dispatcher, lease_token, fence)?;
+        let record = self
+            .records
+            .get_mut(delivery_id)
+            .ok_or_else(|| EpochError::NotFound(delivery_id.to_owned()))?;
+        complete_current_attempt(
+            record,
+            DeliveryAttemptOutcome::Failed {
+                failed_at_ms: now_ms,
+                reason: reason.to_owned(),
+                retry_at_ms: None,
+            },
+        )?;
+        record.state = DeliveryState::DeadLettered {
+            dead_lettered_at_ms: now_ms,
+            reason: reason.to_owned(),
+        };
+        Ok(record.clone())
     }
 
     pub(crate) fn maintain(
@@ -571,6 +631,96 @@ impl DeliveryLedger {
                 _ => None,
             })
             .min()
+    }
+
+    pub(crate) fn signed_webhook_candidates(
+        &self,
+        now_ms: u64,
+    ) -> EpochResult<Vec<SignedWebhookDeliveryCandidate>> {
+        ensure_enabled(self.enabled)?;
+        let mut in_flight = BTreeMap::<&str, usize>::new();
+        for record in self.records.values() {
+            if record.state.kind() == DeliveryStateKind::InFlight {
+                *in_flight.entry(&record.subscription).or_default() += 1;
+            }
+        }
+
+        let mut pending = self
+            .records
+            .values()
+            .filter(|record| match record.state {
+                DeliveryState::Pending { eligible_at_ms } => eligible_at_ms <= now_ms,
+                DeliveryState::InFlight { .. }
+                | DeliveryState::Acknowledged { .. }
+                | DeliveryState::DeadLettered { .. } => false,
+            })
+            .collect::<Vec<_>>();
+        pending.sort_by(|left, right| {
+            (&left.subscription, left.publish_position, &left.delivery_id).cmp(&(
+                &right.subscription,
+                right.publish_position,
+                &right.delivery_id,
+            ))
+        });
+
+        let mut candidates = Vec::new();
+        let mut previous_subscription = None::<&str>;
+        for record in pending {
+            if previous_subscription == Some(record.subscription.as_str()) {
+                continue;
+            }
+            previous_subscription = Some(&record.subscription);
+
+            // AcquireDeliveries leases the oldest pending record for a
+            // subscription. Do not skip an older pull/queue/unsigned target
+            // and accidentally lease it as a signed webhook.
+            let signing_key_id = match &record.target {
+                SubscriptionTarget::Webhook {
+                    signing_key_id: Some(signing_key_id),
+                    ..
+                }
+                | SubscriptionTarget::Http {
+                    signing_key_id: Some(signing_key_id),
+                    ..
+                } => signing_key_id,
+                SubscriptionTarget::Pull
+                | SubscriptionTarget::Queue { .. }
+                | SubscriptionTarget::Stream { .. }
+                | SubscriptionTarget::Webhook {
+                    signing_key_id: None,
+                    ..
+                }
+                | SubscriptionTarget::Http {
+                    signing_key_id: None,
+                    ..
+                } => continue,
+            };
+            if in_flight
+                .get(record.subscription.as_str())
+                .copied()
+                .unwrap_or_default()
+                >= usize::from(record.policy.max_in_flight)
+            {
+                continue;
+            }
+            let next_attempt = u32::try_from(record.attempts.len())
+                .map_err(|_| EpochError::Capacity("delivery attempt count overflow".into()))?
+                .checked_add(1)
+                .ok_or_else(|| EpochError::Capacity("delivery attempt count overflow".into()))?;
+            candidates.push(SignedWebhookDeliveryCandidate {
+                delivery_id: record.delivery_id.clone(),
+                subscription: record.subscription.clone(),
+                next_attempt,
+                signing_key_id: signing_key_id.clone(),
+            });
+        }
+        Ok(candidates)
+    }
+
+    pub(crate) fn has_signed_webhook_targets(&self) -> bool {
+        self.records
+            .values()
+            .any(|record| record.target.signing_key_id().is_some())
     }
 
     pub(crate) fn get(&self, delivery_id: &str) -> Option<DeliveryRecord> {
@@ -788,6 +938,62 @@ impl DeliveryLedger {
         };
         Ok(record.clone())
     }
+}
+
+fn begin_delivery_attempt(
+    record: &mut DeliveryRecord,
+    dispatcher: &str,
+    now_ms: u64,
+    fence: DeliveryFence,
+) -> EpochResult<DeliveryLease> {
+    let attempt = u32::try_from(record.attempts.len())
+        .map_err(|_| EpochError::Capacity("delivery attempt count overflow".into()))?
+        .checked_add(1)
+        .ok_or_else(|| EpochError::Capacity("delivery attempt count overflow".into()))?;
+    if attempt > record.policy.retry.max_attempts {
+        return Err(EpochError::Internal(format!(
+            "pending delivery {} exceeded its retry policy",
+            record.delivery_id
+        )));
+    }
+    let lease_deadline_ms = now_ms
+        .checked_add(record.policy.timeout_ms)
+        .ok_or_else(|| EpochError::Capacity("delivery lease deadline overflow".into()))?;
+    let lease_token = lease_token(
+        &record.delivery_id,
+        dispatcher,
+        attempt,
+        lease_deadline_ms,
+        fence,
+    );
+    record.attempts.push(DeliveryAttempt {
+        attempt,
+        dispatcher: dispatcher.to_owned(),
+        dispatcher_epoch: fence.dispatcher_epoch(),
+        leader_term: fence.leader_term,
+        started_at_ms: now_ms,
+        lease_deadline_ms,
+        outcome: DeliveryAttemptOutcome::InFlight,
+    });
+    record.state = DeliveryState::InFlight {
+        dispatcher: dispatcher.to_owned(),
+        dispatcher_epoch: fence.dispatcher_epoch(),
+        attempt,
+        lease_token: lease_token.clone(),
+        lease_deadline_ms,
+        fence,
+    };
+    Ok(DeliveryLease {
+        delivery_id: record.delivery_id.clone(),
+        publish_position: record.publish_position,
+        subscription: record.subscription.clone(),
+        target: record.target.clone(),
+        envelope: record.envelope.clone(),
+        route_plan_version: record.route_plan_version,
+        attempt,
+        lease_token,
+        lease_deadline_ms,
+    })
 }
 
 fn validate_snapshot_attempts(

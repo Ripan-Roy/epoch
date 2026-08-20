@@ -97,6 +97,10 @@ pub enum BusTabletOperationResult {
         )]
         next_eligible_at_ms: Option<u64>,
     },
+    DeliveryRejected {
+        delivery_id: String,
+        state: DeliveryStateKind,
+    },
     DeliveriesMaintained {
         processed: u16,
         retried: u16,

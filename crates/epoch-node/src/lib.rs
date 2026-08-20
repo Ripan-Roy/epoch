@@ -16,6 +16,7 @@ pub mod regional_topology;
 pub mod stream_tablet;
 mod tablet_http;
 pub mod tablet_materializer;
+pub mod webhook_delivery;
 
 use std::{sync::Arc, time::Duration};
 

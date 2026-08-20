@@ -180,16 +180,26 @@ class SubscriptionTarget:
     kind: TargetKind
     resource: str | None = None
     url: str | None = None
+    signing_key_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind in {"queue", "stream"}:
-            if not self.resource or self.url is not None:
+            if not self.resource or self.url is not None or self.signing_key_id is not None:
                 raise ValueError(f"{self.kind} targets require only a resource")
         elif self.kind in {"webhook", "http"}:
             if not self.url or self.resource is not None:
                 raise ValueError(f"{self.kind} targets require only a URL")
+            if self.signing_key_id is not None and (
+                not 1 <= len(self.signing_key_id) <= 128
+                or not self.signing_key_id.isascii()
+                or any(
+                    not (character.isalnum() or character in "-_.")
+                    for character in self.signing_key_id
+                )
+            ):
+                raise ValueError("signing key ID must be a 1-128 byte resource name")
         elif self.kind == "pull":
-            if self.resource is not None or self.url is not None:
+            if self.resource is not None or self.url is not None or self.signing_key_id is not None:
                 raise ValueError("pull targets do not accept a resource or URL")
         else:
             raise ValueError(f"unsupported subscription target: {self.kind}")
@@ -211,8 +221,16 @@ class SubscriptionTarget:
         return cls("webhook", url=url)
 
     @classmethod
+    def signed_webhook(cls, url: str, signing_key_id: str) -> SubscriptionTarget:
+        return cls("webhook", url=url, signing_key_id=signing_key_id)
+
+    @classmethod
     def http(cls, url: str) -> SubscriptionTarget:
         return cls("http", url=url)
+
+    @classmethod
+    def signed_http(cls, url: str, signing_key_id: str) -> SubscriptionTarget:
+        return cls("http", url=url, signing_key_id=signing_key_id)
 
     def to_dict(self) -> dict[str, str]:
         value = {"kind": self.kind}
@@ -220,6 +238,8 @@ class SubscriptionTarget:
             value["resource"] = self.resource
         if self.url is not None:
             value["url"] = self.url
+        if self.signing_key_id is not None:
+            value["signing_key_id"] = self.signing_key_id
         return value
 
 

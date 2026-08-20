@@ -53,7 +53,7 @@ class RegionalBusClientTests(unittest.TestCase):
     def test_complete_mutation_and_linearizable_read_contract(self) -> None:
         subscription = Subscription(
             "orders",
-            SubscriptionTarget.pull(),
+            SubscriptionTarget.signed_webhook("https://example.com/orders", "primary"),
             filter=EventFilter(event_type_patterns=["order.*"]),
             delivery_policy=DeliveryPolicy(retry=DeliveryRetryPolicy(strategy="fixed")),
         )
@@ -88,6 +88,16 @@ class RegionalBusClientTests(unittest.TestCase):
             "lease-2",
             "downstream timeout",
         )
+        self.client.reject_delivery(
+            bus,
+            0,
+            "reject-1",
+            "delivery-3",
+            "worker-a",
+            7,
+            "lease-3",
+            "http status 400",
+        )
         self.client.maintain_deliveries(bus, 0, "maintain-1", max_deliveries=100)
         self.client.remove_subscription(bus, 0, "remove-1", "orders")
         self.client.mutation(bus, 0, 12)
@@ -102,7 +112,7 @@ class RegionalBusClientTests(unittest.TestCase):
             "buses/events%2Feu/shards/0"
         )
         operations = self.transport.requests[1::2]
-        self.assertEqual(len(operations), 11)
+        self.assertEqual(len(operations), 12)
         self.assertTrue(all(request["path"].startswith(base) for request in operations))
         self.assertEqual(operations[0]["body"]["operation"]["kind"], "upsert_subscription")
         self.assertEqual(
@@ -111,10 +121,15 @@ class RegionalBusClientTests(unittest.TestCase):
             ],
             "fixed",
         )
-        self.assertEqual(operations[7]["path"], f"{base}/mutations/12")
-        self.assertEqual(operations[8]["body"]["from_ms"], "1")
-        self.assertEqual(operations[9]["body"]["state"], "in_flight")
-        for request in operations[7:]:
+        self.assertEqual(
+            operations[0]["body"]["operation"]["subscription"]["target"]["signing_key_id"],
+            "primary",
+        )
+        self.assertEqual(operations[5]["body"]["operation"]["kind"], "reject_delivery")
+        self.assertEqual(operations[8]["path"], f"{base}/mutations/12")
+        self.assertEqual(operations[9]["body"]["from_ms"], "1")
+        self.assertEqual(operations[10]["body"]["state"], "in_flight")
+        for request in operations[8:]:
             self.assertEqual(request["headers"]["x-epoch-read-consistency"], "linearizable")
 
     def test_invalid_bounds_and_policy_fail_before_network(self) -> None:
@@ -132,6 +147,8 @@ class RegionalBusClientTests(unittest.TestCase):
             self.client.replay_archive("events", 0, from_ms=10, to_ms=1, limit=1)
         with self.assertRaisesRegex(ValueError, "initial delay"):
             DeliveryRetryPolicy(initial_delay_ms=10, max_delay_ms=1)
+        with self.assertRaisesRegex(ValueError, "signing key ID"):
+            SubscriptionTarget.signed_webhook("https://example.com/orders", "bad/key")
         self.assertEqual(self.transport.requests, [])
 
 

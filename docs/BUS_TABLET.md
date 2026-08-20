@@ -1,8 +1,8 @@
 # Experimental Replicated Event Bus Tablet
 
 **Status:** Working bounded fixed-three-voter ingress and per-subscription
-delivery-ledger profile with an authenticated regional v1 adapter; not a public
-target-execution claim
+delivery-ledger profile with an authenticated regional v1 adapter and optional
+leader-owned signed HTTP/webhook execution
 
 `epoch-bus` and `epoch-tablet` implement a canonical Event Bus ingress and
 delivery-ledger boundary. The standalone engine owns validated subscriptions,
@@ -69,12 +69,16 @@ filter, target, transform, and envelope boundaries. The leader owns
 `applied_at_ms`; retries compare only semantic input, so changing an expected
 term does not conflict while changing the operation does.
 
-Status reports `target_dispatch: external_executor_not_implemented` and
-`durable_target_outbox: true`. A publish receipt proves replicated ingress,
+The profile-local status reports `target_dispatch:
+external_executor_not_implemented` because the tablet itself performs no I/O;
+regional topology separately reports whether its signed-webhook worker is
+enabled and its cumulative pass/lease/outcome/error counters. Status also
+reports `durable_target_outbox: true`. A publish receipt proves replicated ingress,
 the captured deterministic route plan, archive state, and durable delivery
 intent. An acknowledgement proves only that an internal dispatcher committed
-the target result it observed. No built-in Queue, Stream, webhook, HTTP, or
-network pull executor runs in this milestone.
+the target result it observed. The regional runtime can execute signed
+HTTP/webhook targets; Queue, Stream, unsigned HTTP/webhook, and network pull
+remain external.
 
 The regional runtime additionally maps the fully qualified authenticated v1
 route below to that same tablet without a second store or Go data proxy:
@@ -122,8 +126,10 @@ Tablet commands are capped at 512 KiB, matching the consensus proposal ceiling.
 
 ## Commands
 
-Every command binds format version `1`, tablet ID and epoch, resource name,
-idempotency key, candidate application time, and one operation:
+Every command binds a format version, tablet ID and epoch, resource name,
+idempotency key, candidate application time, and one operation. Existing
+unsigned operations retain their exact v1 bytes. A signed subscription,
+internal exact-delivery acquisition, or terminal rejection uses v2:
 
 | Operation | Deterministic result |
 | --- | --- |
@@ -133,6 +139,7 @@ idempotency key, candidate application time, and one operation:
 | `acquire_deliveries` | Lease an ordered bounded batch for one subscription under the current leader term and dispatcher epoch. |
 | `acknowledge_delivery` | Fence by exact active lease and commit terminal acknowledgement. |
 | `fail_delivery` | Fence by exact active lease and commit deterministic retry eligibility or terminal dead-letter state. |
+| `reject_delivery` | Fence by exact active lease and immediately commit a bounded terminal dead-letter reason. |
 | `maintain_deliveries` | Settle a bounded batch of expired leases as timeout failures. |
 
 An internal dispatcher first commits an acquisition:
@@ -197,10 +204,19 @@ JSONPath arrays, predicates, escaping, or compiled bytecode.
 
 Queue and Stream targets require valid Epoch resource names. HTTP and webhook
 targets require a bounded absolute `http` or `https` URL with a host and no
-embedded credentials or fragment. This is syntax validation, not the final
-webhook security boundary: private-address egress policy, DNS rebinding
-defense, signing, secret rotation, replay defense, timeout, and rate control
-remain future runtime work.
+embedded credentials or fragment. An optional `signing_key_id` is a bounded
+resource name captured into every matching outbox record. Only a signed target
+is eligible for the built-in regional executor.
+
+On each attempt the regional leader revalidates the URL, resolves every domain,
+rejects any non-public or mixed DNS answer, and pins the validated addresses.
+HTTPS is mandatory except for an explicitly enabled loopback development
+target. Redirects and ambient proxies are disabled, response bodies are
+discarded, and the request timeout cannot exceed the replicated lease. The
+worker emits CloudEvents 1.0 binary-mode headers and an exact-body
+HMAC-SHA-256 signature. See
+[ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md) for the canonical
+input, key rotation, replay identity, and non-claims.
 
 Transforms add bounded headers and optionally project named top-level output
 fields from deterministic JSON paths. Each publish receipt retains the route
@@ -223,7 +239,7 @@ stored result with disposition `replayed` and changes no counters, archive
 records, receipt count, or digest. Reusing the proposal ID with different
 committed metadata fails closed.
 
-The v2 business-state digest covers normalized configuration, sorted
+The latest business-state digest covers normalized configuration, sorted
 subscriptions, route-plan version, publish position, archive, every outbox
 record and attempt, and dispatcher epoch high-water marks. The v2 tablet
 transition digest additionally covers the prior tablet digest, proposal ID,
@@ -264,8 +280,14 @@ The tests cover:
   independent tablets replaying one committed history;
 - strict DTOs, browser-safe metadata, semantic retry/conflict, actor-missed
   commit fail-stop, and recovery ordering;
+- v1 byte preservation plus v2 signed-target/exact-acquire/rejection commands
+  and snapshots;
+- signed binary CloudEvents, exact HMAC vectors, strict/redacted rotating key
+  files, special-address and mixed-DNS rejection, redirect/proxy suppression,
+  invalid-header rejection, and a real loopback receiver;
 - three real HTTP consensus runtimes committing, converging, shutting down, and
-  reopening from EPRS; and
+  reopening from EPRS, including one 503/204 signed retry whose two-attempt
+  acknowledged history survives full voter restart; and
 - a three-container gate with follower rejection, committed acquire/ack,
   leader loss, catch-up, archive/outbox agreement, all-node `SIGKILL`, and
   same-volume recovery.
@@ -276,9 +298,9 @@ Reproduce the deployment proof with:
 make test-bus-tablet
 ```
 
-Still required are the target executors themselves, rate limiting, redrive and
-terminal-record retention, replay attempt lineage, built-in Queue/Stream writes,
-long-poll and push transports, webhook/HTTP security and signing,
-user-exportable backups/PITR, coordinated restore checkpoints, production identity/TLS,
-generated response models, package
+Still required are rate limiting, redrive and terminal-record retention, replay
+attempt lineage, built-in Queue/Stream and unsigned HTTP writes, long-poll and
+push transports, OAuth/API-key destinations, private managed egress, secret
+manager/hot reload, broader CloudEvents conformance, user-exportable
+backups/PITR, production identity/TLS, generated response models, package
 publication, and multi-shard routing.

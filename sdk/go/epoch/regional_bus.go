@@ -149,6 +149,19 @@ func (client *RegionalBusClient) FailDelivery(ctx context.Context, bus string, s
 	return client.mutate(ctx, bus, shard, idempotencyKey, operation)
 }
 
+// RejectDelivery records a terminal failure and dead-letters the fenced attempt.
+func (client *RegionalBusClient) RejectDelivery(ctx context.Context, bus string, shard uint32, idempotencyKey, deliveryID, dispatcher string, dispatcherEpoch uint64, leaseToken, reason string) (Document, error) {
+	operation, err := busSettlement("reject_delivery", deliveryID, dispatcher, dispatcherEpoch, leaseToken)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(reason) == "" {
+		return nil, fmt.Errorf("epoch: delivery rejection reason is required")
+	}
+	operation["reason"] = reason
+	return client.mutate(ctx, bus, shard, idempotencyKey, operation)
+}
+
 // MaintainDeliveries applies due retry and expired-lease transitions explicitly.
 func (client *RegionalBusClient) MaintainDeliveries(ctx context.Context, bus string, shard uint32, idempotencyKey string, maxDeliveries uint16) (Document, error) {
 	if err := validateBusDeliveryBatch(maxDeliveries); err != nil {

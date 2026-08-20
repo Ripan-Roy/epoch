@@ -57,9 +57,12 @@ core. See the
 and [Cache contract guide](../../docs/REGIONAL_CACHE_SDK.md).
 
 `RegionalBusClient` exposes subscription delivery policy, publish, delivery
-acquire/ack/fail/maintenance, mutation lookup, archive replay, delivery query,
+acquire/ack/fail/reject/maintenance, mutation lookup, archive replay, delivery query,
 and status through the shared regional core. Exact mutation keys and opaque
-lease tokens survive one bounded leader rediscovery. See the
+lease tokens survive one bounded leader rediscovery.
+`SubscriptionTarget.signed_webhook` captures the key ID and
+`verify_webhook_signature` authenticates the exact `bytes` body plus canonical
+timestamp/delivery/attempt fields before returning the replay identity. See the
 [complete Event Bus example](../../console/src/quickstarts/regional_bus/quickstart.py)
 and [Event Bus contract guide](../../docs/REGIONAL_EVENT_BUS_SDK.md).
 

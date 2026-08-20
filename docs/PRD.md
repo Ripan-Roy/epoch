@@ -29,6 +29,20 @@ the authorized topology endpoint. This is automatic local voter recovery, not
 a coordinated backup, PITR artifact, restore campaign, or cluster-wide
 checkpoint. See ADR-0028.
 
+**Signed delivery implementation note (20 August 2026):** The regional Rust
+runtime now has an opt-in, leader-owned executor for signed HTTP/webhook
+targets. It commits and awaits an exact delivery lease before external I/O,
+emits the supported envelope as a CloudEvents 1.0 binary-mode request with an
+exact-body HMAC-SHA-256 signature, and commits acknowledgement, retry, or
+terminal rejection. Go, Java, and Python expose matching signed-target and
+constant-time verification helpers. Public HTTPS enforcement, per-attempt DNS
+validation/address pinning, special-address rejection, disabled redirects and
+ambient proxies, lease-capped timeouts, strict external multi-key files, and a
+real three-voter retry/reopen proof are implemented. This advances BUS-003–005
+and BUS-011 without claiming Queue/Stream/unsigned target execution, full
+CloudEvents conformance, rate limiting, private managed egress, secret-manager
+rotation, or exactly-once external side effects. See ADR-0030.
+
 ---
 
 ## 0. Executive decision

@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use epoch_bus::{
     ArchivedEvent, BusConfig, DeliveryCounts, DeliveryFence, DeliveryRecord, DeliveryState,
-    DeliveryStateKind, EventBus, EventFilter,
+    DeliveryStateKind, EventBus, EventFilter, SignedWebhookDeliveryCandidate,
 };
 use epoch_core::{DurabilityProfile, EpochError, EpochResult};
 use serde::{Deserialize, Serialize};
@@ -242,6 +242,13 @@ impl BusTablet {
         self.bus.delivery_counts()
     }
 
+    pub fn signed_webhook_delivery_candidates(
+        &self,
+        now_ms: u64,
+    ) -> TabletResult<Vec<SignedWebhookDeliveryCandidate>> {
+        Ok(self.bus.signed_webhook_delivery_candidates(now_ms)?)
+    }
+
     pub fn next_maintenance_deadline_ms(&self) -> Option<u64> {
         self.bus.next_delivery_maintenance_deadline_ms()
     }
@@ -419,6 +426,7 @@ fn execute(
             dispatcher,
             dispatcher_epoch,
             max_deliveries,
+            expected_delivery_id,
         } => execute_acquire(
             bus,
             DeliveryExecution::new(scope, committed, applied_at_ms),
@@ -426,6 +434,7 @@ fn execute(
             &dispatcher,
             dispatcher_epoch,
             max_deliveries,
+            expected_delivery_id.as_deref(),
         ),
         BusTabletOperation::AcknowledgeDelivery {
             delivery_id,
@@ -447,6 +456,21 @@ fn execute(
             lease_token,
             reason,
         } => execute_failure(
+            bus,
+            DeliveryExecution::new(scope, committed, applied_at_ms),
+            delivery_id,
+            &dispatcher,
+            dispatcher_epoch,
+            &lease_token,
+            &reason,
+        ),
+        BusTabletOperation::RejectDelivery {
+            delivery_id,
+            dispatcher,
+            dispatcher_epoch,
+            lease_token,
+            reason,
+        } => execute_rejection(
             bus,
             DeliveryExecution::new(scope, committed, applied_at_ms),
             delivery_id,
@@ -498,16 +522,29 @@ fn execute_acquire(
     dispatcher: &str,
     dispatcher_epoch: u64,
     max_deliveries: u16,
+    expected_delivery_id: Option<&str>,
 ) -> EpochResult<BusTabletOperationResult> {
     let fence = execution.fence(dispatcher_epoch)?;
-    let deliveries = bus
-        .acquire_deliveries(
+    let deliveries = if let Some(delivery_id) = expected_delivery_id {
+        bus.acquire_specific_delivery(
+            subscription,
+            delivery_id,
+            dispatcher,
+            execution.applied_at_ms,
+            fence,
+        )?
+        .into_iter()
+        .collect::<Vec<_>>()
+    } else {
+        bus.acquire_deliveries(
             subscription,
             dispatcher,
             usize::from(max_deliveries),
             execution.applied_at_ms,
             fence,
         )?
+    };
+    let deliveries = deliveries
         .into_iter()
         .map(BusTabletDelivery::from)
         .collect();
@@ -566,6 +603,35 @@ fn execute_failure(
         delivery_id,
         state,
         next_eligible_at_ms,
+    })
+}
+
+fn execute_rejection(
+    bus: &mut EventBus,
+    execution: DeliveryExecution<'_>,
+    delivery_id: String,
+    dispatcher: &str,
+    dispatcher_epoch: u64,
+    lease_token: &str,
+    reason: &str,
+) -> EpochResult<BusTabletOperationResult> {
+    let fence = execution.fence(dispatcher_epoch)?;
+    let record = bus.reject_delivery(
+        &delivery_id,
+        dispatcher,
+        lease_token,
+        fence,
+        reason,
+        execution.applied_at_ms,
+    )?;
+    if record.state.kind() != DeliveryStateKind::DeadLettered {
+        return Err(EpochError::Internal(
+            "rejected delivery did not settle to dead-lettered".into(),
+        ));
+    }
+    Ok(BusTabletOperationResult::DeliveryRejected {
+        delivery_id,
+        state: DeliveryStateKind::DeadLettered,
     })
 }
 

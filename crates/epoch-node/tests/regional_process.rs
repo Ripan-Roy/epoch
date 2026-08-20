@@ -4,12 +4,15 @@ use std::{
     net::{SocketAddr, TcpListener as StdTcpListener},
     path::PathBuf,
     process::{Child, Command, Stdio},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
+use axum::{Router, body::Bytes, extract::State, http::HeaderMap, routing::post};
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tokio::sync::oneshot;
 
 const NODE_COUNT: usize = 3;
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -22,6 +25,7 @@ struct NodeProcess {
     data_dir: PathBuf,
     stdout_path: PathBuf,
     stderr_path: PathBuf,
+    webhook_signing_keys_path: PathBuf,
     child: Option<Child>,
 }
 
@@ -50,6 +54,13 @@ impl NodeProcess {
                 "20",
                 "--regional-max-groups",
                 "16",
+                "--regional-webhook-signing-keys-path",
+                self.webhook_signing_keys_path
+                    .to_str()
+                    .expect("webhook key path should be UTF-8"),
+                "--regional-webhook-delivery-interval-ms",
+                "20",
+                "--regional-webhook-allow-http-loopback",
                 "--log",
                 "warn",
             ])
@@ -93,6 +104,12 @@ struct ProcessCluster {
 impl ProcessCluster {
     fn start() -> Self {
         let root = TempDir::new().expect("temp directory should be created");
+        let webhook_signing_keys_path = root.path().join("webhook-signing-keys.json");
+        std::fs::write(
+            &webhook_signing_keys_path,
+            r#"{"format_version":1,"keys":[{"id":"primary","secret":"0123456789abcdef0123456789abcdef"}]}"#,
+        )
+        .expect("webhook signing keys should be written");
         let (http_addresses, peer_addresses) = reserve_cluster_addresses();
         let peer_spec = peer_addresses
             .iter()
@@ -113,6 +130,7 @@ impl ProcessCluster {
                     peer_address,
                     stdout_path: root.path().join(format!("node-{node_id}.stdout.log")),
                     stderr_path: root.path().join(format!("node-{node_id}.stderr.log")),
+                    webhook_signing_keys_path: webhook_signing_keys_path.clone(),
                     data_dir,
                     child: None,
                 }
@@ -484,6 +502,282 @@ async fn write_profile(
     }
 }
 
+async fn write_bus_mutation(
+    client: &Client,
+    cluster: &ProcessCluster,
+    indexes: &[usize],
+    idempotency_key: &str,
+    operation: &Value,
+) -> Value {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            let routes = wait_for_routes(client, cluster, "event-bus", "events", indexes).await;
+            let (leader, term) = writable_route(&routes, indexes);
+            let response = client
+                .post(data_url(
+                    &cluster.nodes[leader],
+                    "event-bus",
+                    "events",
+                    "mutations",
+                ))
+                .bearer_auth(ADMIN_TOKEN)
+                .header("x-epoch-resource-generation", "1")
+                .header("x-epoch-tablet-epoch", "1")
+                .json(&json!({
+                    "idempotency_key": idempotency_key,
+                    "expected_term": term.to_string(),
+                    "operation": operation,
+                }))
+                .send()
+                .await
+                .expect("Event Bus mutation should receive a response");
+            let status = response.status();
+            let document = response
+                .json::<Value>()
+                .await
+                .expect("Event Bus mutation response should be JSON");
+            if status.is_success() {
+                return document;
+            }
+            assert!(
+                is_retryable_leadership_response(status, &document),
+                "Event Bus mutation failed with {status}: {document}\n{}",
+                cluster.diagnostics()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "Event Bus mutation {idempotency_key} did not commit\n{}",
+            cluster.diagnostics()
+        )
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CapturedWebhook {
+    body: Vec<u8>,
+    delivery_id: String,
+    attempt: String,
+    signature: String,
+    key_id: String,
+    cloud_event_id: String,
+}
+
+type CapturedWebhooks = Arc<Mutex<Vec<CapturedWebhook>>>;
+
+struct TestWebhookReceiver {
+    address: SocketAddr,
+    captured: CapturedWebhooks,
+    shutdown: oneshot::Sender<()>,
+    server: tokio::task::JoinHandle<std::io::Result<()>>,
+}
+
+impl TestWebhookReceiver {
+    async fn start() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("webhook receiver should bind");
+        let address = listener
+            .local_addr()
+            .expect("webhook receiver address should exist");
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let receiver = Router::new()
+            .route("/orders", post(capture_webhook))
+            .with_state(Arc::clone(&captured));
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, receiver)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+        });
+        Self {
+            address,
+            captured,
+            shutdown,
+            server,
+        }
+    }
+
+    async fn attempts(&self) -> Result<Vec<CapturedWebhook>, tokio::time::error::Elapsed> {
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            loop {
+                let attempts = self
+                    .captured
+                    .lock()
+                    .expect("webhook capture lock should hold")
+                    .clone();
+                if attempts.len() >= 2 {
+                    return attempts;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+    }
+
+    async fn stop(self) {
+        let _ = self.shutdown.send(());
+        self.server
+            .await
+            .expect("webhook receiver task should join")
+            .expect("webhook receiver should stop cleanly");
+    }
+}
+
+async fn capture_webhook(
+    State(captured): State<CapturedWebhooks>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> StatusCode {
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let mut captured = captured.lock().expect("webhook capture lock should hold");
+    captured.push(CapturedWebhook {
+        body: body.to_vec(),
+        delivery_id: header("epoch-delivery-id"),
+        attempt: header("epoch-delivery-attempt"),
+        signature: header("epoch-signature"),
+        key_id: header("epoch-signature-key-id"),
+        cloud_event_id: header("ce-id"),
+    });
+    if captured.len() == 1 {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::NO_CONTENT
+    }
+}
+
+async fn webhook_diagnostics(client: &Client, cluster: &ProcessCluster) -> String {
+    let mut output = Vec::new();
+    for node in &cluster.nodes {
+        let topology = match client
+            .get(format!(
+                "http://{}/experimental/v1/regional/topology",
+                node.http_address
+            ))
+            .bearer_auth(ADMIN_TOKEN)
+            .send()
+            .await
+        {
+            Ok(response) => format!(
+                "{} {}",
+                response.status(),
+                response.text().await.unwrap_or_default()
+            ),
+            Err(error) => error.to_string(),
+        };
+        let deliveries = match client
+            .post(data_url(node, "event-bus", "events", "deliveries/query"))
+            .bearer_auth(ADMIN_TOKEN)
+            .header("x-epoch-resource-generation", "1")
+            .header("x-epoch-tablet-epoch", "1")
+            .header("x-epoch-read-consistency", "local_stale")
+            .json(&json!({"subscription": "webhook-orders", "limit": 10}))
+            .send()
+            .await
+        {
+            Ok(response) => format!(
+                "{} {}",
+                response.status(),
+                response.text().await.unwrap_or_default()
+            ),
+            Err(error) => error.to_string(),
+        };
+        output.push(format!(
+            "node {} topology: {topology}\nnode {} deliveries: {deliveries}",
+            node.node_id, node.node_id
+        ));
+    }
+    output.join("\n")
+}
+
+async fn prove_signed_webhook_retry(client: &Client, cluster: &ProcessCluster, indexes: &[usize]) {
+    let receiver = TestWebhookReceiver::start().await;
+
+    write_bus_mutation(
+        client,
+        cluster,
+        indexes,
+        "process-bus-upsert-webhook-v1",
+        &json!({
+            "kind": "upsert_subscription",
+            "subscription": {
+                "name": "webhook-orders",
+                "filter": {"event_type_patterns": ["order.*"]},
+                "target": {
+                    "kind": "webhook",
+                    "url": format!("http://{}/orders", receiver.address),
+                    "signing_key_id": "primary"
+                },
+                "delivery_policy": {
+                    "timeout_ms": 1000,
+                    "max_in_flight": 1,
+                    "retry": {
+                        "strategy": "fixed",
+                        "initial_delay_ms": 0,
+                        "max_delay_ms": 0,
+                        "jitter_percent": 0,
+                        "max_attempts": 2,
+                        "max_age_ms": null
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    write_bus_mutation(
+        client,
+        cluster,
+        indexes,
+        "process-bus-publish-webhook-v1",
+        &json!({
+            "kind": "publish",
+            "envelope": {
+                "id": "webhook-event-1",
+                "source": "regional-process-test",
+                "type": "order.created",
+                "time_ms": "2",
+                "payload": {"id": 2}
+            }
+        }),
+    )
+    .await;
+
+    let Ok(attempts) = receiver.attempts().await else {
+        let webhook_diagnostics = webhook_diagnostics(client, cluster).await;
+        panic!(
+            "signed webhook retry was not delivered\n{webhook_diagnostics}\n{}",
+            cluster.diagnostics()
+        );
+    };
+    assert_eq!(
+        attempts.len(),
+        2,
+        "unexpected webhook attempts: {attempts:?}"
+    );
+    assert_eq!(attempts[0].body, br#"{"id":2}"#);
+    assert_eq!(attempts[0].delivery_id, attempts[1].delivery_id);
+    assert_eq!(attempts[0].attempt, "1");
+    assert_eq!(attempts[1].attempt, "2");
+    assert_eq!(attempts[0].key_id, "primary");
+    assert_eq!(attempts[0].cloud_event_id, "webhook-event-1");
+    assert!(attempts[0].signature.starts_with("v1="));
+    assert_ne!(attempts[0].signature, attempts[1].signature);
+
+    wait_for_profile_apply(client, cluster, "event-bus", "events", indexes, 7).await;
+    receiver.stop().await;
+}
+
 #[test]
 fn retry_classifier_accepts_only_explicit_leadership_transitions() {
     assert!(is_retryable_leadership_response(
@@ -564,6 +858,84 @@ async fn wait_for_profile_apply(
     .unwrap_or_else(|_| {
         panic!(
             "{kind}/{name} did not converge to {expected} applied commands\n{}",
+            cluster.diagnostics()
+        )
+    });
+}
+
+async fn wait_for_acknowledged_webhook(
+    client: &Client,
+    cluster: &ProcessCluster,
+    indexes: &[usize],
+) {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            let mut converged = true;
+            for &index in indexes {
+                let response = client
+                    .post(data_url(
+                        &cluster.nodes[index],
+                        "event-bus",
+                        "events",
+                        "deliveries/query",
+                    ))
+                    .bearer_auth(ADMIN_TOKEN)
+                    .header("x-epoch-resource-generation", "1")
+                    .header("x-epoch-tablet-epoch", "1")
+                    .header("x-epoch-read-consistency", "local_stale")
+                    .json(&json!({
+                        "subscription": "webhook-orders",
+                        "state": "acknowledged",
+                        "limit": 10
+                    }))
+                    .send()
+                    .await;
+                let Ok(response) = response else {
+                    converged = false;
+                    break;
+                };
+                if response.status() != StatusCode::OK {
+                    converged = false;
+                    break;
+                }
+                let body = response
+                    .json::<Value>()
+                    .await
+                    .expect("delivery query should be JSON");
+                let Some(record) = body["records"]
+                    .as_array()
+                    .and_then(|records| (records.len() == 1).then(|| &records[0]))
+                else {
+                    converged = false;
+                    break;
+                };
+                let attempts = record["attempts"].as_array();
+                if record["envelope"]["id"] != "webhook-event-1"
+                    || record["state"]["kind"] != "acknowledged"
+                    || attempts.map(Vec::len) != Some(2)
+                    || attempts
+                        .and_then(|attempts| attempts.first())
+                        .and_then(|attempt| attempt["outcome"]["kind"].as_str())
+                        != Some("failed")
+                    || attempts
+                        .and_then(|attempts| attempts.get(1))
+                        .and_then(|attempt| attempt["outcome"]["kind"].as_str())
+                        != Some("acknowledged")
+                {
+                    converged = false;
+                    break;
+                }
+            }
+            if converged {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "signed webhook acknowledgement did not converge\n{}",
             cluster.diagnostics()
         )
     });
@@ -741,6 +1113,8 @@ async fn regional_processes_fail_over_reopen_and_converge() {
         write_profile(&client, &cluster, kind, name, &all).await;
         wait_for_profile_apply(&client, &cluster, kind, name, &all, 1).await;
     }
+    prove_signed_webhook_retry(&client, &cluster, &all).await;
+    wait_for_acknowledged_webhook(&client, &cluster, &all).await;
     wait_for_catalog_counts(&client, &cluster, 4).await;
 
     cluster.stop_all();
@@ -750,7 +1124,9 @@ async fn regional_processes_fail_over_reopen_and_converge() {
     wait_for_record_count(&client, &cluster, &all, 2).await;
     for (kind, name) in additional_profiles {
         wait_for_routes(&client, &cluster, kind, name, &all).await;
-        wait_for_profile_apply(&client, &cluster, kind, name, &all, 1).await;
+        let expected = if kind == "event-bus" { 7 } else { 1 };
+        wait_for_profile_apply(&client, &cluster, kind, name, &all, expected).await;
     }
+    wait_for_acknowledged_webhook(&client, &cluster, &all).await;
     wait_for_catalog_counts(&client, &cluster, 4).await;
 }

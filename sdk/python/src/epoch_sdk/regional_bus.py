@@ -132,6 +132,24 @@ class RegionalBusClient(RegionalClient):
         operation["reason"] = reason
         return self._mutate(bus, shard, idempotency_key, operation)
 
+    def reject_delivery(
+        self,
+        bus: str,
+        shard: int,
+        idempotency_key: str,
+        delivery_id: str,
+        dispatcher: str,
+        dispatcher_epoch: int,
+        lease_token: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        _required(reason, "delivery rejection reason")
+        operation = _settlement(
+            "reject_delivery", delivery_id, dispatcher, dispatcher_epoch, lease_token
+        )
+        operation["reason"] = reason
+        return self._mutate(bus, shard, idempotency_key, operation)
+
     def maintain_deliveries(
         self,
         bus: str,

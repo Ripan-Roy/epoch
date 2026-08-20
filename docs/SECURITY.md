@@ -299,37 +299,35 @@ signing secrets, full connector credentials, or unrestricted user headers.
 
 ## 9. Webhook SSRF and replay controls
 
-Managed webhook delivery uses a dedicated worker and controlled egress path. A
-target is validated when configured and again on every connection attempt:
+The regional alpha now has a dedicated leader-owned worker for signed
+HTTP/webhook targets. Target syntax is validated when the subscription is
+configured, and the network boundary is validated again on every attempt:
 
 1. parse and canonicalize scheme, host, IDNA name, port, and path;
 2. reject URL user information, fragments, malformed encodings, and ambiguous
    numeric IP forms;
-3. require HTTPS in managed mode; standalone HTTP requires an explicit local
-   development policy;
-4. resolve through an Epoch-controlled resolver and inspect every IPv4/IPv6
-   result;
+3. require HTTPS; HTTP requires the explicit
+   `EPOCH_REGIONAL_WEBHOOK_ALLOW_HTTP_LOOPBACK=true` development flag and a
+   literal loopback or `localhost` target;
+4. resolve each domain on every attempt and inspect every IPv4/IPv6 result;
 5. reject loopback, link-local, multicast, unspecified, carrier-grade NAT,
-   cloud metadata, cluster/service, and private ranges unless an approved
-   private-egress profile explicitly owns that range;
-6. pin the selected validated IP for the attempt while retaining the original
+   documentation, transition/protocol, benchmark, cloud metadata,
+   cluster/service, private, and other non-public ranges using the current
+   [IANA special-purpose registries](https://www.iana.org/numbers/registries);
+6. pin all validated addresses for the attempt while retaining the original
    hostname for TLS SNI and certificate verification;
-7. disable redirects by default; an enabled redirect repeats the entire policy
-   and DNS check and has a small hop limit;
-8. allow only configured destination ports and ignore ambient proxy environment
-   variables;
-9. bound connection, TLS, request, response, decompression, and total attempt
-   time and bytes.
+7. disable redirects and ignore ambient proxy environment variables; and
+8. cap connection time and the complete DNS-plus-request attempt, with the
+   attempt never extending beyond the replicated lease deadline; an
+   already-expired lease emits no request.
 
-These checks defend against DNS rebinding and IPv4/IPv6 encoding tricks. A
-private destination is reached only through an explicitly configured tenant
-network/egress policy, not by weakening the global deny list.
+These checks defend against DNS rebinding and IPv4/IPv6 encoding tricks. Mixed
+public/private DNS answers fail closed. A private destination will require a
+future explicit tenant network/egress policy; this alpha does not provide one.
 
-Workers strip hop-by-hop and internal headers. Customer-configured headers are
-allowlisted and cannot overwrite Epoch signature, Host, authorization, trace, or
-idempotency headers except through a dedicated secret-backed target-auth field.
-Response bodies are bounded and discarded unless a connector contract requires
-them.
+The worker constructs its own fixed delivery/CloudEvents header set. Every
+user-derived header value is parsed through the HTTP library and control
+characters terminally reject the delivery. Response bodies are never consumed.
 
 Webhook signing uses a versioned HMAC-SHA-256 contract initially. The signed
 input is the following canonical UTF-8/ASCII lines, including the newline
@@ -339,15 +337,19 @@ separators:
 v1
 <unix-timestamp>
 <delivery-id>
+<attempt>
 <lowercase-hex-sha256-of-raw-body>
 ```
 
-The target receives versioned signature, timestamp, delivery ID, event ID, and
-attempt headers. Rotation supports an overlap window with key IDs. Verification
-helpers use constant-time comparison, enforce timestamp tolerance, and expose
-delivery ID so targets can maintain their own replay/idempotency store. A valid
-signature authenticates Epoch delivery; it does not make processing exactly
-once.
+The target receives versioned signature, key ID, timestamp, delivery ID, event
+ID, subscription, and attempt headers. Rotation supports an overlap window by
+retaining multiple IDs in the external key file while new subscriptions select
+the desired ID. Go, Java, and Python verification helpers use constant-time
+comparison, reject non-canonical decimal/hex fields, enforce timestamp
+tolerance, and expose `(delivery ID, attempt)` so targets can maintain their own
+durable replay/idempotency store. A valid signature authenticates Epoch
+delivery; it does not make processing exactly once. See
+[ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md).
 
 ## 10. Connector and transform isolation
 
@@ -491,15 +493,15 @@ This is not the complete security architecture above. There is still no OIDC,
 credential expiry/revocation service, TLS/mTLS identity, signed forwarded
 context, replicated or hot-reloaded regional policy, envelope encryption, KMS
 integration, immutable audit pipeline/export, tenant scheduler, secret manager,
-webhook sender, SSRF enforcement, connector sandbox, quota system, or support
-workflow. The example policy tokens are public development fixtures, and
+private managed webhook egress, connector sandbox, quota system, or support
+workflow. Signed public HTTPS delivery has request-local SSRF enforcement but
+not a network-level egress proxy or tenant egress policy. The example policy tokens are public development fixtures, and
 environment-variable injection of the Go-to-Rust token is not a production
 secret-delivery design.
 
-The current Bus prototype accepts HTTP-shaped target URLs but does not make
-network deliveries and must not be interpreted as safe webhook validation. The
-current local WAL checksum detects accidental corruption; it is not encryption,
-tamper-proofing, replication, or a compliance control.
+Unsigned Bus HTTP targets remain durable intent only. The current local WAL
+checksum detects accidental corruption; it is not encryption, tamper-proofing,
+replication, or a compliance control.
 
 The development node listens on loopback by default, while the development
 container binds its HTTP port on all interfaces. Browser CORS is fail-closed:

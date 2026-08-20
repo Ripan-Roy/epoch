@@ -690,12 +690,11 @@ GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/names
 ```
 
 The adapter exposes subscription upsert/removal, publish, delivery
-acquire/ack/fail/maintenance, mutation lookup, archive replay, delivery query,
+acquire/ack/fail/reject/maintenance, mutation lookup, archive replay, delivery query,
 and status for shard `0`. Archive replay and delivery query are query-shaped
 POST reads: they require `data.read` and a linearizable barrier, not
 `data.write`. Regional materialization enables the durable delivery outbox;
-the adapter delegates to the replicated Event Bus tablet and owns no bus state
-or target executor.
+the adapter delegates to the replicated Event Bus tablet and owns no bus state.
 
 ### 12.1 Regional automatic maintenance
 
@@ -715,7 +714,25 @@ The interval is configured by `EPOCH_REGIONAL_MAINTENANCE_INTERVAL_MS`, defaults
 to 100, and must be 1–60,000. Explicit maintenance routes remain supported.
 See [ADR-0027](adr/0027-regional-leader-maintenance.md).
 
-### 12.2 Regional automatic consensus checkpoints
+### 12.2 Regional signed webhook worker
+
+When `EPOCH_REGIONAL_WEBHOOK_SIGNING_KEYS_PATH` names a valid key file, each
+regional node enables the signed-webhook scheduler. Only the current Bus tablet
+leader acts. It selects the exact oldest due signed HTTP/webhook delivery,
+commits and awaits that acquisition, performs the HTTPS request, then commits
+acknowledgement, retryable failure, or terminal rejection with the lease token.
+Topology exposes enablement, interval, examined tablets/leaders/subscriptions,
+leases, outcomes, errors, and last pass time.
+
+The worker sends CloudEvents 1.0 binary-mode headers plus the signed replay
+identity. It requires public HTTPS, re-resolves and pins DNS answers, rejects
+mixed/special addresses, follows no redirects, ignores ambient proxies, and
+caps the request by the replicated lease. Explicit HTTP is restricted to
+loopback development. Go, Java, and Python provide exact-body verification
+helpers. See [ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md) and
+[Regional Event Bus SDK](REGIONAL_EVENT_BUS_SDK.md).
+
+### 12.3 Regional automatic consensus checkpoints
 
 Every regional node evaluates catalog plus all local profile groups on a
 configured interval. Every healthy voter may checkpoint its own recovery
@@ -1033,7 +1050,8 @@ ingress/outbox tablet on the internal listener:
 
 - `POST /experimental/v1/tablets/bus/mutations` submits a strict
   `upsert_subscription`, `remove_subscription`, `publish`,
-  `acquire_deliveries`, `acknowledge_delivery`, `fail_delivery`, or
+  `acquire_deliveries`, `acknowledge_delivery`, `fail_delivery`,
+  `reject_delivery`, or
   `maintain_deliveries` operation;
 - `GET /experimental/v1/tablets/bus/mutations/{proposal_id}` resolves local
   unknown, pending, or committed state;
@@ -1054,12 +1072,12 @@ position, delivery count, and SHA-256 digest of the transformed ordered
 delivery plan. Every match also creates a stable per-subscription record with
 captured timeout/max-in-flight/retry policy. Acquires are fenced by leader term
 and dispatcher epoch; ack, failure, retry, timeout maintenance, and dead-letter
-state are replicated and recovered. Status therefore reports
+state are replicated and recovered. The tablet-local status therefore reports
 `target_dispatch: external_executor_not_implemented` and
-`durable_target_outbox: true`. The regional v1 route and repository-local SDKs
-expose that storage lifecycle, but there is no built-in target transport or
-CLI commitment, and a dispatcher acknowledgement is not proof of an arbitrary
-external business side effect. See
+`durable_target_outbox: true`. The optional regional worker executes signed
+HTTP/webhook records outside the tablet; Queue, Stream, unsigned HTTP/webhook,
+and pull delivery remain external. A dispatcher acknowledgement is not proof
+of an arbitrary external business side effect. See
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 Neither the earlier single-profile modes nor the regional multi-group mode is
