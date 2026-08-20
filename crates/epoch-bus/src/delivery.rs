@@ -26,6 +26,90 @@ pub const MAX_DISPATCHER_BYTES: usize = 128;
 const DELIVERY_ID_PREFIX: &str = "epoch.bus.delivery.v1";
 const DELIVERY_LEASE_PREFIX: &str = "epoch.bus.delivery.lease.v1.";
 
+/// The Epoch-owned profile selected by a Queue or Stream subscription target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EpochTargetKind {
+    Queue,
+    Stream,
+}
+
+/// The exact destination incarnation durably bound to an internal delivery.
+///
+/// The simple resource name is intentionally repeated from the target so a
+/// snapshot or command cannot bind Queue intent to an unrelated tablet kind or
+/// name. Tenant scope is supplied by the source Bus route and verified by the
+/// regional worker before this binding is proposed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EpochTargetDestination {
+    pub kind: EpochTargetKind,
+    pub resource: String,
+    pub resource_generation: u64,
+    pub shard_index: u32,
+    pub tablet_id: u64,
+    pub tablet_epoch: u64,
+}
+
+impl EpochTargetDestination {
+    pub fn new(
+        kind: EpochTargetKind,
+        resource: impl Into<String>,
+        resource_generation: u64,
+        shard_index: u32,
+        tablet_id: u64,
+        tablet_epoch: u64,
+    ) -> EpochResult<Self> {
+        let destination = Self {
+            kind,
+            resource: resource.into(),
+            resource_generation,
+            shard_index,
+            tablet_id,
+            tablet_epoch,
+        };
+        destination.validate()?;
+        Ok(destination)
+    }
+
+    pub fn validate(&self) -> EpochResult<()> {
+        validate_resource_name(&self.resource)?;
+        if self.resource_generation == 0 || self.tablet_id == 0 || self.tablet_epoch == 0 {
+            return Err(EpochError::InvalidArgument(
+                "Epoch target generation, tablet ID, and tablet epoch must be non-zero".into(),
+            ));
+        }
+        if self.kind == EpochTargetKind::Queue && self.shard_index != 0 {
+            return Err(EpochError::InvalidArgument(
+                "Queue targets must bind logical shard zero".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_for_target(&self, target: &SubscriptionTarget) -> EpochResult<()> {
+        self.validate()?;
+        let matches = match target {
+            SubscriptionTarget::Queue { resource } => {
+                self.kind == EpochTargetKind::Queue && self.resource == *resource
+            }
+            SubscriptionTarget::Stream { resource } => {
+                self.kind == EpochTargetKind::Stream && self.resource == *resource
+            }
+            SubscriptionTarget::Pull
+            | SubscriptionTarget::Webhook { .. }
+            | SubscriptionTarget::Http { .. } => false,
+        };
+        if matches {
+            Ok(())
+        } else {
+            Err(EpochError::Conflict(
+                "Epoch destination does not match the subscription target".into(),
+            ))
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryBackoffStrategy {
@@ -248,6 +332,8 @@ pub struct DeliveryRecord {
     pub created_at_ms: u64,
     pub expires_at_ms: Option<u64>,
     pub policy: DeliveryPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<EpochTargetDestination>,
     pub state: DeliveryState,
     pub attempts: Vec<DeliveryAttempt>,
 }
@@ -261,6 +347,8 @@ pub struct DeliveryLease {
     pub target: SubscriptionTarget,
     pub envelope: EventEnvelope,
     pub route_plan_version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<EpochTargetDestination>,
     pub attempt: u32,
     pub lease_token: String,
     pub lease_deadline_ms: u64,
@@ -277,6 +365,18 @@ pub struct SignedWebhookDeliveryCandidate {
     pub subscription: String,
     pub next_attempt: u32,
     pub signing_key_id: String,
+}
+
+/// The oldest due Queue or Stream delivery that the built-in regional worker
+/// may resolve and acquire for one subscription.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpochTargetDeliveryCandidate {
+    pub delivery_id: String,
+    pub subscription: String,
+    pub next_attempt: u32,
+    pub target: SubscriptionTarget,
+    pub partition_key: String,
+    pub destination: Option<EpochTargetDestination>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,6 +470,7 @@ impl DeliveryLedger {
                     created_at_ms,
                     expires_at_ms,
                     policy: delivery.delivery_policy.clone(),
+                    destination: None,
                     state: DeliveryState::Pending {
                         eligible_at_ms: created_at_ms,
                     },
@@ -431,6 +532,15 @@ impl DeliveryLedger {
                 .records
                 .get_mut(&delivery_id)
                 .ok_or_else(|| EpochError::Internal("delivery candidate disappeared".into()))?;
+            if matches!(
+                record.target,
+                SubscriptionTarget::Queue { .. } | SubscriptionTarget::Stream { .. }
+            ) {
+                // Built-in Epoch targets require an exact v3 acquisition that
+                // durably binds their destination. Do not skip them or expose
+                // them to the legacy pull dispatcher.
+                break;
+            }
             let effective_in_flight = initial_in_flight
                 .checked_add(leases.len())
                 .ok_or_else(|| EpochError::Capacity("delivery in-flight count overflow".into()))?;
@@ -449,6 +559,7 @@ impl DeliveryLedger {
         dispatcher: &str,
         now_ms: u64,
         fence: DeliveryFence,
+        destination: Option<EpochTargetDestination>,
     ) -> EpochResult<Option<DeliveryLease>> {
         ensure_enabled(self.enabled)?;
         validate_resource_name(subscription)?;
@@ -462,6 +573,40 @@ impl DeliveryLedger {
         if record.subscription != subscription {
             return Err(EpochError::Conflict(
                 "expected delivery does not belong to the requested subscription".into(),
+            ));
+        }
+        match (&record.target, destination.as_ref()) {
+            (
+                SubscriptionTarget::Queue { .. } | SubscriptionTarget::Stream { .. },
+                Some(destination),
+            ) => destination.validate_for_target(&record.target)?,
+            (SubscriptionTarget::Queue { .. } | SubscriptionTarget::Stream { .. }, None) => {
+                return Err(EpochError::Conflict(
+                    "Epoch Queue and Stream targets require a bound destination".into(),
+                ));
+            }
+            (
+                SubscriptionTarget::Pull
+                | SubscriptionTarget::Webhook { .. }
+                | SubscriptionTarget::Http { .. },
+                Some(_),
+            ) => {
+                return Err(EpochError::Conflict(
+                    "only Epoch Queue and Stream targets accept a destination binding".into(),
+                ));
+            }
+            (
+                SubscriptionTarget::Pull
+                | SubscriptionTarget::Webhook { .. }
+                | SubscriptionTarget::Http { .. },
+                None,
+            ) => {}
+        }
+        if let (Some(bound), Some(requested)) = (&record.destination, destination.as_ref())
+            && bound != requested
+        {
+            return Err(EpochError::Conflict(
+                "delivery is already bound to a different Epoch destination".into(),
             ));
         }
         if !matches!(
@@ -500,6 +645,9 @@ impl DeliveryLedger {
             .records
             .get_mut(delivery_id)
             .ok_or_else(|| EpochError::Internal("delivery candidate disappeared".into()))?;
+        if record.destination.is_none() {
+            record.destination = destination;
+        }
         begin_delivery_attempt(record, dispatcher, now_ms, fence).map(Some)
     }
 
@@ -717,10 +865,87 @@ impl DeliveryLedger {
         Ok(candidates)
     }
 
+    pub(crate) fn epoch_target_candidates(
+        &self,
+        now_ms: u64,
+    ) -> EpochResult<Vec<EpochTargetDeliveryCandidate>> {
+        ensure_enabled(self.enabled)?;
+        let mut in_flight = BTreeMap::<&str, usize>::new();
+        for record in self.records.values() {
+            if record.state.kind() == DeliveryStateKind::InFlight {
+                *in_flight.entry(&record.subscription).or_default() += 1;
+            }
+        }
+
+        let mut pending = self
+            .records
+            .values()
+            .filter(|record| match record.state {
+                DeliveryState::Pending { eligible_at_ms } => eligible_at_ms <= now_ms,
+                DeliveryState::InFlight { .. }
+                | DeliveryState::Acknowledged { .. }
+                | DeliveryState::DeadLettered { .. } => false,
+            })
+            .collect::<Vec<_>>();
+        pending.sort_by(|left, right| {
+            (&left.subscription, left.publish_position, &left.delivery_id).cmp(&(
+                &right.subscription,
+                right.publish_position,
+                &right.delivery_id,
+            ))
+        });
+
+        let mut candidates = Vec::new();
+        let mut previous_subscription = None::<&str>;
+        for record in pending {
+            if previous_subscription == Some(record.subscription.as_str()) {
+                continue;
+            }
+            previous_subscription = Some(&record.subscription);
+            if !matches!(
+                record.target,
+                SubscriptionTarget::Queue { .. } | SubscriptionTarget::Stream { .. }
+            ) {
+                continue;
+            }
+            if in_flight
+                .get(record.subscription.as_str())
+                .copied()
+                .unwrap_or_default()
+                >= usize::from(record.policy.max_in_flight)
+            {
+                continue;
+            }
+            let next_attempt = u32::try_from(record.attempts.len())
+                .map_err(|_| EpochError::Capacity("delivery attempt count overflow".into()))?
+                .checked_add(1)
+                .ok_or_else(|| EpochError::Capacity("delivery attempt count overflow".into()))?;
+            candidates.push(EpochTargetDeliveryCandidate {
+                delivery_id: record.delivery_id.clone(),
+                subscription: record.subscription.clone(),
+                next_attempt,
+                target: record.target.clone(),
+                partition_key: record
+                    .envelope
+                    .key
+                    .clone()
+                    .unwrap_or_else(|| record.envelope.id.clone()),
+                destination: record.destination.clone(),
+            });
+        }
+        Ok(candidates)
+    }
+
     pub(crate) fn has_signed_webhook_targets(&self) -> bool {
         self.records
             .values()
             .any(|record| record.target.signing_key_id().is_some())
+    }
+
+    pub(crate) fn has_epoch_target_bindings(&self) -> bool {
+        self.records
+            .values()
+            .any(|record| record.destination.is_some())
     }
 
     pub(crate) fn get(&self, delivery_id: &str) -> Option<DeliveryRecord> {
@@ -815,6 +1040,9 @@ impl DeliveryLedger {
                 delivery_policy: record.policy.clone(),
             }
             .validate()?;
+            if let Some(destination) = &record.destination {
+                destination.validate_for_target(&record.target)?;
+            }
             let expected_expiry = record
                 .policy
                 .retry
@@ -990,6 +1218,7 @@ fn begin_delivery_attempt(
         target: record.target.clone(),
         envelope: record.envelope.clone(),
         route_plan_version: record.route_plan_version,
+        destination: record.destination.clone(),
         attempt,
         lease_token,
         lease_deadline_ms,

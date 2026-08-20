@@ -29,11 +29,15 @@ Ack, retry, or rejection state. Exact-main CI `32365193683`, main-only Pages
 and verifier contracts, real 503-to-204 retry, convergence, and all-voter
 same-storage reopen.
 
-After the source release, the next cohesive P0 data-plane slice is durable
-Event Bus Queue and Stream target execution. It must preserve target-owned
-ordering and backpressure, derive deterministic destination idempotency,
-survive ownership races and cross-tablet recovery, and publish truthful SDK and
-operator evidence without claiming atomic cross-tablet transactions. Stable
+The current cohesive P0 data-plane slice implements durable Event Bus Queue and
+Stream target execution. Source-leader ownership, immutable destination
+generation/tablet binding, shared Stream key routing, target-owned admission and
+ordering, stable destination idempotency, internal forwarding to a different
+group leader, committed-target-before-source-Ack ordering, and all-voter reopen
+are working in the local real-process campaign. Public SDK examples, operator
+status, ADR/API/semantics evidence, and the cross-tablet non-claim are part of
+the same feature-sized delivery; protected CI, Pages, and merge evidence remain
+the exit gate. Stable
 streaming protocols, replicated multi-instance hosted metadata, production
 identity, follower routing, dynamic membership/voter selection,
 repair/rebalance, and the broader M2 security/performance gates remain open.
@@ -120,7 +124,7 @@ The traceability register marks the following as **Slice**. A Slice entry can be
 | Stream slice | Rust | Key routing, generation-fenced committed offsets/reset/lag/replay, fetch, retention baseline, visible ack policy, and bounded atomic batch frames for none/gzip/LZ4/Snappy/Zstd | Ordered recovery, stale-owner fencing, no-early-ack history, strict codec corpus, correlated receipts, and record/checkpoint EPRS replay |
 | Queue slice | Rust | Ready/scheduled/leased/acked/DLQ state, renewal, retry, redrive | Crash-at-every-transition history check |
 | Cache slice | Rust | One volatile memory shard, core types, TTL, eviction, atomic batch, pipeline | Linearizability, expiry, and eviction tests; snapshot/restore remains M3 |
-| Route slice | Rust | Bounded envelope-normalized direct/fan-out plan, independent delivery ledger, and signed HTTP/webhook worker with canonical replicated commands | Route/filter truth table, atomic outbox capacity, fenced acquire/ack/fail/reject, retry/DLQ isolation, exact replay, real-runtime/EPRS/container convergence, signed 503/204 receiver retry, and full-voter reopen; other target execution remains open |
+| Route slice | Rust | Bounded envelope-normalized direct/fan-out plan, independent delivery ledger, signed HTTP/webhook worker, and generation-pinned Epoch Queue/Stream worker with canonical replicated commands | Route/filter truth table, atomic outbox capacity, fenced acquire/ack/fail/reject, retry/DLQ isolation, exact replay, signed 503/204 receiver retry, cross-group Queue/Stream commit, and full-voter reopen; unsigned/custom target execution remains open |
 | Standalone and cluster lifecycle | Rust | One selectable node binary, local admin API, truthful mode/guarantee health | Disconnected standalone and three-node smoke suites |
 | CLI, SDK, emulator | Rust, Go, Java, Python | Create, append/publish, consume/ack, inspect, deterministic local testing | Cross-language executable quickstarts in CI |
 | Control-plane contract and durable registry | Go | Reconciler using only administration contracts plus versioned transactional management metadata; no record-path ownership | Boundary/dependency audit, commit-before-visible tests, and real-process metadata reopen |
@@ -362,14 +366,23 @@ lease-capped timeout, strict/redacted key files, and Go/Java/Python receiver
 verification helpers are implemented. A real three-process 503/204 campaign
 proves distinct signed attempts, voter convergence, and all-voter reopen.
 
-This advances BUS-001, BUS-003–BUS-006, BUS-011, and DX-001/DX-002. Queue/Stream
-and unsigned target executors, broad CloudEvents conformance, rate limiting,
+The source Bus leader also executes Epoch Queue and Stream targets. Its exact
+lease pins the destination generation/shard/tablet/epoch, the destination
+proposal identity remains stable across Bus attempts, and source Ack follows
+the committed target receipt. The real three-process campaign covers a Queue
+and keyed multi-shard Stream whose groups have independent leaders, then reopens
+all voters without adding another destination record. The pair of commits is
+not advertised as one cross-tablet transaction.
+
+This advances BUS-001, BUS-003–BUS-006, BUS-011, and DX-001/DX-002. Unsigned
+target executors, broad CloudEvents conformance, rate limiting,
 redrive/retention, OAuth/API-key destinations, private managed egress, generated
 models, package publication, backups/PITR, and production placement remain
 open. See
 [Regional Event Bus SDK](REGIONAL_EVENT_BUS_SDK.md),
 [ADR-0020](adr/0020-regional-event-bus-v1-and-sdk-routing.md), and
-[ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md), and
+[ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md),
+[ADR-0031](adr/0031-leader-owned-epoch-target-delivery.md), and
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 ADR-0027 unifies those profile timers in the regional node. State machines

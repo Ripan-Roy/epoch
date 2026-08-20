@@ -249,7 +249,7 @@ valid = len(digests) == 1 and all(
     and status["subscription_count"] == "1"
     and status["commit_position"] == str(expected)
     and status["archived_event_count"] == str(expected)
-    and status["target_dispatch"] == "external_executor_not_implemented"
+    and status["target_dispatch"] == "regional_epoch_targets_and_configured_signed_webhooks"
     and status["durable_target_outbox"] is True
     and status["pending_delivery_count"] == str(expected - acknowledged)
     and status["in_flight_delivery_count"] == "0"

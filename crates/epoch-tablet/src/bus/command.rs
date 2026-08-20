@@ -1,13 +1,16 @@
 //! Versioned Event Bus tablet commands and their strict canonical codec.
 
-use epoch_bus::{MAX_DELIVERY_ACQUIRE_BATCH, MAX_DELIVERY_REASON_BYTES, Subscription};
+use epoch_bus::{
+    EpochTargetDestination, MAX_DELIVERY_ACQUIRE_BATCH, MAX_DELIVERY_REASON_BYTES, Subscription,
+};
 use epoch_core::{EventEnvelope, validate_resource_name};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{proposal_id_from_domain, validate_idempotency_key};
 use crate::{TabletError, TabletResult, TabletScope};
 
-pub const BUS_TABLET_COMMAND_FORMAT_VERSION: u16 = 2;
+pub const BUS_TABLET_COMMAND_FORMAT_VERSION: u16 = 3;
+const SIGNED_WEBHOOK_BUS_TABLET_COMMAND_FORMAT_VERSION: u16 = 2;
 const LEGACY_BUS_TABLET_COMMAND_FORMAT_VERSION: u16 = 1;
 pub const MAX_BUS_TABLET_COMMAND_BYTES: usize = 512 * 1024;
 pub const MAX_BUS_DELIVERY_ID_BYTES: usize = 512;
@@ -46,6 +49,8 @@ pub enum BusTabletOperation {
         max_deliveries: u16,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_delivery_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination: Option<EpochTargetDestination>,
     },
     AcknowledgeDelivery {
         delivery_id: String,
@@ -193,109 +198,133 @@ impl BusTabletCommand {
             )));
         }
         validate_idempotency_key(&self.idempotency_key)?;
-        match &self.operation {
-            BusTabletOperation::UpsertSubscription { subscription } => {
-                subscription.validate()?;
-            }
-            BusTabletOperation::RemoveSubscription { name } => {
-                validate_resource_name(name)?;
-            }
-            BusTabletOperation::Publish { envelope } => {
-                envelope.validate()?;
-            }
-            BusTabletOperation::AcquireDeliveries {
-                subscription,
-                dispatcher,
-                dispatcher_epoch,
-                max_deliveries,
-                expected_delivery_id,
-            } => {
-                validate_resource_name(subscription)?;
-                validate_dispatcher(dispatcher, *dispatcher_epoch)?;
-                validate_delivery_batch(*max_deliveries)?;
-                if let Some(expected_delivery_id) = expected_delivery_id {
-                    validate_required_bounded(
-                        "expected_delivery_id",
-                        expected_delivery_id,
-                        MAX_BUS_DELIVERY_ID_BYTES,
-                    )?;
-                    if *max_deliveries != 1 {
-                        return Err(TabletError::InvalidCommand(
-                            "expected_delivery_id requires max_deliveries 1".into(),
-                        ));
-                    }
-                }
-            }
-            BusTabletOperation::AcknowledgeDelivery {
-                delivery_id,
-                dispatcher,
-                dispatcher_epoch,
-                lease_token,
-            } => {
-                validate_delivery_settlement(
-                    delivery_id,
-                    dispatcher,
-                    *dispatcher_epoch,
-                    lease_token,
-                )?;
-            }
-            BusTabletOperation::FailDelivery {
-                delivery_id,
-                dispatcher,
-                dispatcher_epoch,
-                lease_token,
-                reason,
-            }
-            | BusTabletOperation::RejectDelivery {
-                delivery_id,
-                dispatcher,
-                dispatcher_epoch,
-                lease_token,
-                reason,
-            } => {
-                validate_delivery_settlement(
-                    delivery_id,
-                    dispatcher,
-                    *dispatcher_epoch,
-                    lease_token,
-                )?;
-                validate_required_bounded("reason", reason, MAX_DELIVERY_REASON_BYTES)?;
-            }
-            BusTabletOperation::MaintainDeliveries { max_deliveries } => {
-                validate_delivery_batch(*max_deliveries)?;
-            }
-        }
-        Ok(())
+        validate_operation(&self.operation)
     }
 }
 
 impl BusTabletOperation {
     fn format_version(&self) -> u16 {
-        let requires_v2 = match self {
+        match self {
+            Self::AcquireDeliveries {
+                destination: Some(_),
+                ..
+            } => BUS_TABLET_COMMAND_FORMAT_VERSION,
             Self::RejectDelivery { .. }
             | Self::AcquireDeliveries {
                 expected_delivery_id: Some(_),
+                destination: None,
                 ..
-            } => true,
-            Self::UpsertSubscription { subscription } => {
-                subscription.target.signing_key_id().is_some()
+            } => SIGNED_WEBHOOK_BUS_TABLET_COMMAND_FORMAT_VERSION,
+            Self::UpsertSubscription { subscription }
+                if subscription.target.signing_key_id().is_some() =>
+            {
+                SIGNED_WEBHOOK_BUS_TABLET_COMMAND_FORMAT_VERSION
             }
-            Self::RemoveSubscription { .. }
+            Self::UpsertSubscription { .. }
+            | Self::RemoveSubscription { .. }
             | Self::Publish { .. }
             | Self::AcquireDeliveries {
                 expected_delivery_id: None,
+                destination: None,
                 ..
             }
             | Self::AcknowledgeDelivery { .. }
             | Self::FailDelivery { .. }
-            | Self::MaintainDeliveries { .. } => false,
-        };
-        if requires_v2 {
-            BUS_TABLET_COMMAND_FORMAT_VERSION
-        } else {
-            LEGACY_BUS_TABLET_COMMAND_FORMAT_VERSION
+            | Self::MaintainDeliveries { .. } => LEGACY_BUS_TABLET_COMMAND_FORMAT_VERSION,
         }
     }
+}
+
+fn validate_operation(operation: &BusTabletOperation) -> TabletResult<()> {
+    match operation {
+        BusTabletOperation::UpsertSubscription { subscription } => {
+            subscription.validate()?;
+            Ok(())
+        }
+        BusTabletOperation::RemoveSubscription { name } => {
+            validate_resource_name(name)?;
+            Ok(())
+        }
+        BusTabletOperation::Publish { envelope } => {
+            envelope.validate()?;
+            Ok(())
+        }
+        BusTabletOperation::AcquireDeliveries {
+            subscription,
+            dispatcher,
+            dispatcher_epoch,
+            max_deliveries,
+            expected_delivery_id,
+            destination,
+        } => validate_acquire(
+            subscription,
+            dispatcher,
+            *dispatcher_epoch,
+            *max_deliveries,
+            expected_delivery_id.as_deref(),
+            destination.as_ref(),
+        ),
+        BusTabletOperation::AcknowledgeDelivery {
+            delivery_id,
+            dispatcher,
+            dispatcher_epoch,
+            lease_token,
+        } => validate_delivery_settlement(delivery_id, dispatcher, *dispatcher_epoch, lease_token),
+        BusTabletOperation::FailDelivery {
+            delivery_id,
+            dispatcher,
+            dispatcher_epoch,
+            lease_token,
+            reason,
+        }
+        | BusTabletOperation::RejectDelivery {
+            delivery_id,
+            dispatcher,
+            dispatcher_epoch,
+            lease_token,
+            reason,
+        } => {
+            validate_delivery_settlement(delivery_id, dispatcher, *dispatcher_epoch, lease_token)?;
+            validate_required_bounded("reason", reason, MAX_DELIVERY_REASON_BYTES)
+        }
+        BusTabletOperation::MaintainDeliveries { max_deliveries } => {
+            validate_delivery_batch(*max_deliveries)
+        }
+    }
+}
+
+fn validate_acquire(
+    subscription: &str,
+    dispatcher: &str,
+    dispatcher_epoch: u64,
+    max_deliveries: u16,
+    expected_delivery_id: Option<&str>,
+    destination: Option<&EpochTargetDestination>,
+) -> TabletResult<()> {
+    validate_resource_name(subscription)?;
+    validate_dispatcher(dispatcher, dispatcher_epoch)?;
+    validate_delivery_batch(max_deliveries)?;
+    if let Some(delivery_id) = expected_delivery_id {
+        validate_required_bounded(
+            "expected_delivery_id",
+            delivery_id,
+            MAX_BUS_DELIVERY_ID_BYTES,
+        )?;
+        if max_deliveries != 1 {
+            return Err(TabletError::InvalidCommand(
+                "expected_delivery_id requires max_deliveries 1".into(),
+            ));
+        }
+    }
+    if let Some(destination) = destination {
+        destination.validate()?;
+        if expected_delivery_id.is_none() || max_deliveries != 1 {
+            return Err(TabletError::InvalidCommand(
+                "destination requires expected_delivery_id and max_deliveries 1".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn bus_proposal_id_for(scope: &BusTabletScope, idempotency_key: &str) -> TabletResult<u64> {

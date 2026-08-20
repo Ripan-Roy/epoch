@@ -376,11 +376,25 @@ special-purpose addresses, ignores ambient proxies, and follows no redirects.
 `2xx` acknowledges; `429`, `5xx`, DNS/connect/timeouts retry; other non-2xx
 responses terminally dead-letter. The attempt timeout is capped by the lease.
 
-Queue/Stream writes, unsigned HTTP/webhook execution, public pull/long-poll,
+The regional Epoch-target worker executes Queue and Stream records from the
+current source Bus leader. It resolves the target in the same namespace, uses
+Queue shard `0` or the published FNV-1a Stream key router, and commits a source
+lease that pins target kind, resource generation, shard, tablet ID, and tablet
+epoch before the target proposal. The target enqueue/append idempotency key is
+stable across Bus attempts and scoped by source and destination incarnations.
+The Bus is acknowledged only after the exact target receipt commits. A crash
+between those commits can retry the target proposal, but cannot insert a second
+record in that pinned target incarnation. This is not an atomic cross-tablet
+transaction; a permanently unavailable bound target follows the captured Bus
+retry/dead-letter policy. An unbound target that is not yet materialized stays
+pending and is reported through worker status until it can be resolved.
+
+Unsigned HTTP/webhook execution, public pull/long-poll,
 rate limiting, redrive and terminal retention, OAuth/API-key destinations,
 private managed egress, archive retention, and replay-origin lineage remain
 required before the full durable semantics above are a product claim. See
-[ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md).
+[ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md) and
+[ADR-0031](adr/0031-leader-owned-epoch-target-delivery.md).
 
 ## 9. Pipes and cross-profile behavior
 
@@ -584,7 +598,7 @@ leader term and
 dispatcher epoch, then commit an acknowledgement or failure; lease expiry is an
 explicit bounded maintenance command. Status reports
 `durable_target_outbox: true` and
-`target_dispatch: external_executor_not_implemented`. Thus a committed publish
+`target_dispatch: regional_epoch_targets_and_configured_signed_webhooks`. Thus a committed publish
 means replicated ingress and durable delivery intent, never by itself a
 webhook/Queue/Stream/HTTP side effect. See
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
@@ -604,9 +618,9 @@ regional Stream, Queue, Cache, and Event Bus v1 SDKs make those explicit
 wrappers callable from Go, Java, and Python, including Stream keyed routing,
 retention policy operations, and shard-zero consumer-session coordination.
 They do not turn fixed-voter evidence into a production durability claim or
-atomically couple assignment with per-shard offsets. SDK calls themselves do
-not execute external Bus targets; the optional regional signed-webhook worker
-owns that separate at-least-once sequence. See
+atomically couple assignment with per-shard offsets. SDK subscription and
+publish calls create replicated intent; separate source-leader workers own
+signed webhook and Epoch Queue/Stream target execution. See
 [REGIONAL_STREAM_SDK.md](REGIONAL_STREAM_SDK.md),
 [REGIONAL_QUEUE_SDK.md](REGIONAL_QUEUE_SDK.md),
 [REGIONAL_CACHE_SDK.md](REGIONAL_CACHE_SDK.md),
@@ -616,8 +630,9 @@ owns that separate at-least-once sequence. See
 The Cache tablet additionally lacks user-exportable backup/PITR, automatic
 checkpoint scheduling, background active expiry, multi-shard routing, and a
 public idempotency-retention contract; see [CACHE_TABLET.md](CACHE_TABLET.md).
-The direct Bus profile additionally lacks target executors. The regional worker is
-limited to signed HTTP/webhook targets; Queue/Stream/unsigned execution, rate
+The direct Bus profile additionally lacks target executors. The regional
+workers execute signed HTTP/webhook and Epoch Queue/Stream targets; unsigned
+HTTP/webhook execution, rate
 limiting, redrive/terminal retention, replay-attempt lineage, public pull/push,
 private egress, and target authentication remain open; see
 [BUS_TABLET.md](BUS_TABLET.md).

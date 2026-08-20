@@ -158,9 +158,10 @@ content mislabeled with the wrong minimum format.
   suppression and business idempotency.
 - Unsigned HTTP/webhook targets remain durable intent for external dispatchers;
   the built-in worker deliberately handles signed targets only.
-- Queue/Stream targets, public push/long-poll, rate limiting, redrive/retention,
+- Queue/Stream targets remain outside this decision and are addressed by
+  ADR-0031. Public push/long-poll, rate limiting, redrive/retention,
   OAuth/API-key destinations, private egress, and broad CloudEvents conformance
-  remain outside this decision.
+  remain open.
 
 ## Evidence
 

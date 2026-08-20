@@ -4,7 +4,8 @@
 - Date: 2026-08-06
 - Owners: Rust regional ingress and tablet runtime; Go, Java, and Python SDKs
 - Related: BUS-001–005, BUS-011, DX-001–002, MT-10, G4, ADR-0011, ADR-0013, ADR-0017–0019
-- Amended by: ADR-0030 for optional leader-owned signed HTTP/webhook execution
+- Amended by: ADR-0030 for optional leader-owned signed HTTP/webhook execution;
+  ADR-0031 for leader-owned Epoch Queue/Stream execution
 
 ## Context
 
@@ -63,9 +64,11 @@ Regional materialization enables the existing replicated delivery outbox. This m
 ## Explicit non-claims
 
 ADR-0030 later added a regional worker for signed HTTP/webhook targets while
-preserving this tablet/API boundary. The remaining non-claims are:
+preserving this tablet/API boundary. ADR-0031 later added generation-pinned
+Epoch Queue/Stream targets with a non-atomic cross-tablet boundary. The
+remaining non-claims are:
 
-- Queue, Stream, unsigned HTTP/webhook, or public pull/long-poll executors;
+- unsigned HTTP/webhook or public pull/long-poll executors;
 - OAuth/API-key destinations, secret-manager/hot reload, or receiver-owned
   durable replay storage;
 - push streaming, long polling, dispatcher sessions, or automatic lease renewal;

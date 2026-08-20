@@ -62,6 +62,9 @@ and [Cache contract guide](../../docs/REGIONAL_CACHE_SDK.md).
 acquire/ack/fail/reject/maintenance, mutation lookup, archive replay, delivery query,
 and status through the shared regional core. Unsigned policy and query bounds
 use `BigInteger`; opaque lease tokens pass through unchanged.
+`SubscriptionTarget.queue` and `SubscriptionTarget.stream` create native
+destinations executed by the source Bus leader; delivery queries expose the
+read-only pinned generation/tablet coordinates.
 `SubscriptionTarget.signedWebhook` captures the key ID and
 `WebhookSignatures.verify` authenticates the exact raw body, timestamp, delivery
 ID, and attempt before returning the receiver replay identity. See the

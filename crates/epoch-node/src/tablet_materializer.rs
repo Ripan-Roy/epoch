@@ -84,6 +84,24 @@ impl MaterializedTabletRoute {
             | PendingTabletService::Queue(_) => None,
         }
     }
+
+    pub(crate) fn queue_service(&self) -> Option<Arc<QueueTabletService>> {
+        match &self.service {
+            PendingTabletService::Queue(service) => Some(Arc::clone(service)),
+            PendingTabletService::Cache(_)
+            | PendingTabletService::Stream(_)
+            | PendingTabletService::Bus(_) => None,
+        }
+    }
+
+    pub(crate) fn stream_service(&self) -> Option<Arc<StreamTabletService>> {
+        match &self.service {
+            PendingTabletService::Stream(service) => Some(Arc::clone(service)),
+            PendingTabletService::Cache(_)
+            | PendingTabletService::Queue(_)
+            | PendingTabletService::Bus(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Error)]

@@ -54,6 +54,8 @@ impl NodeProcess {
                 "20",
                 "--regional-max-groups",
                 "16",
+                "--regional-epoch-target-delivery-interval-ms",
+                "20",
                 "--regional-webhook-signing-keys-path",
                 self.webhook_signing_keys_path
                     .to_str()
@@ -556,6 +558,151 @@ async fn write_bus_mutation(
     })
 }
 
+async fn prove_epoch_queue_and_stream_targets(
+    client: &Client,
+    cluster: &ProcessCluster,
+    indexes: &[usize],
+) {
+    for (subscription, target_kind, resource) in [
+        ("queue-jobs", "queue", "jobs"),
+        ("stream-orders", "stream", "orders"),
+    ] {
+        write_bus_mutation(
+            client,
+            cluster,
+            indexes,
+            &format!("process-bus-upsert-{subscription}-v1"),
+            &json!({
+                "kind": "upsert_subscription",
+                "subscription": {
+                    "name": subscription,
+                    "filter": {"event_type_patterns": ["target.*"]},
+                    "target": {"kind": target_kind, "resource": resource},
+                    "delivery_policy": {
+                        "timeout_ms": 1000,
+                        "max_in_flight": 1,
+                        "retry": {
+                            "strategy": "fixed",
+                            "initial_delay_ms": 0,
+                            "max_delay_ms": 0,
+                            "jitter_percent": 0,
+                            "max_attempts": 3,
+                            "max_age_ms": null
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+    }
+    write_bus_mutation(
+        client,
+        cluster,
+        indexes,
+        "process-bus-publish-epoch-targets-v1",
+        &json!({
+            "kind": "publish",
+            "envelope": {
+                "id": "epoch-target-event-1",
+                "source": "regional-process-test",
+                "type": "target.created",
+                "time_ms": "2",
+                "key": "customer-42",
+                "payload": {"id": 2}
+            }
+        }),
+    )
+    .await;
+
+    wait_for_profile_apply(client, cluster, "queue", "jobs", indexes, 2).await;
+    wait_for_profile_apply(client, cluster, "stream", "orders", indexes, 3).await;
+    wait_for_record_count(client, cluster, indexes, 3).await;
+    wait_for_profile_apply(client, cluster, "event-bus", "events", indexes, 8).await;
+    wait_for_acknowledged_epoch_targets(client, cluster, indexes).await;
+}
+
+async fn wait_for_acknowledged_epoch_targets(
+    client: &Client,
+    cluster: &ProcessCluster,
+    indexes: &[usize],
+) {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            let mut converged = true;
+            for &index in indexes {
+                for (subscription, kind, resource) in [
+                    ("queue-jobs", "queue", "jobs"),
+                    ("stream-orders", "stream", "orders"),
+                ] {
+                    let response = client
+                        .post(data_url(
+                            &cluster.nodes[index],
+                            "event-bus",
+                            "events",
+                            "deliveries/query",
+                        ))
+                        .bearer_auth(ADMIN_TOKEN)
+                        .header("x-epoch-resource-generation", "1")
+                        .header("x-epoch-tablet-epoch", "1")
+                        .header("x-epoch-read-consistency", "local_stale")
+                        .json(&json!({
+                            "subscription": subscription,
+                            "state": "acknowledged",
+                            "limit": 10
+                        }))
+                        .send()
+                        .await;
+                    let Ok(response) = response else {
+                        converged = false;
+                        break;
+                    };
+                    if response.status() != StatusCode::OK {
+                        converged = false;
+                        break;
+                    }
+                    let body = response
+                        .json::<Value>()
+                        .await
+                        .expect("delivery query should be JSON");
+                    let Some(record) = body["records"]
+                        .as_array()
+                        .and_then(|records| (records.len() == 1).then(|| &records[0]))
+                    else {
+                        converged = false;
+                        break;
+                    };
+                    if record["envelope"]["id"] != "epoch-target-event-1"
+                        || record["state"]["kind"] != "acknowledged"
+                        || record["target"]["kind"] != kind
+                        || record["destination"]["kind"] != kind
+                        || record["destination"]["resource"] != resource
+                        || record["destination"]["resource_generation"] != "1"
+                        || record["destination"]["tablet_epoch"] != "1"
+                        || record["attempts"].as_array().map(Vec::len) != Some(1)
+                    {
+                        converged = false;
+                        break;
+                    }
+                }
+                if !converged {
+                    break;
+                }
+            }
+            if converged {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "Epoch Queue/Stream target deliveries did not converge\n{}",
+            cluster.diagnostics()
+        )
+    });
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CapturedWebhook {
     body: Vec<u8>,
@@ -774,7 +921,7 @@ async fn prove_signed_webhook_retry(client: &Client, cluster: &ProcessCluster, i
     assert!(attempts[0].signature.starts_with("v1="));
     assert_ne!(attempts[0].signature, attempts[1].signature);
 
-    wait_for_profile_apply(client, cluster, "event-bus", "events", indexes, 7).await;
+    wait_for_profile_apply(client, cluster, "event-bus", "events", indexes, 14).await;
     receiver.stop().await;
 }
 
@@ -1113,6 +1260,7 @@ async fn regional_processes_fail_over_reopen_and_converge() {
         write_profile(&client, &cluster, kind, name, &all).await;
         wait_for_profile_apply(&client, &cluster, kind, name, &all, 1).await;
     }
+    prove_epoch_queue_and_stream_targets(&client, &cluster, &all).await;
     prove_signed_webhook_retry(&client, &cluster, &all).await;
     wait_for_acknowledged_webhook(&client, &cluster, &all).await;
     wait_for_catalog_counts(&client, &cluster, 4).await;
@@ -1121,12 +1269,18 @@ async fn regional_processes_fail_over_reopen_and_converge() {
     cluster.restart_all();
     wait_for_nodes(&client, &cluster, &all).await;
     wait_for_routes(&client, &cluster, "stream", "orders", &all).await;
-    wait_for_record_count(&client, &cluster, &all, 2).await;
+    wait_for_record_count(&client, &cluster, &all, 3).await;
     for (kind, name) in additional_profiles {
         wait_for_routes(&client, &cluster, kind, name, &all).await;
-        let expected = if kind == "event-bus" { 7 } else { 1 };
+        let expected = match kind {
+            "event-bus" => 14,
+            "queue" => 2,
+            _ => 1,
+        };
         wait_for_profile_apply(&client, &cluster, kind, name, &all, expected).await;
     }
+    wait_for_record_count(&client, &cluster, &all, 3).await;
+    wait_for_acknowledged_epoch_targets(&client, &cluster, &all).await;
     wait_for_acknowledged_webhook(&client, &cluster, &all).await;
     wait_for_catalog_counts(&client, &cluster, 4).await;
 }

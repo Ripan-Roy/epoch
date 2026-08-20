@@ -6,7 +6,21 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
-_No changes yet._
+### Added
+
+- Leader-owned Event Bus delivery into regional Epoch Queue and Stream targets.
+  The source lease pins resource generation, logical shard, tablet ID, and
+  tablet epoch before the destination write; Queue uses shard `0` and Stream
+  uses the shared FNV-1a key router.
+- Stable source-and-destination-scoped target proposal identities, internal
+  follower-to-known-leader forwarding, destination receipt resolution, and
+  source acknowledgement only after Queue enqueue or Stream append commits.
+  This provides duplicate-free insertion within the pinned target incarnation
+  across Bus retries without claiming an atomic cross-tablet transaction.
+- Additive Event Bus command/snapshot v3 for destination bindings, browser-safe
+  read-only destination evidence, always-enabled topology counters, ADR-0031,
+  three-language end-to-end examples, and a real three-process convergence and
+  all-voter-reopen campaign.
 
 ## [0.1.0-alpha.4] - 2026-08-20
 

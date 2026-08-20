@@ -105,8 +105,9 @@ attempts, and complete digests before exposing status or local filtered
 archive/delivery queries. Real-runtime and container gates prove semantic
 retry/conflict, target isolation, leader loss, catch-up, convergence, and
 all-node recovery. This direct profile has no built-in target executor. The
-regional runtime can layer the optional signed HTTP/webhook worker outside the
-state machine, but neither path claims the target's business side effect; see
+regional runtime layers the always-enabled Epoch Queue/Stream worker and can
+layer the optional signed HTTP/webhook worker outside the state machine, but
+neither path claims cross-tablet atomicity or the target's business side effect; see
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 ## Processing contract

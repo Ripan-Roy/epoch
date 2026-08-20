@@ -81,8 +81,9 @@ profile client plus separate authenticated, leader- and fence-aware regional
 Stream, Queue, Cache, and Event Bus v1 clients. Generated response types,
 background/cooperative streaming sessions, atomic assignment-plus-offset
 handoff, and full native streaming parity remain tracked by DX-001.
-The Event Bus models now include signed HTTP/webhook targets, and every SDK
-ships the same exact-body HMAC verifier and replay identity.
+The Event Bus models include Queue, Stream, and signed HTTP/webhook targets.
+Every SDK ships the same exact-body HMAC verifier and replay identity, and its
+displayed regional Bus example exercises automatic Queue/Stream delivery.
 
 `crates/epoch-testkit` is the no-sleep correctness harness for the replicated
 foundation: seeded scheduling, independent wall/monotonic time, scripted fault
@@ -174,9 +175,13 @@ leader after committing and awaiting an exact lease. It emits CloudEvents 1.0
 binary-mode requests with HMAC-SHA-256, enforces public HTTPS (or explicit
 loopback development), revalidates and pins DNS, disables redirects/proxies,
 and records retry/Ack/rejection back into the ledger. A real 503/204 campaign
-proves distinct signed attempts and all-voter reopen. Queue, Stream, unsigned
-HTTP/webhook, and network pull executors remain open, and no arbitrary external
-side effect is exactly-once. The regional Event Bus v1 adapter and
+proves distinct signed attempts and all-voter reopen. An always-enabled
+source-leader worker also pins and executes Epoch Queue/Stream targets through
+the destination group's known leader, with stable target idempotency and
+target-commit-before-source-Ack ordering. Real three-process recovery preserves
+one destination record. Unsigned HTTP/webhook and network pull executors remain
+open, and neither cross-tablet atomicity nor exactly-once external side effects
+are claimed. The regional Event Bus v1 adapter and
 repository-local Go, Java, and Python clients expose subscription policy,
 publish, archive replay, delivery acquire/ack/fail/reject/maintenance, delivery query,
 mutation lookup, and status through the same authenticated discovery, fencing,
@@ -191,12 +196,13 @@ exact-retry, and linearizable-read contract as the other profiles. See the
 [regional Cache SDK guide](docs/REGIONAL_CACHE_SDK.md),
 [regional Event Bus SDK guide](docs/REGIONAL_EVENT_BUS_SDK.md),
 [signed webhook decision](docs/adr/0030-leader-owned-signed-webhook-delivery.md),
+[Epoch target decision](docs/adr/0031-leader-owned-epoch-target-delivery.md),
 [consensus checkpoint guide](docs/CONSENSUS_CHECKPOINTS.md),
 [probe guide](docs/CONSENSUS_PROBE.md), [spike report](docs/CONSENSUS_SPIKE.md),
 and proposed [ADR-0003](docs/adr/0003-consensus-adapter.md). An exhaustive crash
 matrix, user-exportable snapshots/backups, membership/epoch transitions, follower read routing,
 authenticated peer transport, dynamic/zone-aware placement, and external Event
-Bus target execution remain open.
+Bus target breadth remain open.
 
 ## Quick start
 

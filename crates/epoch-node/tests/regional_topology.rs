@@ -1,5 +1,6 @@
 use axum::{body::Body, http::Request};
 use epoch_node::{
+    epoch_target_delivery::EpochTargetDeliveryStatus,
     regional_checkpoint::RegionalCheckpointStatus,
     regional_maintenance::RegionalMaintenanceStatus,
     regional_topology::{NodeTopology, regional_topology_router},
@@ -26,6 +27,7 @@ async fn topology_reports_fixed_voters_and_live_group_capacity() {
         TabletDirectory::default(),
         RegionalMaintenanceStatus::new(100),
         RegionalCheckpointStatus::new(1_000, 1_024),
+        EpochTargetDeliveryStatus::new(std::time::Duration::from_millis(100)),
         WebhookDeliveryStatus::disabled(),
     )
     .oneshot(
@@ -58,6 +60,9 @@ async fn topology_reports_fixed_voters_and_live_group_capacity() {
     assert_eq!(body["checkpoints"]["min_applied_entries"], 1_024);
     assert_eq!(body["checkpoints"]["passes"], 0);
     assert_eq!(body["checkpoints"]["groups"], serde_json::json!([]));
+    assert_eq!(body["epoch_target_delivery"]["enabled"], true);
+    assert_eq!(body["epoch_target_delivery"]["interval_ms"], 100);
+    assert_eq!(body["epoch_target_delivery"]["passes"], 0);
     assert_eq!(body["webhook_delivery"]["enabled"], false);
 }
 

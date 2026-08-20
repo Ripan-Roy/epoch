@@ -16,9 +16,10 @@ pub use delivery::{
     DEFAULT_MAX_OUTBOX_DELIVERIES, DeliveryAttempt, DeliveryAttemptOutcome,
     DeliveryBackoffStrategy, DeliveryCounts, DeliveryFence, DeliveryLease,
     DeliveryMaintenanceResult, DeliveryPolicy, DeliveryRecord, DeliveryRetryPolicy, DeliveryState,
-    DeliveryStateKind, MAX_BUS_OUTBOX_DELIVERIES, MAX_DELIVERY_ACQUIRE_BATCH,
-    MAX_DELIVERY_ATTEMPTS, MAX_DELIVERY_IN_FLIGHT, MAX_DELIVERY_QUERY_RESULTS,
-    MAX_DELIVERY_REASON_BYTES, MAX_DELIVERY_TIMEOUT_MS, SignedWebhookDeliveryCandidate,
+    DeliveryStateKind, EpochTargetDeliveryCandidate, EpochTargetDestination, EpochTargetKind,
+    MAX_BUS_OUTBOX_DELIVERIES, MAX_DELIVERY_ACQUIRE_BATCH, MAX_DELIVERY_ATTEMPTS,
+    MAX_DELIVERY_IN_FLIGHT, MAX_DELIVERY_QUERY_RESULTS, MAX_DELIVERY_REASON_BYTES,
+    MAX_DELIVERY_TIMEOUT_MS, SignedWebhookDeliveryCandidate,
 };
 use delivery::{DeliveryLedger, delivery_id};
 
@@ -37,7 +38,8 @@ pub const MAX_JSON_PATH_BYTES: usize = 1_024;
 pub const MAX_PROJECTED_FIELD_BYTES: usize = 256;
 pub const MAX_FILTER_VALUE_BYTES: usize = 64 * 1024;
 pub const MAX_TARGET_URL_BYTES: usize = 8 * 1024;
-pub const EVENT_BUS_SNAPSHOT_FORMAT_VERSION: u16 = 2;
+pub const EVENT_BUS_SNAPSHOT_FORMAT_VERSION: u16 = 3;
+const SIGNED_WEBHOOK_EVENT_BUS_SNAPSHOT_FORMAT_VERSION: u16 = 2;
 const LEGACY_EVENT_BUS_SNAPSHOT_FORMAT_VERSION: u16 = 1;
 pub const MAX_EVENT_BUS_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 
@@ -584,8 +586,36 @@ impl EventBus {
         fence: DeliveryFence,
     ) -> EpochResult<Option<DeliveryLease>> {
         let mut candidate = self.delivery_ledger.clone();
-        let delivery =
-            candidate.acquire_specific(subscription, delivery_id, dispatcher, now_ms, fence)?;
+        let delivery = candidate.acquire_specific(
+            subscription,
+            delivery_id,
+            dispatcher,
+            now_ms,
+            fence,
+            None,
+        )?;
+        self.delivery_ledger = candidate;
+        Ok(delivery)
+    }
+
+    pub fn acquire_specific_epoch_target_delivery(
+        &mut self,
+        subscription: &str,
+        delivery_id: &str,
+        dispatcher: &str,
+        now_ms: u64,
+        fence: DeliveryFence,
+        destination: EpochTargetDestination,
+    ) -> EpochResult<Option<DeliveryLease>> {
+        let mut candidate = self.delivery_ledger.clone();
+        let delivery = candidate.acquire_specific(
+            subscription,
+            delivery_id,
+            dispatcher,
+            now_ms,
+            fence,
+            Some(destination),
+        )?;
         self.delivery_ledger = candidate;
         Ok(delivery)
     }
@@ -659,6 +689,13 @@ impl EventBus {
         self.delivery_ledger.signed_webhook_candidates(now_ms)
     }
 
+    pub fn epoch_target_delivery_candidates(
+        &self,
+        now_ms: u64,
+    ) -> EpochResult<Vec<EpochTargetDeliveryCandidate>> {
+        self.delivery_ledger.epoch_target_candidates(now_ms)
+    }
+
     pub fn delivery(&self, delivery_id: &str) -> Option<DeliveryRecord> {
         self.delivery_ledger.get(delivery_id)
     }
@@ -696,8 +733,10 @@ impl EventBus {
     /// Encodes the complete routing, archive, and delivery-ledger state as a
     /// canonical versioned application snapshot.
     pub fn encode_snapshot(&self) -> EpochResult<Vec<u8>> {
-        let format_version = if self.uses_signed_webhook_format() {
+        let format_version = if self.uses_epoch_target_format() {
             EVENT_BUS_SNAPSHOT_FORMAT_VERSION
+        } else if self.uses_signed_webhook_format() {
+            SIGNED_WEBHOOK_EVENT_BUS_SNAPSHOT_FORMAT_VERSION
         } else {
             LEGACY_EVENT_BUS_SNAPSHOT_FORMAT_VERSION
         };
@@ -732,81 +771,7 @@ impl EventBus {
         }
         let snapshot: VersionedEventBusSnapshot = serde_json::from_slice(encoded)
             .map_err(|error| EpochError::InvalidArgument(error.to_string()))?;
-        if !matches!(
-            snapshot.format_version,
-            LEGACY_EVENT_BUS_SNAPSHOT_FORMAT_VERSION | EVENT_BUS_SNAPSHOT_FORMAT_VERSION
-        ) {
-            return Err(EpochError::InvalidArgument(format!(
-                "unsupported Event Bus snapshot version {}",
-                snapshot.format_version
-            )));
-        }
-        if serde_json::to_vec(&snapshot)
-            .map_err(|error| EpochError::InvalidArgument(error.to_string()))?
-            != encoded
-        {
-            return Err(EpochError::InvalidArgument(
-                "Event Bus snapshot is not canonical".into(),
-            ));
-        }
-        validate_config(&snapshot.config)?;
-        if snapshot.route_plan_version == 0
-            || snapshot.subscriptions.len() > snapshot.config.max_subscriptions
-        {
-            return Err(EpochError::InvalidArgument(
-                "Event Bus snapshot route plan is invalid".into(),
-            ));
-        }
-        for (name, subscription) in &snapshot.subscriptions {
-            if name != &subscription.name {
-                return Err(EpochError::InvalidArgument(
-                    "Event Bus snapshot subscription registry is invalid".into(),
-                ));
-            }
-            subscription.validate()?;
-        }
-        if (snapshot.config.archive
-            && u64::try_from(snapshot.archive.len()).ok() != Some(snapshot.commit_position))
-            || (!snapshot.config.archive && !snapshot.archive.is_empty())
-            || snapshot.archive.len() > snapshot.config.max_archive_events
-        {
-            return Err(EpochError::InvalidArgument(
-                "Event Bus snapshot archive configuration is invalid".into(),
-            ));
-        }
-        for (position, event) in snapshot.archive.iter().enumerate() {
-            if u64::try_from(position + 1).ok() != Some(event.position)
-                || event.route_plan_version == 0
-                || event.route_plan_version > snapshot.route_plan_version
-            {
-                return Err(EpochError::InvalidArgument(
-                    "Event Bus snapshot archive position is invalid".into(),
-                ));
-            }
-            event.envelope.validate()?;
-        }
-        snapshot.delivery_ledger.validate_snapshot(
-            snapshot.config.delivery_outbox,
-            snapshot.config.max_outbox_deliveries,
-            snapshot.commit_position,
-            snapshot.route_plan_version,
-        )?;
-        let uses_signed_webhook_format = snapshot
-            .subscriptions
-            .values()
-            .any(|subscription| subscription.target.signing_key_id().is_some())
-            || snapshot.delivery_ledger.has_signed_webhook_targets();
-        let expected_format_version = if uses_signed_webhook_format {
-            EVENT_BUS_SNAPSHOT_FORMAT_VERSION
-        } else {
-            LEGACY_EVENT_BUS_SNAPSHOT_FORMAT_VERSION
-        };
-        if snapshot.format_version != expected_format_version {
-            return Err(EpochError::InvalidArgument(format!(
-                "Event Bus snapshot version {} does not match its target metadata",
-                snapshot.format_version
-            )));
-        }
+        validate_snapshot_document(&snapshot, encoded)?;
         let bus = Self {
             config: snapshot.config,
             subscriptions: snapshot.subscriptions,
@@ -833,6 +798,100 @@ impl EventBus {
             .any(|subscription| subscription.target.signing_key_id().is_some())
             || self.delivery_ledger.has_signed_webhook_targets()
     }
+
+    fn uses_epoch_target_format(&self) -> bool {
+        self.delivery_ledger.has_epoch_target_bindings()
+    }
+}
+
+fn validate_snapshot_document(
+    snapshot: &VersionedEventBusSnapshot,
+    encoded: &[u8],
+) -> EpochResult<()> {
+    if !matches!(
+        snapshot.format_version,
+        LEGACY_EVENT_BUS_SNAPSHOT_FORMAT_VERSION
+            | SIGNED_WEBHOOK_EVENT_BUS_SNAPSHOT_FORMAT_VERSION
+            | EVENT_BUS_SNAPSHOT_FORMAT_VERSION
+    ) {
+        return Err(EpochError::InvalidArgument(format!(
+            "unsupported Event Bus snapshot version {}",
+            snapshot.format_version
+        )));
+    }
+    if serde_json::to_vec(snapshot)
+        .map_err(|error| EpochError::InvalidArgument(error.to_string()))?
+        != encoded
+    {
+        return Err(EpochError::InvalidArgument(
+            "Event Bus snapshot is not canonical".into(),
+        ));
+    }
+    validate_config(&snapshot.config)?;
+    if snapshot.route_plan_version == 0
+        || snapshot.subscriptions.len() > snapshot.config.max_subscriptions
+    {
+        return Err(EpochError::InvalidArgument(
+            "Event Bus snapshot route plan is invalid".into(),
+        ));
+    }
+    for (name, subscription) in &snapshot.subscriptions {
+        if name != &subscription.name {
+            return Err(EpochError::InvalidArgument(
+                "Event Bus snapshot subscription registry is invalid".into(),
+            ));
+        }
+        subscription.validate()?;
+    }
+    if (snapshot.config.archive
+        && u64::try_from(snapshot.archive.len()).ok() != Some(snapshot.commit_position))
+        || (!snapshot.config.archive && !snapshot.archive.is_empty())
+        || snapshot.archive.len() > snapshot.config.max_archive_events
+    {
+        return Err(EpochError::InvalidArgument(
+            "Event Bus snapshot archive configuration is invalid".into(),
+        ));
+    }
+    for (position, event) in snapshot.archive.iter().enumerate() {
+        if u64::try_from(position + 1).ok() != Some(event.position)
+            || event.route_plan_version == 0
+            || event.route_plan_version > snapshot.route_plan_version
+        {
+            return Err(EpochError::InvalidArgument(
+                "Event Bus snapshot archive position is invalid".into(),
+            ));
+        }
+        event.envelope.validate()?;
+    }
+    snapshot.delivery_ledger.validate_snapshot(
+        snapshot.config.delivery_outbox,
+        snapshot.config.max_outbox_deliveries,
+        snapshot.commit_position,
+        snapshot.route_plan_version,
+    )?;
+    validate_snapshot_format_for_targets(snapshot)
+}
+
+fn validate_snapshot_format_for_targets(snapshot: &VersionedEventBusSnapshot) -> EpochResult<()> {
+    let uses_signed_webhook_format = snapshot
+        .subscriptions
+        .values()
+        .any(|subscription| subscription.target.signing_key_id().is_some())
+        || snapshot.delivery_ledger.has_signed_webhook_targets();
+    let expected_format_version = if snapshot.delivery_ledger.has_epoch_target_bindings() {
+        EVENT_BUS_SNAPSHOT_FORMAT_VERSION
+    } else if uses_signed_webhook_format {
+        SIGNED_WEBHOOK_EVENT_BUS_SNAPSHOT_FORMAT_VERSION
+    } else {
+        LEGACY_EVENT_BUS_SNAPSHOT_FORMAT_VERSION
+    };
+    if snapshot.format_version != expected_format_version {
+        return Err(EpochError::InvalidArgument(format!(
+            "Event Bus snapshot version {} does not match its target metadata",
+            snapshot.format_version
+        )));
+    }
+    Ok(())
 }
 
 fn validate_config(config: &BusConfig) -> EpochResult<()> {
@@ -1379,7 +1438,10 @@ mod tests {
         signed.publish(event("order.created"), 100).unwrap();
         let encoded = signed.encode_snapshot().unwrap();
         let snapshot: VersionedEventBusSnapshot = serde_json::from_slice(&encoded).unwrap();
-        assert_eq!(snapshot.format_version, EVENT_BUS_SNAPSHOT_FORMAT_VERSION);
+        assert_eq!(
+            snapshot.format_version,
+            SIGNED_WEBHOOK_EVENT_BUS_SNAPSHOT_FORMAT_VERSION
+        );
         let restored = EventBus::decode_snapshot(&encoded).unwrap();
         assert_eq!(restored.encode_snapshot().unwrap(), encoded);
         assert_eq!(
@@ -1632,6 +1694,152 @@ mod tests {
             .remove(0);
         assert_eq!(retried.delivery_id, candidate.delivery_id);
         assert_eq!(retried.next_attempt, 2);
+    }
+
+    #[test]
+    fn epoch_target_candidates_bind_one_exact_destination_across_retries() {
+        let mut bus = EventBus::new(BusConfig {
+            delivery_outbox: true,
+            ..BusConfig::default()
+        })
+        .unwrap();
+        bus.upsert_subscription(subscription(
+            "orders",
+            SubscriptionTarget::Queue {
+                resource: "jobs".into(),
+            },
+        ))
+        .unwrap();
+        let mut published = event("order.created");
+        published.id = "event-1".into();
+        published.key = Some("customer-42".into());
+        bus.publish(published, 100).unwrap();
+
+        let candidate = bus.epoch_target_delivery_candidates(100).unwrap().remove(0);
+        assert_eq!(candidate.delivery_id, "epoch.bus.delivery.v1.1.orders");
+        assert_eq!(candidate.subscription, "orders");
+        assert_eq!(candidate.next_attempt, 1);
+        assert_eq!(candidate.partition_key, "customer-42");
+        assert_eq!(
+            candidate.target,
+            SubscriptionTarget::Queue {
+                resource: "jobs".into()
+            }
+        );
+        assert_eq!(candidate.destination, None);
+
+        let destination =
+            EpochTargetDestination::new(EpochTargetKind::Queue, "jobs", 4, 0, 41, 3).unwrap();
+        let fence = DeliveryFence::new(7, 2, 5, 1).unwrap();
+        assert!(
+            bus.acquire_deliveries("orders", "external-dispatcher", 1, 100, fence)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(
+            bus.acquire_specific_delivery(
+                "orders",
+                &candidate.delivery_id,
+                "external-dispatcher",
+                100,
+                fence,
+            ),
+            Err(EpochError::Conflict(_))
+        ));
+        let lease = bus
+            .acquire_specific_epoch_target_delivery(
+                "orders",
+                &candidate.delivery_id,
+                "epoch-target-v1",
+                100,
+                fence,
+                destination.clone(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.destination.as_ref(), Some(&destination));
+
+        bus.fail_delivery(
+            &lease.delivery_id,
+            "epoch-target-v1",
+            &lease.lease_token,
+            fence,
+            "destination_unavailable",
+            101,
+        )
+        .unwrap();
+        let retried = bus
+            .epoch_target_delivery_candidates(u64::MAX)
+            .unwrap()
+            .remove(0);
+        assert_eq!(retried.next_attempt, 2);
+        assert_eq!(retried.destination.as_ref(), Some(&destination));
+
+        let different_generation =
+            EpochTargetDestination::new(EpochTargetKind::Queue, "jobs", 5, 0, 51, 1).unwrap();
+        assert!(matches!(
+            bus.acquire_specific_epoch_target_delivery(
+                "orders",
+                &candidate.delivery_id,
+                "epoch-target-v1",
+                u64::MAX,
+                fence,
+                different_generation,
+            ),
+            Err(EpochError::Conflict(_))
+        ));
+        assert_eq!(
+            bus.delivery(&candidate.delivery_id)
+                .unwrap()
+                .destination
+                .as_ref(),
+            Some(&destination)
+        );
+    }
+
+    #[test]
+    fn epoch_target_binding_requires_snapshot_v3_and_preserves_legacy_versions() {
+        let mut bus = EventBus::new(BusConfig {
+            delivery_outbox: true,
+            ..BusConfig::default()
+        })
+        .unwrap();
+        bus.upsert_subscription(subscription(
+            "audit",
+            SubscriptionTarget::Stream {
+                resource: "events".into(),
+            },
+        ))
+        .unwrap();
+        bus.publish(event("order.created"), 100).unwrap();
+        let delivery_id = "epoch.bus.delivery.v1.1.audit";
+        let destination =
+            EpochTargetDestination::new(EpochTargetKind::Stream, "events", 8, 3, 83, 2).unwrap();
+        bus.acquire_specific_epoch_target_delivery(
+            "audit",
+            delivery_id,
+            "epoch-target-v1",
+            100,
+            DeliveryFence::new(7, 2, 5, 1).unwrap(),
+            destination.clone(),
+        )
+        .unwrap()
+        .unwrap();
+
+        let encoded = bus.encode_snapshot().unwrap();
+        let snapshot: VersionedEventBusSnapshot = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(snapshot.format_version, EVENT_BUS_SNAPSHOT_FORMAT_VERSION);
+        assert_eq!(EVENT_BUS_SNAPSHOT_FORMAT_VERSION, 3);
+        let restored = EventBus::decode_snapshot(&encoded).unwrap();
+        assert_eq!(restored.encode_snapshot().unwrap(), encoded);
+        assert_eq!(
+            restored.delivery(delivery_id).unwrap().destination,
+            Some(destination)
+        );
+
+        let mut mislabeled = snapshot;
+        mislabeled.format_version = SIGNED_WEBHOOK_EVENT_BUS_SNAPSHOT_FORMAT_VERSION;
+        assert!(EventBus::decode_snapshot(&serde_json::to_vec(&mislabeled).unwrap()).is_err());
     }
 
     #[test]

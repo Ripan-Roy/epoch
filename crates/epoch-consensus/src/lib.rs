@@ -621,6 +621,11 @@ pub trait ConsensusAdapter {
 
     fn propose(&mut self, proposal: Proposal) -> ConsensusResult<ConsensusOutput>;
 
+    /// Submits an Epoch-internal proposal through a follower when it knows the
+    /// current leader. Public write admission continues to use `propose` and
+    /// remains leader-only.
+    fn forward_proposal(&mut self, proposal: Proposal) -> ConsensusResult<ConsensusOutput>;
+
     fn read_barrier(&mut self, request: ReadBarrierRequest) -> ConsensusResult<ConsensusOutput>;
 
     fn cancel_read_barrier(&mut self, request_id: ReadBarrierId) -> ConsensusResult<()>;
@@ -1929,7 +1934,7 @@ impl InMemoryRaftAdapter {
         self.state_digest = checkpoint.state_digest;
     }
 
-    fn validate_proposal(&self, proposal: &Proposal) -> ConsensusResult<()> {
+    fn validate_proposal_common(&self, proposal: &Proposal) -> ConsensusResult<ConsensusStatus> {
         self.ensure_healthy()?;
         if proposal.group_id != self.group_id {
             return Err(ConsensusError::GroupMismatch {
@@ -1950,11 +1955,6 @@ impl InMemoryRaftAdapter {
                 observed: proposal.expected_term,
             });
         }
-        if status.role != ConsensusRole::Leader {
-            return Err(ConsensusError::NotLeader {
-                leader_hint: status.leader_id,
-            });
-        }
         if let Some(tracked) = self.proposals.get(&proposal.proposal_id) {
             let payload = match tracked {
                 TrackedProposal::Pending { payload } => payload,
@@ -1965,6 +1965,24 @@ impl InMemoryRaftAdapter {
             } else {
                 Err(ConsensusError::ConflictingProposal(proposal.proposal_id))
             };
+        }
+        Ok(status)
+    }
+
+    fn validate_proposal(&self, proposal: &Proposal) -> ConsensusResult<()> {
+        let status = self.validate_proposal_common(proposal)?;
+        if status.role != ConsensusRole::Leader {
+            return Err(ConsensusError::NotLeader {
+                leader_hint: status.leader_id,
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_forwarded_proposal(&self, proposal: &Proposal) -> ConsensusResult<()> {
+        let status = self.validate_proposal_common(proposal)?;
+        if status.role != ConsensusRole::Leader && status.leader_id.is_none() {
+            return Err(ConsensusError::NotLeader { leader_hint: None });
         }
         Ok(())
     }
@@ -2010,6 +2028,15 @@ impl ConsensusAdapter for InMemoryRaftAdapter {
 
     fn propose(&mut self, proposal: Proposal) -> ConsensusResult<ConsensusOutput> {
         self.validate_proposal(&proposal)?;
+        let encoded = encode_command(&proposal)?;
+        self.raw_node
+            .propose(Vec::new(), encoded)
+            .map_err(|error| ConsensusError::Library(error.to_string()))?;
+        self.process_ready()
+    }
+
+    fn forward_proposal(&mut self, proposal: Proposal) -> ConsensusResult<ConsensusOutput> {
+        self.validate_forwarded_proposal(&proposal)?;
         let encoded = encode_command(&proposal)?;
         self.raw_node
             .propose(Vec::new(), encoded)
@@ -2193,6 +2220,10 @@ impl ConsensusAdapter for PersistentRaftAdapter {
         self.inner.propose(proposal)
     }
 
+    fn forward_proposal(&mut self, proposal: Proposal) -> ConsensusResult<ConsensusOutput> {
+        self.inner.forward_proposal(proposal)
+    }
+
     fn read_barrier(&mut self, request: ReadBarrierRequest) -> ConsensusResult<ConsensusOutput> {
         self.inner.read_barrier(request)
     }
@@ -2221,7 +2252,10 @@ fn raft_config(node_id: NodeId, applied_index: LogIndex) -> ConsensusResult<Conf
         max_size_per_msg: 0,
         max_uncommitted_size: MAX_UNCOMMITTED_BYTES,
         max_committed_size_per_ready: MAX_COMMITTED_BYTES_PER_READY,
-        disable_proposal_forwarding: true,
+        // Public admission remains explicitly leader-only. Enabling the Raft
+        // transport path lets the regional runtime use the separate,
+        // internal-only `forward_proposal` API for cross-tablet execution.
+        disable_proposal_forwarding: false,
         ..Config::default()
     };
     config

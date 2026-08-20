@@ -9,7 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use epoch_bus::{
     ArchivedEvent, BusConfig, DeliveryCounts, DeliveryFence, DeliveryRecord, DeliveryState,
-    DeliveryStateKind, EventBus, EventFilter, SignedWebhookDeliveryCandidate,
+    DeliveryStateKind, EpochTargetDeliveryCandidate, EventBus, EventFilter,
+    SignedWebhookDeliveryCandidate,
 };
 use epoch_core::{DurabilityProfile, EpochError, EpochResult};
 use serde::{Deserialize, Serialize};
@@ -249,6 +250,13 @@ impl BusTablet {
         Ok(self.bus.signed_webhook_delivery_candidates(now_ms)?)
     }
 
+    pub fn epoch_target_delivery_candidates(
+        &self,
+        now_ms: u64,
+    ) -> TabletResult<Vec<EpochTargetDeliveryCandidate>> {
+        Ok(self.bus.epoch_target_delivery_candidates(now_ms)?)
+    }
+
     pub fn next_maintenance_deadline_ms(&self) -> Option<u64> {
         self.bus.next_delivery_maintenance_deadline_ms()
     }
@@ -427,14 +435,18 @@ fn execute(
             dispatcher_epoch,
             max_deliveries,
             expected_delivery_id,
+            destination,
         } => execute_acquire(
             bus,
             DeliveryExecution::new(scope, committed, applied_at_ms),
-            &subscription,
-            &dispatcher,
-            dispatcher_epoch,
-            max_deliveries,
-            expected_delivery_id.as_deref(),
+            AcquireRequest {
+                subscription,
+                dispatcher,
+                dispatcher_epoch,
+                max_deliveries,
+                expected_delivery_id,
+                destination,
+            },
         ),
         BusTabletOperation::AcknowledgeDelivery {
             delivery_id,
@@ -515,31 +527,47 @@ impl<'a> DeliveryExecution<'a> {
     }
 }
 
+struct AcquireRequest {
+    subscription: String,
+    dispatcher: String,
+    dispatcher_epoch: u64,
+    max_deliveries: u16,
+    expected_delivery_id: Option<String>,
+    destination: Option<epoch_bus::EpochTargetDestination>,
+}
+
 fn execute_acquire(
     bus: &mut EventBus,
     execution: DeliveryExecution<'_>,
-    subscription: &str,
-    dispatcher: &str,
-    dispatcher_epoch: u64,
-    max_deliveries: u16,
-    expected_delivery_id: Option<&str>,
+    request: AcquireRequest,
 ) -> EpochResult<BusTabletOperationResult> {
-    let fence = execution.fence(dispatcher_epoch)?;
-    let deliveries = if let Some(delivery_id) = expected_delivery_id {
-        bus.acquire_specific_delivery(
-            subscription,
-            delivery_id,
-            dispatcher,
-            execution.applied_at_ms,
-            fence,
-        )?
+    let fence = execution.fence(request.dispatcher_epoch)?;
+    let deliveries = if let Some(delivery_id) = request.expected_delivery_id.as_deref() {
+        if let Some(destination) = request.destination {
+            bus.acquire_specific_epoch_target_delivery(
+                &request.subscription,
+                delivery_id,
+                &request.dispatcher,
+                execution.applied_at_ms,
+                fence,
+                destination,
+            )?
+        } else {
+            bus.acquire_specific_delivery(
+                &request.subscription,
+                delivery_id,
+                &request.dispatcher,
+                execution.applied_at_ms,
+                fence,
+            )?
+        }
         .into_iter()
         .collect::<Vec<_>>()
     } else {
         bus.acquire_deliveries(
-            subscription,
-            dispatcher,
-            usize::from(max_deliveries),
+            &request.subscription,
+            &request.dispatcher,
+            usize::from(request.max_deliveries),
             execution.applied_at_ms,
             fence,
         )?

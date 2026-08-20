@@ -300,10 +300,16 @@ special-address and mixed-DNS denial, DNS pinning, redirect/proxy suppression,
 and a real loopback receiver. The real-process gate returns 503 then 204,
 observes attempts 1/2 with stable identity and distinct signatures, converges
 the failed/Ack history on all voters, and verifies it after all voters reopen.
+Epoch-target tests add v3 command/snapshot compatibility, immutable destination
+binding, public-acquire isolation, shared keyed Stream routing, stable
+source/destination-scoped target identity, and internal proposal forwarding.
+The same real-process gate writes one event to Queue and a keyed multi-shard
+Stream through independently led groups, acknowledges both source records,
+and verifies one destination record after every voter reopens.
 The container gate adds follower rejection,
 majority-before-success, acquire/ack replication, leader loss, catch-up,
 archive/outbox/digest agreement, all-node `SIGKILL`, and same-volume recovery.
-Queue/Stream/unsigned target executors, rate limiting, redrive/retention, and a
+Unsigned target executors, rate limiting, redrive/retention, and a
 broader crash-at-every-network-boundary matrix remain open; see
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
@@ -318,9 +324,12 @@ after command replay.
 Node integration tests extend that state machine through dedicated catalog
 consensus, shared peer-frame group/epoch demultiplexing, bounded multi-group
 supervision, catalog-driven typed tablet materialization, and resource/shard
-routing. `regional_process` additionally launches a signed-webhook worker on
-every real process, retries through a real receiver, and proves converged
-acknowledgement after all three storage directories reopen. The suites reject unknown group/epoch, stale generation, stale tablet epoch,
+routing. `regional_process` additionally launches signed-webhook and
+Epoch-target workers on every real process, retries through a real receiver,
+forwards Queue and Stream writes to their independently elected leaders, and
+proves converged acknowledgement plus duplicate-free destination state after
+all three storage directories reopen. The suites reject unknown group/epoch,
+stale generation, stale tablet epoch,
 nonleader writes, wrong profile dispatch, missing routes, and inconsistent
 materialization. `regional_process` starts three actual `epoch-node` binaries,
 creates all four profiles in distinct groups, commits through each leader,

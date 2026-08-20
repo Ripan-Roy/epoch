@@ -39,9 +39,23 @@ constant-time verification helpers. Public HTTPS enforcement, per-attempt DNS
 validation/address pinning, special-address rejection, disabled redirects and
 ambient proxies, lease-capped timeouts, strict external multi-key files, and a
 real three-voter retry/reopen proof are implemented. This advances BUS-003–005
-and BUS-011 without claiming Queue/Stream/unsigned target execution, full
+and BUS-011 without claiming unsigned target execution, full
 CloudEvents conformance, rate limiting, private managed egress, secret-manager
 rotation, or exactly-once external side effects. See ADR-0030.
+
+**Epoch target implementation note (20 August 2026):** The regional Rust
+runtime now automatically executes Event Bus Queue and Stream targets from the
+current source Bus leader. Before the destination write, the source lease
+durably pins the target kind, resource generation, logical shard, tablet, and
+tablet epoch. Queue targets use shard `0`; Stream targets use the published
+FNV-1a key router over the transformed event key, falling back to the event ID.
+The destination proposal uses a stable source-and-destination-scoped
+idempotency key across Bus attempts, and the Bus is acknowledged only after the
+target receipt commits. A three-process campaign proves differing group
+leaders, convergence, all-voter reopen, and no duplicate destination record.
+This is effectively-once insertion into the pinned Epoch target incarnation,
+not an atomic cross-tablet transaction or an exactly-once external side-effect
+claim. See ADR-0031.
 
 ---
 

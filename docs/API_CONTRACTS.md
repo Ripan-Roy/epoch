@@ -364,6 +364,31 @@ The same response includes node-local regional maintenance observations:
 These cumulative counters reset with the node process and require
 `topology.read`; they are operational evidence, not replicated product state.
 
+The always-enabled Epoch-target worker has a separate node-local observation:
+
+```json
+{
+  "epoch_target_delivery": {
+    "enabled": true,
+    "interval_ms": 100,
+    "passes": 42,
+    "tablets_examined": 210,
+    "leaders_examined": 70,
+    "subscriptions_examined": 8,
+    "leases_acquired": 8,
+    "queue_enqueued": 4,
+    "stream_appended": 4,
+    "retry_scheduled": 0,
+    "dead_lettered": 0,
+    "errors": 0,
+    "last_pass_at_ms": 1786630000000
+  }
+}
+```
+
+`last_error` appears only after an error and may name an unresolved or stale
+target route; it never contains event payload bytes.
+
 The response also exposes automatic local consensus checkpoint observations:
 
 ```json
@@ -695,6 +720,11 @@ and status for shard `0`. Archive replay and delivery query are query-shaped
 POST reads: they require `data.read` and a linearizable barrier, not
 `data.write`. Regional materialization enables the durable delivery outbox;
 the adapter delegates to the replicated Event Bus tablet and owns no bus state.
+Delivery-query records may include a read-only `destination` object after an
+Epoch Queue/Stream attempt is acquired. It contains `kind`, `resource`,
+`resource_generation`, `shard_index`, `tablet_id`, and `tablet_epoch`; every
+64-bit value is a decimal JSON string. Public mutation requests cannot submit
+or replace this internal binding.
 
 ### 12.1 Regional automatic maintenance
 
@@ -732,7 +762,28 @@ loopback development. Go, Java, and Python provide exact-body verification
 helpers. See [ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md) and
 [Regional Event Bus SDK](REGIONAL_EVENT_BUS_SDK.md).
 
-### 12.3 Regional automatic consensus checkpoints
+### 12.3 Regional Epoch Queue/Stream target worker
+
+Every regional node runs the Epoch-target scheduler. Only the current source
+Bus tablet leader selects the oldest due Queue/Stream delivery. It resolves the
+destination in the same organization/project/environment/namespace, chooses
+Queue shard `0` or the versioned Stream key shard, and commits an exact source
+lease containing the destination generation/tablet fence. It forwards a
+deterministic enqueue/append proposal to the destination group's known leader,
+waits for the exact committed target receipt, then acknowledges the source.
+
+The target proposal identity is stable across Bus attempts and includes the
+source Bus incarnation, delivery ID, and destination incarnation. Therefore an
+unknown source-settlement outcome does not duplicate a record in that pinned
+target. The two commits are deliberately not advertised as one atomic
+cross-tablet transaction. An unmaterialized unbound target remains pending;
+unavailability after binding follows the subscription retry policy. Configure
+the 1–60,000 ms scan with
+`EPOCH_REGIONAL_EPOCH_TARGET_DELIVERY_INTERVAL_MS` (default `100`). Topology
+publishes the counters above. See
+[ADR-0031](adr/0031-leader-owned-epoch-target-delivery.md).
+
+### 12.4 Regional automatic consensus checkpoints
 
 Every regional node evaluates catalog plus all local profile groups on a
 configured interval. Every healthy voter may checkpoint its own recovery
@@ -1073,10 +1124,10 @@ delivery plan. Every match also creates a stable per-subscription record with
 captured timeout/max-in-flight/retry policy. Acquires are fenced by leader term
 and dispatcher epoch; ack, failure, retry, timeout maintenance, and dead-letter
 state are replicated and recovered. The tablet-local status therefore reports
-`target_dispatch: external_executor_not_implemented` and
-`durable_target_outbox: true`. The optional regional worker executes signed
-HTTP/webhook records outside the tablet; Queue, Stream, unsigned HTTP/webhook,
-and pull delivery remain external. A dispatcher acknowledgement is not proof
+`target_dispatch: regional_epoch_targets_and_configured_signed_webhooks` and
+`durable_target_outbox: true`. Regional workers execute signed HTTP/webhook and
+Epoch Queue/Stream records outside the tablet; unsigned HTTP/webhook and pull
+delivery remain external. A dispatcher acknowledgement is not proof
 of an arbitrary external business side effect. See
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 

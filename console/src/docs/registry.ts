@@ -58,6 +58,7 @@ const regionalBusHeadings: ReadonlyArray<DocsHeading> = [
   { id: "install", label: "2. Prepare the SDK" },
   { id: "example", label: "3. Run the example" },
   { id: "guarantees", label: "What the client guarantees" },
+  { id: "epoch-targets", label: "Queue & Stream targets" },
   { id: "signed-webhooks", label: "Signed webhooks" },
   { id: "boundary", label: "Current boundary" },
 ];
@@ -177,7 +178,7 @@ export const docsPages: ReadonlyArray<DocsPageMeta> = [
     label: "Regional Event Bus",
     title: "Regional Event Bus SDK",
     summary:
-      "Route, archive, lease, deliver signed webhooks, verify receivers, and recover through the replicated Event Bus tablet.",
+      "Route, archive, lease, deliver to Queue, Stream, or signed webhooks, and recover through the replicated Event Bus tablet.",
     headings: regionalBusHeadings,
     Body: RegionalBusBody,
   },

@@ -14,6 +14,7 @@ use epoch_node::{
     consensus::{
         CommittedProposalApplier, ConsensusProbeConfig, ConsensusProbeError, ConsensusProbeRuntime,
     },
+    epoch_target_delivery::EpochTargetDeliveryConfig,
     queue_tablet::{self, DEFAULT_COMMIT_WAIT as QUEUE_DEFAULT_COMMIT_WAIT, QueueTabletService},
     regional_auth::with_regional_auth,
     regional_runtime::{RegionalNodeRuntime, RegionalRuntimeConfig},
@@ -40,6 +41,7 @@ const DEFAULT_REGIONAL_READ_BARRIER_TIMEOUT_MS: u64 = 2_000;
 const DEFAULT_REGIONAL_MAINTENANCE_INTERVAL_MS: u64 = 100;
 const DEFAULT_REGIONAL_CHECKPOINT_INTERVAL_MS: u64 = 1_000;
 const DEFAULT_REGIONAL_CHECKPOINT_MIN_APPLIED_ENTRIES: u64 = 1_024;
+const DEFAULT_REGIONAL_EPOCH_TARGET_DELIVERY_INTERVAL_MS: u64 = 100;
 const SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
@@ -111,6 +113,13 @@ struct Args {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     regional_checkpoint_min_applied_entries: u64,
+    #[arg(
+        long,
+        env = "EPOCH_REGIONAL_EPOCH_TARGET_DELIVERY_INTERVAL_MS",
+        default_value_t = DEFAULT_REGIONAL_EPOCH_TARGET_DELIVERY_INTERVAL_MS,
+        value_parser = clap::value_parser!(u64).range(1..=60_000)
+    )]
+    regional_epoch_target_delivery_interval_ms: u64,
     #[arg(long, env = "EPOCH_REGIONAL_WEBHOOK_SIGNING_KEYS_PATH")]
     regional_webhook_signing_keys_path: Option<PathBuf>,
     #[arg(
@@ -227,6 +236,7 @@ struct RegionalRuntimeLaunch {
     maintenance_interval: Duration,
     checkpoint_interval: Duration,
     checkpoint_min_applied_entries: u64,
+    epoch_target_delivery: EpochTargetDeliveryConfig,
     topology: NodeTopology,
     webhook_delivery: Option<WebhookDeliveryConfig>,
 }
@@ -341,6 +351,7 @@ async fn serve_regional_mode(
                 launch.checkpoint_interval,
                 launch.checkpoint_min_applied_entries,
             )
+            .with_epoch_target_delivery(launch.epoch_target_delivery.clone())
             .with_webhook_delivery(launch.webhook_delivery),
     )
     .await?;
@@ -360,6 +371,7 @@ async fn serve_regional_mode(
         maintenance_interval_ms = launch.maintenance_interval.as_millis(),
         checkpoint_interval_ms = launch.checkpoint_interval.as_millis(),
         checkpoint_min_applied_entries = launch.checkpoint_min_applied_entries,
+        epoch_target_delivery_interval_ms = launch.epoch_target_delivery.interval.as_millis(),
         region = launch.topology.region(),
         zone = launch.topology.zone(),
         node_class = launch.topology.node_class(),
@@ -605,6 +617,9 @@ fn regional_runtime_launch(
         maintenance_interval: Duration::from_millis(args.regional_maintenance_interval_ms),
         checkpoint_interval: Duration::from_millis(args.regional_checkpoint_interval_ms),
         checkpoint_min_applied_entries: args.regional_checkpoint_min_applied_entries,
+        epoch_target_delivery: EpochTargetDeliveryConfig {
+            interval: Duration::from_millis(args.regional_epoch_target_delivery_interval_ms),
+        },
         topology,
         webhook_delivery,
     }))
@@ -1034,6 +1049,8 @@ mod tests {
             "500",
             "--regional-checkpoint-min-applied-entries",
             "64",
+            "--regional-epoch-target-delivery-interval-ms",
+            "125",
             "--regional-region",
             "ap-south",
             "--regional-zone",
@@ -1061,6 +1078,10 @@ mod tests {
         assert_eq!(launch.maintenance_interval, Duration::from_millis(250));
         assert_eq!(launch.checkpoint_interval, Duration::from_millis(500));
         assert_eq!(launch.checkpoint_min_applied_entries, 64);
+        assert_eq!(
+            launch.epoch_target_delivery.interval,
+            Duration::from_millis(125)
+        );
         assert_eq!(launch.topology.node_id(), 2);
         assert_eq!(launch.topology.region(), "ap-south");
         assert_eq!(launch.topology.zone(), "ap-south-1b");

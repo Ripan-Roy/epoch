@@ -41,6 +41,24 @@ subscription = Subscription(
 upserted = client.upsert_subscription(
     "events", 0, "docs-python-bus-upsert-v1", subscription
 )
+queue_subscription = Subscription(
+    "queue-jobs",
+    SubscriptionTarget.queue("jobs"),
+    filter=EventFilter(event_type_patterns=["target.*"]),
+    delivery_policy=subscription.delivery_policy,
+)
+queue_upserted = client.upsert_subscription(
+    "events", 0, "docs-python-bus-queue-target-v1", queue_subscription
+)
+stream_subscription = Subscription(
+    "stream-orders",
+    SubscriptionTarget.stream("orders"),
+    filter=EventFilter(event_type_patterns=["target.*"]),
+    delivery_policy=subscription.delivery_policy,
+)
+stream_upserted = client.upsert_subscription(
+    "events", 0, "docs-python-bus-stream-target-v1", stream_subscription
+)
 event = EventEnvelope(
     id="docs-order-1",
     source="docs-python",
@@ -69,14 +87,52 @@ acknowledged = client.acknowledge_delivery(
     1,
     delivery["lease_token"],
 )
+target_published = client.publish(
+    "events",
+    0,
+    "docs-python-bus-target-publish-v1",
+    EventEnvelope(
+        id="docs-target-1",
+        source="docs-python",
+        event_type="target.created",
+        key="customer-42",
+        payload={"id": 2},
+    ),
+)
+
+
+def wait_for_target(subscription_name: str, kind: str) -> dict[str, Any]:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        document = client.query_deliveries(
+            "events",
+            0,
+            subscription=subscription_name,
+            state="acknowledged",
+            limit=100,
+        )
+        for record in document["records"]:
+            if record.get("destination", {}).get("kind") == kind:
+                return record
+        time.sleep(0.05)
+    raise TimeoutError(f"timed out waiting for {kind} target delivery")
+
+
+queue_delivery = wait_for_target("queue-jobs", "queue")
+stream_delivery = wait_for_target("stream-orders", "stream")
 
 print(
     json.dumps(
         {
             "upsert": upserted,
+            "queue_target_upsert": queue_upserted,
+            "stream_target_upsert": stream_upserted,
             "publish": published,
             "exact_retry": replayed,
             "acknowledge": acknowledged,
+            "target_publish": target_published,
+            "queue_delivery": queue_delivery,
+            "stream_delivery": stream_delivery,
             "archive": client.replay_archive(
                 "events",
                 0,

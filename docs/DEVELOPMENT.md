@@ -413,6 +413,14 @@ private-network egress policy. The key ID, not the secret, is captured in the
 subscription/outbox. See
 [ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md).
 
+Epoch Queue and Stream target execution is always enabled in regional mode.
+Optionally set `EPOCH_REGIONAL_EPOCH_TARGET_DELIVERY_INTERVAL_MS` (default 100
+ms; range 1–60,000) on every node. The source Bus leader resolves targets in
+the same catalog scope, pins the destination generation/tablet coordinates,
+and forwards to the destination group's known leader. No signing-key or
+application dispatcher is required. See
+[ADR-0031](adr/0031-leader-owned-epoch-target-delivery.md).
+
 Run `make test-regional-runtime` for the disposable end-to-end campaign. It
 allocates its own ports/project/volumes, builds the Go control binary, verifies
 authorization-protected topology/group capacity, creates a three-zone managed resource
@@ -439,7 +447,7 @@ resources. The displayed Go, Java, and Python regional sources are compiled by
 [Regional Event Bus SDK](REGIONAL_EVENT_BUS_SDK.md). `epoch-catalog` remains
 independently testable with `cargo test -p epoch-catalog --all-targets`.
 
-The real-process signed delivery/retry/reopen proof is:
+The real-process signed and Epoch-target delivery/retry/reopen proof is:
 
 ```shell
 cargo test -p epoch-node --test regional_process \
@@ -447,7 +455,10 @@ cargo test -p epoch-node --test regional_process \
 ```
 
 It binds loopback ports and launches three local `epoch-node` children, so the
-test needs permission to create local listeners. Dynamic
+test needs permission to create local listeners. The same test provisions
+Queue and three-shard Stream destinations, publishes a keyed Bus event, waits
+for both target commits and source acknowledgements, then proves one target
+record remains after all-voter reopen. Dynamic
 membership, general voter selection, rack placement, production peer
 identity/TLS, user-exportable backups/PITR, follower read routing, and
 transactional assignment-plus-offset handoff, background session maintenance,

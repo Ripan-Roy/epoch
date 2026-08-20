@@ -38,24 +38,46 @@ public final class RegionalBusQuickstart {
             environment("EPOCH_TOKEN", "epoch-dev-admin-v1"),
             new RegionalScope("acme", "shop", "dev", "core"),
             Duration.ofSeconds(3));
+    DeliveryPolicy policy =
+        new DeliveryPolicy(
+            BigInteger.valueOf(30_000),
+            16,
+            new DeliveryRetryPolicy(
+                DeliveryBackoffStrategy.FIXED,
+                BigInteger.valueOf(1_000),
+                BigInteger.valueOf(60_000),
+                10,
+                8,
+                null));
     Subscription subscription =
         new Subscription(
             "orders",
             new EventFilter(List.of("order.*"), List.of(), List.of(), Map.of(), Map.of()),
             SubscriptionTarget.pull(),
             EventTransform.empty(),
-            new DeliveryPolicy(
-                BigInteger.valueOf(30_000),
-                16,
-                new DeliveryRetryPolicy(
-                    DeliveryBackoffStrategy.FIXED,
-                    BigInteger.valueOf(1_000),
-                    BigInteger.valueOf(60_000),
-                    10,
-                    8,
-                    null)));
+            policy);
     JsonNode upserted =
         client.upsertSubscription("events", 0, "docs-java-bus-upsert-v1", subscription);
+    Subscription queueSubscription =
+        new Subscription(
+            "queue-jobs",
+            new EventFilter(List.of("target.*"), List.of(), List.of(), Map.of(), Map.of()),
+            SubscriptionTarget.queue("jobs"),
+            EventTransform.empty(),
+            policy);
+    JsonNode queueUpserted =
+        client.upsertSubscription(
+            "events", 0, "docs-java-bus-queue-target-v1", queueSubscription);
+    Subscription streamSubscription =
+        new Subscription(
+            "stream-orders",
+            new EventFilter(List.of("target.*"), List.of(), List.of(), Map.of(), Map.of()),
+            SubscriptionTarget.stream("orders"),
+            EventTransform.empty(),
+            policy);
+    JsonNode streamUpserted =
+        client.upsertSubscription(
+            "events", 0, "docs-java-bus-stream-target-v1", streamSubscription);
     EventEnvelope event =
         EventEnvelope.builder("docs-java", "order.created", Map.of("id", 1))
             .id("docs-order-1")
@@ -75,12 +97,26 @@ public final class RegionalBusQuickstart {
             "docs-java",
             BigInteger.ONE,
             delivery.path("lease_token").asText());
+    EventEnvelope targetEvent =
+        EventEnvelope.builder("docs-java", "target.created", Map.of("id", 2))
+            .id("docs-target-1")
+            .key("customer-42")
+            .build();
+    JsonNode targetPublished =
+        client.publish("events", 0, "docs-java-bus-target-publish-v1", targetEvent);
+    JsonNode queueDelivery = waitForTarget(client, "queue-jobs", "queue");
+    JsonNode streamDelivery = waitForTarget(client, "stream-orders", "stream");
 
     ObjectNode output = MAPPER.createObjectNode();
     output.set("upsert", upserted);
+    output.set("queue_target_upsert", queueUpserted);
+    output.set("stream_target_upsert", streamUpserted);
     output.set("publish", published);
     output.set("exact_retry", replayed);
     output.set("acknowledge", acknowledged);
+    output.set("target_publish", targetPublished);
+    output.set("queue_delivery", queueDelivery);
+    output.set("stream_delivery", streamDelivery);
     output.set(
         "archive",
         client.replayArchive(
@@ -94,6 +130,23 @@ public final class RegionalBusQuickstart {
 
   private static JsonNode result(JsonNode document) {
     return document.path("receipt").path("outcome").path("result");
+  }
+
+  private static JsonNode waitForTarget(
+      RegionalBusClient client, String subscription, String kind) throws Exception {
+    long deadlineNanos = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+    while (System.nanoTime() < deadlineNanos) {
+      JsonNode document =
+          client.queryDeliveries(
+              "events", 0, subscription, RegionalBusDeliveryState.ACKNOWLEDGED, 100);
+      for (JsonNode record : document.path("records")) {
+        if (kind.equals(record.path("destination").path("kind").asText())) {
+          return record;
+        }
+      }
+      Thread.sleep(50);
+    }
+    throw new IllegalStateException("timed out waiting for " + kind + " target delivery");
   }
 
   private static String environment(String name, String fallback) {

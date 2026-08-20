@@ -12,7 +12,7 @@ use std::{
 };
 
 use epoch_bus::SubscriptionTarget;
-use epoch_consensus::{ConsensusError, ConsensusRole, ProposalLookup};
+use epoch_consensus::ConsensusRole;
 use epoch_core::Clock;
 use epoch_tablet::{
     BusTabletCommand, BusTabletOperation, BusTabletOperationResult, BusTabletOutcome,
@@ -30,7 +30,8 @@ use url::{Host, Url};
 
 use crate::{
     bus_tablet::BusTabletService,
-    consensus::{ConsensusProbeError, ConsensusProbeHandle},
+    consensus::ConsensusProbeHandle,
+    delivery_proposal::{ProposalRoute, propose_and_wait},
     tablet_materializer::{MaterializedTabletRoute, TabletDirectory},
 };
 
@@ -538,6 +539,7 @@ async fn dispatch_candidate(
             dispatcher_epoch: WEBHOOK_DISPATCHER_EPOCH,
             max_deliveries: 1,
             expected_delivery_id: Some(candidate.delivery_id),
+            destination: None,
         },
     )
     .map_err(|error| WebhookDeliveryError::State(error.to_string()))?;
@@ -636,83 +638,20 @@ async fn propose_command(
     let payload = command
         .encode(service.scope())
         .map_err(|error| WebhookDeliveryError::State(error.to_string()))?;
-    // Subscribe before lookup/proposal so a fast commit cannot race past the
-    // worker and leave a replicated lease without an HTTP attempt.
-    let mut commits = consensus.subscribe_commits();
-    let lookup = match consensus.lookup(proposal_id).await {
-        Ok(ProposalLookup::Committed(committed)) => ProposalLookup::Committed(committed),
-        Ok(ProposalLookup::Pending { payload: pending }) => {
-            if pending != payload {
-                return Err(WebhookDeliveryError::State(
-                    "webhook proposal identity is already bound to another command".into(),
-                ));
-            }
-            ProposalLookup::Pending { payload: pending }
-        }
-        Ok(ProposalLookup::Unknown) => {
-            match consensus.propose(proposal_id, expected_term, payload).await {
-                Ok(lookup) => lookup,
-                Err(ConsensusProbeError::Consensus(
-                    ConsensusError::NotLeader { .. }
-                    | ConsensusError::StaleTerm { .. }
-                    | ConsensusError::DuplicateProposal(_),
-                )) => consensus
-                    .lookup(proposal_id)
-                    .await
-                    .map_err(|error| WebhookDeliveryError::State(error.to_string()))?,
-                Err(error) => return Err(WebhookDeliveryError::State(error.to_string())),
-            }
-        }
-        Err(error) => return Err(WebhookDeliveryError::State(error.to_string())),
-    };
-    if let ProposalLookup::Committed(committed) = lookup {
-        return service
-            .committed_receipt(&committed)
-            .map_err(WebhookDeliveryError::State);
-    }
-
-    let deadline = tokio::time::Instant::now() + commit_wait;
-    loop {
-        match tokio::time::timeout_at(deadline, commits.recv()).await {
-            Ok(Ok(committed)) if committed.receipt.proposal_id.get() == proposal_id => {
-                return service
-                    .committed_receipt(&committed)
-                    .map_err(WebhookDeliveryError::State);
-            }
-            Ok(Ok(_)) => {}
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
-                if let ProposalLookup::Committed(committed) = consensus
-                    .lookup(proposal_id)
-                    .await
-                    .map_err(|error| WebhookDeliveryError::State(error.to_string()))?
-                {
-                    return service
-                        .committed_receipt(&committed)
-                        .map_err(WebhookDeliveryError::State);
-                }
-            }
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
-                return Err(WebhookDeliveryError::State(
-                    "consensus commit notification channel closed".into(),
-                ));
-            }
-            Err(_) => {
-                if let ProposalLookup::Committed(committed) = consensus
-                    .lookup(proposal_id)
-                    .await
-                    .map_err(|error| WebhookDeliveryError::State(error.to_string()))?
-                {
-                    return service
-                        .committed_receipt(&committed)
-                        .map_err(WebhookDeliveryError::State);
-                }
-                return Err(WebhookDeliveryError::State(format!(
-                    "webhook proposal {proposal_id} did not commit within {} ms",
-                    commit_wait.as_millis()
-                )));
-            }
-        }
-    }
+    let committed = propose_and_wait(
+        consensus,
+        proposal_id,
+        expected_term,
+        payload,
+        commit_wait,
+        "webhook",
+        ProposalRoute::LeaderOnly,
+    )
+    .await
+    .map_err(WebhookDeliveryError::State)?;
+    service
+        .committed_receipt(&committed)
+        .map_err(WebhookDeliveryError::State)
 }
 
 fn settlement_operation(
