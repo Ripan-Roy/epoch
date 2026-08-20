@@ -528,7 +528,7 @@ impl RunningQueueCluster {
                 urls.iter()
                     .enumerate()
                     .map(|(peer, url)| (u64::try_from(peer).unwrap() + 1, url.clone())),
-                Duration::from_millis(20),
+                crate::consensus::TEST_CONSENSUS_TICK_INTERVAL,
             )
             .unwrap();
             let service = QueueTabletService::with_default_config(scope()).unwrap();

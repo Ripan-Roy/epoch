@@ -2629,7 +2629,7 @@ mod tests {
                     urls.iter()
                         .enumerate()
                         .map(|(peer, url)| (u64::try_from(peer).unwrap() + 1, url.clone())),
-                    Duration::from_millis(20),
+                    crate::consensus::TEST_CONSENSUS_TICK_INTERVAL,
                 )
                 .unwrap();
                 let service = StreamTabletService::new_for_shard(scope(), 0, 3).unwrap();
