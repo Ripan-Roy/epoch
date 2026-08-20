@@ -75,6 +75,15 @@ impl MaterializedTabletRoute {
     ) -> Result<Vec<RegionalMaintenanceProposal>, String> {
         self.service.maintenance_proposals(now_ms)
     }
+
+    pub(crate) fn bus_service(&self) -> Option<Arc<BusTabletService>> {
+        match &self.service {
+            PendingTabletService::Bus(service) => Some(Arc::clone(service)),
+            PendingTabletService::Cache(_)
+            | PendingTabletService::Stream(_)
+            | PendingTabletService::Queue(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Error)]

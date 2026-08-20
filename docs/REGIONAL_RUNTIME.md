@@ -180,6 +180,17 @@ from durable consensus status. Configure
 `EPOCH_REGIONAL_CHECKPOINT_INTERVAL_MS` (default 1,000; 1–600,000) and
 `EPOCH_REGIONAL_CHECKPOINT_MIN_APPLIED_ENTRIES` (default 1,024; nonzero).
 
+When a strict signing-key file is configured, topology also contains
+`webhook_delivery`. It reports `enabled`, `interval_ms`, cumulative passes,
+examined tablets/leaders/subscriptions, acquired leases, delivered/retried/
+dead-lettered outcomes, errors, and the last pass/error. Only the current Bus
+tablet leader submits work. Configure
+`EPOCH_REGIONAL_WEBHOOK_SIGNING_KEYS_PATH` and optionally
+`EPOCH_REGIONAL_WEBHOOK_DELIVERY_INTERVAL_MS` (default 100; 1–60,000).
+`EPOCH_REGIONAL_WEBHOOK_ALLOW_HTTP_LOOPBACK=true` is a development-only switch;
+normal targets require public HTTPS. See
+[ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md).
+
 ## Route and fence a data operation
 
 Discover a shard independently on each node:
@@ -312,18 +323,22 @@ The Event Bus client uses the fully qualified versioned shard route:
 
 Go, Java, and Python expose `RegionalBusClient` over the same authenticated
 discovery, fencing, linearizable-read, and one-rediscovery core. Mutations cover
-subscription upsert/removal, publish, delivery acquire/ack/fail/maintenance;
+subscription upsert/removal, publish, delivery acquire/ack/fail/reject/maintenance;
 reads cover mutation lookup, archive replay, delivery query, and status.
 Subscriptions carry bounded timeout, concurrency, attempts, backoff, jitter,
 and age policy. Settlement requires the opaque lease token returned by acquire.
 
-The exact compiled examples, delivery-worker guidance, retry semantics, and
-external-executor non-claims are in
+Signed HTTP/webhook targets name an external key ID. When every node has that
+key and the worker is enabled, the current leader commits an exact lease,
+awaits it, sends a signed CloudEvents 1.0 binary-mode HTTPS request, and commits
+the observed result. The exact compiled examples, receiver verification
+helpers, retry semantics, and external-side-effect non-claims are in
 [Regional Event Bus SDK](REGIONAL_EVENT_BUS_SDK.md) and embedded on the
-published docs page. The real campaign kills the Event Bus leader before
-running the Python client, then catches up the old voter and reopens every EPRS
-volume. The SDK manipulates durable intent; it does not execute a webhook or
-claim an arbitrary external side effect.
+published docs page. The real process campaign receives a 503 then 204, checks
+distinct attempt signatures and converged acknowledgement history, and reopens
+every voter from the same storage. The broader container campaign also kills
+the Event Bus leader before running the Python pull lifecycle. Neither proof
+claims exactly-once business effects.
 
 Regional reads are linearizable by default and therefore must target the
 current leader. Epoch submits a safe Raft `ReadIndex`, waits for majority
@@ -427,7 +442,8 @@ containers/network/volumes.
   batches, retention
   configure/maintain/observe, generation-pinned key routing, and coordinated
   session membership/assignment. They remain repository-local alpha source;
-  package publication, generated models, transactional assignment/offset
+  Event Bus targets and exact-body signature verification are aligned across
+  all three languages. Package publication, generated models, transactional assignment/offset
   handoff, safe remapping, and production transport remain open.
 - The BFF reports policy-protected configured-endpoint region/zone/class and
   group-capacity evidence. Plain HTTP still lacks Rust server identity.

@@ -1,6 +1,6 @@
 # Regional Event Bus SDK
 
-**Status:** Repository-local, single-shard regional alpha
+**Status:** Repository-local, single-shard regional alpha with signed HTTPS delivery
 
 Epoch's Go, Java, and Python Event Bus clients call the same replicated tablet hosted by the Rust regional runtime. The clients discover the current leader, send generation and tablet fences, preserve caller-owned mutation identity across bounded rediscovery, and request linearizable archive, delivery, mutation, and status reads.
 
@@ -32,21 +32,27 @@ The current implementation accepts shard `0`; keeping the shard in the API preve
 | `publish` | `publish` | Archive and route one strict event envelope |
 | `acquire_deliveries` | `acquire_deliveries` | Lease 1–100 delivery intents to one dispatcher epoch |
 | `acknowledge_delivery` | `acknowledge_delivery` | Permanently settle one fenced lease |
-| `fail_delivery` | `fail_delivery` | Record a reason and transition to retry or dead letter |
+| `fail_delivery` | `fail_delivery` | Record a retryable failure and transition to retry or attempt exhaustion |
+| `reject_delivery` | `reject_delivery` | Terminally dead-letter an acquired delivery without another retry |
 | `maintain_deliveries` | `maintain_deliveries` | Explicitly process due retries and expired leases |
 | `mutation` | mutation lookup | Resolve one proposal ID |
 | `replay_archive` | `archive/replay` | Replay 1–10,000 archived events in an inclusive server-received time range |
 | `query_deliveries` | `deliveries/query` | Query 1–10,000 records by subscription/state |
 | `status` | status | Observe consensus, route plan, archive, ledger counts, and digest |
 
-The regional materializer enables the existing replicated delivery outbox. It records durable intent only. Epoch does not perform the target's external side effect in this increment.
+The regional materializer enables the replicated delivery outbox. Pull,
+Queue, Stream, unsigned webhook, and unsigned HTTP targets record durable intent
+for an external dispatcher. A separately configured leader-owned Rust worker
+executes **signed** webhook and HTTP targets; the target response remains an
+external observation, not a consensus operation.
 
 ## Typed subscription policy
 
 A subscription combines:
 
 - event type, source, subject, header, and JSON-equality filters;
-- pull, Queue, Stream, webhook, or HTTP target metadata;
+- pull, Queue, Stream, webhook, or HTTP target metadata, with an optional
+  signing-key ID for HTTP/webhook;
 - deterministic added headers and payload projections;
 - timeout, maximum in-flight delivery count, and bounded retry policy.
 
@@ -122,7 +128,120 @@ client.upsert_subscription("events", 0, "upsert-orders-v1", subscription)
 
 The exact executable source is [quickstart.py](../console/src/quickstarts/regional_bus/quickstart.py).
 
+## Signed webhook delivery
+
+Enable the worker on every regional node with the same externally distributed
+key set:
+
+```shell
+EPOCH_REGIONAL_WEBHOOK_SIGNING_KEYS_PATH=/etc/epoch/webhook-keys.json
+EPOCH_REGIONAL_WEBHOOK_DELIVERY_INTERVAL_MS=100
+```
+
+The key file is strict, bounded, and never replicated:
+
+```json
+{
+  "format_version": 1,
+  "keys": [
+    {"id": "primary", "secret": "replace-with-at-least-32-byte-secret"}
+  ]
+}
+```
+
+Use `EPOCH_REGIONAL_WEBHOOK_ALLOW_HTTP_LOOPBACK=true` only for a receiver on
+`127.0.0.0/8`, `::1`, or `localhost` during local development. Other HTTP
+targets are rejected; production targets require HTTPS and public DNS/IP
+answers.
+
+Create a signed target with the matching key ID:
+
+```go
+subscription := epoch.Subscription{
+    Name: "orders-webhook",
+    Filter: epoch.EventFilter{EventTypePatterns: []string{"order.*"}},
+    Target: epoch.SignedWebhookTarget("https://receiver.example/orders", "primary"),
+}
+_, err := client.UpsertSubscription(ctx, "events", 0, "orders-webhook-v1", subscription)
+```
+
+```java
+Subscription subscription = new Subscription(
+    "orders-webhook",
+    SubscriptionTarget.signedWebhook("https://receiver.example/orders", "primary"));
+client.upsertSubscription("events", 0, "orders-webhook-v1", subscription);
+```
+
+```python
+subscription = Subscription(
+    "orders-webhook",
+    SubscriptionTarget.signed_webhook("https://receiver.example/orders", "primary"),
+    filter=EventFilter(event_type_patterns=["order.*"]),
+)
+client.upsert_subscription("events", 0, "orders-webhook-v1", subscription)
+```
+
+The request body is the exact JSON payload. Envelope attributes use
+CloudEvents 1.0 binary-mode headers. Epoch also sends
+`epoch-delivery-id`, `epoch-delivery-attempt`, `epoch-subscription`,
+`epoch-signature-key-id`, `epoch-signature-timestamp`, and
+`epoch-signature`.
+
+Verify the raw body **before decoding it**. Then transactionally claim the
+returned `(delivery ID, attempt)` in the receiver's inbox before applying side
+effects:
+
+```go
+verified, err := epoch.VerifyWebhookSignature(
+    secret, rawBody,
+    request.Header.Get("epoch-delivery-id"),
+    request.Header.Get("epoch-delivery-attempt"),
+    request.Header.Get("epoch-signature-timestamp"),
+    request.Header.Get("epoch-signature"),
+    time.Now(), 5*time.Minute,
+)
+```
+
+```java
+WebhookSignatures.Verification verified = WebhookSignatures.verify(
+    secret, rawBody,
+    request.getHeader("epoch-delivery-id"),
+    request.getHeader("epoch-delivery-attempt"),
+    request.getHeader("epoch-signature-timestamp"),
+    request.getHeader("epoch-signature"),
+    Instant.now(), Duration.ofMinutes(5));
+```
+
+```python
+verified = verify_webhook_signature(
+    secret,
+    raw_body,
+    request.headers["epoch-delivery-id"],
+    request.headers["epoch-delivery-attempt"],
+    request.headers["epoch-signature-timestamp"],
+    request.headers["epoch-signature"],
+    tolerance_seconds=300,
+)
+```
+
+The canonical HMAC input is:
+
+```text
+v1
+<timestamp-seconds>
+<delivery-id>
+<attempt>
+<lowercase-hex-sha256(raw-body)>
+```
+
+`2xx` acknowledges; `429`, `5xx`, DNS/connect/timeouts retry under the captured
+policy; every other non-2xx response is terminal. Redirects and ambient proxies
+are disabled. The complete DNS-plus-request attempt never extends beyond the
+replicated lease, and an expired lease emits no request.
+
 ## Delivery worker sequence
+
+For pull/unsigned/custom targets:
 
 1. Acquire a bounded batch for one subscription and dispatcher epoch.
 2. Perform the external operation using the delivery ID as downstream idempotency metadata where supported.
@@ -149,8 +268,15 @@ Archive replay, delivery query, mutation lookup, and status request a leader Rea
 - archive/query results: 1–10,000;
 - dispatcher identity: bounded, caller-owned, non-session identity;
 - no push stream, long poll, automatic lease renewal, or dispatcher coordinator;
-- no built-in HTTP/webhook/Queue/Stream executor yet;
-- no webhook signing, OAuth/API-key secrets, schema validation, MQTT, or geo routing;
+- built-in execution is limited to signed HTTP/webhook targets; Queue, Stream,
+  unsigned HTTP/webhook, long-poll, and managed push executors remain open;
+- no OAuth/API-key target auth, key hot reload/secret manager, schema
+  validation, MQTT, private egress profile, or geo routing;
+- no built-in receiver replay store: the SDK verifier returns the identity the
+  receiver must persist;
 - no exactly-once external-side-effect claim.
 
-The authoritative decision record is [ADR-0020](adr/0020-regional-event-bus-v1-and-sdk-routing.md). The lower-level state machine is documented in [BUS_TABLET.md](BUS_TABLET.md).
+The routing boundary remains [ADR-0020](adr/0020-regional-event-bus-v1-and-sdk-routing.md);
+signed delivery is defined by
+[ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md). The lower-level
+state machine is documented in [BUS_TABLET.md](BUS_TABLET.md).

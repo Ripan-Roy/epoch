@@ -398,6 +398,21 @@ connects to only `127.0.0.1:7601`; the example overrides it with all three
 published Compose node URLs. The console points only at the Go HTTP address;
 enter `epoch-dev-admin-v1` in its managed-control credential panel.
 
+Signed HTTP/webhook execution is opt-in. Supply the same strict external key
+file to every regional node:
+
+```json
+{"format_version":1,"keys":[{"id":"primary","secret":"replace-with-at-least-32-byte-secret"}]}
+```
+
+Set `EPOCH_REGIONAL_WEBHOOK_SIGNING_KEYS_PATH` to that file and optionally
+`EPOCH_REGIONAL_WEBHOOK_DELIVERY_INTERVAL_MS` (default 100 ms). Production
+targets require public HTTPS. A local process test may additionally set
+`EPOCH_REGIONAL_WEBHOOK_ALLOW_HTTP_LOOPBACK=true`; never use that switch as a
+private-network egress policy. The key ID, not the secret, is captured in the
+subscription/outbox. See
+[ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md).
+
 Run `make test-regional-runtime` for the disposable end-to-end campaign. It
 allocates its own ports/project/volumes, builds the Go control binary, verifies
 authorization-protected topology/group capacity, creates a three-zone managed resource
@@ -422,7 +437,17 @@ resources. The displayed Go, Java, and Python regional sources are compiled by
 [Regional Queue SDK](REGIONAL_QUEUE_SDK.md), and
 [Regional Cache SDK](REGIONAL_CACHE_SDK.md), and
 [Regional Event Bus SDK](REGIONAL_EVENT_BUS_SDK.md). `epoch-catalog` remains
-independently testable with `cargo test -p epoch-catalog --all-targets`. Dynamic
+independently testable with `cargo test -p epoch-catalog --all-targets`.
+
+The real-process signed delivery/retry/reopen proof is:
+
+```shell
+cargo test -p epoch-node --test regional_process \
+  regional_processes_fail_over_reopen_and_converge -- --nocapture
+```
+
+It binds loopback ports and launches three local `epoch-node` children, so the
+test needs permission to create local listeners. Dynamic
 membership, general voter selection, rack placement, production peer
 identity/TLS, user-exportable backups/PITR, follower read routing, and
 transactional assignment-plus-offset handoff, background session maintenance,

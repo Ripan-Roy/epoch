@@ -22,6 +22,7 @@ import type {
   ResourceSummary,
 } from "./api/types";
 import { ProfileCreateCard } from "./components/ProfileCreateCard";
+import { ThemeToggle } from "./components/ThemeToggle";
 import { DocsPage } from "./DocsPage";
 import { profileDefinitions } from "./profileDefinitions";
 
@@ -41,6 +42,7 @@ const durabilityRank: Record<DurabilityProfile, number> = {
 interface AppRoute {
   page: "console" | "docs";
   section: string | null;
+  heading: string | null;
 }
 
 function App() {
@@ -48,10 +50,10 @@ function App() {
 }
 
 function DocumentationApp() {
-  const [section, setSection] = useState<string | null>(readDocsSection);
+  const [route, setRoute] = useState(readDocsRoute);
 
   useEffect(() => {
-    const updateRoute = () => setSection(readDocsSection());
+    const updateRoute = () => setRoute(readDocsRoute());
     window.addEventListener("hashchange", updateRoute);
     return () => window.removeEventListener("hashchange", updateRoute);
   }, []);
@@ -62,25 +64,17 @@ function DocumentationApp() {
 
   return (
     <>
-      <a
-        className="skip-link"
-        href="#/docs/main-content"
-        onClick={() => {
-          if (section === "main-content") {
-            focusMainContent();
-          }
-        }}
-      >
+      <a className="skip-link" href="#main-content" onClick={focusMainContent}>
         Skip to main content
       </a>
 
       <DocsHeader />
 
-      <DocsPage section={section} />
+      <DocsPage section={route.section} heading={route.heading} />
 
-      <footer className="docs-footer">
+      <footer>
         <div className="docs-header-shell footer__inner">
-          <span>Epoch Docs · 0.1 alpha</span>
+          <span>Epoch Docs · {releaseVersion}</span>
           <span>Reported state only. No silent guarantee upgrades.</span>
         </div>
       </footer>
@@ -213,22 +207,14 @@ function EpochApp() {
 
   return (
     <>
-      <a
-        className="skip-link"
-        href={route.page === "docs" ? "#/docs/main-content" : "#main-content"}
-        onClick={() => {
-          if (route.page === "docs" && route.section === "main-content") {
-            focusMainContent();
-          }
-        }}
-      >
+      <a className="skip-link" href="#main-content" onClick={focusMainContent}>
         Skip to main content
       </a>
 
       {route.page === "docs" ? <DocsHeader showConsoleLink /> : <ConsoleHeader />}
 
       {route.page === "docs" ? (
-        <DocsPage section={route.section} />
+        <DocsPage section={route.section} heading={route.heading} />
       ) : (
         <main id="main-content" tabIndex={-1}>
           <div className="shell" id="top">
@@ -241,17 +227,16 @@ function EpochApp() {
               </span>
             </aside>
 
-            <section className="hero" aria-labelledby="overview-title">
+            <section className="page-header" aria-labelledby="overview-title">
               <div>
-                <p className="eyebrow">NODE OVERVIEW</p>
-                <h1 id="overview-title">One runtime, four explicit behaviors.</h1>
+                <h1 id="overview-title">One runtime, four explicit behaviors</h1>
                 <p className="hero__lede">
                   Inspect what this node can actually guarantee, then create the workload profile whose
                   semantics fit the job.
                 </p>
               </div>
               <div className="hero__actions">
-                <code>{apiBaseUrl}</code>
+                <span className="endpoint-chip">{apiBaseUrl}</span>
                 <button
                   className="button button--secondary"
                   type="button"
@@ -310,7 +295,7 @@ function EpochApp() {
             <section className="section resources-section" aria-labelledby="regional-title">
               <div className="section-heading">
                 <div>
-                  <p className="eyebrow">REGIONAL PLACEMENT</p>
+                  <p className="eyebrow">Regional placement</p>
                   <h2 id="regional-title">Observed catalog and serving risk</h2>
                 </div>
                 <p>
@@ -438,8 +423,8 @@ function EpochApp() {
             <section className="section" aria-labelledby="create-title">
               <div className="section-heading">
                 <div>
-                  <p className="eyebrow">CREATE</p>
-                  <h2 id="create-title">Choose behavior, not a vendor analogy.</h2>
+                  <p className="eyebrow">Create</p>
+                  <h2 id="create-title">Choose behavior, not a vendor analogy</h2>
                 </div>
                 <p>
                   These alpha forms target the standalone node API; regional desired state uses RegionalAdmin.
@@ -460,7 +445,7 @@ function EpochApp() {
             <section className="section resources-section" aria-labelledby="resources-title">
               <div className="section-heading">
                 <div>
-                  <p className="eyebrow">INVENTORY</p>
+                  <p className="eyebrow">Inventory</p>
                   <h2 id="resources-title">Resources reported by this process</h2>
                 </div>
                 <p>
@@ -519,7 +504,7 @@ function EpochApp() {
         </main>
       )}
 
-      <footer className={route.page === "docs" ? "docs-footer" : undefined}>
+      <footer>
         <div className={route.page === "docs" ? "docs-header-shell footer__inner" : "shell footer__inner"}>
           <span>
             Epoch {route.page === "docs" ? "Docs" : "Console"} · {releaseVersion}
@@ -533,27 +518,29 @@ function EpochApp() {
 
 function DocsHeader({ showConsoleLink = false }: { showConsoleLink?: boolean }) {
   return (
-    <header className="topbar topbar--docs">
-      <div className="docs-header-shell docs-header">
-        <div className="docs-header__product">
-          <a className="brand brand--docs" href="#/docs" aria-label="Epoch documentation home">
+    <header className="topbar">
+      <div className="docs-header-shell topbar__inner">
+        <div className="topbar__left">
+          <a className="brand" href="#/docs" aria-label="Epoch documentation home">
             <span className="brand__mark" aria-hidden="true">
               E
             </span>
             <strong>Epoch</strong>
           </a>
-          <span className="docs-header__divider" aria-hidden="true" />
-          <span className="docs-header__label">Documentation</span>
+          <span className="brand__context">Docs</span>
         </div>
-        <nav className="docs-header__nav" aria-label="Primary navigation">
-          <a href="#/docs/quickstart">Quickstart</a>
-          <a href="#/docs/sdk-reference">SDKs</a>
-          {showConsoleLink ? <a href="#/console">Console</a> : null}
-          <a href="https://github.com/Ripan-Roy/epoch" target="_blank" rel="noreferrer">
-            GitHub <span aria-hidden="true">↗</span>
-          </a>
-          <span className="docs-version">v{releaseVersion}</span>
-        </nav>
+        <div className="topbar__right">
+          <nav className="topnav topnav--docs" aria-label="Primary navigation">
+            <a href="#/docs/quickstart">Quickstart</a>
+            <a href="#/docs/sdk-reference">SDKs</a>
+            {showConsoleLink ? <a href="#/console">Console</a> : null}
+            <a href="https://github.com/Ripan-Roy/epoch" target="_blank" rel="noreferrer">
+              GitHub <span aria-hidden="true">↗</span>
+            </a>
+          </nav>
+          <span className="version-tag">v{releaseVersion}</span>
+          <ThemeToggle />
+        </div>
       </div>
     </header>
   );
@@ -563,15 +550,15 @@ function ConsoleHeader() {
   return (
     <header className="topbar">
       <div className="shell topbar__inner">
-        <a className="brand" href="#/console" aria-label="Epoch runtime console home">
-          <span className="brand__mark" aria-hidden="true">
-            E
-          </span>
-          <span>
+        <div className="topbar__left">
+          <a className="brand" href="#/console" aria-label="Epoch runtime console home">
+            <span className="brand__mark" aria-hidden="true">
+              E
+            </span>
             <strong>Epoch</strong>
-            <small>runtime console</small>
-          </span>
-        </a>
+          </a>
+          <span className="brand__context">Console</span>
+        </div>
         <div className="topbar__right">
           <nav className="topnav" aria-label="Primary navigation">
             <a href="#/console" aria-current="page">
@@ -582,7 +569,8 @@ function ConsoleHeader() {
               GitHub <span aria-hidden="true">↗</span>
             </a>
           </nav>
-          <span className="alpha-pill">FOUNDATION ALPHA</span>
+          <span className="version-tag">v{releaseVersion}</span>
+          <ThemeToggle />
         </div>
       </div>
     </header>
@@ -592,19 +580,22 @@ function ConsoleHeader() {
 function readRoute(): AppRoute {
   if (!window.location.hash || window.location.hash === "#") {
     return import.meta.env.VITE_DEFAULT_PAGE === "docs"
-      ? { page: "docs", section: null }
-      : { page: "console", section: null };
+      ? { page: "docs", section: null, heading: null }
+      : { page: "console", section: null, heading: null };
   }
-  const [page, section] = window.location.hash.replace(/^#\/?/, "").split("/");
+  const [page, section, heading] = window.location.hash.replace(/^#\/?/, "").split("/");
   if (page === "docs") {
-    return { page: "docs", section: section || null };
+    return { page: "docs", section: section || null, heading: heading || null };
   }
-  return { page: "console", section: null };
+  return { page: "console", section: null, heading: null };
 }
 
-function readDocsSection(): string | null {
-  const [page, section] = window.location.hash.replace(/^#\/?/, "").split("/");
-  return page === "docs" && section ? section : null;
+function readDocsRoute(): { section: string | null; heading: string | null } {
+  const [page, section, heading] = window.location.hash.replace(/^#\/?/, "").split("/");
+  if (page !== "docs") {
+    return { section: null, heading: null };
+  }
+  return { section: section || null, heading: heading || null };
 }
 
 function focusMainContent() {

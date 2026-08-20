@@ -123,7 +123,7 @@ The traceability register marks the following as **Slice**. A Slice entry can be
 | Stream slice | Rust | Key routing, generation-fenced committed offsets/reset/lag/replay, fetch, retention baseline, visible ack policy, and bounded atomic batch frames for none/gzip/LZ4/Snappy/Zstd | Ordered recovery, stale-owner fencing, no-early-ack history, strict codec corpus, correlated receipts, and record/checkpoint EPRS replay |
 | Queue slice | Rust | Ready/scheduled/leased/acked/DLQ state, renewal, retry, redrive | Crash-at-every-transition history check |
 | Cache slice | Rust | One volatile memory shard, core types, TTL, eviction, atomic batch, pipeline | Linearizability, expiry, and eviction tests; snapshot/restore remains M3 |
-| Route slice | Rust | Bounded envelope-normalized direct/fan-out plan and independent delivery ledger with canonical replicated commands | Route/filter truth table, atomic outbox capacity, fenced acquire/ack/fail, retry/DLQ isolation, exact replay, and real-runtime/EPRS/container convergence; built-in target execution remains open |
+| Route slice | Rust | Bounded envelope-normalized direct/fan-out plan, independent delivery ledger, and signed HTTP/webhook worker with canonical replicated commands | Route/filter truth table, atomic outbox capacity, fenced acquire/ack/fail/reject, retry/DLQ isolation, exact replay, real-runtime/EPRS/container convergence, signed 503/204 receiver retry, and full-voter reopen; other target execution remains open |
 | Standalone and cluster lifecycle | Rust | One selectable node binary, local admin API, truthful mode/guarantee health | Disconnected standalone and three-node smoke suites |
 | CLI, SDK, emulator | Rust, Go, Java, Python | Create, append/publish, consume/ack, inspect, deterministic local testing | Cross-language executable quickstarts in CI |
 | Control-plane contract and durable registry | Go | Reconciler using only administration contracts plus versioned transactional management metadata; no record-path ownership | Boundary/dependency audit, commit-before-visible tests, and real-process metadata reopen |
@@ -349,16 +349,30 @@ retry/DLQ state, semantic retry/conflict, follower rejection, leader
 replacement, catch-up, digest/archive/outbox convergence, and all-node EPRS
 recovery. A fully qualified authenticated regional Event Bus v1 route maps to
 that same tablet. Repository-local Go, Java, and Python clients cover
-subscription policy/removal, publish, acquire/ack/fail/maintenance, mutation
+subscription policy/removal, publish, acquire/ack/fail/reject/maintenance, mutation
 lookup, archive replay, delivery query, and status with exact same-key retry and
 linearizable observations. Contract tests, exact compiled Pages examples, and
 a real Python lifecycle after Event Bus leader loss automatically time out an
-in-flight delivery before retry without client maintenance. This
-advances BUS-001, BUS-003, BUS-004, BUS-006, and DX-001, but target executors,
-rate limiting, redrive/retention, generated models, package publication,
-snapshots, and production placement remain open. See
+in-flight delivery before retry without client maintenance.
+
+The regional leader now also executes signed HTTP/webhook targets outside the
+state machine. It commits and awaits an exact lease before I/O, emits one
+CloudEvents 1.0 binary-mode request with the captured key ID and exact-body
+HMAC-SHA-256 signature, and commits 2xx acknowledgement, retryable 429/5xx or
+network failure, or terminal rejection. HTTPS/public-address validation,
+per-attempt DNS resolution and address pinning, redirect/proxy suppression,
+lease-capped timeout, strict/redacted key files, and Go/Java/Python receiver
+verification helpers are implemented. A real three-process 503/204 campaign
+proves distinct signed attempts, voter convergence, and all-voter reopen.
+
+This advances BUS-001, BUS-003–BUS-006, BUS-011, and DX-001/DX-002. Queue/Stream
+and unsigned target executors, broad CloudEvents conformance, rate limiting,
+redrive/retention, OAuth/API-key destinations, private managed egress, generated
+models, package publication, backups/PITR, and production placement remain
+open. See
 [Regional Event Bus SDK](REGIONAL_EVENT_BUS_SDK.md),
 [ADR-0020](adr/0020-regional-event-bus-v1-and-sdk-routing.md), and
+[ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md), and
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 ADR-0027 unifies those profile timers in the regional node. State machines

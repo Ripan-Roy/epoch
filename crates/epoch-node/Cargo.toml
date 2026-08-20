@@ -21,6 +21,7 @@ epoch-queue = { path = "../epoch-queue" }
 epoch-storage = { path = "../epoch-storage" }
 epoch-stream = { path = "../epoch-stream" }
 epoch-tablet = { path = "../epoch-tablet" }
+hmac.workspace = true
 http.workspace = true
 percent-encoding.workspace = true
 reqwest.workspace = true

@@ -74,9 +74,13 @@ same regional core. See the
 and [Cache contract guide](../../docs/REGIONAL_CACHE_SDK.md).
 
 `RegionalBusClient` exposes subscription delivery policy, publish, delivery
-acquire/ack/fail/maintenance, mutation lookup, archive replay, delivery query,
+acquire/ack/fail/reject/maintenance, mutation lookup, archive replay, delivery query,
 and status over the same regional core. Mutations keep exact caller-owned keys;
-delivery settlement also preserves the opaque lease token. See the
+delivery settlement also preserves the opaque lease token.
+`SignedWebhookTarget` captures a configured key ID, while
+`VerifyWebhookSignature` verifies the exact raw body, canonical attempt and
+timestamp, constant-time HMAC-SHA-256, and returns the replay identity receivers
+must persist before side effects. See the
 [complete Event Bus example](../../console/src/quickstarts/regional_bus/quickstart.go)
 and [Event Bus contract guide](../../docs/REGIONAL_EVENT_BUS_SDK.md).
 

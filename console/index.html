@@ -7,8 +7,30 @@
       name="description"
       content="Epoch alpha documentation and runtime console for explicit real-time data guarantees."
     />
-    <meta name="theme-color" content="#101416" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#fbfbfa" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0f1214" media="(prefers-color-scheme: dark)" />
     <title>Epoch Docs &amp; Console · Alpha</title>
+    <script>
+      // Resolve the theme before first paint so the page never flashes the wrong one.
+      (function () {
+        try {
+          var stored = window.localStorage.getItem("epoch-theme");
+          var choice = stored === "light" || stored === "dark" ? stored : "system";
+          var resolved =
+            choice === "system"
+              ? window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark"
+                : "light"
+              : choice;
+          document.documentElement.dataset.theme = resolved;
+          document.documentElement.dataset.themeChoice = choice;
+        } catch (error) {
+          document.documentElement.dataset.theme = "light";
+          document.documentElement.dataset.themeChoice = "system";
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

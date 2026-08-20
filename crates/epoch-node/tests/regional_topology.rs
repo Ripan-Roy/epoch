@@ -4,6 +4,7 @@ use epoch_node::{
     regional_maintenance::RegionalMaintenanceStatus,
     regional_topology::{NodeTopology, regional_topology_router},
     tablet_materializer::TabletDirectory,
+    webhook_delivery::WebhookDeliveryStatus,
 };
 use http_body_util::BodyExt;
 use serde_json::Value;
@@ -25,6 +26,7 @@ async fn topology_reports_fixed_voters_and_live_group_capacity() {
         TabletDirectory::default(),
         RegionalMaintenanceStatus::new(100),
         RegionalCheckpointStatus::new(1_000, 1_024),
+        WebhookDeliveryStatus::disabled(),
     )
     .oneshot(
         Request::get("/experimental/v1/regional/topology")
@@ -56,6 +58,7 @@ async fn topology_reports_fixed_voters_and_live_group_capacity() {
     assert_eq!(body["checkpoints"]["min_applied_entries"], 1_024);
     assert_eq!(body["checkpoints"]["passes"], 0);
     assert_eq!(body["checkpoints"]["groups"], serde_json::json!([]));
+    assert_eq!(body["webhook_delivery"]["enabled"], false);
 }
 
 #[test]

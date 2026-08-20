@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use crate::{
     regional_checkpoint::RegionalCheckpointStatus, regional_maintenance::RegionalMaintenanceStatus,
-    tablet_materializer::TabletDirectory,
+    tablet_materializer::TabletDirectory, webhook_delivery::WebhookDeliveryStatus,
 };
 
 pub const REGIONAL_TOPOLOGY_PATH: &str = "/experimental/v1/regional/topology";
@@ -112,6 +112,7 @@ struct TopologyState {
     directory: TabletDirectory,
     maintenance: std::sync::Arc<RegionalMaintenanceStatus>,
     checkpoints: std::sync::Arc<RegionalCheckpointStatus>,
+    webhooks: std::sync::Arc<WebhookDeliveryStatus>,
 }
 
 #[derive(Debug, Serialize)]
@@ -124,6 +125,7 @@ struct TopologyResponse {
     capacity: CapacityResponse,
     maintenance: crate::regional_maintenance::RegionalMaintenanceStatusSnapshot,
     checkpoints: crate::regional_checkpoint::RegionalCheckpointStatusSnapshot,
+    webhook_delivery: crate::webhook_delivery::WebhookDeliveryStatusSnapshot,
 }
 
 #[derive(Debug, Serialize)]
@@ -149,6 +151,7 @@ pub fn regional_topology_router(
     directory: TabletDirectory,
     maintenance: std::sync::Arc<RegionalMaintenanceStatus>,
     checkpoints: std::sync::Arc<RegionalCheckpointStatus>,
+    webhooks: std::sync::Arc<WebhookDeliveryStatus>,
 ) -> Router {
     Router::new()
         .route(REGIONAL_TOPOLOGY_PATH, get(get_topology))
@@ -157,6 +160,7 @@ pub fn regional_topology_router(
             directory,
             maintenance,
             checkpoints,
+            webhooks,
         })
 }
 
@@ -193,6 +197,7 @@ async fn get_topology(State(state): State<TopologyState>) -> Response {
         },
         maintenance: state.maintenance.snapshot(),
         checkpoints: state.checkpoints.snapshot(),
+        webhook_delivery: state.webhooks.snapshot(),
     })
     .into_response()
 }

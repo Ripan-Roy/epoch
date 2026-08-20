@@ -341,14 +341,14 @@ pending -> leased/sending -> delivered-awaiting-ack -> acknowledged
 
 Pull subscription settlement follows Queue lease semantics. A Stream or Queue
 target succeeds when the target write commits at that resource's guarantee.
-Webhook delivery is at-least-once unless explicitly configured at-most-once;
-HTTP success only proves the target returned an accepted status, not that its
-business side effect occurred.
+Signed HTTP/webhook delivery is at-least-once. HTTP success only proves the
+target returned a 2xx status, not that its business side effect occurred.
 
-Webhook attempts carry a stable delivery ID and idempotency key. Target retry,
-timeout, rate, and dead-letter policy are per subscription. Transform failure is
-a target failure with an observable reason; it must not silently drop the
-record.
+Webhook attempts carry a stable delivery ID and an explicit attempt number.
+Receivers verify the exact body and make `(delivery ID, attempt)` durable before
+side effects. Target retry, timeout, and dead-letter policy are per
+subscription. Rate limiting is not implemented yet. Transform failure is a
+target failure with an observable reason; it must not silently drop the record.
 
 Archive replay creates new delivery attempts linked to the archived origin.
 Replay and redrive preview count, target, rate, duplicate exposure, and cost
@@ -362,11 +362,25 @@ acknowledgement or dead-letter state. Expired leases advance only through a
 committed bounded maintenance operation. The complete ledger participates in
 EPRS replay and the v2 recovery digest, and a bounded local query exposes it.
 
-The core still has no target executor: it does not perform Queue/Stream writes,
-serve public pull/long-poll, or send webhook/HTTP requests. Rate limiting,
-redrive and terminal retention, signed webhooks, SSRF policy, archive retention,
-and replay-origin lineage remain required before the full durable semantics
-above are a product claim.
+The regional runtime now executes signed HTTP/webhook records outside the state
+machine. It first commits an exact lease, waits for that proposal to apply,
+sends one CloudEvents 1.0 binary-mode request with an HMAC-SHA-256 signature,
+then commits acknowledgement, retry, or terminal rejection. Only the current
+Bus tablet leader may run this sequence. Losing leadership after the target
+accepts but before acknowledgement can produce another attempt, so the
+receiver remains responsible for idempotency.
+
+The executor requires HTTPS except for an explicit loopback development flag,
+re-resolves and pins public DNS results on each attempt, rejects mixed or
+special-purpose addresses, ignores ambient proxies, and follows no redirects.
+`2xx` acknowledges; `429`, `5xx`, DNS/connect/timeouts retry; other non-2xx
+responses terminally dead-letter. The attempt timeout is capped by the lease.
+
+Queue/Stream writes, unsigned HTTP/webhook execution, public pull/long-poll,
+rate limiting, redrive and terminal retention, OAuth/API-key destinations,
+private managed egress, archive retention, and replay-origin lineage remain
+required before the full durable semantics above are a product claim. See
+[ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md).
 
 ## 9. Pipes and cross-profile behavior
 
@@ -589,9 +603,10 @@ the direct-route contract. The
 regional Stream, Queue, Cache, and Event Bus v1 SDKs make those explicit
 wrappers callable from Go, Java, and Python, including Stream keyed routing,
 retention policy operations, and shard-zero consumer-session coordination.
-They do not turn fixed-voter evidence into a production durability claim,
-atomically couple assignment with per-shard offsets, or execute external Bus
-targets. See
+They do not turn fixed-voter evidence into a production durability claim or
+atomically couple assignment with per-shard offsets. SDK calls themselves do
+not execute external Bus targets; the optional regional signed-webhook worker
+owns that separate at-least-once sequence. See
 [REGIONAL_STREAM_SDK.md](REGIONAL_STREAM_SDK.md),
 [REGIONAL_QUEUE_SDK.md](REGIONAL_QUEUE_SDK.md),
 [REGIONAL_CACHE_SDK.md](REGIONAL_CACHE_SDK.md),
@@ -600,10 +615,12 @@ targets. See
 [QUEUE_TABLET.md](QUEUE_TABLET.md).
 The Cache tablet additionally lacks user-exportable backup/PITR, automatic
 checkpoint scheduling, background active expiry, multi-shard routing, and a
-public idempotency-retention contract; see [CACHE_TABLET.md](CACHE_TABLET.md). The Bus
-profile additionally lacks target executors, rate limiting, redrive/terminal
-retention, replay-attempt lineage, public pull/push contracts, and target
-security; see [BUS_TABLET.md](BUS_TABLET.md).
+public idempotency-retention contract; see [CACHE_TABLET.md](CACHE_TABLET.md).
+The direct Bus profile additionally lacks target executors. The regional worker is
+limited to signed HTTP/webhook targets; Queue/Stream/unsigned execution, rate
+limiting, redrive/terminal retention, replay-attempt lineage, public pull/push,
+private egress, and target authentication remain open; see
+[BUS_TABLET.md](BUS_TABLET.md).
 
 The replicated core separately supports bounded **consensus checkpoints**: a
 canonical complete proposal registry at one applied Raft index is fsynced before

@@ -2734,14 +2734,11 @@ mod tests {
     async fn three_probe_runtimes_elect_and_commit_over_real_http() {
         let cluster = TestProbeCluster::start().await;
         let handles = cluster.handles();
-        let (leader_index, leader_status) = wait_for_leader(&handles).await;
+        let (leader_index, _) = wait_for_leader(&handles).await;
 
         let proposal_id = 41;
         let payload = b"opaque-probe-payload".to_vec();
-        let proposed = handles[leader_index]
-            .propose(proposal_id, leader_status.term.get(), payload.clone())
-            .await
-            .expect("leader should accept the probe proposal");
+        let proposed = propose_through_current_leader(&handles, proposal_id, payload.clone()).await;
         assert!(matches!(
             proposed,
             ProposalLookup::Pending { .. } | ProposalLookup::Committed(_)

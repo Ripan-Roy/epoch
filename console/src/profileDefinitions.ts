@@ -12,7 +12,7 @@ export interface ProfileDefinition {
 export const profileDefinitions: ProfileDefinition[] = [
   {
     profile: "cache",
-    eyebrow: "CACHE + STATE",
+    eyebrow: "Cache + state",
     title: "Fast state",
     description: "Memory-first values, expiry, eviction, counters, and shard-local atomic operations.",
     guarantee: "Configured: volatile",
@@ -20,7 +20,7 @@ export const profileDefinitions: ProfileDefinition[] = [
   },
   {
     profile: "stream",
-    eyebrow: "STREAM LOG",
+    eyebrow: "Stream log",
     title: "Replayable events",
     description: "Partitioned, ordered records with offsets, retention, and consumer progress.",
     guarantee: "Selectable: local durable or volatile",
@@ -28,7 +28,7 @@ export const profileDefinitions: ProfileDefinition[] = [
   },
   {
     profile: "queue",
-    eyebrow: "WORK QUEUE",
+    eyebrow: "Work queue",
     title: "Reliable work",
     description: "Lease-based delivery with retry, scheduling, acknowledgements, and dead letters.",
     guarantee: "Selectable: local durable or volatile",
@@ -36,7 +36,7 @@ export const profileDefinitions: ProfileDefinition[] = [
   },
   {
     profile: "event_bus",
-    eyebrow: "EVENT BUS",
+    eyebrow: "Event bus",
     title: "Routed events",
     description: "Filtered fan-out into local queues and streams with an optional replay archive.",
     guarantee: "Configured: volatile",

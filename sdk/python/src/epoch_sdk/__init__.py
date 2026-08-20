@@ -31,6 +31,7 @@ from .regional_cache import (
 )
 from .regional_queue import RegionalQueueClient
 from .transport import Transport, UrllibTransport
+from .webhook import WebhookVerification, verify_webhook_signature
 
 __all__ = [
     "DeliveryPolicy",
@@ -58,5 +59,7 @@ __all__ = [
     "SubscriptionTarget",
     "Transport",
     "UrllibTransport",
+    "WebhookVerification",
     "stream_shard_for",
+    "verify_webhook_signature",
 ]

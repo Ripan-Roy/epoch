@@ -96,8 +96,14 @@ jobs:
           grep -Rq 'CAS, transaction, fencing, expiry, and recovery' console/dist/assets
           grep -Rq 'docs-python-cache-maintain-v1' console/dist/assets
           grep -Rq 'Regional Event Bus SDK' console/dist/assets
-          grep -Rq 'Route, archive, lease, settle, and recover' console/dist/assets
+          grep -Rq 'deliver signed webhooks, verify receivers' console/dist/assets
           grep -Rq 'docs-python-bus-ack-v1' console/dist/assets
+          grep -Rq 'Receive and verify a signed webhook' console/dist/assets
+          grep -Rq 'VerifyWebhookSignature' console/dist/assets
+          grep -Rq 'WebhookSignatures.verify' console/dist/assets
+          grep -Rq 'verify_webhook_signature' console/dist/assets
+          grep -Rq 'EPOCH_REGIONAL_WEBHOOK_SIGNING_KEYS_PATH' console/dist/assets
+          grep -Rq 'adr/0030-leader-owned-signed-webhook-delivery.md' console/dist/assets
           grep -Rq 'Checkpoint, compact, catch up, and reopen' console/dist/assets
           grep -Rq 'retained_log_first_index' console/dist/assets
           grep -Rq 'Multi-tablet operations' console/dist/assets

@@ -20,7 +20,9 @@ use epoch_node::{
     regional_topology::NodeTopology,
     router, spawn_maintenance,
     stream_tablet::{self, DEFAULT_COMMIT_WAIT as STREAM_DEFAULT_COMMIT_WAIT, StreamTabletService},
-    validate_allowed_origins, with_public_http_layers,
+    validate_allowed_origins,
+    webhook_delivery::{WebhookDeliveryConfig, WebhookSigningKeys},
+    with_public_http_layers,
 };
 use epoch_queue::QueueConfig;
 use epoch_storage::{DEFAULT_WAL_SEGMENT_BYTES, MIN_WAL_SEGMENT_BYTES, StandaloneWal};
@@ -42,6 +44,10 @@ const SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
 #[command(name = "epoch-node", version, about = "Epoch standalone data node")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent, explicit CLI safety and feature switches are not shared state"
+)]
 struct Args {
     #[arg(long, env = "EPOCH_HTTP_LISTEN", default_value = "127.0.0.1:7601")]
     http_listen: SocketAddr,
@@ -105,6 +111,17 @@ struct Args {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     regional_checkpoint_min_applied_entries: u64,
+    #[arg(long, env = "EPOCH_REGIONAL_WEBHOOK_SIGNING_KEYS_PATH")]
+    regional_webhook_signing_keys_path: Option<PathBuf>,
+    #[arg(
+        long,
+        env = "EPOCH_REGIONAL_WEBHOOK_DELIVERY_INTERVAL_MS",
+        default_value_t = 100,
+        value_parser = clap::value_parser!(u64).range(1..=60_000)
+    )]
+    regional_webhook_delivery_interval_ms: u64,
+    #[arg(long, env = "EPOCH_REGIONAL_WEBHOOK_ALLOW_HTTP_LOOPBACK")]
+    regional_webhook_allow_http_loopback: bool,
     #[arg(long, env = "EPOCH_REGIONAL_REGION", default_value = "local")]
     regional_region: String,
     #[arg(long, env = "EPOCH_REGIONAL_ZONE", default_value = "local")]
@@ -211,6 +228,7 @@ struct RegionalRuntimeLaunch {
     checkpoint_interval: Duration,
     checkpoint_min_applied_entries: u64,
     topology: NodeTopology,
+    webhook_delivery: Option<WebhookDeliveryConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -322,7 +340,8 @@ async fn serve_regional_mode(
             .with_checkpoint_policy(
                 launch.checkpoint_interval,
                 launch.checkpoint_min_applied_entries,
-            ),
+            )
+            .with_webhook_delivery(launch.webhook_delivery),
     )
     .await?;
     let regional_public = with_public_http_layers(
@@ -563,6 +582,19 @@ fn regional_runtime_launch(
         args.regional_max_groups,
     )
     .map_err(|error| ConsensusProbeError::InvalidConfiguration(error.to_string()))?;
+    let webhook_delivery = args
+        .regional_webhook_signing_keys_path
+        .as_ref()
+        .map(|path| {
+            WebhookSigningKeys::load(path)
+                .map(|signing_keys| WebhookDeliveryConfig {
+                    interval: Duration::from_millis(args.regional_webhook_delivery_interval_ms),
+                    allow_http_loopback: args.regional_webhook_allow_http_loopback,
+                    signing_keys: Arc::new(signing_keys),
+                })
+                .map_err(|error| ConsensusProbeError::InvalidConfiguration(error.to_string()))
+        })
+        .transpose()?;
     Ok(Some(RegionalRuntimeLaunch {
         config,
         listen: args.consensus_listen,
@@ -574,6 +606,7 @@ fn regional_runtime_launch(
         checkpoint_interval: Duration::from_millis(args.regional_checkpoint_interval_ms),
         checkpoint_min_applied_entries: args.regional_checkpoint_min_applied_entries,
         topology,
+        webhook_delivery,
     }))
 }
 

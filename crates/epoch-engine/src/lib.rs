@@ -570,7 +570,7 @@ impl EpochEngine {
                     status: RouteExecutionStatus::PullAvailable,
                     detail: Some("durable pull ledger is a later milestone".into()),
                 },
-                SubscriptionTarget::Webhook { url } | SubscriptionTarget::Http { url } => {
+                SubscriptionTarget::Webhook { url, .. } | SubscriptionTarget::Http { url, .. } => {
                     RouteExecution {
                         subscription: delivery.subscription.clone(),
                         target: url.clone(),

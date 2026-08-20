@@ -67,7 +67,7 @@ fn command_codec_is_versioned_bounded_strict_and_scope_separated() {
         BusTabletCommand::decode(&valid, &scope())
             .unwrap()
             .format_version,
-        BUS_TABLET_COMMAND_FORMAT_VERSION
+        1
     );
     assert_eq!(
         String::from_utf8(valid.clone()).unwrap(),
@@ -99,6 +99,95 @@ fn command_codec_is_versioned_bounded_strict_and_scope_separated() {
         )
         .unwrap()
     );
+}
+
+#[test]
+fn signed_targets_and_terminal_rejection_use_v2_without_rewriting_v1_commands() {
+    let legacy = BusTabletCommand::publish(
+        &scope(),
+        "publish-legacy",
+        event("evt-legacy", "order.created"),
+        11,
+    )
+    .unwrap();
+    assert_eq!(legacy.format_version, 1);
+    let unsigned = BusTabletCommand::upsert_subscription(
+        &scope(),
+        "unsigned-webhook",
+        subscription(
+            "unsigned",
+            SubscriptionTarget::Webhook {
+                url: "https://example.com/unsigned".into(),
+                signing_key_id: None,
+            },
+        ),
+        12,
+    )
+    .unwrap();
+    assert_eq!(unsigned.format_version, 1);
+    let signed = BusTabletCommand::upsert_subscription(
+        &scope(),
+        "signed-webhook",
+        subscription(
+            "signed",
+            SubscriptionTarget::Webhook {
+                url: "https://example.com/signed".into(),
+                signing_key_id: Some("primary".into()),
+            },
+        ),
+        12,
+    )
+    .unwrap();
+    assert_eq!(signed.format_version, 2);
+    assert_eq!(
+        BusTabletCommand::decode(&signed.encode(&scope()).unwrap(), &scope()).unwrap(),
+        signed
+    );
+    let exact_acquire = BusTabletCommand::new(
+        &scope(),
+        "exact-acquire",
+        12,
+        BusTabletOperation::AcquireDeliveries {
+            subscription: "signed".into(),
+            dispatcher: "webhook-sender".into(),
+            dispatcher_epoch: 1,
+            max_deliveries: 1,
+            expected_delivery_id: Some("epoch.bus.delivery.v1.1.signed".into()),
+        },
+    )
+    .unwrap();
+    assert_eq!(exact_acquire.format_version, 2);
+    assert_eq!(
+        BusTabletCommand::decode(&exact_acquire.encode(&scope()).unwrap(), &scope()).unwrap(),
+        exact_acquire
+    );
+
+    let rejection = BusTabletCommand::new(
+        &scope(),
+        "reject-1",
+        12,
+        BusTabletOperation::RejectDelivery {
+            delivery_id: "epoch.bus.delivery.v1.1.orders".into(),
+            dispatcher: "webhook-sender".into(),
+            dispatcher_epoch: 7,
+            lease_token: "epoch.bus.delivery.lease.v1.token".into(),
+            reason: "http_status_400".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(rejection.format_version, 2);
+    let encoded = rejection.encode(&scope()).unwrap();
+    assert_eq!(
+        BusTabletCommand::decode(&encoded, &scope()).unwrap(),
+        rejection
+    );
+
+    let mut mislabeled: Value = serde_json::from_slice(&encoded).unwrap();
+    mislabeled["format_version"] = json!(1);
+    assert!(matches!(
+        BusTabletCommand::decode(&serde_json::to_vec(&mislabeled).unwrap(), &scope()),
+        Err(TabletError::InvalidCommand(_))
+    ));
 }
 
 #[test]
@@ -446,6 +535,7 @@ fn delivery_commands_are_fenced_retriable_and_recoverable() {
                 dispatcher: "sender".into(),
                 dispatcher_epoch: 1,
                 max_deliveries: 1,
+                expected_delivery_id: None,
             },
         )
         .unwrap(),
@@ -509,6 +599,7 @@ fn delivery_commands_are_fenced_retriable_and_recoverable() {
             dispatcher: "sender".into(),
             dispatcher_epoch: 1,
             max_deliveries: 1,
+            expected_delivery_id: None,
         },
     )
     .unwrap();
@@ -574,6 +665,7 @@ fn invalid_subscription_is_rejected_before_consensus_application() {
         "bad/name",
         SubscriptionTarget::Webhook {
             url: "https://example.com".into(),
+            signing_key_id: None,
         },
     );
     assert!(matches!(

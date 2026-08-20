@@ -18,7 +18,7 @@ pub use delivery::{
     DeliveryMaintenanceResult, DeliveryPolicy, DeliveryRecord, DeliveryRetryPolicy, DeliveryState,
     DeliveryStateKind, MAX_BUS_OUTBOX_DELIVERIES, MAX_DELIVERY_ACQUIRE_BATCH,
     MAX_DELIVERY_ATTEMPTS, MAX_DELIVERY_IN_FLIGHT, MAX_DELIVERY_QUERY_RESULTS,
-    MAX_DELIVERY_REASON_BYTES, MAX_DELIVERY_TIMEOUT_MS,
+    MAX_DELIVERY_REASON_BYTES, MAX_DELIVERY_TIMEOUT_MS, SignedWebhookDeliveryCandidate,
 };
 use delivery::{DeliveryLedger, delivery_id};
 
@@ -37,7 +37,8 @@ pub const MAX_JSON_PATH_BYTES: usize = 1_024;
 pub const MAX_PROJECTED_FIELD_BYTES: usize = 256;
 pub const MAX_FILTER_VALUE_BYTES: usize = 64 * 1024;
 pub const MAX_TARGET_URL_BYTES: usize = 8 * 1024;
-pub const EVENT_BUS_SNAPSHOT_FORMAT_VERSION: u16 = 1;
+pub const EVENT_BUS_SNAPSHOT_FORMAT_VERSION: u16 = 2;
+const LEGACY_EVENT_BUS_SNAPSHOT_FORMAT_VERSION: u16 = 1;
 pub const MAX_EVENT_BUS_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,10 +144,33 @@ fn matches_patterns(patterns: &[String], value: Option<&str>) -> bool {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SubscriptionTarget {
     Pull,
-    Queue { resource: String },
-    Stream { resource: String },
-    Webhook { url: String },
-    Http { url: String },
+    Queue {
+        resource: String,
+    },
+    Stream {
+        resource: String,
+    },
+    Webhook {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signing_key_id: Option<String>,
+    },
+    Http {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signing_key_id: Option<String>,
+    },
+}
+
+impl SubscriptionTarget {
+    pub fn signing_key_id(&self) -> Option<&str> {
+        match self {
+            Self::Webhook { signing_key_id, .. } | Self::Http { signing_key_id, .. } => {
+                signing_key_id.as_deref()
+            }
+            Self::Pull | Self::Queue { .. } | Self::Stream { .. } => None,
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for SubscriptionTarget {
@@ -164,8 +188,8 @@ enum StrictSubscriptionTarget {
     Pull(StrictPullTarget),
     Queue(StrictResourceTarget<QueueTargetKind>),
     Stream(StrictResourceTarget<StreamTargetKind>),
-    Webhook(StrictUrlTarget<WebhookTargetKind>),
-    Http(StrictUrlTarget<HttpTargetKind>),
+    Webhook(StrictSignedUrlTarget<WebhookTargetKind>),
+    Http(StrictSignedUrlTarget<HttpTargetKind>),
 }
 
 impl From<StrictSubscriptionTarget> for SubscriptionTarget {
@@ -178,8 +202,14 @@ impl From<StrictSubscriptionTarget> for SubscriptionTarget {
             StrictSubscriptionTarget::Stream(target) => Self::Stream {
                 resource: target.resource,
             },
-            StrictSubscriptionTarget::Webhook(target) => Self::Webhook { url: target.url },
-            StrictSubscriptionTarget::Http(target) => Self::Http { url: target.url },
+            StrictSubscriptionTarget::Webhook(target) => Self::Webhook {
+                url: target.url,
+                signing_key_id: target.signing_key_id,
+            },
+            StrictSubscriptionTarget::Http(target) => Self::Http {
+                url: target.url,
+                signing_key_id: target.signing_key_id,
+            },
         }
     }
 }
@@ -201,10 +231,12 @@ struct StrictResourceTarget<Kind> {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StrictUrlTarget<Kind> {
+struct StrictSignedUrlTarget<Kind> {
     #[serde(rename = "kind")]
     _kind: Kind,
     url: String,
+    #[serde(default)]
+    signing_key_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -317,8 +349,18 @@ impl Subscription {
             SubscriptionTarget::Queue { resource } | SubscriptionTarget::Stream { resource } => {
                 validate_resource_name(resource)?;
             }
-            SubscriptionTarget::Webhook { url } | SubscriptionTarget::Http { url } => {
+            SubscriptionTarget::Webhook {
+                url,
+                signing_key_id,
+            }
+            | SubscriptionTarget::Http {
+                url,
+                signing_key_id,
+            } => {
                 validate_http_target(url)?;
+                if let Some(signing_key_id) = signing_key_id {
+                    validate_resource_name(signing_key_id)?;
+                }
             }
         }
         Ok(())
@@ -533,6 +575,21 @@ impl EventBus {
         Ok(deliveries)
     }
 
+    pub fn acquire_specific_delivery(
+        &mut self,
+        subscription: &str,
+        delivery_id: &str,
+        dispatcher: &str,
+        now_ms: u64,
+        fence: DeliveryFence,
+    ) -> EpochResult<Option<DeliveryLease>> {
+        let mut candidate = self.delivery_ledger.clone();
+        let delivery =
+            candidate.acquire_specific(subscription, delivery_id, dispatcher, now_ms, fence)?;
+        self.delivery_ledger = candidate;
+        Ok(delivery)
+    }
+
     pub fn acknowledge_delivery(
         &mut self,
         delivery_id: &str,
@@ -562,6 +619,22 @@ impl EventBus {
         Ok(record)
     }
 
+    pub fn reject_delivery(
+        &mut self,
+        delivery_id: &str,
+        dispatcher: &str,
+        lease_token: &str,
+        fence: DeliveryFence,
+        reason: &str,
+        now_ms: u64,
+    ) -> EpochResult<DeliveryRecord> {
+        let mut candidate = self.delivery_ledger.clone();
+        let record =
+            candidate.reject(delivery_id, dispatcher, lease_token, fence, reason, now_ms)?;
+        self.delivery_ledger = candidate;
+        Ok(record)
+    }
+
     pub fn maintain_deliveries(
         &mut self,
         now_ms: u64,
@@ -577,6 +650,13 @@ impl EventBus {
     /// committed maintenance transition.
     pub fn next_delivery_maintenance_deadline_ms(&self) -> Option<u64> {
         self.delivery_ledger.next_maintenance_deadline_ms()
+    }
+
+    pub fn signed_webhook_delivery_candidates(
+        &self,
+        now_ms: u64,
+    ) -> EpochResult<Vec<SignedWebhookDeliveryCandidate>> {
+        self.delivery_ledger.signed_webhook_candidates(now_ms)
     }
 
     pub fn delivery(&self, delivery_id: &str) -> Option<DeliveryRecord> {
@@ -616,8 +696,13 @@ impl EventBus {
     /// Encodes the complete routing, archive, and delivery-ledger state as a
     /// canonical versioned application snapshot.
     pub fn encode_snapshot(&self) -> EpochResult<Vec<u8>> {
+        let format_version = if self.uses_signed_webhook_format() {
+            EVENT_BUS_SNAPSHOT_FORMAT_VERSION
+        } else {
+            LEGACY_EVENT_BUS_SNAPSHOT_FORMAT_VERSION
+        };
         let encoded = serde_json::to_vec(&VersionedEventBusSnapshot {
-            format_version: EVENT_BUS_SNAPSHOT_FORMAT_VERSION,
+            format_version,
             config: self.config.clone(),
             subscriptions: self.subscriptions.clone(),
             route_plan_version: self.route_plan_version,
@@ -647,7 +732,10 @@ impl EventBus {
         }
         let snapshot: VersionedEventBusSnapshot = serde_json::from_slice(encoded)
             .map_err(|error| EpochError::InvalidArgument(error.to_string()))?;
-        if snapshot.format_version != EVENT_BUS_SNAPSHOT_FORMAT_VERSION {
+        if !matches!(
+            snapshot.format_version,
+            LEGACY_EVENT_BUS_SNAPSHOT_FORMAT_VERSION | EVENT_BUS_SNAPSHOT_FORMAT_VERSION
+        ) {
             return Err(EpochError::InvalidArgument(format!(
                 "unsupported Event Bus snapshot version {}",
                 snapshot.format_version
@@ -703,6 +791,22 @@ impl EventBus {
             snapshot.commit_position,
             snapshot.route_plan_version,
         )?;
+        let uses_signed_webhook_format = snapshot
+            .subscriptions
+            .values()
+            .any(|subscription| subscription.target.signing_key_id().is_some())
+            || snapshot.delivery_ledger.has_signed_webhook_targets();
+        let expected_format_version = if uses_signed_webhook_format {
+            EVENT_BUS_SNAPSHOT_FORMAT_VERSION
+        } else {
+            LEGACY_EVENT_BUS_SNAPSHOT_FORMAT_VERSION
+        };
+        if snapshot.format_version != expected_format_version {
+            return Err(EpochError::InvalidArgument(format!(
+                "Event Bus snapshot version {} does not match its target metadata",
+                snapshot.format_version
+            )));
+        }
         let bus = Self {
             config: snapshot.config,
             subscriptions: snapshot.subscriptions,
@@ -721,6 +825,13 @@ impl EventBus {
 
     pub fn has_subscription(&self, name: &str) -> bool {
         self.subscriptions.contains_key(name)
+    }
+
+    fn uses_signed_webhook_format(&self) -> bool {
+        self.subscriptions
+            .values()
+            .any(|subscription| subscription.target.signing_key_id().is_some())
+            || self.delivery_ledger.has_signed_webhook_targets()
     }
 }
 
@@ -1132,9 +1243,11 @@ mod tests {
             },
             SubscriptionTarget::Webhook {
                 url: "https://user:secret@example.com/hook".into(),
+                signing_key_id: None,
             },
             SubscriptionTarget::Http {
                 url: "file:///tmp/hook".into(),
+                signing_key_id: None,
             },
         ] {
             assert!(matches!(
@@ -1180,9 +1293,11 @@ mod tests {
             },
             SubscriptionTarget::Webhook {
                 url: "https://example.com/hook".into(),
+                signing_key_id: None,
             },
             SubscriptionTarget::Http {
                 url: "https://example.com/events".into(),
+                signing_key_id: None,
             },
         ] {
             let encoded = serde_json::to_value(&target).unwrap();
@@ -1238,6 +1353,43 @@ mod tests {
             )
             .unwrap();
         assert_eq!(restored.delivery_counts().acknowledged, 1);
+    }
+
+    #[test]
+    fn snapshot_version_tracks_signed_target_metadata_without_rewriting_legacy_images() {
+        let legacy = EventBus::new(BusConfig::default()).unwrap();
+        let legacy_snapshot: VersionedEventBusSnapshot =
+            serde_json::from_slice(&legacy.encode_snapshot().unwrap()).unwrap();
+        assert_eq!(legacy_snapshot.format_version, 1);
+
+        let mut signed = EventBus::new(BusConfig {
+            delivery_outbox: true,
+            ..BusConfig::default()
+        })
+        .unwrap();
+        signed
+            .upsert_subscription(subscription(
+                "orders",
+                SubscriptionTarget::Webhook {
+                    url: "https://example.com/orders".into(),
+                    signing_key_id: Some("primary".into()),
+                },
+            ))
+            .unwrap();
+        signed.publish(event("order.created"), 100).unwrap();
+        let encoded = signed.encode_snapshot().unwrap();
+        let snapshot: VersionedEventBusSnapshot = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(snapshot.format_version, EVENT_BUS_SNAPSHOT_FORMAT_VERSION);
+        let restored = EventBus::decode_snapshot(&encoded).unwrap();
+        assert_eq!(restored.encode_snapshot().unwrap(), encoded);
+        assert_eq!(
+            restored.recovery_state_digest().unwrap(),
+            signed.recovery_state_digest().unwrap()
+        );
+
+        let mut mislabeled = snapshot;
+        mislabeled.format_version = LEGACY_EVENT_BUS_SNAPSHOT_FORMAT_VERSION;
+        assert!(EventBus::decode_snapshot(&serde_json::to_vec(&mislabeled).unwrap()).is_err());
     }
 
     #[test]
@@ -1388,6 +1540,98 @@ mod tests {
         assert_eq!(dead_lettered.attempts.len(), 2);
         assert_eq!(bus.delivery_counts().dead_lettered, 1);
         assert_eq!(bus.delivery_counts().pending, 1);
+    }
+
+    #[test]
+    fn signed_webhook_candidates_follow_exact_acquire_order_and_attempt() {
+        let mut bus = EventBus::new(BusConfig {
+            delivery_outbox: true,
+            ..BusConfig::default()
+        })
+        .unwrap();
+        bus.upsert_subscription(subscription("orders", SubscriptionTarget::Pull))
+            .unwrap();
+        bus.publish(event("order.created"), 100).unwrap();
+        bus.upsert_subscription(subscription(
+            "orders",
+            SubscriptionTarget::Webhook {
+                url: "https://example.com/orders".into(),
+                signing_key_id: Some("primary".into()),
+            },
+        ))
+        .unwrap();
+        bus.publish(event("order.updated"), 101).unwrap();
+        bus.upsert_subscription(subscription(
+            "unsigned",
+            SubscriptionTarget::Webhook {
+                url: "https://example.com/unsigned".into(),
+                signing_key_id: None,
+            },
+        ))
+        .unwrap();
+        bus.publish(event("order.updated"), 102).unwrap();
+
+        // The built-in signed dispatcher must not skip the older pull record
+        // and then acquire a target it did not inspect.
+        assert!(
+            bus.signed_webhook_delivery_candidates(102)
+                .unwrap()
+                .is_empty()
+        );
+
+        let fence = DeliveryFence::new(7, 3, 2, 1).unwrap();
+        assert!(
+            bus.acquire_specific_delivery(
+                "orders",
+                "epoch.bus.delivery.v1.2.orders",
+                "dispatcher",
+                102,
+                fence,
+            )
+            .unwrap()
+            .is_none()
+        );
+        let pull = bus
+            .acquire_deliveries("orders", "dispatcher", 1, 102, fence)
+            .unwrap()
+            .remove(0);
+        bus.acknowledge_delivery(
+            &pull.delivery_id,
+            "dispatcher",
+            &pull.lease_token,
+            fence,
+            103,
+        )
+        .unwrap();
+
+        let candidate = bus
+            .signed_webhook_delivery_candidates(103)
+            .unwrap()
+            .remove(0);
+        assert_eq!(candidate.delivery_id, "epoch.bus.delivery.v1.2.orders");
+        assert_eq!(candidate.subscription, "orders");
+        assert_eq!(candidate.next_attempt, 1);
+        assert_eq!(candidate.signing_key_id, "primary");
+
+        let lease = bus
+            .acquire_specific_delivery("orders", &candidate.delivery_id, "dispatcher", 103, fence)
+            .unwrap()
+            .unwrap();
+        bus.fail_delivery(
+            &lease.delivery_id,
+            "dispatcher",
+            &lease.lease_token,
+            fence,
+            "retry",
+            104,
+        )
+        .unwrap();
+        let retried = bus
+            .signed_webhook_delivery_candidates(u64::MAX)
+            .unwrap()
+            .remove(0);
+        assert_eq!(retried.delivery_id, candidate.delivery_id);
+        assert_eq!(retried.next_attempt, 2);
     }
 
     #[test]

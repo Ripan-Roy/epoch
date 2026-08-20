@@ -59,9 +59,12 @@ mutation/read lifecycle over the same regional core. Unsigned fields use
 and [Cache contract guide](../../docs/REGIONAL_CACHE_SDK.md).
 
 `RegionalBusClient` exposes subscription delivery policy, publish, delivery
-acquire/ack/fail/maintenance, mutation lookup, archive replay, delivery query,
+acquire/ack/fail/reject/maintenance, mutation lookup, archive replay, delivery query,
 and status through the shared regional core. Unsigned policy and query bounds
-use `BigInteger`; opaque lease tokens pass through unchanged. See the
+use `BigInteger`; opaque lease tokens pass through unchanged.
+`SubscriptionTarget.signedWebhook` captures the key ID and
+`WebhookSignatures.verify` authenticates the exact raw body, timestamp, delivery
+ID, and attempt before returning the receiver replay identity. See the
 [complete Event Bus example](../../console/src/quickstarts/regional_bus/RegionalBusQuickstart.java)
 and [Event Bus contract guide](../../docs/REGIONAL_EVENT_BUS_SDK.md).
 

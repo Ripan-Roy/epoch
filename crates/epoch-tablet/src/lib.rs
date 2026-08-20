@@ -6,8 +6,9 @@
 //! the node owns transport and Raft. Stream, Queue, Cache, and Event Bus attach
 //! to the experimental node runtime as mutually exclusive profiles for one
 //! fixed consensus group. Event Bus replication covers ingress, route-plan
-//! evidence, archive, and independent delivery-ledger state; built-in target
-//! executors remain open.
+//! evidence, archive, and independent delivery-ledger state. The tablet performs
+//! no external I/O; the regional node may layer a leader-owned signed-webhook
+//! worker over committed leases.
 
 mod bus;
 mod cache;

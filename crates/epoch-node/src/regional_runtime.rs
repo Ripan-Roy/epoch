@@ -35,6 +35,10 @@ use crate::{
     },
     regional_topology::{NodeTopology, regional_topology_router},
     tablet_materializer::{RegionalTabletMaterializer, TabletMaterializerError},
+    webhook_delivery::{
+        WebhookDeliveryConfig, WebhookDeliveryStatus, WebhookDeliveryWorker,
+        run_webhook_delivery_pass,
+    },
 };
 
 const DEFAULT_PROFILE_COMMIT_WAIT: Duration = Duration::from_secs(5);
@@ -57,6 +61,7 @@ pub struct RegionalRuntimeConfig {
     pub maintenance_interval: Duration,
     pub checkpoint_interval: Duration,
     pub checkpoint_min_applied_entries: u64,
+    pub webhook_delivery: Option<WebhookDeliveryConfig>,
 }
 
 impl fmt::Debug for RegionalRuntimeConfig {
@@ -108,6 +113,7 @@ impl RegionalRuntimeConfig {
             maintenance_interval: DEFAULT_REGIONAL_MAINTENANCE_INTERVAL,
             checkpoint_interval: DEFAULT_REGIONAL_CHECKPOINT_INTERVAL,
             checkpoint_min_applied_entries: DEFAULT_REGIONAL_CHECKPOINT_MIN_APPLIED_ENTRIES,
+            webhook_delivery: None,
         }
     }
 
@@ -133,6 +139,12 @@ impl RegionalRuntimeConfig {
     pub fn with_checkpoint_policy(mut self, interval: Duration, min_applied_entries: u64) -> Self {
         self.checkpoint_interval = interval;
         self.checkpoint_min_applied_entries = min_applied_entries;
+        self
+    }
+
+    #[must_use]
+    pub fn with_webhook_delivery(mut self, config: Option<WebhookDeliveryConfig>) -> Self {
+        self.webhook_delivery = config;
         self
     }
 }
@@ -182,6 +194,8 @@ struct RegionalBackground {
     checkpoint_interval: Duration,
     checkpoint_min_applied_entries: u64,
     checkpoint_status: Arc<RegionalCheckpointStatus>,
+    webhook_worker: Option<WebhookDeliveryWorker>,
+    webhook_status: Arc<WebhookDeliveryStatus>,
 }
 
 impl fmt::Debug for RegionalNodeRuntime {
@@ -195,6 +209,10 @@ impl fmt::Debug for RegionalNodeRuntime {
 }
 
 impl RegionalNodeRuntime {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "runtime startup wires independently tested catalog, tablet, maintenance, checkpoint, webhook, topology, and supervision components"
+    )]
     pub async fn start(config: RegionalRuntimeConfig) -> Result<Self, RegionalRuntimeError> {
         validate_config(&config)?;
         let catalog_scope = CatalogTabletScope::new(
@@ -255,6 +273,18 @@ impl RegionalNodeRuntime {
             checkpoint_interval_ms,
             config.checkpoint_min_applied_entries,
         );
+        let webhook_worker = config
+            .webhook_delivery
+            .clone()
+            .map(|webhook| WebhookDeliveryWorker::new(webhook, config.profile_commit_wait))
+            .transpose()
+            .map_err(|error| RegionalRuntimeError::InvalidConfiguration(error.to_string()))?;
+        let webhook_status = config
+            .webhook_delivery
+            .as_ref()
+            .map_or_else(WebhookDeliveryStatus::disabled, |webhook| {
+                WebhookDeliveryStatus::enabled(webhook.interval)
+            });
         let public_router = regional_catalog_router(catalog_state.clone())
             .merge(regional_tablet_router_with_read_timeout(
                 directory.clone(),
@@ -265,6 +295,7 @@ impl RegionalNodeRuntime {
                 directory.clone(),
                 Arc::clone(&maintenance_status),
                 Arc::clone(&checkpoint_status),
+                Arc::clone(&webhook_status),
             ));
         let background_config = RegionalBackground {
             reconcile_state: catalog_state.clone(),
@@ -275,6 +306,8 @@ impl RegionalNodeRuntime {
             checkpoint_interval: config.checkpoint_interval,
             checkpoint_min_applied_entries: config.checkpoint_min_applied_entries,
             checkpoint_status,
+            webhook_worker,
+            webhook_status,
         };
         let (stop, failure, background) =
             spawn_background(background_config, catalog_commits, group_failures);
@@ -346,6 +379,11 @@ fn validate_config(config: &RegionalRuntimeConfig) -> Result<(), RegionalRuntime
             "catalog/profile waits and checkpoint threshold must be non-zero; read-barrier/maintenance intervals must be at most 60 seconds and checkpoint interval at most 10 minutes".into(),
         ));
     }
+    if let Some(webhook) = &config.webhook_delivery {
+        webhook
+            .validate()
+            .map_err(|error| RegionalRuntimeError::InvalidConfiguration(error.to_string()))?;
+    }
     Ok(())
 }
 
@@ -365,6 +403,11 @@ fn spawn_background(
         maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut checkpoints = tokio::time::interval(background.checkpoint_interval);
         checkpoints.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut webhooks = background.webhook_worker.as_ref().map(|worker| {
+            let mut interval = tokio::time::interval(worker.config().interval);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval
+        });
         loop {
             tokio::select! {
                 biased;
@@ -394,6 +437,23 @@ fn spawn_background(
                         background.checkpoint_min_applied_entries,
                     ).await;
                     background.checkpoint_status.record(now_ms, pass, groups, error);
+                }
+                () = async {
+                    if let Some(interval) = webhooks.as_mut() {
+                        interval.tick().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    let now_ms = background.clock.wall_time_ms();
+                    if let Some(worker) = background.webhook_worker.as_ref() {
+                        let (pass, error) = run_webhook_delivery_pass(
+                            &background.directory,
+                            worker,
+                            background.clock.as_ref(),
+                        ).await;
+                        background.webhook_status.record(now_ms, pass, error);
+                    }
                 }
                 commit = catalog_commits.recv() => {
                     match commit {
