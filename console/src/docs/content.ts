@@ -124,7 +124,40 @@ curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
     }
   }'`;
 
-export const regionalBusResource = `# Terminal C · create one replicated Event Bus
+export const regionalBusResource = `# Terminal C · create the Queue and Stream targets
+curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
+  --header 'authorization: Bearer epoch-dev-admin-v1' \
+  --header 'content-type: application/json' \
+  --data '{
+    "request_token":"docs-create-jobs-v1",
+    "expected_generation":0,
+    "resource":{
+      "organization":"acme","project":"shop","environment":"dev","namespace":"core",
+      "kind":"queue","name":"jobs",
+      "spec":{"shard_count":1,"replica_count":3,"placement":{
+        "allowed_regions":["ap-south"],"minimum_zones":3,
+        "required_node_class":"general-purpose"
+      }}
+    }
+  }'
+
+curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
+  --header 'authorization: Bearer epoch-dev-admin-v1' \
+  --header 'content-type: application/json' \
+  --data '{
+    "request_token":"docs-create-orders-target-v1",
+    "expected_generation":0,
+    "resource":{
+      "organization":"acme","project":"shop","environment":"dev","namespace":"core",
+      "kind":"stream","name":"orders",
+      "spec":{"shard_count":3,"replica_count":3,"placement":{
+        "allowed_regions":["ap-south"],"minimum_zones":3,
+        "required_node_class":"general-purpose"
+      }}
+    }
+  }'
+
+# Create the replicated Event Bus
 curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
   --header 'authorization: Bearer epoch-dev-admin-v1' \
   --header 'content-type: application/json' \
@@ -140,6 +173,46 @@ curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
       }}
     }
   }'`;
+
+export const epochTargetLanguageGuides: Record<LanguageId, RegionalGuide> = {
+  go: {
+    filename: "targets.go",
+    setup: "// QueueTarget and StreamTarget use the existing regional Bus client.",
+    source: `queue := epoch.Subscription{
+    Name: "queue-jobs",
+    Filter: epoch.EventFilter{EventTypePatterns: []string{"target.*"}},
+    Target: epoch.QueueTarget("jobs"),
+}
+stream := epoch.Subscription{
+    Name: "stream-orders",
+    Filter: epoch.EventFilter{EventTypePatterns: []string{"target.*"}},
+    Target: epoch.StreamTarget("orders"),
+}
+_, _ = client.UpsertSubscription(ctx, "events", 0, "queue-jobs-v1", queue)
+_, _ = client.UpsertSubscription(ctx, "events", 0, "stream-orders-v1", stream)`,
+    run: "go run ./console/src/quickstarts/regional_bus/quickstart.go",
+  },
+  java: {
+    filename: "Targets.java",
+    setup: "// Queue and Stream targets need no application delivery worker.",
+    source: `Subscription queue = new Subscription(
+    "queue-jobs", SubscriptionTarget.queue("jobs"));
+Subscription stream = new Subscription(
+    "stream-orders", SubscriptionTarget.stream("orders"));
+client.upsertSubscription("events", 0, "queue-jobs-v1", queue);
+client.upsertSubscription("events", 0, "stream-orders-v1", stream);`,
+    run: "java RegionalBusQuickstart",
+  },
+  python: {
+    filename: "targets.py",
+    setup: "# The regional source leader owns target execution.",
+    source: `queue = Subscription("queue-jobs", SubscriptionTarget.queue("jobs"))
+stream = Subscription("stream-orders", SubscriptionTarget.stream("orders"))
+client.upsert_subscription("events", 0, "queue-jobs-v1", queue)
+client.upsert_subscription("events", 0, "stream-orders-v1", stream)`,
+    run: "python console/src/quickstarts/regional_bus/quickstart.py",
+  },
+};
 
 export const regionalWebhookConfiguration = `# On every regional node
 EPOCH_REGIONAL_WEBHOOK_SIGNING_KEYS_PATH=/etc/epoch/webhook-keys.json

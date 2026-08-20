@@ -60,6 +60,9 @@ and [Cache contract guide](../../docs/REGIONAL_CACHE_SDK.md).
 acquire/ack/fail/reject/maintenance, mutation lookup, archive replay, delivery query,
 and status through the shared regional core. Exact mutation keys and opaque
 lease tokens survive one bounded leader rediscovery.
+`SubscriptionTarget.queue` and `SubscriptionTarget.stream` create native
+destinations executed by the source Bus leader; delivery queries expose the
+read-only pinned generation/tablet coordinates.
 `SubscriptionTarget.signed_webhook` captures the key ID and
 `verify_webhook_signature` authenticates the exact `bytes` body plus canonical
 timestamp/delivery/attempt fields before returning the replay identity. See the

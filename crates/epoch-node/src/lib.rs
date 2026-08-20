@@ -6,6 +6,8 @@ pub mod catalog_api;
 pub mod catalog_tablet;
 pub mod consensus;
 pub mod consensus_groups;
+mod delivery_proposal;
+pub mod epoch_target_delivery;
 pub mod queue_tablet;
 pub mod regional_auth;
 pub mod regional_checkpoint;

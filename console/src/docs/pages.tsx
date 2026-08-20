@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { CodeBlock, CodeTabs, type CodeSample } from "./CodeBlock";
 import {
   consensusCheckpoint,
+  epochTargetLanguageGuides,
   languageGuides,
   nodeRestart,
   nodeStart,
@@ -860,58 +861,93 @@ export function RegionalBusBody() {
             exact acquire receipt, sends one CloudEvents binary-mode request through public-address-only
             egress, then commits Ack, retry, or terminal rejection.
           </EvidenceCard>
+          <EvidenceCard label="Epoch targets" claim="The target commit precedes the Bus acknowledgement.">
+            Queue and keyed multi-shard Stream writes are automatic. The source lease pins the exact target
+            generation, shard, tablet, and epoch; a stable destination proposal prevents a second target
+            record when source settlement is uncertain.
+          </EvidenceCard>
         </>
       }
       extra={
-        <Topic id="signed-webhooks" title="Receive and verify a signed webhook">
-          <p>
-            Give every voter the same external key set. Secret bytes never enter the subscription or Raft
-            state; the target captures only <code>primary</code>. Normal delivery requires public HTTPS. Plain
-            HTTP is restricted to an explicit loopback-only development switch.
-          </p>
-          <CodeBlock label="Regional node configuration" value={regionalWebhookConfiguration} />
-          <CodeTabs
-            label="Create the signed target"
-            samples={regionalSamples(
-              signedWebhookLanguageGuides,
-              (guide) => guide.setup,
-              (guide) => guide.filename,
-            )}
-            collapsible={false}
-          />
-          <p>
-            Verify the exact raw body before decoding JSON. Enforce the timestamp window, then atomically
-            claim <code>(delivery ID, attempt)</code> in a durable inbox before applying side effects. A valid
-            signature authenticates the request; it does not make the receiver exactly once.
-          </p>
-          <CodeTabs
-            label="Receiver verification"
-            samples={regionalSamples(
-              signedWebhookLanguageGuides,
-              (guide) => guide.source,
-              (guide) => guide.filename,
-            )}
-          />
-          <CodeTabs
-            label="Run the shared verifier tests"
-            samples={regionalSamples(
-              signedWebhookLanguageGuides,
-              (guide) => guide.run,
-              () => "Terminal · verify",
-            )}
-            collapsible={false}
-          />
-          <Note title="Outcome contract">
-            Epoch acknowledges 2xx, retries 429/5xx and network failures, and terminally dead-letters other
-            non-2xx responses. Redirects and ambient proxies are disabled; each request is capped by its
-            replicated lease.
-          </Note>
-        </Topic>
+        <>
+          <Topic id="epoch-targets" title="Deliver directly to Epoch Queue and Stream">
+            <p>
+              Provision <code>jobs</code> and <code>orders</code> in the same namespace as the Bus, then
+              create typed Queue and Stream subscriptions. Every regional node runs the scheduler, but only
+              the current source Bus leader acts. No application dispatcher is required. Tune the scan with{" "}
+              <code>EPOCH_REGIONAL_EPOCH_TARGET_DELIVERY_INTERVAL_MS</code> when the 100 ms default is not
+              appropriate.
+            </p>
+            <CodeTabs
+              label="Create native targets"
+              samples={regionalSamples(
+                epochTargetLanguageGuides,
+                (guide) => guide.source,
+                (guide) => guide.filename,
+              )}
+              collapsible={false}
+            />
+            <p>
+              Queue binds shard <code>0</code>. Stream uses the same FNV-1a UTF-8 key router as direct SDK
+              appends, with event ID fallback. Delivery query exposes the pinned destination coordinates as
+              browser-safe strings after acquisition; clients cannot submit or replace that binding.
+            </p>
+            <Note title="Commit boundary">
+              Epoch commits the destination enqueue or append before acknowledging the Bus record. The target
+              proposal is stable across Bus attempts, but the two Raft-group commits are not one atomic
+              cross-tablet transaction.
+            </Note>
+          </Topic>
+          <Topic id="signed-webhooks" title="Receive and verify a signed webhook">
+            <p>
+              Give every voter the same external key set. Secret bytes never enter the subscription or Raft
+              state; the target captures only <code>primary</code>. Normal delivery requires public HTTPS.
+              Plain HTTP is restricted to an explicit loopback-only development switch.
+            </p>
+            <CodeBlock label="Regional node configuration" value={regionalWebhookConfiguration} />
+            <CodeTabs
+              label="Create the signed target"
+              samples={regionalSamples(
+                signedWebhookLanguageGuides,
+                (guide) => guide.setup,
+                (guide) => guide.filename,
+              )}
+              collapsible={false}
+            />
+            <p>
+              Verify the exact raw body before decoding JSON. Enforce the timestamp window, then atomically
+              claim <code>(delivery ID, attempt)</code> in a durable inbox before applying side effects. A
+              valid signature authenticates the request; it does not make the receiver exactly once.
+            </p>
+            <CodeTabs
+              label="Receiver verification"
+              samples={regionalSamples(
+                signedWebhookLanguageGuides,
+                (guide) => guide.source,
+                (guide) => guide.filename,
+              )}
+            />
+            <CodeTabs
+              label="Run the shared verifier tests"
+              samples={regionalSamples(
+                signedWebhookLanguageGuides,
+                (guide) => guide.run,
+                () => "Terminal · verify",
+              )}
+              collapsible={false}
+            />
+            <Note title="Outcome contract">
+              Epoch acknowledges 2xx, retries 429/5xx and network failures, and terminally dead-letters other
+              non-2xx responses. Redirects and ambient proxies are disabled; each request is capped by its
+              replicated lease.
+            </Note>
+          </Topic>
+        </>
       }
       boundary={
         <p>
-          Regional Event Bus v1 is a repository-local, single-shard alpha. Built-in execution is limited to
-          signed HTTP/webhook targets. Queue/Stream and unsigned target workers, long-poll/push, target rate
+          Regional Event Bus v1 is a repository-local, single-shard alpha. Built-in execution covers Epoch
+          Queue/Stream and signed HTTP/webhook targets. Unsigned target workers, long-poll/push, target rate
           limiting, private managed egress, hot key reload, cross-shard ordering, generated response models,
           and public package-registry releases remain open.
         </p>
@@ -1178,6 +1214,12 @@ export function ReferenceBody() {
             title="Leader-owned signed webhook delivery"
             description="Lease-before-I/O ordering, CloudEvents binary mode, exact-body HMAC, key rotation, receiver replay identity, public-only egress, and recovery evidence."
             href={`${repositoryDocsUrl}/adr/0030-leader-owned-signed-webhook-delivery.md`}
+          />
+          <ReferenceCard
+            eyebrow="Cross-profile delivery"
+            title="Leader-owned Epoch Queue and Stream targets"
+            description="Pinned destination generations, shared Stream key routing, stable target idempotency, cross-group forwarding, recovery, and non-atomic transaction boundaries."
+            href={`${repositoryDocsUrl}/adr/0031-leader-owned-epoch-target-delivery.md`}
           />
           <ReferenceCard
             eyebrow="Cache tablet"

@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use epoch_bus::{DeliveryCounts, DeliveryLease, DeliveryStateKind, SubscriptionTarget};
+use epoch_bus::{
+    DeliveryCounts, DeliveryLease, DeliveryStateKind, EpochTargetDestination, SubscriptionTarget,
+};
 use epoch_core::{EpochError, EventEnvelope};
 use serde::{Deserialize, Serialize};
 
@@ -125,6 +127,8 @@ pub struct BusTabletDelivery {
         deserialize_with = "deserialize_u64_from_number_or_decimal"
     )]
     pub route_plan_version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<EpochTargetDestination>,
     pub attempt: u32,
     pub lease_token: String,
     #[serde(
@@ -264,6 +268,30 @@ impl From<EventEnvelope> for BusTabletEnvelope {
     }
 }
 
+impl From<BusTabletEnvelope> for EventEnvelope {
+    fn from(envelope: BusTabletEnvelope) -> Self {
+        Self {
+            id: envelope.id,
+            source: envelope.source,
+            event_type: envelope.event_type,
+            subject: envelope.subject,
+            time_ms: envelope.time_ms,
+            key: envelope.key,
+            headers: envelope.headers,
+            content_type: envelope.content_type,
+            schema_ref: envelope.schema_ref,
+            traceparent: envelope.traceparent,
+            payload: envelope.payload,
+            deliver_at_ms: envelope.deliver_at_ms,
+            ttl_ms: envelope.ttl_ms,
+            priority: envelope.priority,
+            dedupe_id: envelope.dedupe_id,
+            transaction_id: envelope.transaction_id,
+            extensions: envelope.extensions,
+        }
+    }
+}
+
 impl From<DeliveryLease> for BusTabletDelivery {
     fn from(delivery: DeliveryLease) -> Self {
         Self {
@@ -273,6 +301,7 @@ impl From<DeliveryLease> for BusTabletDelivery {
             target: delivery.target,
             envelope: delivery.envelope.into(),
             route_plan_version: delivery.route_plan_version,
+            destination: delivery.destination,
             attempt: delivery.attempt,
             lease_token: delivery.lease_token,
             lease_deadline_ms: delivery.lease_deadline_ms,

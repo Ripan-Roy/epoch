@@ -481,6 +481,13 @@ baseline at the managed and regional public boundaries:
   proposal and again on voter decode. Unit tests cover corrupt metadata,
   unknown fields, and oversized expansion; corpus fuzzing and sustained
   adversarial compression-ratio testing remain open.
+- Event Bus Queue/Stream delivery resolves targets only inside the source
+  organization/project/environment/namespace and durably pins the destination
+  generation/tablet fence before forwarding. Public mutation DTOs reject the
+  internal binding, and topology counters contain neither payloads nor
+  credentials. This is same-runtime routing, not a substitute for authenticated
+  peer transport or per-target authorization: the current fixed voter set and
+  bootstrap trust boundary must remain private.
 
 Health and CORS preflight remain public. The stable standalone local-emulator
 HTTP API also remains unauthenticated and must stay on a trusted interface.

@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use epoch_bus::{
     BusConfig, DeliveryBackoffStrategy, DeliveryPolicy, DeliveryRetryPolicy, DeliveryState,
-    EventFilter, EventTransform, Subscription, SubscriptionTarget,
+    EpochTargetDestination, EpochTargetKind, EventFilter, EventTransform, Subscription,
+    SubscriptionTarget,
 };
 use epoch_core::{EpochError, EventEnvelope};
 use serde_json::{Value, json};
@@ -153,6 +154,7 @@ fn signed_targets_and_terminal_rejection_use_v2_without_rewriting_v1_commands() 
             dispatcher_epoch: 1,
             max_deliveries: 1,
             expected_delivery_id: Some("epoch.bus.delivery.v1.1.signed".into()),
+            destination: None,
         },
     )
     .unwrap();
@@ -184,6 +186,43 @@ fn signed_targets_and_terminal_rejection_use_v2_without_rewriting_v1_commands() 
 
     let mut mislabeled: Value = serde_json::from_slice(&encoded).unwrap();
     mislabeled["format_version"] = json!(1);
+    assert!(matches!(
+        BusTabletCommand::decode(&serde_json::to_vec(&mislabeled).unwrap(), &scope()),
+        Err(TabletError::InvalidCommand(_))
+    ));
+}
+
+#[test]
+fn exact_epoch_target_acquisition_uses_canonical_v3_destination_binding() {
+    let destination =
+        EpochTargetDestination::new(EpochTargetKind::Stream, "events", 8, 3, 83, 2).unwrap();
+    let command = BusTabletCommand::new(
+        &scope(),
+        "epoch-target-acquire",
+        12,
+        BusTabletOperation::AcquireDeliveries {
+            subscription: "audit".into(),
+            dispatcher: "epoch-target-v1".into(),
+            dispatcher_epoch: 1,
+            max_deliveries: 1,
+            expected_delivery_id: Some("epoch.bus.delivery.v1.1.audit".into()),
+            destination: Some(destination),
+        },
+    )
+    .unwrap();
+    assert_eq!(command.format_version, 3);
+    let encoded = command.encode(&scope()).unwrap();
+    assert_eq!(
+        String::from_utf8(encoded.clone()).unwrap(),
+        r#"{"format_version":3,"tablet_id":29,"tablet_epoch":4,"resource":"orders-bus","idempotency_key":"epoch-target-acquire","applied_at_ms":12,"operation":{"kind":"acquire_deliveries","subscription":"audit","dispatcher":"epoch-target-v1","dispatcher_epoch":1,"max_deliveries":1,"expected_delivery_id":"epoch.bus.delivery.v1.1.audit","destination":{"kind":"stream","resource":"events","resource_generation":8,"shard_index":3,"tablet_id":83,"tablet_epoch":2}}}"#
+    );
+    assert_eq!(
+        BusTabletCommand::decode(&encoded, &scope()).unwrap(),
+        command
+    );
+
+    let mut mislabeled: Value = serde_json::from_slice(&encoded).unwrap();
+    mislabeled["format_version"] = json!(2);
     assert!(matches!(
         BusTabletCommand::decode(&serde_json::to_vec(&mislabeled).unwrap(), &scope()),
         Err(TabletError::InvalidCommand(_))
@@ -536,6 +575,7 @@ fn delivery_commands_are_fenced_retriable_and_recoverable() {
                 dispatcher_epoch: 1,
                 max_deliveries: 1,
                 expected_delivery_id: None,
+                destination: None,
             },
         )
         .unwrap(),
@@ -600,6 +640,7 @@ fn delivery_commands_are_fenced_retriable_and_recoverable() {
             dispatcher_epoch: 1,
             max_deliveries: 1,
             expected_delivery_id: None,
+            destination: None,
         },
     )
     .unwrap();

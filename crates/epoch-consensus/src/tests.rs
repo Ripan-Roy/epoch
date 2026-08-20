@@ -103,6 +103,18 @@ impl TestCluster {
         self.capture(node_id, output);
     }
 
+    fn forward_proposal(&mut self, node_id: NodeId, proposal_id: u64, payload: &[u8]) {
+        let proposal = self.proposal(node_id, proposal_id, payload);
+        let output = self
+            .nodes
+            .get_mut(&node_id)
+            .unwrap()
+            .forward_proposal(proposal)
+            .unwrap();
+        self.capture(node_id, output);
+        self.drain();
+    }
+
     fn read_barrier_without_drain(
         &mut self,
         node_id: NodeId,
@@ -573,6 +585,28 @@ fn leadership_transfer_is_deterministic_when_target_is_caught_up() {
     cluster.propose(node(2), 2, b"after-transfer");
     cluster.tick_repeatedly(node(2), HEARTBEAT_TICK);
     assert_eq!(cluster.all_digests(), vec![cluster.all_digests()[0]; 3]);
+}
+
+#[test]
+fn explicit_internal_forwarding_commits_through_a_known_remote_leader() {
+    let mut cluster = TestCluster::new(90);
+    cluster.campaign(node(1));
+
+    let public_follower_write = cluster.proposal(node(2), 1, b"public-follower-write");
+    assert!(matches!(
+        cluster
+            .nodes
+            .get_mut(&node(2))
+            .unwrap()
+            .propose(public_follower_write),
+        Err(ConsensusError::NotLeader { .. })
+    ));
+    cluster.forward_proposal(node(2), 2, b"internal-cross-tablet-write");
+
+    let expected = vec![(proposal(2), b"internal-cross-tablet-write".to_vec())];
+    assert_eq!(cluster.applied_history(node(1)), expected);
+    assert_eq!(cluster.applied_history(node(2)), expected);
+    assert_eq!(cluster.applied_history(node(3)), expected);
 }
 
 #[test]

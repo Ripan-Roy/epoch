@@ -180,6 +180,14 @@ from durable consensus status. Configure
 `EPOCH_REGIONAL_CHECKPOINT_INTERVAL_MS` (default 1,000; 1–600,000) and
 `EPOCH_REGIONAL_CHECKPOINT_MIN_APPLIED_ENTRIES` (default 1,024; nonzero).
 
+Topology also contains `epoch_target_delivery`. The worker is always enabled;
+only the current source Bus leader selects a Queue/Stream record. Counters
+cover passes, examined tablets/leaders/subscriptions, acquired leases, Queue
+enqueues, Stream appends, retries, dead letters, errors, and the last pass/error.
+They reset on process restart and contain no event payload. Configure
+`EPOCH_REGIONAL_EPOCH_TARGET_DELIVERY_INTERVAL_MS` (default 100; 1–60,000).
+See [ADR-0031](adr/0031-leader-owned-epoch-target-delivery.md).
+
 When a strict signing-key file is configured, topology also contains
 `webhook_delivery`. It reports `enabled`, `interval_ms`, cumulative passes,
 examined tablets/leaders/subscriptions, acquired leases, delivered/retried/
@@ -328,6 +336,14 @@ reads cover mutation lookup, archive replay, delivery query, and status.
 Subscriptions carry bounded timeout, concurrency, attempts, backoff, jitter,
 and age policy. Settlement requires the opaque lease token returned by acquire.
 
+Queue and Stream subscription targets are executed automatically. The source
+leader commits a lease that pins the exact target generation/shard/tablet/epoch,
+forwards a stable-idempotency enqueue or append proposal to that group's known
+leader, awaits its committed receipt, and then acknowledges the Bus record.
+Queue binds shard `0`; Stream uses the shared FNV-1a key router. This survives
+different group leaders and source-settlement uncertainty without duplicating
+the target record, but the two commits are not one cross-tablet transaction.
+
 Signed HTTP/webhook targets name an external key ID. When every node has that
 key and the worker is enabled, the current leader commits an exact lease,
 awaits it, sends a signed CloudEvents 1.0 binary-mode HTTPS request, and commits
@@ -336,7 +352,10 @@ helpers, retry semantics, and external-side-effect non-claims are in
 [Regional Event Bus SDK](REGIONAL_EVENT_BUS_SDK.md) and embedded on the
 published docs page. The real process campaign receives a 503 then 204, checks
 distinct attempt signatures and converged acknowledgement history, and reopens
-every voter from the same storage. The broader container campaign also kills
+every voter from the same storage. That campaign also delivers one event into
+Queue and keyed multi-shard Stream targets, proves both Bus records
+acknowledged, and reopens every voter without a duplicate destination record.
+The broader container campaign also kills
 the Event Bus leader before running the Python pull lifecycle. Neither proof
 claims exactly-once business effects.
 

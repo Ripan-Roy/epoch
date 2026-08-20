@@ -15,7 +15,8 @@ use axum::{
 use epoch_bus::{
     ArchivedEvent, BusConfig, DeliveryAttempt, DeliveryAttemptOutcome, DeliveryCounts,
     DeliveryPolicy, DeliveryRecord, DeliveryRetryPolicy, DeliveryState, DeliveryStateKind,
-    EventFilter, MAX_DELIVERY_QUERY_RESULTS, MAX_REPLAY_EVENTS, Subscription, SubscriptionTarget,
+    EpochTargetDestination, EpochTargetKind, EventFilter, MAX_DELIVERY_QUERY_RESULTS,
+    MAX_REPLAY_EVENTS, Subscription, SubscriptionTarget,
 };
 use epoch_consensus::{
     ApplicationSnapshot, CommittedProposal, ConsensusError, ConsensusRole, ConsensusStatus,
@@ -283,6 +284,18 @@ impl BusTabletService {
             .signed_webhook_delivery_candidates(now_ms)
             .map_err(|error| error.to_string())
     }
+
+    pub(crate) fn epoch_target_delivery_candidates(
+        &self,
+        now_ms: u64,
+    ) -> Result<Vec<epoch_bus::EpochTargetDeliveryCandidate>, String> {
+        self.ensure_healthy()?;
+        self.tablet
+            .read()
+            .map_err(|_| "Event Bus tablet read lock was poisoned".to_owned())?
+            .epoch_target_delivery_candidates(now_ms)
+            .map_err(|error| error.to_string())
+    }
 }
 
 enum BusArchiveReplayError {
@@ -541,6 +554,7 @@ impl BusOperationRequest {
                 dispatcher_epoch: *dispatcher_epoch,
                 max_deliveries: *max_deliveries,
                 expected_delivery_id: expected_delivery_id.clone(),
+                destination: None,
             },
             Self::AcknowledgeDelivery {
                 delivery_id,
@@ -949,7 +963,7 @@ struct BusTabletStatus {
 }
 
 impl BusTabletStatus {
-    const TARGET_DISPATCH: &'static str = "external_executor_not_implemented";
+    const TARGET_DISPATCH: &'static str = "regional_epoch_targets_and_configured_signed_webhooks";
     const DURABLE_TARGET_OUTBOX: bool = true;
 
     fn new_with_read(
@@ -1074,8 +1088,23 @@ struct BusDeliveryRecordResponse {
     )]
     expires_at_ms: Option<u64>,
     policy: BusDeliveryPolicyResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    destination: Option<BusEpochTargetDestinationResponse>,
     state: BusDeliveryStateResponse,
     attempts: Vec<BusDeliveryAttemptResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct BusEpochTargetDestinationResponse {
+    kind: EpochTargetKind,
+    resource: String,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    resource_generation: u64,
+    shard_index: u32,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    tablet_id: u64,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    tablet_epoch: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1176,8 +1205,22 @@ impl From<DeliveryRecord> for BusDeliveryRecordResponse {
             created_at_ms: record.created_at_ms,
             expires_at_ms: record.expires_at_ms,
             policy: record.policy.into(),
+            destination: record.destination.map(Into::into),
             state: record.state.into(),
             attempts: record.attempts.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<EpochTargetDestination> for BusEpochTargetDestinationResponse {
+    fn from(destination: EpochTargetDestination) -> Self {
+        Self {
+            kind: destination.kind,
+            resource: destination.resource,
+            resource_generation: destination.resource_generation,
+            shard_index: destination.shard_index,
+            tablet_id: destination.tablet_id,
+            tablet_epoch: destination.tablet_epoch,
         }
     }
 }
@@ -1430,6 +1473,7 @@ mod tests {
                     dispatcher_epoch: 1,
                     max_deliveries: 1,
                     expected_delivery_id: None,
+                    destination: None,
                 },
                 100,
                 2,
@@ -1493,6 +1537,30 @@ mod tests {
                 ..
             }
         ));
+
+        assert!(
+            serde_json::from_value::<BusMutationRequest>(json!({
+                "idempotency_key": "acquire-internal-binding",
+                "expected_term": "7",
+                "operation": {
+                    "kind": "acquire_deliveries",
+                    "subscription": "sink",
+                    "dispatcher": "sender",
+                    "dispatcher_epoch": "1",
+                    "max_deliveries": 1,
+                    "expected_delivery_id": "epoch.bus.delivery.v1.1.sink",
+                    "destination": {
+                        "kind": "queue",
+                        "resource": "jobs",
+                        "resource_generation": "4",
+                        "shard_index": 0,
+                        "tablet_id": "41",
+                        "tablet_epoch": "3"
+                    }
+                }
+            }))
+            .is_err()
+        );
 
         assert!(
             serde_json::from_value::<BusMutationRequest>(json!({
@@ -1755,6 +1823,17 @@ mod tests {
                     max_age_ms: Some(u64::MAX - 1),
                 },
             },
+            destination: Some(
+                EpochTargetDestination::new(
+                    EpochTargetKind::Queue,
+                    "jobs",
+                    u64::MAX,
+                    0,
+                    u64::MAX - 4,
+                    u64::MAX - 5,
+                )
+                .unwrap(),
+            ),
             state: DeliveryState::Pending {
                 eligible_at_ms: u64::MAX,
             },
@@ -1777,6 +1856,14 @@ mod tests {
         assert_eq!(document["policy"]["timeout_ms"], u64::MAX.to_string());
         assert_eq!(document["state"]["eligible_at_ms"], u64::MAX.to_string());
         assert_eq!(
+            document["destination"]["resource_generation"],
+            u64::MAX.to_string()
+        );
+        assert_eq!(
+            document["destination"]["tablet_id"],
+            (u64::MAX - 4).to_string()
+        );
+        assert_eq!(
             document["attempts"][0]["dispatcher_epoch"],
             u64::MAX.to_string()
         );
@@ -1787,10 +1874,10 @@ mod tests {
     }
 
     #[test]
-    fn status_contract_claims_the_ledger_but_not_an_external_executor() {
+    fn status_contract_names_regional_executors_without_claiming_atomicity() {
         assert_eq!(
             BusTabletStatus::TARGET_DISPATCH,
-            "external_executor_not_implemented"
+            "regional_epoch_targets_and_configured_signed_webhooks"
         );
         const {
             assert!(BusTabletStatus::DURABLE_TARGET_OUTBOX);
@@ -2268,7 +2355,7 @@ mod tests {
             assert_eq!(status["archived_event_count"], "1");
             assert_eq!(
                 status["target_dispatch"],
-                "external_executor_not_implemented"
+                "regional_epoch_targets_and_configured_signed_webhooks"
             );
             assert_eq!(status["durable_target_outbox"], true);
             assert_eq!(status["pending_delivery_count"], "0");

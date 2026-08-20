@@ -77,6 +77,9 @@ and [Cache contract guide](../../docs/REGIONAL_CACHE_SDK.md).
 acquire/ack/fail/reject/maintenance, mutation lookup, archive replay, delivery query,
 and status over the same regional core. Mutations keep exact caller-owned keys;
 delivery settlement also preserves the opaque lease token.
+`QueueTarget` and `StreamTarget` create native destinations executed by the
+source Bus leader; delivery queries expose the server-pinned generation,
+shard, tablet, and epoch after acquisition.
 `SignedWebhookTarget` captures a configured key ID, while
 `VerifyWebhookSignature` verifies the exact raw body, canonical attempt and
 timestamp, constant-time HMAC-SHA-256, and returns the replay identity receivers

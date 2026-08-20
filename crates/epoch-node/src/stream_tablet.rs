@@ -250,7 +250,7 @@ impl StreamTabletService {
         result.map_err(|error| self.fail(error))
     }
 
-    fn committed_receipt(
+    pub(crate) fn committed_receipt(
         &self,
         committed: &CommittedProposal,
     ) -> Result<StreamTabletMutationReceipt, String> {

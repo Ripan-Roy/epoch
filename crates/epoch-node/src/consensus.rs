@@ -461,6 +461,10 @@ enum ActorCommand {
         proposal: Proposal,
         reply: ActorReply<ProposalLookup>,
     },
+    ForwardProposal {
+        proposal: Proposal,
+        reply: ActorReply<ProposalLookup>,
+    },
     ReadBarrier {
         request: ReadBarrierRequest,
         reply: ActorReply<ConsensusStatus>,
@@ -557,6 +561,25 @@ impl ConsensusProbeHandle {
             payload,
         );
         self.request(|reply| ActorCommand::Propose { proposal, reply })
+            .await
+    }
+
+    /// Routes an internal proposal through the local follower to its known
+    /// leader. Public APIs deliberately keep using leader-only `propose`.
+    pub(crate) async fn forward_propose(
+        &self,
+        proposal_id: u64,
+        expected_term: u64,
+        payload: Vec<u8>,
+    ) -> ConsensusProbeResult<ProposalLookup> {
+        let proposal = Proposal::new(
+            self.group_id,
+            self.group_epoch,
+            Term::new(expected_term),
+            ProposalId::new(proposal_id)?,
+            payload,
+        );
+        self.request(|reply| ActorCommand::ForwardProposal { proposal, reply })
             .await
     }
 
@@ -1150,6 +1173,17 @@ fn handle_actor_command(
             let proposal_id = proposal.proposal_id;
             let result = adapter
                 .propose(proposal)
+                .map_err(Into::into)
+                .and_then(|output| {
+                    publish_output(output, outbound, commits, read_barriers, applier)
+                })
+                .map(|_| adapter.lookup_proposal(proposal_id));
+            deliver_actor_result(adapter, reply, result)?;
+        }
+        ActorCommand::ForwardProposal { proposal, reply } => {
+            let proposal_id = proposal.proposal_id;
+            let result = adapter
+                .forward_proposal(proposal)
                 .map_err(Into::into)
                 .and_then(|output| {
                     publish_output(output, outbound, commits, read_barriers, applier)
@@ -1868,6 +1902,7 @@ mod tests {
 
     use super::*;
     use crate::catalog_tablet::{CatalogTabletScope, CatalogTabletService};
+    use crate::delivery_proposal::{ProposalRoute, propose_and_wait};
 
     fn peer_url(port: u16) -> Url {
         Url::parse(&format!("http://127.0.0.1:{port}/")).expect("test peer URL should parse")
@@ -2819,6 +2854,70 @@ mod tests {
             status.retained_log_first_index.get(),
             checkpoint_index.saturating_add(1)
         );
+        cluster.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn exact_proposal_replay_resolves_an_unknown_outcome_without_duplicate_commit() {
+        let cluster = TestProbeCluster::start().await;
+        let handles = cluster.handles();
+        let (leader_index, leader_status) = wait_for_leader(&handles).await;
+        let proposal_id = 42;
+        let payload = b"stable-destination-command".to_vec();
+
+        let first = propose_and_wait(
+            &handles[leader_index],
+            proposal_id,
+            leader_status.term.get(),
+            payload.clone(),
+            Duration::from_secs(2),
+            "test destination",
+            ProposalRoute::LeaderOnly,
+        )
+        .await
+        .expect("the first destination command should commit");
+        let _ = wait_for_commit(&handles, proposal_id).await;
+
+        // Model a target commit whose result was lost before source settlement:
+        // the next worker pass must resolve the exact commit instead of append.
+        let replayed = propose_and_wait(
+            &handles[leader_index],
+            proposal_id,
+            leader_status.term.get(),
+            payload.clone(),
+            Duration::from_secs(2),
+            "test destination",
+            ProposalRoute::LeaderOnly,
+        )
+        .await
+        .expect("the unknown outcome should resolve through proposal lookup");
+        assert_eq!(replayed, first);
+        for handle in &handles {
+            assert_eq!(
+                handle
+                    .applied_proposals()
+                    .await
+                    .expect("applied history should be available")
+                    .into_iter()
+                    .filter(|proposal| proposal.receipt.proposal_id.get() == proposal_id)
+                    .count(),
+                1
+            );
+        }
+
+        let collision = propose_and_wait(
+            &handles[leader_index],
+            proposal_id,
+            leader_status.term.get(),
+            b"different-destination-command".to_vec(),
+            Duration::from_secs(2),
+            "test destination",
+            ProposalRoute::LeaderOnly,
+        )
+        .await
+        .expect_err("a committed proposal identity must reject another payload");
+        assert!(collision.contains("already bound to another command"));
+
         cluster.shutdown().await;
     }
 

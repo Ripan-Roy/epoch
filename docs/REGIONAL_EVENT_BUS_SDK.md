@@ -1,6 +1,6 @@
 # Regional Event Bus SDK
 
-**Status:** Repository-local, single-shard regional alpha with signed HTTPS delivery
+**Status:** Repository-local, single-shard regional alpha with Epoch Queue/Stream and signed HTTPS delivery
 
 Epoch's Go, Java, and Python Event Bus clients call the same replicated tablet hosted by the Rust regional runtime. The clients discover the current leader, send generation and tablet fences, preserve caller-owned mutation identity across bounded rediscovery, and request linearizable archive, delivery, mutation, and status reads.
 
@@ -41,10 +41,11 @@ The current implementation accepts shard `0`; keeping the shard in the API preve
 | `status` | status | Observe consensus, route plan, archive, ledger counts, and digest |
 
 The regional materializer enables the replicated delivery outbox. Pull,
-Queue, Stream, unsigned webhook, and unsigned HTTP targets record durable intent
-for an external dispatcher. A separately configured leader-owned Rust worker
-executes **signed** webhook and HTTP targets; the target response remains an
-external observation, not a consensus operation.
+unsigned webhook, and unsigned HTTP targets record durable intent for an
+external dispatcher. The source Bus leader automatically executes **Queue** and
+**Stream** targets. A separately configured leader-owned Rust worker executes
+**signed** webhook and HTTP targets; an HTTP response remains an external
+observation, not a consensus operation.
 
 ## Typed subscription policy
 
@@ -127,6 +128,53 @@ client.upsert_subscription("events", 0, "upsert-orders-v1", subscription)
 ```
 
 The exact executable source is [quickstart.py](../console/src/quickstarts/regional_bus/quickstart.py).
+
+## Epoch Queue and Stream delivery
+
+Create the destination Queue or Stream in the same
+organization/project/environment/namespace as the Bus, then use the existing
+typed constructors:
+
+```go
+queue := epoch.Subscription{Name: "queue-jobs", Target: epoch.QueueTarget("jobs")}
+stream := epoch.Subscription{Name: "stream-orders", Target: epoch.StreamTarget("orders")}
+_, _ = client.UpsertSubscription(ctx, "events", 0, "queue-jobs-v1", queue)
+_, _ = client.UpsertSubscription(ctx, "events", 0, "stream-orders-v1", stream)
+```
+
+```java
+Subscription queue = new Subscription("queue-jobs", SubscriptionTarget.queue("jobs"));
+Subscription stream = new Subscription("stream-orders", SubscriptionTarget.stream("orders"));
+client.upsertSubscription("events", 0, "queue-jobs-v1", queue);
+client.upsertSubscription("events", 0, "stream-orders-v1", stream);
+```
+
+```python
+queue = Subscription("queue-jobs", SubscriptionTarget.queue("jobs"))
+stream = Subscription("stream-orders", SubscriptionTarget.stream("orders"))
+client.upsert_subscription("events", 0, "queue-jobs-v1", queue)
+client.upsert_subscription("events", 0, "stream-orders-v1", stream)
+```
+
+No application dispatcher is required. Every regional node runs the scheduler;
+only the current source Bus leader acts. Queue targets bind shard `0`. Stream
+targets use the same FNV-1a UTF-8 key router as direct Stream clients, using the
+transformed event key and falling back to the event ID. Configure the scan with
+`EPOCH_REGIONAL_EPOCH_TARGET_DELIVERY_INTERVAL_MS` (default `100`, accepted
+range 1–60,000).
+
+The first source acquisition pins target kind, resource generation, shard,
+tablet ID, and tablet epoch. The destination enqueue/append proposal has one
+stable idempotency key across Bus attempts. A destination commit therefore
+survives an unknown source-settlement outcome without inserting a duplicate in
+that target incarnation. The Bus acknowledges only after the target receipt
+commits. This ordered pair of commits is not an atomic cross-tablet transaction.
+
+`query_deliveries` returns the read-only `destination` binding on acquired and
+settled Queue/Stream records. Applications cannot submit that field through
+the acquire API. The executable quickstarts provision both destinations,
+publish a keyed event, and wait for both delivery records to become
+`acknowledged` with a pinned binding.
 
 ## Signed webhook delivery
 
@@ -260,6 +308,8 @@ If a request's outcome is uncertain, resolve its proposal ID before generating a
 ## Read guarantees
 
 Archive replay, delivery query, mutation lookup, and status request a leader ReadIndex barrier. Responses include consistency evidence and browser-safe decimal strings for unsigned 64-bit positions, epochs, terms, times, and indexes. No SDK silently falls back to `local_stale`.
+Queue/Stream delivery records expose their destination generation/tablet fence
+with the same browser-safe encoding.
 
 ## Current limits and non-claims
 
@@ -268,7 +318,7 @@ Archive replay, delivery query, mutation lookup, and status request a leader Rea
 - archive/query results: 1–10,000;
 - dispatcher identity: bounded, caller-owned, non-session identity;
 - no push stream, long poll, automatic lease renewal, or dispatcher coordinator;
-- built-in execution is limited to signed HTTP/webhook targets; Queue, Stream,
+- built-in execution covers Epoch Queue/Stream and signed HTTP/webhook targets;
   unsigned HTTP/webhook, long-poll, and managed push executors remain open;
 - no OAuth/API-key target auth, key hot reload/secret manager, schema
   validation, MQTT, private egress profile, or geo routing;
@@ -278,5 +328,7 @@ Archive replay, delivery query, mutation lookup, and status request a leader Rea
 
 The routing boundary remains [ADR-0020](adr/0020-regional-event-bus-v1-and-sdk-routing.md);
 signed delivery is defined by
-[ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md). The lower-level
+[ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md), and Epoch-target
+delivery by
+[ADR-0031](adr/0031-leader-owned-epoch-target-delivery.md). The lower-level
 state machine is documented in [BUS_TABLET.md](BUS_TABLET.md).

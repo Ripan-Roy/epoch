@@ -27,6 +27,10 @@ use crate::{
         ConsensusGroupSupervisor, ConsensusGroupSupervisorError, SupervisedConsensusGroupFailure,
         shared_internal_peer_router,
     },
+    epoch_target_delivery::{
+        EpochTargetDeliveryConfig, EpochTargetDeliveryStatus, EpochTargetDeliveryWorker,
+        run_epoch_target_delivery_pass,
+    },
     regional_checkpoint::{RegionalCheckpointStatus, run_regional_checkpoint_pass},
     regional_maintenance::{RegionalMaintenanceStatus, run_regional_maintenance_pass},
     regional_router::{
@@ -61,6 +65,7 @@ pub struct RegionalRuntimeConfig {
     pub maintenance_interval: Duration,
     pub checkpoint_interval: Duration,
     pub checkpoint_min_applied_entries: u64,
+    pub epoch_target_delivery: EpochTargetDeliveryConfig,
     pub webhook_delivery: Option<WebhookDeliveryConfig>,
 }
 
@@ -81,6 +86,7 @@ impl fmt::Debug for RegionalRuntimeConfig {
                 "checkpoint_min_applied_entries",
                 &self.checkpoint_min_applied_entries,
             )
+            .field("epoch_target_delivery", &self.epoch_target_delivery)
             .finish_non_exhaustive()
     }
 }
@@ -113,6 +119,7 @@ impl RegionalRuntimeConfig {
             maintenance_interval: DEFAULT_REGIONAL_MAINTENANCE_INTERVAL,
             checkpoint_interval: DEFAULT_REGIONAL_CHECKPOINT_INTERVAL,
             checkpoint_min_applied_entries: DEFAULT_REGIONAL_CHECKPOINT_MIN_APPLIED_ENTRIES,
+            epoch_target_delivery: EpochTargetDeliveryConfig::default(),
             webhook_delivery: None,
         }
     }
@@ -145,6 +152,12 @@ impl RegionalRuntimeConfig {
     #[must_use]
     pub fn with_webhook_delivery(mut self, config: Option<WebhookDeliveryConfig>) -> Self {
         self.webhook_delivery = config;
+        self
+    }
+
+    #[must_use]
+    pub fn with_epoch_target_delivery(mut self, config: EpochTargetDeliveryConfig) -> Self {
+        self.epoch_target_delivery = config;
         self
     }
 }
@@ -194,6 +207,8 @@ struct RegionalBackground {
     checkpoint_interval: Duration,
     checkpoint_min_applied_entries: u64,
     checkpoint_status: Arc<RegionalCheckpointStatus>,
+    epoch_target_worker: EpochTargetDeliveryWorker,
+    epoch_target_status: Arc<EpochTargetDeliveryStatus>,
     webhook_worker: Option<WebhookDeliveryWorker>,
     webhook_status: Arc<WebhookDeliveryStatus>,
 }
@@ -273,6 +288,13 @@ impl RegionalNodeRuntime {
             checkpoint_interval_ms,
             config.checkpoint_min_applied_entries,
         );
+        let epoch_target_worker = EpochTargetDeliveryWorker::new(
+            config.epoch_target_delivery.clone(),
+            config.profile_commit_wait,
+        )
+        .map_err(|error| RegionalRuntimeError::InvalidConfiguration(error.to_string()))?;
+        let epoch_target_status =
+            EpochTargetDeliveryStatus::new(config.epoch_target_delivery.interval);
         let webhook_worker = config
             .webhook_delivery
             .clone()
@@ -295,6 +317,7 @@ impl RegionalNodeRuntime {
                 directory.clone(),
                 Arc::clone(&maintenance_status),
                 Arc::clone(&checkpoint_status),
+                Arc::clone(&epoch_target_status),
                 Arc::clone(&webhook_status),
             ));
         let background_config = RegionalBackground {
@@ -306,6 +329,8 @@ impl RegionalNodeRuntime {
             checkpoint_interval: config.checkpoint_interval,
             checkpoint_min_applied_entries: config.checkpoint_min_applied_entries,
             checkpoint_status,
+            epoch_target_worker,
+            epoch_target_status,
             webhook_worker,
             webhook_status,
         };
@@ -384,6 +409,10 @@ fn validate_config(config: &RegionalRuntimeConfig) -> Result<(), RegionalRuntime
             .validate()
             .map_err(|error| RegionalRuntimeError::InvalidConfiguration(error.to_string()))?;
     }
+    config
+        .epoch_target_delivery
+        .validate()
+        .map_err(|error| RegionalRuntimeError::InvalidConfiguration(error.to_string()))?;
     Ok(())
 }
 
@@ -403,6 +432,9 @@ fn spawn_background(
         maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut checkpoints = tokio::time::interval(background.checkpoint_interval);
         checkpoints.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut epoch_targets =
+            tokio::time::interval(background.epoch_target_worker.config().interval);
+        epoch_targets.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut webhooks = background.webhook_worker.as_ref().map(|worker| {
             let mut interval = tokio::time::interval(worker.config().interval);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -437,6 +469,15 @@ fn spawn_background(
                         background.checkpoint_min_applied_entries,
                     ).await;
                     background.checkpoint_status.record(now_ms, pass, groups, error);
+                }
+                _ = epoch_targets.tick() => {
+                    let now_ms = background.clock.wall_time_ms();
+                    let (pass, error) = run_epoch_target_delivery_pass(
+                        &background.directory,
+                        &background.epoch_target_worker,
+                        background.clock.as_ref(),
+                    ).await;
+                    background.epoch_target_status.record(now_ms, pass, error);
                 }
                 () = async {
                     if let Some(interval) = webhooks.as_mut() {

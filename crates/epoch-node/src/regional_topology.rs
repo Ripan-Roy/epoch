@@ -13,6 +13,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::{
+    epoch_target_delivery::EpochTargetDeliveryStatus,
     regional_checkpoint::RegionalCheckpointStatus, regional_maintenance::RegionalMaintenanceStatus,
     tablet_materializer::TabletDirectory, webhook_delivery::WebhookDeliveryStatus,
 };
@@ -112,6 +113,7 @@ struct TopologyState {
     directory: TabletDirectory,
     maintenance: std::sync::Arc<RegionalMaintenanceStatus>,
     checkpoints: std::sync::Arc<RegionalCheckpointStatus>,
+    epoch_targets: std::sync::Arc<EpochTargetDeliveryStatus>,
     webhooks: std::sync::Arc<WebhookDeliveryStatus>,
 }
 
@@ -125,6 +127,7 @@ struct TopologyResponse {
     capacity: CapacityResponse,
     maintenance: crate::regional_maintenance::RegionalMaintenanceStatusSnapshot,
     checkpoints: crate::regional_checkpoint::RegionalCheckpointStatusSnapshot,
+    epoch_target_delivery: crate::epoch_target_delivery::EpochTargetDeliveryStatusSnapshot,
     webhook_delivery: crate::webhook_delivery::WebhookDeliveryStatusSnapshot,
 }
 
@@ -151,6 +154,7 @@ pub fn regional_topology_router(
     directory: TabletDirectory,
     maintenance: std::sync::Arc<RegionalMaintenanceStatus>,
     checkpoints: std::sync::Arc<RegionalCheckpointStatus>,
+    epoch_targets: std::sync::Arc<EpochTargetDeliveryStatus>,
     webhooks: std::sync::Arc<WebhookDeliveryStatus>,
 ) -> Router {
     Router::new()
@@ -160,6 +164,7 @@ pub fn regional_topology_router(
             directory,
             maintenance,
             checkpoints,
+            epoch_targets,
             webhooks,
         })
 }
@@ -197,6 +202,7 @@ async fn get_topology(State(state): State<TopologyState>) -> Response {
         },
         maintenance: state.maintenance.snapshot(),
         checkpoints: state.checkpoints.snapshot(),
+        epoch_target_delivery: state.epoch_targets.snapshot(),
         webhook_delivery: state.webhooks.snapshot(),
     })
     .into_response()

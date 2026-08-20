@@ -2,7 +2,7 @@
 
 **Status:** Working bounded fixed-three-voter ingress and per-subscription
 delivery-ledger profile with an authenticated regional v1 adapter and optional
-leader-owned signed HTTP/webhook execution
+leader-owned signed HTTP/webhook plus automatic Epoch Queue/Stream execution
 
 `epoch-bus` and `epoch-tablet` implement a canonical Event Bus ingress and
 delivery-ledger boundary. The standalone engine owns validated subscriptions,
@@ -21,7 +21,7 @@ histories still replay; committed application divergence fail-stops the group.
 ## Boundary
 
 ```text
-canonical BusTabletCommand v1
+canonical BusTabletCommand v1/v2/v3
   -> strict internal HTTP DTO and semantic idempotency validation
   -> current leader/term admission and fixed-voter majority persistence
   -> actor-owned committed metadata supplied to the tablet
@@ -70,15 +70,15 @@ filter, target, transform, and envelope boundaries. The leader owns
 term does not conflict while changing the operation does.
 
 The profile-local status reports `target_dispatch:
-external_executor_not_implemented` because the tablet itself performs no I/O;
-regional topology separately reports whether its signed-webhook worker is
-enabled and its cumulative pass/lease/outcome/error counters. Status also
+regional_epoch_targets_and_configured_signed_webhooks`; the tablet itself still
+performs no I/O. Regional topology separately reports signed-webhook and
+always-enabled Epoch-target pass/lease/outcome/error counters. Status also
 reports `durable_target_outbox: true`. A publish receipt proves replicated ingress,
 the captured deterministic route plan, archive state, and durable delivery
 intent. An acknowledgement proves only that an internal dispatcher committed
-the target result it observed. The regional runtime can execute signed
-HTTP/webhook targets; Queue, Stream, unsigned HTTP/webhook, and network pull
-remain external.
+the target result it observed. The regional runtime executes signed
+HTTP/webhook and Epoch Queue/Stream targets; unsigned HTTP/webhook and network
+pull remain external.
 
 The regional runtime additionally maps the fully qualified authenticated v1
 route below to that same tablet without a second store or Go data proxy:
@@ -129,7 +129,8 @@ Tablet commands are capped at 512 KiB, matching the consensus proposal ceiling.
 Every command binds a format version, tablet ID and epoch, resource name,
 idempotency key, candidate application time, and one operation. Existing
 unsigned operations retain their exact v1 bytes. A signed subscription,
-internal exact-delivery acquisition, or terminal rejection uses v2:
+internal exact-delivery acquisition, or terminal rejection uses v2. An exact
+Queue/Stream acquisition containing a pinned destination uses additive v3:
 
 | Operation | Deterministic result |
 | --- | --- |
@@ -141,6 +142,13 @@ internal exact-delivery acquisition, or terminal rejection uses v2:
 | `fail_delivery` | Fence by exact active lease and commit deterministic retry eligibility or terminal dead-letter state. |
 | `reject_delivery` | Fence by exact active lease and immediately commit a bounded terminal dead-letter reason. |
 | `maintain_deliveries` | Settle a bounded batch of expired leases as timeout failures. |
+
+The public mutation DTO never accepts a destination binding. The regional
+source-leader worker alone submits an exact v3 acquire that binds target kind,
+resource generation, shard, tablet ID, and tablet epoch. Queue uses shard `0`;
+Stream uses the shared FNV-1a key router. Legacy batch acquisition does not
+lease Queue/Stream records, so an external pull dispatcher cannot bypass that
+binding step.
 
 An internal dispatcher first commits an acquisition:
 
@@ -205,8 +213,9 @@ JSONPath arrays, predicates, escaping, or compiled bytecode.
 Queue and Stream targets require valid Epoch resource names. HTTP and webhook
 targets require a bounded absolute `http` or `https` URL with a host and no
 embedded credentials or fragment. An optional `signing_key_id` is a bounded
-resource name captured into every matching outbox record. Only a signed target
-is eligible for the built-in regional executor.
+resource name captured into every matching outbox record. Only a signed
+HTTP/webhook target is eligible for the network executor; Queue/Stream records
+are owned by the separate native-target executor.
 
 On each attempt the regional leader revalidates the URL, resolves every domain,
 rejects any non-public or mixed DNS answer, and pins the validated addresses.
@@ -281,13 +290,16 @@ The tests cover:
 - strict DTOs, browser-safe metadata, semantic retry/conflict, actor-missed
   commit fail-stop, and recovery ordering;
 - v1 byte preservation plus v2 signed-target/exact-acquire/rejection commands
-  and snapshots;
+  and snapshots, plus v3 destination-bound commands/snapshots and mislabeled
+  version rejection;
 - signed binary CloudEvents, exact HMAC vectors, strict/redacted rotating key
   files, special-address and mixed-DNS rejection, redirect/proxy suppression,
   invalid-header rejection, and a real loopback receiver;
 - three real HTTP consensus runtimes committing, converging, shutting down, and
   reopening from EPRS, including one 503/204 signed retry whose two-attempt
-  acknowledged history survives full voter restart; and
+  acknowledged history survives full voter restart, plus Queue enqueue and
+  keyed multi-shard Stream append through independently led groups without a
+  duplicate after full-voter reopen; and
 - a three-container gate with follower rejection, committed acquire/ack,
   leader loss, catch-up, archive/outbox agreement, all-node `SIGKILL`, and
   same-volume recovery.
@@ -299,7 +311,7 @@ make test-bus-tablet
 ```
 
 Still required are rate limiting, redrive and terminal-record retention, replay
-attempt lineage, built-in Queue/Stream and unsigned HTTP writes, long-poll and
+attempt lineage, unsigned HTTP writes, long-poll and
 push transports, OAuth/API-key destinations, private managed egress, secret
 manager/hot reload, broader CloudEvents conformance, user-exportable
 backups/PITR, production identity/TLS, generated response models, package
