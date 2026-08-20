@@ -3137,15 +3137,28 @@ mod tests {
         let cluster =
             TestProbeCluster::start_with_appliers(DEFAULT_OUTBOUND_QUEUE_CAPACITY, appliers).await;
         let handles = cluster.handles();
-        let (leader_index, leader_status) = wait_for_leader(&handles).await;
-
-        let proposed = handles[leader_index]
-            .propose(
-                51,
-                leader_status.term.get(),
-                b"rejected-profile-command".to_vec(),
-            )
-            .await;
+        let (leader_index, proposed) = tokio::time::timeout(Duration::from_secs(5), async {
+            'proposal: loop {
+                for (index, handle) in handles.iter().enumerate() {
+                    let status = handle.status().await.expect("status should be available");
+                    if status.role != ConsensusRole::Leader {
+                        continue;
+                    }
+                    match handle
+                        .propose(51, status.term.get(), b"rejected-profile-command".to_vec())
+                        .await
+                    {
+                        Err(ConsensusProbeError::Consensus(
+                            ConsensusError::NotLeader { .. } | ConsensusError::StaleTerm { .. },
+                        )) => {}
+                        result => break 'proposal (index, result),
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a stable leader should reach profile application");
         assert!(
             matches!(
                 proposed,
