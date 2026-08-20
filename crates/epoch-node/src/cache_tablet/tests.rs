@@ -4,6 +4,7 @@ use epoch_consensus::{
     CommitReceipt, ConsensusRole, ConsensusStatus, GroupEpoch, GroupId, LogIndex, NodeId,
     ProposalId, Term,
 };
+use epoch_core::ManualClock;
 use epoch_tablet::{CacheTabletOperationResult, CacheTabletOutcome, CacheTabletWriteEvidence};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -151,6 +152,72 @@ fn exact_live_commit_is_applied_only_once() {
     assert_eq!(snapshot.applied_command_count, 1);
     assert_eq!(snapshot.cache_revision, 1);
     assert_eq!(snapshot.retained_entry_count, 1);
+}
+
+#[test]
+fn cold_items_are_fsynced_served_from_the_file_tier_and_removed_on_commit() {
+    let temporary = TempDir::new().unwrap();
+    let service = CacheTabletService::new_with_cold_store(
+        scope(),
+        CacheConfig {
+            max_cold_bytes: Some(64 * 1024),
+            ..CacheConfig::default()
+        },
+        Some(temporary.path().join("cold")),
+    )
+    .unwrap();
+    let cold = committed(
+        "cold-1",
+        CacheTabletOperation::Transform(CacheTransformCommand {
+            shard: 0,
+            key: "archive".into(),
+            transform: CacheTransform::Replace {
+                value: CacheValue::String("persisted".into()),
+                storage_class: CacheStorageClass::Cold,
+            },
+            expected_version: None,
+            ttl_ms: None,
+            lock_guard: None,
+        }),
+        10,
+        2,
+        1,
+    );
+    service.apply(&cold).unwrap();
+    let files = std::fs::read_dir(temporary.path().join("cold"))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(files.len(), 1);
+    let observed = service.observe("archive").unwrap();
+    assert_eq!(
+        observed.item.unwrap().value,
+        CacheValue::String("persisted".into())
+    );
+    let snapshot = service.snapshot().unwrap();
+    assert_eq!(snapshot.cold_storage_backend, "local_fsync_file_read_path");
+    assert_eq!(snapshot.cold_read_count, 1);
+
+    service
+        .apply(&committed(
+            "delete-cold",
+            CacheTabletOperation::Delete(CacheDeleteCommand {
+                shard: 0,
+                key: "archive".into(),
+                expected_version: Some(1),
+                lock_guard: None,
+            }),
+            11,
+            2,
+            2,
+        ))
+        .unwrap();
+    assert_eq!(
+        std::fs::read_dir(temporary.path().join("cold"))
+            .unwrap()
+            .count(),
+        0
+    );
 }
 
 #[test]
@@ -389,6 +456,86 @@ fn value_dtos_cover_every_bounded_collection_family() {
     assert!(matches!(values[3], CacheValue::SortedSet(_)));
 }
 
+#[test]
+fn advanced_queries_are_typed_bounded_and_browser_safe() {
+    let mut bitmap = CacheBitmap::default();
+    bitmap.set(63, true).unwrap();
+    let bitmap_query = CacheQueryRequest::BitmapGet {
+        key: "flags".into(),
+        bit: 63,
+    };
+    assert!(matches!(
+        bitmap_query
+            .execute(&CacheValue::Bitmap(bitmap))
+            .unwrap(),
+        CacheQueryResult::Bitmap {
+            value: true,
+            count
+        } if count == "1"
+    ));
+
+    let mut geo = CacheGeoIndex::default();
+    let center = CacheGeoPoint::from_degrees(88.3639, 22.5726).unwrap();
+    geo.upsert("kolkata", center).unwrap();
+    let result = CacheQueryRequest::GeoRadius {
+        key: "places".into(),
+        center,
+        radius_meters: 10.0,
+        limit: 10,
+    }
+    .execute(&CacheValue::Geo(geo))
+    .unwrap();
+    assert!(matches!(result, CacheQueryResult::Geo { hits } if hits.len() == 1));
+
+    let mut bloom = CacheBloomFilter::new(1_024, 5).unwrap();
+    bloom.add(b"epoch");
+    assert!(matches!(
+        CacheQueryRequest::BloomContains {
+            key: "seen".into(),
+            value: b"epoch".to_vec(),
+        }
+        .execute(&CacheValue::Bloom(bloom))
+        .unwrap(),
+        CacheQueryResult::Membership { contains: true }
+    ));
+}
+
+#[test]
+fn lossy_pubsub_matches_patterns_drains_once_and_reports_overflow() {
+    assert!(glob_matches(b"orders.*", b"orders.created"));
+    assert!(glob_matches(b"orders.?", b"orders.x"));
+    assert!(!glob_matches(b"orders.?", b"orders.created"));
+
+    let mut hub = CachePubSubHub::default();
+    let subscription = hub
+        .subscribe(
+            7,
+            BTreeSet::from(["audit".into()]),
+            BTreeSet::from(["orders.*".into()]),
+        )
+        .unwrap();
+    let (_, delivered, dropped) = hub
+        .publish("orders.created", &json!({"id": 1}), 100)
+        .unwrap();
+    assert_eq!((delivered, dropped), (1, 0));
+    let first = hub.poll(&subscription, 10).unwrap();
+    assert_eq!(first.messages.len(), 1);
+    assert_eq!(first.messages[0].channel, "orders.created");
+    assert!(hub.poll(&subscription, 10).unwrap().messages.is_empty());
+
+    for sequence in 0..=MAX_CACHE_PUBSUB_PENDING_MESSAGES {
+        hub.publish("audit", &json!(sequence), 200).unwrap();
+    }
+    let overflow = hub.poll(&subscription, 1).unwrap();
+    assert_eq!(overflow.dropped_messages, 1);
+    assert_eq!(
+        overflow.remaining_messages,
+        MAX_CACHE_PUBSUB_PENDING_MESSAGES - 1
+    );
+    assert!(hub.unsubscribe(&subscription));
+    assert!(!hub.unsubscribe(&subscription));
+}
+
 fn operation_from(document: Value) -> CacheTabletOperation {
     serde_json::from_value::<CacheMutationRequest>(document)
         .unwrap()
@@ -500,8 +647,17 @@ fn status_is_browser_safe_and_truthful_about_retained_storage() {
         applied_command_count: u64::MAX - 4,
         cache_revision: u64::MAX - 5,
         retained_entry_count: u64::MAX - 6,
+        retained_memory_bytes: u64::MAX - 8,
+        retained_cold_bytes: u64::MAX - 9,
+        max_memory_bytes: Some(u64::MAX - 10),
+        max_cold_bytes: Some(u64::MAX - 11),
         active_lock_count: u64::MAX - 7,
         eviction: EvictionPolicy::AllKeysLru,
+        requested_durability: DurabilityProfile::ReplicatedMemory,
+        cold_storage_backend: "local_fsync_file_read_path",
+        cold_read_count: 3,
+        cold_read_average_micros: 7,
+        cold_read_max_micros: 11,
         cache_recovery_state_digest: "11".repeat(32),
         state_digest: "22".repeat(32),
     };
@@ -537,7 +693,18 @@ fn status_is_browser_safe_and_truthful_about_retained_storage() {
         "local_profile_applied_stale_capable"
     );
     assert_eq!(document["linearizable_read_barrier"], false);
-    assert!(document.get("durability").is_none());
+    assert_eq!(document["requested_durability"], "replicated_memory");
+    assert_eq!(document["achieved_durability"], "quorum_durable");
+    assert_eq!(document["durability_overachieved"], true);
+    assert_eq!(
+        document["cold_storage_backend"],
+        "local_fsync_file_read_path"
+    );
+    assert_eq!(document["cold_read_count"], "3");
+    assert_eq!(
+        document["cold_read_latency_disclosure"],
+        "observed_local_file_read_micros_not_an_slo"
+    );
     assert!(document.get("active_entry_count").is_none());
 
     let ahead = CacheTabletSnapshot {
@@ -546,8 +713,17 @@ fn status_is_browser_safe_and_truthful_about_retained_storage() {
         applied_command_count: 0,
         cache_revision: 0,
         retained_entry_count: 0,
+        retained_memory_bytes: 0,
+        retained_cold_bytes: 0,
+        max_memory_bytes: None,
+        max_cold_bytes: None,
         active_lock_count: 0,
         eviction: EvictionPolicy::NoEviction,
+        requested_durability: DurabilityProfile::QuorumDurable,
+        cold_storage_backend: "logical_class_in_replicated_memory",
+        cold_read_count: 0,
+        cold_read_average_micros: 0,
+        cold_read_max_micros: 0,
         cache_recovery_state_digest: "00".repeat(32),
         state_digest: "00".repeat(32),
     };
@@ -621,6 +797,7 @@ struct RunningCacheNode {
     runtime: ConsensusProbeRuntime,
     server: JoinHandle<()>,
     service: Arc<CacheTabletService>,
+    url: url::Url,
 }
 
 struct RunningCacheCluster {
@@ -652,7 +829,11 @@ impl RunningCacheCluster {
                 urls.iter()
                     .enumerate()
                     .map(|(peer, url)| (u64::try_from(peer).unwrap() + 1, url.clone())),
-                Duration::from_millis(20),
+                // A one-second election window keeps this recovery test focused
+                // on Cache state. Dedicated failover tests exercise leadership
+                // turnover; an overloaded parallel CI runner must not invalidate
+                // a term-fenced lock midway through this history.
+                Duration::from_millis(100),
             )
             .unwrap();
             let service = CacheTabletService::with_default_config(scope()).unwrap();
@@ -661,7 +842,12 @@ impl RunningCacheCluster {
                 ConsensusProbeRuntime::start_with_profile_applier(config, stable_path, applier)
                     .await
                     .unwrap();
-            let app = runtime.internal_router();
+            let app = runtime.internal_router().merge(router(
+                service.clone(),
+                runtime.handle(),
+                Arc::new(ManualClock::new(1_000)),
+                DEFAULT_COMMIT_WAIT,
+            ));
             let server = tokio::spawn(async move {
                 axum::serve(listener, app).await.unwrap();
             });
@@ -669,6 +855,7 @@ impl RunningCacheCluster {
                 runtime,
                 server,
                 service,
+                url: urls[index].clone(),
             });
         }
         Self { nodes }
@@ -700,6 +887,81 @@ impl RunningCacheCluster {
             node.runtime.shutdown().await.unwrap();
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_multiplex_correlates_independent_ordered_mutations_and_exact_replays() {
+    let temporary = TempDir::new().unwrap();
+    let paths = cache_runtime_paths(temporary.path());
+    let cluster = RunningCacheCluster::start(&paths).await;
+    let (leader, term) = cluster.leader().await;
+    let endpoint = cluster.nodes[leader]
+        .url
+        .join(EXPERIMENTAL_CACHE_TABLET_MULTIPLEX_PATH)
+        .unwrap();
+    let body = json!({
+        "expected_term": term.to_string(),
+        "mutations": [
+            {
+                "correlation_id": "profile",
+                "idempotency_key": "multiplex-set-profile",
+                "operation": {
+                    "kind": "set",
+                    "key": "profile",
+                    "value": {"kind": "string", "value": "ready"}
+                }
+            },
+            {
+                "correlation_id": "visits",
+                "idempotency_key": "multiplex-increment-visits",
+                "operation": {"kind": "increment", "key": "visits", "delta": "2"}
+            }
+        ]
+    });
+    let client = reqwest::Client::new();
+    let first: Value = client
+        .post(endpoint.clone())
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(first["atomic"], false);
+    assert_eq!(first["ordering"], "request_order_independent_outcomes");
+    assert_eq!(first["results"][0]["correlation_id"], "profile");
+    assert_eq!(first["results"][0]["http_status"], 201);
+    assert_eq!(first["results"][1]["correlation_id"], "visits");
+    assert_eq!(first["results"][1]["http_status"], 201);
+    wait_for_cache_apply(&cluster, 2).await;
+
+    let replayed: Value = client
+        .post(endpoint)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(replayed["results"][0]["http_status"], 200);
+    assert_eq!(replayed["results"][1]["http_status"], 200);
+    assert_eq!(
+        cluster.nodes[leader]
+            .service
+            .observe("visits")
+            .unwrap()
+            .item
+            .unwrap()
+            .value,
+        CacheValue::Counter(2)
+    );
+    cluster.shutdown().await;
 }
 
 #[derive(Debug, Clone, PartialEq)]

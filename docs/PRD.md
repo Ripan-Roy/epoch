@@ -21,16 +21,20 @@ ownership, coordinated backups/PITR, Stream compaction/tiering, Cache
 byte-pressure/SLO evidence, Queue streaming receive, or Event Bus target
 execution. See ADR-0027.
 
-**Cache implementation note (20 August 2026):** Managed Cache configuration now
-flows from the Go desired resource through the replicated Rust catalog into
-every materialized voter. The single-shard regional profile enforces
-deterministic entry-count no-eviction, all-key LRU/LFU/random, and volatile
-LRU/LFU/random/TTL policies. LRU/LFU access is an idempotent committed `Get`;
-pure `Observe` does not affect eviction. Go, Java, and Python expose the
-existing ordered transaction as a one-request atomic-batch API and document
-transport reuse/pooling. Byte-pressure accounting, native multiplexing,
-automatic batch coalescing, and the CACHE-005 throughput target remain open.
-See ADR-0032.
+**Cache implementation note (21 August 2026):** The fixed-three-voter,
+single-shard regional Cache now implements the alpha contract for every
+non-deferred Cache row. Deterministic entry and memory/cold byte admission,
+named replicated-memory/quorum durability, collection and advanced transforms,
+exact bitmap/probabilistic/geo/JSON/vector queries, a durable change cursor,
+canonical resource-local backup/PITR, independent correlated multiplexing, and
+explicitly node-local at-most-once Pub/Sub share one compatible recovery model.
+Cold values are fsynced to and integrity-checked from a voter-local file path;
+observed read microseconds are disclosed as not an SLO, and canonical state
+still remains in the tablet image. Go, Java, and Python expose the full surface
+and the leader-loss/reopen campaign exercises it. Multi-shard routing,
+automatic coalescing, RESP compatibility, production performance/identity,
+managed backup scheduling/encryption, and CACHE-015 CRDTs remain open under
+their separate requirements. See ADR-0034.
 
 **Recovery implementation note (13 August 2026):** Every healthy regional
 voter now schedules its own canonical native checkpoint for catalog and all
@@ -679,8 +683,10 @@ For CACHE-003, deterministic regional admission means every voter and a replay
 select the same victim; volatile policies may select only expiring keys, and a
 write rejects atomically if that class cannot make room. For CACHE-005, an
 atomic batch is one ordered, one-to-128-operation same-shard transaction with
-one correlated result per operation. It is not a partial-success pipeline;
-native multiplexing and client-side coalescing require separate evidence.
+one correlated result per operation. It is not a partial-success pipeline.
+Native multiplexing carries one to 128 independently committed operations with
+unique identities and request-ordered correlated outcomes; automatic
+client-side coalescing requires separate performance evidence.
 
 ### 10.2 Stream Log
 
@@ -1131,12 +1137,15 @@ This isolation is the default because it protects both systems from crashes, mem
 
 ### 16.4 Recommended commercial/open-source boundary
 
-Decision still required. A credible hypothesis:
+The public repository source is licensed under MIT. The current product
+boundary is:
 
-- Open source the single-cluster data plane, native clients, protocol gateways, local emulator, and Kubernetes operator under a permissive or source-available license chosen after business/legal review.
+- Open source the repository's single-cluster data plane, native clients, protocol gateways, local emulator, and Kubernetes operator under MIT.
 - Keep the global managed control plane, serverless fleet management, enterprise governance, advanced geo orchestration, and hosted connector operations commercial.
 
-The license must be decided before outside contributions or public code release. Compatibility with third-party client licenses and protocol test suites requires legal review.
+Third-party dependency/client licenses, protocol test suites, trademarks, and
+future hosted-service terms still require review before package or commercial
+publication.
 
 ---
 
@@ -1414,7 +1423,7 @@ Epoch is not GA until all of the following are true:
 
 ### Business and governance
 
-- Open-source and commercial boundary and license.
+- Hosted-service commercial boundary and trademark/package terms.
 - Formal Epoch trademark, company-name, domain, repository, and package-registry clearance.
 - Initial cloud regions and residency promise.
 - Support model and target customer size.

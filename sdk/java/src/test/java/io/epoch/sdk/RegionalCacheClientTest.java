@@ -134,6 +134,73 @@ final class RegionalCacheClientTest {
     assertEquals(List.of(), transport.requests);
   }
 
+  @Test
+  void routesAdvancedStateBackupQueryAndPubSub() throws Exception {
+    RecordingTransport transport = new RecordingTransport();
+    RegionalCacheClient client =
+        RegionalCacheClient.withTransports(
+            List.of(transport), "secret-token", new RegionalScope("acme", "shop", "dev", "core"));
+
+    client.transform(
+        "sessions",
+        0,
+        "transform-1",
+        "flags",
+        "bitmap_set",
+        Map.of("bit", 7, "value", true),
+        null,
+        null,
+        null);
+    client.changes("sessions", 0, BigInteger.ONE, 100);
+    client.backup("sessions", 0);
+    client.restore("sessions", 0, "restore-1", "artifact", BigInteger.valueOf(7));
+    client.query("sessions", 0, "bitmap_get", Map.of("key", "flags", "bit", 7));
+    client.createSubscription("sessions", 0, List.of("audit"), List.of("orders.*"));
+    client.publish("sessions", 0, "audit", Map.of("id", 1));
+    client.pollSubscription("sessions", 0, "cache-7-1", 10);
+    client.deleteSubscription("sessions", 0, "cache-7-1");
+    client.multiplex(
+        "sessions",
+        0,
+        List.of(
+            new RegionalCacheMultiplexMutation(
+                "profile",
+                "multiplex-profile",
+                RegionalCacheMutation.set("profile", RegionalCacheValue.string("ready"), null)),
+            new RegionalCacheMultiplexMutation(
+                "visits",
+                "multiplex-visits",
+                RegionalCacheMutation.increment("visits", 1, null, null))));
+
+    List<Request> operations = new ArrayList<>();
+    for (int index = 1; index < transport.requests.size(); index += 2) {
+      operations.add(transport.requests.get(index));
+    }
+    assertEquals(10, operations.size());
+    assertEquals("transform", operations.get(0).body().path("operation").path("kind").asText());
+    assertEquals(
+        "bitmap_set",
+        operations.get(0).body().path("operation").path("transform").path("kind").asText());
+    assertEquals("POST", operations.get(4).method());
+    assertEquals("linearizable", operations.get(4).headers().get("x-epoch-read-consistency"));
+    assertEquals("DELETE", operations.get(8).method());
+    assertEquals(
+        List.of(
+            "/mutations",
+            "/changes",
+            "/backup",
+            "/mutations",
+            "/query",
+            "/pubsub/subscriptions",
+            "/pubsub/messages",
+            "/pubsub/subscriptions/cache-7-1/messages",
+            "/pubsub/subscriptions/cache-7-1",
+            "/multiplex"),
+        operations.stream()
+            .map(request -> request.path().substring(request.path().indexOf("/shards/0") + 9))
+            .toList());
+  }
+
   private record Request(
       String method,
       String path,

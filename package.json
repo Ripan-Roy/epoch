@@ -1,7 +1,8 @@
 {
   "name": "epoch-workspace",
-  "version": "0.1.0-alpha.5",
+  "version": "0.1.0-alpha.6",
   "private": true,
+  "license": "MIT",
   "description": "One runtime for cache, stream, queue, and event-bus workloads",
   "packageManager": "pnpm@10.28.0",
   "engines": {

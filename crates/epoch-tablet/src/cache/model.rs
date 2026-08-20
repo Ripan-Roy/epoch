@@ -2,7 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use epoch_cache::{CacheItem, CacheValue};
+use epoch_cache::{
+    CacheBitmap, CacheBloomFilter, CacheCardinality, CacheCuckooFilter, CacheGeoIndex, CacheItem,
+    CacheJsonDocument, CacheJsonIndex, CacheStorageClass, CacheValue, CacheVectorIndex,
+};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::TabletWriteEvidence;
@@ -61,6 +64,7 @@ pub struct CacheTabletItem {
         deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
     )]
     pub expires_at_ms: Option<u64>,
+    pub storage_class: CacheStorageClass,
 }
 
 impl From<CacheItem> for CacheTabletItem {
@@ -69,6 +73,7 @@ impl From<CacheItem> for CacheTabletItem {
             value: item.value,
             version: item.version,
             expires_at_ms: item.expires_at_ms,
+            storage_class: item.storage_class,
         }
     }
 }
@@ -143,6 +148,12 @@ pub enum CacheTransactionMutationResult {
         )]
         expires_at_ms: Option<u64>,
     },
+    Transformed {
+        key: String,
+        item: CacheTabletItem,
+        changed: bool,
+        result: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -203,6 +214,14 @@ pub enum CacheTabletOperationResult {
         revision: u64,
         item: Option<CacheTabletItem>,
     },
+    Transformed {
+        key: String,
+        item: CacheTabletItem,
+        changed: bool,
+        result: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        evicted_keys: Vec<String>,
+    },
     TransactionCommitted {
         #[serde(
             serialize_with = "serialize_u64_as_decimal",
@@ -261,6 +280,19 @@ pub enum CacheTabletOperationResult {
         cache_revision: u64,
         expired_keys: Vec<String>,
         expired_locks: Vec<String>,
+    },
+    Restored {
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
+        revision: u64,
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
+        restored_from_revision: u64,
+        restored_keys: Vec<String>,
     },
 }
 
@@ -330,6 +362,14 @@ enum BrowserSafeCacheValue<'a> {
     List(&'a [String]),
     Set(&'a BTreeSet<String>),
     SortedSet(&'a BTreeMap<String, f64>),
+    Bitmap(&'a CacheBitmap),
+    Cardinality(&'a CacheCardinality),
+    Bloom(&'a CacheBloomFilter),
+    Cuckoo(&'a CacheCuckooFilter),
+    Geo(&'a CacheGeoIndex),
+    Json(&'a CacheJsonDocument),
+    JsonIndex(&'a CacheJsonIndex),
+    Vector(&'a CacheVectorIndex),
 }
 
 #[derive(Deserialize)]
@@ -342,6 +382,14 @@ enum OwnedBrowserSafeCacheValue {
     List(Vec<String>),
     Set(BTreeSet<String>),
     SortedSet(BTreeMap<String, f64>),
+    Bitmap(CacheBitmap),
+    Cardinality(CacheCardinality),
+    Bloom(CacheBloomFilter),
+    Cuckoo(CacheCuckooFilter),
+    Geo(CacheGeoIndex),
+    Json(CacheJsonDocument),
+    JsonIndex(CacheJsonIndex),
+    Vector(CacheVectorIndex),
 }
 
 fn serialize_cache_value<S>(value: &CacheValue, serializer: S) -> Result<S::Ok, S::Error>
@@ -356,6 +404,14 @@ where
         CacheValue::List(value) => BrowserSafeCacheValue::List(value),
         CacheValue::Set(value) => BrowserSafeCacheValue::Set(value),
         CacheValue::SortedSet(value) => BrowserSafeCacheValue::SortedSet(value),
+        CacheValue::Bitmap(value) => BrowserSafeCacheValue::Bitmap(value),
+        CacheValue::Cardinality(value) => BrowserSafeCacheValue::Cardinality(value),
+        CacheValue::Bloom(value) => BrowserSafeCacheValue::Bloom(value),
+        CacheValue::Cuckoo(value) => BrowserSafeCacheValue::Cuckoo(value),
+        CacheValue::Geo(value) => BrowserSafeCacheValue::Geo(value),
+        CacheValue::Json(value) => BrowserSafeCacheValue::Json(value),
+        CacheValue::JsonIndex(value) => BrowserSafeCacheValue::JsonIndex(value),
+        CacheValue::Vector(value) => BrowserSafeCacheValue::Vector(value),
     };
     value.serialize(serializer)
 }
@@ -375,6 +431,14 @@ where
             OwnedBrowserSafeCacheValue::List(value) => CacheValue::List(value),
             OwnedBrowserSafeCacheValue::Set(value) => CacheValue::Set(value),
             OwnedBrowserSafeCacheValue::SortedSet(value) => CacheValue::SortedSet(value),
+            OwnedBrowserSafeCacheValue::Bitmap(value) => CacheValue::Bitmap(value),
+            OwnedBrowserSafeCacheValue::Cardinality(value) => CacheValue::Cardinality(value),
+            OwnedBrowserSafeCacheValue::Bloom(value) => CacheValue::Bloom(value),
+            OwnedBrowserSafeCacheValue::Cuckoo(value) => CacheValue::Cuckoo(value),
+            OwnedBrowserSafeCacheValue::Geo(value) => CacheValue::Geo(value),
+            OwnedBrowserSafeCacheValue::Json(value) => CacheValue::Json(value),
+            OwnedBrowserSafeCacheValue::JsonIndex(value) => CacheValue::JsonIndex(value),
+            OwnedBrowserSafeCacheValue::Vector(value) => CacheValue::Vector(value),
         },
     )
 }

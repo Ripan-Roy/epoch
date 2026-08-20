@@ -9,7 +9,9 @@ from epoch_sdk import (
     RegionalCacheClient,
     RegionalCacheExpectation,
     RegionalCacheLockGuard,
+    RegionalCacheMultiplexMutation,
     RegionalCacheMutation,
+    RegionalCacheTransform,
     RegionalCacheValue,
     RegionalScope,
 )
@@ -108,6 +110,64 @@ time.sleep(0.01)
 maintained = client.maintain(
     "sessions", 0, "docs-python-cache-maintain-v1", max_expirations=100
 )
+cold = client.set(
+    "sessions",
+    0,
+    "docs-python-cache-cold-v1",
+    "profile-archive",
+    RegionalCacheValue.string("alice-archive"),
+    storage_class="cold",
+)
+backup = client.backup("sessions", 0)
+captured_revision = int(backup["captured_revision"])
+client.set(
+    "sessions",
+    0,
+    f"docs-python-cache-restore-scratch-{captured_revision}",
+    "restore-scratch",
+    RegionalCacheValue.string("remove-me"),
+)
+restored = client.restore(
+    "sessions",
+    0,
+    f"docs-python-cache-restore-{captured_revision}",
+    backup["artifact_base64"],
+    captured_revision,
+)
+bitmap = client.transform(
+    "sessions",
+    0,
+    "docs-python-cache-bitmap-v1",
+    "feature-flags",
+    RegionalCacheTransform("bitmap_set", {"bit": 7, "value": True}),
+)
+bitmap_query = client.query(
+    "sessions", 0, "bitmap_get", {"key": "feature-flags", "bit": 7}
+)
+multiplexed = client.multiplex(
+    "sessions",
+    0,
+    [
+        RegionalCacheMultiplexMutation(
+            "presence",
+            "docs-python-cache-multiplex-presence-v1",
+            RegionalCacheMutation.set("presence", RegionalCacheValue.string("online")),
+        ),
+        RegionalCacheMultiplexMutation(
+            "notifications",
+            "docs-python-cache-multiplex-notifications-v1",
+            RegionalCacheMutation.increment("notifications", 1),
+        ),
+    ],
+)
+subscription = client.create_subscription(
+    "sessions", 0, channels=["session.audit"], patterns=["session.*"]
+)
+subscription_id = subscription["subscription_id"]
+published = client.publish("sessions", 0, "session.audit", {"profile": "alice"})
+polled = client.poll_subscription("sessions", 0, subscription_id, limit=10)
+deleted_subscription = client.delete_subscription("sessions", 0, subscription_id)
+changes = client.changes("sessions", 0, 1, limit=100)
 
 print(
     json.dumps(
@@ -121,6 +181,17 @@ print(
             "release": released,
             "ttl": ephemeral,
             "maintain": maintained,
+            "cold": cold,
+            "backup": backup,
+            "restore": restored,
+            "bitmap": bitmap,
+            "bitmap_query": bitmap_query,
+            "multiplex": multiplexed,
+            "subscription": subscription,
+            "publish": published,
+            "poll": polled,
+            "delete_subscription": deleted_subscription,
+            "changes": changes,
             "profile": client.observe("sessions", 0, "profile"),
             "status": client.status("sessions", 0),
         },

@@ -6,6 +6,28 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+## [0.1.0-alpha.6] - 2026-08-21
+
+### Added
+
+- Completed the alpha implementation contract for `CACHE-001` through
+  `CACHE-014`: typed collection and advanced state transforms, exact
+  bitmap/probabilistic/geo/JSON/vector queries, entry plus memory/cold byte
+  admission, and named requested/achieved regional durability.
+- Added replicated bounded Cache changes, canonical checksummed backup and
+  point-in-time restore with fresh non-ABA versions, request-correlated
+  non-atomic multiplexing, and explicitly node-local at-most-once Pub/Sub.
+- Added a per-voter canonical fsynced cold-file read path with recovery
+  synchronization, integrity checking, removal on committed state changes, and
+  observed read timing disclosed as not an SLO or heap-offload claim.
+- Extended Go, Java, and Python SDKs, the Go control plane, console, public
+  executable documentation, focused/runtime/recovery suites, traceability, and
+  the regional leader-loss/all-voter-reopen campaign across the complete Cache
+  lifecycle.
+- Added the MIT License and contributor guide. External contributions remain
+  small and issue-scoped; maintainer feature releases retain cross-stack
+  coordination.
+
 ## [0.1.0-alpha.5] - 2026-08-20
 
 ### Added
@@ -411,6 +433,7 @@ Go/Java/Python SDKs, deterministic testkit, fixed-voter consensus probe, CI,
 development containers, and main-only documentation deployment.
 
 [0.1.0-alpha.5]: https://github.com/Ripan-Roy/epoch/compare/v0.1.0-alpha.4...v0.1.0-alpha.5
+[0.1.0-alpha.6]: https://github.com/Ripan-Roy/epoch/compare/v0.1.0-alpha.5...v0.1.0-alpha.6
 [0.1.0-alpha.4]: https://github.com/Ripan-Roy/epoch/compare/v0.1.0-alpha.3...v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/Ripan-Roy/epoch/compare/v0.1.0-alpha.2...v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/Ripan-Roy/epoch/compare/v0.1.0-alpha.1...v0.1.0-alpha.2

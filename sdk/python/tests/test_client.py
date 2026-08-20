@@ -50,6 +50,21 @@ class EpochClientTests(unittest.TestCase):
         _, _, body, _ = self.transport.requests[-1]
         self.assertEqual(body["durability"], "local_durable")
 
+    def test_cache_create_supports_tier_limits_and_named_durability(self) -> None:
+        self.client.create_cache(
+            "sessions",
+            max_entries=20_000,
+            max_memory_bytes=1_048_576,
+            max_cold_bytes=4_194_304,
+            durability="replicated_memory",
+        )
+
+        method, path, body, _ = self.transport.requests[-1]
+        self.assertEqual((method, path), ("POST", "/v1/caches/sessions"))
+        self.assertEqual(body["max_memory_bytes"], 1_048_576)
+        self.assertEqual(body["max_cold_bytes"], 4_194_304)
+        self.assertEqual(body["durability"], "replicated_memory")
+
     def test_queue_create_can_request_local_durability(self) -> None:
         self.client.create_queue("jobs", durability="local_durable")
 

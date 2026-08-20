@@ -9,8 +9,8 @@ never broadens the guarantees proved by its tests.
 Alpha releases are source previews. GitHub supplies source archives for the
 tagged tree, but Epoch does not yet publish binaries, container images,
 installers, Cargo crates, Go modules, Maven artifacts, Python distributions, or
-npm packages. No license has been selected, so a source preview must not be
-described as an open-source or package-registry release.
+npm packages. Repository source is MIT licensed; that does not imply any
+package-registry artifact has been published or supported.
 
 Signed artifacts, SBOM and provenance, clean-install matrices, migration and
 rollback support, vulnerability attestations, and production support limits are

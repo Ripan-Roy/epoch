@@ -727,16 +727,26 @@ fencing boundary:
 ```text
 GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}
 POST /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}/mutations
+POST /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}/multiplex
 GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}/mutations/{proposal_id}
 GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}/observations?key={key}
+GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}/changes
+GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}/backup
+POST /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}/query
+*    /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}/pubsub/{operation}
 GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}/status
 ```
 
-The strict mutation union covers set, conditional delete, version or
-missing-at-revision CAS, signed increment, bounded atomic transaction, lock
-acquire/renew/release, and explicit maintenance for shard `0`. Observation,
-mutation lookup, and status are linearizable SDK reads. The adapter delegates
-to the replicated Cache tablet without translating values or owning state.
+The strict mutation union covers memory/cold set, conditional delete, version
+or missing-at-revision CAS, signed increment, typed collection/advanced
+transform, bounded atomic transaction, backup restore, lock
+acquire/renew/release, and explicit maintenance for shard `0`. Multiplex
+validates one to 128 unique correlation/idempotency pairs before independently
+submitting them; results preserve request order and explicitly report
+`atomic: false`. Observation, mutation lookup, changes, backup, typed query,
+and status are linearizable SDK reads. Pub/Sub is a separate node-local,
+node-affine, bounded at-most-once surface. The adapter delegates to the
+replicated Cache tablet without translating values or owning state.
 
 The versioned regional Event Bus application route uses the same discovery and
 fencing boundary:
@@ -1108,15 +1118,24 @@ The mutually exclusive Cache mode mounts a canonical single-shard Cache tablet
 on that same internal listener:
 
 - `POST /experimental/v1/tablets/cache/mutations` submits one strict
-  Set/Delete/CAS/Increment/Transaction/lock/Maintain operation with an
+  Set/Delete/CAS/Increment/Transform/Transaction/Restore/lock/Maintain operation with an
   idempotency key and expected current term;
+- `POST /experimental/v1/tablets/cache/multiplex` validates and submits one to
+  128 independently committed, request-correlated mutations;
 - `GET /experimental/v1/tablets/cache/mutations/{proposal_id}` resolves local
   unknown, pending, or committed state without applying a missed command;
 - `GET /experimental/v1/tablets/cache/observations?key=...` returns a pure,
-  explicitly local and stale-capable observation; and
+  explicitly local and stale-capable observation;
+- `GET /experimental/v1/tablets/cache/changes` reads the replicated bounded
+  change cursor;
+- `GET /experimental/v1/tablets/cache/backup` exports a canonical bounded
+  backup and PITR window;
+- `POST /experimental/v1/tablets/cache/query` performs a typed advanced read;
+- `/experimental/v1/tablets/cache/pubsub/...` owns node-local subscribe,
+  publish, poll, and delete behavior; and
 - `GET /experimental/v1/tablets/cache/status` reports consensus/profile
-  positions, retained entries, active locks, revisions, and recovery/state
-  digests.
+  positions, requested/achieved durability, retained memory/cold bytes, cold
+  read observations, active locks, revisions, and recovery/state digests.
 
 The API accepts 64-bit counter and metadata inputs as JSON numbers or decimal
 strings and serializes every signed or unsigned 64-bit output as a decimal
@@ -1170,8 +1189,9 @@ Retention deletion, dynamic
 membership, dynamic constraint-aware placement, follower read routing,
 TLS/mTLS transport, and production identity remain absent. Regional Stream,
 Queue, Cache, and Event Bus v1 routes and repository-local Go/Java/Python
-clients are versioned application slices; the Stream clients include bounded
-single-shard atomic batch frames, while stable native data gRPC, coordinated
+clients are versioned application slices; Stream includes bounded atomic batch
+frames and Cache includes the complete non-deferred lifecycle, while stable
+native data gRPC, coordinated
 streaming, automatic batching, generated response types, and package releases
 remain absent. The standalone engine journal
 remains a separate single-node source of truth and is never used by a
@@ -1191,12 +1211,10 @@ implementation, long-running operations, metrics on the reserved port,
 protocol gateways, full Go/Java/Python generated SDK parity, and compatibility
 negotiation remain unimplemented. The experimental Stream,
 Queue, Cache, and Event Bus tablets expose only the mutation/read surfaces
-described above. Typed Go, Java, and Python clients cover the provisional
-standalone profile HTTP routes, including explicit local Stream and Queue
-durability; they do not cover the regional tablet routes. All three use
-injectable transport boundaries and run against the real standalone node; the
-exact quickstarts displayed by the documentation each drive an independent
-seed, forced process crash, restart, and recovery proof in CI.
+described above. Typed Go, Java, and Python clients cover both provisional
+standalone routes and the versioned regional Stream, Queue, Cache, and Event Bus
+routes. All three use injectable transport boundaries; standalone restart
+quickstarts and regional failover/reopen campaigns execute in CI.
 
 Node browser calls use exact origins from `EPOCH_ALLOWED_ORIGINS`; Go BFF calls
 use `EPOCH_CONTROL_ALLOWED_ORIGINS`. Requests without an `Origin` header remain
@@ -1208,6 +1226,7 @@ only in browser session storage. The current bootstrap policy, HTTP payloads,
 storage schema, and Rust error enum remain provisional scaffolding that may
 change before any public compatibility promise.
 
-The Cache tablet rebuilds by replaying the retained EPRS committed history
-before readiness. It has no profile snapshot/compaction path, and its
-exact-replay receipt map is currently unbounded with no advertised retry window.
+The Cache tablet installs a compatible native profile snapshot when available,
+replays the retained EPRS tail before readiness, and separately supports a
+bounded canonical user backup/PITR artifact. Its consensus checkpoint retains a
+bounded retry suffix, but no public idempotency-retention window is advertised.

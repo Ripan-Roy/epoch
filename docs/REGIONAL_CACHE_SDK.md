@@ -1,20 +1,18 @@
 # Regional Cache SDK
 
 Epoch's repository-local Go, Java, and Python SDKs expose the complete
-implemented single-shard replicated Cache lifecycle through
-`RegionalCacheClient`. The client talks directly to Rust voters, discovers the
-current leader before every operation, carries generation and tablet-epoch
-fences, requests linearizable reads, and preserves caller-owned mutation
-identity across one bounded rediscovery.
+non-deferred single-shard Cache lifecycle through `RegionalCacheClient`. The
+clients discover the current Rust leader, carry resource-generation and tablet
+fences, preserve caller-owned mutation identities during rediscovery, and use
+linearizable reads by default.
 
-This contract is separate from the standalone `EpochClient` Cache helpers. The
-standalone API can select volatile or local-durable behavior on one host; the
-regional client uses the fixed-three-voter replicated Cache tablet.
+This is separate from the standalone `EpochClient` Cache helpers. The
+standalone profile is one-host volatile/local-durable state; the regional
+client uses the fixed three-voter tablet.
 
-## Provision a Cache
+## Provision the resource
 
-Start the disposable regional topology and Go management bridge as described in
-[Regional Stream SDK](REGIONAL_STREAM_SDK.md), then apply a Cache resource:
+Start the regional topology and Go control bridge, then create a Cache:
 
 ```shell
 curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
@@ -28,239 +26,184 @@ curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
       "kind":"cache","name":"sessions",
       "governance":{"owner":"team:platform","cost_center":"cc-1042","classification":"confidential","tags":{"service":"sessions","profile":"cache"}},
       "spec":{"shard_count":1,"replica_count":3,"configuration":{
-        "shard_count":1,"max_entries":32,"default_ttl_ms":null,
-        "eviction":"all_keys_lru"
-      },"placement":{
-        "allowed_regions":["ap-south"],"minimum_zones":3,
-        "required_node_class":"general-purpose"
-      }}
+        "shard_count":1,"max_entries":10000,
+        "max_memory_bytes":262144,"max_cold_bytes":262144,
+        "default_ttl_ms":null,"eviction":"all_keys_lru",
+        "durability":"quorum_durable"
+      },"placement":{"allowed_regions":["ap-south"],"minimum_zones":3,
+        "required_node_class":"general-purpose"}}
     }
   }'
 ```
 
-The public docs embed these exact executable sources:
+The configuration is immutable in this alpha. `max_entries` and the optional
+memory/cold byte caps are per shard. Admission counts canonical retained bytes,
+not process RSS. Supported eviction policies are `no_eviction`, all-key
+LRU/LFU/random, and volatile LRU/LFU/random/TTL. Regional durability accepts
+`quorum_durable` or `replicated_memory`; the persisted fixed-voter runtime
+reports when the latter is fulfilled by the stronger quorum-durable path.
+
+The public docs embed and compile these exact programs:
 
 - [Go](../console/src/quickstarts/regional_cache/quickstart.go)
 - [Java](../console/src/quickstarts/regional_cache/RegionalCacheQuickstart.java)
 - [Python](../console/src/quickstarts/regional_cache/quickstart.py)
 
-Each example writes and exactly replays a value, uses versioned CAS, records a
-committed access, commits a multi-value atomic batch, acquires and applies a
-fenced lock guard, increments a counter, releases the lock, expires a TTL value
-explicitly, and reads linearizable observations and status.
+## Complete cross-language surface
 
-## Client construction
+| Capability | Go | Java | Python |
+|---|---|---|---|
+| Scalar/collection value | `NewRegionalCache*` | `RegionalCacheValue.*` | `RegionalCacheValue.*` |
+| Set/get/observe/delete/CAS/increment | `Set` etc. | `set` etc. | `set` etc. |
+| Typed atomic transform | `Transform` | `transform` | `transform` |
+| Atomic transaction/batch | `Transaction` / `AtomicBatch` | `transaction` / `atomicBatch` | `transaction` / `atomic_batch` |
+| Non-atomic correlated pipeline | `Multiplex` | `multiplex` | `multiplex` |
+| Fenced lease lock | `AcquireLock` / `RenewLock` / `ReleaseLock` | camel-case equivalents | snake-case equivalents |
+| Expiry maintenance | `Maintain` | `maintain` | `maintain` |
+| Durable changes | `Changes` | `changes` | `changes` |
+| Backup and PITR restore | `Backup` / `Restore` | `backup` / `restore` | `backup` / `restore` |
+| Typed advanced query | `Query` | `query` | `query` |
+| Lossy Pub/Sub | `CreateSubscription` / `Publish` / `PollSubscription` / `DeleteSubscription` | camel-case equivalents | snake-case equivalents |
+| Linearizable status | `Status` | `status` | `status` |
 
-All clients require every voter endpoint, a bearer token, and the complete
-namespace scope. Endpoint order controls reachability only. An operation selects
-an endpoint only when discovery reports `accepts_writes: true`.
+Strict ordinary value constructors cover strings, byte blobs, signed counters,
+hashes, lists, unique sets, and finite-score sorted sets. Blobs are JSON byte
+arrays and all unsigned 64-bit wire values are decimal strings. Java uses
+`BigInteger` for the full range.
 
-Go:
+## Atomic state operations
 
-```go
-client, err := epoch.NewRegionalCacheClient(
-    []string{"http://127.0.0.1:18661", "http://127.0.0.1:18662", "http://127.0.0.1:18663"},
-    token,
-    epoch.RegionalScope{Organization: "acme", Project: "shop", Environment: "dev", Namespace: "core"},
-    3*time.Second,
-)
-```
+`Get` is a consensus mutation because it records access for deterministic
+LRU/LFU policy; exact retry does not count twice. `Observe` is a pure
+linearizable read and never changes eviction order.
 
-Java:
+CAS distinguishes a non-ABA item version from a missing-at-shard-revision
+expectation. Transactions carry the observed shard revision and one to 128
+distinct-key set, delete, CAS, increment, or transform mutations. They stage
+the whole result and either commit one revision or reject without partial
+state. `AtomicBatch` is an alias for this exact all-or-nothing contract.
 
-```java
-var client = new RegionalCacheClient(
-    endpoints,
-    token,
-    new RegionalScope("acme", "shop", "dev", "core"),
-    Duration.ofSeconds(3));
-```
+`Multiplex` is intentionally different: one HTTP request carries one to 128
+unique correlation IDs and unique idempotency keys. Results are returned in
+request order, but items commit independently and `atomic` is `false`. Use it
+for unrelated calls; use an atomic batch when operations share one invariant.
+Long-lived clients reuse their HTTP transport; bound application concurrency.
 
-Python:
+## Transforms and queries
+
+Construct a transform with `NewRegionalCacheTransform`, Java's
+`transform(kind, fields, ...)`, or `RegionalCacheTransform`. Supported kinds:
+
+| Family | Mutation kinds | Query kinds |
+|---|---|---|
+| Collections | `hash_put`, `hash_remove`, `list_push`, `list_pop`, `set_add`, `set_remove`, `sorted_set_add`, `sorted_set_remove` | observe returned value |
+| Bitmap/cardinality | `bitmap_set`, `cardinality_add` | `bitmap_get`, `cardinality_estimate` |
+| Probabilistic | `bloom_add`, `cuckoo_add`, `cuckoo_delete` | `bloom_contains`, `cuckoo_contains` |
+| Geo | `geo_upsert`, `geo_remove` | `geo_radius` |
+| JSON | `json_set`, `json_remove`, `json_index_upsert`, `json_index_remove` | `json_pointer`, `json_search` |
+| Vector | `vector_upsert`, `vector_remove` | `vector_search` |
+
+All transforms are atomic, type checked, optionally version/TTL/lock guarded,
+and can participate in a transaction. Bounds include a 1,048,576-bit bitmap,
+10,000 geo points, 256 KiB JSON documents, 10,000-document/2 MiB JSON indexes
+over at most 32 pointers, and 10,000 vector documents with at most 2,048
+dimensions. JSON search is exact over canonical pointer values. Vector search
+is an exact bounded cosine/text hybrid with metadata filters; it is not an ANN
+latency or recall claim.
+
+Python example:
 
 ```python
-client = RegionalCacheClient(
-    endpoints,
-    token=token,
-    scope=RegionalScope("acme", "shop", "dev", "core"),
-    timeout=3.0,
+client.transform(
+    "sessions", 0, "profile-index-v1", "profiles",
+    RegionalCacheTransform("json_index_upsert", {
+        "id": "user-1",
+        "document": {"value": {"role": "admin", "active": True}},
+        "indexed_pointers": ["/role"],
+    }),
+)
+admins = client.query(
+    "sessions", 0, "json_search",
+    {"key": "profiles", "pointer": "/role", "value": "admin", "limit": 10},
 )
 ```
 
-## Value model
+## Durability, changes, and recovery
 
-Use type-specific constructors rather than passing arbitrary JSON. Every SDK
-validates the local representation before discovery.
+`Changes(from_sequence, limit)` reads the replicated 1,024-record mutation,
+expiry, eviction, and restore history. The response publishes the next cursor
+and retention floor; a stale cursor fails explicitly.
 
-| Wire kind | Go | Java | Python |
-|---|---|---|---|
-| String | `NewRegionalCacheString` | `RegionalCacheValue.string` | `RegionalCacheValue.string` |
-| Blob | `NewRegionalCacheBlob` | `RegionalCacheValue.blob` | `RegionalCacheValue.blob` |
-| Signed counter | `NewRegionalCacheCounter` | `RegionalCacheValue.counter` | `RegionalCacheValue.counter` |
-| Hash | `NewRegionalCacheHash` | `RegionalCacheValue.hash` | `RegionalCacheValue.hash` |
-| List | `NewRegionalCacheList` | `RegionalCacheValue.list` | `RegionalCacheValue.list` |
-| Unique set | `NewRegionalCacheSet` | `RegionalCacheValue.set` | `RegionalCacheValue.set` |
-| Finite-score sorted set | `NewRegionalCacheSortedSet` | `RegionalCacheValue.sortedSet` | `RegionalCacheValue.sorted_set` |
+`Backup` returns a canonical base64 artifact, SHA-256 state digest, captured
+revision/time, and oldest restorable revision. The decoded artifact is capped
+at 320 KiB. `Restore` validates canonical encoding, digest, matching immutable
+configuration, capacity, and requested revision before one consensus commit.
+It removes values created after that revision, excludes values expired at
+restore time, and assigns fresh versions so old CAS tokens cannot revive.
 
-Blob values are JSON byte arrays. Counter values and all unsigned 64-bit fields
-are canonical decimal strings on the wire. Set constructors reject duplicates;
-sorted-set constructors reject NaN and infinity. Java uses `BigInteger` for the
-complete unsigned 64-bit range.
+This is caller-managed resource-local backup/PITR. Managed schedules,
+encryption/key management, remote catalogs/retention, cross-resource restore,
+and full-cluster disaster recovery remain separate managed-service work.
 
-## Lifecycle surface
+## Cold storage class
 
-| Behavior | Go | Java | Python |
-|---|---|---|---|
-| Set | `Set` | `set` | `set` |
-| Committed access | `Get` | `get` | `get` |
-| Conditional delete | `Delete` | `delete` | `delete` |
-| Version/missing CAS | `CompareAndSet` | `compareAndSet` | `compare_and_set` |
-| Signed increment | `Increment` | `increment` | `increment` |
-| Atomic transaction | `Transaction` | `transaction` | `transaction` |
-| Atomic batch alias | `AtomicBatch` | `atomicBatch` | `atomic_batch` |
-| Acquire lock | `AcquireLock` | `acquireLock` | `acquire_lock` |
-| Renew lock | `RenewLock` | `renewLock` | `renew_lock` |
-| Release lock | `ReleaseLock` | `releaseLock` | `release_lock` |
-| Apply expiry | `Maintain` | `maintain` | `maintain` |
-| Mutation lookup | `Mutation` | `mutation` | `mutation` |
-| Observe key | `Observe` | `observe` | `observe` |
-| Tablet status | `Status` | `status` | `status` |
+`Set` accepts storage class `memory` or `cold`; Python uses
+`storage_class="cold"`, Go uses `RegionalCacheWriteOptions.StorageClass`, and
+Java uses the extended `set` overload. Each voter fsyncs a canonical per-key
+cold file after committed apply. Cold observation/query reads and verifies that
+file against replicated state. Status publishes retained/max bytes, backend,
+read count, average/max microseconds, and
+`observed_local_file_read_micros_not_an_slo`.
 
-Every mutation, including committed `Get`, requires a nonempty caller-owned
-idempotency key. Set, delete, CAS, and increment optionally accept a
-`RegionalCacheLockGuard`. TTL is nonzero relative milliseconds. An expected
-version of `0` means no live item where that operation supports version
-matching.
+The alpha cold path is a real local-file read tier, not heap offload: canonical
+values still reside in the replicated tablet image. It does not claim
+production flash capacity relief, remote object storage, or a latency SLO.
 
-## Committed access and eviction
+## Pub/Sub semantics
 
-`Get` is a consensus mutation, not a read shortcut. It returns the current item
-and records one deterministic access for LRU/LFU policy. An exact retry returns
-the committed receipt without counting a second access. `Observe` remains a
-pure linearizable read and never changes eviction order. Use `Observe` when the
-application does not need access-sensitive eviction.
+Cache Pub/Sub is explicitly lossy and node-affine. A subscription contains up
+to 64 exact channels or `*`/`?` patterns; polling drains up to 1,000 messages.
+Each subscription holds at most 1,024 pending messages. Overflow drops the new
+message and reports a counter. Subscriptions are not replicated or persisted,
+so disconnect, rerouting, or process loss can lose them and their messages.
+Use the durable change stream or Event Bus when replay or acknowledgement is
+required.
 
-Managed Cache creation accepts per-shard `max_entries`, optional
-`default_ttl_ms`, and one of `no_eviction`, `all_keys_lru`, `all_keys_lfu`,
-`all_keys_random`, `volatile_lru`, `volatile_lfu`, `volatile_random`, or
-`volatile_ttl`. Capacity admission, victim selection, and the write are staged
-as one committed operation. Successful receipts expose sorted `evicted_keys`;
-a volatile policy rejects without mutation when no expiring victim is eligible.
-The configuration is immutable in this alpha and entry count, rather than
-estimated byte pressure, is the enforced capacity boundary. Omitting the object
-preserves the legacy default of 10,000 entries, no default TTL, and
-`no_eviction`; an existing unconfigured resource is not silently rewritten.
+## HTTP and retry contract
 
-## CAS and transactions
-
-`RegionalCacheVersion(version)` / `RegionalCacheExpectation.version(version)`
-checks one non-ABA item version. `RegionalCacheMissing(revision)` /
-`RegionalCacheExpectation.missing(revision)` checks that the key is absent and
-the shard has not changed since the observation.
-
-A transaction carries the exact observed shard revision and one to 128
-distinct-key `RegionalCacheMutation` values. It may contain set, delete, CAS,
-and increment. The tablet stages the entire operation: either one new revision
-contains every result or the committed receipt reports a business rejection
-without partial state. `AtomicBatch`/`atomicBatch`/`atomic_batch` is the clearer
-one-request alias for this same wire command: caller order is preserved, there
-is one HTTP request and one consensus proposal, and partial success is
-impossible. Lock-management and nested transaction operations cannot be
-embedded.
-
-Clients reuse their underlying HTTP transport and should be long-lived. One
-client can issue concurrent operations, but it does not yet automatically
-coalesce unrelated calls or expose a native multiplexed stream. Prefer one
-bounded atomic batch when operations share a shard and revision; otherwise
-bound application concurrency and retain each operation's idempotency key.
-
-## Fenced locks
-
-Acquire requires a lock key, owner, monotonically increasing owner epoch, and
-nonzero lease duration. The result includes:
-
-- an opaque `lease_token` for renewal, release, and guarded mutations;
-- a `lease_generation` that advances on renewal; and
-- a `fencing_token` containing tablet epoch and acquisition index.
-
-Renewal rotates the lease token. Applications must discard the old token.
-Downstream protected systems compare the fencing token lexicographically as
-`(tablet_epoch, acquisition_index)`; possession of a lease token alone is not a
-safe downstream fence.
-
-## TTL and maintenance
-
-Observations are pure reads. A logically expired value is not removed by a
-read. In the regional runtime the current Raft leader automatically submits the
-same bounded `maintain` command at the earliest value or lock deadline; each
-command removes at most 1,000 due entries through consensus. Applications may
-still submit explicit maintenance for diagnostics or recovery. The scheduler
-uses the exact due time, so expiry ordering remains deterministic and
-recoverable across leader loss.
-
-## HTTP contract
-
-The shard base path is:
+The shard base is:
 
 ```text
 /v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/caches/{name}/shards/{shard}
 ```
 
-`GET` on that path performs discovery. Mutations, including committed access,
-append `mutations`; other operations append
-`mutations/{proposal_id}`, `observations?key=...`, or `status`.
+Discovery is `GET` on the base. The SDKs route `mutations`, `multiplex`,
+`observations`, `changes`, `backup`, `query`, `pubsub/...`, and `status` through
+the discovered voter. Data calls carry bearer authorization, resource
+generation, and tablet epoch. Mutations also carry the discovered current term;
+reads carry `x-epoch-read-consistency: linearizable`.
 
-Every data request carries:
+One rediscovery is allowed for leader/fence/route/read-barrier or retryable
+transport failures. Retried mutations preserve the semantic body and
+idempotency key. Authentication, authorization, validation, idempotency
+conflicts, and committed business rejections return immediately. A timeout can
+be an unknown outcome: retry the same operation and identity.
 
-```text
-authorization: Bearer <token>
-x-epoch-resource-generation: <discovered decimal generation>
-x-epoch-tablet-epoch: <discovered decimal tablet epoch>
-```
-
-Every SDK read also carries `x-epoch-read-consistency: linearizable`. The server
-confirms the read barrier in response headers and JSON. The SDK never silently
-falls back to a follower or stale local state.
-
-## Retry and outcome rules
-
-- `not_leader`, `fenced`, `route_not_found`, `route_unavailable`,
-  `read_barrier_timeout`, and retryable transport/server errors allow one
-  rediscovery cycle.
-- A reconstructed mutation retains the exact idempotency key and semantic
-  operation. The newly discovered term can change.
-- Authentication, scope denial, schema validation, idempotency conflict, and a
-  committed business rejection return immediately.
-- A timeout can leave the outcome unknown. Retry the same operation with the
-  same key or use mutation lookup when the proposal ID is known.
-
-Go returns `*epoch.APIError`, Java returns `EpochApiException`, and Python
-returns `EpochAPIError`.
-
-## Verification
+## Verification and boundary
 
 ```shell
-go test ./sdk/go/epoch ./console/src/quickstarts/regional_cache
-PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests -v
-cd sdk/java && ./mvnw verify
-make test-regional-runtime
+go test ./sdk/go/epoch/...
+PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests -p 'test_*.py'
+cd sdk/java && ./mvnw clean test
 bash tests/integration/docs-quickstarts.sh
+make test-regional-runtime
 ```
 
-The Docker campaign kills the active Cache leader before using the Python SDK,
-then covers exact replay, every value kind, CAS, increment, a committed LRU
-access, an atomic batch, deterministic capacity eviction, guarded writes, lease
-renewal, guarded delete, release, explicit expiry, linearizable reads, voter
-catch-up, and all-voter reopen. Go and Java exercise the same request contract
-in unit tests and compile their exact public docs programs.
-
-## Current boundary
-
-This alpha is a complete SDK surface over the implemented single-shard tablet,
-not a Redis-compatible production service. Byte-pressure capacity accounting,
-native partial-success pipelining/multiplexing, automatic batch coalescing,
-multi-shard transactions, exportable backup/PITR, Pub/Sub, dynamic membership,
-TLS/OIDC/mTLS, generated response types, package-registry publication, and the
-production fault/scale matrix remain open. See
-[ADR-0019](adr/0019-regional-cache-v1-and-sdk-routing.md) and
-[ADR-0032](adr/0032-regional-cache-eviction-and-access-batches.md).
+The regional Docker campaign loses the active Cache leader, exercises ordinary
+and advanced values, atomic and multiplex calls, byte eviction, cold-file reads,
+backup/PITR, changes, lossy Pub/Sub, locks, TTL, catch-up, and all-voter reopen.
+This is a fixed-topology single-shard alpha. Multi-shard routing/transactions,
+automatic client coalescing, Redis/RESP compatibility, dynamic membership,
+production identity/transport, package publication, scale/SLO evidence, and
+`CACHE-015` CRDTs remain open. See
+[ADR-0034](adr/0034-cache-state-services-and-cold-read-tier.md).

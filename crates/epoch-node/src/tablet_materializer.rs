@@ -432,11 +432,23 @@ impl RegionalTabletMaterializer {
             descriptor.tablet_epoch,
             metadata.resource.name.clone(),
         )?;
+        let config = self
+            .group_template
+            .for_group(descriptor.consensus_group_id, descriptor.tablet_epoch)?;
+        let stable_directory = self
+            .data_dir
+            .join("consensus")
+            .join(format!("group-{}", descriptor.consensus_group_id));
+        std::fs::create_dir_all(&stable_directory)
+            .map_err(|error| TabletMaterializerError::Storage(error.to_string()))?;
         let service = match descriptor.workload_profile {
-            WorkloadProfile::CacheAndState => PendingTabletService::Cache(CacheTabletService::new(
-                CacheTabletScope::clone(&scope),
-                cache_config(&metadata)?,
-            )?),
+            WorkloadProfile::CacheAndState => {
+                PendingTabletService::Cache(CacheTabletService::new_with_cold_store(
+                    CacheTabletScope::clone(&scope),
+                    cache_config(&metadata)?,
+                    Some(stable_directory.join("cache-cold")),
+                )?)
+            }
             WorkloadProfile::StreamLog => {
                 PendingTabletService::Stream(StreamTabletService::new_for_shard(
                     scope.clone(),
@@ -455,15 +467,6 @@ impl RegionalTabletMaterializer {
                 },
             )?),
         };
-        let config = self
-            .group_template
-            .for_group(descriptor.consensus_group_id, descriptor.tablet_epoch)?;
-        let stable_directory = self
-            .data_dir
-            .join("consensus")
-            .join(format!("group-{}", descriptor.consensus_group_id));
-        std::fs::create_dir_all(&stable_directory)
-            .map_err(|error| TabletMaterializerError::Storage(error.to_string()))?;
         let stable_path = stable_directory.join(format!("node-{}.wal", config.node_id().get()));
         let consensus = self
             .supervisor
@@ -712,6 +715,8 @@ mod tests {
         request.spec.configuration = Some(
             serde_json::to_value(CacheConfig {
                 max_entries: 2,
+                max_memory_bytes: None,
+                max_cold_bytes: None,
                 default_ttl_ms: None,
                 eviction: EvictionPolicy::AllKeysLru,
                 durability: DurabilityProfile::QuorumDurable,

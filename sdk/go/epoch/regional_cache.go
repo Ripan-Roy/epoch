@@ -185,8 +185,9 @@ func (guard RegionalCacheLockGuard) wire() (map[string]any, error) {
 
 // RegionalCacheWriteOptions controls TTL and optional lock fencing for set and CAS.
 type RegionalCacheWriteOptions struct {
-	TTLMS     *uint64
-	LockGuard *RegionalCacheLockGuard
+	TTLMS        *uint64
+	LockGuard    *RegionalCacheLockGuard
+	StorageClass string
 }
 
 // RegionalCacheDeleteOptions controls version and optional lock fencing for delete.
@@ -207,6 +208,66 @@ type RegionalCacheMutation struct {
 	key       string
 	operation map[string]any
 	err       error
+}
+
+// RegionalCacheMultiplexMutation is one independently committed mutation in a
+// correlated, non-atomic multiplex request.
+type RegionalCacheMultiplexMutation struct {
+	correlationID  string
+	idempotencyKey string
+	mutation       RegionalCacheMutation
+}
+
+// NewRegionalCacheMultiplexMutation constructs one correlated multiplex item.
+func NewRegionalCacheMultiplexMutation(correlationID, idempotencyKey string, mutation RegionalCacheMutation) (RegionalCacheMultiplexMutation, error) {
+	if strings.TrimSpace(correlationID) == "" || strings.TrimSpace(idempotencyKey) == "" {
+		return RegionalCacheMultiplexMutation{}, fmt.Errorf("epoch: Cache multiplex correlation and idempotency keys are required")
+	}
+	if mutation.err != nil {
+		return RegionalCacheMultiplexMutation{}, mutation.err
+	}
+	if strings.TrimSpace(mutation.key) == "" || mutation.operation == nil {
+		return RegionalCacheMultiplexMutation{}, fmt.Errorf("epoch: Cache multiplex mutation is invalid")
+	}
+	return RegionalCacheMultiplexMutation{
+		correlationID:  correlationID,
+		idempotencyKey: idempotencyKey,
+		mutation:       mutation,
+	}, nil
+}
+
+// RegionalCacheTransform is one atomic server-side data-structure operation.
+// Use NewRegionalCacheTransform with a documented transform kind and bounded fields.
+type RegionalCacheTransform struct {
+	kind   string
+	fields map[string]any
+}
+
+// NewRegionalCacheTransform constructs an advanced atomic Cache transform.
+func NewRegionalCacheTransform(kind string, fields map[string]any) (RegionalCacheTransform, error) {
+	if strings.TrimSpace(kind) == "" {
+		return RegionalCacheTransform{}, fmt.Errorf("epoch: Cache transform kind is required")
+	}
+	copy := make(map[string]any, len(fields))
+	for key, value := range fields {
+		if strings.TrimSpace(key) == "" || key == "kind" {
+			return RegionalCacheTransform{}, fmt.Errorf("epoch: Cache transform field %q is invalid", key)
+		}
+		copy[key] = value
+	}
+	return RegionalCacheTransform{kind: kind, fields: copy}, nil
+}
+
+func (transform RegionalCacheTransform) wire() (map[string]any, error) {
+	if strings.TrimSpace(transform.kind) == "" {
+		return nil, fmt.Errorf("epoch: Cache transform must be created with NewRegionalCacheTransform")
+	}
+	wire := make(map[string]any, len(transform.fields)+1)
+	wire["kind"] = transform.kind
+	for key, value := range transform.fields {
+		wire[key] = value
+	}
+	return wire, nil
 }
 
 // NewRegionalCacheSetMutation constructs a transactional set.
@@ -233,6 +294,13 @@ func NewRegionalCacheCompareAndSetMutation(key string, expected RegionalCacheExp
 // NewRegionalCacheIncrementMutation constructs a transactional signed increment.
 func NewRegionalCacheIncrementMutation(key string, delta int64, expectedVersion, ttlMS *uint64) RegionalCacheMutation {
 	operation, err := cacheIncrementOperation(key, delta, RegionalCacheIncrementOptions{ExpectedVersion: expectedVersion, TTLMS: ttlMS})
+	delete(operation, "shard")
+	return RegionalCacheMutation{key: key, operation: operation, err: err}
+}
+
+// NewRegionalCacheTransformMutation constructs a transactional advanced transform.
+func NewRegionalCacheTransformMutation(key string, transform RegionalCacheTransform, expectedVersion, ttlMS *uint64) RegionalCacheMutation {
+	operation, err := cacheTransformOperation(key, transform, expectedVersion, ttlMS, nil)
 	delete(operation, "shard")
 	return RegionalCacheMutation{key: key, operation: operation, err: err}
 }
@@ -291,6 +359,15 @@ func (client *RegionalCacheClient) CompareAndSet(ctx context.Context, cache stri
 // Increment applies a checked signed 64-bit delta.
 func (client *RegionalCacheClient) Increment(ctx context.Context, cache string, shard uint32, idempotencyKey, key string, delta int64, options RegionalCacheIncrementOptions) (Document, error) {
 	operation, err := cacheIncrementOperation(key, delta, options)
+	if err != nil {
+		return nil, err
+	}
+	return client.mutate(ctx, cache, shard, idempotencyKey, operation)
+}
+
+// Transform applies one atomic advanced data-structure operation.
+func (client *RegionalCacheClient) Transform(ctx context.Context, cache string, shard uint32, idempotencyKey, key string, transform RegionalCacheTransform, expectedVersion, ttlMS *uint64, guard *RegionalCacheLockGuard) (Document, error) {
+	operation, err := cacheTransformOperation(key, transform, expectedVersion, ttlMS, guard)
 	if err != nil {
 		return nil, err
 	}
@@ -411,6 +488,117 @@ func (client *RegionalCacheClient) Observe(ctx context.Context, cache string, sh
 	return client.read(ctx, cache, shard, "/observations", url.Values{"key": {key}})
 }
 
+// Changes returns the retained durable mutation/change stream from a sequence cursor.
+func (client *RegionalCacheClient) Changes(ctx context.Context, cache string, shard uint32, fromSequence uint64, limit uint32) (Document, error) {
+	if fromSequence == 0 || limit == 0 {
+		return nil, fmt.Errorf("epoch: Cache change sequence and limit must be non-zero")
+	}
+	return client.read(ctx, cache, shard, "/changes", url.Values{
+		"from_sequence": {strconv.FormatUint(fromSequence, 10)},
+		"limit":         {strconv.FormatUint(uint64(limit), 10)},
+	})
+}
+
+// Backup downloads one canonical bounded Cache backup artifact and PITR window.
+func (client *RegionalCacheClient) Backup(ctx context.Context, cache string, shard uint32) (Document, error) {
+	return client.read(ctx, cache, shard, "/backup", nil)
+}
+
+// Restore atomically restores a backup at one retained revision.
+func (client *RegionalCacheClient) Restore(ctx context.Context, cache string, shard uint32, idempotencyKey, artifactBase64 string, targetRevision uint64) (Document, error) {
+	if strings.TrimSpace(artifactBase64) == "" || targetRevision == 0 {
+		return nil, fmt.Errorf("epoch: Cache backup artifact and target revision are required")
+	}
+	return client.mutate(ctx, cache, shard, idempotencyKey, map[string]any{
+		"kind": "restore", "shard": uint32(0), "backup_base64": artifactBase64,
+		"target_revision": strconv.FormatUint(targetRevision, 10),
+	})
+}
+
+// Query runs a typed read-only bitmap, probabilistic, geo, JSON, or vector query.
+func (client *RegionalCacheClient) Query(ctx context.Context, cache string, shard uint32, query map[string]any) (Document, error) {
+	if strings.TrimSpace(fmt.Sprint(query["kind"])) == "" {
+		return nil, fmt.Errorf("epoch: Cache query kind is required")
+	}
+	return client.postRead(ctx, cache, shard, "/query", query)
+}
+
+// Multiplex pipelines independently committed mutations through one HTTP request.
+// Results are correlated in request order; the operation is deliberately non-atomic.
+func (client *RegionalCacheClient) Multiplex(ctx context.Context, cache string, shard uint32, mutations []RegionalCacheMultiplexMutation) (Document, error) {
+	if len(mutations) < 1 || len(mutations) > maxRegionalCacheTransactionMutations {
+		return nil, fmt.Errorf("epoch: Cache multiplex mutations must be between 1 and %d", maxRegionalCacheTransactionMutations)
+	}
+	correlations := make(map[string]struct{}, len(mutations))
+	identities := make(map[string]struct{}, len(mutations))
+	wire := make([]map[string]any, 0, len(mutations))
+	for _, mutation := range mutations {
+		if mutation.mutation.err != nil {
+			return nil, mutation.mutation.err
+		}
+		if strings.TrimSpace(mutation.correlationID) == "" || strings.TrimSpace(mutation.idempotencyKey) == "" || mutation.mutation.operation == nil {
+			return nil, fmt.Errorf("epoch: Cache multiplex mutation is invalid")
+		}
+		if _, exists := correlations[mutation.correlationID]; exists {
+			return nil, fmt.Errorf("epoch: Cache multiplex correlation IDs must be unique")
+		}
+		if _, exists := identities[mutation.idempotencyKey]; exists {
+			return nil, fmt.Errorf("epoch: Cache multiplex idempotency keys must be unique")
+		}
+		correlations[mutation.correlationID] = struct{}{}
+		identities[mutation.idempotencyKey] = struct{}{}
+		wire = append(wire, map[string]any{
+			"correlation_id":  mutation.correlationID,
+			"idempotency_key": mutation.idempotencyKey,
+			"operation":       mutation.mutation.operation,
+		})
+	}
+	return regionalCall[Document](ctx, client.regionalClient(), "caches", "Cache", cache, shard, func(route regionalRoute) Request {
+		return Request{Method: "POST", Path: "/multiplex", Body: map[string]any{
+			"expected_term": route.Term,
+			"mutations":     wire,
+		}}
+	})
+}
+
+// CreateSubscription creates a node-affine, at-most-once Cache Pub/Sub subscription.
+func (client *RegionalCacheClient) CreateSubscription(ctx context.Context, cache string, shard uint32, channels, patterns []string) (Document, error) {
+	if len(channels) == 0 && len(patterns) == 0 {
+		return nil, fmt.Errorf("epoch: Cache Pub/Sub requires a channel or pattern")
+	}
+	return client.write(ctx, cache, shard, "POST", "/pubsub/subscriptions", map[string]any{
+		"channels": append([]string(nil), channels...), "patterns": append([]string(nil), patterns...),
+	})
+}
+
+// Publish sends one explicitly lossy, at-most-once Cache Pub/Sub message.
+func (client *RegionalCacheClient) Publish(ctx context.Context, cache string, shard uint32, channel string, payload any) (Document, error) {
+	if strings.TrimSpace(channel) == "" {
+		return nil, fmt.Errorf("epoch: Cache Pub/Sub channel is required")
+	}
+	return client.write(ctx, cache, shard, "POST", "/pubsub/messages", map[string]any{
+		"channel": channel, "payload": payload,
+	})
+}
+
+// PollSubscription drains up to limit pending at-most-once messages.
+func (client *RegionalCacheClient) PollSubscription(ctx context.Context, cache string, shard uint32, subscriptionID string, limit uint32) (Document, error) {
+	if strings.TrimSpace(subscriptionID) == "" || limit == 0 {
+		return nil, fmt.Errorf("epoch: Cache Pub/Sub subscription and limit are required")
+	}
+	return client.read(ctx, cache, shard, "/pubsub/subscriptions/"+url.PathEscape(subscriptionID)+"/messages", url.Values{
+		"limit": {strconv.FormatUint(uint64(limit), 10)},
+	})
+}
+
+// DeleteSubscription deletes one node-local Cache Pub/Sub subscription.
+func (client *RegionalCacheClient) DeleteSubscription(ctx context.Context, cache string, shard uint32, subscriptionID string) (Document, error) {
+	if strings.TrimSpace(subscriptionID) == "" {
+		return nil, fmt.Errorf("epoch: Cache Pub/Sub subscription is required")
+	}
+	return client.write(ctx, cache, shard, "DELETE", "/pubsub/subscriptions/"+url.PathEscape(subscriptionID), nil)
+}
+
 // Status returns the linearizable Cache tablet status and digest.
 func (client *RegionalCacheClient) Status(ctx context.Context, cache string, shard uint32) (Document, error) {
 	return client.read(ctx, cache, shard, "/status", nil)
@@ -419,6 +607,18 @@ func (client *RegionalCacheClient) Status(ctx context.Context, cache string, sha
 func (client *RegionalCacheClient) read(ctx context.Context, cache string, shard uint32, path string, query url.Values) (Document, error) {
 	return regionalCall[Document](ctx, client.regionalClient(), "caches", "Cache", cache, shard, func(_ regionalRoute) Request {
 		return Request{Method: "GET", Path: path, Query: query, Headers: map[string]string{regionalReadHeader: "linearizable"}}
+	})
+}
+
+func (client *RegionalCacheClient) postRead(ctx context.Context, cache string, shard uint32, path string, body any) (Document, error) {
+	return regionalCall[Document](ctx, client.regionalClient(), "caches", "Cache", cache, shard, func(_ regionalRoute) Request {
+		return Request{Method: "POST", Path: path, Body: body, Headers: map[string]string{regionalReadHeader: "linearizable"}}
+	})
+}
+
+func (client *RegionalCacheClient) write(ctx context.Context, cache string, shard uint32, method, path string, body any) (Document, error) {
+	return regionalCall[Document](ctx, client.regionalClient(), "caches", "Cache", cache, shard, func(_ regionalRoute) Request {
+		return Request{Method: method, Path: path, Body: body}
 	})
 }
 
@@ -476,6 +676,9 @@ func cacheDeleteOperation(key string, options RegionalCacheDeleteOptions) (map[s
 }
 
 func cacheCASOperation(key string, expected RegionalCacheExpectation, value RegionalCacheValue, options RegionalCacheWriteOptions) (map[string]any, error) {
+	if options.StorageClass == "cold" {
+		return nil, fmt.Errorf("epoch: use an expected-version replace transform to move a Cache value to cold storage")
+	}
 	operation, err := cacheSetOperation(key, value, options)
 	if err != nil {
 		return nil, err
@@ -485,6 +688,7 @@ func cacheCASOperation(key string, expected RegionalCacheExpectation, value Regi
 		return nil, err
 	}
 	operation["kind"] = "compare_and_set"
+	delete(operation, "storage_class")
 	operation["expected"] = wire
 	return operation, nil
 }
@@ -515,7 +719,43 @@ func cacheIncrementOperation(key string, delta int64, options RegionalCacheIncre
 	return operation, nil
 }
 
+func cacheTransformOperation(key string, transform RegionalCacheTransform, expectedVersion, ttlMS *uint64, guard *RegionalCacheLockGuard) (map[string]any, error) {
+	if strings.TrimSpace(key) == "" {
+		return nil, fmt.Errorf("epoch: Cache key is required")
+	}
+	wire, err := transform.wire()
+	if err != nil {
+		return nil, err
+	}
+	operation := map[string]any{
+		"kind": "transform", "shard": uint32(0), "key": key, "transform": wire,
+	}
+	if expectedVersion != nil {
+		operation["expected_version"] = strconv.FormatUint(*expectedVersion, 10)
+	}
+	if ttlMS != nil {
+		if *ttlMS == 0 {
+			return nil, fmt.Errorf("epoch: Cache TTL must be non-zero when provided")
+		}
+		operation["ttl_ms"] = strconv.FormatUint(*ttlMS, 10)
+	}
+	if guard != nil {
+		guardWire, err := guard.wire()
+		if err != nil {
+			return nil, err
+		}
+		operation["lock_guard"] = guardWire
+	}
+	return operation, nil
+}
+
 func addCacheWriteOptions(operation map[string]any, options RegionalCacheWriteOptions) error {
+	if options.StorageClass != "" {
+		if options.StorageClass != "memory" && options.StorageClass != "cold" {
+			return fmt.Errorf("epoch: Cache storage class must be memory or cold")
+		}
+		operation["storage_class"] = options.StorageClass
+	}
 	if options.TTLMS != nil {
 		if *options.TTLMS == 0 {
 			return fmt.Errorf("epoch: Cache TTL must be non-zero when provided")

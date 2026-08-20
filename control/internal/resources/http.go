@@ -259,9 +259,13 @@ type regionalCostAttributionView struct {
 }
 
 type regionalCacheConfigurationView struct {
-	MaxEntriesPerShard uint64  `json:"max_entries_per_shard"`
-	DefaultTTLMS       *uint64 `json:"default_ttl_ms"`
-	Eviction           string  `json:"eviction"`
+	MaxEntriesPerShard     uint64  `json:"max_entries_per_shard"`
+	MaxMemoryBytesPerShard *uint64 `json:"max_memory_bytes_per_shard"`
+	MaxColdBytesPerShard   *uint64 `json:"max_cold_bytes_per_shard"`
+	DefaultTTLMS           *uint64 `json:"default_ttl_ms"`
+	Eviction               string  `json:"eviction"`
+	Durability             string  `json:"durability"`
+	ColdLatencyDisclosure  string  `json:"cold_latency_disclosure"`
 }
 
 type regionalTabletView struct {
@@ -515,24 +519,51 @@ func browserCacheConfiguration(kind Kind, raw json.RawMessage) *regionalCacheCon
 	}
 	var spec struct {
 		Configuration *struct {
-			MaxEntries   uint64  `json:"max_entries"`
-			DefaultTTLMS *uint64 `json:"default_ttl_ms"`
-			Eviction     string  `json:"eviction"`
+			MaxEntries     uint64  `json:"max_entries"`
+			MaxMemoryBytes *uint64 `json:"max_memory_bytes"`
+			MaxColdBytes   *uint64 `json:"max_cold_bytes"`
+			DefaultTTLMS   *uint64 `json:"default_ttl_ms"`
+			Eviction       string  `json:"eviction"`
+			Durability     string  `json:"durability"`
 		} `json:"configuration"`
 	}
 	if err := json.Unmarshal(raw, &spec); err != nil || spec.Configuration == nil {
 		return nil
 	}
 	configuration := spec.Configuration
+	if configuration.Durability == "" {
+		configuration.Durability = "quorum_durable"
+	}
 	if configuration.MaxEntries == 0 ||
+		(configuration.MaxMemoryBytes != nil && *configuration.MaxMemoryBytes == 0) ||
+		(configuration.MaxColdBytes != nil && *configuration.MaxColdBytes == 0) ||
 		(configuration.DefaultTTLMS != nil && *configuration.DefaultTTLMS == 0) ||
-		!browserCacheEviction(configuration.Eviction) {
+		!browserCacheEviction(configuration.Eviction) ||
+		!browserCacheDurability(configuration.Durability) {
 		return nil
 	}
 	return &regionalCacheConfigurationView{
-		MaxEntriesPerShard: configuration.MaxEntries,
-		DefaultTTLMS:       configuration.DefaultTTLMS,
-		Eviction:           configuration.Eviction,
+		MaxEntriesPerShard:     configuration.MaxEntries,
+		MaxMemoryBytesPerShard: configuration.MaxMemoryBytes,
+		MaxColdBytesPerShard:   configuration.MaxColdBytes,
+		DefaultTTLMS:           configuration.DefaultTTLMS,
+		Eviction:               configuration.Eviction,
+		Durability:             configuration.Durability,
+		ColdLatencyDisclosure: func() string {
+			if configuration.MaxColdBytes == nil {
+				return "disabled"
+			}
+			return "observed_local_file_read_micros_not_an_slo"
+		}(),
+	}
+}
+
+func browserCacheDurability(durability string) bool {
+	switch durability {
+	case "replicated_memory", "quorum_durable":
+		return true
+	default:
+		return false
 	}
 }
 

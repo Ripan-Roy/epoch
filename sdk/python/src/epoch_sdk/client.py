@@ -36,17 +36,22 @@ class EpochClient:
         name: str,
         *,
         max_entries: int = 10_000,
+        max_memory_bytes: int | None = None,
+        max_cold_bytes: int | None = None,
         default_ttl_ms: int | None = None,
         eviction: str = "no_eviction",
+        durability: DurabilityProfile = "volatile",
     ) -> dict[str, Any]:
         return self._create(
             "caches",
             name,
             {
                 "max_entries": max_entries,
+                "max_memory_bytes": max_memory_bytes,
+                "max_cold_bytes": max_cold_bytes,
                 "default_ttl_ms": default_ttl_ms,
                 "eviction": eviction,
-                "durability": "volatile",
+                "durability": durability,
             },
         )
 

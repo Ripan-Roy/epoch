@@ -108,6 +108,24 @@ function profileFields(profile: CreateProfile, prefix: string): ReactNode {
               optional
             />
           </div>
+          <div className="field-row">
+            <NumberField
+              id={`${prefix}-max-memory-bytes`}
+              label="Memory bytes"
+              name="max_memory_bytes"
+              placeholder="Entry limit only"
+              min={1}
+              optional
+            />
+            <NumberField
+              id={`${prefix}-max-cold-bytes`}
+              label="Cold-class bytes"
+              name="max_cold_bytes"
+              placeholder="Disabled"
+              min={1}
+              optional
+            />
+          </div>
           <label className="field" htmlFor={`${prefix}-eviction`}>
             <span>Eviction policy</span>
             <select id={`${prefix}-eviction`} name="eviction" defaultValue="no_eviction">
@@ -281,6 +299,8 @@ function buildConfig(profile: CreateProfile, formData: FormData): ResourceConfig
     case "cache":
       return {
         max_entries: readPositiveInteger(formData, "max_entries"),
+        max_memory_bytes: readOptionalPositiveInteger(formData, "max_memory_bytes"),
+        max_cold_bytes: readOptionalPositiveInteger(formData, "max_cold_bytes"),
         default_ttl_ms: readOptionalPositiveInteger(formData, "default_ttl_ms"),
         durability: "volatile",
         eviction: readString(formData, "eviction") as CacheConfig["eviction"],

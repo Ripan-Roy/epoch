@@ -595,10 +595,17 @@ revision, non-repeating item versions, staged same-shard transactions,
 deterministic expiry, committed-order effective time, and composite fenced locks
 rebuild from EPRS before readiness. Writes require expected-current-term
 admission and majority persistence before the local profile receipt is returned.
-Its catalog-bound configuration selects entry capacity, default TTL, and one of
+Its catalog-bound configuration selects entry and memory/cold byte capacity,
+named durability, default TTL, and one of
 the no-eviction/all-key/volatile LRU, LFU, random, or TTL policies. Committed
 `Get` supplies deterministic access metadata; the atomic-batch SDK aliases the
-existing ordered one-to-128 transaction command.
+existing ordered one-to-128 transaction command. A separate `Multiplex` request
+returns ordered correlations for independently committed mutations. Typed
+collection/advanced transforms, exact advanced queries, a replicated bounded
+change cursor, canonical resource-local backup/PITR, and a node-local
+at-most-once Pub/Sub hub share the regional route. Cold-class reads use a
+voter-local fsynced file synchronized after commit; canonical state remains in
+the tablet image.
 Direct profile reads remain explicitly local and stale-capable. The regional
 resource/shard boundary now implements the general rule above: reads default to
 a safe leader ReadIndex and expose barrier term/read/applied evidence, while an
@@ -625,7 +632,7 @@ webhook/Queue/Stream/HTTP side effect. See
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 Epoch does **not** yet provide a production clustered durability contract,
-dynamic regional placement/membership, user-exportable backups/PITR,
+dynamic regional placement/membership, managed scheduled/encrypted backup/PITR,
 consumer-group coordination, bounded transactions, object tier, geo
 replication, native Protobuf data services, compatibility gateways, durable
 webhook delivery, connector execution, or the production security controls in
@@ -648,9 +655,9 @@ signed webhook and Epoch Queue/Stream target execution. See
 [REGIONAL_EVENT_BUS_SDK.md](REGIONAL_EVENT_BUS_SDK.md),
 [STREAM_TABLET.md](STREAM_TABLET.md), and
 [QUEUE_TABLET.md](QUEUE_TABLET.md).
-The Cache tablet additionally lacks user-exportable backup/PITR, byte-pressure
-capacity accounting, automatic client-side batch coalescing/native multiplexing,
-multi-shard routing, and a public idempotency-retention contract; see
+The Cache tablet additionally lacks automatic client-side batch coalescing,
+multi-shard routing, RESP compatibility, heap-offloading flash capacity, a
+production latency/throughput SLO, and a public idempotency-retention contract; see
 [CACHE_TABLET.md](CACHE_TABLET.md).
 The direct Bus profile additionally lacks target executors. The regional
 workers execute signed HTTP/webhook and Epoch Queue/Stream targets; unsigned

@@ -19,6 +19,10 @@ checksummed, rotating, single-node journal and replayed on restart. This is not
 replication, a standalone snapshot/compaction system, or protection from total
 machine loss.
 
+Epoch is available under the [MIT License](LICENSE). See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the TDD, clean-code, verification, and
+feature pull-request workflow.
+
 An opt-in regional alpha also runs a three-voter catalog plus several
 profile-specific consensus groups in each Rust node. It is fixed-topology
 engineering evidence, not a production or multi-zone guarantee. Its replicated
@@ -360,7 +364,7 @@ These ports are development defaults, not a public compatibility promise.
 
 ## License and name
 
-The open-source/commercial boundary and license have not been selected. Epoch is
-also a working name pending formal trademark, domain, repository, and package
-registry clearance. Do not publish packages or artifacts before those decisions
-are recorded.
+The repository source is licensed under MIT. Epoch remains a working name
+pending formal trademark, domain, and package-registry clearance. Package
+publication is intentionally deferred until its release, provenance, and
+support gates are complete.

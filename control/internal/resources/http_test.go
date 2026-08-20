@@ -449,17 +449,26 @@ func TestRegionalResourceForBrowserExposesSafeCacheConfiguration(t *testing.T) {
 			"configuration":{
 				"shard_count":1,
 				"max_entries":32,
+				"max_memory_bytes":1048576,
+				"max_cold_bytes":4194304,
 				"default_ttl_ms":60000,
-				"eviction":"all_keys_lru"
+				"eviction":"all_keys_lru",
+				"durability":"quorum_durable"
 			}
 		}`),
 	})
 
 	if view.CacheConfiguration == nil ||
 		view.CacheConfiguration.MaxEntriesPerShard != 32 ||
+		view.CacheConfiguration.MaxMemoryBytesPerShard == nil ||
+		*view.CacheConfiguration.MaxMemoryBytesPerShard != 1_048_576 ||
+		view.CacheConfiguration.MaxColdBytesPerShard == nil ||
+		*view.CacheConfiguration.MaxColdBytesPerShard != 4_194_304 ||
 		view.CacheConfiguration.DefaultTTLMS == nil ||
 		*view.CacheConfiguration.DefaultTTLMS != 60_000 ||
-		view.CacheConfiguration.Eviction != "all_keys_lru" {
+		view.CacheConfiguration.Eviction != "all_keys_lru" ||
+		view.CacheConfiguration.Durability != "quorum_durable" ||
+		view.CacheConfiguration.ColdLatencyDisclosure != "observed_local_file_read_micros_not_an_slo" {
 		t.Fatalf("cache configuration = %+v", view.CacheConfiguration)
 	}
 }

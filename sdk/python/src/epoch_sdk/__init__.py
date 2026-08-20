@@ -26,7 +26,9 @@ from .regional_cache import (
     RegionalCacheClient,
     RegionalCacheExpectation,
     RegionalCacheLockGuard,
+    RegionalCacheMultiplexMutation,
     RegionalCacheMutation,
+    RegionalCacheTransform,
     RegionalCacheValue,
 )
 from .regional_queue import RegionalQueueClient
@@ -46,7 +48,9 @@ __all__ = [
     "RegionalCacheClient",
     "RegionalCacheExpectation",
     "RegionalCacheLockGuard",
+    "RegionalCacheMultiplexMutation",
     "RegionalCacheMutation",
+    "RegionalCacheTransform",
     "RegionalCacheValue",
     "RegionalQueueClient",
     "RegionalScope",

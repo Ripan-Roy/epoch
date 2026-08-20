@@ -14,12 +14,23 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use epoch_core::{DurabilityProfile, EpochError, EpochResult};
 use serde::{Deserialize, Serialize};
 
+mod advanced;
 mod replicated;
 
+pub use advanced::{
+    CacheBitmap, CacheBloomFilter, CacheCardinality, CacheCuckooFilter, CacheGeoHit, CacheGeoIndex,
+    CacheGeoPoint, CacheJsonDocument, CacheJsonHit, CacheJsonIndex, CacheVectorDocument,
+    CacheVectorHit, CacheVectorIndex, MAX_CACHE_BITMAP_BITS, MAX_CACHE_FILTER_BITS,
+    MAX_CACHE_GEO_POINTS, MAX_CACHE_JSON_BYTES, MAX_CACHE_JSON_INDEX_BYTES,
+    MAX_CACHE_JSON_INDEX_DOCUMENTS, MAX_CACHE_JSON_INDEX_POINTERS, MAX_CACHE_VECTOR_DIMENSIONS,
+    MAX_CACHE_VECTOR_DOCUMENTS,
+};
 pub use replicated::{
-    CACHE_SHARD_SNAPSHOT_FORMAT_VERSION, CacheExpiryResult, CacheMutation, CacheMutationResult,
-    CacheObservation, CacheShard, CacheTransaction, CacheTransactionResult,
-    MAX_CACHE_ATOMIC_OPERATIONS, MAX_CACHE_MAINTENANCE_KEYS, MAX_CACHE_SHARD_SNAPSHOT_BYTES,
+    CACHE_SHARD_SNAPSHOT_FORMAT_VERSION, CacheBackupMetadata, CacheChange, CacheChangeKind,
+    CacheExpiryResult, CacheMutation, CacheMutationResult, CacheObservation, CacheRestoreResult,
+    CacheShard, CacheTransaction, CacheTransactionResult, CacheTransform,
+    MAX_CACHE_ATOMIC_OPERATIONS, MAX_CACHE_BACKUP_BYTES, MAX_CACHE_CHANGE_RECORDS,
+    MAX_CACHE_MAINTENANCE_KEYS, MAX_CACHE_SHARD_SNAPSHOT_BYTES,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -37,6 +48,14 @@ pub enum CacheValue {
     List(Vec<String>),
     Set(BTreeSet<String>),
     SortedSet(BTreeMap<String, f64>),
+    Bitmap(CacheBitmap),
+    Cardinality(CacheCardinality),
+    Bloom(CacheBloomFilter),
+    Cuckoo(CacheCuckooFilter),
+    Geo(CacheGeoIndex),
+    Json(CacheJsonDocument),
+    JsonIndex(CacheJsonIndex),
+    Vector(CacheVectorIndex),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -53,9 +72,21 @@ pub enum EvictionPolicy {
     VolatileTtl,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheStorageClass {
+    #[default]
+    Memory,
+    Cold,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheConfig {
     pub max_entries: usize,
+    #[serde(default)]
+    pub max_memory_bytes: Option<usize>,
+    #[serde(default)]
+    pub max_cold_bytes: Option<usize>,
     pub default_ttl_ms: Option<u64>,
     pub eviction: EvictionPolicy,
     pub durability: DurabilityProfile,
@@ -65,6 +96,8 @@ impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             max_entries: 10_000,
+            max_memory_bytes: None,
+            max_cold_bytes: None,
             default_ttl_ms: None,
             eviction: EvictionPolicy::NoEviction,
             durability: DurabilityProfile::Volatile,
@@ -79,6 +112,8 @@ pub struct SetOptions {
     pub expected_version: Option<u64>,
     pub only_if_absent: bool,
     pub only_if_present: bool,
+    #[serde(default)]
+    pub storage_class: CacheStorageClass,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -86,6 +121,8 @@ pub struct CacheItem {
     pub value: CacheValue,
     pub version: u64,
     pub expires_at_ms: Option<u64>,
+    #[serde(default)]
+    pub storage_class: CacheStorageClass,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +150,7 @@ struct Entry {
     last_access_ms: u64,
     accesses: u64,
     insertion_sequence: u64,
+    storage_class: CacheStorageClass,
 }
 
 #[derive(Debug)]
@@ -128,6 +166,11 @@ impl Cache {
         if config.max_entries == 0 {
             return Err(EpochError::InvalidArgument(
                 "cache max_entries must be greater than zero".into(),
+            ));
+        }
+        if config.max_memory_bytes == Some(0) || config.max_cold_bytes == Some(0) {
+            return Err(EpochError::InvalidArgument(
+                "cache byte capacities must be greater than zero when configured".into(),
             ));
         }
         Ok(Self {
@@ -193,6 +236,7 @@ impl Cache {
                 last_access_ms: now_ms,
                 accesses: 0,
                 insertion_sequence: self.sequence,
+                storage_class: options.storage_class,
             },
         );
         self.record_event(key, CacheEventKind::Set, now_ms);
@@ -200,6 +244,7 @@ impl Cache {
             value,
             version,
             expires_at_ms,
+            storage_class: options.storage_class,
         })
     }
 
@@ -212,6 +257,7 @@ impl Cache {
                 value: entry.value.clone(),
                 version: entry.version,
                 expires_at_ms: entry.expires_at_ms,
+                storage_class: entry.storage_class,
             }
         })
     }

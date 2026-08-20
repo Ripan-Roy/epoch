@@ -655,8 +655,11 @@ def create_managed_cache(cluster: RegionalCluster, resource: Resource) -> None:
     spec["configuration"] = {
         "shard_count": 1,
         "max_entries": 12,
+        "max_memory_bytes": 262_144,
+        "max_cold_bytes": 262_144,
         "default_ttl_ms": None,
         "eviction": "all_keys_lru",
+        "durability": "quorum_durable",
     }
     response = cluster.control_request("PUT", "/v1/resources", request)
     assert response.status == 201, response
@@ -665,8 +668,12 @@ def create_managed_cache(cluster: RegionalCluster, resource: Resource) -> None:
     )
     assert managed.get("cache_configuration") == {
         "max_entries_per_shard": 12,
+        "max_memory_bytes_per_shard": 262_144,
+        "max_cold_bytes_per_shard": 262_144,
         "default_ttl_ms": None,
         "eviction": "all_keys_lru",
+        "durability": "quorum_durable",
+        "cold_latency_disclosure": "observed_local_file_read_micros_not_an_slo",
     }, managed
 
 
@@ -1737,6 +1744,223 @@ def prove_python_sdk_native_cache_after_failover(
         is None
     )
 
+    cold = cache_result(
+        client.set(
+            resource.name,
+            0,
+            "python-cache-cold-profile",
+            "cold-profile",
+            epoch_sdk.RegionalCacheValue.string("archive"),
+            storage_class="cold",
+        ),
+        "set",
+    )
+    assert cold.get("item", {}).get("storage_class") == "cold", cold
+    cold_observation = client.observe(resource.name, 0, "cold-profile")
+    assert (
+        cold_observation.get("observation", {}).get("item", {}).get("storage_class")
+        == "cold"
+    ), cold_observation
+    status = client.status(resource.name, 0)
+    assert status.get("requested_durability") == "quorum_durable", status
+    assert status.get("achieved_durability") == "quorum_durable", status
+    assert status.get("max_memory_bytes") == "262144", status
+    assert status.get("max_cold_bytes") == "262144", status
+    assert int(status.get("retained_cold_bytes", "0")) > 0, status
+    assert status.get("cold_storage_backend") == "local_fsync_file_read_path", status
+    assert int(status.get("cold_read_count", "0")) >= 1, status
+    assert (
+        status.get("cold_read_latency_disclosure")
+        == "observed_local_file_read_micros_not_an_slo"
+    ), status
+
+    backup = client.backup(resource.name, 0)
+    assert backup.get("captured_revision") == "13", backup
+    artifact = backup.get("artifact_base64")
+    assert isinstance(artifact, str) and artifact, backup
+    cache_result(
+        client.set(
+            resource.name,
+            0,
+            "python-cache-restore-temp",
+            "restore-temp",
+            epoch_sdk.RegionalCacheValue.string("remove-me"),
+        ),
+        "set",
+    )
+    restored = cache_result(
+        client.restore(
+            resource.name,
+            0,
+            "python-cache-restore-revision-13",
+            artifact,
+            13,
+        ),
+        "restored",
+    )
+    assert restored.get("restored_from_revision") == "13", restored
+    assert (
+        client.observe(resource.name, 0, "restore-temp")
+        .get("observation", {})
+        .get("item")
+        is None
+    )
+
+    advanced_operations = [
+        ("flags", "bitmap_set", {"bit": 7, "value": True}),
+        ("unique-users", "cardinality_add", {"value": [117, 49], "precision": 8}),
+        (
+            "seen",
+            "bloom_add",
+            {"value": [111, 114, 100, 101, 114], "bit_count": 256, "hashes": 3},
+        ),
+        (
+            "blocked",
+            "cuckoo_add",
+            {"value": [98, 111, 116], "bucket_count": 16, "bucket_size": 2},
+        ),
+        (
+            "places",
+            "geo_upsert",
+            {
+                "member": "blr",
+                "point": {
+                    "longitude_microdegrees": 77_594_600,
+                    "latitude_microdegrees": 12_971_600,
+                },
+            },
+        ),
+        ("profile-json", "json_set", {"pointer": "/role", "value": "admin"}),
+        (
+            "profiles-index",
+            "json_index_upsert",
+            {
+                "id": "user-1",
+                "document": {"value": {"role": "admin", "active": True}},
+                "indexed_pointers": ["/role"],
+            },
+        ),
+        (
+            "semantic-index",
+            "vector_upsert",
+            {
+                "id": "doc-1",
+                "document": {
+                    "vector": [1.0, 0.0],
+                    "text": "checkout order",
+                    "metadata": {"tenant": "acme"},
+                },
+            },
+        ),
+    ]
+    for index, (key, kind, fields) in enumerate(advanced_operations, start=1):
+        transformed = cache_result(
+            client.transform(
+                resource.name,
+                0,
+                f"python-cache-advanced-{index}",
+                key,
+                epoch_sdk.RegionalCacheTransform(kind, fields),
+            ),
+            "transformed",
+        )
+        assert transformed.get("changed") is True, transformed
+
+    assert client.query(resource.name, 0, "bitmap_get", {"key": "flags", "bit": 7}).get(
+        "result"
+    ) == {"kind": "bitmap", "value": True, "count": "1"}
+    assert client.query(
+        resource.name,
+        0,
+        "bloom_contains",
+        {"key": "seen", "value": [111, 114, 100, 101, 114]},
+    ).get("result") == {"kind": "membership", "contains": True}
+    geo = client.query(
+        resource.name,
+        0,
+        "geo_radius",
+        {
+            "key": "places",
+            "center": {
+                "longitude_microdegrees": 77_594_600,
+                "latitude_microdegrees": 12_971_600,
+            },
+            "radius_meters": 1.0,
+            "limit": 10,
+        },
+    )
+    assert geo.get("result", {}).get("hits", [{}])[0].get("member") == "blr", geo
+    json_hits = client.query(
+        resource.name,
+        0,
+        "json_search",
+        {"key": "profiles-index", "pointer": "/role", "value": "admin", "limit": 10},
+    )
+    assert json_hits.get("result", {}).get("hits", [{}])[0].get("id") == "user-1", (
+        json_hits
+    )
+    vector_hits = client.query(
+        resource.name,
+        0,
+        "vector_search",
+        {
+            "key": "semantic-index",
+            "query_vector": [1.0, 0.0],
+            "query_text": "checkout",
+            "vector_weight": 0.8,
+            "filters": {"tenant": "acme"},
+            "limit": 10,
+        },
+    )
+    assert vector_hits.get("result", {}).get("hits", [{}])[0].get("id") == "doc-1", (
+        vector_hits
+    )
+
+    changes = client.changes(resource.name, 0, 1, limit=100)
+    assert len(changes.get("changes", [])) >= 20, changes
+    subscription = client.create_subscription(
+        resource.name, 0, channels=["audit"], patterns=["orders.*"]
+    )
+    assert subscription.get("delivery_semantics") == "at_most_once", subscription
+    assert subscription.get("node_affinity_required") is True, subscription
+    subscription_id = subscription.get("subscription_id")
+    assert isinstance(subscription_id, str), subscription
+    published = client.publish(resource.name, 0, "audit", {"id": 1})
+    assert published.get("delivered_subscriptions") == 1, published
+    polled = client.poll_subscription(resource.name, 0, subscription_id, limit=10)
+    assert polled.get("delivery_semantics") == "at_most_once", polled
+    assert polled.get("messages", [{}])[0].get("payload") == {"id": 1}, polled
+    deleted = client.delete_subscription(resource.name, 0, subscription_id)
+    assert deleted.get("deleted") is True, deleted
+    multiplexed = client.multiplex(
+        resource.name,
+        0,
+        [
+            epoch_sdk.RegionalCacheMultiplexMutation(
+                "pipeline-profile",
+                "python-cache-multiplex-profile",
+                epoch_sdk.RegionalCacheMutation.set(
+                    "pipeline-profile", epoch_sdk.RegionalCacheValue.string("ready")
+                ),
+            ),
+            epoch_sdk.RegionalCacheMultiplexMutation(
+                "pipeline-count",
+                "python-cache-multiplex-count",
+                epoch_sdk.RegionalCacheMutation.increment("pipeline-count", 1),
+            ),
+        ],
+    )
+    assert multiplexed.get("atomic") is False, multiplexed
+    assert multiplexed.get("ordering") == "request_order_independent_outcomes", (
+        multiplexed
+    )
+    assert [
+        result.get("correlation_id") for result in multiplexed.get("results", [])
+    ] == [
+        "pipeline-profile",
+        "pipeline-count",
+    ], multiplexed
+
 
 def prove_python_sdk_native_queue_after_failover(
     cluster: RegionalCluster,
@@ -1981,10 +2205,10 @@ def run_campaign(cluster: RegionalCluster) -> None:
     assert cache_new_leader != cache_old_leader
     assert cache_new_term > cache_old_term
     prove_python_sdk_native_cache_after_failover(cluster, cache)
-    wait_for_profile_apply(cluster, cache, 15, cache_survivors)
+    wait_for_profile_apply(cluster, cache, 28, cache_survivors)
     cluster.start_node(cache_old_leader)
     wait_for_nodes(cluster)
-    wait_for_profile_apply(cluster, cache, 15)
+    wait_for_profile_apply(cluster, cache, 28)
 
     bus = next(resource for resource in RESOURCES if resource.kind == "event-bus")
     bus_old_leader, bus_old_term = wait_for_routes(cluster, bus)
@@ -2020,7 +2244,7 @@ def run_campaign(cluster: RegionalCluster) -> None:
         expected = (
             12
             if resource == queue
-            else 15
+            else 28
             if resource == cache
             else 8
             if resource == bus

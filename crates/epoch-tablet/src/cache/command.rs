@@ -2,7 +2,11 @@
 
 use std::collections::BTreeSet;
 
-use epoch_cache::{CacheValue, MAX_CACHE_ATOMIC_OPERATIONS as ENGINE_MAX_CACHE_ATOMIC_OPERATIONS};
+use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+use epoch_cache::{
+    CacheTransform, CacheValue, MAX_CACHE_ATOMIC_OPERATIONS as ENGINE_MAX_CACHE_ATOMIC_OPERATIONS,
+    MAX_CACHE_BACKUP_BYTES,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{proposal_id_from_domain, validate_idempotency_key};
@@ -10,6 +14,7 @@ use crate::{TabletError, TabletResult, TabletScope};
 
 pub const CACHE_TABLET_COMMAND_FORMAT_VERSION: u16 = 1;
 pub const CACHE_TABLET_ACCESS_COMMAND_FORMAT_VERSION: u16 = 2;
+pub const CACHE_TABLET_RESTORE_COMMAND_FORMAT_VERSION: u16 = 3;
 pub const MAX_CACHE_TABLET_COMMAND_BYTES: usize = 512 * 1024;
 pub const MAX_CACHE_KEY_BYTES: usize = 1_024;
 pub const MAX_CACHE_OWNER_BYTES: usize = 256;
@@ -46,11 +51,13 @@ pub enum CacheTabletOperation {
     CompareAndSet(CacheCompareAndSetCommand),
     Increment(CacheIncrementCommand),
     Get(CacheGetCommand),
+    Transform(CacheTransformCommand),
     Transaction(CacheTransactionCommand),
     AcquireLock(CacheAcquireLockCommand),
     RenewLock(CacheRenewLockCommand),
     ReleaseLock(CacheReleaseLockCommand),
     Maintain(CacheMaintainCommand),
+    Restore(CacheRestoreCommand),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -110,6 +117,17 @@ pub struct CacheGetCommand {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CacheTransformCommand {
+    pub shard: u32,
+    pub key: String,
+    pub transform: CacheTransform,
+    pub expected_version: Option<u64>,
+    pub ttl_ms: Option<u64>,
+    pub lock_guard: Option<CacheLockGuard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CacheTransactionCommand {
     pub shard: u32,
     pub expected_revision: u64,
@@ -138,6 +156,12 @@ pub enum CacheTransactionMutation {
     Increment {
         key: String,
         delta: i64,
+        expected_version: Option<u64>,
+        ttl_ms: Option<u64>,
+    },
+    Transform {
+        key: String,
+        transform: CacheTransform,
         expected_version: Option<u64>,
         ttl_ms: Option<u64>,
     },
@@ -188,6 +212,14 @@ pub struct CacheLockGuard {
 pub struct CacheMaintainCommand {
     pub shard: u32,
     pub max_expirations: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheRestoreCommand {
+    pub shard: u32,
+    pub backup_base64: String,
+    pub target_revision: u64,
 }
 
 impl CacheTabletCommand {
@@ -277,6 +309,7 @@ impl CacheTabletOperation {
     const fn format_version(&self) -> u16 {
         match self {
             Self::Get(_) => CACHE_TABLET_ACCESS_COMMAND_FORMAT_VERSION,
+            Self::Restore(_) | Self::Transform(_) => CACHE_TABLET_RESTORE_COMMAND_FORMAT_VERSION,
             Self::Set(_)
             | Self::Delete(_)
             | Self::CompareAndSet(_)
@@ -321,6 +354,17 @@ impl CacheTabletOperation {
                 validate_key(&command.key)?;
                 command.shard
             }
+            Self::Transform(command) => {
+                validate_key(&command.key)?;
+                if command.expected_version == Some(0) {
+                    return Err(TabletError::InvalidCommand(
+                        "transform expected_version must be non-zero when provided".into(),
+                    ));
+                }
+                validate_ttl(command.ttl_ms)?;
+                validate_optional_guard(command.lock_guard.as_ref())?;
+                command.shard
+            }
             Self::Transaction(command) => {
                 validate_transaction(command)?;
                 command.shard
@@ -353,6 +397,22 @@ impl CacheTabletOperation {
                 }
                 command.shard
             }
+            Self::Restore(command) => {
+                if command.target_revision == 0 {
+                    return Err(TabletError::InvalidCommand(
+                        "Cache restore target_revision must be non-zero".into(),
+                    ));
+                }
+                let backup = STANDARD_NO_PAD
+                    .decode(&command.backup_base64)
+                    .map_err(|error| TabletError::InvalidCommand(error.to_string()))?;
+                if backup.is_empty() || backup.len() > MAX_CACHE_BACKUP_BYTES {
+                    return Err(TabletError::InvalidCommand(format!(
+                        "Cache restore backup must be between 1 and {MAX_CACHE_BACKUP_BYTES} bytes"
+                    )));
+                }
+                command.shard
+            }
         };
         if shard != 0 {
             return Err(TabletError::InvalidCommand(
@@ -369,7 +429,8 @@ impl CacheTransactionMutation {
             Self::Set { key, .. }
             | Self::Delete { key, .. }
             | Self::CompareAndSet { key, .. }
-            | Self::Increment { key, .. } => key,
+            | Self::Increment { key, .. }
+            | Self::Transform { key, .. } => key,
         }
     }
 
@@ -399,6 +460,18 @@ impl CacheTransactionMutation {
                 validate_ttl(*ttl_ms)
             }
             Self::Increment { ttl_ms, .. } => validate_ttl(*ttl_ms),
+            Self::Transform {
+                expected_version,
+                ttl_ms,
+                ..
+            } => {
+                if *expected_version == Some(0) {
+                    return Err(TabletError::InvalidCommand(
+                        "transform expected_version must be non-zero when provided".into(),
+                    ));
+                }
+                validate_ttl(*ttl_ms)
+            }
         }
     }
 }
@@ -560,6 +633,14 @@ fn validate_value(value: &CacheValue) -> TabletResult<()> {
             }
             Ok(())
         }
+        CacheValue::Bitmap(value) => value.validate().map_err(TabletError::Profile),
+        CacheValue::Cardinality(value) => value.validate().map_err(TabletError::Profile),
+        CacheValue::Bloom(value) => value.validate().map_err(TabletError::Profile),
+        CacheValue::Cuckoo(value) => value.validate().map_err(TabletError::Profile),
+        CacheValue::Geo(value) => value.validate().map_err(TabletError::Profile),
+        CacheValue::Json(value) => value.validate().map_err(TabletError::Profile),
+        CacheValue::JsonIndex(value) => value.validate().map_err(TabletError::Profile),
+        CacheValue::Vector(value) => value.validate().map_err(TabletError::Profile),
     }
 }
 

@@ -33,7 +33,7 @@ use axum::{
     routing::{get, post, put},
 };
 use epoch_bus::{ArchivedEvent, BusConfig, EventFilter, Subscription};
-use epoch_cache::{CacheConfig, CacheItem, CacheValue, SetOptions};
+use epoch_cache::{CacheConfig, CacheItem, CacheStorageClass, CacheValue, SetOptions};
 use epoch_core::{EpochError, EpochResult, EventEnvelope};
 use epoch_engine::{BusPublishOutcome, EngineHealth, EpochEngine, ResourceSummary};
 use epoch_queue::{Delivery, EnqueueReceipt, QueueConfig, QueueCounts};
@@ -248,6 +248,8 @@ struct CachePutRequest {
     only_if_absent: bool,
     #[serde(default)]
     only_if_present: bool,
+    #[serde(default)]
+    storage_class: CacheStorageClass,
 }
 
 async fn cache_put(
@@ -265,6 +267,7 @@ async fn cache_put(
             expected_version: request.expected_version,
             only_if_absent: request.only_if_absent,
             only_if_present: request.only_if_present,
+            storage_class: request.storage_class,
         },
         now,
     )?;

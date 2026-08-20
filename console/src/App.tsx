@@ -31,7 +31,7 @@ import { profileDefinitions } from "./profileDefinitions";
 
 const refreshIntervalMs = 15_000;
 const docsOnly = import.meta.env.VITE_DOCS_ONLY === "true";
-const releaseVersion = "0.1.0-alpha.5";
+const releaseVersion = "0.1.0-alpha.6";
 
 const durabilityRank: Record<DurabilityProfile, number> = {
   volatile: 0,
@@ -514,6 +514,19 @@ function EpochApp() {
                               <span className="resource-generation-detail">
                                 {formatEnum(resource.cacheConfiguration.eviction)} ·{" "}
                                 {resource.cacheConfiguration.maxEntriesPerShard} entries/shard ·{" "}
+                                {resource.cacheConfiguration.maxMemoryBytesPerShard === null
+                                  ? "memory bytes unbounded"
+                                  : `${resource.cacheConfiguration.maxMemoryBytesPerShard} memory bytes/shard`}
+                                {" · "}
+                                {resource.cacheConfiguration.maxColdBytesPerShard === null
+                                  ? "cold class disabled"
+                                  : `${resource.cacheConfiguration.maxColdBytesPerShard} cold-class bytes/shard`}
+                                {" · "}
+                                {formatEnum(resource.cacheConfiguration.durability)} requested ·{" "}
+                                {resource.cacheConfiguration.coldLatencyDisclosure === "disabled"
+                                  ? "cold latency unavailable"
+                                  : "cold reads report observed local-file microseconds; no SLO"}
+                                {" · "}
                                 {resource.cacheConfiguration.defaultTTLMS === null
                                   ? "no default TTL"
                                   : `${resource.cacheConfiguration.defaultTTLMS} ms default TTL`}

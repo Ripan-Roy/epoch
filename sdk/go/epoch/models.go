@@ -25,14 +25,17 @@ const (
 
 // CacheConfig configures a standalone Cache profile.
 type CacheConfig struct {
-	MaxEntries   uint64
-	DefaultTTLMS *uint64
-	Eviction     string
+	MaxEntries     uint64
+	MaxMemoryBytes *uint64
+	MaxColdBytes   *uint64
+	DefaultTTLMS   *uint64
+	Eviction       string
+	Durability     DurabilityProfile
 }
 
 // DefaultCacheConfig returns the standalone Cache defaults.
 func DefaultCacheConfig() CacheConfig {
-	return CacheConfig{MaxEntries: 10_000, Eviction: "no_eviction"}
+	return CacheConfig{MaxEntries: 10_000, Eviction: "no_eviction", Durability: Volatile}
 }
 
 // StreamConfig configures a standalone Stream profile.

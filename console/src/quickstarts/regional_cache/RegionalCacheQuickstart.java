@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.epoch.sdk.RegionalCacheClient;
 import io.epoch.sdk.RegionalCacheExpectation;
 import io.epoch.sdk.RegionalCacheLockGuard;
+import io.epoch.sdk.RegionalCacheMultiplexMutation;
 import io.epoch.sdk.RegionalCacheMutation;
 import io.epoch.sdk.RegionalCacheValue;
 import io.epoch.sdk.RegionalScope;
@@ -127,6 +128,71 @@ public final class RegionalCacheQuickstart {
             null);
     Thread.sleep(10);
     JsonNode maintained = client.maintain("sessions", 0, "docs-java-cache-maintain-v1", 100);
+    JsonNode cold =
+        client.set(
+            "sessions",
+            0,
+            "docs-java-cache-cold-v1",
+            "profile-archive",
+            RegionalCacheValue.string("alice-archive"),
+            null,
+            null,
+            "cold");
+    JsonNode backup = client.backup("sessions", 0);
+    BigInteger capturedRevision = new BigInteger(backup.path("captured_revision").asText());
+    client.set(
+        "sessions",
+        0,
+        "docs-java-cache-restore-scratch-" + capturedRevision,
+        "restore-scratch",
+        RegionalCacheValue.string("remove-me"),
+        null,
+        null);
+    JsonNode restored =
+        client.restore(
+            "sessions",
+            0,
+            "docs-java-cache-restore-" + capturedRevision,
+            backup.path("artifact_base64").asText(),
+            capturedRevision);
+    JsonNode bitmap =
+        client.transform(
+            "sessions",
+            0,
+            "docs-java-cache-bitmap-v1",
+            "feature-flags",
+            "bitmap_set",
+            Map.of("bit", 7, "value", true),
+            null,
+            null,
+            null);
+    JsonNode bitmapQuery =
+        client.query(
+            "sessions", 0, "bitmap_get", Map.of("key", "feature-flags", "bit", 7));
+    JsonNode multiplexed =
+        client.multiplex(
+            "sessions",
+            0,
+            List.of(
+                new RegionalCacheMultiplexMutation(
+                    "presence",
+                    "docs-java-cache-multiplex-presence-v1",
+                    RegionalCacheMutation.set(
+                        "presence", RegionalCacheValue.string("online"), null)),
+                new RegionalCacheMultiplexMutation(
+                    "notifications",
+                    "docs-java-cache-multiplex-notifications-v1",
+                    RegionalCacheMutation.increment("notifications", 1, null, null))));
+    JsonNode subscription =
+        client.createSubscription(
+            "sessions", 0, List.of("session.audit"), List.of("session.*"));
+    String subscriptionId = subscription.path("subscription_id").asText();
+    JsonNode published =
+        client.publish("sessions", 0, "session.audit", Map.of("profile", "alice"));
+    JsonNode polled = client.pollSubscription("sessions", 0, subscriptionId, 10);
+    JsonNode deletedSubscription =
+        client.deleteSubscription("sessions", 0, subscriptionId);
+    JsonNode changes = client.changes("sessions", 0, BigInteger.ONE, 100);
 
     ObjectNode output = MAPPER.createObjectNode();
     output.set("set", written);
@@ -138,6 +204,17 @@ public final class RegionalCacheQuickstart {
     output.set("release", released);
     output.set("ttl", ephemeral);
     output.set("maintain", maintained);
+    output.set("cold", cold);
+    output.set("backup", backup);
+    output.set("restore", restored);
+    output.set("bitmap", bitmap);
+    output.set("bitmap_query", bitmapQuery);
+    output.set("multiplex", multiplexed);
+    output.set("subscription", subscription);
+    output.set("publish", published);
+    output.set("poll", polled);
+    output.set("delete_subscription", deletedSubscription);
+    output.set("changes", changes);
     output.set("profile", client.observe("sessions", 0, "profile"));
     output.set("status", client.status("sessions", 0));
     System.out.println(MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(output));

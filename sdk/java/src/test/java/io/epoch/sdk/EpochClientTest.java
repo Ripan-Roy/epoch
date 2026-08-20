@@ -109,6 +109,24 @@ final class EpochClientTest {
   }
 
   @Test
+  void createsCacheWithTierLimitsAndNamedDurability() throws Exception {
+    client.createCache(
+        "sessions",
+        new CacheConfig(
+            20_000,
+            1_048_576L,
+            4_194_304L,
+            null,
+            "all_keys_lru",
+            DurabilityProfile.REPLICATED_MEMORY));
+
+    JsonNode body = transport.requests.getFirst().body();
+    assertEquals(1_048_576L, body.get("max_memory_bytes").longValue());
+    assertEquals(4_194_304L, body.get("max_cold_bytes").longValue());
+    assertEquals("replicated_memory", body.get("durability").textValue());
+  }
+
+  @Test
   void mapsQueueLifecycleOperations() throws Exception {
     EventEnvelope event = EventEnvelope.builder("tests", "job.created", Map.of()).build();
     client.send("jobs", event);

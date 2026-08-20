@@ -165,8 +165,12 @@ export function mapRegionalInventory(resource: ManagedRegionalResource): Regiona
     cacheConfiguration: resource.cache_configuration
       ? {
           maxEntriesPerShard: resource.cache_configuration.max_entries_per_shard,
+          maxMemoryBytesPerShard: resource.cache_configuration.max_memory_bytes_per_shard,
+          maxColdBytesPerShard: resource.cache_configuration.max_cold_bytes_per_shard,
           defaultTTLMS: resource.cache_configuration.default_ttl_ms,
           eviction: resource.cache_configuration.eviction,
+          durability: resource.cache_configuration.durability,
+          coldLatencyDisclosure: resource.cache_configuration.cold_latency_disclosure,
         }
       : null,
     governance: resource.governance
