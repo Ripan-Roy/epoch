@@ -49,8 +49,10 @@ and [contract guide](../../docs/REGIONAL_STREAM_SDK.md).
 
 `RegionalQueueClient` applies that same discovery, bearer, fence, same-key
 rediscovery, and linearizable-read contract to the complete replicated Queue
-lifecycle. Java exposes `BigInteger` overloads where Queue fields span the
-unsigned 64-bit wire range. See the
+lifecycle, including FIFO session locks, deferred exact receive,
+request/reply correlation, advanced capacity/dispatch state, and the durable
+DLQ forwarding outbox. Java exposes `BigInteger` overloads where Queue fields
+span the unsigned 64-bit wire range. See the
 [complete Queue example](../../console/src/quickstarts/regional_queue/RegionalQueueQuickstart.java)
 and [Queue contract guide](../../docs/REGIONAL_QUEUE_SDK.md).
 

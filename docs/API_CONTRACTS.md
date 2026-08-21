@@ -713,16 +713,19 @@ fencing boundary:
 ```text
 GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/queues/{name}/shards/{shard}
 POST /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/queues/{name}/shards/{shard}/mutations
-GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/queues/{name}/shards/{shard}/{counts|dead-letters|redrives|status}
+GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/queues/{name}/shards/{shard}/{counts|dead-letters|redrives|advanced|dead-letter-forwards|status}
 GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/queues/{name}/shards/{shard}/mutations/{proposal_id}
 GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/queues/{name}/shards/{shard}/consumers/{consumer}/flow
+GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/queues/{name}/shards/{shard}/correlations/{correlation_id}
 ```
 
-The strict mutation union covers enqueue, credit-aware acquire, acknowledge,
-lease extension, release, Nack, Reject, redrive, and maintenance for partition
-`0`. Counts, mutation lookup, histories, consumer flow, and status are
-linearizable SDK reads. This adapter delegates to the same replicated Queue
-tablet and owns no queue state or request translation.
+The strict mutation union covers ordinary/metadata enqueue, ordinary/session
+credit acquire, session-lock renewal/release, defer/exact receive,
+acknowledge, lease extension, release, Nack, Reject, redrive, and maintenance
+for partition `0`. Counts, mutation lookup, histories, consumer flow, advanced
+state, correlation, forwarding outbox, and status are linearizable SDK reads.
+This adapter delegates to the same replicated Queue tablet and owns no queue
+state or request translation.
 
 The versioned regional Cache application route uses the same discovery and
 fencing boundary:
@@ -1123,7 +1126,8 @@ instead mounts a Queue profile and does not mount opaque or Stream routes:
 
 - `POST /experimental/v1/tablets/queue/mutations` submits one strict
   `enqueue`, `acquire`, `acknowledge`, `extend_lease`, `release`, `nack`,
-  `reject`, `redrive`, or `maintain` operation;
+  `reject`, `redrive`, `maintain`, `renew_session_lock`,
+  `release_session_lock`, `defer`, or `receive_deferred` operation;
 - `GET /experimental/v1/tablets/queue/mutations/{proposal_id}` resolves local
   `unknown`, `pending`, or `committed` state;
 - `GET /experimental/v1/tablets/queue/status` reports consensus/profile
@@ -1131,7 +1135,10 @@ instead mounts a Queue profile and does not mount opaque or Stream routes:
 - `GET /experimental/v1/tablets/queue/counts`, `/dead-letters`, and `/redrives`
   expose explicitly local, stale-capable reads that never advance time; and
 - `GET /experimental/v1/tablets/queue/consumers/{consumer}/flow` reports the
-  applied consumer epoch and current live-lease count.
+  applied consumer epoch and current live-lease count; and
+- `GET /experimental/v1/tablets/queue/advanced`,
+  `/correlations/{correlation_id}`, and `/dead-letter-forwards` expose durable
+  capacity/expiry/session/breaker, request/reply, and outbox state.
 
 Every mutation requires a scoped idempotency key and expected term. The leader
 assigns `applied_at_ms = max(wall clock, last profile-applied time)`; clients

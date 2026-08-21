@@ -176,7 +176,7 @@ export const docsPages: ReadonlyArray<DocsPageMeta> = [
     label: "Regional Queue",
     title: "Regional Queue SDK",
     summary:
-      "Run the complete Queue lifecycle through one fenced API: enqueue, acquire, extend, settle, redrive.",
+      "Run sessions, deferred retrieval, correlation, fair dispatch, overflow, and crash-safe DLQ forwarding through one fenced API.",
     headings: regionalHeadings,
     Body: RegionalQueueBody,
   },

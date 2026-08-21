@@ -13,6 +13,7 @@ use epoch_bus::BusConfig;
 use epoch_cache::CacheConfig;
 use epoch_catalog::{ResourceName, ResourceRecord, TabletDescriptor};
 use epoch_core::{Clock, DurabilityProfile, WorkloadProfile};
+use epoch_queue::QueueConfig;
 use epoch_tablet::{
     BusTabletScope, CacheTabletScope, QueueTabletScope, StreamTabletScope, TabletError,
 };
@@ -477,9 +478,10 @@ impl RegionalTabletMaterializer {
                     self.cluster_id.clone(),
                 )?)
             }
-            WorkloadProfile::WorkQueue => PendingTabletService::Queue(
-                QueueTabletService::with_default_config(QueueTabletScope::clone(&scope))?,
-            ),
+            WorkloadProfile::WorkQueue => PendingTabletService::Queue(QueueTabletService::new(
+                QueueTabletScope::clone(&scope),
+                queue_config(&metadata)?,
+            )?),
             WorkloadProfile::EventBus => PendingTabletService::Bus(BusTabletService::new(
                 BusTabletScope::clone(&scope),
                 BusConfig {
@@ -644,6 +646,21 @@ fn cache_config(metadata: &MaterializedTabletMetadata) -> TabletMaterializerResu
     }
 }
 
+fn queue_config(metadata: &MaterializedTabletMetadata) -> TabletMaterializerResult<QueueConfig> {
+    match metadata.configuration.clone() {
+        Some(configuration) => serde_json::from_value(configuration).map_err(|error| {
+            TabletMaterializerError::InvalidCatalog(format!(
+                "Queue tablet {} configuration is invalid: {error}",
+                metadata.descriptor.tablet_id
+            ))
+        }),
+        None => Ok(QueueConfig {
+            durability: DurabilityProfile::QuorumDurable,
+            ..QueueConfig::default()
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -792,6 +809,55 @@ mod tests {
             Arc::new(ManualClock::new(1_000)),
             Duration::from_secs(1),
         )
+    }
+
+    #[test]
+    fn queue_materialization_retains_advanced_catalog_configuration() {
+        let configured: QueueConfig = serde_json::from_value(serde_json::json!({
+            "durability": "quorum_durable",
+            "visibility_timeout_ms": 5000,
+            "max_messages": 100,
+            "retry": {
+                "strategy": "fixed",
+                "initial_delay_ms": 10,
+                "max_delay_ms": 10,
+                "jitter_percent": 0,
+                "max_attempts": 3,
+                "max_age_ms": null
+            },
+            "dedupe_window_ms": 60000,
+            "advanced": {
+                "max_active_bytes": 1_048_576,
+                "overflow": "dead_letter_oldest",
+                "idle_expiry_ms": 600_000,
+                "priority_aging_interval_ms": 10,
+                "dead_letter_target": "failed-jobs"
+            }
+        }))
+        .unwrap();
+        let metadata = MaterializedTabletMetadata {
+            resource: ResourceName::new("acme", "shop", "dev", "core", ResourceKind::Queue, "jobs")
+                .unwrap(),
+            shard_count: 1,
+            configuration: Some(serde_json::to_value(&configured).unwrap()),
+            descriptor: TabletDescriptor {
+                tablet_id: 41,
+                consensus_group_id: 41,
+                shard_index: 0,
+                tablet_epoch: 1,
+                resource_generation: 1,
+                workload_profile: WorkloadProfile::WorkQueue,
+                replica_count: SUPPORTED_REPLICA_COUNT,
+            },
+        };
+
+        assert_eq!(queue_config(&metadata).unwrap(), configured);
+        let mut unconfigured = metadata;
+        unconfigured.configuration = None;
+        assert_eq!(
+            queue_config(&unconfigured).unwrap().durability,
+            DurabilityProfile::QuorumDurable
+        );
     }
 
     #[tokio::test]

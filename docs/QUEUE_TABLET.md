@@ -16,7 +16,7 @@ strict typed HTTP mutation
   -> deterministic scoped proposal ID and leader-assigned time
   -> fixed-three-voter persistent Raft proposal
   -> actor-owned committed proposal application
-  -> strict canonical QueueTabletCommand v1/v2 decode
+  -> strict canonical QueueTabletCommand v1/v2/v3 decode
   -> scope, order, proposal, and applied-time validation
   -> deterministic Queue transition on a cloned candidate state
   -> recorded applied or rejected business outcome
@@ -67,6 +67,9 @@ proposal routes are not mounted while a typed profile is selected.
 | `GET /experimental/v1/tablets/queue/dead-letters?limit=100` | Read immutable dead-letter history; limit is 1–1,000. |
 | `GET /experimental/v1/tablets/queue/redrives?limit=100` | Read immutable redrive history; limit is 1–1,000. |
 | `GET /experimental/v1/tablets/queue/consumers/{consumer}/flow` | Read the applied consumer epoch and current live-lease count without advancing time. |
+| `GET /experimental/v1/tablets/queue/advanced` | Read byte use, deferred/session counts, durable expiry, and dispatch-breaker state. |
+| `GET /experimental/v1/tablets/queue/correlations/{correlation_id}` | Read non-terminal correlated messages in commit order. |
+| `GET /experimental/v1/tablets/queue/dead-letter-forwards?limit=100` | Read the bounded durable pending/bound Queue-to-Queue forwarding outbox. |
 
 The mutation body carries no client timestamp:
 
@@ -89,10 +92,12 @@ The mutation body carries no client timestamp:
 ```
 
 `operation.kind` accepts `enqueue`, `acquire`, `acknowledge`, `extend_lease`,
-`release`, `nack`, `reject`, `redrive`, and `maintain`, with the fields listed in
-the command table below. All 64-bit HTTP inputs accept either an unsigned JSON
-number or an exact decimal string. Every 64-bit output is a decimal string.
-Unknown top-level, operation, or nested envelope fields are rejected.
+`release`, `nack`, `reject`, `redrive`, `maintain`, `renew_session_lock`,
+`release_session_lock`, `defer`, and `receive_deferred`, with the fields listed
+below. Enqueue and acquire select their v3 forms when advanced metadata or a
+session is present. All 64-bit HTTP inputs accept either an unsigned JSON number
+or an exact decimal string. Every 64-bit output is a decimal string. Unknown
+top-level, operation, or nested envelope fields are rejected.
 
 An `acquire` may additionally declare `max_in_flight`. In that case
 `max_messages` is the credit granted by this request and the replicated
@@ -156,12 +161,21 @@ idempotency key, leader-assigned `applied_at_ms`, and one typed operation:
 | `Reject` | settlement fields plus `reason` | Move the leased message directly to dead-letter state. |
 | `Redrive` | `partition`, `message_id`, `dead_letter_history_id` | Reactivate only the message whose current dead-letter history ID exactly matches. |
 | `Maintain` | `partition` | Deterministically promote schedules and process lease, TTL, max-age, retry, and expiry boundaries. |
+| `EnqueueAdvanced` v3 | `partition`, `envelope`, optional `session_id`, `correlation_id`, `reply_to` | Admit one message with durable grouping and request/reply metadata. |
+| `AcquireSession` v3 | `partition`, session/consumer identity and epoch, `credit`, `max_in_flight`, optional visibility and current lock token | Acquire or continue one exclusive session and return its FIFO deliveries plus renewable lock. |
+| `RenewSessionLock` v3 | partition, consumer fence, current lock token, `extension_ms` | Rotate and extend the exact live session lock. |
+| `ReleaseSessionLock` v3 | partition, consumer fence, current lock token | Release only the exact current session lock. |
+| `Defer` v3 | settlement fields plus `reason` | Remove a live lease and hide the message from ordinary delivery. |
+| `ReceiveDeferred` v3 | `partition`, `message_id`, consumer fence, optional visibility | Lease exactly one deferred non-session message by ID. |
+| `BindDeadLetterForward` v3 | partition, history ID, exact target incarnation | Durably pin the Queue target before network I/O. Internal leader worker only. |
+| `CompleteDeadLetterForward` v3 | binding fields plus target message ID | Mark the outbox item complete after target commit. Internal leader worker only. |
 
-Versions 1 and 2 accept only partition `0`. Existing operations continue to
-emit version 1; only `AcquireWithCredit` emits version 2, preserving historical
-canonical payloads and proposal vectors. Each operation rejects any mismatched
-version, unknown fields, non-canonical JSON, mismatched scope, and payloads
-above 512 KiB.
+All versions accept only partition `0`. Existing operations continue to emit
+version 1; only `AcquireWithCredit` emits version 2; state-services and outbox
+operations emit version 3. Historical v1/v2 canonical payloads and proposal
+vectors remain unchanged. Each operation rejects any mismatched version,
+unknown fields, non-canonical JSON, mismatched scope, and payloads above 512
+KiB.
 Idempotency keys are limited to 128 bytes; message IDs to 1,024 bytes; consumer
 identities to 256 bytes; reasons to 4 KiB; lease tokens to 4 KiB; and acquire
 batches/credit to 1–100 messages. A declared consumer window is limited to
@@ -229,9 +243,64 @@ barrier as other regional reads.
 The current implementation scans authoritative applied Queue state rather than
 maintaining a second counter index. It is deterministic and recovery-safe, but
 the scan is linear in retained messages. Native bidirectional receive streams,
-connection-scoped credit replenishment, automatic prefetch, fairness, dispatch
-shaping, and backlog-scale indexing remain open. See
-[ADR-0014](adr/0014-queue-consumer-credit.md).
+connection-scoped credit replenishment, automatic prefetch, and backlog-scale
+indexing remain open. See [ADR-0014](adr/0014-queue-consumer-credit.md).
+
+## Capacity, expiry, deduplication, and fair dispatch
+
+An optional advanced configuration adds an active-byte ceiling of at most 3
+MiB, queue idle expiry, priority aging, dispatch shaping, and a Queue DLQ
+target. Canonical envelope and Queue metadata bytes are charged. Message-count
+and byte admission use one explicit overflow policy: reject the new message,
+expire the oldest non-leased active message, or dead-letter that victim. An
+active lease is never stolen, and the complete enqueue is rejected atomically
+when no eligible victim can create capacity.
+
+The existing `dedupe_id` window is resolved before overflow. An exact duplicate
+therefore returns the original receipt without evicting a message or replacing
+its metadata. Queue expiry begins only after first use and only when active
+messages, session locks, and pending DLQ forwards are all absent. Expiry is a
+durable tablet state; it does not delete the catalog resource.
+
+Ordinary messages are ordered by effective priority
+`min(255, base + waited_ms / aging_interval_ms)`, followed by commit position
+and message ID. This gives deterministic starvation protection without making
+a latency or throughput SLO. The optional replicated token bucket gates
+messages per second and burst, while a queue-wide in-flight ceiling and
+consecutive-failure circuit breaker protect downstream dispatch. Acknowledge
+resets the breaker; Nack/Reject records failure; one half-open probe is admitted
+after the open interval.
+
+## Sessions, deferred delivery, and request/reply
+
+Session messages are invisible to ordinary acquisition. `AcquireSession`
+creates or continues one exclusive lock bound to the Queue incarnation,
+committed leader term, consumer ID/epoch, session ID, generation, and deadline.
+Only its opaque current token can renew or release it. Messages are selected in
+commit-order FIFO for that owner; independent sessions can progress in
+parallel. Expired locks are removed by the same committed maintenance path as
+other Queue timers.
+
+`Defer` settles an exact live lease into durable hidden state. Ordinary and
+session acquisition skip it; `ReceiveDeferred` leases the exact non-session
+message ID. Advanced ingress can also store `correlation_id` and `reply_to`.
+Linearizable correlation lookup returns non-terminal matches in commit order.
+A temporary reply destination is a normal managed Queue configured with idle
+expiry—not a process-local object—and this metadata does not claim exactly-once
+RPC.
+
+## Crash-safe dead-letter forwarding
+
+A `quorum_durable` Queue may name another, distinct `quorum_durable` Queue in
+the same namespace as its dead-letter target; self-targeting is rejected by
+catalog admission and runtime resolution, and non-quorum targets fail closed
+during resolution. Each new dead-letter history record creates one durable
+source outbox item. The current source leader first commits an exact target
+generation/shard/tablet/epoch binding, then commits a target enqueue using a
+stable source-incarnation/history-derived idempotency key, then commits source
+completion. A crash after target commit retries the same target mutation
+identity, so the contract is at-least-once forwarding with exact insertion
+into that target incarnation—not an atomic cross-tablet transaction.
 
 ## Monotonic applied time
 
@@ -291,18 +360,21 @@ Redrive requires both message ID and the exact currently active dead-letter
 history ID. A stale ID is a recorded fenced rejection. A successful redrive
 appends its own immutable history record with the source proposal, term, index,
 time, and referenced dead-letter history. Checked counters fail closed rather
-than wrap. These histories are memory-resident while running and included in
-the canonical native Queue voter checkpoint. User-configurable history
-retention and exported backup/PITR do not exist yet.
+than wrap. These histories and the pending/bound/completed forwarding state are
+included in the canonical native Queue voter checkpoint. User-configurable
+history retention and exported backup/PITR do not exist yet.
 
 ## Digest and receipt evidence
 
 The initial digest commits to the Queue tablet domain, scope, and normalized
 configuration. Every transition then hashes the previous digest, proposal ID,
 term, log index, payload digest, the complete Queue recovery checksum, encoded
-consumer/DLQ/redrive auxiliary state, applied time, and exact applied or rejected
-outcome. Three independent tablets given the same committed history produce
-identical receipts, Queue checksums, histories, counts, and state digests.
+consumer/DLQ/redrive/outbox auxiliary state, applied time, and exact applied or
+rejected outcome. The Queue recovery checksum also covers capacity, metadata,
+deferred/session, expiry, token-bucket, and breaker state whenever advanced
+configuration is enabled. Three independent tablets given the same committed
+history produce identical receipts, Queue checksums, histories, counts, and
+state digests.
 
 Receipts serialize all 64-bit identity, term, position, deadline, time, and
 history values as decimal strings for browser safety. A receipt currently names
@@ -341,6 +413,12 @@ The deterministic Queue tablet suite covers:
 - old-lease conservatism and new-term fencing across leader replacement;
 - TTL/max-age precedence over scheduled readiness;
 - deterministic non-zero retry jitter and progress after a recorded rejection;
+- exact count/byte overflow, dedupe-before-eviction, and durable idle expiry;
+- per-session FIFO selection, exclusive renewable token rotation, and fencing;
+- deterministic priority aging, rate/burst/concurrency gates, and breaker
+  half-open recovery;
+- deferred exact receive and request/reply correlation after snapshot restore;
+- durable DLQ binding/completion, stable target identity, and snapshot recovery;
 - browser-safe nested 64-bit JSON values; and
 - complete-outcome digest coverage and a pinned digest vector.
 
@@ -350,30 +428,31 @@ JSON vectors and the original Stream public goldens.
 
 The `epoch-node` real-runtime suite exercises strict HTTP extraction, semantic
 retry/conflict, server time under wall-clock rollback, descending assigned-time
-recovery, committed rejection, all nine operations, Queue reads, three-voter
+recovery, committed rejection, every Queue operation, Queue reads, three-voter
 convergence, and EPRS reopen. The
 Docker gate additionally proves scheduled eligibility, bounded acquire-credit
 evidence and consumer-flow reads, follower rejection, active-leader `SIGKILL`,
 old-term token fencing, conservative redelivery, renewal replay, immutable
-DLQ/redrive reads, all-voter convergence, and exact state recovery after every
+DLQ/redrive reads, session/deferred/correlation behavior, leader-owned DLQ
+forwarding, all-voter convergence, and exact state recovery after every
 container receives `SIGKILL`. CI retains container logs and EPRS state on
 failure.
 
 ## Deliberate limitations
 
 The versioned regional Queue v1 route and repository-local Go, Java, and Python
-SDKs now expose this complete implemented lifecycle through authenticated,
-generation/tablet-fenced, leader-discovered calls with linearizable reads. It
-still has no gRPC service, CLI, native bidirectional receive stream, connection-scoped credit
-replenishment, automatic prefetch/fairness, timer precision/load evidence, or
-production durability claim. It has one resource, one tablet, partition `0`,
-static configuration; its direct diagnostic route has no automatic checkpoint
-schedule, while the regional wrapper now schedules local voter checkpoints. It
-has no advertised product
-idempotency horizon or audit-history retention, no user-exportable backup/PITR,
-no catalog-authorized tablet epoch transition, dynamic placement, membership change,
-consumer-group/session coordinator, follower read routing, authenticated peer identity,
-token authentication, multi-tenant policy, or exhaustive crash/I/O matrix.
+SDKs expose the complete implemented single-partition lifecycle through
+authenticated, generation/tablet-fenced, leader-discovered calls with
+linearizable reads. It still has no gRPC service, CLI, native bidirectional
+receive stream, connection-scoped credit replenishment, automatic prefetch,
+timer/throughput/fairness load report, or production durability claim. It has
+one resource, one tablet, partition `0`, and static configuration; its direct
+diagnostic route has no automatic checkpoint schedule, while the regional
+wrapper schedules local voter checkpoints. It has no advertised audit-history
+retention, user-exportable backup/PITR, catalog-authorized tablet epoch
+transition, dynamic placement, membership change, cross-Queue transaction,
+follower read routing, authenticated peer identity, or exhaustive crash/I/O
+matrix.
 The Docker proof covers selected process faults, not every crash point,
 filesystem failure, or network partition schedule.
 
@@ -382,7 +461,9 @@ paths. Adding this core does not migrate them or raise their guarantee.
 
 See [Regional Queue SDK](REGIONAL_QUEUE_SDK.md) and
 [ADR-0018](adr/0018-regional-queue-v1-and-sdk-routing.md) for the application
-route and bounded retry contract.
+route and bounded retry contract. See
+[ADR-0036](adr/0036-queue-state-services.md) for the completed Queue state
+services and crash boundary.
 
 See [Architecture](ARCHITECTURE.md), [Semantics](SEMANTICS.md),
 [Testing](TESTING.md), [Requirements traceability](REQUIREMENTS_TRACEABILITY.md),

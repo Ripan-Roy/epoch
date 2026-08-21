@@ -322,9 +322,36 @@ Session FIFO grants an exclusive renewable session epoch. Messages within the
 session are selected in session order; other sessions proceed independently.
 Priority applies across eligible work with starvation protection.
 
+Advanced admission checks the message-count ceiling and canonical
+envelope-plus-metadata bytes before publication. A configured overflow policy
+either rejects the new message, expires the oldest non-leased active message,
+or dead-letters that victim. Dedupe lookup happens first, so an exact duplicate
+cannot evict or replace metadata. Queue idle expiry is a durable data-plane
+state reached only when active messages, session locks, and pending DLQ
+forwards are absent; it does not delete the catalog record.
+
+Priority starvation protection increases effective priority by one band per
+configured committed-time interval, capped at 255, then preserves commit order.
+The replicated dispatch token bucket limits rate and burst; Queue-wide live
+leases limit concurrency. Consecutive Nack/Reject outcomes open a durable
+circuit breaker, one half-open acquisition probes after cooldown, and Ack
+closes it. These are deterministic admission rules, not performance SLOs.
+
+A fenced consumer may defer a live delivery. It remains hidden until exact
+message-ID receive; session messages cannot bypass their session owner.
+Correlation and reply-destination metadata survive recovery and are returned
+by commit-ordered linearizable lookup. A temporary reply destination is an
+ordinary managed Queue with idle expiry, not an unreplicated process-local
+object.
+
 Dead-letter state preserves original resource, reason, attempts, timestamps,
 and last failure. Redrive is an explicit, audited operation with a new delivery
 history and an origin reference; it does not erase the dead-letter evidence.
+For a configured `quorum_durable` Queue target, the source tablet records an
+outbox item, binds one exact target incarnation, commits the target enqueue
+with a stable source-history identity, and only then records completion. This
+is at-least-once forwarding with retry-safe Epoch target insertion, not one
+atomic cross-tablet transaction.
 
 ## 8. Event Bus semantics
 
@@ -606,13 +633,15 @@ state machine over the shared committed-command substrate. Given the same
 ordered history, independent voters reproduce fenced acquire/settlement,
 monotonic consumer epochs and applied time, retry/schedule/expiry transitions,
 recorded business rejections, exact renewed-token replay, immutable DLQ/redrive
-history, and one state digest. Effective Queue time is the maximum of each
-command's server-assigned candidate and the prior committed effective time, so
-an uncommitted entry retained across leader failover cannot make later replay
-regress or fail-stop. EPRS recovery completes before its internal
+history, advanced capacity/metadata, session/deferred state, dispatch controls,
+the durable forwarding outbox, and one state digest. Effective Queue time is
+the maximum of each command's server-assigned candidate and the prior committed
+effective time, so an uncommitted entry retained across leader failover cannot
+make later replay regress or fail-stop. EPRS recovery completes before its internal
 typed listener becomes ready. This remains a bounded experimental mode and
 raises no public durability claim. See
-[Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
+[Experimental Replicated Queue Tablet](QUEUE_TABLET.md) and
+[ADR-0036](adr/0036-queue-state-services.md).
 
 The Cache profile now also has a deterministic, single-shard tablet on the
 opt-in fixed-voter runtime. Its pure observations, checked global value

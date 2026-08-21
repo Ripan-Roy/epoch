@@ -86,6 +86,93 @@ public final class RegionalQueueQuickstart {
             1,
             result(finalAcquire).path("deliveries").path(0).path("lease_token").asText());
 
+    EventEnvelope sessionEvent =
+        EventEnvelope.builder("docs-java", "session.job.created", Map.of("job_id", "java-session-42"))
+            .id("docs-java-session-42")
+            .timeMs(43)
+            .build();
+    JsonNode sessionEnqueue =
+        client.enqueueAdvanced(
+            "jobs",
+            0,
+            "docs-java-session-enqueue-v1",
+            sessionEvent,
+            "account-java-7",
+            "request-java-7",
+            "reply-temporary");
+    JsonNode correlated = client.correlation("jobs", 0, "request-java-7");
+    JsonNode sessionAcquire =
+        client.acquireSession(
+            "jobs",
+            0,
+            "docs-java-session-acquire-v1",
+            "account-java-7",
+            "docs-java-session",
+            BigInteger.ONE,
+            1,
+            1,
+            BigInteger.valueOf(5_000),
+            null);
+    JsonNode sessionRenew =
+        client.renewSessionLock(
+            "jobs",
+            0,
+            "docs-java-session-renew-v1",
+            "docs-java-session",
+            BigInteger.ONE,
+            result(sessionAcquire).path("session_lock_token").asText(),
+            BigInteger.valueOf(30_000));
+    client.acknowledge(
+        "jobs",
+        0,
+        "docs-java-session-ack-v1",
+        "docs-java-session",
+        BigInteger.ONE,
+        result(sessionAcquire).path("deliveries").path(0).path("lease_token").asText());
+    JsonNode sessionRelease =
+        client.releaseSessionLock(
+            "jobs",
+            0,
+            "docs-java-session-release-v1",
+            "docs-java-session",
+            BigInteger.ONE,
+            result(sessionRenew).path("session_lock_token").asText());
+
+    EventEnvelope deferredEvent =
+        EventEnvelope.builder("docs-java", "job.deferred", Map.of("job_id", "java-deferred-42"))
+            .id("docs-java-deferred-42")
+            .timeMs(44)
+            .build();
+    client.enqueue("jobs", 0, "docs-java-deferred-enqueue-v1", deferredEvent);
+    JsonNode deferredAcquire =
+        client.acquire(
+            "jobs", 0, "docs-java-deferred-acquire-v1", "docs-java-deferred", 1, 1, 1, null);
+    JsonNode deferred =
+        client.defer(
+            "jobs",
+            0,
+            "docs-java-defer-v1",
+            "docs-java-deferred",
+            BigInteger.ONE,
+            result(deferredAcquire).path("deliveries").path(0).path("lease_token").asText(),
+            "await dependency");
+    JsonNode receivedDeferred =
+        client.receiveDeferred(
+            "jobs",
+            0,
+            "docs-java-receive-deferred-v1",
+            "docs-java-deferred-42",
+            "docs-java-deferred",
+            BigInteger.ONE,
+            BigInteger.valueOf(5_000));
+    client.acknowledge(
+        "jobs",
+        0,
+        "docs-java-deferred-ack-v1",
+        "docs-java-deferred",
+        BigInteger.ONE,
+        result(receivedDeferred).path("delivery").path("lease_token").asText());
+
     ObjectNode output = MAPPER.createObjectNode();
     output.set("enqueue", enqueued);
     output.set("exact_retry", replayed);
@@ -96,6 +183,13 @@ public final class RegionalQueueQuickstart {
     output.set("ack", acknowledged);
     output.set("counts", client.counts("jobs", 0));
     output.set("flow", client.consumerFlow("jobs", 0, "docs-java"));
+    output.set("session_enqueue", sessionEnqueue);
+    output.set("correlation", correlated);
+    output.set("session_release", sessionRelease);
+    output.set("defer", deferred);
+    output.set("receive_deferred", receivedDeferred);
+    output.set("advanced", client.advancedStatus("jobs", 0));
+    output.set("dead_letter_forwards", client.deadLetterForwards("jobs", 0, 10));
     System.out.println(MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(output));
   }
 

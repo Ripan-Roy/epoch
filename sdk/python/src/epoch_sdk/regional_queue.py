@@ -17,13 +17,34 @@ class RegionalQueueClient(RegionalClient):
     """Complete Queue lifecycle client with explicit mutation identities."""
 
     def enqueue(
-        self, queue: str, shard: int, idempotency_key: str, event: EventEnvelope
+        self,
+        queue: str,
+        shard: int,
+        idempotency_key: str,
+        event: EventEnvelope,
+        *,
+        session_id: str | None = None,
+        correlation_id: str | None = None,
+        reply_to: str | None = None,
     ) -> dict[str, Any]:
+        operation: dict[str, Any] = {
+            "kind": "enqueue",
+            "partition": 0,
+            "envelope": event.to_dict(),
+        }
+        for field, value in (
+            ("session_id", session_id),
+            ("correlation_id", correlation_id),
+            ("reply_to", reply_to),
+        ):
+            if value is not None:
+                _required(value, f"Queue {field}")
+                operation[field] = value
         return self._mutate(
             queue,
             shard,
             idempotency_key,
-            {"kind": "enqueue", "partition": 0, "envelope": event.to_dict()},
+            operation,
         )
 
     def acquire(
@@ -37,6 +58,8 @@ class RegionalQueueClient(RegionalClient):
         max_messages: int,
         max_in_flight: int | None = None,
         visibility_timeout_ms: int | None = None,
+        session_id: str | None = None,
+        session_lock_token: str | None = None,
     ) -> dict[str, Any]:
         _consumer(consumer, consumer_epoch)
         _bounded(max_messages, 1, _MAX_ACQUIRE_BATCH, "Queue max messages")
@@ -44,6 +67,14 @@ class RegionalQueueClient(RegionalClient):
             _bounded(max_in_flight, 1, _MAX_IN_FLIGHT, "Queue max in flight")
         if visibility_timeout_ms is not None:
             _positive(visibility_timeout_ms, "Queue visibility timeout")
+        if session_id is not None:
+            _required(session_id, "Queue session ID")
+            if max_in_flight is None:
+                raise ValueError("Queue session acquire requires max_in_flight")
+        if session_lock_token is not None:
+            _required(session_lock_token, "Queue session lock token")
+            if session_id is None:
+                raise ValueError("Queue session lock token requires session_id")
         operation: dict[str, Any] = {
             "kind": "acquire",
             "partition": 0,
@@ -54,6 +85,101 @@ class RegionalQueueClient(RegionalClient):
         if max_in_flight is not None:
             operation["max_in_flight"] = max_in_flight
         if visibility_timeout_ms is not None:
+            operation["visibility_timeout_ms"] = str(visibility_timeout_ms)
+        if session_id is not None:
+            operation["session_id"] = session_id
+        if session_lock_token is not None:
+            operation["session_lock_token"] = session_lock_token
+        return self._mutate(queue, shard, idempotency_key, operation)
+
+    def renew_session_lock(
+        self,
+        queue: str,
+        shard: int,
+        idempotency_key: str,
+        consumer: str,
+        consumer_epoch: int,
+        session_lock_token: str,
+        extension_ms: int,
+    ) -> dict[str, Any]:
+        _consumer(consumer, consumer_epoch)
+        _required(session_lock_token, "Queue session lock token")
+        _positive(extension_ms, "Queue session lock extension")
+        return self._mutate(
+            queue,
+            shard,
+            idempotency_key,
+            {
+                "kind": "renew_session_lock",
+                "partition": 0,
+                "consumer": consumer,
+                "consumer_epoch": str(consumer_epoch),
+                "session_lock_token": session_lock_token,
+                "extension_ms": str(extension_ms),
+            },
+        )
+
+    def release_session_lock(
+        self,
+        queue: str,
+        shard: int,
+        idempotency_key: str,
+        consumer: str,
+        consumer_epoch: int,
+        session_lock_token: str,
+    ) -> dict[str, Any]:
+        _consumer(consumer, consumer_epoch)
+        _required(session_lock_token, "Queue session lock token")
+        return self._mutate(
+            queue,
+            shard,
+            idempotency_key,
+            {
+                "kind": "release_session_lock",
+                "partition": 0,
+                "consumer": consumer,
+                "consumer_epoch": str(consumer_epoch),
+                "session_lock_token": session_lock_token,
+            },
+        )
+
+    def defer(
+        self,
+        queue: str,
+        shard: int,
+        idempotency_key: str,
+        consumer: str,
+        consumer_epoch: int,
+        lease_token: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        operation = _settlement("defer", consumer, consumer_epoch, lease_token)
+        _required(reason, "Queue defer reason")
+        operation["reason"] = reason
+        return self._mutate(queue, shard, idempotency_key, operation)
+
+    def receive_deferred(
+        self,
+        queue: str,
+        shard: int,
+        idempotency_key: str,
+        message_id: str,
+        consumer: str,
+        consumer_epoch: int,
+        *,
+        visibility_timeout_ms: int | None = None,
+    ) -> dict[str, Any]:
+        _required(message_id, "Queue message ID")
+        _consumer(consumer, consumer_epoch)
+        operation: dict[str, Any] = {
+            "kind": "receive_deferred",
+            "partition": 0,
+            "message_id": message_id,
+            "consumer": consumer,
+            "consumer_epoch": str(consumer_epoch),
+        }
+        if visibility_timeout_ms is not None:
+            _positive(visibility_timeout_ms, "Queue visibility timeout")
             operation["visibility_timeout_ms"] = str(visibility_timeout_ms)
         return self._mutate(queue, shard, idempotency_key, operation)
 
@@ -191,6 +317,19 @@ class RegionalQueueClient(RegionalClient):
 
     def consumer_flow(self, queue: str, shard: int, consumer: str) -> dict[str, Any]:
         return self._read(queue, shard, f"/consumers/{_segment(consumer, 'Queue consumer')}/flow")
+
+    def advanced_status(self, queue: str, shard: int) -> dict[str, Any]:
+        return self._read(queue, shard, "/advanced")
+
+    def correlation(self, queue: str, shard: int, correlation_id: str) -> dict[str, Any]:
+        return self._read(
+            queue,
+            shard,
+            f"/correlations/{_segment(correlation_id, 'Queue correlation ID')}",
+        )
+
+    def dead_letter_forwards(self, queue: str, shard: int, *, limit: int = 100) -> dict[str, Any]:
+        return self._history(queue, shard, "/dead-letter-forwards", limit)
 
     def status(self, queue: str, shard: int) -> dict[str, Any]:
         return self._read(queue, shard, "/status")

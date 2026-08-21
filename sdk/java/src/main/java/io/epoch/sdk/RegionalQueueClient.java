@@ -37,9 +37,25 @@ public final class RegionalQueueClient {
   /** Enqueues one message using an explicit idempotency key. */
   public JsonNode enqueue(String queue, int shard, String idempotencyKey, EventEnvelope event)
       throws IOException, InterruptedException {
+    return enqueueAdvanced(queue, shard, idempotencyKey, event, null, null, null);
+  }
+
+  /** Enqueues one message with optional session and request/reply metadata. */
+  public JsonNode enqueueAdvanced(
+      String queue,
+      int shard,
+      String idempotencyKey,
+      EventEnvelope event,
+      String sessionId,
+      String correlationId,
+      String replyTo)
+      throws IOException, InterruptedException {
     Objects.requireNonNull(event, "event");
     ObjectNode operation = operation("enqueue");
     operation.set("envelope", event.toJson());
+    putOptionalRequired(operation, "session_id", sessionId, "Queue session ID");
+    putOptionalRequired(operation, "correlation_id", correlationId, "Queue correlation ID");
+    putOptionalRequired(operation, "reply_to", replyTo, "Queue reply destination");
     return mutate(queue, shard, idempotencyKey, operation);
   }
 
@@ -90,6 +106,116 @@ public final class RegionalQueueClient {
       operation.put("max_in_flight", maxInFlight);
     }
     if (visibilityTimeoutMs != null) {
+      operation.put("visibility_timeout_ms", visibilityTimeoutMs.toString());
+    }
+    return mutate(queue, shard, idempotencyKey, operation);
+  }
+
+  /** Acquires FIFO messages under an exclusive fenced session lock. */
+  public JsonNode acquireSession(
+      String queue,
+      int shard,
+      String idempotencyKey,
+      String sessionId,
+      String consumer,
+      BigInteger consumerEpoch,
+      int maxMessages,
+      int maxInFlight,
+      BigInteger visibilityTimeoutMs,
+      String sessionLockToken)
+      throws IOException, InterruptedException {
+    RegionalClientCore.required(sessionId, "Queue session ID");
+    consumer(consumer, consumerEpoch);
+    bounded(maxMessages, 1, MAX_ACQUIRE_BATCH, "Queue max messages");
+    bounded(maxInFlight, 1, MAX_IN_FLIGHT, "Queue max in flight");
+    if (visibilityTimeoutMs != null) {
+      RegionalClientCore.positiveU64(visibilityTimeoutMs, "Queue visibility timeout");
+    }
+    ObjectNode operation = settlementBase("acquire", consumer, consumerEpoch, null);
+    operation.put("session_id", sessionId);
+    operation.put("max_messages", maxMessages);
+    operation.put("max_in_flight", maxInFlight);
+    if (visibilityTimeoutMs != null) {
+      operation.put("visibility_timeout_ms", visibilityTimeoutMs.toString());
+    }
+    putOptionalRequired(
+        operation, "session_lock_token", sessionLockToken, "Queue session lock token");
+    return mutate(queue, shard, idempotencyKey, operation);
+  }
+
+  /** Renews one exact fenced session lock. */
+  public JsonNode renewSessionLock(
+      String queue,
+      int shard,
+      String idempotencyKey,
+      String consumer,
+      BigInteger consumerEpoch,
+      String sessionLockToken,
+      BigInteger extensionMs)
+      throws IOException, InterruptedException {
+    consumer(consumer, consumerEpoch);
+    RegionalClientCore.required(sessionLockToken, "Queue session lock token");
+    RegionalClientCore.positiveU64(extensionMs, "Queue session lock extension");
+    ObjectNode operation = operation("renew_session_lock");
+    operation.put("consumer", consumer);
+    operation.put("consumer_epoch", consumerEpoch.toString());
+    operation.put("session_lock_token", sessionLockToken);
+    operation.put("extension_ms", extensionMs.toString());
+    return mutate(queue, shard, idempotencyKey, operation);
+  }
+
+  /** Releases one exact fenced session lock. */
+  public JsonNode releaseSessionLock(
+      String queue,
+      int shard,
+      String idempotencyKey,
+      String consumer,
+      BigInteger consumerEpoch,
+      String sessionLockToken)
+      throws IOException, InterruptedException {
+    consumer(consumer, consumerEpoch);
+    RegionalClientCore.required(sessionLockToken, "Queue session lock token");
+    ObjectNode operation = operation("release_session_lock");
+    operation.put("consumer", consumer);
+    operation.put("consumer_epoch", consumerEpoch.toString());
+    operation.put("session_lock_token", sessionLockToken);
+    return mutate(queue, shard, idempotencyKey, operation);
+  }
+
+  /** Defers a live delivery until exact message-ID retrieval. */
+  public JsonNode defer(
+      String queue,
+      int shard,
+      String idempotencyKey,
+      String consumer,
+      BigInteger consumerEpoch,
+      String leaseToken,
+      String reason)
+      throws IOException, InterruptedException {
+    RegionalClientCore.required(reason, "Queue defer reason");
+    ObjectNode operation = settlementBase("defer", consumer, consumerEpoch, leaseToken);
+    operation.put("reason", reason);
+    return mutate(queue, shard, idempotencyKey, operation);
+  }
+
+  /** Receives one exact deferred message. */
+  public JsonNode receiveDeferred(
+      String queue,
+      int shard,
+      String idempotencyKey,
+      String messageId,
+      String consumer,
+      BigInteger consumerEpoch,
+      BigInteger visibilityTimeoutMs)
+      throws IOException, InterruptedException {
+    RegionalClientCore.required(messageId, "Queue message ID");
+    consumer(consumer, consumerEpoch);
+    ObjectNode operation = operation("receive_deferred");
+    operation.put("message_id", messageId);
+    operation.put("consumer", consumer);
+    operation.put("consumer_epoch", consumerEpoch.toString());
+    if (visibilityTimeoutMs != null) {
+      RegionalClientCore.positiveU64(visibilityTimeoutMs, "Queue visibility timeout");
       operation.put("visibility_timeout_ms", visibilityTimeoutMs.toString());
     }
     return mutate(queue, shard, idempotencyKey, operation);
@@ -358,6 +484,27 @@ public final class RegionalQueueClient {
         Map.of());
   }
 
+  /** Returns replicated capacity, expiry, session, defer, and circuit state. */
+  public JsonNode advancedStatus(String queue, int shard) throws IOException, InterruptedException {
+    return read(queue, shard, "/advanced", Map.of());
+  }
+
+  /** Returns active messages matching one request/reply correlation ID. */
+  public JsonNode correlation(String queue, int shard, String correlationId)
+      throws IOException, InterruptedException {
+    return read(
+        queue,
+        shard,
+        "/correlations/" + RegionalClientCore.segment(correlationId, "Queue correlation ID"),
+        Map.of());
+  }
+
+  /** Returns the bounded pending Queue dead-letter forwarding outbox. */
+  public JsonNode deadLetterForwards(String queue, int shard, int limit)
+      throws IOException, InterruptedException {
+    return history(queue, shard, "/dead-letter-forwards", limit);
+  }
+
   /** Returns linearizable Queue tablet status and digest. */
   public JsonNode status(String queue, int shard) throws IOException, InterruptedException {
     return read(queue, shard, "/status", Map.of());
@@ -418,6 +565,14 @@ public final class RegionalQueueClient {
   private static void consumer(String consumer, BigInteger consumerEpoch) {
     RegionalClientCore.required(consumer, "Queue consumer");
     RegionalClientCore.positiveU64(consumerEpoch, "Queue consumer epoch");
+  }
+
+  private static void putOptionalRequired(
+      ObjectNode operation, String field, String value, String label) {
+    if (value != null) {
+      RegionalClientCore.required(value, label);
+      operation.put(field, value);
+    }
   }
 
   private static void bounded(int value, int minimum, int maximum, String label) {

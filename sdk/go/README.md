@@ -64,7 +64,9 @@ and [contract guide](../../docs/REGIONAL_STREAM_SDK.md).
 `RegionalQueueClient` applies that same discovery, bearer, fence, same-key
 rediscovery, and linearizable-read contract to the complete replicated Queue
 lifecycle: enqueue, credit-aware acquire, every lease disposition, maintenance,
-DLQ/redrive history, redrive, counts, flow, mutation lookup, and status. See the
+FIFO session acquire/renew/release, deferred exact receive, request/reply
+correlation, advanced capacity/dispatch state, DLQ/redrive/forwarding history,
+redrive, counts, flow, mutation lookup, and status. See the
 [complete Queue example](../../console/src/quickstarts/regional_queue/quickstart.go)
 and [Queue contract guide](../../docs/REGIONAL_QUEUE_SDK.md).
 

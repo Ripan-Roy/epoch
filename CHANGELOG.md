@@ -6,6 +6,32 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+## [0.1.0-alpha.8] - 2026-08-21
+
+### Added
+
+- Completed the remaining Work Queue development surface with count/byte
+  admission, reject/drop/dead-letter overflow, durable idle expiry,
+  dedupe-before-eviction, deterministic priority aging, and replicated
+  rate/burst/concurrency plus circuit-breaker state.
+- Added FIFO session/message groups with renewable exclusive locks, deferred
+  exact-ID retrieval, request/reply correlation and reply metadata, command v3,
+  Queue snapshot v2 compatibility, complete digest coverage, and linearizable
+  regional observations.
+- Added a quorum-only crash-safe Queue-to-Queue dead-letter outbox. The source
+  leader durably pins one target incarnation, uses a stable history-derived
+  target mutation, and records completion only after the target enqueue commits.
+- Extended Go, Java, and Python SDKs, exact executable quickstarts, public Pages
+  documentation, catalog materialization, and the regional leader-loss/reopen
+  campaign across the complete Queue state-services lifecycle.
+
+### Limitations
+
+- Queue remains one physical partition in this alpha. Native streaming receive,
+  automatic prefetch, cross-Queue transactions, external DLQ adapters,
+  production load/fairness SLOs, and an exhaustive crash/I/O matrix remain
+  release gates.
+
 ## [0.1.0-alpha.7] - 2026-08-21
 
 ### Added

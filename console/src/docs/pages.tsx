@@ -871,16 +871,45 @@ export function RegionalQueueBody() {
             payload, so an exact replay returns the committed receipt instead of duplicating work.
           </EvidenceCard>
           <EvidenceCard label="Observation" claim="Operational reads require a leader barrier.">
-            Counts, flow, mutation receipts, status, dead letters, and redrive history explicitly request{" "}
-            <code>linearizable</code> and never silently downgrade to stale state.
+            Counts, flow, advanced state, correlations, forwarding outbox, mutation receipts, status, dead
+            letters, and redrive history explicitly request <code>linearizable</code> and never silently
+            downgrade to stale state.
+          </EvidenceCard>
+          <EvidenceCard label="FIFO sessions" claim="One renewable lock owns each message group.">
+            Grouped messages are excluded from ordinary acquisition. The opaque session token binds the Queue
+            incarnation, committed term, consumer epoch, generation, and deadline; selection for its owner is
+            commit-order FIFO while unrelated sessions progress independently.
+          </EvidenceCard>
+          <EvidenceCard
+            label="Capacity &amp; fairness"
+            claim="Admission and dispatch are replicated decisions."
+          >
+            Count and byte ceilings apply one explicit overflow policy. Dedupe resolves before eviction;
+            priority aging prevents permanent starvation; rate, burst, concurrency, and circuit state use
+            committed time and survive recovery.
+          </EvidenceCard>
+          <EvidenceCard
+            label="Deferred &amp; request/reply"
+            claim="Hidden work remains exact and addressable."
+          >
+            A fenced consumer can defer a delivery and later receive that exact message ID. Correlation and
+            reply metadata survive snapshots; a temporary reply destination is a managed Queue with idle
+            expiry, not process-local state.
+          </EvidenceCard>
+          <EvidenceCard label="DLQ forwarding" claim="Target commit precedes source completion.">
+            The source leader durably binds one exact Queue incarnation, enqueues with a stable source-history
+            identity, then completes its outbox item. A crash retries the same target mutation; this is not a
+            cross-tablet transaction.
           </EvidenceCard>
         </>
       }
       boundary={
         <p>
           Regional Queue v1 is a repository-local, single-partition alpha. Native bidirectional receive,
-          automatic session management, fairness/load evidence, dynamic placement, generated response models,
-          and public package-registry releases remain open.
+          automatic prefetch, timer/throughput/fairness load evidence, dynamic placement, generated response
+          models, cross-Queue transactions, and public package-registry releases remain open. Read the exact
+          method matrix and limits in the{" "}
+          <a href={`${repositoryDocsUrl}/REGIONAL_QUEUE_SDK.md`}>end-to-end Queue SDK guide</a>.
         </p>
       }
     />
@@ -1337,7 +1366,7 @@ export function ReferenceBody() {
           <ReferenceCard
             eyebrow="Queue tablet"
             title="Experimental replicated Queue"
-            description="Typed mutations, fenced leases, bounded consumer credit, failover/redelivery, immutable DLQ/redrive history, and all-voter recovery."
+            description="Typed mutations, fenced leases and sessions, bounded admission/dispatch, defer/correlation, crash-safe DLQ forwarding, and all-voter recovery."
             href={`${repositoryDocsUrl}/QUEUE_TABLET.md`}
           />
           <ReferenceCard
@@ -1351,6 +1380,12 @@ export function ReferenceBody() {
             title="Regional Queue routing decision"
             description="Native v1 route shape, shared discovery and retry contract, lease-token handling, authorization, recovery evidence, and explicit alpha boundaries."
             href={`${repositoryDocsUrl}/adr/0018-regional-queue-v1-and-sdk-routing.md`}
+          />
+          <ReferenceCard
+            eyebrow="Queue completion"
+            title="Replicated Queue state services"
+            description="Count/byte overflow, idle expiry, FIFO sessions, priority aging, dispatch breaker, deferred/request-reply state, crash-safe DLQ forwarding, and compatibility."
+            href={`${repositoryDocsUrl}/adr/0036-queue-state-services.md`}
           />
           <ReferenceCard
             eyebrow="Cache design"
@@ -1402,9 +1437,9 @@ export function ReferenceBody() {
           />
           <ReferenceCard
             eyebrow="Release"
-            title="v0.1.0-alpha.7 release notes"
+            title="v0.1.0-alpha.8 release notes"
             description="Verified milestone highlights, source-only artifacts, compatibility guidance, and explicit alpha limitations."
-            href={`${repositoryDocsUrl}/releases/v0.1.0-alpha.7.md`}
+            href={`${repositoryDocsUrl}/releases/v0.1.0-alpha.8.md`}
           />
         </div>
       </Topic>

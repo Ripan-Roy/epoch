@@ -367,6 +367,130 @@ fn acquire_request_selects_credit_command_only_when_a_window_is_declared() {
 }
 
 #[test]
+fn advanced_requests_map_to_explicit_v3_queue_operations() {
+    let enqueue: QueueMutationRequest = serde_json::from_value(json!({
+        "idempotency_key": "advanced-enqueue",
+        "expected_term": "2",
+        "operation": {
+            "kind": "enqueue",
+            "session_id": "account-7",
+            "correlation_id": "request-7",
+            "reply_to": "reply-temporary",
+            "envelope": {
+                "id": "job-1",
+                "source": "tests",
+                "type": "job.created",
+                "time_ms": "1",
+                "payload": {"id": 1}
+            }
+        }
+    }))
+    .unwrap();
+    let QueueTabletOperation::EnqueueAdvanced(enqueue) = enqueue.operation.to_tablet_operation()
+    else {
+        panic!("expected advanced enqueue");
+    };
+    assert_eq!(enqueue.ingress.session_id.as_deref(), Some("account-7"));
+    assert_eq!(enqueue.ingress.correlation_id.as_deref(), Some("request-7"));
+    assert_eq!(enqueue.ingress.reply_to.as_deref(), Some("reply-temporary"));
+
+    let acquire: QueueMutationRequest = serde_json::from_value(json!({
+        "idempotency_key": "session-acquire",
+        "expected_term": "2",
+        "operation": {
+            "kind": "acquire",
+            "consumer": "worker-a",
+            "consumer_epoch": "3",
+            "max_messages": 2,
+            "max_in_flight": 5,
+            "visibility_timeout_ms": "30000",
+            "session_id": "account-7",
+            "session_lock_token": "epoch.queue.session.existing"
+        }
+    }))
+    .unwrap();
+    assert!(matches!(
+        acquire.operation.to_tablet_operation(),
+        QueueTabletOperation::AcquireSession(QueueSessionAcquireCommand {
+            credit: 2,
+            max_in_flight: 5,
+            session_lock_token: Some(ref token),
+            ..
+        }) if token == "epoch.queue.session.existing"
+    ));
+
+    let defer: QueueMutationRequest = serde_json::from_value(json!({
+        "idempotency_key": "defer-1",
+        "expected_term": "2",
+        "operation": {
+            "kind": "defer",
+            "consumer": "worker-a",
+            "consumer_epoch": "3",
+            "lease_token": "lease-token",
+            "reason": "wait for dependency"
+        }
+    }))
+    .unwrap();
+    assert!(matches!(
+        defer.operation.to_tablet_operation(),
+        QueueTabletOperation::Defer(QueueDeferCommand { ref reason, .. })
+            if reason == "wait for dependency"
+    ));
+
+    let receive: QueueMutationRequest = serde_json::from_value(json!({
+        "idempotency_key": "receive-deferred-1",
+        "expected_term": "2",
+        "operation": {
+            "kind": "receive_deferred",
+            "message_id": "job-1",
+            "consumer": "worker-a",
+            "consumer_epoch": "3",
+            "visibility_timeout_ms": "5000"
+        }
+    }))
+    .unwrap();
+    assert!(matches!(
+        receive.operation.to_tablet_operation(),
+        QueueTabletOperation::ReceiveDeferred(QueueReceiveDeferredCommand {
+            visibility_timeout_ms: Some(5_000),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn session_acquire_shape_rejects_ignored_or_implicit_lock_controls() {
+    let token_without_session: QueueMutationRequest = serde_json::from_value(json!({
+        "idempotency_key": "invalid-session-token",
+        "expected_term": "2",
+        "operation": {
+            "kind": "acquire",
+            "consumer": "worker-a",
+            "consumer_epoch": "3",
+            "max_messages": 1,
+            "max_in_flight": 1,
+            "session_lock_token": "epoch.queue.session.token"
+        }
+    }))
+    .unwrap();
+    assert!(token_without_session.operation.validate_shape().is_err());
+
+    let session_without_window: QueueMutationRequest = serde_json::from_value(json!({
+        "idempotency_key": "invalid-session-window",
+        "expected_term": "2",
+        "operation": {
+            "kind": "acquire",
+            "consumer": "worker-a",
+            "consumer_epoch": "3",
+            "max_messages": 1,
+            "session_id": "account-7"
+        }
+    }))
+    .unwrap();
+    assert!(session_without_window.operation.validate_shape().is_err());
+}
+
+#[test]
 fn request_identity_ignores_only_expected_term_and_server_time() {
     let request: QueueMutationRequest = serde_json::from_value(json!({
         "idempotency_key": "enqueue-1",

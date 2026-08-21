@@ -16,7 +16,7 @@ import regionalBusPythonSource from "../quickstarts/regional_bus/quickstart.py?r
 
 export const repositoryUrl = "https://github.com/Ripan-Roy/epoch";
 export const repositoryDocsUrl = `${repositoryUrl}/blob/main/docs`;
-export const releaseVersion = "0.1.0-alpha.7";
+export const releaseVersion = "0.1.0-alpha.8";
 
 export type LanguageId = "go" | "java" | "python";
 
@@ -100,7 +100,25 @@ curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
     }
   }'`;
 
-export const regionalQueueResource = `# Terminal C · create one replicated Queue
+export const regionalQueueResource = `# Terminal C · create the dead-letter target first
+curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
+  --header 'authorization: Bearer epoch-dev-admin-v1' \
+  --header 'content-type: application/json' \
+  --data '{
+    "request_token":"docs-create-failed-jobs-v1",
+    "expected_generation":0,
+    "resource":{
+      "organization":"acme","project":"shop","environment":"dev","namespace":"core",
+      "kind":"queue","name":"failed-jobs",
+      "governance":{"owner":"team:platform","cost_center":"cc-1042","classification":"internal","tags":{"service":"jobs","profile":"queue"}},
+      "spec":{"shard_count":1,"replica_count":3,"placement":{
+        "allowed_regions":["ap-south"],"minimum_zones":3,
+        "required_node_class":"general-purpose"
+      }}
+    }
+  }'
+
+# Create one bounded replicated Queue with all state services enabled
 curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
   --header 'authorization: Bearer epoch-dev-admin-v1' \
   --header 'content-type: application/json' \
@@ -111,7 +129,18 @@ curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
       "organization":"acme","project":"shop","environment":"dev","namespace":"core",
       "kind":"queue","name":"jobs",
       "governance":{"owner":"team:platform","cost_center":"cc-1042","classification":"internal","tags":{"service":"jobs","profile":"queue"}},
-      "spec":{"shard_count":1,"replica_count":3,"placement":{
+      "spec":{"shard_count":1,"replica_count":3,"configuration":{
+        "durability":"quorum_durable","visibility_timeout_ms":30000,
+        "max_messages":100000,
+        "retry":{"strategy":"exponential","initial_delay_ms":1000,
+          "max_delay_ms":60000,"jitter_percent":10,"max_attempts":8,"max_age_ms":null},
+        "dedupe_window_ms":60000,
+        "advanced":{"max_active_bytes":3145728,"overflow":"dead_letter_oldest",
+          "idle_expiry_ms":600000,"priority_aging_interval_ms":1000,
+          "dispatch":{"messages_per_second":1000,"burst":100,
+            "max_in_flight":100,"failure_threshold":5,"open_interval_ms":30000},
+          "dead_letter_target":"failed-jobs"}
+      },"placement":{
         "allowed_regions":["ap-south"],"minimum_zones":3,
         "required_node_class":"general-purpose"
       }}
@@ -520,10 +549,10 @@ export const sdkSurface = [
   },
   {
     area: "Regional Queue",
-    go: "RegionalQueueClient · Enqueue · Acquire · ExtendLease · Acknowledge · Release · Nack · Reject · Redrive · Maintain · Counts · ConsumerFlow",
-    java: "RegionalQueueClient · enqueue · acquire · extendLease · acknowledge · release · nack · reject · redrive · maintain · counts · consumerFlow",
+    go: "RegionalQueueClient · Enqueue · EnqueueAdvanced · Acquire · RenewSessionLock · ReleaseSessionLock · Defer · ReceiveDeferred · ExtendLease · Acknowledge · Release · Nack · Reject · Redrive · Maintain · Counts · ConsumerFlow · AdvancedStatus · Correlation · DeadLetterForwards",
+    java: "RegionalQueueClient · enqueue · enqueueAdvanced · acquire · acquireSession · renewSessionLock · releaseSessionLock · defer · receiveDeferred · extendLease · acknowledge · release · nack · reject · redrive · maintain · counts · consumerFlow · advancedStatus · correlation · deadLetterForwards",
     python:
-      "RegionalQueueClient · enqueue · acquire · extend_lease · acknowledge · release · nack · reject · redrive · maintain · counts · consumer_flow",
+      "RegionalQueueClient · enqueue · acquire · renew_session_lock · release_session_lock · defer · receive_deferred · extend_lease · acknowledge · release · nack · reject · redrive · maintain · counts · consumer_flow · advanced_status · correlation · dead_letter_forwards",
   },
   {
     area: "Regional Cache",
