@@ -238,6 +238,13 @@ and live-lease count through the read-consistency rules below. This is the
 experimental bounded HTTP slice; it is not the future native bidirectional
 receive stream.
 
+Configured Queue state services use the same route. Enqueue may attach session,
+correlation, and reply metadata; acquire may name a session/current lock token;
+separate mutations renew/release that lock and defer/receive an exact message.
+Linearizable `advanced`, `correlations/{id}`, and `dead-letter-forwards` reads
+expose capacity/expiry/dispatch state, request/reply matches, and the durable
+outbox. A Queue DLQ target requires `quorum_durable` catalog configuration.
+
 For a Stream resource, `POST .../data/records/batches` delegates to the
 replicated batch handler after the same authorization, generation, epoch, and
 leader checks. The request carries one canonical record array as `none`, gzip,
@@ -292,18 +299,21 @@ The Queue client uses the fully qualified versioned shard route:
 
 Go, Java, and Python expose `RegionalQueueClient` over the same shared discovery,
 authorization, fencing, linearizable-read, and one-rediscovery contract as the
-Stream client. Mutations require caller-owned idempotency keys and cover enqueue,
-acquire, lease extension, acknowledge, release, nack, reject, redrive, and
-bounded maintenance. Reads cover mutation receipts, counts, dead-letter and
-redrive histories, consumer flow, and status. Acquire additionally carries the
-consumer epoch and explicit credit, while settlement operations carry the
-opaque lease token returned by acquire.
+Stream client. Mutations require caller-owned idempotency keys and cover
+ordinary/metadata enqueue, credit/session acquire, session-lock renewal/release,
+defer/exact receive, lease extension, acknowledge, release, nack, reject,
+redrive, and bounded maintenance. Reads cover mutation receipts, counts,
+dead-letter/redrive histories, consumer flow, advanced state, correlation,
+forwarding outbox, and status. Acquire additionally carries the consumer epoch
+and explicit credit, while settlement operations carry the opaque latest lease
+or session token.
 
 The exact compiled examples, lifecycle guidance, and failure semantics are in
 [Regional Queue SDK](REGIONAL_QUEUE_SDK.md) and embedded on the published
 documentation page. This is a single-partition alpha surface; it is not a claim
-of streaming receive, automatic session coordination, package publication, or
-production placement.
+of streaming receive, automatic prefetch, cross-Queue transactions, package
+publication, or production placement/load evidence. See
+[ADR-0036](adr/0036-queue-state-services.md).
 
 ## Use the regional Cache v1 SDK
 

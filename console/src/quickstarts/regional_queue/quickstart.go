@@ -58,6 +58,47 @@ func main() {
 	finalDelivery := result(finalAcquire)["deliveries"].([]any)[0].(map[string]any)
 	acknowledged, err := client.Acknowledge(ctx, "jobs", 0, "docs-go-ack-v1", "docs-go", 1, finalDelivery["lease_token"].(string))
 	must(err)
+
+	sessionID, correlationID, replyTo := "account-go-7", "request-go-7", "reply-temporary"
+	sessionEvent := epoch.NewEventEnvelope("docs-go", "session.job.created", map[string]any{"job_id": "go-session-42"})
+	sessionEvent.ID, sessionEvent.TimeMS = "docs-go-session-42", 43
+	sessionEnqueue, err := client.EnqueueAdvanced(ctx, "jobs", 0, "docs-go-session-enqueue-v1", sessionEvent, epoch.RegionalQueueEnqueueOptions{
+		SessionID: sessionID, CorrelationID: correlationID, ReplyTo: replyTo,
+	})
+	must(err)
+	correlated, err := client.Correlation(ctx, "jobs", 0, correlationID)
+	must(err)
+	sessionAcquire, err := client.Acquire(ctx, "jobs", 0, "docs-go-session-acquire-v1", epoch.RegionalQueueAcquireOptions{
+		Consumer: "docs-go-session", ConsumerEpoch: 1, MaxMessages: 1,
+		MaxInFlight: &window, VisibilityTimeoutMS: &timeout, SessionID: sessionID,
+	})
+	must(err)
+	sessionResult := result(sessionAcquire)
+	sessionRenew, err := client.RenewSessionLock(ctx, "jobs", 0, "docs-go-session-renew-v1", "docs-go-session", 1, sessionResult["session_lock_token"].(string), 30_000)
+	must(err)
+	sessionDelivery := sessionResult["deliveries"].([]any)[0].(map[string]any)
+	_, err = client.Acknowledge(ctx, "jobs", 0, "docs-go-session-ack-v1", "docs-go-session", 1, sessionDelivery["lease_token"].(string))
+	must(err)
+	sessionRelease, err := client.ReleaseSessionLock(ctx, "jobs", 0, "docs-go-session-release-v1", "docs-go-session", 1, result(sessionRenew)["session_lock_token"].(string))
+	must(err)
+
+	deferredEvent := epoch.NewEventEnvelope("docs-go", "job.deferred", map[string]any{"job_id": "go-deferred-42"})
+	deferredEvent.ID, deferredEvent.TimeMS = "docs-go-deferred-42", 44
+	_, err = client.Enqueue(ctx, "jobs", 0, "docs-go-deferred-enqueue-v1", deferredEvent)
+	must(err)
+	deferredAcquire, err := client.Acquire(ctx, "jobs", 0, "docs-go-deferred-acquire-v1", epoch.RegionalQueueAcquireOptions{Consumer: "docs-go-deferred", ConsumerEpoch: 1, MaxMessages: 1, MaxInFlight: &window})
+	must(err)
+	deferredDelivery := result(deferredAcquire)["deliveries"].([]any)[0].(map[string]any)
+	deferred, err := client.Defer(ctx, "jobs", 0, "docs-go-defer-v1", "docs-go-deferred", 1, deferredDelivery["lease_token"].(string), "await dependency")
+	must(err)
+	receivedDeferred, err := client.ReceiveDeferred(ctx, "jobs", 0, "docs-go-receive-deferred-v1", deferredEvent.ID, "docs-go-deferred", 1, &timeout)
+	must(err)
+	_, err = client.Acknowledge(ctx, "jobs", 0, "docs-go-deferred-ack-v1", "docs-go-deferred", 1, result(receivedDeferred)["delivery"].(map[string]any)["lease_token"].(string))
+	must(err)
+	advanced, err := client.AdvancedStatus(ctx, "jobs", 0)
+	must(err)
+	forwards, err := client.DeadLetterForwards(ctx, "jobs", 0, 10)
+	must(err)
 	counts, err := client.Counts(ctx, "jobs", 0)
 	must(err)
 	flow, err := client.ConsumerFlow(ctx, "jobs", 0, "docs-go")
@@ -66,6 +107,8 @@ func main() {
 	output, err := json.MarshalIndent(map[string]any{
 		"enqueue": enqueued, "exact_retry": replayed, "release": released, "maintain": maintained,
 		"dead_letters": deadLetters, "redrive": redriven, "ack": acknowledged, "counts": counts, "flow": flow,
+		"session_enqueue": sessionEnqueue, "correlation": correlated, "session_release": sessionRelease,
+		"defer": deferred, "receive_deferred": receivedDeferred, "advanced": advanced, "dead_letter_forwards": forwards,
 	}, "", "  ")
 	must(err)
 	fmt.Println(string(output))

@@ -108,6 +108,104 @@ acknowledged = client.acknowledge(
     final_delivery["lease_token"],
 )
 
+session_event = EventEnvelope(
+    id="docs-python-session-42",
+    source="docs-python",
+    event_type="session.job.created",
+    payload={"job_id": "python-session-42"},
+    time_ms=43,
+)
+session_enqueue = client.enqueue(
+    "jobs",
+    0,
+    "docs-python-session-enqueue-v1",
+    session_event,
+    session_id="account-python-7",
+    correlation_id="request-python-7",
+    reply_to="reply-temporary",
+)
+correlated = client.correlation("jobs", 0, "request-python-7")
+session_acquire = client.acquire(
+    "jobs",
+    0,
+    "docs-python-session-acquire-v1",
+    consumer="docs-python-session",
+    consumer_epoch=1,
+    max_messages=1,
+    max_in_flight=1,
+    visibility_timeout_ms=5_000,
+    session_id="account-python-7",
+)
+session_renew = client.renew_session_lock(
+    "jobs",
+    0,
+    "docs-python-session-renew-v1",
+    "docs-python-session",
+    1,
+    result(session_acquire)["session_lock_token"],
+    30_000,
+)
+client.acknowledge(
+    "jobs",
+    0,
+    "docs-python-session-ack-v1",
+    "docs-python-session",
+    1,
+    result(session_acquire)["deliveries"][0]["lease_token"],
+)
+session_release = client.release_session_lock(
+    "jobs",
+    0,
+    "docs-python-session-release-v1",
+    "docs-python-session",
+    1,
+    result(session_renew)["session_lock_token"],
+)
+
+deferred_event = EventEnvelope(
+    id="docs-python-deferred-42",
+    source="docs-python",
+    event_type="job.deferred",
+    payload={"job_id": "python-deferred-42"},
+    time_ms=44,
+)
+client.enqueue("jobs", 0, "docs-python-deferred-enqueue-v1", deferred_event)
+deferred_acquire = client.acquire(
+    "jobs",
+    0,
+    "docs-python-deferred-acquire-v1",
+    consumer="docs-python-deferred",
+    consumer_epoch=1,
+    max_messages=1,
+    max_in_flight=1,
+)
+deferred = client.defer(
+    "jobs",
+    0,
+    "docs-python-defer-v1",
+    "docs-python-deferred",
+    1,
+    result(deferred_acquire)["deliveries"][0]["lease_token"],
+    "await dependency",
+)
+received_deferred = client.receive_deferred(
+    "jobs",
+    0,
+    "docs-python-receive-deferred-v1",
+    deferred_event.id,
+    "docs-python-deferred",
+    1,
+    visibility_timeout_ms=5_000,
+)
+client.acknowledge(
+    "jobs",
+    0,
+    "docs-python-deferred-ack-v1",
+    "docs-python-deferred",
+    1,
+    result(received_deferred)["delivery"]["lease_token"],
+)
+
 print(
     json.dumps(
         {
@@ -120,6 +218,13 @@ print(
             "ack": acknowledged,
             "counts": client.counts("jobs", 0),
             "flow": client.consumer_flow("jobs", 0, "docs-python"),
+            "session_enqueue": session_enqueue,
+            "correlation": correlated,
+            "session_release": session_release,
+            "defer": deferred,
+            "receive_deferred": received_deferred,
+            "advanced": client.advanced_status("jobs", 0),
+            "dead_letter_forwards": client.dead_letter_forwards("jobs", 0, limit=10),
         },
         indent=2,
     )

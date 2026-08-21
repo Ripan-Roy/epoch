@@ -11,12 +11,15 @@ use epoch_bus::{
 };
 use epoch_catalog::ResourceName;
 use epoch_consensus::ConsensusRole;
-use epoch_core::{Clock, EventEnvelope, ResourceKind, WorkloadProfile};
+use epoch_core::{Clock, DurabilityProfile, EventEnvelope, ResourceKind, WorkloadProfile};
+use epoch_queue::QueueConfig;
 use epoch_stream::stream_partition_for;
 use epoch_tablet::{
     BusTabletCommand, BusTabletDelivery, BusTabletOperation, BusTabletOperationResult,
-    BusTabletOutcome, QueueTabletCommand, QueueTabletOperationResult, QueueTabletOutcome,
-    StreamTabletCommand, StreamTabletMutationReceipt,
+    BusTabletOutcome, QueueBindDeadLetterForwardCommand, QueueCompleteDeadLetterForwardCommand,
+    QueueTabletCommand, QueueTabletDeadLetterForward, QueueTabletDeadLetterForwardStatus,
+    QueueTabletOperation, QueueTabletOperationResult, QueueTabletOutcome, StreamTabletCommand,
+    StreamTabletMutationReceipt,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -25,6 +28,7 @@ use thiserror::Error;
 use crate::{
     bus_tablet::BusTabletService,
     delivery_proposal::{ProposalRoute, propose_and_wait},
+    queue_tablet::QueueTabletService,
     tablet_materializer::{MaterializedTabletRoute, TabletDirectory},
 };
 
@@ -237,17 +241,274 @@ pub async fn run_epoch_target_delivery_pass(
     let mut last_error = None;
     for route in routes {
         pass.tablets_examined = pass.tablets_examined.saturating_add(1);
-        let Some(service) = route.bus_service() else {
-            continue;
-        };
-        if let Err(error) =
-            dispatch_route(directory, &route, &service, worker, clock, &mut pass).await
+        if let Some(service) = route.bus_service()
+            && let Err(error) =
+                dispatch_route(directory, &route, &service, worker, clock, &mut pass).await
+        {
+            pass.errors = pass.errors.saturating_add(1);
+            last_error = Some(error.to_string());
+        }
+        if let Some(service) = route.queue_service()
+            && let Err(error) =
+                dispatch_queue_dead_letters(directory, &route, &service, worker, clock, &mut pass)
+                    .await
         {
             pass.errors = pass.errors.saturating_add(1);
             last_error = Some(error.to_string());
         }
     }
     (pass, last_error)
+}
+
+async fn dispatch_queue_dead_letters(
+    directory: &TabletDirectory,
+    source_route: &MaterializedTabletRoute,
+    source_service: &QueueTabletService,
+    worker: &EpochTargetDeliveryWorker,
+    clock: &dyn Clock,
+    pass: &mut EpochTargetDeliveryPass,
+) -> Result<(), EpochTargetDeliveryError> {
+    let consensus = source_route.consensus();
+    let status = consensus
+        .status()
+        .await
+        .map_err(|error| EpochTargetDeliveryError::State(error.to_string()))?;
+    if status.role != ConsensusRole::Leader || status.fail_stopped {
+        return Ok(());
+    }
+    let forwards = source_service
+        .pending_dead_letter_forwards(128)
+        .map_err(EpochTargetDeliveryError::State)?;
+    if forwards.is_empty() {
+        return Ok(());
+    }
+    pass.leaders_examined = pass.leaders_examined.saturating_add(1);
+    for forward in forwards {
+        pass.subscriptions_examined = pass.subscriptions_examined.saturating_add(1);
+        dispatch_queue_dead_letter(
+            directory,
+            source_route,
+            source_service,
+            worker,
+            clock,
+            forward,
+        )
+        .await?;
+        pass.queue_enqueued = pass.queue_enqueued.saturating_add(1);
+    }
+    Ok(())
+}
+
+async fn dispatch_queue_dead_letter(
+    directory: &TabletDirectory,
+    source_route: &MaterializedTabletRoute,
+    source_service: &QueueTabletService,
+    worker: &EpochTargetDeliveryWorker,
+    clock: &dyn Clock,
+    forward: QueueTabletDeadLetterForward,
+) -> Result<(), EpochTargetDeliveryError> {
+    let Some((target_route, destination)) = bind_or_resolve_queue_dead_letter(
+        directory,
+        source_route,
+        source_service,
+        worker,
+        clock,
+        &forward,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+
+    let idempotency_key =
+        queue_dead_letter_target_key(source_route, forward.dead_letter_history_id, &destination);
+    let target_message_id = enqueue_queue_target(
+        &target_route,
+        idempotency_key,
+        forward.envelope.into(),
+        clock.wall_time_ms(),
+        worker.commit_wait,
+    )
+    .await
+    .map_err(|disposition| {
+        EpochTargetDeliveryError::State(format!(
+            "Queue dead-letter target is unresolved: {disposition:?}"
+        ))
+    })?;
+
+    complete_queue_dead_letter(
+        source_route,
+        source_service,
+        worker,
+        clock,
+        forward.dead_letter_history_id,
+        destination,
+        target_message_id,
+    )
+    .await
+}
+
+async fn bind_or_resolve_queue_dead_letter(
+    directory: &TabletDirectory,
+    source_route: &MaterializedTabletRoute,
+    source_service: &QueueTabletService,
+    worker: &EpochTargetDeliveryWorker,
+    clock: &dyn Clock,
+    forward: &QueueTabletDeadLetterForward,
+) -> Result<Option<(MaterializedTabletRoute, EpochTargetDestination)>, EpochTargetDeliveryError> {
+    match forward.status {
+        QueueTabletDeadLetterForwardStatus::Pending => {
+            let (route, destination) =
+                resolve_queue_dead_letter_destination(directory, source_route, &forward.target)?;
+            let status = source_route
+                .consensus()
+                .status()
+                .await
+                .map_err(|error| EpochTargetDeliveryError::State(error.to_string()))?;
+            if status.role != ConsensusRole::Leader || status.fail_stopped {
+                return Ok(None);
+            }
+            let command = QueueTabletCommand::new(
+                source_service.scope(),
+                queue_forward_command_key("bind", forward.dead_letter_history_id, &destination),
+                clock.wall_time_ms().max(
+                    source_service
+                        .last_applied_time_ms()
+                        .map_err(EpochTargetDeliveryError::State)?,
+                ),
+                QueueTabletOperation::BindDeadLetterForward(QueueBindDeadLetterForwardCommand {
+                    partition: 0,
+                    dead_letter_history_id: forward.dead_letter_history_id,
+                    destination: destination.clone(),
+                }),
+            )
+            .map_err(|error| EpochTargetDeliveryError::State(error.to_string()))?;
+            let receipt = propose_queue_command(
+                &source_route.consensus(),
+                source_service,
+                command,
+                status.term.get(),
+                worker.commit_wait,
+                "Queue dead-letter binding",
+            )
+            .await?;
+            if !matches!(
+                receipt.outcome,
+                QueueTabletOutcome::Applied {
+                    result: QueueTabletOperationResult::DeadLetterForwardBound { .. }
+                }
+            ) {
+                return Err(EpochTargetDeliveryError::State(
+                    "Queue dead-letter binding was rejected".into(),
+                ));
+            }
+            Ok(Some((route, destination)))
+        }
+        QueueTabletDeadLetterForwardStatus::Bound => {
+            let destination = forward.destination.clone().ok_or_else(|| {
+                EpochTargetDeliveryError::State(
+                    "bound Queue dead-letter forward has no destination".into(),
+                )
+            })?;
+            let route = resolve_bound_queue_dead_letter_destination(
+                directory,
+                source_route,
+                &forward.target,
+                &destination,
+            )?;
+            Ok(Some((route, destination)))
+        }
+        QueueTabletDeadLetterForwardStatus::Completed => Ok(None),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "completion requires the source lease, stable delivery identity, and target receipt"
+)]
+async fn complete_queue_dead_letter(
+    source_route: &MaterializedTabletRoute,
+    source_service: &QueueTabletService,
+    worker: &EpochTargetDeliveryWorker,
+    clock: &dyn Clock,
+    dead_letter_history_id: u64,
+    destination: EpochTargetDestination,
+    target_message_id: String,
+) -> Result<(), EpochTargetDeliveryError> {
+    let status = source_route
+        .consensus()
+        .status()
+        .await
+        .map_err(|error| EpochTargetDeliveryError::State(error.to_string()))?;
+    if status.role != ConsensusRole::Leader || status.fail_stopped {
+        return Ok(());
+    }
+    let command = QueueTabletCommand::new(
+        source_service.scope(),
+        queue_forward_command_key("complete", dead_letter_history_id, &destination),
+        clock.wall_time_ms().max(
+            source_service
+                .last_applied_time_ms()
+                .map_err(EpochTargetDeliveryError::State)?,
+        ),
+        QueueTabletOperation::CompleteDeadLetterForward(QueueCompleteDeadLetterForwardCommand {
+            partition: 0,
+            dead_letter_history_id,
+            destination,
+            target_message_id,
+        }),
+    )
+    .map_err(|error| EpochTargetDeliveryError::State(error.to_string()))?;
+    let receipt = propose_queue_command(
+        &source_route.consensus(),
+        source_service,
+        command,
+        status.term.get(),
+        worker.commit_wait,
+        "Queue dead-letter completion",
+    )
+    .await?;
+    if !matches!(
+        receipt.outcome,
+        QueueTabletOutcome::Applied {
+            result: QueueTabletOperationResult::DeadLetterForwardCompleted { .. }
+        }
+    ) {
+        return Err(EpochTargetDeliveryError::State(
+            "Queue dead-letter completion was rejected".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn propose_queue_command(
+    consensus: &crate::consensus::ConsensusProbeHandle,
+    service: &QueueTabletService,
+    command: QueueTabletCommand,
+    expected_term: u64,
+    commit_wait: Duration,
+    label: &str,
+) -> Result<epoch_tablet::QueueTabletReceipt, EpochTargetDeliveryError> {
+    let proposal_id = command
+        .proposal_id(service.scope())
+        .map_err(|error| EpochTargetDeliveryError::State(error.to_string()))?;
+    let payload = command
+        .encode(service.scope())
+        .map_err(|error| EpochTargetDeliveryError::State(error.to_string()))?;
+    let committed = propose_and_wait(
+        consensus,
+        proposal_id,
+        expected_term,
+        payload,
+        commit_wait,
+        label,
+        ProposalRoute::LeaderOnly,
+    )
+    .await
+    .map_err(EpochTargetDeliveryError::State)?;
+    service
+        .committed_receipt(&committed)
+        .map_err(EpochTargetDeliveryError::State)
 }
 
 async fn dispatch_route(
@@ -416,28 +677,41 @@ async fn execute_queue_target(
     now_ms: u64,
     commit_wait: Duration,
 ) -> TargetDisposition {
+    match enqueue_queue_target(route, idempotency_key, envelope, now_ms, commit_wait).await {
+        Ok(_) => TargetDisposition::Acknowledge(EpochTargetKind::Queue),
+        Err(disposition) => disposition,
+    }
+}
+
+async fn enqueue_queue_target(
+    route: &MaterializedTabletRoute,
+    idempotency_key: String,
+    envelope: EventEnvelope,
+    now_ms: u64,
+    commit_wait: Duration,
+) -> Result<String, TargetDisposition> {
     let Some(service) = route.queue_service() else {
-        return TargetDisposition::Reject("destination_profile_mismatch");
+        return Err(TargetDisposition::Reject("destination_profile_mismatch"));
     };
     let consensus = route.consensus();
     let status = match consensus.status().await {
         Ok(status) if !status.fail_stopped && status.leader_id.is_some() => status,
-        Ok(_) | Err(_) => return TargetDisposition::Retry("destination_unavailable"),
+        Ok(_) | Err(_) => return Err(TargetDisposition::Retry("destination_unavailable")),
     };
     let applied_at_ms = match service.last_applied_time_ms() {
         Ok(last) => now_ms.max(last),
-        Err(_) => return TargetDisposition::Retry("destination_unavailable"),
+        Err(_) => return Err(TargetDisposition::Retry("destination_unavailable")),
     };
     let Ok(command) =
         QueueTabletCommand::enqueue(service.scope(), idempotency_key, envelope, applied_at_ms)
     else {
-        return TargetDisposition::Reject("invalid_destination_command");
+        return Err(TargetDisposition::Reject("invalid_destination_command"));
     };
     let Ok(proposal_id) = command.proposal_id(service.scope()) else {
-        return TargetDisposition::Reject("invalid_destination_command");
+        return Err(TargetDisposition::Reject("invalid_destination_command"));
     };
     let Ok(payload) = command.encode(service.scope()) else {
-        return TargetDisposition::Reject("invalid_destination_command");
+        return Err(TargetDisposition::Reject("invalid_destination_command"));
     };
     let Ok(committed) = propose_and_wait(
         &consensus,
@@ -450,20 +724,20 @@ async fn execute_queue_target(
     )
     .await
     else {
-        return TargetDisposition::Retry("destination_commit_unknown");
+        return Err(TargetDisposition::Retry("destination_commit_unknown"));
     };
     let Ok(receipt) = service.committed_receipt(&committed) else {
-        return TargetDisposition::Retry("destination_commit_unknown");
+        return Err(TargetDisposition::Retry("destination_commit_unknown"));
     };
     match receipt.outcome {
         QueueTabletOutcome::Applied {
-            result: QueueTabletOperationResult::Enqueued { .. },
-        } => TargetDisposition::Acknowledge(EpochTargetKind::Queue),
+            result: QueueTabletOperationResult::Enqueued { message_id, .. },
+        } => Ok(message_id),
         QueueTabletOutcome::Rejected { code, .. } => {
-            TargetDisposition::Reject(queue_rejection_reason(code))
+            Err(TargetDisposition::Reject(queue_rejection_reason(code)))
         }
         QueueTabletOutcome::Applied { .. } => {
-            TargetDisposition::Reject("unexpected_destination_receipt")
+            Err(TargetDisposition::Reject("unexpected_destination_receipt"))
         }
     }
 }
@@ -710,6 +984,124 @@ fn resolve_bound_destination(
     Ok(route)
 }
 
+fn resolve_queue_dead_letter_destination(
+    directory: &TabletDirectory,
+    source_route: &MaterializedTabletRoute,
+    target: &str,
+) -> Result<(MaterializedTabletRoute, EpochTargetDestination), EpochTargetDeliveryError> {
+    let source = &source_route.metadata().resource;
+    if source.kind != ResourceKind::Queue {
+        return Err(EpochTargetDeliveryError::State(
+            "dead-letter source route is not a Queue".into(),
+        ));
+    }
+    if target == source.name {
+        return Err(EpochTargetDeliveryError::State(
+            "dead-letter target must differ from the source Queue".into(),
+        ));
+    }
+    let resource = ResourceName::new(
+        source.organization.clone(),
+        source.project.clone(),
+        source.environment.clone(),
+        source.namespace.clone(),
+        ResourceKind::Queue,
+        target,
+    )
+    .map_err(|error| EpochTargetDeliveryError::State(error.to_string()))?;
+    let route = directory
+        .resource_route(&resource, 0)
+        .map_err(|error| EpochTargetDeliveryError::State(error.to_string()))?
+        .ok_or_else(|| {
+            EpochTargetDeliveryError::State(format!(
+                "dead-letter target Queue {target} is not materialized"
+            ))
+        })?;
+    validate_queue_dead_letter_target_route(&route, &resource, None)
+        .map_err(EpochTargetDeliveryError::State)?;
+    let descriptor = &route.metadata().descriptor;
+    let destination = EpochTargetDestination::new(
+        EpochTargetKind::Queue,
+        target,
+        descriptor.resource_generation,
+        descriptor.shard_index,
+        descriptor.tablet_id,
+        descriptor.tablet_epoch,
+    )
+    .map_err(|error| EpochTargetDeliveryError::State(error.to_string()))?;
+    Ok((route, destination))
+}
+
+fn resolve_bound_queue_dead_letter_destination(
+    directory: &TabletDirectory,
+    source_route: &MaterializedTabletRoute,
+    target: &str,
+    destination: &EpochTargetDestination,
+) -> Result<MaterializedTabletRoute, EpochTargetDeliveryError> {
+    if destination.kind != EpochTargetKind::Queue
+        || destination.resource != target
+        || destination.shard_index != 0
+    {
+        return Err(EpochTargetDeliveryError::State(
+            "dead-letter Queue binding does not match its target".into(),
+        ));
+    }
+    let source = &source_route.metadata().resource;
+    if target == source.name {
+        return Err(EpochTargetDeliveryError::State(
+            "dead-letter target must differ from the source Queue".into(),
+        ));
+    }
+    let resource = ResourceName::new(
+        source.organization.clone(),
+        source.project.clone(),
+        source.environment.clone(),
+        source.namespace.clone(),
+        ResourceKind::Queue,
+        target,
+    )
+    .map_err(|error| EpochTargetDeliveryError::State(error.to_string()))?;
+    let route = directory
+        .route(destination.tablet_id)
+        .map_err(|error| EpochTargetDeliveryError::State(error.to_string()))?
+        .ok_or_else(|| {
+            EpochTargetDeliveryError::State(
+                "bound dead-letter destination tablet is not materialized".into(),
+            )
+        })?;
+    validate_queue_dead_letter_target_route(&route, &resource, Some(destination))
+        .map_err(EpochTargetDeliveryError::State)?;
+    Ok(route)
+}
+
+fn validate_queue_dead_letter_target_route(
+    route: &MaterializedTabletRoute,
+    resource: &ResourceName,
+    binding: Option<&EpochTargetDestination>,
+) -> Result<(), String> {
+    validate_target_route(route, resource, EpochTargetKind::Queue, binding)?;
+    validate_queue_dead_letter_target_configuration(route.metadata().configuration.as_ref())
+}
+
+fn validate_queue_dead_letter_target_configuration(
+    configuration: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    let durability = match configuration {
+        Some(configuration) => {
+            serde_json::from_value::<QueueConfig>(configuration.clone())
+                .map_err(|error| {
+                    format!("dead-letter target Queue configuration is invalid: {error}")
+                })?
+                .durability
+        }
+        None => DurabilityProfile::QuorumDurable,
+    };
+    if durability != DurabilityProfile::QuorumDurable {
+        return Err("dead-letter target Queue must use quorum_durable durability".into());
+    }
+    Ok(())
+}
+
 fn target_resource(
     source_route: &MaterializedTabletRoute,
     target: &SubscriptionTarget,
@@ -787,6 +1179,60 @@ fn destination_idempotency_key(
     )
 }
 
+fn queue_forward_command_key(
+    action: &str,
+    history_id: u64,
+    destination: &EpochTargetDestination,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"epoch/queue/dead-letter-source-command/v1\0");
+    hash_length_prefixed(&mut hasher, action.as_bytes());
+    hasher.update(history_id.to_be_bytes());
+    hash_length_prefixed(&mut hasher, destination.resource.as_bytes());
+    hasher.update(destination.resource_generation.to_be_bytes());
+    hasher.update(destination.tablet_id.to_be_bytes());
+    hasher.update(destination.tablet_epoch.to_be_bytes());
+    format!("epoch-queue-dlq-{action}.{}", lower_hex(&hasher.finalize()))
+}
+
+fn queue_dead_letter_target_key(
+    source_route: &MaterializedTabletRoute,
+    history_id: u64,
+    destination: &EpochTargetDestination,
+) -> String {
+    let metadata = source_route.metadata();
+    queue_dead_letter_target_key_for(
+        &metadata.resource,
+        metadata.descriptor.resource_generation,
+        metadata.descriptor.tablet_id,
+        metadata.descriptor.tablet_epoch,
+        history_id,
+        destination,
+    )
+}
+
+fn queue_dead_letter_target_key_for(
+    source_resource: &ResourceName,
+    source_generation: u64,
+    source_tablet_id: u64,
+    source_tablet_epoch: u64,
+    history_id: u64,
+    destination: &EpochTargetDestination,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"epoch/queue/dead-letter-target/v1\0");
+    hash_length_prefixed(&mut hasher, source_resource.canonical_name().as_bytes());
+    hasher.update(source_generation.to_be_bytes());
+    hasher.update(source_tablet_id.to_be_bytes());
+    hasher.update(source_tablet_epoch.to_be_bytes());
+    hasher.update(history_id.to_be_bytes());
+    hash_length_prefixed(&mut hasher, destination.resource.as_bytes());
+    hasher.update(destination.resource_generation.to_be_bytes());
+    hasher.update(destination.tablet_id.to_be_bytes());
+    hasher.update(destination.tablet_epoch.to_be_bytes());
+    format!("epoch-queue-dlq-target.{}", lower_hex(&hasher.finalize()))
+}
+
 fn destination_idempotency_key_for(
     source_resource: &ResourceName,
     source_generation: u64,
@@ -856,6 +1302,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn queue_dead_letter_target_requires_quorum_durability() {
+        assert!(validate_queue_dead_letter_target_configuration(None).is_ok());
+
+        let quorum = QueueConfig {
+            durability: DurabilityProfile::QuorumDurable,
+            ..QueueConfig::default()
+        };
+        let quorum = serde_json::to_value(quorum).unwrap();
+        assert!(validate_queue_dead_letter_target_configuration(Some(&quorum)).is_ok());
+
+        let memory_only = QueueConfig {
+            durability: DurabilityProfile::ReplicatedMemory,
+            ..QueueConfig::default()
+        };
+        let memory_only = serde_json::to_value(memory_only).unwrap();
+        assert!(validate_queue_dead_letter_target_configuration(Some(&memory_only)).is_err());
+    }
+
+    #[test]
     fn attempt_keys_are_bounded_and_attempt_specific() {
         let first = attempt_idempotency_key("epoch-target-acquire", &"x".repeat(512), 1);
         let second = attempt_idempotency_key("epoch-target-acquire", &"x".repeat(512), 2);
@@ -923,6 +1388,44 @@ mod tests {
                 "epoch.bus.delivery.v1.1.audit",
                 &recreated,
             )
+        );
+    }
+
+    #[test]
+    fn queue_dead_letter_keys_are_retry_stable_and_incarnation_fenced() {
+        let source =
+            ResourceName::new("acme", "shop", "dev", "core", ResourceKind::Queue, "jobs").unwrap();
+        let destination =
+            EpochTargetDestination::new(EpochTargetKind::Queue, "failed-jobs", 3, 0, 42, 7)
+                .unwrap();
+        let first = queue_dead_letter_target_key_for(&source, 5, 29, 4, 11, &destination);
+        assert_eq!(first.len(), "epoch-queue-dlq-target.".len() + 64);
+        assert_eq!(
+            first,
+            queue_dead_letter_target_key_for(&source, 5, 29, 4, 11, &destination)
+        );
+        assert_ne!(
+            first,
+            queue_dead_letter_target_key_for(&source, 5, 29, 4, 12, &destination)
+        );
+        assert_ne!(
+            first,
+            queue_dead_letter_target_key_for(&source, 6, 29, 4, 11, &destination)
+        );
+        let recreated =
+            EpochTargetDestination::new(EpochTargetKind::Queue, "failed-jobs", 4, 0, 52, 1)
+                .unwrap();
+        assert_ne!(
+            first,
+            queue_dead_letter_target_key_for(&source, 5, 29, 4, 11, &recreated)
+        );
+
+        let bind = queue_forward_command_key("bind", 11, &destination);
+        assert_eq!(bind.len(), "epoch-queue-dlq-bind.".len() + 64);
+        assert_eq!(bind, queue_forward_command_key("bind", 11, &destination));
+        assert_ne!(
+            bind,
+            queue_forward_command_key("complete", 11, &destination)
         );
     }
 

@@ -54,7 +54,8 @@ mutate Epoch storage files directly.
 - **Stream Log:** partitioned ordering, retention, replay, compaction, consumer
   offsets, replication, and transactions.
 - **Work Queue:** acknowledgements, renewable leases, retries, scheduling,
-  priorities, competing consumers, and dead-lettering.
+  priorities, FIFO sessions, competing consumers, deferred work, and
+  dead-lettering/forwarding.
 - **Event Bus:** filtering, fan-out, push and pull delivery, webhooks, schemas,
   transformations, connectors, and archive/replay.
 
@@ -153,14 +154,17 @@ renewal, settlement, retry/scheduling, maintenance, DLQ, redrive, status, and
 mutation lookup with deterministic time and leader/consumer-fenced leases.
 Flow-controlled acquire adds bounded request credit, a per-consumer live-lease
 window, exact capacity evidence, and a pure consumer-flow read while preserving
-legacy command bytes. Real-runtime and container gates prove saturation,
-settlement replenishment, failover, exact renewal replay, convergence, and
+legacy command bytes. Command v3 and snapshot v2 add count/byte overflow,
+durable idle expiry, dedupe-before-eviction, FIFO session locks, priority aging,
+rate/burst/concurrency and circuit state, deferred exact receive,
+request/reply correlation, and a crash-safe Queue-to-Queue DLQ outbox while
+preserving v1/v2 bytes and v1 snapshot reads. Real-runtime and container gates
+prove saturation, settlement replenishment, session/deferred/correlation
+recovery, DLQ forwarding, failover, exact renewal replay, convergence, and
 all-node `SIGKILL` recovery. The regional Queue v1 adapter and repository-local
-Go, Java, and Python clients now expose enqueue, credit acquire, renewal, every
-disposition, maintenance, DLQ/redrive histories, counts, flow, mutation lookup,
-and status. The real Python client executes that lifecycle after active-leader
-loss and before all-node recovery. Native bidirectional receive/fairness remains
-open; this does not raise the standalone
+Go, Java, and Python clients expose the full surface and linearizable
+observations. Native bidirectional receive, automatic prefetch, and production
+fairness/load evidence remain open; this does not raise the standalone
 `local_durable` ceiling.
 
 The deterministic single-shard Cache tablet now runs through the same opt-in

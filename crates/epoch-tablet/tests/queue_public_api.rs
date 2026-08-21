@@ -110,7 +110,7 @@ fn queue_enqueue_is_usable_through_the_public_crate_api() {
         })
     );
 
-    assert_eq!(QUEUE_TABLET_COMMAND_FORMAT_VERSION, 2);
+    assert_eq!(QUEUE_TABLET_COMMAND_FORMAT_VERSION, 3);
     assert_eq!(MAX_QUEUE_TABLET_COMMAND_BYTES, 512 * 1024);
     assert_eq!(MAX_QUEUE_ACQUIRE_BATCH_SIZE, 100);
     assert_eq!(MAX_QUEUE_CONSUMER_IN_FLIGHT, 10_000);

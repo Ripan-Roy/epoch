@@ -11,8 +11,10 @@ use epoch_core::{AckMetadata, DurabilityProfile, EpochError, EpochResult, EventE
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod advanced;
 mod lease;
 
+pub use advanced::*;
 #[cfg(test)]
 use lease::FENCED_LEASE_TOKEN_PREFIX;
 pub use lease::{
@@ -20,7 +22,8 @@ pub use lease::{
 };
 
 const RECOVERY_STATE_CHECKSUM_VERSION: u16 = 1;
-pub const QUEUE_SNAPSHOT_FORMAT_VERSION: u16 = 1;
+const LEGACY_QUEUE_SNAPSHOT_FORMAT_VERSION: u16 = 1;
+pub const QUEUE_SNAPSHOT_FORMAT_VERSION: u16 = 2;
 pub const MAX_QUEUE_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -61,6 +64,8 @@ pub struct QueueConfig {
     pub max_messages: usize,
     pub retry: RetryPolicy,
     pub dedupe_window_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advanced: Option<QueueAdvancedConfig>,
 }
 
 impl Default for QueueConfig {
@@ -71,6 +76,7 @@ impl Default for QueueConfig {
             max_messages: 100_000,
             retry: RetryPolicy::default(),
             dedupe_window_ms: None,
+            advanced: None,
         }
     }
 }
@@ -154,6 +160,8 @@ struct VersionedQueueSnapshot {
     dedupe: Vec<QueueSnapshotDedupeEntry>,
     commit_position: u64,
     lease_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    advanced: Option<QueueAdvancedState>,
     state_checksum: u32,
 }
 
@@ -175,6 +183,7 @@ pub struct Queue {
     dedupe: HashMap<String, DedupeEntry>,
     commit_position: u64,
     lease_generation: u64,
+    advanced: QueueAdvancedState,
 }
 
 impl Queue {
@@ -199,6 +208,9 @@ impl Queue {
                 "retry jitter_percent cannot exceed 100".into(),
             ));
         }
+        if let Some(advanced) = &config.advanced {
+            advanced.validate()?;
+        }
         Ok(Self {
             config,
             messages: HashMap::new(),
@@ -207,6 +219,7 @@ impl Queue {
             dedupe: HashMap::new(),
             commit_position: 0,
             lease_generation: 0,
+            advanced: QueueAdvancedState::default(),
         })
     }
 
@@ -217,6 +230,13 @@ impl Queue {
     /// Returns the earliest replicated deadline that can make explicit queue
     /// maintenance change state.
     pub fn next_maintenance_deadline_ms(&self) -> Option<u64> {
+        self.next_maintenance_deadline_with_pending_forwards(0)
+    }
+
+    pub fn next_maintenance_deadline_with_pending_forwards(
+        &self,
+        pending_dead_letter_forwards: usize,
+    ) -> Option<u64> {
         let message_deadline = self.messages.values().filter_map(|message| {
             if matches!(
                 message.state,
@@ -241,7 +261,10 @@ impl Queue {
             [ttl, max_age, state].into_iter().flatten().min()
         });
         let dedupe_deadline = self.dedupe.values().map(|entry| entry.expires_at_ms);
-        message_deadline.chain(dedupe_deadline).min()
+        message_deadline
+            .chain(dedupe_deadline)
+            .chain(self.next_advanced_maintenance_deadline_ms(pending_dead_letter_forwards))
+            .min()
     }
 
     /// Returns the deterministic checksum persisted after durable queue commands.
@@ -282,6 +305,7 @@ impl Queue {
             dedupe,
             commit_position: self.commit_position,
             lease_generation: self.lease_generation,
+            advanced: Some(self.advanced_state().clone()),
             state_checksum: self.recovery_state_checksum(),
         })
         .map_err(|error| EpochError::InvalidArgument(error.to_string()))?;
@@ -311,7 +335,7 @@ impl Queue {
             &snapshot.config,
             snapshot.commit_position,
         )?;
-        let queue = Self {
+        let mut queue = Self {
             config: snapshot.config,
             messages,
             order: snapshot.order.into(),
@@ -319,7 +343,9 @@ impl Queue {
             dedupe,
             commit_position: snapshot.commit_position,
             lease_generation: snapshot.lease_generation,
+            advanced: QueueAdvancedState::default(),
         };
+        queue.restore_advanced_state(snapshot.advanced.unwrap_or_default())?;
         if queue.active_len() > queue.config.max_messages
             || queue.recovery_state_checksum() != snapshot.state_checksum
         {
@@ -331,17 +357,13 @@ impl Queue {
     }
 
     pub fn enqueue(&mut self, envelope: EventEnvelope, now_ms: u64) -> EpochResult<EnqueueReceipt> {
+        if self.config.advanced.is_some() {
+            return self.enqueue_advanced(QueueIngress::new(envelope), now_ms);
+        }
         envelope.validate()?;
         self.cleanup_dedupe(now_ms);
-        if let Some(dedupe_id) = &envelope.dedupe_id
-            && let Some(original) = self.dedupe.get(dedupe_id)
-        {
-            let mut acknowledgement = original.receipt.clone();
-            acknowledgement.duplicate = true;
-            return Ok(EnqueueReceipt {
-                message_id: original.message_id.clone(),
-                acknowledgement,
-            });
+        if let Some(receipt) = self.duplicate_receipt(&envelope) {
+            return Ok(receipt);
         }
         if self.active_len() >= self.config.max_messages {
             return Err(EpochError::Capacity("queue is full".into()));
@@ -349,6 +371,28 @@ impl Queue {
         if self.messages.contains_key(&envelope.id) {
             return Err(EpochError::AlreadyExists(envelope.id));
         }
+        self.enqueue_unchecked(envelope, now_ms)
+    }
+
+    fn duplicate_receipt(&self, envelope: &EventEnvelope) -> Option<EnqueueReceipt> {
+        if let Some(dedupe_id) = &envelope.dedupe_id
+            && let Some(original) = self.dedupe.get(dedupe_id)
+        {
+            let mut acknowledgement = original.receipt.clone();
+            acknowledgement.duplicate = true;
+            return Some(EnqueueReceipt {
+                message_id: original.message_id.clone(),
+                acknowledgement,
+            });
+        }
+        None
+    }
+
+    fn enqueue_unchecked(
+        &mut self,
+        envelope: EventEnvelope,
+        now_ms: u64,
+    ) -> EpochResult<EnqueueReceipt> {
         let state = envelope
             .deliver_at_ms
             .map_or(QueueState::Ready, |eligible_at_ms| {
@@ -358,7 +402,7 @@ impl Queue {
                     QueueState::Scheduled { eligible_at_ms }
                 }
             });
-        self.commit_position = self.commit_position.saturating_add(1);
+        self.commit_position = self.next_fenced_commit_position()?;
         let acknowledgement = AckMetadata::standalone(self.commit_position, self.config.durability);
         let message_id = envelope.id.clone();
         let dedupe_id = envelope.dedupe_id.clone();
@@ -527,6 +571,105 @@ impl Queue {
         Ok(deliveries)
     }
 
+    /// Leases an already deterministically selected set of ready messages.
+    ///
+    /// Selection services stage a cloned Queue, run maintenance and policy
+    /// checks, then call this primitive so capacity/session/dispatch decisions
+    /// and lease publication remain one atomic transition.
+    pub(crate) fn acquire_selected_fenced(
+        &mut self,
+        consumer: &str,
+        message_ids: &[String],
+        visibility_timeout_ms: Option<u64>,
+        now_ms: u64,
+        fence: LeaseFence,
+    ) -> EpochResult<Vec<Delivery>> {
+        fence.validate()?;
+        if consumer.trim().is_empty() {
+            return Err(EpochError::InvalidArgument("consumer is required".into()));
+        }
+        let visibility = visibility_timeout_ms.unwrap_or(self.config.visibility_timeout_ms);
+        if visibility == 0 {
+            return Err(EpochError::InvalidArgument(
+                "visibility timeout must be greater than zero".into(),
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for message_id in message_ids {
+            if !unique.insert(message_id)
+                || !self
+                    .messages
+                    .get(message_id)
+                    .is_some_and(|message| message.state == QueueState::Ready)
+            {
+                return Err(EpochError::Unavailable(
+                    "selected Queue message is no longer ready".into(),
+                ));
+            }
+        }
+        let acquisition_count = u64::try_from(message_ids.len())
+            .map_err(|_| EpochError::Capacity("fenced acquisition batch is too large".into()))?;
+        self.lease_generation
+            .checked_add(acquisition_count)
+            .ok_or_else(|| EpochError::Capacity("queue lease generation is exhausted".into()))?;
+        self.commit_position
+            .checked_add(acquisition_count)
+            .ok_or_else(|| EpochError::Capacity("queue commit position is exhausted".into()))?;
+
+        let mut generation = self.lease_generation;
+        let mut commit_position = self.commit_position;
+        let mut planned = Vec::with_capacity(message_ids.len());
+        for id in message_ids {
+            generation = generation.checked_add(1).ok_or_else(|| {
+                EpochError::Capacity("queue lease generation is exhausted".into())
+            })?;
+            commit_position = commit_position
+                .checked_add(1)
+                .ok_or_else(|| EpochError::Capacity("queue commit position is exhausted".into()))?;
+            let requested_deadline_ms = now_ms.saturating_add(visibility);
+            let deadline_ms = self
+                .messages
+                .get(id)
+                .and_then(|message| self.terminal_deadline_ms(message))
+                .map_or(requested_deadline_ms, |bound| {
+                    requested_deadline_ms.min(bound)
+                });
+            if deadline_ms <= now_ms {
+                return Err(EpochError::Unavailable(
+                    "message reached its terminal deadline before fenced acquisition".into(),
+                ));
+            }
+            let token = FencedLeaseTokenMetadata::new(
+                fence,
+                consumer.to_owned(),
+                id.clone(),
+                generation,
+                deadline_ms,
+            )?
+            .encode()?;
+            planned.push((id.clone(), generation, commit_position, deadline_ms, token));
+        }
+        let mut deliveries = Vec::with_capacity(planned.len());
+        for (id, generation, commit_position, deadline_ms, token) in planned {
+            self.lease_generation = generation;
+            self.commit_position = commit_position;
+            let message = self.messages.get_mut(&id).expect("selected message exists");
+            message.attempt = message.attempt.saturating_add(1);
+            message.state = QueueState::Leased {
+                consumer: consumer.to_owned(),
+                token: token.clone(),
+                deadline_ms,
+                generation,
+            };
+            deliveries.push(Delivery {
+                message: message.clone(),
+                lease_token: token,
+                lease_deadline_ms: deadline_ms,
+            });
+        }
+        Ok(deliveries)
+    }
+
     fn lease_candidates(&self) -> Vec<(String, u8, u64)> {
         let mut candidates: Vec<_> = self
             .order
@@ -595,6 +738,7 @@ impl Queue {
         let commit_position = self.next_fenced_commit_position()?;
         self.messages.get_mut(&id).expect("token resolved").state = QueueState::Acknowledged;
         self.commit_position = commit_position;
+        self.note_advanced_activity(now_ms);
         Ok(AckMetadata {
             durability: self.config.durability,
             resource_epoch: expected_fence.tablet_epoch(),
@@ -682,6 +826,7 @@ impl Queue {
         live_token.clone_from(&renewed_token);
         *live_deadline_ms = deadline_ms;
         self.commit_position = commit_position;
+        self.note_advanced_activity(now_ms);
         Ok(LeaseRenewal {
             lease_token: renewed_token,
             lease_deadline_ms: deadline_ms,
@@ -714,7 +859,9 @@ impl Queue {
         Self::validate_expected_fence_metadata(token, expected_fence)?;
         self.maintain_fenced(now_ms)?;
         let (id, _) = self.message_id_for_expected_fence(token, expected_fence)?;
-        self.retry_or_dead_letter_fenced(&id, delay_ms, reason, now_ms)
+        self.retry_or_dead_letter_fenced(&id, delay_ms, reason, now_ms)?;
+        self.note_advanced_activity(now_ms);
+        Ok(())
     }
 
     /// Negatively acknowledges a delivery and applies configured retry policy.
@@ -751,7 +898,9 @@ impl Queue {
         self.maintain_fenced(now_ms)?;
         let (id, _) = self.message_id_for_expected_fence(token, expected_fence)?;
         let delay_ms = self.retry_delay_for(&id);
-        self.retry_or_dead_letter_fenced(&id, delay_ms, Some(reason), now_ms)
+        self.retry_or_dead_letter_fenced(&id, delay_ms, Some(reason), now_ms)?;
+        self.note_advanced_activity(now_ms);
+        Ok(())
     }
 
     pub fn reject(
@@ -778,7 +927,9 @@ impl Queue {
         Self::validate_expected_fence_metadata(token, expected_fence)?;
         self.maintain_fenced(now_ms)?;
         let (id, _) = self.message_id_for_expected_fence(token, expected_fence)?;
-        self.move_to_dead_letter_fenced(&id, reason.into(), now_ms)
+        self.move_to_dead_letter_fenced(&id, reason.into(), now_ms)?;
+        self.note_advanced_activity(now_ms);
+        Ok(())
     }
 
     pub fn get(&self, message_id: &str) -> Option<QueueMessage> {
@@ -823,7 +974,7 @@ impl Queue {
         message.commit_position = self.commit_position;
         self.order.retain(|candidate| candidate != message_id);
         self.order.push_back(message_id.to_owned());
-        let _ = now_ms;
+        self.note_advanced_activity(now_ms);
         Ok(())
     }
 
@@ -954,6 +1105,7 @@ impl Queue {
                 }
             }
         }
+        self.reconcile_advanced();
         Ok(())
     }
 
@@ -992,7 +1144,7 @@ impl Queue {
             .count()
     }
 
-    fn active_len(&self) -> usize {
+    pub fn active_len(&self) -> usize {
         self.messages
             .values()
             .filter(|message| {
@@ -1004,6 +1156,27 @@ impl Queue {
                 )
             })
             .count()
+    }
+
+    pub(crate) fn defer_live_fenced(
+        &mut self,
+        token: &str,
+        expected_fence: LeaseFence,
+        reason: &str,
+        _now_ms: u64,
+    ) -> EpochResult<String> {
+        expected_fence.validate()?;
+        Self::validate_expected_fence_metadata(token, expected_fence)?;
+        let (id, _) = self.message_id_for_expected_fence(token, expected_fence)?;
+        let commit_position = self.next_fenced_commit_position()?;
+        let message = self
+            .messages
+            .get_mut(&id)
+            .ok_or_else(|| EpochError::NotFound(id.clone()))?;
+        message.last_error = Some(reason.to_owned());
+        message.state = QueueState::Ready;
+        self.commit_position = commit_position;
+        Ok(id)
     }
 
     fn message_id_for_live_token(&self, token: &str) -> EpochResult<String> {
@@ -1250,11 +1423,24 @@ fn decode_snapshot_envelope(encoded: &[u8]) -> EpochResult<VersionedQueueSnapsho
     }
     let snapshot: VersionedQueueSnapshot = serde_json::from_slice(encoded)
         .map_err(|error| EpochError::InvalidArgument(error.to_string()))?;
-    if snapshot.format_version != QUEUE_SNAPSHOT_FORMAT_VERSION {
+    if ![
+        LEGACY_QUEUE_SNAPSHOT_FORMAT_VERSION,
+        QUEUE_SNAPSHOT_FORMAT_VERSION,
+    ]
+    .contains(&snapshot.format_version)
+    {
         return Err(EpochError::InvalidArgument(format!(
             "unsupported Queue snapshot version {}",
             snapshot.format_version
         )));
+    }
+    if (snapshot.format_version == LEGACY_QUEUE_SNAPSHOT_FORMAT_VERSION
+        && snapshot.advanced.is_some())
+        || (snapshot.format_version == QUEUE_SNAPSHOT_FORMAT_VERSION && snapshot.advanced.is_none())
+    {
+        return Err(EpochError::InvalidArgument(
+            "Queue snapshot advanced state does not match its version".into(),
+        ));
     }
     if serde_json::to_vec(&snapshot)
         .map_err(|error| EpochError::InvalidArgument(error.to_string()))?
@@ -1550,6 +1736,13 @@ impl CanonicalRecoveryState {
 
         self.u64(queue.commit_position);
         self.u64(queue.lease_generation);
+        if queue.config.advanced.is_some() || queue.advanced != QueueAdvancedState::default() {
+            self.byte(0xa7);
+            let encoded = serde_json::to_vec(&(&queue.config.advanced, &queue.advanced))
+                .expect("validated Queue advanced state has a canonical JSON encoding");
+            self.usize(encoded.len());
+            self.hasher.update(&encoded);
+        }
     }
 
     fn message(&mut self, message: &QueueMessage) {
@@ -1730,6 +1923,7 @@ mod tests {
                 max_age_ms: Some(5_000),
             },
             dedupe_window_ms: Some(1_000),
+            advanced: None,
         })
         .unwrap();
 

@@ -64,6 +64,8 @@ RESOURCES = (
     Resource("stream", "advanced-orders"),
     Resource("cache", "sessions"),
     Resource("queue", "jobs"),
+    Resource("queue", "failed-jobs"),
+    Resource("queue", "advanced-jobs"),
     Resource("event-bus", "events"),
 )
 MANAGED_RESOURCE = Resource("stream", "managed-orders")
@@ -72,6 +74,8 @@ CAPACITY_REJECTED_RESOURCE = Resource("stream", "too-many-shards")
 ADVANCED_STREAM = next(
     resource for resource in RESOURCES if resource.name == "advanced-orders"
 )
+ADVANCED_QUEUE = next(resource for resource in RESOURCES if resource.name == "advanced-jobs")
+FAILED_QUEUE = next(resource for resource in RESOURCES if resource.name == "failed-jobs")
 
 
 @dataclass(frozen=True)
@@ -554,6 +558,35 @@ def create_resource(cluster: RegionalCluster, resource: Resource) -> None:
         "shard_count": 1,
         "replica_count": 3,
     }
+    if resource == ADVANCED_QUEUE:
+        body["configuration"] = {
+            "durability": "quorum_durable",
+            "visibility_timeout_ms": 5_000,
+            "max_messages": 100,
+            "retry": {
+                "strategy": "fixed",
+                "initial_delay_ms": 10,
+                "max_delay_ms": 10,
+                "jitter_percent": 0,
+                "max_attempts": 3,
+                "max_age_ms": None,
+            },
+            "dedupe_window_ms": 60_000,
+            "advanced": {
+                "max_active_bytes": 1_048_576,
+                "overflow": "dead_letter_oldest",
+                "idle_expiry_ms": 600_000,
+                "priority_aging_interval_ms": 10,
+                "dispatch": {
+                    "messages_per_second": 1_000,
+                    "burst": 100,
+                    "max_in_flight": 100,
+                    "failure_threshold": 2,
+                    "open_interval_ms": 50,
+                },
+                "dead_letter_target": FAILED_QUEUE.name,
+            },
+        }
 
     def created() -> bool:
         for node in NODES:
@@ -837,21 +870,40 @@ def wait_for_routes(
     nodes: tuple[int, ...] = NODES,
     shard: int = 0,
 ) -> tuple[int, int]:
+    previous: tuple[int, int] | None = None
+    consecutive_observations = 0
+
     def converged() -> tuple[int, int] | None:
+        nonlocal consecutive_observations, previous
         routes: list[tuple[int, dict[str, Any]]] = []
-        for node in nodes:
-            response = cluster.request(node, "GET", resource.route_path_for(shard))
-            if response.status != 200:
-                return None
-            routes.append((node, response.document))
+        try:
+            for node in nodes:
+                response = cluster.request(node, "GET", resource.route_path_for(shard))
+                if response.status != 200:
+                    previous = None
+                    consecutive_observations = 0
+                    return None
+                routes.append((node, response.document))
+        except OSError:
+            previous = None
+            consecutive_observations = 0
+            raise
         leaders = [
             (node, exact_int(route.get("term")))
             for node, route in routes
             if route.get("accepts_writes") is True
         ]
         if len(leaders) != 1 or leaders[0][1] is None:
+            previous = None
+            consecutive_observations = 0
             return None
-        return leaders[0][0], leaders[0][1]
+        observation = (leaders[0][0], leaders[0][1])
+        if observation == previous:
+            consecutive_observations += 1
+        else:
+            previous = observation
+            consecutive_observations = 1
+        return observation if consecutive_observations >= 3 else None
 
     return wait_until(
         f"{resource.kind}/{resource.name} shard {shard} routes on nodes {nodes}",
@@ -1158,7 +1210,10 @@ def prove_python_sdk_native_stream_after_failover(
         epoch_sdk.StreamRetentionPolicy(
             max_records_per_partition=1,
             max_bytes_per_partition=1_048_576,
-            max_age_ms=2_000,
+            # Keep the count-pruning assertion independent from a slow CI host,
+            # then prove the automatic age deadline without racing the request
+            # sequence that immediately precedes this policy change.
+            max_age_ms=10_000,
         ),
     )
     assert configured.get("state") == "committed", configured
@@ -2518,6 +2573,284 @@ def prove_python_sdk_native_queue_after_failover(
     assert isinstance(redrives, list) and len(redrives) == 1, redrives
 
 
+def prove_python_sdk_advanced_queue_after_failover(
+    cluster: RegionalCluster,
+    resource: Resource,
+) -> None:
+    sdk_source = str(REPO_ROOT / "sdk/python/src")
+    if sdk_source not in sys.path:
+        sys.path.insert(0, sdk_source)
+    epoch_sdk = importlib.import_module("epoch_sdk")
+    client = epoch_sdk.RegionalQueueClient(
+        [f"http://127.0.0.1:{cluster.http_ports[node]}" for node in NODES],
+        token=ADMIN_TOKEN,
+        scope=epoch_sdk.RegionalScope("acme", "shop", "dev", "core"),
+        timeout=2.0,
+    )
+
+    # Remove the campaign's seed messages so every assertion below names its
+    # exact source. This also proves ordinary acquisitions after leader loss.
+    for queue_name in (resource.name, FAILED_QUEUE.name):
+        drained = client.acquire(
+            queue_name,
+            0,
+            f"advanced-drain-{queue_name}",
+            consumer="advanced-drain",
+            consumer_epoch=1,
+            max_messages=100,
+            max_in_flight=100,
+        )
+        for delivery in queue_result(drained, "acquired").get("deliveries", []):
+            queue_result(
+                client.acknowledge(
+                    queue_name,
+                    0,
+                    f"advanced-drain-ack-{queue_name}-{delivery['message_id']}",
+                    "advanced-drain",
+                    1,
+                    delivery["lease_token"],
+                ),
+                "acknowledged",
+            )
+
+    session_event = epoch_sdk.EventEnvelope(
+        id="advanced-session-1",
+        source="python-regional-sdk",
+        event_type="job.requested",
+        payload={"account": 7},
+        time_ms=10,
+        dedupe_id="advanced-dedupe-1",
+    )
+    queue_result(
+        client.enqueue(
+            resource.name,
+            0,
+            "advanced-session-enqueue",
+            session_event,
+            session_id="account-7",
+            correlation_id="correlation-7",
+            reply_to="temporary-replies",
+        ),
+        "enqueued",
+    )
+    duplicate_event = epoch_sdk.EventEnvelope(
+        id="advanced-session-duplicate",
+        source="python-regional-sdk",
+        event_type="job.requested",
+        payload={"account": 7},
+        time_ms=11,
+        dedupe_id="advanced-dedupe-1",
+    )
+    duplicate = queue_result(
+        client.enqueue(
+            resource.name,
+            0,
+            "advanced-session-dedupe",
+            duplicate_event,
+            session_id="account-7",
+            correlation_id="correlation-7",
+            reply_to="temporary-replies",
+        ),
+        "enqueued",
+    )
+    assert duplicate.get("duplicate") is True, duplicate
+    correlated = client.correlation(resource.name, 0, "correlation-7").get("messages")
+    assert isinstance(correlated, list) and len(correlated) == 1, correlated
+
+    ordinary = client.acquire(
+        resource.name,
+        0,
+        "advanced-ordinary-excludes-session",
+        consumer="ordinary-worker",
+        consumer_epoch=1,
+        max_messages=1,
+        max_in_flight=1,
+    )
+    assert queue_result(ordinary, "acquired").get("deliveries") == [], ordinary
+    session = queue_result(
+        client.acquire(
+            resource.name,
+            0,
+            "advanced-session-acquire",
+            consumer="session-worker",
+            consumer_epoch=1,
+            max_messages=1,
+            max_in_flight=2,
+            visibility_timeout_ms=5_000,
+            session_id="account-7",
+        ),
+        "session_acquired",
+    )
+    session_token = session.get("session_lock_token")
+    deliveries = session.get("deliveries")
+    assert isinstance(session_token, str) and isinstance(deliveries, list), session
+    assert deliveries[0].get("message_id") == "advanced-session-1", session
+    renewed = queue_result(
+        client.renew_session_lock(
+            resource.name,
+            0,
+            "advanced-session-renew",
+            "session-worker",
+            1,
+            session_token,
+            1_000,
+        ),
+        "session_lock_renewed",
+    )
+    queue_result(
+        client.acknowledge(
+            resource.name,
+            0,
+            "advanced-session-ack",
+            "session-worker",
+            1,
+            deliveries[0]["lease_token"],
+        ),
+        "acknowledged",
+    )
+    queue_result(
+        client.release_session_lock(
+            resource.name,
+            0,
+            "advanced-session-release",
+            "session-worker",
+            1,
+            renewed["session_lock_token"],
+        ),
+        "session_lock_released",
+    )
+
+    deferred_event = epoch_sdk.EventEnvelope(
+        id="advanced-deferred-1",
+        source="python-regional-sdk",
+        event_type="job.requested",
+        payload={"deferred": True},
+        time_ms=12,
+    )
+    queue_result(
+        client.enqueue(resource.name, 0, "advanced-deferred-enqueue", deferred_event),
+        "enqueued",
+    )
+    deferred_delivery = queue_result(
+        client.acquire(
+            resource.name,
+            0,
+            "advanced-deferred-acquire",
+            consumer="defer-worker",
+            consumer_epoch=1,
+            max_messages=1,
+            max_in_flight=1,
+        ),
+        "acquired",
+    )["deliveries"][0]
+    queue_result(
+        client.defer(
+            resource.name,
+            0,
+            "advanced-defer",
+            "defer-worker",
+            1,
+            deferred_delivery["lease_token"],
+            "awaiting dependency",
+        ),
+        "deferred",
+    )
+    exact = queue_result(
+        client.receive_deferred(
+            resource.name,
+            0,
+            "advanced-deferred-receive",
+            "advanced-deferred-1",
+            "defer-worker",
+            1,
+        ),
+        "deferred_received",
+    )["delivery"]
+    queue_result(
+        client.acknowledge(
+            resource.name,
+            0,
+            "advanced-deferred-ack",
+            "defer-worker",
+            1,
+            exact["lease_token"],
+        ),
+        "acknowledged",
+    )
+
+    poison = epoch_sdk.EventEnvelope(
+        id="advanced-poison-1",
+        source="python-regional-sdk",
+        event_type="job.poison",
+        payload={"poison": True},
+        time_ms=13,
+    )
+    queue_result(
+        client.enqueue(resource.name, 0, "advanced-poison-enqueue", poison), "enqueued"
+    )
+    poison_delivery = queue_result(
+        client.acquire(
+            resource.name,
+            0,
+            "advanced-poison-acquire",
+            consumer="poison-worker",
+            consumer_epoch=1,
+            max_messages=1,
+            max_in_flight=1,
+        ),
+        "acquired",
+    )["deliveries"][0]
+    queue_result(
+        client.reject(
+            resource.name,
+            0,
+            "advanced-poison-reject",
+            "poison-worker",
+            1,
+            poison_delivery["lease_token"],
+            "poison",
+        ),
+        "dead_lettered",
+    )
+
+    def forwarded() -> dict[str, Any] | None:
+        outbox = client.dead_letter_forwards(resource.name, 0, limit=10).get("records")
+        target_counts = client.counts(FAILED_QUEUE.name, 0).get("counts")
+        if outbox != [] or not isinstance(target_counts, dict):
+            return None
+        return target_counts if target_counts.get("ready") == "1" else None
+
+    wait_until("Queue dead-letter forwarding after leader loss", forwarded)
+    forwarded_delivery = queue_result(
+        client.acquire(
+            FAILED_QUEUE.name,
+            0,
+            "advanced-forwarded-acquire",
+            consumer="failed-worker",
+            consumer_epoch=1,
+            max_messages=1,
+            max_in_flight=1,
+        ),
+        "acquired",
+    )["deliveries"][0]
+    assert forwarded_delivery.get("message_id") == "advanced-poison-1", forwarded_delivery
+    queue_result(
+        client.acknowledge(
+            FAILED_QUEUE.name,
+            0,
+            "advanced-forwarded-ack",
+            "failed-worker",
+            1,
+            forwarded_delivery["lease_token"],
+        ),
+        "acknowledged",
+    )
+    advanced = client.advanced_status(resource.name, 0).get("advanced")
+    assert isinstance(advanced, dict) and advanced.get("pending_dead_letter_forwards") == 0, (
+        advanced
+    )
+
+
 def run_campaign(cluster: RegionalCluster) -> None:
     cluster.start()
     wait_for_nodes(cluster)
@@ -2591,6 +2924,30 @@ def run_campaign(cluster: RegionalCluster) -> None:
     wait_for_nodes(cluster)
     wait_for_profile_apply(cluster, queue, 12)
 
+    advanced_queue_old_leader, advanced_queue_old_term = wait_for_routes(
+        cluster, ADVANCED_QUEUE
+    )
+    cluster.stop_node(advanced_queue_old_leader)
+    advanced_queue_survivors = tuple(
+        node for node in NODES if node != advanced_queue_old_leader
+    )
+    advanced_queue_new_leader, advanced_queue_new_term = wait_for_routes(
+        cluster, ADVANCED_QUEUE, advanced_queue_survivors
+    )
+    assert advanced_queue_new_leader != advanced_queue_old_leader
+    assert advanced_queue_new_term > advanced_queue_old_term
+    prove_python_sdk_advanced_queue_after_failover(cluster, ADVANCED_QUEUE)
+    advanced_queue_applied = wait_for_profile_convergence(
+        cluster, ADVANCED_QUEUE, 20, advanced_queue_survivors
+    )
+    failed_queue_applied = wait_for_profile_convergence(
+        cluster, FAILED_QUEUE, 3, advanced_queue_survivors
+    )
+    cluster.start_node(advanced_queue_old_leader)
+    wait_for_nodes(cluster)
+    wait_for_profile_apply(cluster, ADVANCED_QUEUE, advanced_queue_applied)
+    wait_for_profile_apply(cluster, FAILED_QUEUE, failed_queue_applied)
+
     cache = next(resource for resource in RESOURCES if resource.kind == "cache")
     cache_old_leader, cache_old_term = wait_for_routes(cluster, cache)
     cluster.stop_node(cache_old_leader)
@@ -2638,6 +2995,12 @@ def run_campaign(cluster: RegionalCluster) -> None:
         if resource == ADVANCED_STREAM:
             wait_for_profile_convergence(cluster, resource, 16)
             assert_python_sdk_advanced_stream(cluster, resource, advanced_capture_id)
+            continue
+        if resource == ADVANCED_QUEUE:
+            wait_for_profile_convergence(cluster, resource, advanced_queue_applied)
+            continue
+        if resource == FAILED_QUEUE:
+            wait_for_profile_convergence(cluster, resource, failed_queue_applied)
             continue
         expected = (
             12

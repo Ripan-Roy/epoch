@@ -48,6 +48,20 @@ as scheduling isolation; external cloud-object adapters, two-region transport
 and RPO/RTO drills, cross-shard transactions, and throughput SLOs remain
 production gates. See ADR-0035.
 
+**Queue implementation note (21 August 2026):** The fixed-three-voter,
+single-partition regional Queue now implements the complete alpha development
+surface in QUEUE-001–015. The remaining state-services increment adds exact
+count/byte admission and overflow, durable idle expiry, dedupe-before-eviction,
+FIFO session groups with renewable exclusive locks, priority aging, replicated
+rate/burst/concurrency and circuit state, deferred exact receive,
+request/reply metadata, and a crash-safe Queue-to-Queue DLQ outbox. Command v3
+and tablet snapshot v2 preserve v1/v2 command bytes and legacy snapshot reads;
+catalog configuration, Go/Java/Python clients, public docs, and the real
+leader-loss/reopen campaign use the same state. The alpha remains one physical
+partition and does not claim native streaming receive, automatic prefetch,
+cross-Queue transactions, external DLQ targets, production scale/fairness
+SLOs, or the exhaustive fault matrix. See ADR-0036.
+
 **Recovery implementation note (13 August 2026):** Every healthy regional
 voter now schedules its own canonical native checkpoint for catalog and all
 materialized profile groups after configurable applied-index growth. The

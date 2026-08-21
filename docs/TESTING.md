@@ -278,14 +278,18 @@ monotonic committed-order time including descending leader assignments,
 exclusive deadlines, rejection rollback, non-zero jitter, TTL/max-age
 precedence, credit/window saturation, consumer isolation, settlement
 replenishment, immutable DLQ/redrive provenance, browser-safe receipts, and
-pinned proposal/command/digest vectors. A real three-runtime test drives every
-Queue operation plus flow-controlled receive and consumer-flow observation
-through typed HTTP and EPRS reopen. The container gate adds bounded credit
-evidence, scheduled eligibility, follower rejection, leader `SIGKILL`,
-old-term-token fencing, redelivery, DLQ/redrive reads, convergence, and all-node
-`SIGKILL` replay. This is bounded fixed-voter evidence, not a native streaming,
-fairness, complete crash/I/O-fault, or production placement matrix. See
-[Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
+pinned proposal/command/digest vectors. Advanced suites add exact count/byte
+overflow, dedupe-before-eviction, durable idle expiry, session FIFO/renewal and
+fencing, priority aging, rate/burst/concurrency/circuit transitions, defer and
+correlation snapshot recovery, and durable outbox binding/completion. A real
+three-runtime test drives every Queue operation plus flow-controlled receive
+and consumer-flow observation through typed HTTP and EPRS reopen. The container
+gate adds bounded credit evidence, scheduled eligibility, follower rejection,
+leader `SIGKILL`, old-term-token fencing, session/deferred/correlation behavior,
+Queue-to-Queue DLQ forwarding, redelivery, DLQ/redrive reads, convergence, and
+all-node `SIGKILL` replay. This is bounded fixed-voter evidence, not a native
+streaming, production fairness/load, complete crash/I/O-fault, or production
+placement matrix. See [Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
 
 The Cache suite checks pure observations, checked shard revisions and
 non-repeating item versions, distinct-key transaction bounds, absent-state ABA
@@ -515,7 +519,12 @@ release, automatic scheduled-retry promotion, reacquire, terminal reject,
 immutable dead-letter observation, redrive, final settlement, and linearizable
 counts/flow/redrive reads. It waits for 12
 Queue commands to converge on the survivors and catches up the old voter. It
-repeats the leader-loss proof with the real Python `RegionalCacheClient` across
+then kills the configured advanced Queue leader and exercises dedupe, ordinary
+session exclusion, exclusive lock acquire/renew/release, commit-order session
+delivery, correlation, defer/exact receive, terminal rejection, and durable
+forwarding into a separate `failed-jobs` Queue. Both source/outbox and target
+state must converge, catch up, and reopen from the same voter volumes.
+It repeats the leader-loss proof with the real Python `RegionalCacheClient` across
 strict/advanced values, CAS, committed LRU access, atomic batch and independent
 multiplex, deterministic entry/byte capacity eviction, a real cold-file read,
 backup/PITR, durable changes, explicitly lossy Pub/Sub, fenced locks, automatic

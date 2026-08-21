@@ -87,6 +87,18 @@ func TestRegionalQueueClientCoversEveryLifecycleOperation(t *testing.T) {
 	}
 	ctx := context.Background()
 	queue := "jobs"
+	if _, err = client.RenewSessionLock(ctx, queue, 0, "renew-session", "worker", 7, "session", 1_000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.ReleaseSessionLock(ctx, queue, 0, "release-session", "worker", 7, "session"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.Defer(ctx, queue, 0, "defer", "worker", 7, "lease", "dependency"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.ReceiveDeferred(ctx, queue, 0, "receive-deferred", "message", "worker", 7, nil); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = client.Acknowledge(ctx, queue, 0, "ack", "worker", 7, "lease"); err != nil {
 		t.Fatal(err)
 	}
@@ -120,6 +132,15 @@ func TestRegionalQueueClientCoversEveryLifecycleOperation(t *testing.T) {
 	if _, err = client.ConsumerFlow(ctx, queue, 0, "worker/a"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err = client.AdvancedStatus(ctx, queue, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.Correlation(ctx, queue, 0, "correlation/a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.DeadLetterForwards(ctx, queue, 0, 25); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = client.Status(ctx, queue, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -131,13 +152,15 @@ func TestRegionalQueueClientCoversEveryLifecycleOperation(t *testing.T) {
 	base := "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/queues/jobs/shards/0"
 	want := []string{
 		base + "/mutations", base + "/mutations", base + "/mutations", base + "/mutations",
+		base + "/mutations", base + "/mutations", base + "/mutations", base + "/mutations",
 		base + "/mutations", base + "/mutations", base + "/mutations", base + "/mutations/12",
-		base + "/dead-letters", base + "/redrives", base + "/consumers/worker%2Fa/flow", base + "/status",
+		base + "/dead-letters", base + "/redrives", base + "/consumers/worker%2Fa/flow",
+		base + "/advanced", base + "/correlations/correlation%2Fa", base + "/dead-letter-forwards", base + "/status",
 	}
 	if !reflect.DeepEqual(paths, want) {
 		t.Fatalf("unexpected lifecycle paths:\n got %#v\nwant %#v", paths, want)
 	}
-	for index := 15; index < len(leader.requests); index += 2 {
+	for index := 23; index < len(leader.requests); index += 2 {
 		if leader.requests[index].Headers[regionalReadHeader] != "linearizable" {
 			t.Fatalf("read %q was not linearizable", leader.requests[index].Path)
 		}

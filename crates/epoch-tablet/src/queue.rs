@@ -8,7 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use epoch_core::{DurabilityProfile, EpochError};
-use epoch_queue::{FencedLeaseTokenMetadata, LeaseFence, Queue, QueueConfig, QueueCounts};
+use epoch_queue::{
+    FencedLeaseTokenMetadata, LeaseFence, Queue, QueueConfig, QueueCounts, QueueIngress,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{AppliedCommand, validate_committed_command_scope};
@@ -21,7 +23,8 @@ use digest::{encode_auxiliary_state, initial_state_digest, transition_digest};
 use model::history_ids_as_decimal;
 pub use model::*;
 
-pub const QUEUE_TABLET_SNAPSHOT_FORMAT_VERSION: u16 = 1;
+const LEGACY_QUEUE_TABLET_SNAPSHOT_FORMAT_VERSION: u16 = 1;
+pub const QUEUE_TABLET_SNAPSHOT_FORMAT_VERSION: u16 = 2;
 pub const MAX_QUEUE_TABLET_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
@@ -33,6 +36,7 @@ struct QueueTabletBusinessState {
     next_dead_letter_history_id: u64,
     redrive_history: BTreeMap<u64, QueueTabletRedriveHistory>,
     next_redrive_history_id: u64,
+    dead_letter_forwards: BTreeMap<u64, QueueTabletDeadLetterForward>,
 }
 
 #[derive(Debug)]
@@ -57,6 +61,8 @@ struct VersionedQueueTabletSnapshot {
     next_dead_letter_history_id: u64,
     redrive_history: BTreeMap<u64, QueueTabletRedriveHistory>,
     next_redrive_history_id: u64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    dead_letter_forwards: BTreeMap<u64, QueueTabletDeadLetterForward>,
     applied: Vec<QueueTabletAppliedSnapshot>,
     last_applied_command_index: u64,
     last_applied_time_ms: u64,
@@ -90,6 +96,7 @@ impl QueueTablet {
                 next_dead_letter_history_id: 0,
                 redrive_history: BTreeMap::new(),
                 next_redrive_history_id: 0,
+                dead_letter_forwards: BTreeMap::new(),
             },
             applied: BTreeMap::new(),
             last_applied_command_index: 0,
@@ -210,7 +217,11 @@ impl QueueTablet {
     }
 
     pub fn next_maintenance_deadline_ms(&self) -> Option<u64> {
-        self.state.queue.next_maintenance_deadline_ms()
+        self.state
+            .queue
+            .next_maintenance_deadline_with_pending_forwards(
+                self.state.pending_dead_letter_forward_count(),
+            )
     }
 
     pub fn consumer_epoch(&self, consumer: &str) -> Option<u64> {
@@ -249,6 +260,32 @@ impl QueueTablet {
         self.state
             .redrive_history
             .values()
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    pub fn advanced_status(&self) -> QueueTabletAdvancedStatus {
+        QueueTabletAdvancedStatus {
+            state: self.state.queue.advanced_observation(),
+            pending_dead_letter_forwards: self
+                .state
+                .dead_letter_forwards
+                .values()
+                .filter(|forward| forward.status != QueueTabletDeadLetterForwardStatus::Completed)
+                .count(),
+        }
+    }
+
+    pub fn correlation(&self, correlation_id: &str) -> Vec<epoch_queue::QueueCorrelatedMessage> {
+        self.state.queue.lookup_correlation(correlation_id)
+    }
+
+    pub fn pending_dead_letter_forwards(&self, limit: usize) -> Vec<QueueTabletDeadLetterForward> {
+        self.state
+            .dead_letter_forwards
+            .values()
+            .filter(|forward| forward.status != QueueTabletDeadLetterForwardStatus::Completed)
             .take(limit)
             .cloned()
             .collect()
@@ -305,6 +342,7 @@ impl QueueTablet {
             next_dead_letter_history_id: self.state.next_dead_letter_history_id,
             redrive_history: self.state.redrive_history.clone(),
             next_redrive_history_id: self.state.next_redrive_history_id,
+            dead_letter_forwards: self.state.dead_letter_forwards.clone(),
             applied,
             last_applied_command_index: self.last_applied_command_index,
             last_applied_time_ms: self.last_applied_time_ms,
@@ -332,7 +370,12 @@ impl QueueTablet {
         }
         let snapshot: VersionedQueueTabletSnapshot = serde_json::from_slice(encoded)
             .map_err(|error| TabletError::Decoding(error.to_string()))?;
-        if snapshot.format_version != QUEUE_TABLET_SNAPSHOT_FORMAT_VERSION {
+        if ![
+            LEGACY_QUEUE_TABLET_SNAPSHOT_FORMAT_VERSION,
+            QUEUE_TABLET_SNAPSHOT_FORMAT_VERSION,
+        ]
+        .contains(&snapshot.format_version)
+        {
             return Err(TabletError::InvalidCommand(format!(
                 "unsupported Queue tablet snapshot version {}",
                 snapshot.format_version
@@ -408,6 +451,7 @@ impl QueueTablet {
                 next_dead_letter_history_id: snapshot.next_dead_letter_history_id,
                 redrive_history: snapshot.redrive_history,
                 next_redrive_history_id: snapshot.next_redrive_history_id,
+                dead_letter_forwards: snapshot.dead_letter_forwards,
             },
             applied,
             last_applied_command_index: snapshot.last_applied_command_index,
@@ -417,6 +461,10 @@ impl QueueTablet {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "snapshot restoration exhaustively cross-validates all Queue auxiliary registries"
+)]
 fn validate_queue_snapshot_auxiliary(
     queue: &Queue,
     snapshot: &VersionedQueueTabletSnapshot,
@@ -495,6 +543,50 @@ fn validate_queue_snapshot_auxiliary(
             "Queue tablet snapshot redrive history is invalid".into(),
         ));
     }
+    let configured_forward_target = queue
+        .config()
+        .advanced
+        .as_ref()
+        .and_then(|config| config.dead_letter_target.as_deref());
+    for (history_id, forward) in &snapshot.dead_letter_forwards {
+        let Some(history) = snapshot.dead_letter_history.get(history_id) else {
+            return Err(TabletError::InvalidCommand(
+                "Queue tablet snapshot dead-letter forward history is invalid".into(),
+            ));
+        };
+        if forward.dead_letter_history_id != *history_id
+            || configured_forward_target != Some(forward.target.as_str())
+            || forward.envelope != history.dead_letter.envelope
+        {
+            return Err(TabletError::InvalidCommand(
+                "Queue tablet snapshot dead-letter forward history is invalid".into(),
+            ));
+        }
+        match forward.status {
+            QueueTabletDeadLetterForwardStatus::Pending
+                if forward.destination.is_none() && forward.target_message_id.is_none() => {}
+            QueueTabletDeadLetterForwardStatus::Bound
+                if forward.destination.is_some() && forward.target_message_id.is_none() => {}
+            QueueTabletDeadLetterForwardStatus::Completed
+                if forward.destination.is_some() && forward.target_message_id.is_some() => {}
+            _ => {
+                return Err(TabletError::InvalidCommand(
+                    "Queue tablet snapshot dead-letter forward state is invalid".into(),
+                ));
+            }
+        }
+        if let Some(destination) = &forward.destination {
+            destination.validate()?;
+            if destination.kind != epoch_bus::EpochTargetKind::Queue
+                || destination.resource != forward.target
+                || destination.shard_index != 0
+            {
+                return Err(TabletError::InvalidCommand(
+                    "Queue tablet snapshot dead-letter destination is invalid".into(),
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -535,6 +627,30 @@ impl QueueTabletBusinessState {
                 self.execute_redrive(committed, command, applied_at_ms)?
             }
             QueueTabletOperation::Maintain(_) => self.execute_maintain(applied_at_ms)?,
+            QueueTabletOperation::EnqueueAdvanced(command) => {
+                self.execute_enqueue_advanced(*command, applied_at_ms)?
+            }
+            QueueTabletOperation::AcquireSession(command) => {
+                self.execute_acquire_session(scope, committed, &command, applied_at_ms)?
+            }
+            QueueTabletOperation::RenewSessionLock(command) => {
+                self.execute_renew_session_lock(scope, committed, &command, applied_at_ms)?
+            }
+            QueueTabletOperation::ReleaseSessionLock(command) => {
+                self.execute_release_session_lock(scope, committed, &command, applied_at_ms)?
+            }
+            QueueTabletOperation::Defer(command) => {
+                self.execute_defer(scope, committed, command, applied_at_ms)?
+            }
+            QueueTabletOperation::ReceiveDeferred(command) => {
+                self.execute_receive_deferred(scope, committed, &command, applied_at_ms)?
+            }
+            QueueTabletOperation::BindDeadLetterForward(command) => {
+                self.execute_bind_dead_letter_forward(command)?
+            }
+            QueueTabletOperation::CompleteDeadLetterForward(command) => {
+                self.execute_complete_dead_letter_forward(command)?
+            }
         };
         let new_history_ids = self.reconcile_dead_letter_history(committed)?;
         self.attach_dead_letter_evidence(&mut result, &new_history_ids)?;
@@ -546,7 +662,31 @@ impl QueueTabletBusinessState {
         command: QueueEnqueueCommand,
         applied_at_ms: u64,
     ) -> Result<QueueTabletOperationResult, EpochError> {
-        let receipt = self.queue.enqueue(command.envelope, applied_at_ms)?;
+        let receipt = if self.queue.config().advanced.is_some() {
+            self.queue.enqueue_advanced_with_pending_forwards(
+                QueueIngress::new(command.envelope),
+                applied_at_ms,
+                self.pending_dead_letter_forward_count(),
+            )?
+        } else {
+            self.queue.enqueue(command.envelope, applied_at_ms)?
+        };
+        Ok(QueueTabletOperationResult::Enqueued {
+            message_id: receipt.message_id,
+            duplicate: receipt.acknowledgement.duplicate,
+        })
+    }
+
+    fn execute_enqueue_advanced(
+        &mut self,
+        command: QueueAdvancedEnqueueCommand,
+        applied_at_ms: u64,
+    ) -> Result<QueueTabletOperationResult, EpochError> {
+        let receipt = self.queue.enqueue_advanced_with_pending_forwards(
+            command.ingress,
+            applied_at_ms,
+            self.pending_dead_letter_forward_count(),
+        )?;
         Ok(QueueTabletOperationResult::Enqueued {
             message_id: receipt.message_id,
             duplicate: receipt.acknowledgement.duplicate,
@@ -570,24 +710,16 @@ impl QueueTabletBusinessState {
         )?;
         let deliveries = self
             .queue
-            .acquire_fenced(
+            .acquire_advanced_with_pending_forwards(
                 &command.consumer,
                 usize::from(command.max_messages),
                 command.visibility_timeout_ms,
                 applied_at_ms,
                 fence,
+                self.pending_dead_letter_forward_count(),
             )?
             .into_iter()
-            .map(|delivery| {
-                let message = delivery.message;
-                QueueTabletDelivery {
-                    message_id: message.id,
-                    envelope: message.envelope.into(),
-                    attempt: message.attempt,
-                    lease_token: delivery.lease_token,
-                    lease_deadline_ms: delivery.lease_deadline_ms,
-                }
-            })
+            .map(|delivery| tablet_delivery(&self.queue, delivery))
             .collect();
         Ok(QueueTabletOperationResult::Acquired {
             deliveries,
@@ -616,30 +748,23 @@ impl QueueTabletBusinessState {
         // state-machine transition. Maintenance first removes leases whose
         // committed deadline has elapsed; the subsequent acquire repeats the
         // idempotent maintenance pass before creating new leases.
-        self.queue.maintain_fenced(applied_at_ms)?;
+        self.queue
+            .maintain_advanced(applied_at_ms, self.pending_dead_letter_forward_count())?;
         let in_flight_before = self.queue.in_flight_for_consumer(&command.consumer);
         let available = usize::from(command.max_in_flight).saturating_sub(in_flight_before);
         let granted = usize::from(command.credit).min(available);
         let deliveries = self
             .queue
-            .acquire_fenced(
+            .acquire_advanced_with_pending_forwards(
                 &command.consumer,
                 granted,
                 command.visibility_timeout_ms,
                 applied_at_ms,
                 fence,
+                self.pending_dead_letter_forward_count(),
             )?
             .into_iter()
-            .map(|delivery| {
-                let message = delivery.message;
-                QueueTabletDelivery {
-                    message_id: message.id,
-                    envelope: message.envelope.into(),
-                    attempt: message.attempt,
-                    lease_token: delivery.lease_token,
-                    lease_deadline_ms: delivery.lease_deadline_ms,
-                }
-            })
+            .map(|delivery| tablet_delivery(&self.queue, delivery))
             .collect();
         let in_flight_after = self.queue.in_flight_for_consumer(&command.consumer);
         let remaining_capacity = usize::from(command.max_in_flight).saturating_sub(in_flight_after);
@@ -660,6 +785,225 @@ impl QueueTabletBusinessState {
         })
     }
 
+    fn execute_acquire_session(
+        &mut self,
+        scope: &QueueTabletScope,
+        committed: CommittedCommand<'_>,
+        command: &QueueSessionAcquireCommand,
+        applied_at_ms: u64,
+    ) -> Result<QueueTabletOperationResult, EpochError> {
+        self.accept_consumer_epoch(&command.consumer, command.consumer_epoch)?;
+        let fence = LeaseFence::new(
+            scope.tablet_id,
+            scope.tablet_epoch,
+            command.partition,
+            committed.term,
+            command.consumer_epoch,
+        )?;
+        self.queue
+            .maintain_advanced(applied_at_ms, self.pending_dead_letter_forward_count())?;
+        let in_flight_before = self.queue.in_flight_for_consumer(&command.consumer);
+        let available = usize::from(command.max_in_flight).saturating_sub(in_flight_before);
+        let granted = usize::from(command.credit).min(available);
+        let acquired = self.queue.acquire_session_fenced_with_pending_forwards(
+            &command.session_id,
+            &command.consumer,
+            granted,
+            command.visibility_timeout_ms,
+            command.session_lock_token.as_deref(),
+            applied_at_ms,
+            fence,
+            self.pending_dead_letter_forward_count(),
+        )?;
+        let deliveries = acquired
+            .deliveries
+            .into_iter()
+            .map(|delivery| tablet_delivery(&self.queue, delivery))
+            .collect();
+        let in_flight_after = self.queue.in_flight_for_consumer(&command.consumer);
+        let remaining_capacity = usize::from(command.max_in_flight).saturating_sub(in_flight_after);
+        Ok(QueueTabletOperationResult::SessionAcquired {
+            session_id: acquired.session_id,
+            session_lock_token: acquired.lock_token,
+            session_lock_deadline_ms: acquired.lock_deadline_ms,
+            deliveries,
+            flow_control: QueueTabletFlowControl {
+                requested_credit: command.credit,
+                max_in_flight: command.max_in_flight,
+                in_flight_before: queue_count_u64(in_flight_before)?,
+                in_flight_after: queue_count_u64(in_flight_after)?,
+                remaining_capacity: queue_count_u64(remaining_capacity)?,
+            },
+        })
+    }
+
+    fn execute_renew_session_lock(
+        &mut self,
+        scope: &QueueTabletScope,
+        committed: CommittedCommand<'_>,
+        command: &QueueSessionLockRenewCommand,
+        applied_at_ms: u64,
+    ) -> Result<QueueTabletOperationResult, EpochError> {
+        self.authorize_consumer_epoch(&command.consumer, command.consumer_epoch)?;
+        let fence = LeaseFence::new(
+            scope.tablet_id,
+            scope.tablet_epoch,
+            command.partition,
+            committed.term,
+            command.consumer_epoch,
+        )?;
+        let renewal = self.queue.renew_session_lock_fenced_with_pending_forwards(
+            &command.session_lock_token,
+            command.extension_ms,
+            applied_at_ms,
+            fence,
+            self.pending_dead_letter_forward_count(),
+        )?;
+        Ok(QueueTabletOperationResult::SessionLockRenewed {
+            session_id: renewal.session_id,
+            session_lock_token: renewal.lock_token,
+            session_lock_deadline_ms: renewal.lock_deadline_ms,
+        })
+    }
+
+    fn execute_release_session_lock(
+        &mut self,
+        scope: &QueueTabletScope,
+        committed: CommittedCommand<'_>,
+        command: &QueueSessionLockReleaseCommand,
+        applied_at_ms: u64,
+    ) -> Result<QueueTabletOperationResult, EpochError> {
+        self.authorize_consumer_epoch(&command.consumer, command.consumer_epoch)?;
+        let fence = LeaseFence::new(
+            scope.tablet_id,
+            scope.tablet_epoch,
+            command.partition,
+            committed.term,
+            command.consumer_epoch,
+        )?;
+        self.queue
+            .release_session_lock_fenced_with_pending_forwards(
+                &command.session_lock_token,
+                fence,
+                applied_at_ms,
+                self.pending_dead_letter_forward_count(),
+            )?;
+        Ok(QueueTabletOperationResult::SessionLockReleased)
+    }
+
+    fn execute_defer(
+        &mut self,
+        scope: &QueueTabletScope,
+        committed: CommittedCommand<'_>,
+        command: QueueDeferCommand,
+        applied_at_ms: u64,
+    ) -> Result<QueueTabletOperationResult, EpochError> {
+        let authorized = self.authorize_lease_command(
+            scope,
+            committed,
+            &command.consumer,
+            command.consumer_epoch,
+            &command.lease_token,
+        )?;
+        let message_id = self.queue.defer_fenced_with_pending_forwards(
+            &command.lease_token,
+            authorized.fence,
+            command.reason,
+            applied_at_ms,
+            self.pending_dead_letter_forward_count(),
+        )?;
+        Ok(QueueTabletOperationResult::Deferred { message_id })
+    }
+
+    fn execute_receive_deferred(
+        &mut self,
+        scope: &QueueTabletScope,
+        committed: CommittedCommand<'_>,
+        command: &QueueReceiveDeferredCommand,
+        applied_at_ms: u64,
+    ) -> Result<QueueTabletOperationResult, EpochError> {
+        self.accept_consumer_epoch(&command.consumer, command.consumer_epoch)?;
+        let fence = LeaseFence::new(
+            scope.tablet_id,
+            scope.tablet_epoch,
+            command.partition,
+            committed.term,
+            command.consumer_epoch,
+        )?;
+        let delivery = self.queue.receive_deferred_fenced_with_pending_forwards(
+            &command.message_id,
+            &command.consumer,
+            command.visibility_timeout_ms,
+            applied_at_ms,
+            fence,
+            self.pending_dead_letter_forward_count(),
+        )?;
+        Ok(QueueTabletOperationResult::DeferredReceived {
+            delivery: Box::new(tablet_delivery(&self.queue, delivery)),
+        })
+    }
+
+    fn execute_bind_dead_letter_forward(
+        &mut self,
+        command: QueueBindDeadLetterForwardCommand,
+    ) -> Result<QueueTabletOperationResult, EpochError> {
+        let forward = self
+            .dead_letter_forwards
+            .get_mut(&command.dead_letter_history_id)
+            .ok_or_else(|| EpochError::NotFound(command.dead_letter_history_id.to_string()))?;
+        if forward.target != command.destination.resource {
+            return Err(EpochError::Conflict(
+                "dead-letter destination does not match the configured target".into(),
+            ));
+        }
+        match forward.status {
+            QueueTabletDeadLetterForwardStatus::Pending => {
+                forward.destination = Some(command.destination.clone());
+                forward.status = QueueTabletDeadLetterForwardStatus::Bound;
+            }
+            QueueTabletDeadLetterForwardStatus::Bound
+                if forward.destination.as_ref() == Some(&command.destination) => {}
+            _ => {
+                return Err(EpochError::Conflict(
+                    "dead-letter forward is already bound or completed differently".into(),
+                ));
+            }
+        }
+        Ok(QueueTabletOperationResult::DeadLetterForwardBound {
+            dead_letter_history_id: command.dead_letter_history_id,
+            destination: command.destination,
+        })
+    }
+
+    fn execute_complete_dead_letter_forward(
+        &mut self,
+        command: QueueCompleteDeadLetterForwardCommand,
+    ) -> Result<QueueTabletOperationResult, EpochError> {
+        let forward = self
+            .dead_letter_forwards
+            .get_mut(&command.dead_letter_history_id)
+            .ok_or_else(|| EpochError::NotFound(command.dead_letter_history_id.to_string()))?;
+        match forward.status {
+            QueueTabletDeadLetterForwardStatus::Bound
+                if forward.destination.as_ref() == Some(&command.destination) =>
+            {
+                forward.target_message_id = Some(command.target_message_id.clone());
+                forward.status = QueueTabletDeadLetterForwardStatus::Completed;
+            }
+            QueueTabletDeadLetterForwardStatus::Completed
+                if forward.destination.as_ref() == Some(&command.destination)
+                    && forward.target_message_id.as_deref()
+                        == Some(command.target_message_id.as_str()) => {}
+            _ => {
+                return Err(EpochError::Fenced);
+            }
+        }
+        Ok(QueueTabletOperationResult::DeadLetterForwardCompleted {
+            dead_letter_history_id: command.dead_letter_history_id,
+            target_message_id: command.target_message_id,
+        })
+    }
+
     fn execute_acknowledge(
         &mut self,
         scope: &QueueTabletScope,
@@ -676,6 +1020,7 @@ impl QueueTabletBusinessState {
         )?;
         self.queue
             .acknowledge_fenced(&command.lease_token, authorized.fence, applied_at_ms)?;
+        self.queue.record_dispatch_success(applied_at_ms)?;
         Ok(QueueTabletOperationResult::Acknowledged {
             message_id: authorized.message_id,
         })
@@ -755,6 +1100,7 @@ impl QueueTabletBusinessState {
             command.reason,
             applied_at_ms,
         )?;
+        self.queue.record_dispatch_failure(applied_at_ms)?;
         Ok(QueueTabletOperationResult::Nacked {
             message_id: authorized.message_id,
             dead_letter_history_id: None,
@@ -781,6 +1127,7 @@ impl QueueTabletBusinessState {
             command.reason,
             applied_at_ms,
         )?;
+        self.queue.record_dispatch_failure(applied_at_ms)?;
         Ok(QueueTabletOperationResult::DeadLettered {
             message_id: authorized.message_id,
             dead_letter_history_id: 0,
@@ -816,7 +1163,8 @@ impl QueueTabletBusinessState {
         &mut self,
         applied_at_ms: u64,
     ) -> Result<QueueTabletOperationResult, EpochError> {
-        self.queue.maintain_fenced(applied_at_ms)?;
+        self.queue
+            .maintain_advanced(applied_at_ms, self.pending_dead_letter_forward_count())?;
         Ok(QueueTabletOperationResult::Maintained {
             counts: self.queue.counts().try_into()?,
             new_dead_letter_history_ids: Vec::new(),
@@ -884,6 +1232,25 @@ impl QueueTabletBusinessState {
         }
     }
 
+    fn authorize_consumer_epoch(
+        &self,
+        consumer: &str,
+        requested_epoch: u64,
+    ) -> Result<(), EpochError> {
+        if self.consumer_epochs.get(consumer).copied() == Some(requested_epoch) {
+            Ok(())
+        } else {
+            Err(EpochError::Fenced)
+        }
+    }
+
+    fn pending_dead_letter_forward_count(&self) -> usize {
+        self.dead_letter_forwards
+            .values()
+            .filter(|forward| forward.status != QueueTabletDeadLetterForwardStatus::Completed)
+            .count()
+    }
+
     fn authorize_lease_command(
         &self,
         scope: &QueueTabletScope,
@@ -928,6 +1295,12 @@ impl QueueTabletBusinessState {
             .retain(|message_id, _| current_message_ids.contains(message_id));
 
         let mut appended = Vec::new();
+        let forward_target = self
+            .queue
+            .config()
+            .advanced
+            .as_ref()
+            .and_then(|config| config.dead_letter_target.clone());
         for dead_letter in current {
             if self
                 .active_dead_letters
@@ -951,9 +1324,22 @@ impl QueueTabletBusinessState {
                     recorded_term: committed.term,
                     recorded_commit_index: committed.log_index,
                     source_proposal_id: committed.proposal_id,
-                    dead_letter: dead_letter.into(),
+                    dead_letter: dead_letter.clone().into(),
                 },
             );
+            if let Some(target) = &forward_target {
+                self.dead_letter_forwards.insert(
+                    history_id,
+                    QueueTabletDeadLetterForward {
+                        dead_letter_history_id: history_id,
+                        target: target.clone(),
+                        envelope: dead_letter.envelope.into(),
+                        status: QueueTabletDeadLetterForwardStatus::Pending,
+                        destination: None,
+                        target_message_id: None,
+                    },
+                );
+            }
             appended.push(history_id);
         }
         Ok(appended)
@@ -991,6 +1377,24 @@ impl QueueTabletBusinessState {
 struct AuthorizedLease {
     fence: LeaseFence,
     message_id: String,
+}
+
+fn tablet_delivery(queue: &Queue, delivery: epoch_queue::Delivery) -> QueueTabletDelivery {
+    let metadata = queue.message_metadata(&delivery.message.id);
+    let message = delivery.message;
+    QueueTabletDelivery {
+        message_id: message.id,
+        envelope: message.envelope.into(),
+        attempt: message.attempt,
+        lease_token: delivery.lease_token,
+        lease_deadline_ms: delivery.lease_deadline_ms,
+        metadata,
+    }
+}
+
+fn queue_count_u64(value: usize) -> Result<u64, EpochError> {
+    u64::try_from(value)
+        .map_err(|_| EpochError::Internal("consumer in-flight count exceeds u64".into()))
 }
 
 fn recordable_rejected_outcome(error: EpochError) -> TabletResult<QueueTabletOutcome> {

@@ -17,6 +17,7 @@ use epoch_catalog::{
 };
 use epoch_consensus::{CommittedProposal, ConsensusError, ProposalLookup};
 use epoch_core::{DurabilityProfile, ResourceKind, WorkloadProfile};
+use epoch_queue::{Queue, QueueConfig};
 use epoch_tablet::{MAX_CACHE_TABLET_ENTRIES, MAX_CACHE_TABLET_TIER_BYTES, MAX_CACHE_TTL_MS};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -373,7 +374,7 @@ async fn apply_resource(
     let name = path.resource_name()?;
     let workload_profile = profile_for_kind(name.kind)?;
     let configuration =
-        normalize_profile_configuration(name.kind, request.shard_count, request.configuration)?;
+        normalize_profile_configuration(&name, request.shard_count, request.configuration)?;
     let command = CatalogCommand::Apply(ApplyResource {
         request_token: request.request_token,
         expected_generation: request.expected_generation,
@@ -403,10 +404,14 @@ async fn apply_resource(
 }
 
 fn normalize_profile_configuration(
-    kind: ResourceKind,
+    resource: &ResourceName,
     shard_count: u32,
     configuration: Option<serde_json::Value>,
 ) -> Result<Option<serde_json::Value>, RegionalCatalogApiError> {
+    let kind = resource.kind;
+    if kind == ResourceKind::Queue {
+        return normalize_queue_configuration(resource, configuration);
+    }
     if !matches!(kind, ResourceKind::Cache | ResourceKind::Table) {
         return Ok(None);
     }
@@ -469,6 +474,52 @@ fn normalize_profile_configuration(
     })
     .map(Some)
     .map_err(|error| RegionalCatalogApiError::Catalog(CatalogError::InvalidSpec(error.to_string())))
+}
+
+fn normalize_queue_configuration(
+    resource: &ResourceName,
+    configuration: Option<serde_json::Value>,
+) -> Result<Option<serde_json::Value>, RegionalCatalogApiError> {
+    let Some(raw) = configuration else {
+        return Ok(None);
+    };
+    let configuration: QueueConfig = serde_json::from_value(raw).map_err(|error| {
+        RegionalCatalogApiError::Catalog(CatalogError::InvalidSpec(format!(
+            "invalid Queue configuration: {error}"
+        )))
+    })?;
+    if !matches!(
+        configuration.durability,
+        DurabilityProfile::ReplicatedMemory | DurabilityProfile::QuorumDurable
+    ) {
+        return Err(RegionalCatalogApiError::Catalog(CatalogError::InvalidSpec(
+            "regional Queue durability must be replicated_memory or quorum_durable".into(),
+        )));
+    }
+    let dead_letter_target = configuration
+        .advanced
+        .as_ref()
+        .and_then(|advanced| advanced.dead_letter_target.as_deref());
+    if let Some(target) = dead_letter_target {
+        if configuration.durability != DurabilityProfile::QuorumDurable {
+            return Err(RegionalCatalogApiError::Catalog(CatalogError::InvalidSpec(
+                "Queue dead-letter forwarding requires quorum_durable durability".into(),
+            )));
+        }
+        if target == resource.name {
+            return Err(RegionalCatalogApiError::Catalog(CatalogError::InvalidSpec(
+                "Queue dead-letter target must differ from the source Queue".into(),
+            )));
+        }
+    }
+    Queue::new(configuration.clone()).map_err(|error| {
+        RegionalCatalogApiError::Catalog(CatalogError::InvalidSpec(error.to_string()))
+    })?;
+    serde_json::to_value(configuration)
+        .map(Some)
+        .map_err(|error| {
+            RegionalCatalogApiError::Catalog(CatalogError::InvalidSpec(error.to_string()))
+        })
 }
 
 async fn delete_resource(
@@ -943,11 +994,80 @@ mod tests {
         .unwrap()
     }
 
+    fn queue_resource_name() -> ResourceName {
+        ResourceName::new("acme", "shop", "dev", "core", ResourceKind::Queue, "jobs").unwrap()
+    }
+
     #[test]
     fn omitted_cache_configuration_preserves_the_legacy_catalog_contract() {
         assert_eq!(
-            normalize_profile_configuration(ResourceKind::Cache, 1, None).unwrap(),
+            normalize_profile_configuration(&cache_resource_name(), 1, None).unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn queue_configuration_is_validated_and_persisted_canonically() {
+        let raw = json!({
+            "durability": "quorum_durable",
+            "visibility_timeout_ms": 5000,
+            "max_messages": 100,
+            "retry": {
+                "strategy": "fixed",
+                "initial_delay_ms": 10,
+                "max_delay_ms": 10,
+                "jitter_percent": 0,
+                "max_attempts": 3,
+                "max_age_ms": null
+            },
+            "dedupe_window_ms": 60000,
+            "advanced": {
+                "max_active_bytes": 1_048_576,
+                "overflow": "dead_letter_oldest",
+                "idle_expiry_ms": 600_000,
+                "priority_aging_interval_ms": 10,
+                "dispatch": {
+                    "messages_per_second": 1000,
+                    "burst": 100,
+                    "max_in_flight": 100,
+                    "failure_threshold": 2,
+                    "open_interval_ms": 50
+                },
+                "dead_letter_target": "failed-jobs"
+            }
+        });
+        let normalized = normalize_profile_configuration(&queue_resource_name(), 1, Some(raw))
+            .expect("advanced Queue configuration should be accepted")
+            .expect("configured Queue should retain its configuration");
+        let config: QueueConfig = serde_json::from_value(normalized.clone()).unwrap();
+        assert_eq!(config.durability, DurabilityProfile::QuorumDurable);
+        let advanced = config
+            .advanced
+            .as_ref()
+            .expect("advanced policy should survive");
+        assert_eq!(advanced.max_active_bytes, Some(1_048_576));
+        assert_eq!(advanced.dead_letter_target.as_deref(), Some("failed-jobs"));
+        assert_eq!(
+            normalized["advanced"]["overflow"],
+            json!("dead_letter_oldest")
+        );
+
+        let mut volatile = normalized;
+        volatile["durability"] = json!("volatile");
+        assert!(
+            normalize_profile_configuration(&queue_resource_name(), 1, Some(volatile)).is_err()
+        );
+
+        let mut memory_only = serde_json::to_value(&config).unwrap();
+        memory_only["durability"] = json!("replicated_memory");
+        assert!(
+            normalize_profile_configuration(&queue_resource_name(), 1, Some(memory_only)).is_err()
+        );
+
+        let mut self_target = serde_json::to_value(&config).unwrap();
+        self_target["advanced"]["dead_letter_target"] = json!("jobs");
+        assert!(
+            normalize_profile_configuration(&queue_resource_name(), 1, Some(self_target)).is_err()
         );
     }
 

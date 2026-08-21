@@ -65,10 +65,13 @@ resource governance, exact authorized filters, deterministic cost-driver
 attribution, console visibility, legacy recovery, and a real control/data-plane
 restart proof. PR #80 plus stabilization PR #82 and `v0.1.0-alpha.6` complete
 every non-deferred Cache row as the second release in the six-PR train. The
-current Stream feature candidate completes STREAM-007–015 and closes the
-remaining development semantics across producer fencing, same-tablet
-transactions, compaction/tiering, automatic capture, expansion advice,
-consumer modes, replication ingress, and logical superstreams. Stable
+PR #83 and `v0.1.0-alpha.7` complete the Stream release in the six-PR train
+across producer fencing, same-tablet transactions, compaction/tiering,
+automatic capture, expansion advice, consumer modes, replication ingress, and
+logical superstreams. The current Queue candidate closes QUEUE-007–015 with
+bounded admission/overflow, idle expiry, FIFO session locks, priority aging,
+dispatch protection, deferred/request-reply state, and crash-safe Queue DLQ
+forwarding. Stable
 streaming protocols, replicated multi-instance hosted metadata, production
 identity, follower routing, dynamic membership/voter selection,
 repair/rebalance, and the broader M2 security/performance gates remain open.

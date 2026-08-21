@@ -25,6 +25,7 @@ fn config() -> QueueConfig {
             max_age_ms: None,
         },
         dedupe_window_ms: Some(1_000),
+        advanced: None,
     }
 }
 

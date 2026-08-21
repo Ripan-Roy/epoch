@@ -27,8 +27,33 @@ final class RegionalQueueClientTest {
             .timeMs(42)
             .build();
 
-    client.enqueue("jobs/eu", 0, "enqueue-42", event);
-    client.acquire("jobs/eu", 0, "acquire-42", "worker-a", 7, 4, 2, 5_000L);
+    client.enqueueAdvanced(
+        "jobs/eu", 0, "enqueue-42", event, "account-7", "correlation-42", "reply-temp");
+    client.acquireSession(
+        "jobs/eu",
+        0,
+        "acquire-42",
+        "account-7",
+        "worker-a",
+        BigInteger.valueOf(7),
+        4,
+        2,
+        BigInteger.valueOf(5_000),
+        null);
+    client.renewSessionLock(
+        "jobs/eu",
+        0,
+        "renew-session",
+        "worker-a",
+        BigInteger.valueOf(7),
+        "session-42",
+        BigInteger.valueOf(1_000));
+    client.releaseSessionLock(
+        "jobs/eu", 0, "release-session", "worker-a", BigInteger.valueOf(7), "session-42");
+    client.defer(
+        "jobs/eu", 0, "defer-42", "worker-a", BigInteger.valueOf(7), "lease-42", "dependency");
+    client.receiveDeferred(
+        "jobs/eu", 0, "receive-deferred", "job-42", "worker-a", BigInteger.valueOf(7), null);
     client.acknowledge("jobs/eu", 0, "ack-42", "worker-a", 7, "lease-42");
     client.extendLease("jobs/eu", 0, "extend-42", "worker-a", 7, "lease-42", 1_000);
     client.release("jobs/eu", 0, "release-42", "worker-a", 7, "lease-42", 50, "retry");
@@ -55,6 +80,9 @@ final class RegionalQueueClientTest {
     client.deadLetters("jobs/eu", 0, 25);
     client.redrives("jobs/eu", 0, 25);
     client.consumerFlow("jobs/eu", 0, "worker/a");
+    client.advancedStatus("jobs/eu", 0);
+    client.correlation("jobs/eu", 0, "correlation/a");
+    client.deadLetterForwards("jobs/eu", 0, 25);
     client.status("jobs/eu", 0);
 
     String base =
@@ -64,13 +92,16 @@ final class RegionalQueueClientTest {
     for (int index = 1; index < transport.requests.size(); index += 2) {
       operations.add(transport.requests.get(index));
     }
-    assertEquals(15, operations.size());
+    assertEquals(22, operations.size());
     assertEquals(base + "/mutations", operations.get(0).path());
     assertEquals("acquire", operations.get(1).body().path("operation").path("kind").asText());
     assertEquals("7", operations.get(1).body().path("operation").path("consumer_epoch").asText());
-    assertEquals(base + "/mutations/12", operations.get(9).path());
-    assertEquals(base + "/consumers/worker%2Fa/flow", operations.get(13).path());
-    for (Request request : operations.subList(9, operations.size())) {
+    assertEquals(
+        "account-7", operations.get(1).body().path("operation").path("session_id").asText());
+    assertEquals(base + "/mutations/12", operations.get(13).path());
+    assertEquals(base + "/consumers/worker%2Fa/flow", operations.get(17).path());
+    assertEquals(base + "/correlations/correlation%2Fa", operations.get(19).path());
+    for (Request request : operations.subList(13, operations.size())) {
       assertEquals("linearizable", request.headers().get("x-epoch-read-consistency"));
     }
   }

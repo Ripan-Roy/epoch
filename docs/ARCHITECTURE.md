@@ -375,8 +375,9 @@ mutation idempotency keys across one bounded rediscovery, and request
 linearizable reads. Stream sessions always select shard 0 and expose
 join/heartbeat/leave/maintenance plus membership/assignment observation. Queue
 exposes its complete implemented lifecycle: enqueue,
-credit acquire, all lease dispositions, maintenance, histories, redrive,
-counts, flow, mutation lookup, and status. Cache exposes every strict value
+credit/session acquire, renewable session locks, deferred exact receive, all
+lease dispositions, maintenance, histories, redrive, advanced/correlation/DLQ
+outbox reads, counts, flow, mutation lookup, and status. Cache exposes every strict value
 kind, set/committed-get/delete/CAS/increment, atomic transactions/batches,
 deterministic eviction, fenced locks, explicit expiry, pure observation,
 mutation lookup, and status. The generic regional and direct
@@ -405,14 +406,18 @@ placement API. See [ADR-0009](adr/0009-regional-tablet-catalog.md),
 `crates/epoch-tablet` also contains the canonical single-partition Queue tablet
 state machine. `epoch-node` attaches it as the only selected profile for one
 fixed consensus group, rebuilds it from EPRS before readiness, and mounts
-strict mutation/status/count/DLQ/redrive/consumer-flow routes on the internal listener and
-the versioned regional Queue adapter on the authenticated public listener. The
+strict mutation/status/count/DLQ/redrive/consumer-flow/advanced/correlation/outbox
+routes on the internal listener and the versioned regional Queue adapter on the
+authenticated public listener. The
 actor alone applies committed commands; reads never advance time; business
 rejections are committed receipts; structural divergence fails the actor and
 drains both listeners. Real-runtime and container gates prove leader-term and
-consumer fencing, bounded consumer credit, settlement replenishment, scheduled
-redelivery, immutable history, convergence, and all-node `SIGKILL` replay. See
-[Experimental Replicated Queue Tablet](QUEUE_TABLET.md).
+consumer/session fencing, bounded byte/count/credit/concurrency admission,
+priority aging and dispatch protection, defer/correlation recovery, scheduled
+redelivery, immutable history, crash-safe Queue DLQ forwarding, convergence,
+and all-node `SIGKILL` replay. See
+[Experimental Replicated Queue Tablet](QUEUE_TABLET.md) and
+[ADR-0036](adr/0036-queue-state-services.md).
 
 The Cache profile now has a separate deterministic tablet boundary. An additive
 `epoch-cache::CacheShard` uses sorted state, a checked shard-global revision,
@@ -583,6 +588,20 @@ returns exact before/after capacity evidence, and preserves legacy v1 command
 bytes by using command v2 only for the new operation. The consumer-flow read is
 pure; regional routing supplies its normal default ReadIndex barrier. See
 [ADR-0014](adr/0014-queue-consumer-credit.md).
+
+Command v3 adds one tablet-owned state-services layer without changing v1/v2
+bytes. It charges canonical active bytes, applies explicit overflow, ages
+priority with committed time, owns renewable session locks, hides deferred
+messages, stores correlation/reply metadata, and persists token-bucket/breaker
+state. Snapshot v2 includes this state while accepting v1 as empty/default.
+
+Quorum Queue dead letters create a source-tablet outbox record. An always-on
+regional worker acts only for the current source leader, commits the exact
+target Queue incarnation, proposes one stable target enqueue, and then commits
+source completion. Network I/O stays outside the state machine; target binding
+and target-before-completion ordering make crash retries deterministic without
+claiming a distributed transaction. See
+[ADR-0036](adr/0036-queue-state-services.md).
 
 In the standalone slice, a local-durable Queue uses deterministic command
 replay. The engine clones the current state, validates and applies a proposed
@@ -1077,6 +1096,7 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0029: Session-Fenced Stream Consumption](adr/0029-stream-session-fenced-consumption.md)
 - [ADR-0030: Leader-Owned Signed Webhook Delivery](adr/0030-leader-owned-signed-webhook-delivery.md)
 - [ADR-0031: Leader-Owned Epoch Queue and Stream Target Delivery](adr/0031-leader-owned-epoch-target-delivery.md)
+- [ADR-0036: Replicated Queue State Services](adr/0036-queue-state-services.md)
 - [ADR-0032: Regional Cache Eviction and Committed Access Batches](adr/0032-regional-cache-eviction-and-access-batches.md)
 - [ADR-0033: Replicated Resource Governance and Authorized Cost Attribution](adr/0033-resource-governance-and-cost-attribution.md)
 - [ADR-0034: Cache State Services and Cold Read Tier](adr/0034-cache-state-services-and-cold-read-tier.md)

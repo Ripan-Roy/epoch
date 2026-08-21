@@ -27,16 +27,29 @@ pub(super) fn encode_auxiliary_state(
     state: &QueueTabletBusinessState,
     last_applied_time_ms: u64,
 ) -> TabletResult<Vec<u8>> {
-    serde_json::to_vec(&(
-        &state.consumer_epochs,
-        &state.dead_letter_history,
-        &state.active_dead_letters,
-        state.next_dead_letter_history_id,
-        &state.redrive_history,
-        state.next_redrive_history_id,
-        last_applied_time_ms,
-    ))
-    .map_err(|error| TabletError::Encoding(error.to_string()))
+    let encoded = if state.dead_letter_forwards.is_empty() {
+        serde_json::to_vec(&(
+            &state.consumer_epochs,
+            &state.dead_letter_history,
+            &state.active_dead_letters,
+            state.next_dead_letter_history_id,
+            &state.redrive_history,
+            state.next_redrive_history_id,
+            last_applied_time_ms,
+        ))
+    } else {
+        serde_json::to_vec(&(
+            &state.consumer_epochs,
+            &state.dead_letter_history,
+            &state.active_dead_letters,
+            state.next_dead_letter_history_id,
+            &state.redrive_history,
+            state.next_redrive_history_id,
+            &state.dead_letter_forwards,
+            last_applied_time_ms,
+        ))
+    };
+    encoded.map_err(|error| TabletError::Encoding(error.to_string()))
 }
 
 pub(super) fn transition_digest(
@@ -83,6 +96,10 @@ fn hash_outcome_v1(hasher: &mut Sha256, outcome: &QueueTabletOutcome) {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the versioned digest exhaustively assigns a stable tag to every Queue result"
+)]
 fn hash_operation_result_v1(hasher: &mut Sha256, result: &QueueTabletOperationResult) {
     match result {
         QueueTabletOperationResult::Enqueued {
@@ -105,6 +122,12 @@ fn hash_operation_result_v1(hasher: &mut Sha256, result: &QueueTabletOperationRe
                 hasher.update(delivery.attempt.to_be_bytes());
                 hash_length_prefixed(hasher, delivery.lease_token.as_bytes());
                 hasher.update(delivery.lease_deadline_ms.to_be_bytes());
+                if let Some(metadata) = &delivery.metadata {
+                    hasher.update([0xf1]);
+                    let encoded = serde_json::to_vec(metadata)
+                        .expect("validated Queue delivery metadata is serializable");
+                    hash_length_prefixed(hasher, &encoded);
+                }
             }
             hash_strings_v1(hasher, new_dead_letter_history_ids);
             if let Some(flow) = flow_control {
@@ -179,7 +202,35 @@ fn hash_operation_result_v1(hasher: &mut Sha256, result: &QueueTabletOperationRe
             hasher.update(counts.dead_lettered.to_be_bytes());
             hash_strings_v1(hasher, new_dead_letter_history_ids);
         }
+        QueueTabletOperationResult::SessionAcquired { .. } => {
+            hash_advanced_result(hasher, 9, result);
+        }
+        QueueTabletOperationResult::SessionLockRenewed { .. } => {
+            hash_advanced_result(hasher, 10, result);
+        }
+        QueueTabletOperationResult::SessionLockReleased => {
+            hash_advanced_result(hasher, 11, result);
+        }
+        QueueTabletOperationResult::Deferred { .. } => {
+            hash_advanced_result(hasher, 12, result);
+        }
+        QueueTabletOperationResult::DeferredReceived { .. } => {
+            hash_advanced_result(hasher, 13, result);
+        }
+        QueueTabletOperationResult::DeadLetterForwardBound { .. } => {
+            hash_advanced_result(hasher, 14, result);
+        }
+        QueueTabletOperationResult::DeadLetterForwardCompleted { .. } => {
+            hash_advanced_result(hasher, 15, result);
+        }
     }
+}
+
+fn hash_advanced_result(hasher: &mut Sha256, tag: u8, result: &QueueTabletOperationResult) {
+    hasher.update([tag]);
+    let encoded =
+        serde_json::to_vec(result).expect("validated Queue result has a canonical JSON encoding");
+    hash_length_prefixed(hasher, &encoded);
 }
 
 fn hash_envelope_v1(hasher: &mut Sha256, envelope: &QueueTabletEnvelope) {

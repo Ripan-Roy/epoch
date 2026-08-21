@@ -2,8 +2,9 @@
 
 use std::collections::BTreeMap;
 
+use epoch_bus::EpochTargetDestination;
 use epoch_core::{EpochError, EventEnvelope};
-use epoch_queue::QueueCounts;
+use epoch_queue::{QueueAdvancedObservation, QueueCounts, QueueMessageMetadata};
 use serde::{Deserialize, Serialize};
 
 use crate::TabletWriteEvidence;
@@ -113,6 +114,30 @@ impl From<EventEnvelope> for QueueTabletEnvelope {
     }
 }
 
+impl From<QueueTabletEnvelope> for EventEnvelope {
+    fn from(envelope: QueueTabletEnvelope) -> Self {
+        Self {
+            id: envelope.id,
+            source: envelope.source,
+            event_type: envelope.event_type,
+            subject: envelope.subject,
+            time_ms: envelope.time_ms,
+            key: envelope.key,
+            headers: envelope.headers,
+            content_type: envelope.content_type,
+            schema_ref: envelope.schema_ref,
+            traceparent: envelope.traceparent,
+            payload: envelope.payload,
+            deliver_at_ms: envelope.deliver_at_ms,
+            ttl_ms: envelope.ttl_ms,
+            priority: envelope.priority,
+            dedupe_id: envelope.dedupe_id,
+            transaction_id: envelope.transaction_id,
+            extensions: envelope.extensions,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueTabletDelivery {
     pub message_id: String,
@@ -124,6 +149,8 @@ pub struct QueueTabletDelivery {
         deserialize_with = "deserialize_u64_from_number_or_decimal"
     )]
     pub lease_deadline_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<QueueMessageMetadata>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -264,6 +291,81 @@ pub enum QueueTabletOperationResult {
         counts: QueueTabletCounts,
         new_dead_letter_history_ids: Vec<String>,
     },
+    SessionAcquired {
+        session_id: String,
+        session_lock_token: String,
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
+        session_lock_deadline_ms: u64,
+        deliveries: Vec<QueueTabletDelivery>,
+        flow_control: QueueTabletFlowControl,
+    },
+    SessionLockRenewed {
+        session_id: String,
+        session_lock_token: String,
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
+        session_lock_deadline_ms: u64,
+    },
+    SessionLockReleased,
+    Deferred {
+        message_id: String,
+    },
+    DeferredReceived {
+        delivery: Box<QueueTabletDelivery>,
+    },
+    DeadLetterForwardBound {
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
+        dead_letter_history_id: u64,
+        destination: EpochTargetDestination,
+    },
+    DeadLetterForwardCompleted {
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
+        dead_letter_history_id: u64,
+        target_message_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueTabletDeadLetterForwardStatus {
+    Pending,
+    Bound,
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueueTabletDeadLetterForward {
+    #[serde(
+        serialize_with = "serialize_u64_as_decimal",
+        deserialize_with = "deserialize_u64_from_number_or_decimal"
+    )]
+    pub dead_letter_history_id: u64,
+    pub target: String,
+    pub envelope: QueueTabletEnvelope,
+    pub status: QueueTabletDeadLetterForwardStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<EpochTargetDestination>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_message_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueueTabletAdvancedStatus {
+    pub state: QueueAdvancedObservation,
+    pub pending_dead_letter_forwards: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

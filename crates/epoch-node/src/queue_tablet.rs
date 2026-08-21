@@ -17,15 +17,20 @@ use epoch_consensus::{
     LogIndex, ProposalLookup,
 };
 use epoch_core::{Clock, DurabilityProfile};
-use epoch_queue::QueueConfig;
+use epoch_queue::{
+    MAX_QUEUE_ADVANCED_IDENTIFIER_BYTES, QueueConfig, QueueCorrelatedMessage, QueueIngress,
+};
 use epoch_tablet::{
     CommittedCommand, MAX_QUEUE_CONSUMER_BYTES, MAX_QUEUE_TABLET_COMMAND_BYTES,
-    QueueAcknowledgeCommand, QueueAcquireCommand, QueueCreditAcquireCommand, QueueEnqueueCommand,
-    QueueExtendLeaseCommand, QueueMaintainCommand, QueueNackCommand, QueueRedriveCommand,
-    QueueRejectCommand, QueueReleaseCommand, QueueTablet, QueueTabletCommand,
-    QueueTabletConsumerFlow, QueueTabletCounts, QueueTabletDeadLetterHistory,
-    QueueTabletDisposition, QueueTabletOperation, QueueTabletReceipt, QueueTabletRedriveHistory,
-    QueueTabletScope, TabletError, queue_proposal_id_for,
+    QueueAcknowledgeCommand, QueueAcquireCommand, QueueAdvancedEnqueueCommand,
+    QueueCreditAcquireCommand, QueueDeferCommand, QueueEnqueueCommand, QueueExtendLeaseCommand,
+    QueueMaintainCommand, QueueNackCommand, QueueReceiveDeferredCommand, QueueRedriveCommand,
+    QueueRejectCommand, QueueReleaseCommand, QueueSessionAcquireCommand,
+    QueueSessionLockReleaseCommand, QueueSessionLockRenewCommand, QueueTablet,
+    QueueTabletAdvancedStatus, QueueTabletCommand, QueueTabletConsumerFlow, QueueTabletCounts,
+    QueueTabletDeadLetterForward, QueueTabletDeadLetterHistory, QueueTabletDisposition,
+    QueueTabletOperation, QueueTabletReceipt, QueueTabletRedriveHistory, QueueTabletScope,
+    TabletError, queue_proposal_id_for,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
@@ -49,6 +54,12 @@ pub const EXPERIMENTAL_QUEUE_TABLET_DEAD_LETTERS_PATH: &str =
 pub const EXPERIMENTAL_QUEUE_TABLET_REDRIVES_PATH: &str = "/experimental/v1/tablets/queue/redrives";
 pub const EXPERIMENTAL_QUEUE_TABLET_CONSUMER_FLOW_PATH: &str =
     "/experimental/v1/tablets/queue/consumers/{consumer}/flow";
+pub const EXPERIMENTAL_QUEUE_TABLET_ADVANCED_STATUS_PATH: &str =
+    "/experimental/v1/tablets/queue/advanced";
+pub const EXPERIMENTAL_QUEUE_TABLET_CORRELATION_PATH: &str =
+    "/experimental/v1/tablets/queue/correlations/{correlation_id}";
+pub const EXPERIMENTAL_QUEUE_TABLET_DEAD_LETTER_FORWARDS_PATH: &str =
+    "/experimental/v1/tablets/queue/dead-letter-forwards";
 
 const MAX_HISTORY_RECORDS: usize = 1_000;
 const TABLET_REQUEST_BODY_BYTES: usize = MAX_QUEUE_TABLET_COMMAND_BYTES + 16 * 1024;
@@ -241,6 +252,33 @@ impl QueueTabletService {
             .consumer_flow(consumer)
             .map_err(|error| error.to_string())
     }
+
+    fn advanced_status(&self) -> Result<QueueTabletAdvancedStatus, String> {
+        self.ensure_healthy()?;
+        self.tablet
+            .read()
+            .map_err(|_| "Queue tablet read lock was poisoned".to_owned())
+            .map(|tablet| tablet.advanced_status())
+    }
+
+    fn correlation(&self, correlation_id: &str) -> Result<Vec<QueueCorrelatedMessage>, String> {
+        self.ensure_healthy()?;
+        self.tablet
+            .read()
+            .map_err(|_| "Queue tablet read lock was poisoned".to_owned())
+            .map(|tablet| tablet.correlation(correlation_id))
+    }
+
+    pub(crate) fn pending_dead_letter_forwards(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<QueueTabletDeadLetterForward>, String> {
+        self.ensure_healthy()?;
+        self.tablet
+            .read()
+            .map_err(|_| "Queue tablet read lock was poisoned".to_owned())
+            .map(|tablet| tablet.pending_dead_letter_forwards(limit))
+    }
 }
 
 fn committed_command(committed: &CommittedProposal) -> CommittedCommand<'_> {
@@ -406,6 +444,18 @@ pub fn router(
             EXPERIMENTAL_QUEUE_TABLET_CONSUMER_FLOW_PATH,
             get(consumer_flow),
         )
+        .route(
+            EXPERIMENTAL_QUEUE_TABLET_ADVANCED_STATUS_PATH,
+            get(advanced_status),
+        )
+        .route(
+            EXPERIMENTAL_QUEUE_TABLET_CORRELATION_PATH,
+            get(correlation_lookup),
+        )
+        .route(
+            EXPERIMENTAL_QUEUE_TABLET_DEAD_LETTER_FORWARDS_PATH,
+            get(dead_letter_forwards),
+        )
         .layer(DefaultBodyLimit::max(TABLET_REQUEST_BODY_BYTES))
         .with_state(state)
 }
@@ -426,6 +476,12 @@ enum QueueOperationRequest {
         #[serde(default)]
         partition: u32,
         envelope: Box<StrictEventEnvelope>,
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        correlation_id: Option<String>,
+        #[serde(default)]
+        reply_to: Option<String>,
     },
     Acquire {
         #[serde(default)]
@@ -441,6 +497,10 @@ enum QueueOperationRequest {
             deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
         )]
         visibility_timeout_ms: Option<u64>,
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        session_lock_token: Option<String>,
     },
     Acknowledge {
         #[serde(default)]
@@ -501,18 +561,102 @@ enum QueueOperationRequest {
         #[serde(default)]
         partition: u32,
     },
+    RenewSessionLock {
+        #[serde(default)]
+        partition: u32,
+        consumer: String,
+        #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+        consumer_epoch: u64,
+        session_lock_token: String,
+        #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+        extension_ms: u64,
+    },
+    ReleaseSessionLock {
+        #[serde(default)]
+        partition: u32,
+        consumer: String,
+        #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+        consumer_epoch: u64,
+        session_lock_token: String,
+    },
+    Defer {
+        #[serde(default)]
+        partition: u32,
+        consumer: String,
+        #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+        consumer_epoch: u64,
+        lease_token: String,
+        reason: String,
+    },
+    ReceiveDeferred {
+        #[serde(default)]
+        partition: u32,
+        message_id: String,
+        consumer: String,
+        #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+        consumer_epoch: u64,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
+        )]
+        visibility_timeout_ms: Option<u64>,
+    },
 }
 
 impl QueueOperationRequest {
+    fn validate_shape(&self) -> Result<(), TabletError> {
+        if let Self::Acquire {
+            session_id,
+            session_lock_token,
+            max_in_flight,
+            ..
+        } = self
+        {
+            if session_lock_token.is_some() && session_id.is_none() {
+                return Err(TabletError::InvalidCommand(
+                    "session_lock_token requires session_id".into(),
+                ));
+            }
+            if session_id.is_some() && max_in_flight.is_none() {
+                return Err(TabletError::InvalidCommand(
+                    "session acquire requires max_in_flight".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the exhaustive HTTP-to-tablet conversion keeps every Queue wire operation visible"
+    )]
     fn to_tablet_operation(&self) -> QueueTabletOperation {
         match self {
             Self::Enqueue {
                 partition,
                 envelope,
-            } => QueueTabletOperation::Enqueue(Box::new(QueueEnqueueCommand {
-                partition: *partition,
-                envelope: envelope.as_ref().clone().into(),
-            })),
+                session_id,
+                correlation_id,
+                reply_to,
+            } => {
+                let envelope = envelope.as_ref().clone().into();
+                if session_id.is_none() && correlation_id.is_none() && reply_to.is_none() {
+                    QueueTabletOperation::Enqueue(Box::new(QueueEnqueueCommand {
+                        partition: *partition,
+                        envelope,
+                    }))
+                } else {
+                    QueueTabletOperation::EnqueueAdvanced(Box::new(QueueAdvancedEnqueueCommand {
+                        partition: *partition,
+                        ingress: QueueIngress {
+                            envelope,
+                            session_id: session_id.clone(),
+                            correlation_id: correlation_id.clone(),
+                            reply_to: reply_to.clone(),
+                        },
+                    }))
+                }
+            }
             Self::Acquire {
                 partition,
                 consumer,
@@ -520,13 +664,31 @@ impl QueueOperationRequest {
                 max_messages,
                 max_in_flight,
                 visibility_timeout_ms,
-            } => acquire_operation(
-                *partition,
-                consumer,
-                *consumer_epoch,
-                *max_messages,
-                *max_in_flight,
-                *visibility_timeout_ms,
+                session_id,
+                session_lock_token,
+            } => session_id.as_ref().map_or_else(
+                || {
+                    acquire_operation(
+                        *partition,
+                        consumer,
+                        *consumer_epoch,
+                        *max_messages,
+                        *max_in_flight,
+                        *visibility_timeout_ms,
+                    )
+                },
+                |session_id| {
+                    QueueTabletOperation::AcquireSession(QueueSessionAcquireCommand {
+                        partition: *partition,
+                        session_id: session_id.clone(),
+                        consumer: consumer.clone(),
+                        consumer_epoch: *consumer_epoch,
+                        credit: *max_messages,
+                        max_in_flight: max_in_flight.unwrap_or(*max_messages),
+                        visibility_timeout_ms: *visibility_timeout_ms,
+                        session_lock_token: session_lock_token.clone(),
+                    })
+                },
             ),
             Self::Acknowledge {
                 partition,
@@ -603,6 +765,56 @@ impl QueueOperationRequest {
                 dead_letter_history_id: *dead_letter_history_id,
             }),
             Self::Maintain { partition } => maintain_operation(*partition),
+            Self::RenewSessionLock {
+                partition,
+                consumer,
+                consumer_epoch,
+                session_lock_token,
+                extension_ms,
+            } => QueueTabletOperation::RenewSessionLock(QueueSessionLockRenewCommand {
+                partition: *partition,
+                consumer: consumer.clone(),
+                consumer_epoch: *consumer_epoch,
+                session_lock_token: session_lock_token.clone(),
+                extension_ms: *extension_ms,
+            }),
+            Self::ReleaseSessionLock {
+                partition,
+                consumer,
+                consumer_epoch,
+                session_lock_token,
+            } => QueueTabletOperation::ReleaseSessionLock(QueueSessionLockReleaseCommand {
+                partition: *partition,
+                consumer: consumer.clone(),
+                consumer_epoch: *consumer_epoch,
+                session_lock_token: session_lock_token.clone(),
+            }),
+            Self::Defer {
+                partition,
+                consumer,
+                consumer_epoch,
+                lease_token,
+                reason,
+            } => QueueTabletOperation::Defer(QueueDeferCommand {
+                partition: *partition,
+                consumer: consumer.clone(),
+                consumer_epoch: *consumer_epoch,
+                lease_token: lease_token.clone(),
+                reason: reason.clone(),
+            }),
+            Self::ReceiveDeferred {
+                partition,
+                message_id,
+                consumer,
+                consumer_epoch,
+                visibility_timeout_ms,
+            } => QueueTabletOperation::ReceiveDeferred(QueueReceiveDeferredCommand {
+                partition: *partition,
+                message_id: message_id.clone(),
+                consumer: consumer.clone(),
+                consumer_epoch: *consumer_epoch,
+                visibility_timeout_ms: *visibility_timeout_ms,
+            }),
         }
     }
 }
@@ -650,6 +862,7 @@ async fn submit_mutation(
         status: rejection.status(),
         message: rejection.body_text(),
     })?;
+    request.operation.validate_shape()?;
     state
         .service
         .ensure_healthy()
@@ -902,6 +1115,52 @@ async fn consumer_flow(
     }))
 }
 
+async fn advanced_status(
+    State(state): State<QueueTabletApiState>,
+    read: Option<Extension<TabletReadMetadata>>,
+) -> TabletApiResult<Json<QueueTabletAdvancedStatusResponse>> {
+    Ok(Json(QueueTabletAdvancedStatusResponse {
+        read: tablet_read_metadata(read),
+        advanced: state.service.advanced_status()?,
+    }))
+}
+
+async fn correlation_lookup(
+    State(state): State<QueueTabletApiState>,
+    Path(correlation_id): Path<String>,
+    read: Option<Extension<TabletReadMetadata>>,
+) -> TabletApiResult<Json<QueueTabletCorrelationResponse>> {
+    validate_advanced_identifier("correlation_id", &correlation_id)?;
+    Ok(Json(QueueTabletCorrelationResponse {
+        read: tablet_read_metadata(read),
+        messages: state.service.correlation(&correlation_id)?,
+    }))
+}
+
+async fn dead_letter_forwards(
+    State(state): State<QueueTabletApiState>,
+    Query(query): Query<HistoryQuery>,
+    read: Option<Extension<TabletReadMetadata>>,
+) -> TabletApiResult<Json<QueueTabletDeadLetterForwardsResponse>> {
+    validate_history_limit(query.limit)?;
+    Ok(Json(QueueTabletDeadLetterForwardsResponse {
+        read: tablet_read_metadata(read),
+        records: state.service.pending_dead_letter_forwards(query.limit)?,
+    }))
+}
+
+fn validate_advanced_identifier(field: &str, value: &str) -> TabletApiResult<()> {
+    if value.trim().is_empty()
+        || value.len() > MAX_QUEUE_ADVANCED_IDENTIFIER_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(TabletApiError::InvalidRequest(format!(
+            "{field} must contain 1-{MAX_QUEUE_ADVANCED_IDENTIFIER_BYTES} non-control UTF-8 bytes"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_consumer_flow_name(consumer: &str) -> TabletApiResult<()> {
     if consumer.trim().is_empty() {
         return Err(TabletApiError::InvalidRequest(
@@ -1059,6 +1318,27 @@ struct QueueTabletConsumerFlowResponse {
     #[serde(flatten)]
     read: TabletReadMetadata,
     flow: QueueTabletConsumerFlow,
+}
+
+#[derive(Debug, Serialize)]
+struct QueueTabletAdvancedStatusResponse {
+    #[serde(flatten)]
+    read: TabletReadMetadata,
+    advanced: QueueTabletAdvancedStatus,
+}
+
+#[derive(Debug, Serialize)]
+struct QueueTabletCorrelationResponse {
+    #[serde(flatten)]
+    read: TabletReadMetadata,
+    messages: Vec<QueueCorrelatedMessage>,
+}
+
+#[derive(Debug, Serialize)]
+struct QueueTabletDeadLetterForwardsResponse {
+    #[serde(flatten)]
+    read: TabletReadMetadata,
+    records: Vec<QueueTabletDeadLetterForward>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]

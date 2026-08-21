@@ -22,6 +22,15 @@ type RegionalQueueAcquireOptions struct {
 	MaxMessages         uint16
 	MaxInFlight         *uint16
 	VisibilityTimeoutMS *uint64
+	SessionID           string
+	SessionLockToken    string
+}
+
+// RegionalQueueEnqueueOptions carries optional session and request/reply metadata.
+type RegionalQueueEnqueueOptions struct {
+	SessionID     string
+	CorrelationID string
+	ReplyTo       string
 }
 
 // RegionalQueueClient routes authenticated Queue calls across regional nodes.
@@ -50,15 +59,23 @@ func NewRegionalQueueClientWithTransports(transports []Transport, token string, 
 
 // Enqueue appends one message using a caller-owned mutation identity.
 func (client *RegionalQueueClient) Enqueue(ctx context.Context, queue string, shard uint32, idempotencyKey string, event EventEnvelope) (Document, error) {
+	return client.EnqueueAdvanced(ctx, queue, shard, idempotencyKey, event, RegionalQueueEnqueueOptions{})
+}
+
+// EnqueueAdvanced appends one message with optional session and request/reply metadata.
+func (client *RegionalQueueClient) EnqueueAdvanced(ctx context.Context, queue string, shard uint32, idempotencyKey string, event EventEnvelope, options RegionalQueueEnqueueOptions) (Document, error) {
 	event, err := event.normalized()
 	if err != nil {
 		return nil, err
 	}
 	return client.mutate(ctx, queue, shard, idempotencyKey, struct {
-		Kind      string        `json:"kind"`
-		Partition uint32        `json:"partition"`
-		Envelope  EventEnvelope `json:"envelope"`
-	}{"enqueue", 0, event})
+		Kind          string        `json:"kind"`
+		Partition     uint32        `json:"partition"`
+		Envelope      EventEnvelope `json:"envelope"`
+		SessionID     string        `json:"session_id,omitempty"`
+		CorrelationID string        `json:"correlation_id,omitempty"`
+		ReplyTo       string        `json:"reply_to,omitempty"`
+	}{"enqueue", 0, event, options.SessionID, options.CorrelationID, options.ReplyTo})
 }
 
 // Acquire leases up to MaxMessages messages and optionally applies a per-consumer in-flight ceiling.
@@ -75,6 +92,12 @@ func (client *RegionalQueueClient) Acquire(ctx context.Context, queue string, sh
 	if options.VisibilityTimeoutMS != nil && *options.VisibilityTimeoutMS == 0 {
 		return nil, fmt.Errorf("epoch: Queue visibility timeout must be non-zero when provided")
 	}
+	if strings.TrimSpace(options.SessionLockToken) != "" && strings.TrimSpace(options.SessionID) == "" {
+		return nil, fmt.Errorf("epoch: Queue session lock token requires a session ID")
+	}
+	if strings.TrimSpace(options.SessionID) != "" && options.MaxInFlight == nil {
+		return nil, fmt.Errorf("epoch: Queue session acquire requires max in flight")
+	}
 	return client.mutate(ctx, queue, shard, idempotencyKey, struct {
 		Kind                string  `json:"kind"`
 		Partition           uint32  `json:"partition"`
@@ -83,7 +106,72 @@ func (client *RegionalQueueClient) Acquire(ctx context.Context, queue string, sh
 		MaxMessages         uint16  `json:"max_messages"`
 		MaxInFlight         *uint16 `json:"max_in_flight,omitempty"`
 		VisibilityTimeoutMS *string `json:"visibility_timeout_ms,omitempty"`
-	}{"acquire", 0, options.Consumer, strconv.FormatUint(options.ConsumerEpoch, 10), options.MaxMessages, options.MaxInFlight, decimalPointer(options.VisibilityTimeoutMS)})
+		SessionID           string  `json:"session_id,omitempty"`
+		SessionLockToken    string  `json:"session_lock_token,omitempty"`
+	}{"acquire", 0, options.Consumer, strconv.FormatUint(options.ConsumerEpoch, 10), options.MaxMessages, options.MaxInFlight, decimalPointer(options.VisibilityTimeoutMS), options.SessionID, options.SessionLockToken})
+}
+
+// RenewSessionLock renews one exact fenced Queue session lock.
+func (client *RegionalQueueClient) RenewSessionLock(ctx context.Context, queue string, shard uint32, idempotencyKey, consumer string, consumerEpoch uint64, sessionLockToken string, extensionMS uint64) (Document, error) {
+	if err := validateQueueConsumer(consumer, consumerEpoch); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(sessionLockToken) == "" || extensionMS == 0 {
+		return nil, fmt.Errorf("epoch: Queue session token and non-zero extension are required")
+	}
+	return client.mutate(ctx, queue, shard, idempotencyKey, map[string]any{
+		"kind": "renew_session_lock", "partition": uint32(0), "consumer": consumer,
+		"consumer_epoch":     strconv.FormatUint(consumerEpoch, 10),
+		"session_lock_token": sessionLockToken, "extension_ms": strconv.FormatUint(extensionMS, 10),
+	})
+}
+
+// ReleaseSessionLock releases one exact fenced Queue session lock.
+func (client *RegionalQueueClient) ReleaseSessionLock(ctx context.Context, queue string, shard uint32, idempotencyKey, consumer string, consumerEpoch uint64, sessionLockToken string) (Document, error) {
+	if err := validateQueueConsumer(consumer, consumerEpoch); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(sessionLockToken) == "" {
+		return nil, fmt.Errorf("epoch: Queue session lock token is required")
+	}
+	return client.mutate(ctx, queue, shard, idempotencyKey, map[string]any{
+		"kind": "release_session_lock", "partition": uint32(0), "consumer": consumer,
+		"consumer_epoch": strconv.FormatUint(consumerEpoch, 10), "session_lock_token": sessionLockToken,
+	})
+}
+
+// Defer removes a live delivery from ordinary acquisition until exact retrieval.
+func (client *RegionalQueueClient) Defer(ctx context.Context, queue string, shard uint32, idempotencyKey, consumer string, consumerEpoch uint64, leaseToken, reason string) (Document, error) {
+	operation, err := settlementOperation("defer", consumer, consumerEpoch, leaseToken)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(reason) == "" {
+		return nil, fmt.Errorf("epoch: Queue defer reason is required")
+	}
+	operation["reason"] = reason
+	return client.mutate(ctx, queue, shard, idempotencyKey, operation)
+}
+
+// ReceiveDeferred leases one exact deferred message ID.
+func (client *RegionalQueueClient) ReceiveDeferred(ctx context.Context, queue string, shard uint32, idempotencyKey, messageID, consumer string, consumerEpoch uint64, visibilityTimeoutMS *uint64) (Document, error) {
+	if strings.TrimSpace(messageID) == "" {
+		return nil, fmt.Errorf("epoch: Queue message ID is required")
+	}
+	if err := validateQueueConsumer(consumer, consumerEpoch); err != nil {
+		return nil, err
+	}
+	if visibilityTimeoutMS != nil && *visibilityTimeoutMS == 0 {
+		return nil, fmt.Errorf("epoch: Queue visibility timeout must be non-zero when provided")
+	}
+	return client.mutate(ctx, queue, shard, idempotencyKey, struct {
+		Kind                string  `json:"kind"`
+		Partition           uint32  `json:"partition"`
+		MessageID           string  `json:"message_id"`
+		Consumer            string  `json:"consumer"`
+		ConsumerEpoch       string  `json:"consumer_epoch"`
+		VisibilityTimeoutMS *string `json:"visibility_timeout_ms,omitempty"`
+	}{"receive_deferred", 0, messageID, consumer, strconv.FormatUint(consumerEpoch, 10), decimalPointer(visibilityTimeoutMS)})
 }
 
 // Acknowledge permanently settles a fenced lease.
@@ -197,6 +285,25 @@ func (client *RegionalQueueClient) ConsumerFlow(ctx context.Context, queue strin
 		return nil, err
 	}
 	return client.read(ctx, queue, shard, "/consumers/"+consumerSegment+"/flow", nil)
+}
+
+// AdvancedStatus returns replicated capacity, expiry, session, defer, and circuit state.
+func (client *RegionalQueueClient) AdvancedStatus(ctx context.Context, queue string, shard uint32) (Document, error) {
+	return client.read(ctx, queue, shard, "/advanced", nil)
+}
+
+// Correlation returns active messages matching one request/reply correlation ID.
+func (client *RegionalQueueClient) Correlation(ctx context.Context, queue string, shard uint32, correlationID string) (Document, error) {
+	correlationSegment, err := segment(correlationID, "Queue correlation ID")
+	if err != nil {
+		return nil, err
+	}
+	return client.read(ctx, queue, shard, "/correlations/"+correlationSegment, nil)
+}
+
+// DeadLetterForwards returns the bounded pending Queue forwarding outbox.
+func (client *RegionalQueueClient) DeadLetterForwards(ctx context.Context, queue string, shard uint32, limit uint16) (Document, error) {
+	return client.history(ctx, queue, shard, "/dead-letter-forwards", limit)
 }
 
 // Status returns the linearizable Queue tablet status and digest.
