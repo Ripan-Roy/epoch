@@ -549,9 +549,130 @@ final class RegionalStreamClientTest {
   }
 
   @Test
+  void advancedStateContractsAreFencedBrowserSafeAndIsolationAware() throws Exception {
+    RecordingRegionalTransport leader =
+        new RecordingRegionalTransport(
+            MAPPER.readTree(
+                """
+                {"resource_generation":"2","tablet_epoch":"4","term":"9","accepts_writes":true}
+                """));
+    RegionalStreamClient client =
+        RegionalStreamClient.withTransports(
+            List.of(leader), "secret-token", new RegionalScope("acme", "shop", "dev", "core"));
+    BigInteger maximum = BigInteger.ONE.shiftLeft(64).subtract(BigInteger.ONE);
+    EventEnvelope event =
+        EventEnvelope.builder("checkout", "order.created", Map.of("id", "42"))
+            .id("order-42")
+            .timeMs(42)
+            .build();
+
+    client.appendIdempotent("orders", 2, "producer-1", "checkout", maximum, maximum, event);
+    client.beginTransaction("orders", 2, "tx-begin", "tx-1", "checkout", BigInteger.valueOf(7));
+    client.commitTransaction(
+        "orders", 2, "tx-commit", "tx-1", new StreamOffsetCommit("workers", 2, maximum));
+    client.fetchWithIsolation("orders", 2, maximum, 10, StreamReadIsolation.READ_UNCOMMITTED);
+    client.partitionAdvice("orders", BigInteger.valueOf(1_000), BigInteger.valueOf(1_048_576));
+    client.consumeLongPoll(
+        "orders",
+        2,
+        BigInteger.ZERO,
+        10,
+        StreamReadIsolation.READ_COMMITTED,
+        StreamConsumerMode.DEDICATED,
+        "analytics-a",
+        Duration.ofSeconds(1));
+    client.configureCaptureSchedule(
+        "orders",
+        2,
+        "capture-schedule",
+        "analytics",
+        Duration.ofMinutes(1),
+        StreamCaptureFormat.JSON_LINES);
+    client.captureSchedule("orders", 2, "analytics");
+
+    Request producer = leader.requests.get(1);
+    assertEquals(true, producer.path().endsWith("/state"));
+    assertEquals("9", producer.body().path("expected_term").asText());
+    assertEquals(
+        maximum.toString(), producer.body().path("operation").path("producer_epoch").asText());
+    assertEquals(maximum.toString(), producer.body().path("operation").path("sequence").asText());
+
+    JsonNode commit = leader.requests.get(5).body().path("operation").path("offset_commit");
+    assertEquals(0, commit.path("partition").asInt());
+    assertEquals(maximum.toString(), commit.path("next_offset").asText());
+    Request isolated = leader.requests.get(7);
+    assertEquals("read_uncommitted", isolated.query().get("isolation"));
+    Request advice = leader.requests.get(9);
+    assertEquals(true, advice.path().endsWith("/partitions/advice"));
+    assertEquals("linearizable", advice.headers().get("x-epoch-read-consistency"));
+    Request consume = leader.requests.get(11);
+    assertEquals(true, consume.path().endsWith("/records/consume"));
+    assertEquals("dedicated", consume.query().get("mode"));
+    assertEquals("analytics-a", consume.query().get("consumer_id"));
+    JsonNode schedule = leader.requests.get(13).body().path("operation");
+    assertEquals("configure_capture_schedule", schedule.path("action").asText());
+    assertEquals("60000", schedule.path("interval_ms").asText());
+    assertEquals(true, leader.requests.get(15).path().endsWith("/capture-schedules/analytics"));
+  }
+
+  @Test
   void scopeAndMutationInputsFailBeforeNetwork() {
     assertThrows(
         IllegalArgumentException.class, () -> new RegionalScope("", "shop", "dev", "core"));
+  }
+
+  @Test
+  void superstreamMergesIndependentShardsDeterministically() throws Exception {
+    JsonNode route =
+        MAPPER.readTree(
+            """
+            {"resource_generation":"2","tablet_epoch":"4","term":"9","accepts_writes":true}
+            """);
+    RecordingRegionalTransport leader =
+        new RecordingRegionalTransport(
+            route,
+            List.of(
+                MAPPER.readTree(
+                    """
+                    {"records":[
+                      {"appended_at_ms":"20","partition":0,"offset":"4","value":"a"},
+                      {"appended_at_ms":"30","partition":0,"offset":"5","value":"c"}
+                    ]}
+                    """),
+                MAPPER.readTree(
+                    """
+                    {"records":[
+                      {"appended_at_ms":"10","partition":1,"offset":"9","value":"b"}
+                    ]}
+                    """)));
+    RegionalStreamClient client =
+        RegionalStreamClient.withTransports(
+            List.of(leader), "secret-token", new RegionalScope("acme", "shop", "dev", "core"));
+
+    JsonNode merged =
+        client.fetchSuperstream(
+            List.of(
+                new StreamSuperstreamMember("orders", "orders", 0, 4),
+                new StreamSuperstreamMember("audit", "audit", 1, 9)),
+            2,
+            StreamReadIsolation.READ_COMMITTED);
+
+    assertEquals("b", merged.path("records").get(0).path("value").asText());
+    assertEquals("audit", merged.path("records").get(0).path("member").asText());
+    assertEquals("a", merged.path("records").get(1).path("value").asText());
+    assertEquals(2, merged.path("member_count").asInt());
+    assertEquals("independently_linearizable_members", merged.path("snapshot_scope").asText());
+    assertEquals("read_committed", leader.requests.get(1).query().get("isolation"));
+
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            client.fetchSuperstream(
+                List.of(
+                    new StreamSuperstreamMember("same", "orders", 0, 0),
+                    new StreamSuperstreamMember("same", "audit", 0, 0)),
+                10,
+                StreamReadIsolation.READ_COMMITTED));
   }
 
   private record Request(

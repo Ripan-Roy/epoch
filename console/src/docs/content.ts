@@ -16,7 +16,7 @@ import regionalBusPythonSource from "../quickstarts/regional_bus/quickstart.py?r
 
 export const repositoryUrl = "https://github.com/Ripan-Roy/epoch";
 export const repositoryDocsUrl = `${repositoryUrl}/blob/main/docs`;
-export const releaseVersion = "0.1.0-alpha.6";
+export const releaseVersion = "0.1.0-alpha.7";
 
 export type LanguageId = "go" | "java" | "python";
 
@@ -513,10 +513,10 @@ export const sdkSurface = [
   },
   {
     area: "Regional Stream",
-    go: "RegionalStreamClient · StreamShardFor · AppendKeyed · Append · EncodeStreamBatch · NewStreamBatchFrame · AppendBatch · Fetch · CommitOffset · Lag · FetchGroup · ClaimGroup · FetchClaimedGroup · ClaimConsumerSession · JoinConsumerSession · HeartbeatConsumerSession · LeaveConsumerSession · MaintainConsumerSession · ConsumerSession · ConfigureRetention · MaintainRetention · Retention",
-    java: "RegionalStreamClient · StreamPartitioner.shardFor · appendKeyed · append · StreamBatchFrame.encode · StreamBatchFrame.compressed · appendBatch · fetch · commitOffset · lag · fetchGroup · claimGroup · fetchClaimedGroup · claimConsumerSession · joinConsumerSession · heartbeatConsumerSession · leaveConsumerSession · maintainConsumerSession · consumerSession · configureRetention · maintainRetention · retention",
+    go: "RegionalStreamClient · StreamShardFor · AppendKeyed · Append · AppendBatch · Fetch · FetchWithIsolation · ConsumeLongPoll · AppendIdempotent · BeginTransaction · AppendTransaction · CommitTransaction · AbortTransaction · Transaction · Compact · TierPrefix · TierObjects · Capture · CaptureArtifact · ConfigureCaptureSchedule · CaptureSchedule · Replicate · PartitionAdvice · FetchSuperstream · CommitOffset · Lag · ClaimConsumerSession · ConfigureRetention",
+    java: "RegionalStreamClient · StreamPartitioner.shardFor · appendKeyed · append · appendBatch · fetch · fetchWithIsolation · consumeLongPoll · appendIdempotent · beginTransaction · appendTransaction · commitTransaction · abortTransaction · transaction · compact · tierPrefix · tierObjects · capture · captureArtifact · configureCaptureSchedule · captureSchedule · replicate · partitionAdvice · fetchSuperstream · commitOffset · lag · claimConsumerSession · configureRetention",
     python:
-      "RegionalStreamClient · stream_shard_for · append_keyed · append · StreamBatchFrame.encode · StreamBatchFrame.from_compressed · append_batch · fetch · commit_offset · lag · fetch_group · claim_group · fetch_claimed_group · claim_consumer_session · join_consumer_session · heartbeat_consumer_session · leave_consumer_session · maintain_consumer_session · consumer_session · configure_retention · maintain_retention · retention",
+      "RegionalStreamClient · stream_shard_for · append_keyed · append · append_batch · fetch · consume_long_poll · append_idempotent · begin_transaction · append_transaction · commit_transaction · abort_transaction · transaction · compact · tier_prefix · tier_objects · capture · capture_artifact · configure_capture_schedule · capture_schedule · replicate · partition_advice · fetch_superstream · commit_offset · lag · claim_consumer_session · configure_retention",
   },
   {
     area: "Regional Queue",

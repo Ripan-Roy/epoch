@@ -38,10 +38,12 @@ while `appendKeyed` selects that shard from the event key or ID and fails before
 writing if the resource generation changes. The client also exposes
 single-shard atomic `appendBatch`: `StreamBatchFrame.encode` builds canonical
 none or gzip frames, while `StreamBatchFrame.compressed` wraps caller-produced
-standard LZ4, Snappy, or Zstd frames without changing their bytes. It also exposes
-time/size/combined retention configuration and explicit idle maintenance. Its
-shard-zero session methods cover join, heartbeat, leave, expiry maintenance,
-and deterministic resource-wide assignment observation. See the
+standard LZ4, Snappy, or Zstd frames without changing their bytes. The same
+client now covers fenced idempotent producers, same-tablet transactions/read
+isolation, key compaction, checksum-verified tier fetch, manual and automatic
+open-format capture, checkpointed replication ingress, partition advice,
+push/dedicated long poll, and deterministic non-atomic superstreams. It also
+exposes time/size/combined retention and shard-zero coordinated sessions. See the
 [complete regional example](../../console/src/quickstarts/regional/RegionalQuickstart.java)
 and [contract guide](../../docs/REGIONAL_STREAM_SDK.md).
 

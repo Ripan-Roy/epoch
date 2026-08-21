@@ -1,11 +1,16 @@
 //! Ordered, replayable, partitioned stream state machine.
 
+mod advanced;
+
+pub use advanced::*;
+
 use std::collections::{HashMap, VecDeque};
 
 use epoch_core::{AckMetadata, DurabilityProfile, EpochError, EpochResult, EventEnvelope};
 use serde::{Deserialize, Serialize};
 
-pub const STREAM_SNAPSHOT_FORMAT_VERSION: u16 = 1;
+const LEGACY_STREAM_SNAPSHOT_FORMAT_VERSION: u16 = 1;
+pub const STREAM_SNAPSHOT_FORMAT_VERSION: u16 = 2;
 pub const MAX_STREAM_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 /// Stable cross-language partitioner advertised by the regional Stream API.
 pub const STREAM_PARTITIONER: &str = "fnv1a64_utf8_mod_n_v1";
@@ -458,24 +463,31 @@ impl Stream {
         }
         let snapshot: VersionedStreamSnapshot = serde_json::from_slice(encoded)
             .map_err(|error| EpochError::Storage(format!("invalid Stream snapshot: {error}")))?;
-        if snapshot.format_version != STREAM_SNAPSHOT_FORMAT_VERSION {
+        if ![
+            LEGACY_STREAM_SNAPSHOT_FORMAT_VERSION,
+            STREAM_SNAPSHOT_FORMAT_VERSION,
+        ]
+        .contains(&snapshot.format_version)
+        {
             return Err(EpochError::InvalidArgument(format!(
                 "unsupported Stream snapshot format version {}",
                 snapshot.format_version
             )));
         }
-        let stream = Self::from_snapshot(snapshot)?;
-        if stream.encode_snapshot()?.as_slice() != encoded {
+        let canonical = serde_json::to_vec(&snapshot)
+            .map_err(|error| EpochError::Internal(error.to_string()))?;
+        if canonical.as_slice() != encoded {
             return Err(EpochError::Storage(
                 "Stream snapshot is not canonically encoded".into(),
             ));
         }
+        let stream = Self::from_snapshot(snapshot)?;
         Ok(stream)
     }
 
     fn from_snapshot(snapshot: VersionedStreamSnapshot) -> EpochResult<Self> {
         let VersionedStreamSnapshot {
-            format_version: _,
+            format_version,
             config,
             partitions: saved_partitions,
             group_offsets: saved_group_offsets,
@@ -489,8 +501,12 @@ impl Stream {
                 "Stream snapshot partition count does not match its configuration".into(),
             ));
         }
-        let (partitions, total_next_offsets) =
-            restore_partitions(&config, saved_partitions, retention_watermark_ms)?;
+        let (partitions, total_next_offsets) = restore_partitions(
+            &config,
+            saved_partitions,
+            retention_watermark_ms,
+            format_version >= STREAM_SNAPSHOT_FORMAT_VERSION,
+        )?;
         if commit_position != total_next_offsets {
             return Err(EpochError::Storage(
                 "Stream snapshot commit position does not match appended offsets".into(),
@@ -600,13 +616,20 @@ fn restore_partitions(
     config: &StreamConfig,
     saved_partitions: Vec<PartitionSnapshot>,
     retention_watermark_ms: Option<u64>,
+    allow_compaction_holes: bool,
 ) -> EpochResult<(Vec<Partition>, u64)> {
     let mut partitions = Vec::with_capacity(saved_partitions.len());
     let mut total_next_offsets = 0_u64;
     for (partition_id, saved) in saved_partitions.into_iter().enumerate() {
         let partition_id =
             u32::try_from(partition_id).map_err(|error| EpochError::Capacity(error.to_string()))?;
-        let partition = restore_partition(config, saved, retention_watermark_ms, partition_id)?;
+        let partition = restore_partition(
+            config,
+            saved,
+            retention_watermark_ms,
+            partition_id,
+            allow_compaction_holes,
+        )?;
         total_next_offsets = total_next_offsets
             .checked_add(partition.next_offset)
             .ok_or_else(|| EpochError::Capacity("Stream offset sum overflow".into()))?;
@@ -620,6 +643,7 @@ fn restore_partition(
     saved: PartitionSnapshot,
     retention_watermark_ms: Option<u64>,
     partition_id: u32,
+    allow_compaction_holes: bool,
 ) -> EpochResult<Partition> {
     if saved.base_offset > saved.next_offset {
         return Err(EpochError::Storage(
@@ -662,19 +686,37 @@ fn restore_partition(
             "Stream snapshot contains records beyond its age-retention boundary".into(),
         ));
     }
-    let expected_len = saved.next_offset.saturating_sub(saved.base_offset);
-    if u64::try_from(saved.records.len()).ok() != Some(expected_len) {
-        return Err(EpochError::Storage(
-            "Stream snapshot retained offsets are not contiguous".into(),
-        ));
+    if !allow_compaction_holes {
+        let expected_len = saved.next_offset.saturating_sub(saved.base_offset);
+        if u64::try_from(saved.records.len()).ok() != Some(expected_len) {
+            return Err(EpochError::Storage(
+                "Stream snapshot retained offsets are not contiguous".into(),
+            ));
+        }
     }
-    for (offset, record) in (saved.base_offset..saved.next_offset).zip(&saved.records) {
-        if record.partition != partition_id || record.offset != offset {
+    let mut previous_offset: Option<u64> = None;
+    for record in &saved.records {
+        let invalid_position = record.partition != partition_id
+            || record.offset < saved.base_offset
+            || record.offset >= saved.next_offset
+            || previous_offset.is_some_and(|previous| {
+                if allow_compaction_holes {
+                    previous >= record.offset
+                } else {
+                    previous.saturating_add(1) != record.offset
+                }
+            });
+        if invalid_position
+            || (!allow_compaction_holes
+                && previous_offset.is_none()
+                && record.offset != saved.base_offset)
+        {
             return Err(EpochError::Storage(
                 "Stream snapshot record position is invalid".into(),
             ));
         }
         record.envelope.validate()?;
+        previous_offset = Some(record.offset);
     }
     Ok(Partition {
         base_offset: saved.base_offset,
@@ -1134,5 +1176,48 @@ mod tests {
             receipt: removed_receipt,
         }];
         assert!(Stream::from_snapshot(invalid).is_err());
+    }
+
+    #[test]
+    fn snapshot_v2_preserves_compaction_holes_and_reads_from_the_requested_offset() {
+        let mut stream = Stream::new(StreamConfig::default()).unwrap();
+        for (id, key) in [("a1", "a"), ("b1", "b"), ("a2", "a")] {
+            let mut envelope = event(id, None);
+            envelope.key = Some(key.into());
+            stream.append(envelope, Some(0), 1).unwrap();
+        }
+        StreamStateServices::new("snapshot-test")
+            .unwrap()
+            .compact(&mut stream, 0, 2, 1)
+            .unwrap();
+
+        let encoded = stream.encode_snapshot().unwrap();
+        let restored = Stream::decode_snapshot(&encoded).unwrap();
+        assert_eq!(restored.offsets(0).unwrap(), (0, 3));
+        assert_eq!(
+            restored
+                .fetch(0, 0, 10)
+                .unwrap()
+                .into_iter()
+                .map(|record| record.offset)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+    }
+
+    #[test]
+    fn snapshot_v1_remains_readable_but_new_snapshots_use_v2() {
+        let mut stream = Stream::new(StreamConfig::default()).unwrap();
+        stream.append(event("one", None), Some(0), 1).unwrap();
+        let mut legacy: VersionedStreamSnapshot =
+            serde_json::from_slice(&stream.encode_snapshot().unwrap()).unwrap();
+        legacy.format_version = LEGACY_STREAM_SNAPSHOT_FORMAT_VERSION;
+        let legacy_encoded = serde_json::to_vec(&legacy).unwrap();
+
+        let restored = Stream::decode_snapshot(&legacy_encoded).unwrap();
+        let current: VersionedStreamSnapshot =
+            serde_json::from_slice(&restored.encode_snapshot().unwrap()).unwrap();
+        assert_eq!(current.format_version, STREAM_SNAPSHOT_FORMAT_VERSION);
+        assert_eq!(restored.fetch(0, 0, 10).unwrap().len(), 1);
     }
 }

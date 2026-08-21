@@ -516,7 +516,8 @@ async fn execute_stream_target(
         }
         StreamTabletMutationReceipt::Group(_)
         | StreamTabletMutationReceipt::Retention(_)
-        | StreamTabletMutationReceipt::Session(_) => {
+        | StreamTabletMutationReceipt::Session(_)
+        | StreamTabletMutationReceipt::State(_) => {
             TargetDisposition::Reject("unexpected_destination_receipt")
         }
     }

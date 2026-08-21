@@ -92,9 +92,11 @@ cause.
 
 ## Pull requests
 
-Open a branch and keep the pull request focused on one small issue or
-well-defined task. Avoid drive-by refactors and unrelated cleanup. The
-description should include:
+External contributors must keep each pull request focused on one small,
+maintainer-scoped issue. Maintainer-owned feature releases may deliberately
+span implementation, SDK, integration, console, and documentation layers when
+those changes form one complete product capability. In either case, avoid
+drive-by refactors and unrelated cleanup. The description should include:
 
 - the problem and delivered behavior;
 - the exact guarantees, limits, and non-claims;

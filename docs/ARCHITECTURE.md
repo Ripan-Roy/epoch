@@ -283,6 +283,16 @@ generation, and return no assignment after a concurrent rebalance. This is an
 at-least-once cross-group protocol, not a distributed transaction; see
 [ADR-0029](adr/0029-stream-session-fenced-consumption.md).
 
+Command v7 adds one bounded `StreamStateServices` component beside the ordered
+log rather than a second database. Producer epochs/sequences, tablet-local
+transactions, keyed compaction, immutable tier manifests, open-format capture
+schedules/artifacts, and cross-cluster ingress checkpoints change through the
+same consensus history. Mutations stage cloned log and service state and prove
+both canonical snapshots plus cross-references before publishing. Read paths
+verify SHA-256 tier bytes and apply read-committed or read-uncommitted
+visibility while merging historical and hot ranges. See
+[ADR-0035](adr/0035-stream-state-services.md).
+
 Command v4 makes Stream retention another canonical state transition rather
 than a voter-local timer. Configure replaces the complete record-count,
 compact-JSON-byte, and inclusive-age policy and enforces it immediately;
@@ -326,8 +336,9 @@ deadline; only a route whose local consensus actor is the current leader may
 propose. The exact due deadline, rather than scheduler wake time, becomes the
 command's applied time. Deterministic identities suppress overlapping ticks,
 while bounded Queue, Cache, and Event Bus sweeps include the current profile
-index to continue residual work safely. Stream retention is per shard and
-consumer-session expiry is shard-zero-only. This keeps time-driven mutations
+index to continue residual work safely. Stream retention and automatic capture
+are per shard and consumer-session expiry is shard-zero-only. This keeps
+time-driven mutations
 inside Raft and keeps Go, SDKs, and reads out of the authority path. See
 [ADR-0027](adr/0027-regional-leader-maintenance.md).
 
@@ -539,8 +550,10 @@ claim.
 The current regional slice implements that partition-to-tablet boundary for
 several shards of one Stream. Partition order, offsets, checkpoints, retention,
 leadership, and recovery are independent per shard. The versioned FNV-1a UTF-8
-partitioner is stable only for a fixed resource generation and shard count;
-safe online expansion and key remapping remain separate work.
+partitioner is stable only for a fixed resource generation and shard count.
+Expand-only catalog changes preserve existing tablet identities and histories,
+allocate only new shards, and bump the generation; clients fail closed rather
+than remapping an uncertain keyed write.
 
 The current single-partition tablet batch is one atomic command: every record
 is validated and appended to a cloned state before the clone becomes visible.
@@ -1067,3 +1080,4 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0032: Regional Cache Eviction and Committed Access Batches](adr/0032-regional-cache-eviction-and-access-batches.md)
 - [ADR-0033: Replicated Resource Governance and Authorized Cost Attribution](adr/0033-resource-governance-and-cost-attribution.md)
 - [ADR-0034: Cache State Services and Cold Read Tier](adr/0034-cache-state-services-and-cold-read-tier.md)
+- [ADR-0035: Replicated Stream State Services](adr/0035-stream-state-services.md)

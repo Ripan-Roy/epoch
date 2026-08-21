@@ -250,12 +250,13 @@ impl RegionalNodeRuntime {
         let catalog_consensus = supervisor
             .start_group(config.catalog_group.clone(), stable_path, Some(applier))
             .await?;
-        let materializer = RegionalTabletMaterializer::new(
+        let materializer = RegionalTabletMaterializer::new_with_cluster_id(
             supervisor,
             config.catalog_group,
             config.data_dir,
             Arc::clone(&config.clock),
             config.profile_commit_wait,
+            config.topology.region(),
         )?;
         let directory = materializer.directory();
         let peer_router = shared_internal_peer_router(materializer.peer_registry());

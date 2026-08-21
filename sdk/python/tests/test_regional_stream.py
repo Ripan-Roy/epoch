@@ -12,7 +12,9 @@ from epoch_sdk import (
     RegionalStreamClient,
     StreamBatchFrame,
     StreamBatchRecord,
+    StreamOffsetCommit,
     StreamRetentionPolicy,
+    StreamSuperstreamMember,
     stream_shard_for,
 )
 from epoch_sdk.regional import _claim_generations
@@ -213,7 +215,10 @@ class RegionalStreamClientTests(unittest.TestCase):
         self.assertEqual(commit["body"]["mode"], "commit")
         read = self.leader.requests[3]
         self.assertEqual(read["headers"]["x-epoch-read-consistency"], "linearizable")
-        self.assertEqual(read["query"], {"offset": 11, "limit": 25})
+        self.assertEqual(
+            read["query"],
+            {"offset": 11, "limit": 25, "isolation": "read_committed"},
+        )
 
     def test_coordinated_consumer_session_contracts_use_shard_zero(self) -> None:
         self.client.join_consumer_session(
@@ -499,6 +504,108 @@ class RegionalStreamClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "max bytes"):
             StreamRetentionPolicy(max_bytes_per_partition=3 * 1024 * 1024 + 1)
         self.assertEqual(len(self.leader.requests), 0)
+
+    def test_advanced_stream_state_is_fenced_exact_and_isolation_aware(self) -> None:
+        maximum = (1 << 64) - 1
+        event = EventEnvelope(
+            id="order-42",
+            source="checkout",
+            event_type="order.created",
+            payload={"id": "42"},
+            time_ms=42,
+        )
+        self.client.append_idempotent(
+            "orders", 2, "producer-1", "checkout", maximum, maximum, event
+        )
+        self.client.begin_transaction("orders", 2, "tx-begin", "tx-1", "checkout", 7)
+        self.client.commit_transaction(
+            "orders",
+            2,
+            "tx-commit",
+            "tx-1",
+            offset_commit=StreamOffsetCommit("workers", 2, maximum),
+        )
+        self.client.fetch("orders", 2, maximum, limit=10, isolation="read_uncommitted")
+        self.client.partition_advice("orders", 1_000, 1_048_576)
+        self.client.consume_long_poll(
+            "orders", 2, 0, mode="dedicated", consumer_id="analytics-a", wait_ms=1_000
+        )
+        self.client.configure_capture_schedule("orders", 2, "capture-schedule", "analytics", 60_000)
+        self.client.capture_schedule("orders", 2, "analytics")
+
+        producer = self.leader.requests[1]
+        self.assertTrue(producer["path"].endswith("/state"))
+        self.assertEqual(producer["body"]["expected_term"], "8")
+        operation = producer["body"]["operation"]
+        self.assertEqual(operation["producer_epoch"], str(maximum))
+        self.assertEqual(operation["sequence"], str(maximum))
+
+        commit = self.leader.requests[5]["body"]["operation"]
+        self.assertEqual(commit["offset_commit"]["partition"], 0)
+        self.assertEqual(commit["offset_commit"]["next_offset"], str(maximum))
+        isolated = self.leader.requests[7]
+        self.assertEqual(isolated["query"]["isolation"], "read_uncommitted")
+        advice = self.leader.requests[9]
+        self.assertTrue(advice["path"].endswith("/partitions/advice"))
+        self.assertEqual(advice["headers"]["x-epoch-read-consistency"], "linearizable")
+        consume = self.leader.requests[11]
+        self.assertTrue(consume["path"].endswith("/records/consume"))
+        self.assertEqual(consume["query"]["mode"], "dedicated")
+        self.assertEqual(consume["query"]["consumer_id"], "analytics-a")
+        schedule = self.leader.requests[13]["body"]["operation"]
+        self.assertEqual(schedule["action"], "configure_capture_schedule")
+        self.assertEqual(schedule["interval_ms"], "60000")
+        self.assertTrue(self.leader.requests[15]["path"].endswith("/capture-schedules/analytics"))
+
+    def test_superstream_merges_independent_shards_deterministically(self) -> None:
+        leader = RegionalFakeTransport(
+            {
+                "resource_generation": "5",
+                "tablet_epoch": "3",
+                "term": "8",
+                "accepts_writes": True,
+            },
+            operation_responses=[
+                {
+                    "records": [
+                        {"appended_at_ms": "20", "partition": 0, "offset": "4", "value": "a"},
+                        {"appended_at_ms": "30", "partition": 0, "offset": "5", "value": "c"},
+                    ]
+                },
+                {
+                    "records": [
+                        {"appended_at_ms": "10", "partition": 1, "offset": "9", "value": "b"}
+                    ]
+                },
+            ],
+        )
+        client = RegionalStreamClient.with_transports(
+            [leader],
+            token="secret-token",
+            scope=RegionalScope("acme", "shop", "dev", "core"),
+        )
+
+        merged = client.fetch_superstream(
+            [
+                StreamSuperstreamMember("orders", "orders", 0, 4),
+                StreamSuperstreamMember("audit", "audit", 1, 9),
+            ],
+            limit=2,
+        )
+
+        self.assertEqual([record["value"] for record in merged["records"]], ["b", "a"])
+        self.assertEqual([record["member"] for record in merged["records"]], ["audit", "orders"])
+        self.assertEqual(merged["member_count"], 2)
+        self.assertEqual(merged["snapshot_scope"], "independently_linearizable_members")
+        self.assertEqual(leader.requests[1]["query"]["isolation"], "read_committed")
+
+        with self.assertRaisesRegex(ValueError, "duplicate superstream member"):
+            client.fetch_superstream(
+                [
+                    StreamSuperstreamMember("same", "orders", 0),
+                    StreamSuperstreamMember("same", "audit", 0),
+                ]
+            )
 
     def test_retryable_leader_race_rediscovers_without_changing_mutation_identity(self) -> None:
         leader = RegionalFakeTransport(

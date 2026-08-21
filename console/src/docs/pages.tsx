@@ -785,6 +785,38 @@ export function RegionalStreamBody() {
             reopen. The examples above exercise this lifecycle.
           </EvidenceCard>
           <EvidenceCard
+            label="Producer + transaction"
+            claim="Epochs, sequences, records, and one offset commit share the tablet history."
+          >
+            Exact producer retries return their original positions and stale epochs are fenced. Pending
+            records stay out of read-committed fetches; one bounded same-tablet commit exposes every record
+            and can move one consumer checkpoint atomically.
+          </EvidenceCard>
+          <EvidenceCard
+            label="Compaction + tier"
+            claim="Immutable history remains checksum-verified and transparently readable."
+          >
+            Key compaction preserves the latest value and bounded tombstones. Tiering records an exact offset
+            range, canonical bytes, and SHA-256; isolation-aware fetch merges verified historical objects with
+            the hot log after restart.
+          </EvidenceCard>
+          <EvidenceCard
+            label="Capture + replication"
+            claim="Leader-owned export and source checkpoints are replicated state."
+          >
+            JSON Lines or JSON Array schedules retain their next offset and deadline, stop at pending
+            transactions, and survive leader loss. Cross-cluster ingress requires contiguous source offsets,
+            maps them to local positions, and rejects loops through this cluster.
+          </EvidenceCard>
+          <EvidenceCard
+            label="Consumer + superstream"
+            claim="Bounded delivery modes and deterministic logical merges state their scope."
+          >
+            Pull, shared push long poll, and consumer-identified dedicated long poll are strict 1 ms–30 second
+            APIs. A superstream sorts independently linearizable named-member reads and explicitly does not
+            claim an atomic cross-shard snapshot.
+          </EvidenceCard>
+          <EvidenceCard
             label="Automatic maintenance"
             claim="Only the current Raft leader owns each due timer."
           >
@@ -795,13 +827,20 @@ export function RegionalStreamBody() {
         </>
       }
       boundary={
-        <p>
-          Regional v1 covers keyed append, direct per-shard operations, explicit-shard atomic batches, and
-          shard-zero coordinated membership/assignment. Each shard&apos;s record command remains physical
-          partition 0 for compatibility. Cooperative revoke, atomic assignment-plus-offset handoff, online
-          expansion/remapping, automatic producer batching, cross-shard transactions, and package-registry
-          releases remain open.
-        </p>
+        <>
+          <p>
+            Regional v1 now covers keyed append, batches, fenced producers, same-tablet transactions,
+            compaction, immutable tier fetch, automatic open-format capture, replication ingress, partition
+            advice, push/dedicated long poll, and logical superstreams in Go, Java, and Python. Each shard
+            remains physical partition 0 internally. Cooperative revoke, cross-shard transactions, external
+            cloud-object adapters, a two-region worker/RPO drill, throughput SLOs, and package-registry
+            releases remain open.
+          </p>
+          <p>
+            Read the complete method matrix, code examples, bounds, retry rules, and recovery model in the{" "}
+            <a href={`${repositoryDocsUrl}/REGIONAL_STREAM_SDK.md`}>end-to-end Regional Stream SDK guide</a>.
+          </p>
+        </>
       }
     />
   );
@@ -1284,6 +1323,12 @@ export function ReferenceBody() {
             description="Monotonic per-shard session claims, offset-preserving owner fences, bounded pull credit, SDK assignment revalidation, recovery evidence, and cross-shard atomicity non-claims."
             href={`${repositoryDocsUrl}/adr/0029-stream-session-fenced-consumption.md`}
           />
+          <ReferenceCard
+            eyebrow="Stream completion"
+            title="Replicated Stream state services"
+            description="Producer fencing, same-tablet transactions, compaction and tiering, automatic capture, replication ingress, deterministic superstreams, recovery, and exact non-claims."
+            href={`${repositoryDocsUrl}/adr/0035-stream-state-services.md`}
+          />
         </div>
       </Topic>
 
@@ -1357,9 +1402,9 @@ export function ReferenceBody() {
           />
           <ReferenceCard
             eyebrow="Release"
-            title="v0.1.0-alpha.6 release notes"
+            title="v0.1.0-alpha.7 release notes"
             description="Verified milestone highlights, source-only artifacts, compatibility guidance, and explicit alpha limitations."
-            href={`${repositoryDocsUrl}/releases/v0.1.0-alpha.6.md`}
+            href={`${repositoryDocsUrl}/releases/v0.1.0-alpha.7.md`}
           />
         </div>
       </Topic>

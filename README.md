@@ -107,9 +107,9 @@ through none, gzip, LZ4-frame, Snappy-framed, and Zstd-frame paths with hard
 compressed/expanded limits and one exact offset per client sequence. Real
 three-runtime tests exercise every codec; the container campaign sends an
 independently generated Python gzip frame after failover and recovers it after
-all-node `SIGKILL`. Single append remains canonical v1. Stable streaming
-Produce, automatic batching/negotiation, benchmarks, cross-shard batch
-planning, and regional SDK batch helpers remain open.
+all-node `SIGKILL`. Single append remains canonical v1. Stable bidirectional
+Produce, automatic batching/negotiation, matched benchmarks, and cross-shard
+batch planning remain open.
 
 `crates/epoch-catalog` supplies deterministic multi-resource generations and
 shard/tablet/group routing identity. The regional runtime commits it through
@@ -137,9 +137,15 @@ lifecycle and linearizable observation. They now also expose an
 offset-preserving monotonic claim on every assigned shard, exact-member/
 generation bounded fetch, and a resource-generation-pinned claim–revalidate
 helper. Partial claims do not move offsets and do not constitute an atomic
-cross-shard handoff. Cooperative revoke, member-bound authorization, stable
-streaming transport, atomic offset transactions, and online expansion/remapping
-remain explicit future work.
+cross-shard handoff. Command v7 adds fenced producers, tablet-local
+transactions with atomic offset commit, read isolation, keyed compaction,
+checksum-verified embedded tier history, automatic open-format capture,
+cross-cluster ingress checkpoints, partition advice, bounded push/dedicated
+long poll, and deterministic SDK superstreams. Expand-only catalog changes
+preserve existing tablets and generation-fence keyed writes. Cooperative
+revoke, member-bound authorization, persistent streaming transport,
+cross-shard transactions, split/merge/remapping, external object-store and
+inter-region workers remain explicit future work.
 
 The strict single-partition Queue tablet now runs through that same persistent
 three-node actor boundary. Its internal typed API covers enqueue, acquire,

@@ -309,6 +309,7 @@ pub struct RegionalTabletMaterializer {
     data_dir: PathBuf,
     clock: Arc<dyn Clock>,
     commit_wait: Duration,
+    cluster_id: String,
 }
 
 impl fmt::Debug for RegionalTabletMaterializer {
@@ -332,6 +333,24 @@ impl RegionalTabletMaterializer {
         clock: Arc<dyn Clock>,
         commit_wait: Duration,
     ) -> TabletMaterializerResult<Self> {
+        Self::new_with_cluster_id(
+            supervisor,
+            group_template,
+            data_dir,
+            clock,
+            commit_wait,
+            "local",
+        )
+    }
+
+    pub fn new_with_cluster_id(
+        supervisor: ConsensusGroupSupervisor,
+        group_template: ConsensusProbeConfig,
+        data_dir: impl Into<PathBuf>,
+        clock: Arc<dyn Clock>,
+        commit_wait: Duration,
+        cluster_id: impl Into<String>,
+    ) -> TabletMaterializerResult<Self> {
         if supervisor.registry().node_id() != group_template.node_id().get() {
             return Err(TabletMaterializerError::InvalidCatalog(format!(
                 "group template belongs to node {}; supervisor belongs to node {}",
@@ -351,6 +370,7 @@ impl RegionalTabletMaterializer {
             data_dir: data_dir.into(),
             clock,
             commit_wait,
+            cluster_id: cluster_id.into(),
         })
     }
 
@@ -450,10 +470,11 @@ impl RegionalTabletMaterializer {
                 )?)
             }
             WorkloadProfile::StreamLog => {
-                PendingTabletService::Stream(StreamTabletService::new_for_shard(
+                PendingTabletService::Stream(StreamTabletService::new_for_shard_with_cluster_id(
                     scope.clone(),
                     descriptor.shard_index,
                     metadata.shard_count,
+                    self.cluster_id.clone(),
                 )?)
             }
             WorkloadProfile::WorkQueue => PendingTabletService::Queue(

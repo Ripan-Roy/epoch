@@ -17,7 +17,7 @@ This preserves historical command bytes and legacy snapshot decoding; see
 ## What is implemented
 
 ```text
-typed append, compressed batch, checkpoint, retention, or session request
+typed append, compressed batch, checkpoint, retention, session, or state request
   -> canonical versioned tablet command
   -> persistent Raft proposal
   -> durable fixed-voter-majority commit
@@ -44,8 +44,9 @@ The historical single append remains canonical command v1 byte-for-byte. A
 batch alone emits v2, a consumer-group offset mutation alone emits v3, and a
 retention configuration or maintenance mutation alone emits v4. Consumer
 session join, heartbeat, leave, and maintenance alone emit v5. A per-shard
-session claim alone emits v6. All
-accept only partition `0`, reject unknown fields and
+session claim alone emits v6. Producer/transaction, compaction, tier, capture,
+and replication state mutations emit v7. All accept only partition `0`, reject
+unknown fields and
 version/kind mismatches, are limited to the consensus proposal ceiling, and
 must match canonical JSON exactly. A batch contains 1–1,000 unique client
 sequences in canonical record JSON, transported as standard base64 with
@@ -79,7 +80,8 @@ persisted-byte, and record-count policy. Age expiry is inclusive, combined
 policies remove the oldest record whenever any configured bound requires it,
 and offsets never change identity. Every append enforces the active policy;
 idle streams advance age deletion through an explicit committed maintenance
-call. The retained time watermark cannot regress across leader changes.
+call or the current regional leader's stable due proposal. The retained time
+watermark cannot regress across leader changes.
 Configuration is bounded to 100,000 records, 3 MiB, and ten years per
 partition. A record larger than the byte bound fails before mutation.
 
@@ -88,6 +90,32 @@ Retention preserves a group checkpoint below the new base and exposes
 boundary until the caller explicitly resets to a valid offset. Profile
 deduplication expires with its record, while the independently bounded
 consensus retry suffix can still resolve an exact old proposal.
+
+Command v7 colocates one bounded `StreamStateServices` value with the ordered
+log. Producer epochs and contiguous sequences are fenced and exactly
+replayable. A transaction contains at most 128 records on this tablet; commit
+makes every record visible and may advance one local consumer offset atomically,
+while abort permanently hides its records from read-committed. State-dependent
+precondition failures commit as typed `rejected` results, advance command
+history, mutate neither staged clone, and remain replayable after snapshot
+restore. Storage or invariant failures still fail-stop.
+
+Compaction keeps the latest committed record for each nonempty key, retains
+unkeyed records, removes aborted history, and expires JSON-null tombstones at
+their inclusive retention deadline. Stream snapshot v2 preserves the resulting
+offset holes and accepts v1. Tiering then moves a bounded non-pending prefix to
+canonical immutable bytes with its complete covered range and SHA-256 checksum;
+fetch verifies and merges tier plus hot history at the requested isolation.
+
+Manual and automatic captures encode committed ranges as canonical JSON Lines
+or JSON arrays. Replicated schedules retain the next offset and deadline;
+pending transactions stop the boundary, and only the leader proposes a stable
+due maintenance command. Replication ingress requires a contiguous source
+batch, atomically stores its checkpoint and source-to-local mapping, returns
+exact retries, and rejects a path containing the local cluster. Tablet snapshot
+v4 stores the separately versioned state-services image, accepts tablet v1–v3,
+and cross-validates every reference against the ordered log before checkpoint
+and after recovery. See [ADR-0035](adr/0035-stream-state-services.md).
 
 The proposal ID is currently a scope-separated 64-bit prefix of SHA-256; the
 complete key remains in the command, so a collision fails as a conflict instead
@@ -135,7 +163,12 @@ EPRS volumes. It verifies:
 13. after all three containers receive `SIGKILL`, their existing EPRS volumes
    rebuild the exact pre-crash record document, checkpoint/lag/replay view, and
    state digest before readiness, and an exact retry still resolves to the
-   original offset.
+   original offset; and
+14. the regional container campaign uses the Python SDK to drive producer
+   rejection/replay, committed and aborted transactions, both isolation modes,
+   compaction, tiering, automatic capture, replication, long poll, and
+   superstream reads, then verifies that state after voter catch-up and an
+   all-node same-volume reopen.
 
 The script allocates loopback ports dynamically, uses a unique Compose project,
 and removes only its own containers, network, and volumes. CI uploads its logs,

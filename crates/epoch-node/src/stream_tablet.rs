@@ -17,7 +17,11 @@ use epoch_consensus::{
     LogIndex, ProposalLookup,
 };
 use epoch_core::{Clock, EventEnvelope};
-use epoch_stream::{StreamRecord, StreamRetentionPolicy};
+use epoch_stream::{
+    StreamCaptureArtifact, StreamCaptureScheduleObservation, StreamPartitionAdvice,
+    StreamReadIsolation, StreamRecord, StreamRetentionPolicy, StreamTierObject,
+    StreamTransactionObservation,
+};
 use epoch_tablet::{
     CommittedCommand, MAX_STREAM_BATCH_COMPRESSED_BYTES, MAX_STREAM_BATCH_RECORDS,
     MAX_STREAM_BATCH_UNCOMPRESSED_BYTES, MAX_STREAM_CONSUMER_GROUP_BYTES,
@@ -26,17 +30,17 @@ use epoch_tablet::{
     MAX_STREAM_RETENTION_BYTES_PER_PARTITION, MAX_STREAM_RETENTION_RECORDS_PER_PARTITION,
     MAX_STREAM_SESSION_TIMEOUT_MS, MAX_STREAM_TABLET_COMMAND_BYTES, MIN_STREAM_SESSION_TIMEOUT_MS,
     StreamBatchPayload, StreamCompression, StreamGroupOffsetMode, StreamGroupSessionAction,
-    StreamTablet, StreamTabletCommand, StreamTabletGroupObservation, StreamTabletMutationReceipt,
-    StreamTabletOperation, StreamTabletRetentionMode, StreamTabletRetentionObservation,
-    StreamTabletScope, StreamTabletSessionObservation, TabletError, decode_stream_batch_payload,
-    proposal_id_for, validate_retention_policy, validate_stream_consumer_group,
-    validate_stream_consumer_member,
+    StreamStateCommand, StreamTablet, StreamTabletCommand, StreamTabletGroupObservation,
+    StreamTabletMutationReceipt, StreamTabletOperation, StreamTabletRetentionMode,
+    StreamTabletRetentionObservation, StreamTabletScope, StreamTabletSessionObservation,
+    TabletError, decode_stream_batch_payload, proposal_id_for, validate_retention_policy,
+    validate_stream_consumer_group, validate_stream_consumer_member,
 };
 #[cfg(test)]
 use epoch_tablet::{StreamBatchRecord, encode_stream_batch_payload};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, Notify, broadcast};
 
 use crate::consensus::{CommittedProposalApplier, ConsensusProbeError, ConsensusProbeHandle};
 use crate::regional_maintenance::{RegionalMaintenanceOperation, RegionalMaintenanceProposal};
@@ -75,6 +79,19 @@ pub const EXPERIMENTAL_STREAM_TABLET_GROUP_SESSION_MEMBER_PATH: &str =
     "/experimental/v1/tablets/stream/groups/{group}/sessions/{member}";
 pub const EXPERIMENTAL_STREAM_TABLET_GROUP_SESSION_MAINTENANCE_PATH: &str =
     "/experimental/v1/tablets/stream/groups/{group}/sessions/maintenance";
+pub const EXPERIMENTAL_STREAM_TABLET_STATE_PATH: &str = "/experimental/v1/tablets/stream/state";
+pub const EXPERIMENTAL_STREAM_TABLET_TRANSACTION_PATH: &str =
+    "/experimental/v1/tablets/stream/transactions/{transaction_id}";
+pub const EXPERIMENTAL_STREAM_TABLET_TIER_OBJECTS_PATH: &str =
+    "/experimental/v1/tablets/stream/tier/objects";
+pub const EXPERIMENTAL_STREAM_TABLET_CAPTURE_PATH: &str =
+    "/experimental/v1/tablets/stream/captures/{capture_id}";
+pub const EXPERIMENTAL_STREAM_TABLET_CAPTURE_SCHEDULE_PATH: &str =
+    "/experimental/v1/tablets/stream/capture-schedules/{schedule_id}";
+pub const EXPERIMENTAL_STREAM_TABLET_PARTITION_ADVICE_PATH: &str =
+    "/experimental/v1/tablets/stream/partitions/advice";
+pub const EXPERIMENTAL_STREAM_TABLET_CONSUME_PATH: &str =
+    "/experimental/v1/tablets/stream/records/consume";
 pub const DEFAULT_COMMIT_WAIT: Duration = Duration::from_secs(5);
 const MAX_FETCH_RECORDS: usize = 1_000;
 const TABLET_REQUEST_BODY_BYTES: usize = MAX_STREAM_TABLET_COMMAND_BYTES + 16 * 1024;
@@ -86,10 +103,13 @@ type StreamTabletApiError = TabletApiError;
 #[derive(Debug)]
 pub struct StreamTabletService {
     scope: StreamTabletScope,
+    local_cluster_id: String,
     shard_index: u32,
     shard_count: u32,
     tablet: RwLock<StreamTablet>,
     failure: RwLock<Option<String>>,
+    shared_records_changed: Notify,
+    dedicated_records_changed: Notify,
 }
 
 impl StreamTabletService {
@@ -102,18 +122,32 @@ impl StreamTabletService {
         shard_index: u32,
         shard_count: u32,
     ) -> Result<Arc<Self>, TabletError> {
+        let local_cluster_id = format!("tablet-{}", scope.tablet_id);
+        Self::new_for_shard_with_cluster_id(scope, shard_index, shard_count, local_cluster_id)
+    }
+
+    pub fn new_for_shard_with_cluster_id(
+        scope: StreamTabletScope,
+        shard_index: u32,
+        shard_count: u32,
+        local_cluster_id: impl Into<String>,
+    ) -> Result<Arc<Self>, TabletError> {
         if shard_count == 0 || shard_index >= shard_count {
             return Err(TabletError::InvalidCommand(format!(
                 "Stream logical shard {shard_index} is outside resource shard_count {shard_count}"
             )));
         }
-        let tablet = StreamTablet::new(scope.clone())?;
+        let local_cluster_id = local_cluster_id.into();
+        let tablet = StreamTablet::new_with_cluster_id(scope.clone(), local_cluster_id.clone())?;
         Ok(Arc::new(Self {
             scope,
+            local_cluster_id,
             shard_index,
             shard_count,
             tablet: RwLock::new(tablet),
             failure: RwLock::new(None),
+            shared_records_changed: Notify::new(),
+            dedicated_records_changed: Notify::new(),
         }))
     }
 
@@ -198,6 +232,31 @@ impl StreamTabletService {
                 });
             }
         }
+        for (due_at_ms, schedule_id) in tablet.due_capture_schedules(now_ms) {
+            let key = maintenance_key(
+                RegionalMaintenanceOperation::StreamCapture,
+                due_at_ms,
+                None,
+                Some(&schedule_id),
+            );
+            let command = StreamTabletCommand::state(
+                &self.scope,
+                key,
+                StreamStateCommand::MaintainCaptureSchedule { schedule_id },
+                due_at_ms,
+            )
+            .map_err(|error| error.to_string())?;
+            proposals.push(RegionalMaintenanceProposal {
+                operation: RegionalMaintenanceOperation::StreamCapture,
+                due_at_ms,
+                proposal_id: command
+                    .proposal_id(&self.scope)
+                    .map_err(|error| error.to_string())?,
+                payload: command
+                    .encode(&self.scope)
+                    .map_err(|error| error.to_string())?,
+            });
+        }
         proposals.sort_by(|left, right| {
             (left.due_at_ms, left.operation, left.proposal_id).cmp(&(
                 right.due_at_ms,
@@ -247,7 +306,14 @@ impl StreamTabletService {
             .map_err(|_| "Stream tablet write lock was poisoned".to_owned())?
             .apply_mutation(command)
             .map_err(|error| error.to_string());
-        result.map_err(|error| self.fail(error))
+        match result {
+            Ok(receipt) => {
+                self.shared_records_changed.notify_waiters();
+                self.dedicated_records_changed.notify_waiters();
+                Ok(receipt)
+            }
+            Err(error) => Err(self.fail(error)),
+        }
     }
 
     pub(crate) fn committed_receipt(
@@ -278,13 +344,27 @@ impl StreamTabletService {
         }
     }
 
-    fn fetch(&self, offset: u64, limit: usize) -> Result<Vec<StreamRecord>, String> {
+    fn fetch_with_isolation(
+        &self,
+        offset: u64,
+        limit: usize,
+        isolation: StreamReadIsolation,
+    ) -> Result<Vec<StreamRecord>, String> {
         self.ensure_healthy()?;
-        self.tablet
+        let tablet = self
+            .tablet
             .read()
-            .map_err(|_| "Stream tablet read lock was poisoned".to_owned())?
-            .fetch(offset, limit)
-            .map_err(|error| error.to_string())
+            .map_err(|_| "Stream tablet read lock was poisoned".to_owned())?;
+        match isolation {
+            StreamReadIsolation::ReadCommitted => tablet.fetch(offset, limit),
+            StreamReadIsolation::ReadUncommitted => tablet.fetch_uncommitted(offset, limit),
+        }
+        .map_err(|error| error.to_string())
+    }
+
+    #[cfg(test)]
+    fn fetch(&self, offset: u64, limit: usize) -> Result<Vec<StreamRecord>, String> {
+        self.fetch_with_isolation(offset, limit, StreamReadIsolation::ReadCommitted)
     }
 
     fn fetch_for_group(&self, group: &str, limit: usize) -> Result<Vec<StreamRecord>, String> {
@@ -344,6 +424,93 @@ impl StreamTabletService {
             .map_err(|error| error.to_string())
     }
 
+    fn transaction(
+        &self,
+        transaction_id: &str,
+    ) -> Result<Option<StreamTransactionObservation>, String> {
+        self.ensure_healthy()?;
+        Ok(self
+            .tablet
+            .read()
+            .map_err(|_| "Stream tablet read lock was poisoned".to_owned())?
+            .transaction(transaction_id))
+    }
+
+    fn tier_objects(&self) -> Result<Vec<StreamTierObject>, String> {
+        self.ensure_healthy()?;
+        Ok(self
+            .tablet
+            .read()
+            .map_err(|_| "Stream tablet read lock was poisoned".to_owned())?
+            .tier_objects()
+            .to_vec())
+    }
+
+    fn capture(&self, capture_id: &str) -> Result<Option<StreamCaptureArtifact>, String> {
+        self.ensure_healthy()?;
+        Ok(self
+            .tablet
+            .read()
+            .map_err(|_| "Stream tablet read lock was poisoned".to_owned())?
+            .capture_artifact(capture_id)
+            .cloned())
+    }
+
+    fn capture_schedule(
+        &self,
+        schedule_id: &str,
+    ) -> Result<Option<StreamCaptureScheduleObservation>, String> {
+        self.ensure_healthy()?;
+        Ok(self
+            .tablet
+            .read()
+            .map_err(|_| "Stream tablet read lock was poisoned".to_owned())?
+            .capture_schedule(schedule_id))
+    }
+
+    fn partition_advice(
+        &self,
+        target_records_per_partition: u64,
+        target_bytes_per_partition: u64,
+    ) -> Result<StreamPartitionAdvice, String> {
+        self.ensure_healthy()?;
+        self.tablet
+            .read()
+            .map_err(|_| "Stream tablet read lock was poisoned".to_owned())?
+            .partition_advice(
+                self.shard_count,
+                target_records_per_partition,
+                target_bytes_per_partition,
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    async fn consume(
+        &self,
+        offset: u64,
+        limit: usize,
+        isolation: StreamReadIsolation,
+        mode: StreamConsumerDeliveryMode,
+        wait: Duration,
+    ) -> Result<(Vec<StreamRecord>, bool), String> {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let notified = match mode {
+                StreamConsumerDeliveryMode::Push => self.shared_records_changed.notified(),
+                StreamConsumerDeliveryMode::Dedicated => self.dedicated_records_changed.notified(),
+            };
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let records = self.fetch_with_isolation(offset, limit, isolation)?;
+            if !records.is_empty() {
+                return Ok((records, false));
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return Ok((Vec::new(), true));
+            }
+        }
+    }
+
     fn snapshot(&self) -> Result<StreamTabletSnapshot, String> {
         self.ensure_healthy()?;
         let tablet = self
@@ -396,7 +563,8 @@ impl CommittedProposalApplier for StreamTabletService {
         let mut history = committed.to_vec();
         history.sort_by_key(|proposal| proposal.receipt.log_index.get());
         let mut rebuilt =
-            StreamTablet::new(self.scope.clone()).map_err(|error| error.to_string())?;
+            StreamTablet::new_with_cluster_id(self.scope.clone(), self.local_cluster_id.clone())
+                .map_err(|error| error.to_string())?;
         for proposal in &history {
             rebuilt
                 .apply_mutation(CommittedCommand {
@@ -584,6 +752,31 @@ pub fn router(
             EXPERIMENTAL_STREAM_TABLET_GROUP_SESSION_MAINTENANCE_PATH,
             axum::routing::post(maintain_group_sessions),
         )
+        .route(
+            EXPERIMENTAL_STREAM_TABLET_STATE_PATH,
+            axum::routing::post(apply_state_mutation),
+        )
+        .route(
+            EXPERIMENTAL_STREAM_TABLET_TRANSACTION_PATH,
+            get(get_transaction),
+        )
+        .route(
+            EXPERIMENTAL_STREAM_TABLET_TIER_OBJECTS_PATH,
+            get(get_tier_objects),
+        )
+        .route(EXPERIMENTAL_STREAM_TABLET_CAPTURE_PATH, get(get_capture))
+        .route(
+            EXPERIMENTAL_STREAM_TABLET_CAPTURE_SCHEDULE_PATH,
+            get(get_capture_schedule),
+        )
+        .route(
+            EXPERIMENTAL_STREAM_TABLET_PARTITION_ADVICE_PATH,
+            get(get_partition_advice),
+        )
+        .route(
+            EXPERIMENTAL_STREAM_TABLET_CONSUME_PATH,
+            get(consume_records),
+        )
         .layer(DefaultBodyLimit::max(TABLET_REQUEST_BODY_BYTES))
         .with_state(state)
 }
@@ -692,6 +885,15 @@ struct RetentionMaintenanceRequest {
     idempotency_key: String,
     #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
     expected_term: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StateMutationRequest {
+    idempotency_key: String,
+    #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+    expected_term: u64,
+    operation: StreamStateCommand,
 }
 
 #[derive(Debug, Deserialize)]
@@ -913,6 +1115,42 @@ impl StreamMutationSemantics for RetentionMaintenanceRequest {
                 if command.idempotency_key == self.idempotency_key
                     && retention.mode == StreamTabletRetentionMode::Maintain
                     && retention.policy.is_none()
+        )
+    }
+}
+
+impl StreamMutationSemantics for StateMutationRequest {
+    fn idempotency_key(&self) -> &str {
+        &self.idempotency_key
+    }
+
+    fn expected_term(&self) -> u64 {
+        self.expected_term
+    }
+
+    fn validate(&self, scope: &StreamTabletScope) -> TabletApiResult<()> {
+        self.command(scope, 0).map(|_| ()).map_err(Into::into)
+    }
+
+    fn command(
+        &self,
+        scope: &StreamTabletScope,
+        applied_at_ms: u64,
+    ) -> Result<StreamTabletCommand, TabletError> {
+        StreamTabletCommand::state(
+            scope,
+            self.idempotency_key.clone(),
+            self.operation.clone(),
+            applied_at_ms,
+        )
+    }
+
+    fn matches_command(&self, command: &StreamTabletCommand) -> bool {
+        matches!(
+            &command.operation,
+            StreamTabletOperation::State(operation)
+                if command.idempotency_key == self.idempotency_key
+                    && operation == &self.operation
         )
     }
 }
@@ -1152,6 +1390,17 @@ async fn configure_retention(
 async fn maintain_retention(
     State(state): State<StreamTabletApiState>,
     request: Result<Json<RetentionMaintenanceRequest>, JsonRejection>,
+) -> TabletApiResult<(StatusCode, Json<StreamTabletMutationResponse>)> {
+    let Json(request) = request.map_err(|rejection| StreamTabletApiError::RequestBody {
+        status: rejection.status(),
+        message: rejection.body_text(),
+    })?;
+    submit_mutation(state, request).await
+}
+
+async fn apply_state_mutation(
+    State(state): State<StreamTabletApiState>,
+    request: Result<Json<StateMutationRequest>, JsonRejection>,
 ) -> TabletApiResult<(StatusCode, Json<StreamTabletMutationResponse>)> {
     let Json(request) = request.map_err(|rejection| StreamTabletApiError::RequestBody {
         status: rejection.status(),
@@ -1431,9 +1680,53 @@ fn receipt_for_response(
             }
         }
         StreamTabletMutationReceipt::Group(receipt) => receipt.partition = shard_index,
+        StreamTabletMutationReceipt::State(receipt) => {
+            map_state_result_partition(&mut receipt.result, shard_index);
+        }
         StreamTabletMutationReceipt::Retention(_) | StreamTabletMutationReceipt::Session(_) => {}
     }
     receipt
+}
+
+fn map_state_result_partition(
+    result: &mut epoch_tablet::StreamTabletStateResult,
+    shard_index: u32,
+) {
+    use epoch_tablet::StreamTabletStateResult;
+
+    match result {
+        StreamTabletStateResult::ProducerAppend(outcome) => {
+            for position in &mut outcome.positions {
+                position.partition = shard_index;
+            }
+        }
+        StreamTabletStateResult::Transaction(transaction) => {
+            for position in &mut transaction.positions {
+                position.partition = shard_index;
+            }
+            if let Some(offset) = &mut transaction.offset_commit {
+                offset.partition = shard_index;
+            }
+        }
+        StreamTabletStateResult::Compaction(report) => report.partition = shard_index,
+        StreamTabletStateResult::Tier(object) => {
+            if let Some(object) = object {
+                object.partition = shard_index;
+            }
+        }
+        StreamTabletStateResult::Capture(artifact) => artifact.partition = shard_index,
+        StreamTabletStateResult::CaptureSchedule(schedule) => schedule.partition = shard_index,
+        StreamTabletStateResult::CaptureMaintenance(outcome) => {
+            outcome.schedule.partition = shard_index;
+            outcome.artifact.partition = shard_index;
+        }
+        StreamTabletStateResult::Replication(outcome) => {
+            for mapping in &mut outcome.mappings {
+                mapping.local_partition = shard_index;
+            }
+        }
+        StreamTabletStateResult::Rejected(_) => {}
+    }
 }
 
 async fn lookup_mutation(
@@ -1465,6 +1758,44 @@ struct FetchQuery {
     offset: u64,
     #[serde(default = "default_fetch_limit")]
     limit: usize,
+    #[serde(default)]
+    isolation: Option<StreamReadIsolation>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PartitionAdviceQuery {
+    #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+    target_records_per_partition: u64,
+    #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+    target_bytes_per_partition: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StreamConsumerDeliveryMode {
+    Push,
+    Dedicated,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StreamConsumeQuery {
+    #[serde(default)]
+    offset: u64,
+    #[serde(default = "default_fetch_limit")]
+    limit: usize,
+    #[serde(default)]
+    isolation: Option<StreamReadIsolation>,
+    mode: StreamConsumerDeliveryMode,
+    #[serde(default = "default_consume_wait_ms")]
+    wait_ms: u64,
+    #[serde(default)]
+    consumer_id: Option<String>,
+}
+
+const fn default_consume_wait_ms() -> u64 {
+    30_000
 }
 
 #[derive(Debug, Deserialize)]
@@ -1510,16 +1841,179 @@ async fn fetch_records(
         )));
     }
     let shard_index = state.service.shard_index();
+    let isolation = query
+        .isolation
+        .unwrap_or(StreamReadIsolation::ReadCommitted);
     Ok(Json(StreamTabletFetchResponse {
         read: tablet_read_metadata(read),
         shard_index,
+        isolation,
         records: state
             .service
-            .fetch(query.offset, query.limit)?
+            .fetch_with_isolation(query.offset, query.limit, isolation)?
             .into_iter()
             .map(|record| StreamTabletRecordResponse::with_partition(record, shard_index))
             .collect(),
     }))
+}
+
+async fn get_transaction(
+    State(state): State<StreamTabletApiState>,
+    Path(transaction_id): Path<String>,
+    read: Option<Extension<TabletReadMetadata>>,
+) -> TabletApiResult<Json<StreamTabletTransactionResponse>> {
+    validate_state_identifier("transaction ID", &transaction_id)?;
+    let shard_index = state.service.shard_index();
+    let mut transaction = state.service.transaction(&transaction_id)?;
+    if let Some(transaction) = &mut transaction {
+        for position in &mut transaction.positions {
+            position.partition = shard_index;
+        }
+        if let Some(offset) = &mut transaction.offset_commit {
+            offset.partition = shard_index;
+        }
+    }
+    Ok(Json(StreamTabletTransactionResponse {
+        read: tablet_read_metadata(read),
+        shard_index,
+        exists: transaction.is_some(),
+        transaction,
+    }))
+}
+
+async fn get_tier_objects(
+    State(state): State<StreamTabletApiState>,
+    read: Option<Extension<TabletReadMetadata>>,
+) -> TabletApiResult<Json<StreamTabletTierObjectsResponse>> {
+    let shard_index = state.service.shard_index();
+    let mut objects = state.service.tier_objects()?;
+    for object in &mut objects {
+        object.partition = shard_index;
+    }
+    Ok(Json(StreamTabletTierObjectsResponse {
+        read: tablet_read_metadata(read),
+        shard_index,
+        objects,
+    }))
+}
+
+async fn get_capture(
+    State(state): State<StreamTabletApiState>,
+    Path(capture_id): Path<String>,
+    read: Option<Extension<TabletReadMetadata>>,
+) -> TabletApiResult<Json<StreamTabletCaptureResponse>> {
+    validate_state_identifier("capture ID", &capture_id)?;
+    let shard_index = state.service.shard_index();
+    let mut artifact = state.service.capture(&capture_id)?;
+    if let Some(artifact) = &mut artifact {
+        artifact.partition = shard_index;
+    }
+    Ok(Json(StreamTabletCaptureResponse {
+        read: tablet_read_metadata(read),
+        shard_index,
+        exists: artifact.is_some(),
+        artifact,
+    }))
+}
+
+async fn get_capture_schedule(
+    State(state): State<StreamTabletApiState>,
+    Path(schedule_id): Path<String>,
+    read: Option<Extension<TabletReadMetadata>>,
+) -> TabletApiResult<Json<StreamTabletCaptureScheduleResponse>> {
+    validate_state_identifier("capture schedule ID", &schedule_id)?;
+    let shard_index = state.service.shard_index();
+    let mut schedule = state.service.capture_schedule(&schedule_id)?;
+    if let Some(schedule) = &mut schedule {
+        schedule.partition = shard_index;
+    }
+    Ok(Json(StreamTabletCaptureScheduleResponse {
+        read: tablet_read_metadata(read),
+        shard_index,
+        exists: schedule.is_some(),
+        schedule,
+    }))
+}
+
+async fn get_partition_advice(
+    State(state): State<StreamTabletApiState>,
+    Query(query): Query<PartitionAdviceQuery>,
+    read: Option<Extension<TabletReadMetadata>>,
+) -> TabletApiResult<Json<StreamTabletPartitionAdviceResponse>> {
+    let advice = state.service.partition_advice(
+        query.target_records_per_partition,
+        query.target_bytes_per_partition,
+    )?;
+    Ok(Json(StreamTabletPartitionAdviceResponse {
+        read: tablet_read_metadata(read),
+        shard_index: state.service.shard_index(),
+        advice,
+    }))
+}
+
+async fn consume_records(
+    State(state): State<StreamTabletApiState>,
+    Query(query): Query<StreamConsumeQuery>,
+    read: Option<Extension<TabletReadMetadata>>,
+) -> TabletApiResult<Json<StreamTabletConsumeResponse>> {
+    validate_fetch_limit(query.limit)?;
+    if query.wait_ms == 0 || query.wait_ms > 30_000 {
+        return Err(StreamTabletApiError::InvalidRequest(
+            "wait_ms must be between 1 and 30000".into(),
+        ));
+    }
+    match (query.mode, query.consumer_id.as_deref()) {
+        (StreamConsumerDeliveryMode::Dedicated, Some(consumer_id)) => {
+            validate_state_identifier("dedicated consumer ID", consumer_id)?;
+        }
+        (StreamConsumerDeliveryMode::Dedicated, None) => {
+            return Err(StreamTabletApiError::InvalidRequest(
+                "dedicated mode requires consumer_id".into(),
+            ));
+        }
+        (StreamConsumerDeliveryMode::Push, Some(_)) => {
+            return Err(StreamTabletApiError::InvalidRequest(
+                "push mode does not accept consumer_id".into(),
+            ));
+        }
+        (StreamConsumerDeliveryMode::Push, None) => {}
+    }
+    let isolation = query
+        .isolation
+        .unwrap_or(StreamReadIsolation::ReadCommitted);
+    let shard_index = state.service.shard_index();
+    let (records, timed_out) = state
+        .service
+        .consume(
+            query.offset,
+            query.limit,
+            isolation,
+            query.mode,
+            Duration::from_millis(query.wait_ms),
+        )
+        .await?;
+    Ok(Json(StreamTabletConsumeResponse {
+        read: tablet_read_metadata(read),
+        shard_index,
+        mode: query.mode,
+        isolation,
+        consumer_id: query.consumer_id,
+        timed_out,
+        records: records
+            .into_iter()
+            .map(|record| StreamTabletRecordResponse::with_partition(record, shard_index))
+            .collect(),
+    }))
+}
+
+fn validate_state_identifier(label: &str, value: &str) -> TabletApiResult<()> {
+    if value.trim().is_empty() || value.len() > epoch_stream::MAX_STREAM_IDENTIFIER_BYTES {
+        return Err(StreamTabletApiError::InvalidRequest(format!(
+            "{label} must contain 1 to {} UTF-8 bytes",
+            epoch_stream::MAX_STREAM_IDENTIFIER_BYTES
+        )));
+    }
+    Ok(())
 }
 
 async fn group_lag(
@@ -1694,6 +2188,17 @@ struct StreamTabletStatus {
     #[serde(serialize_with = "serialize_u64_as_decimal")]
     max_consumer_session_timeout_ms: u64,
     retention_contract: &'static str,
+    idempotent_producers: &'static str,
+    transactional_streams: &'static str,
+    read_isolation: [&'static str; 2],
+    keyed_compaction: &'static str,
+    immutable_object_tiering: &'static str,
+    capture_formats: [&'static str; 2],
+    capture_scheduling: &'static str,
+    cross_cluster_replication: &'static str,
+    partition_advice: &'static str,
+    superstreams: &'static str,
+    consumer_delivery_modes: [&'static str; 3],
     max_retention_records_per_partition: usize,
     #[serde(serialize_with = "serialize_u64_as_decimal")]
     max_retention_bytes_per_partition: u64,
@@ -1784,7 +2289,18 @@ impl StreamTabletStatus {
             max_consumer_members_per_group: MAX_STREAM_CONSUMER_MEMBERS_PER_GROUP,
             min_consumer_session_timeout_ms: MIN_STREAM_SESSION_TIMEOUT_MS,
             max_consumer_session_timeout_ms: MAX_STREAM_SESSION_TIMEOUT_MS,
-            retention_contract: "replicated_v4_time_size_combined_with_explicit_idle_maintenance",
+            retention_contract: "replicated_v4_time_size_combined_with_leader_maintenance",
+            idempotent_producers: "epoch_fenced_contiguous_sequence_with_exact_retry",
+            transactional_streams: "atomic_visibility_and_consumer_offset_commit",
+            read_isolation: ["read_committed", "read_uncommitted"],
+            keyed_compaction: "latest_key_value_with_bounded_tombstone_retention",
+            immutable_object_tiering: "sha256_verified_transparent_historical_fetch",
+            capture_formats: ["json_lines", "json_array"],
+            capture_scheduling: "replicated_checkpoint_with_leader_due_maintenance",
+            cross_cluster_replication: "checkpointed_source_offsets_with_loop_fencing",
+            partition_advice: "online_expand_only_record_and_byte_targets",
+            superstreams: "client_merge_over_independently_linearizable_members",
+            consumer_delivery_modes: ["pull", "push_long_poll", "dedicated_long_poll"],
             max_retention_records_per_partition: MAX_STREAM_RETENTION_RECORDS_PER_PARTITION,
             max_retention_bytes_per_partition: MAX_STREAM_RETENTION_BYTES_PER_PARTITION,
             max_retention_age_ms: MAX_STREAM_RETENTION_AGE_MS,
@@ -1818,6 +2334,66 @@ struct StreamTabletFetchResponse {
     #[serde(flatten)]
     read: TabletReadMetadata,
     shard_index: u32,
+    isolation: StreamReadIsolation,
+    records: Vec<StreamTabletRecordResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamTabletTransactionResponse {
+    #[serde(flatten)]
+    read: TabletReadMetadata,
+    shard_index: u32,
+    exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transaction: Option<StreamTransactionObservation>,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamTabletTierObjectsResponse {
+    #[serde(flatten)]
+    read: TabletReadMetadata,
+    shard_index: u32,
+    objects: Vec<StreamTierObject>,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamTabletCaptureResponse {
+    #[serde(flatten)]
+    read: TabletReadMetadata,
+    shard_index: u32,
+    exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact: Option<StreamCaptureArtifact>,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamTabletCaptureScheduleResponse {
+    #[serde(flatten)]
+    read: TabletReadMetadata,
+    shard_index: u32,
+    exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schedule: Option<StreamCaptureScheduleObservation>,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamTabletPartitionAdviceResponse {
+    #[serde(flatten)]
+    read: TabletReadMetadata,
+    shard_index: u32,
+    advice: StreamPartitionAdvice,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamTabletConsumeResponse {
+    #[serde(flatten)]
+    read: TabletReadMetadata,
+    shard_index: u32,
+    mode: StreamConsumerDeliveryMode,
+    isolation: StreamReadIsolation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    consumer_id: Option<String>,
+    timed_out: bool,
     records: Vec<StreamTabletRecordResponse>,
 }
 
@@ -1952,6 +2528,60 @@ mod tests {
     use url::Url;
 
     use super::*;
+
+    #[test]
+    fn advanced_state_http_contract_is_strict_and_browser_safe() {
+        let request: StateMutationRequest = serde_json::from_value(json!({
+            "idempotency_key": "producer-maximum",
+            "expected_term": "18446744073709551615",
+            "operation": {
+                "action": "append_idempotent",
+                "producer_id": "checkout",
+                "producer_epoch": "18446744073709551615",
+                "sequence": 0,
+                "partition": 0,
+                "envelope": {
+                    "id": "order-1",
+                    "source": "tests",
+                    "type": "order.created",
+                    "time_ms": 42,
+                    "content_type": "application/json",
+                    "payload": {"id": "1"},
+                    "priority": 0
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(request.expected_term, u64::MAX);
+        assert!(matches!(
+            request.operation,
+            StreamStateCommand::AppendIdempotent {
+                producer_epoch: u64::MAX,
+                sequence: 0,
+                ..
+            }
+        ));
+
+        for invalid in [
+            json!({
+                "idempotency_key": "unknown-top-level",
+                "expected_term": "1",
+                "operation": {"action": "abort_transaction", "transaction_id": "tx"},
+                "unexpected": true
+            }),
+            json!({
+                "idempotency_key": "unknown-operation",
+                "expected_term": "1",
+                "operation": {
+                    "action": "abort_transaction",
+                    "transaction_id": "tx",
+                    "unexpected": true
+                }
+            }),
+        ] {
+            assert!(serde_json::from_value::<StateMutationRequest>(invalid).is_err());
+        }
+    }
     use crate::consensus::{ConsensusProbeConfig, ConsensusProbeRuntime};
 
     fn scope() -> StreamTabletScope {
@@ -2018,6 +2648,21 @@ mod tests {
         service
             .apply(&committed_command_for_scope(&scope, &join, 3))
             .unwrap();
+        let capture = StreamTabletCommand::state(
+            &scope,
+            "capture-schedule",
+            StreamStateCommand::ConfigureCaptureSchedule {
+                schedule_id: "analytics".into(),
+                partition: 0,
+                interval_ms: 1_000,
+                format: epoch_stream::StreamCaptureFormat::JsonLines,
+            },
+            100,
+        )
+        .unwrap();
+        service
+            .apply(&committed_command_for_scope(&scope, &capture, 4))
+            .unwrap();
 
         assert!(service.maintenance_proposals(109).unwrap().is_empty());
         let retention_due = service.maintenance_proposals(110).unwrap();
@@ -2027,14 +2672,15 @@ mod tests {
             RegionalMaintenanceOperation::StreamRetention
         );
         let due = service.maintenance_proposals(1_100).unwrap();
-        assert_eq!(due.len(), 2);
+        assert_eq!(due.len(), 3);
         assert_eq!(
             due.iter()
                 .map(|proposal| proposal.operation)
                 .collect::<Vec<_>>(),
             [
                 RegionalMaintenanceOperation::StreamRetention,
-                RegionalMaintenanceOperation::StreamConsumerSession
+                RegionalMaintenanceOperation::StreamConsumerSession,
+                RegionalMaintenanceOperation::StreamCapture,
             ]
         );
         assert_eq!(due, service.maintenance_proposals(2_000).unwrap());
@@ -2274,6 +2920,10 @@ mod tests {
         assert_eq!(
             document["supported_batch_compressions"],
             json!(["none", "gzip", "lz4", "snappy", "zstd"])
+        );
+        assert_eq!(
+            document["capture_scheduling"],
+            "replicated_checkpoint_with_leader_due_maintenance"
         );
         assert_eq!(document["max_batch_records"], MAX_STREAM_BATCH_RECORDS);
         assert_eq!(
@@ -2792,6 +3442,284 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the real-runtime campaign deliberately covers one complete advanced Stream history and recovery"
+    )]
+    async fn advanced_stream_state_commits_isolates_tiers_and_restores_on_three_runtimes() {
+        let temporary = TempDir::new().unwrap();
+        let paths = tablet_paths(temporary.path());
+        let cluster = RunningTabletCluster::start(&paths).await;
+        let client = reqwest::Client::new();
+        let sequence_gap = json!({
+            "idempotency_key": "producer-gap-1",
+            "expected_term": "0",
+            "operation": {
+                "action": "append_idempotent",
+                "producer_id": "checkout",
+                "producer_epoch": "1",
+                "sequence": "1",
+                "partition": 0,
+                "envelope": {
+                    "id": "producer-gap", "source": "tests", "type": "order.created",
+                    "time_ms": 1, "key": "order-gap", "payload": {"value": 0}
+                }
+            }
+        });
+        let (status, rejected) =
+            post_state_to_current_leader(&cluster, &client, &sequence_gap).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(rejected["receipt"]["result"]["kind"], "rejected");
+        assert_eq!(rejected["receipt"]["result"]["value"]["code"], "conflict");
+        let (retry_status, replayed_rejection) =
+            post_state_to_current_leader(&cluster, &client, &sequence_gap).await;
+        assert_eq!(retry_status, StatusCode::OK);
+        assert_eq!(replayed_rejection["receipt"]["disposition"], "replayed");
+        assert_eq!(
+            replayed_rejection["receipt"]["result"],
+            rejected["receipt"]["result"]
+        );
+        let producer = json!({
+            "idempotency_key": "producer-append-0",
+            "expected_term": "0",
+            "operation": {
+                "action": "append_idempotent",
+                "producer_id": "checkout",
+                "producer_epoch": "1",
+                "sequence": "0",
+                "partition": 0,
+                "envelope": {
+                    "id": "producer-one", "source": "tests", "type": "order.created",
+                    "time_ms": 1, "key": "order-1", "payload": {"value": 1}
+                }
+            }
+        });
+        let (status, appended) = post_state_to_current_leader(&cluster, &client, &producer).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(appended["receipt"]["result"]["kind"], "producer_append");
+        assert_eq!(
+            appended["receipt"]["result"]["value"]["producer_epoch"],
+            "1"
+        );
+
+        for body in [
+            json!({
+                "idempotency_key": "tx-begin-1", "expected_term": "0",
+                "operation": {"action": "begin_transaction", "transaction_id": "tx-1",
+                    "producer_id": "checkout", "producer_epoch": "1"}
+            }),
+            json!({
+                "idempotency_key": "tx-append-1", "expected_term": "0",
+                "operation": {"action": "append_transaction", "transaction_id": "tx-1",
+                    "producer_id": "checkout", "producer_epoch": "1", "sequence": "1",
+                    "partition": 0, "envelopes": [{"id": "producer-two", "source": "tests",
+                        "type": "order.created", "time_ms": 2, "key": "order-2",
+                        "payload": {"value": 2}}]}
+            }),
+        ] {
+            assert_eq!(
+                post_state_to_current_leader(&cluster, &client, &body)
+                    .await
+                    .0,
+                StatusCode::CREATED
+            );
+        }
+        let (leader, _) = cluster.leader().await;
+        let committed: Value = client
+            .get(append_url_for(&cluster.nodes[leader]))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let uncommitted: Value = client
+            .get(append_url_for(&cluster.nodes[leader]))
+            .query(&[("isolation", "read_uncommitted")])
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(committed["records"].as_array().unwrap().len(), 1);
+        assert_eq!(uncommitted["records"].as_array().unwrap().len(), 2);
+
+        let push_client = client.clone();
+        let push_url = consume_url_for(&cluster.nodes[leader]);
+        let pushed = tokio::spawn(async move {
+            push_client
+                .get(push_url)
+                .query(&[
+                    ("offset", "1"),
+                    ("limit", "10"),
+                    ("mode", "push"),
+                    ("wait_ms", "2000"),
+                ])
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        });
+        let commit = json!({
+            "idempotency_key": "tx-commit-1", "expected_term": "0",
+            "operation": {"action": "commit_transaction", "transaction_id": "tx-1",
+                "offset_commit": {"group": "workers", "partition": 0,
+                    "next_offset": "2"}}
+        });
+        assert_eq!(
+            post_state_to_current_leader(&cluster, &client, &commit)
+                .await
+                .0,
+            StatusCode::CREATED
+        );
+        let pushed = pushed.await.unwrap();
+        assert_eq!(pushed["mode"], "push");
+        assert_eq!(pushed["timed_out"], false);
+        assert_eq!(pushed["records"][0]["offset"], "1");
+
+        for body in [
+            json!({
+                "idempotency_key": "tier-1", "expected_term": "0",
+                "operation": {"action": "tier_prefix", "partition": 0,
+                    "before_offset": "1", "max_records": 1}
+            }),
+            json!({
+                "idempotency_key": "capture-1", "expected_term": "0",
+                "operation": {"action": "capture", "capture_id": "capture-1",
+                    "partition": 0, "first_offset": "0", "end_offset": "2",
+                    "format": "json_lines"}
+            }),
+        ] {
+            assert_eq!(
+                post_state_to_current_leader(&cluster, &client, &body)
+                    .await
+                    .0,
+                StatusCode::CREATED
+            );
+        }
+        let capture_schedule_request = json!({
+            "idempotency_key": "capture-schedule-1", "expected_term": "0",
+            "operation": {"action": "configure_capture_schedule",
+                "schedule_id": "analytics", "partition": 0,
+                "interval_ms": "1000", "format": "json_lines"}
+        });
+        let (status, schedule_response) =
+            post_state_to_current_leader(&cluster, &client, &capture_schedule_request).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let capture_due = schedule_response["receipt"]["result"]["value"]["next_capture_at_ms"]
+            .as_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        for node in &cluster.nodes {
+            node.clock.set_wall_time_ms(capture_due);
+        }
+        let maintain_capture = json!({
+            "idempotency_key": "capture-maintain-1", "expected_term": "0",
+            "operation": {"action": "maintain_capture_schedule", "schedule_id": "analytics"}
+        });
+        let (status, maintained_capture) =
+            post_state_to_current_leader(&cluster, &client, &maintain_capture).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            maintained_capture["receipt"]["result"]["value"]["artifact"]["record_count"],
+            2
+        );
+        let (leader, _) = cluster.leader().await;
+        assert_advanced_reads(&cluster.nodes[leader], &client).await;
+        cluster.nodes[leader]
+            .runtime
+            .handle()
+            .checkpoint()
+            .await
+            .unwrap();
+        cluster.shutdown().await;
+
+        let reopened = RunningTabletCluster::start(&paths).await;
+        let (leader, _) = reopened.leader().await;
+        assert_advanced_reads(&reopened.nodes[leader], &client).await;
+        reopened.shutdown().await;
+    }
+
+    async fn assert_advanced_reads(node: &RunningTabletNode, client: &reqwest::Client) {
+        let records: Value = client
+            .get(append_url_for(node))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(records["records"].as_array().unwrap().len(), 2);
+
+        let transaction: Value = client
+            .get(transaction_url_for(node, "tx-1"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(transaction["transaction"]["status"], "committed");
+        assert_eq!(
+            transaction["transaction"]["offset_commit"]["next_offset"],
+            "2"
+        );
+
+        let tiers: Value = client
+            .get(tier_objects_url_for(node))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(tiers["objects"].as_array().unwrap().len(), 1);
+        let capture: Value = client
+            .get(capture_url_for(node, "capture-1"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(capture["artifact"]["record_count"], 2);
+        assert!(capture["artifact"]["checksum_sha256"].is_string());
+        let schedule: Value = client
+            .get(capture_schedule_url_for(node, "analytics"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(schedule["exists"], true);
+        assert_eq!(schedule["schedule"]["next_offset"], "2");
+
+        let dedicated: Value = client
+            .get(consume_url_for(node))
+            .query(&[
+                ("offset", "0"),
+                ("limit", "2"),
+                ("mode", "dedicated"),
+                ("consumer_id", "analytics-a"),
+                ("wait_ms", "1"),
+            ])
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(dedicated["mode"], "dedicated");
+        assert_eq!(dedicated["consumer_id"], "analytics-a");
+        assert_eq!(dedicated["records"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn consumer_sessions_rebalance_expire_converge_and_restore() {
         let temporary = TempDir::new().unwrap();
         let paths = tablet_paths(temporary.path());
@@ -3280,6 +4208,35 @@ mod tests {
         .expect("an exact idempotent batch should resolve under stable leadership")
     }
 
+    async fn post_state_to_current_leader(
+        cluster: &RunningTabletCluster,
+        client: &reqwest::Client,
+        request: &Value,
+    ) -> (StatusCode, Value) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let (leader, term) = cluster.leader().await;
+                let mut attempt = request.clone();
+                attempt["expected_term"] = json!(term);
+                let response = client
+                    .post(state_url_for(&cluster.nodes[leader]))
+                    .json(&attempt)
+                    .send()
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let document: Value = response.json().await.unwrap();
+                if is_retryable_leadership_response(status, &document) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    continue;
+                }
+                return (status, document);
+            }
+        })
+        .await
+        .expect("an exact Stream state mutation should resolve under stable leadership")
+    }
+
     async fn put_group_to_current_leader(
         cluster: &RunningTabletCluster,
         client: &reqwest::Client,
@@ -3599,6 +4556,48 @@ mod tests {
     fn batch_url_for(node: &RunningTabletNode) -> Url {
         node.base_url
             .join(EXPERIMENTAL_STREAM_TABLET_BATCHES_PATH.trim_start_matches('/'))
+            .unwrap()
+    }
+
+    fn state_url_for(node: &RunningTabletNode) -> Url {
+        node.base_url
+            .join(EXPERIMENTAL_STREAM_TABLET_STATE_PATH.trim_start_matches('/'))
+            .unwrap()
+    }
+
+    fn consume_url_for(node: &RunningTabletNode) -> Url {
+        node.base_url
+            .join(EXPERIMENTAL_STREAM_TABLET_CONSUME_PATH.trim_start_matches('/'))
+            .unwrap()
+    }
+
+    fn transaction_url_for(node: &RunningTabletNode, transaction_id: &str) -> Url {
+        node.base_url
+            .join(&format!(
+                "experimental/v1/tablets/stream/transactions/{transaction_id}"
+            ))
+            .unwrap()
+    }
+
+    fn tier_objects_url_for(node: &RunningTabletNode) -> Url {
+        node.base_url
+            .join(EXPERIMENTAL_STREAM_TABLET_TIER_OBJECTS_PATH.trim_start_matches('/'))
+            .unwrap()
+    }
+
+    fn capture_url_for(node: &RunningTabletNode, capture_id: &str) -> Url {
+        node.base_url
+            .join(&format!(
+                "experimental/v1/tablets/stream/captures/{capture_id}"
+            ))
+            .unwrap()
+    }
+
+    fn capture_schedule_url_for(node: &RunningTabletNode, schedule_id: &str) -> Url {
+        node.base_url
+            .join(&format!(
+                "experimental/v1/tablets/stream/capture-schedules/{schedule_id}"
+            ))
             .unwrap()
     }
 

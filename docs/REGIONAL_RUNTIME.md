@@ -441,10 +441,16 @@ then waits for leader-proposed Stream retention/session expiry, Queue retry
 promotion, Cache TTL reclamation, and Event Bus delivery-lease timeout without
 calling explicit maintenance. It checks topology submission/error counters,
 waits for automatic checkpoint creation and retained-prefix compaction on all
-24 voter/group copies, kills and catches up each profile leader, kills all
+27 voter/group copies, kills and catches up each profile leader, kills all
 nodes, reopens the same volumes, verifies durable per-group checkpoint
 boundaries, compares per-shard state and digests, and deletes only its scoped
 containers/network/volumes.
+
+A dedicated advanced Stream in the same campaign is driven through the Python
+SDK. It covers fenced producer retry and committed rejection, transaction
+isolation/abort/atomic offset commit, long poll, compaction and transparent tier
+reads, manual plus automatic capture, replication ingress replay, partition
+advice, and logical superstream merge before and after the all-node reopen.
 
 The campaign checks governance through the filtered Go BFF and every Rust
 catalog voter before and after the Go `SIGKILL`, then repeats it after all-node
@@ -459,11 +465,12 @@ same-volume reopen. See [Resource Governance](RESOURCE_GOVERNANCE.md).
   backups/PITR are absent. Automatic local native voter checkpoints, physical
   EPRS reclamation, replicated Stream
   time/size/combined logical retention, and leader-owned regional maintenance
-  are implemented. Retention still lacks keyed compaction, object-tier
-  deletion, and legal-hold governance. Multi-shard Stream routing and a replicated shard-zero
-  session coordinator are implemented for a fixed resource generation. Safe
-  online expansion/remapping, virtual shards, hot-key mitigation, cooperative
-  revoke, and atomic checkpoint handoff are not. Read
+  are implemented. Stream key compaction and embedded immutable tier reads are
+  implemented; external object lifecycle and legal-hold governance are not.
+  Multi-shard routing and a replicated shard-zero session coordinator are
+  implemented. Expand-only allocation preserves existing tablets and fences
+  stale generations; split/merge/remapping, virtual shards, hot-key mitigation,
+  cooperative revoke, and atomic cross-shard checkpoint handoff are not. Read
   barriers are leader-only and regional-only;
   follower forwarding remains absent.
 - Rust regional HTTP and Go management enforce the bootstrap policy, and the
