@@ -1,6 +1,7 @@
 package io.epoch.sdk;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.math.BigInteger;
@@ -8,9 +9,11 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /** Authenticated, leader- and fence-aware client for regional Stream shards. */
 public final class RegionalStreamClient {
@@ -18,6 +21,8 @@ public final class RegionalStreamClient {
   private static final Duration MIN_SESSION_TIMEOUT = Duration.ofSeconds(1);
   private static final Duration MAX_SESSION_TIMEOUT = Duration.ofMinutes(5);
   private static final int MAX_CLAIM_TRANSITIONS = 4_096;
+  private static final Duration MIN_CAPTURE_INTERVAL = Duration.ofSeconds(1);
+  private static final Duration MAX_CAPTURE_INTERVAL = Duration.ofDays(31);
 
   private final RegionalClientCore regional;
 
@@ -128,6 +133,391 @@ public final class RegionalStreamClient {
         route ->
             new RegionalClientCore.RequestSpec(
                 "GET", "/records", null, Map.of("offset", offset, "limit", limit), linearizable()));
+  }
+
+  /** Performs a linearizable bounded fetch with explicit transaction visibility. */
+  public JsonNode fetchWithIsolation(
+      String stream, int shard, BigInteger offset, int limit, StreamReadIsolation isolation)
+      throws IOException, InterruptedException {
+    RegionalClientCore.nonNegativeU64(offset, "offset");
+    fetchLimit(limit);
+    Objects.requireNonNull(isolation, "isolation");
+    return call(
+        stream,
+        shard,
+        route ->
+            new RegionalClientCore.RequestSpec(
+                "GET",
+                "/records",
+                null,
+                Map.of("offset", offset, "limit", limit, "isolation", isolation.wireValue()),
+                linearizable()));
+  }
+
+  /**
+   * Deterministically merges named shards. Each member read is independently linearizable; the
+   * result is deliberately not advertised as an atomic cross-shard snapshot.
+   */
+  public JsonNode fetchSuperstream(
+      List<StreamSuperstreamMember> members, int limit, StreamReadIsolation isolation)
+      throws IOException, InterruptedException {
+    Objects.requireNonNull(members, "members");
+    Objects.requireNonNull(isolation, "isolation");
+    if (members.isEmpty() || members.size() > 128) {
+      throw new IllegalArgumentException("superstream must contain between 1 and 128 members");
+    }
+    fetchLimit(limit);
+    Set<String> names = new HashSet<>();
+    for (StreamSuperstreamMember member : members) {
+      Objects.requireNonNull(member, "superstream member");
+      if (!names.add(member.name())) {
+        throw new IllegalArgumentException("duplicate superstream member: " + member.name());
+      }
+    }
+
+    List<MergedStreamRecord> merged = new ArrayList<>();
+    for (StreamSuperstreamMember member : members) {
+      JsonNode response =
+          fetchWithIsolation(member.stream(), member.shard(), member.offset(), limit, isolation);
+      JsonNode records = response.path("records");
+      if (!records.isArray()) {
+        throw new IOException("superstream member " + member.name() + " response omitted records");
+      }
+      for (JsonNode record : records) {
+        if (!record.isObject()) {
+          throw new IOException(
+              "superstream member " + member.name() + " returned an invalid record");
+        }
+        ObjectNode decorated = ((ObjectNode) record).deepCopy();
+        decorated.put("member", member.name());
+        merged.add(
+            new MergedStreamRecord(
+                responseU64(record.get("appended_at_ms"), "appended_at_ms"),
+                member.name(),
+                responseU64(record.get("partition"), "partition"),
+                responseU64(record.get("offset"), "offset"),
+                decorated));
+      }
+    }
+    merged.sort(
+        java.util.Comparator.comparing(MergedStreamRecord::appendedAt)
+            .thenComparing(MergedStreamRecord::member)
+            .thenComparing(MergedStreamRecord::partition)
+            .thenComparing(MergedStreamRecord::offset));
+    ArrayNode records = RegionalClientCore.MAPPER.createArrayNode();
+    merged.stream().limit(limit).map(MergedStreamRecord::document).forEach(records::add);
+    ObjectNode result = RegionalClientCore.MAPPER.createObjectNode();
+    result.set("records", records);
+    result.put("member_count", members.size());
+    result.put("ordering", "appended_at_member_partition_offset");
+    result.put("snapshot_scope", "independently_linearizable_members");
+    return result;
+  }
+
+  /** Waits for visible records in a shared push or dedicated consumer lane. */
+  public JsonNode consumeLongPoll(
+      String stream,
+      int shard,
+      BigInteger offset,
+      int limit,
+      StreamReadIsolation isolation,
+      StreamConsumerMode mode,
+      String consumerId,
+      Duration wait)
+      throws IOException, InterruptedException {
+    RegionalClientCore.nonNegativeU64(offset, "offset");
+    fetchLimit(limit);
+    Objects.requireNonNull(isolation, "isolation");
+    Objects.requireNonNull(mode, "mode");
+    Objects.requireNonNull(wait, "wait");
+    long waitMs = wait.toMillis();
+    if (waitMs < 1 || waitMs > 30_000) {
+      throw new IllegalArgumentException("consumer wait must be between 1ms and 30s");
+    }
+    if (mode == StreamConsumerMode.DEDICATED) {
+      RegionalClientCore.required(consumerId, "dedicated consumer ID");
+    } else if (consumerId != null) {
+      throw new IllegalArgumentException("push mode does not accept a consumer ID");
+    }
+    return call(
+        stream,
+        shard,
+        route -> {
+          Map<String, Object> query = new java.util.LinkedHashMap<>();
+          query.put("offset", offset);
+          query.put("limit", limit);
+          query.put("isolation", isolation.wireValue());
+          query.put("mode", mode.wireValue());
+          query.put("wait_ms", waitMs);
+          if (consumerId != null) {
+            query.put("consumer_id", consumerId);
+          }
+          return new RegionalClientCore.RequestSpec(
+              "GET", "/records/consume", null, query, linearizable());
+        });
+  }
+
+  /** Appends one producer-epoch/sequence-fenced record. */
+  public JsonNode appendIdempotent(
+      String stream,
+      int shard,
+      String idempotencyKey,
+      String producerId,
+      BigInteger producerEpoch,
+      BigInteger sequence,
+      EventEnvelope event)
+      throws IOException, InterruptedException {
+    streamProducer(producerId, producerEpoch);
+    RegionalClientCore.nonNegativeU64(sequence, "producer sequence");
+    Objects.requireNonNull(event, "event");
+    ObjectNode operation = RegionalClientCore.MAPPER.createObjectNode();
+    operation.put("action", "append_idempotent");
+    operation.put("producer_id", producerId);
+    operation.put("producer_epoch", producerEpoch.toString());
+    operation.put("sequence", sequence.toString());
+    operation.put("partition", 0);
+    operation.set("envelope", event.toJson());
+    return mutateState(stream, shard, idempotencyKey, operation);
+  }
+
+  /** Opens or exactly replays a producer-fenced transaction. */
+  public JsonNode beginTransaction(
+      String stream,
+      int shard,
+      String idempotencyKey,
+      String transactionId,
+      String producerId,
+      BigInteger producerEpoch)
+      throws IOException, InterruptedException {
+    RegionalClientCore.required(transactionId, "transaction ID");
+    streamProducer(producerId, producerEpoch);
+    ObjectNode operation = RegionalClientCore.MAPPER.createObjectNode();
+    operation.put("action", "begin_transaction");
+    operation.put("transaction_id", transactionId);
+    operation.put("producer_id", producerId);
+    operation.put("producer_epoch", producerEpoch.toString());
+    return mutateState(stream, shard, idempotencyKey, operation);
+  }
+
+  /** Atomically appends a bounded sequence inside an open transaction. */
+  public JsonNode appendTransaction(
+      String stream,
+      int shard,
+      String idempotencyKey,
+      String transactionId,
+      String producerId,
+      BigInteger producerEpoch,
+      BigInteger sequence,
+      List<EventEnvelope> events)
+      throws IOException, InterruptedException {
+    RegionalClientCore.required(transactionId, "transaction ID");
+    streamProducer(producerId, producerEpoch);
+    RegionalClientCore.nonNegativeU64(sequence, "producer sequence");
+    Objects.requireNonNull(events, "events");
+    if (events.isEmpty() || events.size() > 128 || events.stream().anyMatch(Objects::isNull)) {
+      throw new IllegalArgumentException(
+          "transaction append must contain between 1 and 128 non-null records");
+    }
+    ObjectNode operation = RegionalClientCore.MAPPER.createObjectNode();
+    operation.put("action", "append_transaction");
+    operation.put("transaction_id", transactionId);
+    operation.put("producer_id", producerId);
+    operation.put("producer_epoch", producerEpoch.toString());
+    operation.put("sequence", sequence.toString());
+    operation.put("partition", 0);
+    var envelopes = operation.putArray("envelopes");
+    events.forEach(event -> envelopes.add(event.toJson()));
+    return mutateState(stream, shard, idempotencyKey, operation);
+  }
+
+  /** Makes transaction records visible and optionally advances one offset atomically. */
+  public JsonNode commitTransaction(
+      String stream,
+      int shard,
+      String idempotencyKey,
+      String transactionId,
+      StreamOffsetCommit offsetCommit)
+      throws IOException, InterruptedException {
+    RegionalClientCore.required(transactionId, "transaction ID");
+    ObjectNode operation = RegionalClientCore.MAPPER.createObjectNode();
+    operation.put("action", "commit_transaction");
+    operation.put("transaction_id", transactionId);
+    if (offsetCommit != null) {
+      if (offsetCommit.partition() != shard) {
+        throw new IllegalArgumentException(
+            "transaction offset commit must target the transaction shard");
+      }
+      ObjectNode offset = operation.putObject("offset_commit");
+      offset.put("group", offsetCommit.group());
+      offset.put("partition", 0);
+      offset.put("next_offset", offsetCommit.nextOffset().toString());
+    }
+    return mutateState(stream, shard, idempotencyKey, operation);
+  }
+
+  /** Permanently hides transaction records from read-committed consumers. */
+  public JsonNode abortTransaction(
+      String stream, int shard, String idempotencyKey, String transactionId)
+      throws IOException, InterruptedException {
+    RegionalClientCore.required(transactionId, "transaction ID");
+    ObjectNode operation = RegionalClientCore.MAPPER.createObjectNode();
+    operation.put("action", "abort_transaction");
+    operation.put("transaction_id", transactionId);
+    return mutateState(stream, shard, idempotencyKey, operation);
+  }
+
+  /** Retains the latest committed record per key and expires old tombstones. */
+  public JsonNode compact(
+      String stream, int shard, String idempotencyKey, Duration tombstoneRetention)
+      throws IOException, InterruptedException {
+    Objects.requireNonNull(tombstoneRetention, "tombstoneRetention");
+    long milliseconds = tombstoneRetention.toMillis();
+    if (milliseconds <= 0) {
+      throw new IllegalArgumentException("tombstone retention must be positive");
+    }
+    ObjectNode operation = RegionalClientCore.MAPPER.createObjectNode();
+    operation.put("action", "compact");
+    operation.put("partition", 0);
+    operation.put("tombstone_retention_ms", Long.toString(milliseconds));
+    return mutateState(stream, shard, idempotencyKey, operation);
+  }
+
+  /** Moves a committed hot prefix into an immutable checksum-verified object. */
+  public JsonNode tierPrefix(
+      String stream, int shard, String idempotencyKey, BigInteger beforeOffset, int maxRecords)
+      throws IOException, InterruptedException {
+    RegionalClientCore.nonNegativeU64(beforeOffset, "tier before offset");
+    if (maxRecords < 1 || maxRecords > 1_024) {
+      throw new IllegalArgumentException("tier max records must be between 1 and 1024");
+    }
+    ObjectNode operation = RegionalClientCore.MAPPER.createObjectNode();
+    operation.put("action", "tier_prefix");
+    operation.put("partition", 0);
+    operation.put("before_offset", beforeOffset.toString());
+    operation.put("max_records", maxRecords);
+    return mutateState(stream, shard, idempotencyKey, operation);
+  }
+
+  /** Captures one committed offset range in a portable open format. */
+  public JsonNode capture(
+      String stream,
+      int shard,
+      String idempotencyKey,
+      String captureId,
+      BigInteger firstOffset,
+      BigInteger endOffset,
+      StreamCaptureFormat format)
+      throws IOException, InterruptedException {
+    RegionalClientCore.required(captureId, "capture ID");
+    RegionalClientCore.nonNegativeU64(firstOffset, "capture first offset");
+    RegionalClientCore.nonNegativeU64(endOffset, "capture end offset");
+    if (firstOffset.compareTo(endOffset) > 0) {
+      throw new IllegalArgumentException("capture offset range must be ordered");
+    }
+    Objects.requireNonNull(format, "format");
+    ObjectNode operation = RegionalClientCore.MAPPER.createObjectNode();
+    operation.put("action", "capture");
+    operation.put("capture_id", captureId);
+    operation.put("partition", 0);
+    operation.put("first_offset", firstOffset.toString());
+    operation.put("end_offset", endOffset.toString());
+    operation.put("format", format.wireValue());
+    return mutateState(stream, shard, idempotencyKey, operation);
+  }
+
+  /** Enables leader-driven periodic capture with a replicated offset checkpoint. */
+  public JsonNode configureCaptureSchedule(
+      String stream,
+      int shard,
+      String idempotencyKey,
+      String scheduleId,
+      Duration interval,
+      StreamCaptureFormat format)
+      throws IOException, InterruptedException {
+    RegionalClientCore.required(scheduleId, "capture schedule ID");
+    Objects.requireNonNull(interval, "interval");
+    Objects.requireNonNull(format, "format");
+    long intervalMs = interval.toMillis();
+    if (interval.compareTo(MIN_CAPTURE_INTERVAL) < 0
+        || interval.compareTo(MAX_CAPTURE_INTERVAL) > 0
+        || !interval.equals(Duration.ofMillis(intervalMs))) {
+      throw new IllegalArgumentException(
+          "capture interval must be between 1 second and 31 days in whole milliseconds");
+    }
+    ObjectNode operation = RegionalClientCore.MAPPER.createObjectNode();
+    operation.put("action", "configure_capture_schedule");
+    operation.put("schedule_id", scheduleId);
+    operation.put("partition", 0);
+    operation.put("interval_ms", Long.toString(intervalMs));
+    operation.put("format", format.wireValue());
+    return mutateState(stream, shard, idempotencyKey, operation);
+  }
+
+  /** Applies one contiguous source batch with checkpoint and loop fencing. */
+  public JsonNode replicate(
+      String stream, int shard, String idempotencyKey, StreamReplicationBatch replication)
+      throws IOException, InterruptedException {
+    Objects.requireNonNull(replication, "replication");
+    ObjectNode operation = RegionalClientCore.MAPPER.createObjectNode();
+    operation.put("action", "replicate");
+    operation.put("local_partition", 0);
+    ObjectNode batch = operation.putObject("batch");
+    batch.put("source_cluster", replication.sourceCluster());
+    batch.put("source_stream", replication.sourceStream());
+    batch.put("source_partition", replication.sourcePartition());
+    batch.put("first_source_offset", replication.firstSourceOffset().toString());
+    var records = batch.putArray("records");
+    for (StreamReplicationRecord record : replication.records()) {
+      ObjectNode encoded = records.addObject();
+      encoded.put("source_offset", record.sourceOffset().toString());
+      encoded.set("envelope", record.envelope().toJson());
+      encoded.set(
+          "traversed_clusters", RegionalClientCore.MAPPER.valueToTree(record.traversedClusters()));
+    }
+    return mutateState(stream, shard, idempotencyKey, operation);
+  }
+
+  /** Returns one linearizable transaction observation. */
+  public JsonNode transaction(String stream, int shard, String transactionId)
+      throws IOException, InterruptedException {
+    String transaction = RegionalClientCore.segment(transactionId, "transaction");
+    return linearizableRead(stream, shard, "/transactions/" + transaction, Map.of());
+  }
+
+  /** Lists immutable tier manifests for one shard. */
+  public JsonNode tierObjects(String stream, int shard) throws IOException, InterruptedException {
+    return linearizableRead(stream, shard, "/tier/objects", Map.of());
+  }
+
+  /** Returns one retained capture artifact and checksum. */
+  public JsonNode captureArtifact(String stream, int shard, String captureId)
+      throws IOException, InterruptedException {
+    String capture = RegionalClientCore.segment(captureId, "capture");
+    return linearizableRead(stream, shard, "/captures/" + capture, Map.of());
+  }
+
+  /** Returns a replicated automatic-capture checkpoint and next deadline. */
+  public JsonNode captureSchedule(String stream, int shard, String scheduleId)
+      throws IOException, InterruptedException {
+    String schedule = RegionalClientCore.segment(scheduleId, "capture schedule");
+    return linearizableRead(stream, shard, "/capture-schedules/" + schedule, Map.of());
+  }
+
+  /** Estimates an online expand-only partition target. */
+  public JsonNode partitionAdvice(
+      String stream, BigInteger targetRecordsPerPartition, BigInteger targetBytesPerPartition)
+      throws IOException, InterruptedException {
+    RegionalClientCore.positiveU64(targetRecordsPerPartition, "target records per partition");
+    RegionalClientCore.positiveU64(targetBytesPerPartition, "target bytes per partition");
+    return linearizableRead(
+        stream,
+        0,
+        "/partitions/advice",
+        Map.of(
+            "target_records_per_partition",
+            targetRecordsPerPartition,
+            "target_bytes_per_partition",
+            targetBytesPerPartition));
   }
 
   /** Commits or explicitly resets a generation-fenced next offset. */
@@ -628,6 +1018,64 @@ public final class RegionalStreamClient {
             new RegionalClientCore.RequestSpec(
                 "GET", "/retention", null, Map.of(), linearizable()));
   }
+
+  private JsonNode mutateState(
+      String stream, int shard, String idempotencyKey, ObjectNode operation)
+      throws IOException, InterruptedException {
+    RegionalClientCore.required(idempotencyKey, "idempotency key");
+    return call(
+        stream,
+        shard,
+        route -> {
+          ObjectNode body = RegionalClientCore.MAPPER.createObjectNode();
+          body.put("idempotency_key", idempotencyKey);
+          body.put("expected_term", route.term());
+          body.set("operation", operation);
+          return new RegionalClientCore.RequestSpec("POST", "/state", body, Map.of(), Map.of());
+        });
+  }
+
+  private JsonNode linearizableRead(
+      String stream, int shard, String path, Map<String, Object> query)
+      throws IOException, InterruptedException {
+    return call(
+        stream,
+        shard,
+        route -> new RegionalClientCore.RequestSpec("GET", path, null, query, linearizable()));
+  }
+
+  private static void streamProducer(String producerId, BigInteger producerEpoch) {
+    RegionalClientCore.required(producerId, "producer ID");
+    RegionalClientCore.positiveU64(producerEpoch, "producer epoch");
+  }
+
+  private static BigInteger responseU64(JsonNode value, String field) throws IOException {
+    BigInteger parsed;
+    if (value != null && value.isTextual()) {
+      String text = value.textValue();
+      if (!text.matches("0|[1-9][0-9]*")) {
+        throw new IOException("Stream response " + field + " is invalid");
+      }
+      parsed = new BigInteger(text);
+    } else if (value != null && value.isIntegralNumber()) {
+      parsed = value.bigIntegerValue();
+    } else {
+      throw new IOException("Stream response omitted " + field);
+    }
+    try {
+      RegionalClientCore.nonNegativeU64(parsed, "Stream response " + field);
+    } catch (IllegalArgumentException error) {
+      throw new IOException(error.getMessage(), error);
+    }
+    return parsed;
+  }
+
+  private record MergedStreamRecord(
+      BigInteger appendedAt,
+      String member,
+      BigInteger partition,
+      BigInteger offset,
+      ObjectNode document) {}
 
   private JsonNode call(String stream, int shard, RegionalClientCore.RequestFactory requestFactory)
       throws IOException, InterruptedException {

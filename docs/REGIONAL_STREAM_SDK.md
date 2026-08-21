@@ -1,6 +1,6 @@
 # Regional Stream SDK
 
-**Status:** Versioned multi-shard, atomic-batch, and coordinated-session alpha
+**Status:** Versioned multi-shard, transactional state-services alpha
 
 **Languages:** Go, Java, and Python
 
@@ -14,7 +14,9 @@ See [ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md) for the binding
 decision, [ADR-0023](adr/0023-stream-retention-policies.md) for retention,
 [ADR-0024](adr/0024-stream-multishard-key-routing.md) for keyed routing,
 [ADR-0025](adr/0025-stream-consumer-sessions.md) for consumer coordination,
-[ADR-0026](adr/0026-regional-stream-batch-sdks.md) for SDK batch framing, and
+[ADR-0026](adr/0026-regional-stream-batch-sdks.md) for SDK batch framing,
+[ADR-0035](adr/0035-stream-state-services.md) for producer sequencing,
+transactions, compaction, tiering, capture, replication, and superstreams, and
 [Regional runtime](REGIONAL_RUNTIME.md) for provisioning and operations.
 
 ## End-to-end flow
@@ -92,6 +94,24 @@ available for tests in all three SDKs.
 | Encode none/gzip batch | `EncodeStreamBatch` | `StreamBatchFrame.encode` | `StreamBatchFrame.encode` |
 | Wrap any supported frame | `NewStreamBatchFrame` | `StreamBatchFrame.compressed` | `StreamBatchFrame.from_compressed` |
 | Offset fetch | `Fetch` | `fetch` | `fetch` |
+| Fetch with transaction isolation | `FetchWithIsolation` | `fetchWithIsolation` | `fetch(..., isolation=...)` |
+| Push/dedicated long poll | `ConsumeLongPoll` | `consumeLongPoll` | `consume_long_poll` |
+| Idempotent producer append | `AppendIdempotent` | `appendIdempotent` | `append_idempotent` |
+| Begin transaction | `BeginTransaction` | `beginTransaction` | `begin_transaction` |
+| Transactional append | `AppendTransaction` | `appendTransaction` | `append_transaction` |
+| Commit transaction + offset | `CommitTransaction` | `commitTransaction` | `commit_transaction` |
+| Abort transaction | `AbortTransaction` | `abortTransaction` | `abort_transaction` |
+| Observe transaction | `Transaction` | `transaction` | `transaction` |
+| Key compaction | `Compact` | `compact` | `compact` |
+| Tier a hot prefix | `TierPrefix` | `tierPrefix` | `tier_prefix` |
+| List tier manifests | `TierObjects` | `tierObjects` | `tier_objects` |
+| Manual open-format capture | `Capture` | `capture` | `capture` |
+| Configure automatic capture | `ConfigureCaptureSchedule` | `configureCaptureSchedule` | `configure_capture_schedule` |
+| Observe capture schedule | `CaptureSchedule` | `captureSchedule` | `capture_schedule` |
+| Read capture artifact | `CaptureArtifact` | `captureArtifact` | `capture_artifact` |
+| Replicate source batch | `Replicate` | `replicate` | `replicate` |
+| Partition recommendation | `PartitionAdvice` | `partitionAdvice` | `partition_advice` |
+| Logical superstream merge | `FetchSuperstream` | `fetchSuperstream` | `fetch_superstream` |
 | Commit or reset checkpoint | `CommitOffset` | `commitOffset` | `commit_offset` |
 | Observe checkpoint and lag | `Lag` | `lag` | `lag` |
 | Fetch from checkpoint | `FetchGroup` | `fetchGroup` | `fetch_group` |
@@ -176,6 +196,137 @@ Configuration and maintenance require idempotency keys. Retention observation
 is linearizable and reports the active policy, watermark, base/end offsets,
 retained record count, and retained canonical bytes.
 
+## Producer, transaction, and isolation contract
+
+An idempotent producer is identified by a nonempty producer ID and a nonzero
+epoch. Sequences start at zero and must be contiguous. Retrying the exact
+epoch/sequence/payload returns the original positions; changing the payload at
+that sequence conflicts, and advancing the epoch fences the old producer. The
+bounded replay history retains 256 sequences per producer.
+
+A transaction is bound to one producer epoch and one physical Stream shard. It
+may contain up to 128 records. Pending records appear only under
+`read_uncommitted`; commit makes the whole transaction visible and can advance
+one consumer checkpoint in the same replicated state transition. Abort keeps
+the records hidden from `read_committed`. This is a tablet-local transaction,
+not an atomic cross-shard or external-sink transaction.
+
+Push and dedicated consumption use bounded HTTP long polling (1–30,000 ms).
+Dedicated mode requires a consumer ID and runs on its own notification lane;
+push mode forbids one. This is useful isolation in the alpha runtime, but it is
+not a published dedicated-throughput SLO or a persistent bidirectional stream.
+
+## Compaction, tiering, and capture
+
+`Compact` keeps the latest committed record for each nonempty key, retains
+unkeyed records, removes aborted records, and expires JSON `null` tombstones at
+the configured inclusive deadline. Compact before tiering: tier objects are
+immutable and a shard with a historical object rejects later compaction.
+
+`TierPrefix` moves at most 1,024 non-pending hot records into a canonical JSON
+object with an SHA-256 checksum and exact covered offset range. Read-committed
+and read-uncommitted fetches transparently merge verified historical objects
+with the hot log. The current alpha keeps object bytes in the replicated tablet
+snapshot so the complete feature works locally; an external cloud-object-store
+adapter, outage drill, and tier-fetch SLO remain production gates.
+
+Manual capture writes a bounded range as canonical JSON Lines or a JSON array.
+Automatic capture schedules use a 1-second to 31-day interval, a replicated
+next-offset checkpoint, and a stable leader-owned maintenance proposal. A
+pending transaction stops the capture boundary so it cannot be skipped. The
+leader catches up missed deadlines without clock drift, and every artifact,
+checksum, schedule, and checkpoint survives failover and full restart. At most
+32 schedules and 32 retained artifacts exist per tablet; the oldest artifact
+for the same automatic schedule is replaced when that bounded history fills.
+
+Python example:
+
+```python
+producer = client.append_idempotent(
+    "orders", shard, "producer-0", "checkout", 1, 0, event,
+)
+client.begin_transaction("orders", shard, "tx-open", "tx-1", "checkout", 1)
+client.append_transaction(
+    "orders", shard, "tx-write", "tx-1", "checkout", 1, 1, [result_event],
+)
+client.commit_transaction(
+    "orders", shard, "tx-commit", "tx-1",
+    offset_commit=StreamOffsetCommit("billing", shard, next_offset),
+)
+visible = client.fetch("orders", shard, 0, isolation="read_committed")
+schedule = client.configure_capture_schedule(
+    "orders", shard, "capture-config", "analytics", 60_000,
+    format="json_lines",
+)
+```
+
+The same lifecycle in Go:
+
+```go
+producer, err := client.AppendIdempotent(
+    ctx, "orders", shard, "producer-0", "checkout", 1, 0, event,
+)
+_, err = client.BeginTransaction(ctx, "orders", shard, "tx-open", "tx-1", "checkout", 1)
+_, err = client.AppendTransaction(
+    ctx, "orders", shard, "tx-write", "tx-1", "checkout", 1, 1,
+    []epoch.EventEnvelope{resultEvent},
+)
+committed, err := client.CommitTransaction(
+    ctx, "orders", shard, "tx-commit", "tx-1",
+    &epoch.StreamOffsetCommit{Group: "billing", Partition: shard, NextOffset: nextOffset},
+)
+visible, err := client.FetchWithIsolation(
+    ctx, "orders", shard, 0, 100, epoch.StreamReadCommitted,
+)
+schedule, err := client.ConfigureCaptureSchedule(
+    ctx, "orders", shard, "capture-config", "analytics", time.Minute,
+    epoch.StreamCaptureJSONLines,
+)
+```
+
+And Java:
+
+```java
+JsonNode producer = client.appendIdempotent(
+    "orders", shard, "producer-0", "checkout", BigInteger.ONE,
+    BigInteger.ZERO, event);
+client.beginTransaction(
+    "orders", shard, "tx-open", "tx-1", "checkout", BigInteger.ONE);
+client.appendTransaction(
+    "orders", shard, "tx-write", "tx-1", "checkout", BigInteger.ONE,
+    BigInteger.ONE, List.of(resultEvent));
+JsonNode committed = client.commitTransaction(
+    "orders", shard, "tx-commit", "tx-1",
+    new StreamOffsetCommit("billing", shard, nextOffset));
+JsonNode visible = client.fetchWithIsolation(
+    "orders", shard, BigInteger.ZERO, 100, StreamReadIsolation.READ_COMMITTED);
+JsonNode schedule = client.configureCaptureSchedule(
+    "orders", shard, "capture-config", "analytics", Duration.ofMinutes(1),
+    StreamCaptureFormat.JSON_LINES);
+```
+
+## Replication, expansion, and superstreams
+
+`Replicate` accepts one contiguous source-cluster/source-stream/source-shard
+batch. The replicated checkpoint maps every source offset to one local offset,
+an exact retry returns the same mapping, a gap conflicts, and a traversed path
+containing the local cluster rejects a loop. This release provides the complete
+ingress/checkpoint primitive; deployment-specific inter-region workers and a
+two-region RPO/RTO drill remain operational work.
+
+`PartitionAdvice` calculates an expand-only shard target from observed record
+and byte density. The catalog already rejects decreases, preserves existing
+tablet identities and ordered histories, allocates only new shard tablets, and
+increments the resource generation. Generation-pinned keyed appends fail
+closed across that expansion boundary.
+
+A superstream is a client-side logical merge of 1–128 named Stream shards. The
+SDK independently performs a linearizable fetch for every member, decorates
+each record with its member name, and sorts by
+`appended_at_ms/member/partition/offset`. The response declares
+`snapshot_scope=independently_linearizable_members`; it is deterministic but
+not an atomic cross-shard snapshot.
+
 ## Coordinated consumer sessions
 
 Consumer sessions are resource-wide and always use logical shard 0 as the
@@ -189,8 +340,9 @@ and leave require the current positive generation; an old generation is a
 committed `stale_generation` business rejection. Deadlines expire inclusively.
 Session commands sweep expired members before applying their requested action,
 while `MaintainConsumerSession`, `maintainConsumerSession`, and
-`maintain_consumer_session` provide an explicit sweep for idle groups. There is
-no background timer in this alpha.
+`maintain_consumer_session` provide an explicit sweep for diagnostics. The
+current regional leader also proposes the exact due maintenance command
+automatically.
 
 Membership and per-shard checkpoint ownership remain separate replicated
 states, but the SDKs provide an offset-preserving claim–revalidate handoff. The
@@ -379,13 +531,14 @@ cd sdk/java && ./mvnw verify
 cargo test -p epoch-node regional_router::tests
 ```
 
-The real recovery gate builds the node image, creates three independently
-replicated Stream shards, kills the active leader, routes Python keyed appends
-to shards 0, 1, and 2, verifies logical receipt/record/checkpoint identities,
-runs a correlated gzip SDK batch plus two-member join/rebalance/heartbeat/inclusive expiry and retention
-configure/maintenance/observation, restarts and catches up the old voter, kills
-every voter, reopens the same volumes, and verifies the session plus per-shard
-state converged:
+The real recovery gate builds the node image, creates independently replicated
+Stream resources, kills active leaders, routes Python keyed appends across three
+shards, and verifies logical receipt/record/checkpoint identities. It also runs
+gzip batch, join/rebalance/heartbeat/expiry, retention, producer fencing,
+committed rejection replay, transaction isolation and atomic offset commit,
+compaction, tiering, manual/automatic capture, replication ingress, partition
+advice, long poll, and superstream reads. It catches up stopped voters, kills
+every voter, reopens the same volumes, and re-verifies all advanced state:
 
 ```shell
 make test-regional-runtime
@@ -393,16 +546,15 @@ make test-regional-runtime
 
 ## Current boundaries
 
-This versioned alpha covers several independently replicated Stream shards,
-stable key routing for the current resource generation, direct per-shard
-operations, replicated deterministic join/heartbeat/leave/dead-member expiry
-and resource-wide assignment, caller-supplied checkpoint generations, and
-replicated time/size/combined retention, and bounded caller-framed atomic
-batches in every first-party SDK. Automatic split/merge/remapping,
-virtual shards, background session or retention scheduling, cooperative revoke
-handshake, sticky/rack-aware assignment, server-push consumption, atomic
-assignment-plus-offset handoff, keyed compaction, legal hold, cross-shard
-produce-and-offset transactions, streaming Produce, automatic batching or
-compression selection, generated
-response models, package-registry publication, TLS/OIDC/mTLS, dynamic voter
-membership, and the production fault/scale matrix remain open.
+This versioned alpha covers independently replicated Stream shards, stable
+generation-pinned key routing and expand-only allocation, direct per-shard
+operations, consumer sessions and claims, time/size retention, caller-framed
+atomic batches, producer fencing, same-tablet transactions, compaction,
+transparent embedded tier history, capture scheduling, replication ingress,
+bounded long polling, and client-side logical superstreams in every first-party
+SDK. Automatic split/merge/remapping, virtual shards, cooperative revoke,
+sticky/rack-aware assignment, persistent bidirectional streaming, legal hold,
+cross-shard transactions, automatic producer batching/codec selection,
+generated response models, package-registry publication, TLS/OIDC/mTLS,
+dynamic voter membership, external object-store and cross-region workers, and
+the production fault/scale/SLO matrix remain open.

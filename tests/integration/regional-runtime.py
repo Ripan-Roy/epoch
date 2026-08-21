@@ -61,6 +61,7 @@ class Resource:
 
 RESOURCES = (
     Resource("stream", "orders"),
+    Resource("stream", "advanced-orders"),
     Resource("cache", "sessions"),
     Resource("queue", "jobs"),
     Resource("event-bus", "events"),
@@ -68,6 +69,9 @@ RESOURCES = (
 MANAGED_RESOURCE = Resource("stream", "managed-orders")
 MANAGED_STREAM_SHARDS = 3
 CAPACITY_REJECTED_RESOURCE = Resource("stream", "too-many-shards")
+ADVANCED_STREAM = next(
+    resource for resource in RESOURCES if resource.name == "advanced-orders"
+)
 
 
 @dataclass(frozen=True)
@@ -954,6 +958,43 @@ def wait_for_profile_apply(
     )
 
 
+def wait_for_profile_convergence(
+    cluster: RegionalCluster,
+    resource: Resource,
+    minimum_applied: int,
+    nodes: tuple[int, ...] = NODES,
+    shard: int = 0,
+) -> int:
+    """Wait for equal state after leader maintenance may add a bounded command."""
+
+    def converged() -> int | None:
+        observations: list[tuple[int, str]] = []
+        for node in nodes:
+            response = cluster.request(
+                node,
+                "GET",
+                f"{resource.route_path_for(shard)}/data/status",
+                headers=LOCAL_STALE_FENCE_HEADERS,
+            )
+            applied = exact_int(response.document.get("applied_command_count"))
+            digest = response.document.get("state_digest")
+            if (
+                response.status != 200
+                or applied is None
+                or applied < minimum_applied
+                or not isinstance(digest, str)
+            ):
+                return None
+            observations.append((applied, digest))
+        return observations[0][0] if len(set(observations)) == 1 else None
+
+    return wait_until(
+        f"{resource.kind}/{resource.name} shard {shard} to converge after at least "
+        f"{minimum_applied} commands on {nodes}",
+        converged,
+    )
+
+
 def wait_for_catalog(
     cluster: RegionalCluster, expected_resources: int, expected_tablets: int
 ) -> str:
@@ -1322,6 +1363,358 @@ def prove_python_sdk_native_stream_after_failover(
         raise AssertionError(
             "stale consumer member unexpectedly fetched claimed records"
         )
+
+
+def stream_state_result(document: dict[str, Any], expected_kind: str) -> dict[str, Any]:
+    assert document.get("state") == "committed", document
+    receipt = document.get("receipt")
+    assert isinstance(receipt, dict), document
+    result = receipt.get("result")
+    assert isinstance(result, dict) and result.get("kind") == expected_kind, document
+    value = result.get("value")
+    assert isinstance(value, dict), document
+    return value
+
+
+def prove_python_sdk_advanced_stream(
+    cluster: RegionalCluster, resource: Resource
+) -> str:
+    epoch_sdk = importlib.import_module("epoch_sdk")
+    client = python_stream_client(cluster)
+    producer_event = epoch_sdk.EventEnvelope(
+        id="advanced-producer-1",
+        key="order-advanced",
+        source="python-regional-sdk",
+        event_type="order.updated",
+        payload={"version": 1},
+        time_ms=100,
+    )
+    rejected = client.append_idempotent(
+        resource.name,
+        0,
+        "advanced-sequence-gap",
+        "advanced-producer",
+        1,
+        1,
+        producer_event,
+    )
+    assert stream_state_result(rejected, "rejected").get("code") == "conflict"
+    replayed_rejection = client.append_idempotent(
+        resource.name,
+        0,
+        "advanced-sequence-gap",
+        "advanced-producer",
+        1,
+        1,
+        producer_event,
+    )
+    assert replayed_rejection.get("receipt", {}).get("disposition") == "replayed", (
+        replayed_rejection
+    )
+    assert stream_state_result(replayed_rejection, "rejected") == stream_state_result(
+        rejected, "rejected"
+    )
+
+    appended = client.append_idempotent(
+        resource.name,
+        0,
+        "advanced-producer-zero",
+        "advanced-producer",
+        1,
+        0,
+        producer_event,
+    )
+    assert stream_state_result(appended, "producer_append").get("disposition") == "new"
+    producer_duplicate = client.append_idempotent(
+        resource.name,
+        0,
+        "advanced-producer-duplicate",
+        "advanced-producer",
+        1,
+        0,
+        producer_event,
+    )
+    assert (
+        stream_state_result(producer_duplicate, "producer_append").get("disposition")
+        == "duplicate"
+    )
+
+    stream_state_result(
+        client.begin_transaction(
+            resource.name,
+            0,
+            "advanced-tx-begin",
+            "advanced-tx",
+            "advanced-producer",
+            1,
+        ),
+        "transaction",
+    )
+    transaction_event = epoch_sdk.EventEnvelope(
+        id="advanced-transaction-1",
+        key="order-advanced",
+        source="python-regional-sdk",
+        event_type="order.updated",
+        payload={"version": 2},
+        time_ms=101,
+    )
+    stream_state_result(
+        client.append_transaction(
+            resource.name,
+            0,
+            "advanced-tx-append",
+            "advanced-tx",
+            "advanced-producer",
+            1,
+            1,
+            [transaction_event],
+        ),
+        "producer_append",
+    )
+    committed_before = client.fetch(resource.name, 0, 0, limit=10)
+    uncommitted_before = client.fetch(
+        resource.name, 0, 0, limit=10, isolation="read_uncommitted"
+    )
+    assert len(committed_before.get("records", [])) == 2, committed_before
+    assert len(uncommitted_before.get("records", [])) == 3, uncommitted_before
+    dedicated = client.consume_long_poll(
+        resource.name,
+        0,
+        1,
+        limit=1,
+        mode="dedicated",
+        consumer_id="advanced-consumer",
+        wait_ms=1_000,
+    )
+    assert dedicated.get("mode") == "dedicated", dedicated
+    assert dedicated.get("consumer_id") == "advanced-consumer", dedicated
+
+    committed_transaction = client.commit_transaction(
+        resource.name,
+        0,
+        "advanced-tx-commit",
+        "advanced-tx",
+        offset_commit=epoch_sdk.StreamOffsetCommit("advanced-workers", 0, 3),
+    )
+    assert (
+        stream_state_result(committed_transaction, "transaction").get("status")
+        == "committed"
+    )
+    checkpoint = client.lag(resource.name, 0, "advanced-workers").get("checkpoint")
+    assert isinstance(checkpoint, dict) and checkpoint.get("committed_offset") == "3"
+
+    return finish_python_sdk_advanced_stream(cluster, resource, client, epoch_sdk)
+
+
+def finish_python_sdk_advanced_stream(
+    cluster: RegionalCluster,
+    resource: Resource,
+    client: Any,
+    epoch_sdk: Any,
+) -> str:
+    stream_state_result(
+        client.begin_transaction(
+            resource.name,
+            0,
+            "advanced-abort-begin",
+            "advanced-abort",
+            "advanced-producer",
+            1,
+        ),
+        "transaction",
+    )
+    aborted_event = epoch_sdk.EventEnvelope(
+        id="advanced-aborted-1",
+        key="order-aborted",
+        source="python-regional-sdk",
+        event_type="order.cancelled",
+        payload=None,
+        time_ms=102,
+    )
+    stream_state_result(
+        client.append_transaction(
+            resource.name,
+            0,
+            "advanced-abort-append",
+            "advanced-abort",
+            "advanced-producer",
+            1,
+            2,
+            [aborted_event],
+        ),
+        "producer_append",
+    )
+    aborted = client.abort_transaction(
+        resource.name, 0, "advanced-abort-commit", "advanced-abort"
+    )
+    assert stream_state_result(aborted, "transaction").get("status") == "aborted"
+
+    capture = client.capture(
+        resource.name,
+        0,
+        "advanced-capture-command",
+        "advanced-manual",
+        0,
+        3,
+        format="json_array",
+    )
+    assert stream_state_result(capture, "capture").get("record_count") == 3
+    replicated_event = epoch_sdk.EventEnvelope(
+        id="advanced-replica-1",
+        key="remote-order",
+        source="remote-cluster",
+        event_type="order.imported",
+        payload={"remote": True},
+        time_ms=103,
+    )
+    replication_batch = epoch_sdk.StreamReplicationBatch(
+        source_cluster="remote-east",
+        source_stream="remote-orders",
+        source_partition=2,
+        first_source_offset=0,
+        records=(
+            epoch_sdk.StreamReplicationRecord(
+                source_offset=0,
+                envelope=replicated_event,
+                traversed_clusters=("remote-east",),
+            ),
+        ),
+    )
+    replicated = client.replicate(
+        resource.name, 0, "advanced-replication", replication_batch
+    )
+    assert stream_state_result(replicated, "replication").get("duplicate") is False
+    replicated_retry = client.replicate(
+        resource.name, 0, "advanced-replication-retry", replication_batch
+    )
+    assert stream_state_result(replicated_retry, "replication").get("duplicate") is True
+
+    advice = client.partition_advice(resource.name, 1, 1)
+    partition_advice = advice.get("advice")
+    assert isinstance(partition_advice, dict), advice
+    assert partition_advice.get("current_partitions") == 1, advice
+    assert exact_int(partition_advice.get("recommended_partitions")) is not None, advice
+    return finish_python_sdk_advanced_storage(cluster, resource, client, epoch_sdk)
+
+
+def finish_python_sdk_advanced_storage(
+    cluster: RegionalCluster,
+    resource: Resource,
+    client: Any,
+    epoch_sdk: Any,
+) -> str:
+    configured = client.configure_capture_schedule(
+        resource.name,
+        0,
+        "advanced-capture-schedule",
+        "advanced-automatic",
+        1_000,
+    )
+    configured_schedule = stream_state_result(configured, "capture_schedule")
+    first_deadline = exact_int(configured_schedule.get("next_capture_at_ms"))
+    assert first_deadline is not None, configured
+
+    def automatic_capture_completed() -> dict[str, Any] | None:
+        observation = client.capture_schedule(resource.name, 0, "advanced-automatic")
+        schedule = observation.get("schedule")
+        if not isinstance(schedule, dict) or schedule.get("next_offset") != "5":
+            return None
+        return schedule
+
+    automatic_schedule = wait_until(
+        "automatic Stream capture to commit", automatic_capture_completed
+    )
+    automatic_capture_id = f"auto-advanced-automatic-{first_deadline:020d}"
+    automatic_artifact = client.capture_artifact(resource.name, 0, automatic_capture_id)
+    artifact = automatic_artifact.get("artifact")
+    assert isinstance(artifact, dict) and artifact.get("record_count") == 4, (
+        automatic_artifact
+    )
+    slowed = client.configure_capture_schedule(
+        resource.name,
+        0,
+        "advanced-capture-schedule-slow",
+        "advanced-automatic",
+        2_678_400_000,
+    )
+    slowed_schedule = stream_state_result(slowed, "capture_schedule")
+    previous_deadline = exact_int(automatic_schedule.get("next_capture_at_ms"))
+    slowed_deadline = exact_int(slowed_schedule.get("next_capture_at_ms"))
+    assert slowed_schedule.get("next_offset") == "5", slowed
+    assert previous_deadline is not None and slowed_deadline is not None, slowed
+    assert slowed_deadline > previous_deadline, slowed
+
+    compacted = client.compact(
+        resource.name, 0, "advanced-compaction", tombstone_retention_ms=1
+    )
+    compaction = stream_state_result(compacted, "compaction")
+    assert compaction.get("removed_records") == 2, compacted
+    tiered = client.tier_prefix(
+        resource.name, 0, "advanced-tier", before_offset=4, max_records=10
+    )
+    tier = stream_state_result(tiered, "tier")
+    assert tier.get("record_count") == 2, tiered
+    rejected_after_tier = client.compact(
+        resource.name, 0, "advanced-compact-after-tier", tombstone_retention_ms=1
+    )
+    assert (
+        stream_state_result(rejected_after_tier, "rejected").get("code") == "conflict"
+    )
+
+    merged = client.fetch_superstream(
+        (
+            epoch_sdk.StreamSuperstreamMember("advanced", resource.name, 0),
+            epoch_sdk.StreamSuperstreamMember("baseline", "orders", 0),
+        ),
+        limit=10,
+    )
+    assert merged.get("member_count") == 2, merged
+    assert {record.get("member") for record in merged.get("records", [])} == {
+        "advanced",
+        "baseline",
+    }, merged
+    wait_for_profile_convergence(cluster, resource, 16)
+    assert_python_sdk_advanced_stream(cluster, resource, automatic_capture_id)
+    return automatic_capture_id
+
+
+def assert_python_sdk_advanced_stream(
+    cluster: RegionalCluster,
+    resource: Resource,
+    automatic_capture_id: str,
+) -> None:
+    wait_for_routes(cluster, resource)
+    client = python_stream_client(cluster)
+    records = client.fetch(resource.name, 0, 0, limit=10).get("records")
+    assert isinstance(records, list), records
+    assert [record.get("envelope", {}).get("id") for record in records] == [
+        "order-1",
+        "advanced-transaction-1",
+        "advanced-replica-1",
+    ], records
+    committed = client.transaction(resource.name, 0, "advanced-tx").get("transaction")
+    aborted = client.transaction(resource.name, 0, "advanced-abort").get("transaction")
+    assert isinstance(committed, dict) and committed.get("status") == "committed"
+    assert isinstance(aborted, dict) and aborted.get("status") == "aborted"
+
+    tiers = client.tier_objects(resource.name, 0).get("objects")
+    assert isinstance(tiers, list) and len(tiers) == 1, tiers
+    assert tiers[0].get("record_count") == 2, tiers
+    manual = client.capture_artifact(resource.name, 0, "advanced-manual").get(
+        "artifact"
+    )
+    assert isinstance(manual, dict) and manual.get("record_count") == 3, manual
+    assert isinstance(manual.get("checksum_sha256"), str), manual
+    automatic = client.capture_artifact(resource.name, 0, automatic_capture_id).get(
+        "artifact"
+    )
+    assert isinstance(automatic, dict) and automatic.get("record_count") == 4, automatic
+    schedule = client.capture_schedule(resource.name, 0, "advanced-automatic").get(
+        "schedule"
+    )
+    assert isinstance(schedule, dict), schedule
+    assert schedule.get("next_offset") == "5", schedule
+    assert schedule.get("interval_ms") == "2678400000", schedule
 
 
 def queue_result(document: dict[str, Any], expected_kind: str) -> dict[str, Any]:
@@ -2183,6 +2576,7 @@ def run_campaign(cluster: RegionalCluster) -> None:
     assert_managed_governance(cluster, MANAGED_RESOURCE, MANAGED_STREAM_SHARDS)
     for resource in RESOURCES:
         wait_for_profile_apply(cluster, resource, 1)
+    advanced_capture_id = prove_python_sdk_advanced_stream(cluster, ADVANCED_STREAM)
 
     queue = next(resource for resource in RESOURCES if resource.kind == "queue")
     queue_old_leader, queue_old_term = wait_for_routes(cluster, queue)
@@ -2241,6 +2635,10 @@ def run_campaign(cluster: RegionalCluster) -> None:
     assert_python_sdk_stream_batch(cluster, stream)
     assert_python_sdk_fenced_consumption(cluster, stream)
     for resource in RESOURCES:
+        if resource == ADVANCED_STREAM:
+            wait_for_profile_convergence(cluster, resource, 16)
+            assert_python_sdk_advanced_stream(cluster, resource, advanced_capture_id)
+            continue
         expected = (
             12
             if resource == queue
@@ -2268,8 +2666,8 @@ def main() -> int:
     if not failed:
         print(
             "Epoch Go-to-Rust regional catalog/BFF/four-profile/failover/"
-            "Stream-batch-session-Queue-Cache-and-Bus-SDK/control-SIGKILL/"
-            "all-node recovery container campaign passed."
+            "Stream-batch-session-state-services-Queue-Cache-and-Bus-SDK/"
+            "control-SIGKILL/all-node recovery container campaign passed."
         )
     return 0
 

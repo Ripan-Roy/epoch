@@ -170,22 +170,21 @@ fn v6_group_claim_is_canonical_preserves_offset_and_requires_v3_snapshot_state()
         0
     );
 
-    let snapshot_v3 = tablet.encode_snapshot(&BTreeSet::default()).unwrap();
-    let document: serde_json::Value = serde_json::from_slice(&snapshot_v3).unwrap();
+    let snapshot = tablet.encode_snapshot(&BTreeSet::default()).unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
     assert_eq!(
         document["format_version"],
         json!(STREAM_TABLET_SNAPSHOT_FORMAT_VERSION)
     );
-    let restored = StreamTablet::decode_snapshot(&scope(), &snapshot_v3).unwrap();
+    let restored = StreamTablet::decode_snapshot(&scope(), &snapshot).unwrap();
     let observation = restored.group_observation("billing").unwrap();
     assert_eq!(observation.member_id.as_deref(), Some("worker-new"));
     assert_eq!(observation.group_generation, Some(1));
     assert!(observation.session_fenced);
 
-    let mislabeled_v2 = String::from_utf8(snapshot_v3)
-        .unwrap()
-        .replacen("\"format_version\":3", "\"format_version\":2", 1)
-        .into_bytes();
+    let mut mislabeled_v2: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
+    mislabeled_v2["format_version"] = json!(2);
+    let mislabeled_v2 = serde_json::to_vec(&mislabeled_v2).unwrap();
     assert!(matches!(
         StreamTablet::decode_snapshot(&scope(), &mislabeled_v2),
         Err(TabletError::InvalidCommand(_))

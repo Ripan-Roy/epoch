@@ -18,6 +18,7 @@ mod stream_batch;
 mod stream_group;
 mod stream_retention;
 mod stream_session;
+mod stream_state;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,8 +28,12 @@ use common::{
     proposal_id_from_domain, serialize_u64_as_decimal, validate_committed_command_scope,
     validate_idempotency_key,
 };
-use epoch_core::{DurabilityProfile, EventEnvelope};
-use epoch_stream::{AppendReceipt, Stream, StreamConfig, StreamRecord, StreamRetentionPolicy};
+use epoch_core::{DurabilityProfile, EpochError, EpochResult, EventEnvelope};
+use epoch_stream::{
+    AppendReceipt, Stream, StreamConfig, StreamPartitionAdvice, StreamReadIsolation, StreamRecord,
+    StreamRetentionPolicy, StreamStateServices, StreamTierObject, StreamTransactionObservation,
+    advise_stream_partitions,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -44,6 +49,7 @@ pub use stream_batch::*;
 pub use stream_group::*;
 pub use stream_retention::*;
 pub use stream_session::*;
+pub use stream_state::*;
 
 pub const STREAM_TABLET_COMMAND_FORMAT_VERSION: u16 = 1;
 pub const STREAM_TABLET_BATCH_COMMAND_FORMAT_VERSION: u16 = 2;
@@ -51,9 +57,10 @@ pub const STREAM_TABLET_BATCH_COMMAND_FORMAT_VERSION: u16 = 2;
 // boundary repeats the check so a command can never validate here and then be
 // rejected only after it reaches Raft.
 pub const MAX_STREAM_TABLET_COMMAND_BYTES: usize = 512 * 1024;
-pub const STREAM_TABLET_SNAPSHOT_FORMAT_VERSION: u16 = 3;
+pub const STREAM_TABLET_SNAPSHOT_FORMAT_VERSION: u16 = 4;
 const LEGACY_STREAM_TABLET_SNAPSHOT_FORMAT_VERSION: u16 = 1;
 const SESSION_STREAM_TABLET_SNAPSHOT_FORMAT_VERSION: u16 = 2;
+const RETENTION_STREAM_TABLET_SNAPSHOT_FORMAT_VERSION: u16 = 3;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -79,6 +86,7 @@ pub enum StreamTabletOperation {
     GroupOffset(StreamGroupOffsetCommand),
     Retention(StreamRetentionCommand),
     GroupSession(StreamGroupSessionCommand),
+    State(StreamStateCommand),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -347,6 +355,25 @@ impl StreamTabletCommand {
         )
     }
 
+    pub fn state(
+        scope: &StreamTabletScope,
+        idempotency_key: impl Into<String>,
+        operation: StreamStateCommand,
+        applied_at_ms: u64,
+    ) -> TabletResult<Self> {
+        let command = Self {
+            format_version: STREAM_TABLET_STATE_COMMAND_FORMAT_VERSION,
+            tablet_id: scope.tablet_id,
+            tablet_epoch: scope.tablet_epoch,
+            resource: scope.resource.clone(),
+            idempotency_key: idempotency_key.into(),
+            applied_at_ms,
+            operation: StreamTabletOperation::State(operation),
+        };
+        command.validate(scope)?;
+        Ok(command)
+    }
+
     fn group_session(
         scope: &StreamTabletScope,
         idempotency_key: impl Into<String>,
@@ -427,6 +454,9 @@ impl StreamTabletCommand {
             )),
             StreamTabletOperation::GroupSession(_) => Err(TabletError::InvalidCommand(
                 "consumer-session command has no batch payload".into(),
+            )),
+            StreamTabletOperation::State(_) => Err(TabletError::InvalidCommand(
+                "state-service command has no batch payload".into(),
             )),
         }
     }
@@ -512,6 +542,15 @@ impl StreamTabletCommand {
                     )));
                 }
                 validate_session_command(session)?;
+            }
+            StreamTabletOperation::State(state) => {
+                if self.format_version != STREAM_TABLET_STATE_COMMAND_FORMAT_VERSION {
+                    return Err(TabletError::InvalidCommand(format!(
+                        "state-service mutation requires format_version {STREAM_TABLET_STATE_COMMAND_FORMAT_VERSION}; observed {}",
+                        self.format_version
+                    )));
+                }
+                validate_stream_state_command(state)?;
             }
         }
         Ok(())
@@ -600,13 +639,14 @@ pub enum StreamTabletAppendDisposition {
     ProfileDeduplicated,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum StreamTabletMutationReceipt {
     Append(StreamTabletAppendReceipt),
     Group(StreamTabletGroupReceipt),
     Retention(StreamTabletRetentionReceipt),
     Session(StreamTabletSessionReceipt),
+    State(StreamTabletStateReceipt),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -615,6 +655,8 @@ struct VersionedStreamTabletSnapshot {
     format_version: u16,
     scope: StreamTabletScope,
     stream_base64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    state_services_base64: Option<String>,
     consumer_groups: BTreeMap<String, StreamConsumerGroupOwner>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     session_groups: BTreeMap<String, StreamConsumerSessionGroup>,
@@ -637,6 +679,7 @@ impl StreamTabletMutationReceipt {
             Self::Group(receipt) => receipt.proposal_id,
             Self::Retention(receipt) => receipt.proposal_id,
             Self::Session(receipt) => receipt.proposal_id,
+            Self::State(receipt) => receipt.proposal_id,
         }
     }
 
@@ -654,6 +697,9 @@ impl StreamTabletMutationReceipt {
             Self::Session(receipt) => {
                 receipt.disposition = StreamTabletSessionDisposition::Replayed;
             }
+            Self::State(receipt) => {
+                receipt.disposition = StreamTabletStateDisposition::Replayed;
+            }
         }
     }
 }
@@ -662,6 +708,7 @@ impl StreamTabletMutationReceipt {
 pub struct StreamTablet {
     scope: StreamTabletScope,
     stream: Stream,
+    state_services: StreamStateServices,
     consumer_groups: BTreeMap<String, StreamConsumerGroupOwner>,
     session_groups: BTreeMap<String, StreamConsumerSessionGroup>,
     applied: BTreeMap<u64, AppliedCommand<StreamTabletMutationReceipt>>,
@@ -671,6 +718,14 @@ pub struct StreamTablet {
 
 impl StreamTablet {
     pub fn new(scope: StreamTabletScope) -> TabletResult<Self> {
+        let local_cluster_id = format!("tablet-{}", scope.tablet_id);
+        Self::new_with_cluster_id(scope, local_cluster_id)
+    }
+
+    pub fn new_with_cluster_id(
+        scope: StreamTabletScope,
+        local_cluster_id: impl Into<String>,
+    ) -> TabletResult<Self> {
         scope.validate()?;
         let stream = Stream::new(StreamConfig {
             partitions: 1,
@@ -682,6 +737,7 @@ impl StreamTablet {
             max_bytes_per_partition: None,
             max_age_ms: None,
         })?;
+        let state_services = StreamStateServices::new(local_cluster_id)?;
         let mut hasher = Sha256::new();
         hasher.update(b"epoch/stream-tablet/state/v1\0");
         hasher.update(scope.tablet_id.to_be_bytes());
@@ -691,6 +747,7 @@ impl StreamTablet {
         Ok(Self {
             scope,
             stream,
+            state_services,
             consumer_groups: BTreeMap::new(),
             session_groups: BTreeMap::new(),
             applied: BTreeMap::new(),
@@ -720,7 +777,8 @@ impl StreamTablet {
             StreamTabletMutationReceipt::Append(receipt) => Ok(receipt),
             StreamTabletMutationReceipt::Group(_)
             | StreamTabletMutationReceipt::Retention(_)
-            | StreamTabletMutationReceipt::Session(_) => unreachable!("operation checked above"),
+            | StreamTabletMutationReceipt::Session(_)
+            | StreamTabletMutationReceipt::State(_) => unreachable!("operation checked above"),
         }
     }
 
@@ -770,6 +828,10 @@ impl StreamTablet {
                 let receipt = self.apply_group_session(committed, command.applied_at_ms, &session);
                 StreamTabletMutationReceipt::Session(receipt)
             }
+            StreamTabletOperation::State(state) => {
+                let receipt = self.apply_state(committed, command.applied_at_ms, state)?;
+                StreamTabletMutationReceipt::State(receipt)
+            }
         };
         match &receipt {
             StreamTabletMutationReceipt::Append(receipt) => {
@@ -783,6 +845,9 @@ impl StreamTablet {
             }
             StreamTabletMutationReceipt::Session(receipt) => {
                 self.advance_session_digest(committed, metadata.payload_digest, receipt);
+            }
+            StreamTabletMutationReceipt::State(receipt) => {
+                self.advance_state_digest(committed, metadata.payload_digest, receipt)?;
             }
         }
         self.last_applied_command_index = committed.log_index;
@@ -803,7 +868,8 @@ impl StreamTablet {
                 StreamTabletMutationReceipt::Append(receipt) => Some(receipt.clone()),
                 StreamTabletMutationReceipt::Group(_)
                 | StreamTabletMutationReceipt::Retention(_)
-                | StreamTabletMutationReceipt::Session(_) => None,
+                | StreamTabletMutationReceipt::Session(_)
+                | StreamTabletMutationReceipt::State(_) => None,
             })
     }
 
@@ -818,7 +884,8 @@ impl StreamTablet {
             Some(
                 StreamTabletMutationReceipt::Group(_)
                 | StreamTabletMutationReceipt::Retention(_)
-                | StreamTabletMutationReceipt::Session(_),
+                | StreamTabletMutationReceipt::Session(_)
+                | StreamTabletMutationReceipt::State(_),
             )
             | None => None,
         })
@@ -837,7 +904,78 @@ impl StreamTablet {
     }
 
     pub fn fetch(&self, offset: u64, limit: usize) -> TabletResult<Vec<StreamRecord>> {
-        Ok(self.stream.fetch(0, offset, limit)?)
+        Ok(self.state_services.fetch(
+            &self.stream,
+            0,
+            offset,
+            limit,
+            StreamReadIsolation::ReadCommitted,
+        )?)
+    }
+
+    pub fn fetch_uncommitted(&self, offset: u64, limit: usize) -> TabletResult<Vec<StreamRecord>> {
+        Ok(self.state_services.fetch(
+            &self.stream,
+            0,
+            offset,
+            limit,
+            StreamReadIsolation::ReadUncommitted,
+        )?)
+    }
+
+    pub fn transaction(&self, transaction_id: &str) -> Option<StreamTransactionObservation> {
+        self.state_services.transaction(transaction_id)
+    }
+
+    pub fn tier_objects(&self) -> &[StreamTierObject] {
+        self.state_services.tier_objects(0)
+    }
+
+    pub fn capture_artifact(
+        &self,
+        capture_id: &str,
+    ) -> Option<&epoch_stream::StreamCaptureArtifact> {
+        self.state_services.capture_artifact(capture_id)
+    }
+
+    pub fn capture_schedule(
+        &self,
+        schedule_id: &str,
+    ) -> Option<epoch_stream::StreamCaptureScheduleObservation> {
+        self.state_services.capture_schedule(schedule_id)
+    }
+
+    pub fn due_capture_schedules(&self, now_ms: u64) -> Vec<(u64, String)> {
+        self.state_services.due_capture_schedules(now_ms)
+    }
+
+    pub fn partition_advice(
+        &self,
+        current_partitions: u32,
+        target_records_per_partition: u64,
+        target_bytes_per_partition: u64,
+    ) -> TabletResult<StreamPartitionAdvice> {
+        let local_retained_records = u64::try_from(self.fetch(0, usize::MAX)?.len())
+            .map_err(|error| TabletError::InvalidCommand(error.to_string()))?;
+        let retained_records = local_retained_records
+            .checked_mul(u64::from(current_partitions))
+            .ok_or_else(|| {
+                TabletError::InvalidCommand("Stream partition record estimate overflow".into())
+            })?;
+        let retained_bytes = self
+            .stream
+            .retained_bytes(0)?
+            .checked_mul(u64::from(current_partitions))
+            .ok_or_else(|| {
+                TabletError::InvalidCommand("Stream partition byte estimate overflow".into())
+            })?;
+        Ok(advise_stream_partitions(
+            current_partitions,
+            retained_records,
+            retained_bytes,
+            target_records_per_partition,
+            target_bytes_per_partition,
+        )?)
     }
 
     pub fn fetch_for_group(&self, group: &str, limit: usize) -> TabletResult<Vec<StreamRecord>> {
@@ -962,11 +1100,14 @@ impl StreamTablet {
             ));
         }
         applied.sort_by_key(|entry| entry.applied.metadata.log_index);
+        self.state_services.validate_against(&self.stream)?;
         let stream = self.stream.encode_snapshot()?;
+        let state_services = self.state_services.encode_snapshot()?;
         serde_json::to_vec(&VersionedStreamTabletSnapshot {
             format_version: STREAM_TABLET_SNAPSHOT_FORMAT_VERSION,
             scope: self.scope.clone(),
             stream_base64: STANDARD_NO_PAD.encode(stream),
+            state_services_base64: Some(STANDARD_NO_PAD.encode(state_services)),
             consumer_groups: self.consumer_groups.clone(),
             session_groups: self.session_groups.clone(),
             applied,
@@ -1001,6 +1142,15 @@ impl StreamTablet {
             .decode(&snapshot.stream_base64)
             .map_err(|error| TabletError::Decoding(error.to_string()))?;
         let stream = Stream::decode_snapshot(&stream_bytes)?;
+        let state_services = match snapshot.state_services_base64.as_deref() {
+            Some(encoded) => {
+                let bytes = STANDARD_NO_PAD
+                    .decode(encoded)
+                    .map_err(|error| TabletError::Decoding(error.to_string()))?;
+                StreamStateServices::decode_snapshot(&bytes)?
+            }
+            None => StreamStateServices::new(format!("tablet-{}", expected_scope.tablet_id))?,
+        };
         if stream.config().partitions != 1
             || stream.config().durability != DurabilityProfile::Volatile
         {
@@ -1008,6 +1158,7 @@ impl StreamTablet {
                 "Stream tablet snapshot engine configuration is invalid".into(),
             ));
         }
+        state_services.validate_against(&stream)?;
         if snapshot.consumer_groups.len() > MAX_STREAM_CONSUMER_GROUPS {
             return Err(TabletError::InvalidCommand(
                 "Stream tablet snapshot exceeds the consumer-group bound".into(),
@@ -1021,7 +1172,7 @@ impl StreamTablet {
                     "Stream tablet snapshot has a zero group generation".into(),
                 ));
             }
-            if snapshot.format_version < STREAM_TABLET_SNAPSHOT_FORMAT_VERSION
+            if snapshot.format_version < RETENTION_STREAM_TABLET_SNAPSHOT_FORMAT_VERSION
                 && owner.session_fenced
             {
                 return Err(TabletError::InvalidCommand(
@@ -1061,6 +1212,7 @@ impl StreamTablet {
         Ok(Self {
             scope: snapshot.scope,
             stream,
+            state_services,
             consumer_groups: snapshot.consumer_groups,
             session_groups: snapshot.session_groups,
             applied,
@@ -1363,6 +1515,48 @@ impl StreamTablet {
         Ok(receipt)
     }
 
+    fn apply_state(
+        &mut self,
+        committed: CommittedCommand<'_>,
+        applied_at_ms: u64,
+        command: StreamStateCommand,
+    ) -> TabletResult<StreamTabletStateReceipt> {
+        let mut next_stream = self.stream.clone();
+        let mut next_state_services = self.state_services.clone();
+        let staged = (|| {
+            let result = apply_stream_state_transition(
+                &mut next_stream,
+                &mut next_state_services,
+                command,
+                applied_at_ms,
+            )?;
+            next_stream.encode_snapshot()?;
+            next_state_services.encode_snapshot()?;
+            next_state_services.validate_against(&next_stream)?;
+            Ok(result)
+        })();
+        let result = match staged {
+            Ok(result) => {
+                self.stream = next_stream;
+                self.state_services = next_state_services;
+                result
+            }
+            Err(error) => StreamTabletStateResult::Rejected(state_rejection(error)?),
+        };
+        Ok(StreamTabletStateReceipt {
+            proposal_id: committed.proposal_id,
+            tablet_id: self.scope.tablet_id,
+            tablet_epoch: self.scope.tablet_epoch,
+            term: committed.term,
+            commit_index: committed.log_index,
+            applied_at_ms,
+            result,
+            write_evidence: StreamTabletWriteEvidence::FixedVoterMajorityPersisted,
+            durable_voter_acks: 2,
+            disposition: StreamTabletStateDisposition::New,
+        })
+    }
+
     fn validate_commit_scope(&self, committed: CommittedCommand<'_>) -> TabletResult<()> {
         validate_committed_command_scope(&self.scope, committed)
     }
@@ -1485,6 +1679,169 @@ impl StreamTablet {
         hasher.update([session_outcome_code(receipt)]);
         self.state_digest = hasher.finalize().into();
     }
+
+    fn advance_state_digest(
+        &mut self,
+        committed: CommittedCommand<'_>,
+        payload_digest: [u8; 32],
+        receipt: &StreamTabletStateReceipt,
+    ) -> TabletResult<()> {
+        let encoded_result = serde_json::to_vec(&receipt.result)
+            .map_err(|error| TabletError::Encoding(error.to_string()))?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"epoch/stream-tablet/state-transition/state-services/v7\0");
+        hasher.update(self.state_digest);
+        hasher.update(committed.proposal_id.to_be_bytes());
+        hasher.update(committed.term.to_be_bytes());
+        hasher.update(committed.log_index.to_be_bytes());
+        hasher.update(payload_digest);
+        hash_length_prefixed(&mut hasher, &encoded_result);
+        self.state_digest = hasher.finalize().into();
+        Ok(())
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the transition exhaustively maps every v7 wire operation without mixing receipt policy into the profile core"
+)]
+fn apply_stream_state_transition(
+    stream: &mut Stream,
+    services: &mut StreamStateServices,
+    command: StreamStateCommand,
+    applied_at_ms: u64,
+) -> EpochResult<StreamTabletStateResult> {
+    Ok(match command {
+        StreamStateCommand::AppendIdempotent {
+            producer_id,
+            producer_epoch,
+            sequence,
+            partition,
+            envelope,
+        } => StreamTabletStateResult::ProducerAppend(services.append_idempotent(
+            stream,
+            &producer_id,
+            producer_epoch,
+            sequence,
+            partition,
+            *envelope,
+            applied_at_ms,
+        )?),
+        StreamStateCommand::BeginTransaction {
+            transaction_id,
+            producer_id,
+            producer_epoch,
+        } => StreamTabletStateResult::Transaction(services.begin_transaction(
+            &transaction_id,
+            &producer_id,
+            producer_epoch,
+        )?),
+        StreamStateCommand::AppendTransaction {
+            transaction_id,
+            producer_id,
+            producer_epoch,
+            sequence,
+            partition,
+            envelopes,
+        } => StreamTabletStateResult::ProducerAppend(services.append_transaction(
+            stream,
+            &transaction_id,
+            &producer_id,
+            producer_epoch,
+            sequence,
+            partition,
+            envelopes,
+            applied_at_ms,
+        )?),
+        StreamStateCommand::CommitTransaction {
+            transaction_id,
+            offset_commit,
+        } => StreamTabletStateResult::Transaction(services.commit_transaction(
+            stream,
+            &transaction_id,
+            offset_commit,
+        )?),
+        StreamStateCommand::AbortTransaction { transaction_id } => {
+            StreamTabletStateResult::Transaction(services.abort_transaction(&transaction_id)?)
+        }
+        StreamStateCommand::Compact {
+            partition,
+            tombstone_retention_ms,
+        } => StreamTabletStateResult::Compaction(services.compact(
+            stream,
+            partition,
+            applied_at_ms,
+            tombstone_retention_ms,
+        )?),
+        StreamStateCommand::TierPrefix {
+            partition,
+            before_offset,
+            max_records,
+        } => StreamTabletStateResult::Tier(services.tier_prefix(
+            stream,
+            partition,
+            before_offset,
+            max_records,
+        )?),
+        StreamStateCommand::Capture {
+            capture_id,
+            partition,
+            first_offset,
+            end_offset,
+            format,
+        } => StreamTabletStateResult::Capture(services.capture(
+            stream,
+            &capture_id,
+            partition,
+            first_offset,
+            end_offset,
+            format,
+        )?),
+        StreamStateCommand::ConfigureCaptureSchedule {
+            schedule_id,
+            partition,
+            interval_ms,
+            format,
+        } => StreamTabletStateResult::CaptureSchedule(services.configure_capture_schedule(
+            stream,
+            &schedule_id,
+            partition,
+            interval_ms,
+            format,
+            applied_at_ms,
+        )?),
+        StreamStateCommand::MaintainCaptureSchedule { schedule_id } => {
+            StreamTabletStateResult::CaptureMaintenance(services.maintain_capture_schedule(
+                stream,
+                &schedule_id,
+                applied_at_ms,
+            )?)
+        }
+        StreamStateCommand::Replicate {
+            local_partition,
+            batch,
+        } => StreamTabletStateResult::Replication(services.replicate(
+            stream,
+            local_partition,
+            batch,
+            applied_at_ms,
+        )?),
+    })
+}
+
+fn state_rejection(error: EpochError) -> TabletResult<StreamTabletStateRejection> {
+    let detail = error.to_string();
+    let code = match error {
+        EpochError::AlreadyExists(_) => StreamTabletStateRejectionCode::AlreadyExists,
+        EpochError::NotFound(_) => StreamTabletStateRejectionCode::NotFound,
+        EpochError::InvalidArgument(_) => StreamTabletStateRejectionCode::InvalidArgument,
+        EpochError::Conflict(_) => StreamTabletStateRejectionCode::Conflict,
+        EpochError::Fenced => StreamTabletStateRejectionCode::Fenced,
+        EpochError::Capacity(_) => StreamTabletStateRejectionCode::Capacity,
+        EpochError::Unavailable(_) => StreamTabletStateRejectionCode::Unavailable,
+        EpochError::Storage(_) | EpochError::Internal(_) => return Err(error.into()),
+    };
+    Ok(StreamTabletStateRejection { code, detail })
 }
 
 fn stream_receipt_matches_metadata(
@@ -1517,6 +1874,12 @@ fn stream_receipt_matches_metadata(
                 && receipt.term == metadata.term
                 && receipt.commit_index == metadata.log_index
         }
+        StreamTabletMutationReceipt::State(receipt) => {
+            receipt.tablet_id == scope.tablet_id
+                && receipt.tablet_epoch == scope.tablet_epoch
+                && receipt.term == metadata.term
+                && receipt.commit_index == metadata.log_index
+        }
     }
 }
 
@@ -1524,6 +1887,7 @@ fn validate_stream_snapshot_format(snapshot: &VersionedStreamTabletSnapshot) -> 
     if ![
         LEGACY_STREAM_TABLET_SNAPSHOT_FORMAT_VERSION,
         SESSION_STREAM_TABLET_SNAPSHOT_FORMAT_VERSION,
+        RETENTION_STREAM_TABLET_SNAPSHOT_FORMAT_VERSION,
         STREAM_TABLET_SNAPSHOT_FORMAT_VERSION,
     ]
     .contains(&snapshot.format_version)
@@ -1538,6 +1902,20 @@ fn validate_stream_snapshot_format(snapshot: &VersionedStreamTabletSnapshot) -> 
     {
         return Err(TabletError::InvalidCommand(
             "legacy Stream tablet snapshot contains consumer-session state".into(),
+        ));
+    }
+    if snapshot.format_version < STREAM_TABLET_SNAPSHOT_FORMAT_VERSION
+        && snapshot.state_services_base64.is_some()
+    {
+        return Err(TabletError::InvalidCommand(
+            "legacy Stream tablet snapshot contains state-services data".into(),
+        ));
+    }
+    if snapshot.format_version == STREAM_TABLET_SNAPSHOT_FORMAT_VERSION
+        && snapshot.state_services_base64.is_none()
+    {
+        return Err(TabletError::InvalidCommand(
+            "Stream tablet snapshot is missing state-services data".into(),
         ));
     }
     Ok(())

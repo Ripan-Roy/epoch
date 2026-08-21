@@ -670,9 +670,12 @@ GET /v1/organizations/{org}/projects/{project}/environments/{environment}/namesp
 ```
 
 `GET` on the shard base performs discovery. The current Go, Java, and Python
-SDK contract maps `records`, `groups/{group}/{offsets|lag|records|claim|claimed-records}`,
-shard-zero `groups/{group}/sessions[...]`, and `retention[/maintenance]` to the
-replicated tablet owned by the selected logical shard.
+SDK contract maps `records[/batches|consume]`,
+`groups/{group}/{offsets|lag|records|claim|claimed-records}`, shard-zero
+`groups/{group}/sessions[...]`, `retention[/maintenance]`, `state`,
+`transactions/{id}`, `tier/objects`, `captures/{id}`,
+`capture-schedules/{id}`, and `partitions/advice` to the replicated tablet
+owned by the selected logical shard.
 Retention reads use the same default leader ReadIndex barrier. The stable
 adapter removes the generic `kind` and `data`
 segments but does not introduce another log or state store.
@@ -1031,8 +1034,9 @@ Session command v5 and native Stream snapshot v2 preserve v1–v4 command bytes
 and accept legacy snapshot v1 with an empty session map. This coordinator
 assigns logical shards but does not atomically replace each shard's independent
 v3 checkpoint-owner generation. Regional leader-owned deadline maintenance now
-expires idle members; cooperative revoke, server-push consumption, and
-transactional offset handoff remain open. See
+expires idle members; cooperative revoke and a persistent bidirectional push
+transport remain open. Bounded push/dedicated HTTP long poll and same-tablet
+transactional offset commit are command-v7 contracts. See
 [ADR-0025](adr/0025-stream-consumer-sessions.md).
 
 Canonical Stream command v6 adds an offset-preserving per-shard claim:
@@ -1066,6 +1070,42 @@ offsets and do not prove assignment. Low-level claims use namespace
 `data.write`; claimed reads use `data.read`. Bootstrap authorization is not yet
 member-bound. See
 [ADR-0029](adr/0029-stream-session-fenced-consumption.md).
+
+Canonical Stream command v7 adds a strict `state` mutation union for
+idempotent producer append; begin/append/commit/abort transaction; compaction;
+tiering; manual capture; automatic capture configuration/maintenance; and
+cross-cluster replication ingress. All unsigned 64-bit values serialize as
+decimal strings. State receipts are part of the ordinary proposal lookup,
+digest, exact replay, and snapshot registry.
+
+```text
+POST /state
+GET  /records?offset={u64}&limit={1..1000}&isolation={read_committed|read_uncommitted}
+GET  /records/consume?...&mode={push|dedicated}&wait_ms={1..30000}
+GET  /transactions/{transaction_id}
+GET  /tier/objects
+GET  /captures/{capture_id}
+GET  /capture-schedules/{schedule_id}
+GET  /partitions/advice?target_records_per_partition={u64}&target_bytes_per_partition={u64}
+```
+
+Producer sequences are contiguous and exact retries return their original
+positions. One transaction contains at most 128 same-tablet records and may
+atomically commit one local consumer offset. Tier objects cover at most 1,024
+non-pending records per command, retain canonical bytes plus SHA-256, and are
+merged transparently during fetch. Capture intervals are 1,000 through
+2,678,400,000 ms; only the current leader proposes a due automatic capture,
+and pending transactions stop its checkpoint boundary. Replication batches
+contain 1–128 contiguous source records and reject a traversed path containing
+the local cluster. See [ADR-0035](adr/0035-stream-state-services.md).
+
+State-dependent business failures are committed outcomes, not actor failures.
+They return ordinary committed HTTP `201` responses (or `200` on exact replay)
+with `receipt.result.kind=rejected` and one of `already_exists`, `not_found`,
+`invalid_argument`, `conflict`, `fenced`, `capacity`, or `unavailable`. The
+rejection is digested, retained for exact proposal replay, restored from the
+tablet snapshot, and leaves the ordered log and state-services value unchanged.
+
 A bounded unresolved wait returns `202`, preserving local `unknown` versus
 `pending` state while keeping outcome certainty unknown. Exact retries return
 the original offset; changed input under the same key is a conflict, and every

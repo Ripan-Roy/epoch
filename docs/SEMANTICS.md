@@ -217,6 +217,12 @@ An idempotent producer has a producer ID, epoch, and monotonic sequence per
 partition. A lower producer epoch is fenced. A repeated sequence with the same
 input returns the original result; conflicting input is rejected.
 
+The regional command-v7 implementation retains at most 4,096 producers and
+the most recent 256 contiguous sequence receipts per producer. Epochs and
+sequences use exact unsigned 64-bit decimal wire values. Each mutation stages
+the log plus producer state and publishes neither if its bounded canonical
+snapshot would fail.
+
 A consumer-group offset denotes the **next** record to consume. Offset commits
 are independent durable state unless they participate in an Epoch transaction.
 Rebalancing changes group ownership epochs; a member from an older generation
@@ -240,6 +246,12 @@ assignment, but does not atomically install its fence in every checkpoint; see
 
 Read-committed consumers skip prepared and aborted transactional entries. They
 may wait behind an unresolved transaction up to a documented bound.
+
+The current v7 transaction domain is exactly one Stream tablet and at most 128
+records. Commit changes every record from hidden to visible and may advance one
+consumer offset in the same state transition. Abort permanently hides its
+records from read-committed. Push and dedicated long polls wake only after the
+requested isolation has visible data; they do not widen the atomic domain.
 
 ## 7. Work Queue semantics
 
@@ -526,9 +538,9 @@ base remains visible as `checkpoint_out_of_range`; replay fails until an
 explicit generation-fenced reset. Go, Java, and Python expose configure,
 maintain, and quorum-confirmed observe methods on the regional v1 route. The
 current regional leader also proposes due idle maintenance automatically from
-the earliest replicated record deadline. This does not add
-compaction/tombstones, object tiering, legal hold, or a resource-wide retention
-coordinator. See
+the earliest replicated record deadline. Command v7 separately adds bounded
+key compaction/tombstones and immutable historical tier objects; legal hold and
+a resource-wide retention coordinator remain open. See
 [ADR-0023](adr/0023-stream-retention-policies.md).
 
 The regional Stream resource may contain several independently replicated
@@ -567,6 +579,19 @@ assignment. A rebalance can leave safe partial claims but returns no usable
 assignment; this remains at-least-once bounded pull rather than an atomic
 cross-shard transaction or streaming transport. See
 [ADR-0029](adr/0029-stream-session-fenced-consumption.md).
+
+Command v7 also colocates producer history, tablet-local transactions,
+compaction, tier manifests, capture schedules/artifacts, and replication
+checkpoints with the ordered log. Tier and capture bytes are canonical and
+SHA-256 verified. Automatic capture stops at a pending transaction and advances
+its replicated next offset only through a leader-owned due command. Replication
+accepts contiguous source offsets, maps them atomically to local offsets,
+returns an exact retry, and rejects a path containing the local cluster.
+Partition advice is pure and expand-only; catalog expansion preserves old
+tablet identities, adds new tablets, and changes the resource generation.
+Go, Java, and Python superstreams merge independently linearizable reads in a
+declared deterministic order, never as an atomic global snapshot. See
+[ADR-0035](adr/0035-stream-state-services.md).
 
 Regional Queue, Cache, and Event Bus timers follow the same authority rule.
 Only the current Raft leader proposes an existing canonical maintenance command

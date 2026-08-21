@@ -30,9 +30,14 @@ _STREAM_PARTITIONER = "fnv1a64_utf8_mod_n_v1"
 _MAX_BATCH_RECORDS = 1_000
 _MAX_BATCH_COMPRESSED_BYTES = 360 * 1024
 _MAX_BATCH_UNCOMPRESSED_BYTES = 4 * 1024 * 1024
+_MIN_CAPTURE_INTERVAL_MS = 1_000
+_MAX_CAPTURE_INTERVAL_MS = 31 * 24 * 60 * 60 * 1_000
 
 StreamCompression = Literal["none", "gzip", "lz4", "snappy", "zstd"]
 _STREAM_COMPRESSIONS = frozenset({"none", "gzip", "lz4", "snappy", "zstd"})
+StreamReadIsolation = Literal["read_committed", "read_uncommitted"]
+StreamConsumerMode = Literal["push", "dedicated"]
+StreamCaptureFormat = Literal["json_lines", "json_array"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,6 +235,73 @@ class StreamRetentionPolicy:
         return document
 
 
+@dataclass(frozen=True, slots=True)
+class StreamOffsetCommit:
+    """One consumer offset committed atomically with a Stream transaction."""
+
+    group: str
+    partition: int
+    next_offset: int
+
+    def __post_init__(self) -> None:
+        _required(self.group, "consumer group")
+        _non_negative(self.partition, "partition")
+        _non_negative(self.next_offset, "next offset")
+
+
+@dataclass(frozen=True, slots=True)
+class StreamReplicationRecord:
+    """One source-positioned record and its loop-prevention path."""
+
+    source_offset: int
+    envelope: EventEnvelope
+    traversed_clusters: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _non_negative(self.source_offset, "source offset")
+        if not isinstance(self.envelope, EventEnvelope):
+            raise TypeError("replication envelope must be an EventEnvelope")
+        for cluster in self.traversed_clusters:
+            _required(cluster, "traversed cluster")
+
+
+@dataclass(frozen=True, slots=True)
+class StreamReplicationBatch:
+    """One bounded contiguous cross-cluster replication batch."""
+
+    source_cluster: str
+    source_stream: str
+    source_partition: int
+    first_source_offset: int
+    records: tuple[StreamReplicationRecord, ...]
+
+    def __post_init__(self) -> None:
+        _required(self.source_cluster, "source cluster")
+        _required(self.source_stream, "source stream")
+        _non_negative(self.source_partition, "source partition")
+        _non_negative(self.first_source_offset, "first source offset")
+        if not 1 <= len(self.records) <= 128:
+            raise ValueError("replication batch must contain between 1 and 128 records")
+        if any(not isinstance(record, StreamReplicationRecord) for record in self.records):
+            raise TypeError("replication records must be StreamReplicationRecord values")
+
+
+@dataclass(frozen=True, slots=True)
+class StreamSuperstreamMember:
+    """One named physical Stream shard in a logical superstream merge."""
+
+    name: str
+    stream: str
+    shard: int
+    offset: int = 0
+
+    def __post_init__(self) -> None:
+        _required(self.name, "superstream member name")
+        _required(self.stream, "superstream member Stream")
+        _non_negative(self.shard, "superstream member shard")
+        _non_negative(self.offset, "superstream member offset")
+
+
 class RegionalStreamClient(RegionalClient):
     """Synchronous regional Stream client with explicit mutation identity."""
 
@@ -328,9 +400,19 @@ class RegionalStreamClient(RegionalClient):
             ),
         )
 
-    def fetch(self, stream: str, shard: int, offset: int, *, limit: int = 100) -> dict[str, Any]:
+    def fetch(
+        self,
+        stream: str,
+        shard: int,
+        offset: int,
+        *,
+        limit: int = 100,
+        isolation: StreamReadIsolation = "read_committed",
+    ) -> dict[str, Any]:
         _non_negative(offset, "offset")
         _fetch_limit(limit)
+        if isolation not in {"read_committed", "read_uncommitted"}:
+            raise ValueError(f"unsupported Stream read isolation: {isolation}")
         return self._stream_call(
             stream,
             shard,
@@ -338,7 +420,430 @@ class RegionalStreamClient(RegionalClient):
                 "GET",
                 "/records",
                 None,
-                {"offset": offset, "limit": limit},
+                {"offset": offset, "limit": limit, "isolation": isolation},
+                {"x-epoch-read-consistency": "linearizable"},
+            ),
+        )
+
+    def fetch_superstream(
+        self,
+        members: list[StreamSuperstreamMember] | tuple[StreamSuperstreamMember, ...],
+        *,
+        limit: int = 100,
+        isolation: StreamReadIsolation = "read_committed",
+    ) -> dict[str, Any]:
+        """Merge named shards deterministically without claiming an atomic cross-shard snapshot."""
+        if not 1 <= len(members) <= 128:
+            raise ValueError("superstream must contain between 1 and 128 members")
+        _fetch_limit(limit)
+        names: set[str] = set()
+        for member in members:
+            if not isinstance(member, StreamSuperstreamMember):
+                raise TypeError("superstream members must be StreamSuperstreamMember values")
+            if member.name in names:
+                raise ValueError(f"duplicate superstream member: {member.name}")
+            names.add(member.name)
+        merged: list[tuple[int, str, int, int, dict[str, Any]]] = []
+        for member in members:
+            response = self.fetch(
+                member.stream,
+                member.shard,
+                member.offset,
+                limit=limit,
+                isolation=isolation,
+            )
+            records = response.get("records") if isinstance(response, dict) else None
+            if not isinstance(records, list):
+                raise ValueError(f"superstream member {member.name} response omitted records")
+            for record in records:
+                if not isinstance(record, dict):
+                    raise ValueError(f"superstream member {member.name} returned an invalid record")
+                appended_at = _stream_response_u64(record.get("appended_at_ms"), "appended_at_ms")
+                partition = _stream_response_u64(record.get("partition"), "partition")
+                offset = _stream_response_u64(record.get("offset"), "offset")
+                decorated = dict(record)
+                decorated["member"] = member.name
+                merged.append((appended_at, member.name, partition, offset, decorated))
+        merged.sort(key=lambda item: item[:4])
+        return {
+            "records": [item[4] for item in merged[:limit]],
+            "member_count": len(members),
+            "ordering": "appended_at_member_partition_offset",
+            "snapshot_scope": "independently_linearizable_members",
+        }
+
+    def append_idempotent(
+        self,
+        stream: str,
+        shard: int,
+        idempotency_key: str,
+        producer_id: str,
+        producer_epoch: int,
+        sequence: int,
+        event: EventEnvelope,
+    ) -> dict[str, Any]:
+        """Append one producer-epoch/sequence-fenced record."""
+        _stream_producer(producer_id, producer_epoch)
+        _non_negative(sequence, "producer sequence")
+        if not isinstance(event, EventEnvelope):
+            raise TypeError("event must be an EventEnvelope")
+        return self._mutate_state(
+            stream,
+            shard,
+            idempotency_key,
+            {
+                "action": "append_idempotent",
+                "producer_id": producer_id,
+                "producer_epoch": str(producer_epoch),
+                "sequence": str(sequence),
+                "partition": 0,
+                "envelope": event.to_dict(),
+            },
+        )
+
+    def consume_long_poll(
+        self,
+        stream: str,
+        shard: int,
+        offset: int,
+        *,
+        limit: int = 100,
+        isolation: StreamReadIsolation = "read_committed",
+        mode: StreamConsumerMode = "push",
+        consumer_id: str | None = None,
+        wait_ms: int = 30_000,
+    ) -> dict[str, Any]:
+        """Wait for visible records in a shared push or dedicated consumer lane."""
+        _non_negative(offset, "offset")
+        _fetch_limit(limit)
+        if isolation not in {"read_committed", "read_uncommitted"}:
+            raise ValueError(f"unsupported Stream read isolation: {isolation}")
+        if isinstance(wait_ms, bool) or not 1 <= wait_ms <= 30_000:
+            raise ValueError("consumer wait must be between 1 and 30000 milliseconds")
+        if mode == "dedicated":
+            _required(consumer_id or "", "dedicated consumer ID")
+        elif mode != "push" or consumer_id is not None:
+            raise ValueError("push mode does not accept a consumer ID")
+        query: dict[str, Any] = {
+            "offset": offset,
+            "limit": limit,
+            "isolation": isolation,
+            "mode": mode,
+            "wait_ms": wait_ms,
+        }
+        if consumer_id is not None:
+            query["consumer_id"] = consumer_id
+        return self._stream_call(
+            stream,
+            shard,
+            lambda _route: (
+                "GET",
+                "/records/consume",
+                None,
+                query,
+                {"x-epoch-read-consistency": "linearizable"},
+            ),
+        )
+
+    def begin_transaction(
+        self,
+        stream: str,
+        shard: int,
+        idempotency_key: str,
+        transaction_id: str,
+        producer_id: str,
+        producer_epoch: int,
+    ) -> dict[str, Any]:
+        """Open or exactly replay a producer-fenced transaction."""
+        _required(transaction_id, "transaction ID")
+        _stream_producer(producer_id, producer_epoch)
+        return self._mutate_state(
+            stream,
+            shard,
+            idempotency_key,
+            {
+                "action": "begin_transaction",
+                "transaction_id": transaction_id,
+                "producer_id": producer_id,
+                "producer_epoch": str(producer_epoch),
+            },
+        )
+
+    def append_transaction(
+        self,
+        stream: str,
+        shard: int,
+        idempotency_key: str,
+        transaction_id: str,
+        producer_id: str,
+        producer_epoch: int,
+        sequence: int,
+        events: list[EventEnvelope],
+    ) -> dict[str, Any]:
+        """Atomically append a bounded sequence inside an open transaction."""
+        _required(transaction_id, "transaction ID")
+        _stream_producer(producer_id, producer_epoch)
+        _non_negative(sequence, "producer sequence")
+        if not isinstance(events, list) or not 1 <= len(events) <= 128:
+            raise ValueError("transaction append must contain between 1 and 128 records")
+        if any(not isinstance(event, EventEnvelope) for event in events):
+            raise TypeError("transaction events must be EventEnvelope values")
+        return self._mutate_state(
+            stream,
+            shard,
+            idempotency_key,
+            {
+                "action": "append_transaction",
+                "transaction_id": transaction_id,
+                "producer_id": producer_id,
+                "producer_epoch": str(producer_epoch),
+                "sequence": str(sequence),
+                "partition": 0,
+                "envelopes": [event.to_dict() for event in events],
+            },
+        )
+
+    def commit_transaction(
+        self,
+        stream: str,
+        shard: int,
+        idempotency_key: str,
+        transaction_id: str,
+        *,
+        offset_commit: StreamOffsetCommit | None = None,
+    ) -> dict[str, Any]:
+        """Make transaction records visible and optionally commit an offset atomically."""
+        _required(transaction_id, "transaction ID")
+        operation: dict[str, Any] = {
+            "action": "commit_transaction",
+            "transaction_id": transaction_id,
+        }
+        if offset_commit is not None:
+            if not isinstance(offset_commit, StreamOffsetCommit):
+                raise TypeError("offset_commit must be a StreamOffsetCommit")
+            if offset_commit.partition != shard:
+                raise ValueError("transaction offset commit must target the transaction shard")
+            operation["offset_commit"] = {
+                "group": offset_commit.group,
+                "partition": 0,
+                "next_offset": str(offset_commit.next_offset),
+            }
+        return self._mutate_state(stream, shard, idempotency_key, operation)
+
+    def abort_transaction(
+        self,
+        stream: str,
+        shard: int,
+        idempotency_key: str,
+        transaction_id: str,
+    ) -> dict[str, Any]:
+        """Permanently hide transaction records from read-committed consumers."""
+        _required(transaction_id, "transaction ID")
+        return self._mutate_state(
+            stream,
+            shard,
+            idempotency_key,
+            {"action": "abort_transaction", "transaction_id": transaction_id},
+        )
+
+    def compact(
+        self,
+        stream: str,
+        shard: int,
+        idempotency_key: str,
+        tombstone_retention_ms: int,
+    ) -> dict[str, Any]:
+        """Retain the latest committed record per key and expire old tombstones."""
+        _positive(tombstone_retention_ms, "tombstone retention")
+        return self._mutate_state(
+            stream,
+            shard,
+            idempotency_key,
+            {
+                "action": "compact",
+                "partition": 0,
+                "tombstone_retention_ms": str(tombstone_retention_ms),
+            },
+        )
+
+    def tier_prefix(
+        self,
+        stream: str,
+        shard: int,
+        idempotency_key: str,
+        before_offset: int,
+        *,
+        max_records: int = 1_024,
+    ) -> dict[str, Any]:
+        """Move a committed hot prefix into an immutable checksum-verified object."""
+        _non_negative(before_offset, "tier before offset")
+        if isinstance(max_records, bool) or not 1 <= max_records <= 1_024:
+            raise ValueError("tier max records must be between 1 and 1024")
+        return self._mutate_state(
+            stream,
+            shard,
+            idempotency_key,
+            {
+                "action": "tier_prefix",
+                "partition": 0,
+                "before_offset": str(before_offset),
+                "max_records": max_records,
+            },
+        )
+
+    def capture(
+        self,
+        stream: str,
+        shard: int,
+        idempotency_key: str,
+        capture_id: str,
+        first_offset: int,
+        end_offset: int,
+        *,
+        format: StreamCaptureFormat = "json_lines",
+    ) -> dict[str, Any]:
+        """Capture one committed offset range in a portable open format."""
+        _required(capture_id, "capture ID")
+        _non_negative(first_offset, "capture first offset")
+        _non_negative(end_offset, "capture end offset")
+        if first_offset > end_offset:
+            raise ValueError("capture offset range must be ordered")
+        if format not in {"json_lines", "json_array"}:
+            raise ValueError(f"unsupported Stream capture format: {format}")
+        return self._mutate_state(
+            stream,
+            shard,
+            idempotency_key,
+            {
+                "action": "capture",
+                "capture_id": capture_id,
+                "partition": 0,
+                "first_offset": str(first_offset),
+                "end_offset": str(end_offset),
+                "format": format,
+            },
+        )
+
+    def configure_capture_schedule(
+        self,
+        stream: str,
+        shard: int,
+        idempotency_key: str,
+        schedule_id: str,
+        interval_ms: int,
+        *,
+        format: StreamCaptureFormat = "json_lines",
+    ) -> dict[str, Any]:
+        """Enable leader-driven periodic capture with a replicated offset checkpoint."""
+        _required(schedule_id, "capture schedule ID")
+        if (
+            isinstance(interval_ms, bool)
+            or not isinstance(interval_ms, int)
+            or not _MIN_CAPTURE_INTERVAL_MS <= interval_ms <= _MAX_CAPTURE_INTERVAL_MS
+        ):
+            raise ValueError(
+                "capture interval must be between "
+                f"{_MIN_CAPTURE_INTERVAL_MS} and {_MAX_CAPTURE_INTERVAL_MS} milliseconds"
+            )
+        if format not in {"json_lines", "json_array"}:
+            raise ValueError(f"unsupported Stream capture format: {format}")
+        return self._mutate_state(
+            stream,
+            shard,
+            idempotency_key,
+            {
+                "action": "configure_capture_schedule",
+                "schedule_id": schedule_id,
+                "partition": 0,
+                "interval_ms": str(interval_ms),
+                "format": format,
+            },
+        )
+
+    def replicate(
+        self,
+        stream: str,
+        shard: int,
+        idempotency_key: str,
+        batch: StreamReplicationBatch,
+    ) -> dict[str, Any]:
+        """Apply one contiguous source batch with checkpoint and loop fencing."""
+        if not isinstance(batch, StreamReplicationBatch):
+            raise TypeError("batch must be a StreamReplicationBatch")
+        records = [
+            {
+                "source_offset": str(record.source_offset),
+                "envelope": record.envelope.to_dict(),
+                "traversed_clusters": list(record.traversed_clusters),
+            }
+            for record in batch.records
+        ]
+        return self._mutate_state(
+            stream,
+            shard,
+            idempotency_key,
+            {
+                "action": "replicate",
+                "local_partition": 0,
+                "batch": {
+                    "source_cluster": batch.source_cluster,
+                    "source_stream": batch.source_stream,
+                    "source_partition": batch.source_partition,
+                    "first_source_offset": str(batch.first_source_offset),
+                    "records": records,
+                },
+            },
+        )
+
+    def transaction(self, stream: str, shard: int, transaction_id: str) -> dict[str, Any]:
+        """Return one linearizable transaction observation."""
+        transaction = _segment(transaction_id, "transaction")
+        return self._stream_call(
+            stream,
+            shard,
+            lambda _route: (
+                "GET",
+                f"/transactions/{transaction}",
+                None,
+                None,
+                {"x-epoch-read-consistency": "linearizable"},
+            ),
+        )
+
+    def tier_objects(self, stream: str, shard: int) -> dict[str, Any]:
+        """List immutable tier manifests for one shard."""
+        return self._linearizable_stream_read(stream, shard, "/tier/objects")
+
+    def capture_artifact(self, stream: str, shard: int, capture_id: str) -> dict[str, Any]:
+        """Return one retained capture artifact and checksum."""
+        capture = _segment(capture_id, "capture")
+        return self._linearizable_stream_read(stream, shard, f"/captures/{capture}")
+
+    def capture_schedule(self, stream: str, shard: int, schedule_id: str) -> dict[str, Any]:
+        """Return a replicated automatic-capture checkpoint and next deadline."""
+        schedule = _segment(schedule_id, "capture schedule")
+        return self._linearizable_stream_read(stream, shard, f"/capture-schedules/{schedule}")
+
+    def partition_advice(
+        self,
+        stream: str,
+        target_records_per_partition: int,
+        target_bytes_per_partition: int,
+    ) -> dict[str, Any]:
+        """Estimate an online expand-only partition target."""
+        _positive(target_records_per_partition, "target records per partition")
+        _positive(target_bytes_per_partition, "target bytes per partition")
+        return self._stream_call(
+            stream,
+            0,
+            lambda _route: (
+                "GET",
+                "/partitions/advice",
+                None,
+                {
+                    "target_records_per_partition": target_records_per_partition,
+                    "target_bytes_per_partition": target_bytes_per_partition,
+                },
                 {"x-epoch-read-consistency": "linearizable"},
             ),
         )
@@ -762,10 +1267,67 @@ class RegionalStreamClient(RegionalClient):
     def _stream_call(self, stream: str, shard: int, request_for: Any) -> Any:
         return self.call("streams", "Stream", stream, shard, request_for)
 
+    def _mutate_state(
+        self,
+        stream: str,
+        shard: int,
+        idempotency_key: str,
+        operation: dict[str, Any],
+    ) -> dict[str, Any]:
+        _required(idempotency_key, "idempotency key")
+        return self._stream_call(
+            stream,
+            shard,
+            lambda route: (
+                "POST",
+                "/state",
+                {
+                    "idempotency_key": idempotency_key,
+                    "expected_term": route.term,
+                    "operation": operation,
+                },
+                None,
+                {},
+            ),
+        )
+
+    def _linearizable_stream_read(self, stream: str, shard: int, path: str) -> dict[str, Any]:
+        return self._stream_call(
+            stream,
+            shard,
+            lambda _route: (
+                "GET",
+                path,
+                None,
+                None,
+                {"x-epoch-read-consistency": "linearizable"},
+            ),
+        )
+
 
 def _fetch_limit(limit: int) -> None:
     if isinstance(limit, bool) or not 1 <= limit <= _MAX_FETCH_RECORDS:
         raise ValueError(f"fetch limit must be between 1 and {_MAX_FETCH_RECORDS}")
+
+
+def _stream_producer(producer_id: str, producer_epoch: int) -> None:
+    _required(producer_id, "producer ID")
+    _positive(producer_epoch, "producer epoch")
+
+
+def _stream_response_u64(value: Any, field: str) -> int:
+    maximum = (1 << 64) - 1
+    if isinstance(value, str):
+        if not value.isascii() or not value.isdigit() or str(int(value)) != value:
+            raise ValueError(f"Stream response {field} is invalid")
+        parsed = int(value)
+    elif isinstance(value, int) and not isinstance(value, bool):
+        parsed = value
+    else:
+        raise ValueError(f"Stream response omitted {field}")
+    if not 0 <= parsed <= maximum:
+        raise ValueError(f"Stream response {field} is invalid")
+    return parsed
 
 
 def _bounded_session_timeout(session_timeout_ms: int) -> None:
@@ -860,6 +1422,13 @@ __all__ = [
     "RegionalScope",
     "RegionalStreamClient",
     "Route",
+    "StreamCaptureFormat",
+    "StreamConsumerMode",
+    "StreamOffsetCommit",
+    "StreamReadIsolation",
+    "StreamReplicationBatch",
+    "StreamReplicationRecord",
     "StreamRetentionPolicy",
+    "StreamSuperstreamMember",
     "stream_shard_for",
 ]

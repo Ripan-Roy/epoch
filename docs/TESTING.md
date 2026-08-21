@@ -199,9 +199,9 @@ maintenance, compares every retained boundary, checkpoints, reopens all voter
 paths, and verifies the same policy/base/end/watermark before readiness. SDK
 contract suites cover strict configure/maintain/observe requests in Go, Java,
 and Python. The regional container campaign runs the Python path and verifies
-the retained range through leader loss and same-volume recovery. This is not
-automatic retention scheduling, keyed compaction, or a production scale/fault
-matrix.
+the retained range through leader loss and same-volume recovery. Leader-owned
+automatic retention is covered separately; keyed compaction is now part of the
+v7 state-services corpus below. Production scale/fault evidence remains open.
 
 The multi-shard Stream corpus pins `fnv1a64_utf8_mod_n_v1` with the same ASCII
 and non-ASCII vectors in Rust, Go, Java, and Python, including empty-key
@@ -213,8 +213,9 @@ selection and a generation-change failure before any write. The regional
 container campaign creates a three-shard Stream, routes real Python keyed
 appends to shards 0, 1, and 2, checks logical receipts/records/checkpoints, then
 proves per-shard convergence after leader loss, voter return, all-node
-`SIGKILL`, and same-volume reopen. This is not an online-expansion, split/merge,
-hot-key, coordinated multi-shard group, or cross-shard transaction campaign.
+`SIGKILL`, and same-volume reopen. Catalog/materializer tests now cover safe
+expand-only allocation and reopen. Split/merge, hot-key, and cross-shard
+transaction campaigns remain open.
 
 The consumer-session corpus pins canonical command v5 while retaining v1–v4
 goldens and validates join/rejoin, fenced heartbeat/leave, lexical round-robin
@@ -240,7 +241,29 @@ checks the generation-3 all-shard assignment, catches up the old voter, then
 reopens every node and observes the same session. The regional campaign now
 waits for the shard-zero leader to propose expiry instead of calling
 maintenance. This does not prove cooperative revoke, atomic per-shard offset handoff,
-transactions, scale fairness, or a production fault matrix.
+cooperative revoke, scale fairness, or a production fault matrix. Same-tablet
+transactions and bounded long polling are covered by the v7 corpus below.
+
+The Stream state-services corpus exercises command v7 and snapshot v4 across
+the core, tablet, HTTP adapter, three real EPRS-backed voters, and Go/Java/Python
+clients. It covers producer gaps/conflicts/fencing/exact retry; transaction
+visibility, abort, atomic offset commit, and pending-capture barriers; sparse
+key compaction and tombstone expiry; immutable range/checksum/corruption/tier
+reads; manual and scheduled JSON Lines/Array capture; source checkpoint mapping
+and loop rejection; partition advice; push/dedicated long-poll wakeup; and
+deterministic non-atomic superstream merge. Snapshot encoding validates the
+advanced state against the ordered log before install and after decode. The
+real-voter campaign checkpoints and reopens the complete history. External
+object-store outage/latency, two-region RPO/RTO, and dedicated-bandwidth
+benchmarks remain separate production campaigns.
+
+The Docker regional campaign additionally drives the Python SDK through a
+dedicated advanced Stream after process-level leader loss. It commits and
+replays a typed state rejection, completes and aborts transactions, validates
+both isolation levels, captures automatically through leader maintenance,
+compacts and tiers history, applies and retries replication ingress, performs
+long-poll and superstream reads, catches up a stopped voter, then SIGKILLs and
+reopens all three voters before repeating the linearizable observations.
 
 Regional adapter tests cover the fully qualified Stream v1 route and its strict
 authorization actions/scope. A handler-level regression sends a group lag read
@@ -501,8 +524,8 @@ Finally, the real Python `RegionalBusClient`
 proves exact publish, archive replay, acquire/automatic-timeout/reacquire/ack,
 acknowledged-delivery query, subscription removal, and linearizable status
 after Event Bus leader loss. Before faulting the cluster, the campaign waits
-for catalog plus all seven profile groups to checkpoint and physically compact
-on every voter: 24 local voter/group copies. Each old voter catches up before
+for catalog plus all eight profile groups to checkpoint and physically compact
+on every voter: 27 local voter/group copies. Each old voter catches up before
 the campaign verifies durable applied/checkpoint/retained-first boundaries,
 kills every node, verifies Go clears stale placement while authority is
 unavailable, and reopens the same volumes before comparing those boundaries,

@@ -17,6 +17,7 @@ use crate::{consensus::ConsensusProbeError, tablet_materializer::TabletDirectory
 pub enum RegionalMaintenanceOperation {
     StreamRetention,
     StreamConsumerSession,
+    StreamCapture,
     QueueTimers,
     CacheExpiry,
     BusDeliveryLease,
@@ -27,6 +28,7 @@ impl RegionalMaintenanceOperation {
         match self {
             Self::StreamRetention => "stream_retention",
             Self::StreamConsumerSession => "stream_consumer_session",
+            Self::StreamCapture => "stream_capture",
             Self::QueueTimers => "queue_timers",
             Self::CacheExpiry => "cache_expiry",
             Self::BusDeliveryLease => "bus_delivery_lease",

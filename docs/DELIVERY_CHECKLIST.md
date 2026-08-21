@@ -1,8 +1,8 @@
 # Epoch Delivery Checklist
 
 **Last reviewed:** 21 August 2026
-**Current release target:** `v0.1.0-alpha.6`
-**Current core target:** Complete every non-deferred Cache requirement
+**Current release target:** `v0.1.0-alpha.7`
+**Current core target:** Complete Stream state services (`STREAM-007`–`STREAM-015`)
 
 This is the operational checklist for turning PRD scope into verified,
 releasable increments. [PRD.md](PRD.md) owns product scope,
@@ -28,17 +28,17 @@ protected-branch evidence agree.
 
 | Gate | Deliverable | Current state | Required exit evidence | Evidence / next action |
 |---|---|---:|---|---|
-| G0 | Semantic contracts | 🟡 | Versioned envelope, errors, durability, ordering, delivery, time, fencing, and transaction limits | [Semantics](SEMANTICS.md), [API contracts](API_CONTRACTS.md); transaction limits remain open |
+| G0 | Semantic contracts | 🟡 | Versioned envelope, errors, durability, ordering, delivery, time, fencing, and transaction limits | [Semantics](SEMANTICS.md), [API contracts](API_CONTRACTS.md); same-tablet Stream transaction limits are frozen, while cross-profile/cross-shard contracts remain open |
 | G1 | Repository and deterministic foundation | 🟡 | Reproducible toolchains, generated contracts, deterministic clock/fault harness, cross-language build | [Development](DEVELOPMENT.md), [Testing](TESTING.md), CI; broader fuzz/formal harness remains open |
-| G2 | Storage and recovery | 🟡 | Checksummed formats, crash recovery, corruption policy, snapshots, compaction, retention, tiering | Segmented WAL, compatible EPSN v1/v2 checkpoints, native images for all five profiles, checkpoint-plus-tail reopen, fixed-voter catch-up, physical EPRS reclamation, Stream retention, and automatic voter checkpoints pass protected `main`. The Cache candidate adds a canonical resource-local backup/PITR window and fsynced cold read path; protected evidence, product-wide tiering, managed restore campaigns, and production repair remain open |
+| G2 | Storage and recovery | 🟡 | Checksummed formats, crash recovery, corruption policy, snapshots, compaction, retention, tiering | Segmented WAL, compatible EPSN v1/v2 checkpoints, native images for all five profiles, checkpoint-plus-tail reopen, fixed-voter catch-up, physical EPRS reclamation, Stream retention, automatic voter checkpoints, Cache backup/PITR and cold reads pass protected `main`. The Stream candidate adds sparse compaction snapshots and checksum-verified embedded historical objects; protected evidence, product-wide external tiering, managed restore campaigns, and production repair remain open |
 | G3 | Consensus, catalog, and placement | 🟡 | Quorum safety, persistent catalog, multi-group supervision, membership, placement, repair, read barriers | Dedicated catalog consensus, shared multi-group supervision, deterministic multi-shard materialization, authenticated fixed-voter region/zone/class validation, limiting group-capacity admission, fenced routing, safe leader ReadIndex barriers, leader replacement, and per-shard same-volume recovery pass protected `main`; dynamic membership/voter selection, rack placement, transfer/repair, follower reads, and broader model evidence remain open |
-| G4 | Native profile cores | 🟡 | Cache, Stream, Queue, and Bus P0 semantics with truthful public routing and fault evidence | All four typed tablet cores run simultaneously behind resource/shard routing and authenticated three-language clients. The Cache completion candidate covers every non-deferred Cache row, including byte/cold admission, named durability, advanced state/query, changes, backup/PITR, multiplex, and lossy Pub/Sub; protected release evidence is pending. Stream, Queue, and Bus completion releases remain open |
+| G4 | Native profile cores | 🟡 | Cache, Stream, Queue, and Bus P0 semantics with truthful public routing and fault evidence | All four typed tablet cores run simultaneously behind resource/shard routing and authenticated three-language clients. Cache completion shipped in alpha.6. The alpha.7 candidate closes advanced Stream development semantics with producer fencing, transactions, compaction/tiering, capture, replication ingress, and superstreams; Queue and Bus completion releases remain open |
 | G5 | Trust and observability | 🟡 | Identity, authorization, TLS/mTLS, encryption, audit, telemetry, quotas, explain | Shared Go/Rust bootstrap authentication, scoped action authorization, collection isolation, session-only console credential, credential-free decision logs, and regional scheduler/checkpoint topology evidence pass protected `main`; OIDC, expiry/revocation, TLS/mTLS/peer identity, encryption, replicated policy, immutable audit export, exported telemetry/alerts, and quotas remain open |
 | G6 | Compatibility gateways | ⬜ | Named protocol/client matrix, differential tests, fuzzing, malformed frames, migration evidence | Native APIs only; RESP3, Kafka, AMQP, MQTT compatibility is not claimed |
 | G7 | Data services and integrations | 🟡 | Schemas, pipes, connectors, target execution, checkpoints, transaction boundaries | Bus intent/outbox, public-HTTPS signed webhooks, and pinned Queue/Stream target execution with stable destination idempotency pass protected `main` through PR #77; private egress, schemas, and connectors remain open |
 | G8 | Managed operations | 🟡 | Durable Go reconciliation, operator, autoscaling, backup, metering, billing, private networking | Single-owner bbolt desired/status/token/tombstone transactions, Go `SIGKILL` recovery, RegionalAdmin reconciliation, complete topology inventory, pre-catalog capacity rejection, truthful placement status, exact-origin browser BFF, and real Go-to-Rust recovery pass protected `main`. Canonical governance and authorized cost-driver attribution pass the complete local recovery campaign; protected evidence, replicated multi-instance metadata, operator/autoscaling/backup/metering/billing/private networking remain open |
 | G9 | Geo | ⬜ | Replication, RPO/RTO, promotion, failback, residency, split-brain drills | Not implemented |
-| G10 | Release readiness | 🟡 | Synchronized versions, CI, Pages, notes, verified tag provenance, artifacts, security and compatibility statements | `v0.1.0-alpha.5` is the current published source prerelease; `v0.1.0-alpha.6` is the Cache feature-release target. The repository is MIT licensed; packaged artifacts, signing/SBOM provenance, and GA evidence remain open |
+| G10 | Release readiness | 🟡 | Synchronized versions, CI, Pages, notes, verified tag provenance, artifacts, security and compatibility statements | `v0.1.0-alpha.6` is the current published source prerelease; `v0.1.0-alpha.7` is the Stream feature-release target. The repository is MIT licensed; packaged artifacts, signing/SBOM provenance, and GA evidence remain open |
 
 ## Milestone readiness
 
@@ -72,7 +72,7 @@ complete.
 | MT-10 | Route public requests by resource, shard, leader, generation, and epoch | Rust gateway | MT-09 | 🟡 | Generic resource/shard discovery and data dispatch reject stale generation, stale tablet epoch, nonleaders, missing routes, profile mismatches, missing credentials, action denial, and cross-tenant scope; regional reads default to safe leader ReadIndex with explicit stale opt-in. Fully qualified Stream, Queue, Cache, and Event Bus v1 adapters plus three SDKs implement native leader/fence routing; Stream additionally publishes generation-safe keyed routing and a shard-zero session coordinator. Production identity/TLS, follower routing, and safe online remapping remain open |
 | MT-11 | Reconcile hosted desired state through the Rust authority | Go control plane | MT-06, MT-10 | 🟡 | Real authenticated gRPC lifecycle, transactional bbolt desired/status/token/tombstone state, exact replay and generation continuity across restart, corruption/version/exclusive-owner rejection, complete topology inventory, incremental capacity admission, generation-fenced status, and Go-to-Rust container reconciliation pass locally; multi-instance consistency, transactional reservations, OIDC/mTLS, and replicated policy remain open |
 | MT-12 | Show achieved placement and risk without overclaiming | TypeScript console | MT-10, MT-11 | 🟡 | The console reads only the Go BFF with a session-only interactive credential, preserves decimal 64-bit IDs, distinguishes pending/ready/degraded/failed, and lists observed voters/leaders plus consistent configured zone/class/group-capacity evidence and remaining server-identity/rack/dynamic-membership non-claims; OIDC exchange and browser visual/accessibility automation remain open |
-| MT-13 | Real-process and container fault campaign | Test infrastructure | MT-06–MT-12 | 🟡 | Three policy-protected regional containers cover topology/capacity, catalog plus seven tablets/four profiles including a three-shard Stream, authenticated Go recovery, and separate active-leader losses followed by real Python Stream sessions plus Stream, Queue, Cache, and Event Bus lifecycles. Protected CI through PR #74 proves all five maintenance classes, automatic checkpoint/compaction on all 24 voter/group copies, session-fenced consumption, signed-webhook retry, voter catch-up, all-node `SIGKILL`, same-volume reopen, and digest convergence; broader crash/I/O/auth-abuse faults remain |
+| MT-13 | Real-process and container fault campaign | Test infrastructure | MT-06–MT-12 | 🟡 | Three policy-protected regional containers cover topology/capacity, catalog plus eight tablets/four profiles including a three-shard Stream and a dedicated advanced Stream, authenticated Go recovery, and separate active-leader losses followed by real Python SDK lifecycles. The current local campaign proves all maintenance classes, automatic checkpoint/compaction on all 27 voter/group copies, advanced Stream state services, session fencing, signed-webhook retry, voter catch-up, all-node `SIGKILL`, same-volume reopen, and digest convergence; protected alpha.7 and broader crash/I/O/auth-abuse evidence remain |
 | MT-14 | Documentation, traceability, changelog, and release notes | Cross-cutting | MT-13 | 🟡 | ADR-0010–0032 plus published `v0.1.0-alpha.4` evidence cover merged `main`; PR #78 published the Cache engine/SDK/runtime/Pages documentation. ADR-0033 and the resource-governance guide are under local verification; protected publication remains open |
 
 ## Current placement delivery: topology-aware fixed-voter admission
@@ -215,14 +215,14 @@ complete.
 
 | ID | Checklist item | Boundary | State | Evidence / acceptance |
 |---|---|---|---:|---|
-| CC-01 | Freeze guarantees, limits, compatibility, and non-claims | ADR + semantics | 🟡 | ADR-0034 defines snapshot v4 compatibility, byte classes, named durability, transforms/query, change retention, backup/PITR, multiplex, lossy Pub/Sub, cold-file reads, and production non-claims; local docs gates pass and protected review is pending |
-| CC-02 | Complete deterministic state behavior | Rust Cache engine | 🟡 | All 44 Cache tests cover collection transforms, bitmap/cardinality/Bloom/Cuckoo/geo/JSON/vector behavior, exact indexes/search, byte admission/eviction, changes, backup corruption/window/PITR, non-ABA restore, snapshot recovery, and digest convergence; protected evidence is pending |
-| CC-03 | Preserve one replicated recovery model | Rust tablet + node | 🟡 | Compatible commands/snapshots, transactions with transforms, restore proposal bounds, public cold-Set normalization, leader ReadIndex queries, native multiplex exact replay, requested/achieved durability, and fsynced cold synchronization pass tablet plus all 23 focused node tests; protected evidence is pending |
-| CC-04 | Expose the complete lifecycle in every SDK | Go + Java + Python | 🟡 | Go, 42 Java tests, and 40 Python tests cover cold writes, transform, multiplex, changes, backup/restore, typed query, Pub/Sub, and status with pre-network validation and exact route/auth/fence behavior; protected evidence is pending |
-| CC-05 | Materialize and operate the resource end to end | Go control + console | 🟡 | Memory/cold caps and named durability flow through desired state, catalog, every voter, BFF, inventory, and form; cold latency disclosure is visible and Go/console tests, typecheck, lint, and production build pass locally |
-| CC-06 | Prove real leader loss and all-voter reopen | Compose integration | 🟡 | The rebuilt regional campaign passes ordinary/advanced state, atomic/multiplex writes, byte eviction, cold disk read, backup/PITR, changes, lossy Pub/Sub, convergence, catch-up, checkpoints, and same-volume reopen; protected execution is pending |
-| CC-07 | Publish executable end-to-end docs | Docs + Pages | 🟡 | All three displayed quickstarts compile, the Cache guide/tablet/ADR, PRD/traceability/checklist, SDK matrix, production docs build, and every Pages bundle marker pass locally; protected main-only publication is pending |
-| CC-08 | Release `v0.1.0-alpha.6` | Quality + GitHub | 🟡 | Version synchronization, curated notes, and the complete `make ci` mirror pass locally, including cross-language builds, every process/failover campaign, installable Python metadata, displayed SDK lifecycles, and Compose validation; the one feature PR, protected exact-main CI/Pages, tag provenance, and GitHub prerelease remain pending |
+| CC-01 | Freeze guarantees, limits, compatibility, and non-claims | ADR + semantics | ✅ | ADR-0034 defines snapshot v4 compatibility, byte classes, named durability, transforms/query, change retention, backup/PITR, multiplex, lossy Pub/Sub, cold-file reads, and production non-claims; protected review shipped in alpha.6 |
+| CC-02 | Complete deterministic state behavior | Rust Cache engine | ✅ | All 44 Cache tests cover collection transforms, bitmap/cardinality/Bloom/Cuckoo/geo/JSON/vector behavior, exact indexes/search, byte admission/eviction, changes, backup corruption/window/PITR, non-ABA restore, snapshot recovery, and digest convergence in protected CI |
+| CC-03 | Preserve one replicated recovery model | Rust tablet + node | ✅ | Compatible commands/snapshots, transactions with transforms, restore proposal bounds, public cold-Set normalization, leader ReadIndex queries, native multiplex exact replay, requested/achieved durability, and fsynced cold synchronization pass tablet plus all 23 focused node tests |
+| CC-04 | Expose the complete lifecycle in every SDK | Go + Java + Python | ✅ | Go, 42 Java tests, and 40 Python tests cover cold writes, transform, multiplex, changes, backup/restore, typed query, Pub/Sub, and status with pre-network validation and exact route/auth/fence behavior |
+| CC-05 | Materialize and operate the resource end to end | Go control + console | ✅ | Memory/cold caps and named durability flow through desired state, catalog, every voter, BFF, inventory, and form; cold latency disclosure is visible and Go/console tests, typecheck, lint, and production build pass |
+| CC-06 | Prove real leader loss and all-voter reopen | Compose integration | ✅ | The rebuilt regional campaign passes ordinary/advanced state, atomic/multiplex writes, byte eviction, cold disk read, backup/PITR, changes, lossy Pub/Sub, convergence, catch-up, checkpoints, and same-volume reopen |
+| CC-07 | Publish executable end-to-end docs | Docs + Pages | ✅ | All three displayed quickstarts compile; the Cache guide/tablet/ADR, PRD/traceability/checklist, SDK matrix, production docs build, and Pages bundle shipped from `main` |
+| CC-08 | Release `v0.1.0-alpha.6` | Quality + GitHub | ✅ | Synchronized source-only prerelease notes, protected CI, main-only Pages, tag provenance, and GitHub release are published; package-manager artifacts remain intentionally deferred |
 
 ## Current native delivery: regional Event Bus v1 and SDK routing
 
@@ -384,6 +384,23 @@ complete.
 | FC-07 | Publish executable end-to-end documentation | Docs + Pages | ✅ | Go/Java/Python quickstarts join, claim, fenced-fetch, and leave; PRD/API/runtime/SDK/semantics/testing/traceability/changelog/ADR/console are aligned, main-only Pages run `31726157684` deployed, and the live bundle exposes the claim guide and ADR-0029 |
 | FC-08 | Pass local and protected quality evidence | Quality + GitHub | ✅ | `make check`, `make build`, all-target Clippy/Rustdoc, exact displayed quickstarts, docs-only Pages assertions, and the rebuilt regional Docker campaign pass locally and in protected CI; [PR #68](https://github.com/Ripan-Roy/epoch/pull/68) squash-merged as `c30c511`, exact-main CI `31726157672`, main-only Pages `31726157684`, and live-bundle verification passed |
 
+## Current Stream delivery: complete state services
+
+| ID | Checklist item | Boundary | State | Evidence / acceptance |
+|---|---|---|---:|---|
+| SS-01 | Freeze the advanced state model and non-claims | ADR + semantics | 🟡 | ADR-0035 colocates producer, transaction, tier, capture, and replication truth with one tablet and explicitly excludes cross-shard atomicity, external-store authority, global superstream snapshots, and bandwidth SLO claims; protected review is pending. |
+| SS-02 | Fence producers and preserve exact retry | Rust Stream/tablet | 🟡 | Epoch/sequence validation, payload conflict, bounded contiguous history, v7 commands, browser-safe decimal positions, snapshot recovery, and real-voter exact retry pass locally. |
+| SS-03 | Commit transactions and offsets atomically | Rust Stream/tablet | 🟡 | Pending/committed/aborted visibility, 128-record bounds, one colocated offset commit, long-poll wakeup, snapshot reinstall, digest convergence, and full-cluster reopen pass locally. |
+| SS-04 | Compact keys and preserve tombstone semantics | Rust Stream | 🟡 | Latest committed keyed values, unkeyed retention, aborted removal, inclusive tombstone expiry, sparse-offset v2 snapshots, and compact-before-tier rejection pass locally. |
+| SS-05 | Tier immutable history transparently | Rust Stream/tablet | 🟡 | Exact covered ranges, canonical bytes, SHA-256, overlap/corruption rejection, read isolation, aborted-history reads, hot merge, and snapshot cross-validation pass locally. |
+| SS-06 | Recommend and safely expand partitions | Rust catalog/runtime + SDK | 🟡 | Pure density advice, expand-only catalog fencing, stable existing tablet identities, new-shard allocation, materializer reopen, and generation-pinned keyed writes have local regression evidence. |
+| SS-07 | Serve pull, push, and dedicated consumers | Rust HTTP + SDK | 🟡 | Strict bounded pull and long-poll queries, separate push/dedicated notification lanes, consumer ID rules, timeout, transaction visibility wakeup, and three SDK contracts pass locally. |
+| SS-08 | Capture open formats automatically | Rust maintenance + SDK | 🟡 | JSON Lines/Array artifacts, checksums, replicated schedules/checkpoints, stable due proposals, catch-up without drift, pending-transaction barriers, bounded rotation, reads, and recovery pass locally. |
+| SS-09 | Replicate cross-cluster batches safely | Rust Stream/tablet + SDK | 🟡 | Contiguous source checkpoints, exact retry, source-to-local mappings, loop rejection, local cluster identity, snapshots, strict HTTP, and three SDKs pass locally. |
+| SS-10 | Merge logical superstreams consistently | Go + Java + Python | 🟡 | All SDKs validate named members, independently fetch with explicit isolation, decorate identity, sort deterministically, apply one global limit, and declare the non-atomic snapshot scope. |
+| SS-11 | Publish end-to-end user documentation | Docs + console + Pages | 🟡 | Regional SDK guide, ADR, API/architecture/semantics/traceability, console feature surface, executable source snippets, release notes, and the production Pages mirror pass locally; main-only protected publication remains. |
+| SS-12 | Pass local, protected, and release evidence | Quality + GitHub | 🟡 | `make check`, `make build`, every integration stage, displayed SDK quickstarts, and the docs-only Pages mirror pass locally. The maintainer feature PR, exact-main CI/Pages, tag provenance, and `v0.1.0-alpha.7` release remain exit evidence. |
+
 ## Current security delivery: bootstrap trust baseline
 
 | ID | Checklist item | Boundary | State | Evidence / acceptance |
@@ -421,18 +438,18 @@ complete.
 | Order | Release action | Required evidence | State for next release |
 |---:|---|---|---:|
 | 1 | Select a completed, merged milestone boundary | Traceability and changelog agree with `main` | ⬜ |
-| 2 | Choose the next semantic prerelease version | `v0.1.0-alpha.6` is later than alpha.5 and does not already exist | ✅ |
-| 3 | Synchronize Rust, Go, Java, Python, TypeScript, SDK user agents, and lockfiles | `./scripts/check-release-version.sh` passes at `0.1.0-alpha.6` | ✅ |
-| 4 | Write curated, version-controlled release notes | `docs/releases/v0.1.0-alpha.6.md` names highlights, verification, compatibility, limitations, and source-only artifacts | ✅ |
+| 2 | Choose the next semantic prerelease version | `v0.1.0-alpha.7` is later than alpha.6 and does not already exist | ✅ |
+| 3 | Synchronize Rust, Go, Java, Python, TypeScript, SDK user agents, and lockfiles | `./scripts/check-release-version.sh` passes at `0.1.0-alpha.7` | ✅ |
+| 4 | Write curated, version-controlled release notes | `docs/releases/v0.1.0-alpha.7.md` names highlights, verification, compatibility, limitations, and source-only artifacts | ✅ |
 | 5 | Pass protected `main` CI and main-only Pages | Both workflow runs green at the same commit | ⬜ |
 | 6 | Verify the live docs show the release and governance/SDK content | Public Pages bundle assertions | ⬜ |
 | 7 | Create an annotated tag at the exact current `main` commit | Local and remote commit IDs match | ⬜ |
 | 8 | Pass tag/version/main provenance workflow | Release-tag workflow green | ⬜ |
-| 9 | Publish the GitHub release from the checked-in notes | GitHub prerelease targets `v0.1.0-alpha.6` | ⬜ |
+| 9 | Publish the GitHub release from the checked-in notes | GitHub prerelease targets `v0.1.0-alpha.7` | ⬜ |
 | 10 | Verify downloads and package claims | Source-only artifacts match the notes; package-manager publication remains deferred | ⬜ |
 | 11 | Start the next `Unreleased` section | Changelog prepared for continued delivery | ✅ |
 
-After `v0.1.0-alpha.6` completes this sequence as a source-only prerelease, the
+After `v0.1.0-alpha.7` completes this sequence as a source-only prerelease, the
 table above intentionally resets for the next release.
 
 ## Feature delivery template

@@ -711,6 +711,158 @@ func TestRegionalStreamRetentionRejectsInvalidPolicyBeforeNetwork(t *testing.T) 
 	}
 }
 
+func TestRegionalStreamAdvancedStateContractsAreFencedAndBrowserSafe(t *testing.T) {
+	leader := &regionalFakeTransport{route: Document{
+		"resource_generation": "2", "tablet_epoch": "4", "term": "9", "accepts_writes": true,
+	}}
+	client, err := NewRegionalStreamClientWithTransports(
+		[]Transport{leader}, "secret-token",
+		RegionalScope{Organization: "acme", Project: "shop", Environment: "dev", Namespace: "core"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := NewEventEnvelope("checkout", "order.created", map[string]any{"id": "42"})
+	event.ID = "order-42"
+	event.TimeMS = 42
+	ctx := context.Background()
+
+	if _, err = client.AppendIdempotent(ctx, "orders", 2, "producer-1", "checkout", ^uint64(0), ^uint64(0), event); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.BeginTransaction(ctx, "orders", 2, "tx-begin", "tx-1", "checkout", 7); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.CommitTransaction(ctx, "orders", 2, "tx-commit", "tx-1", &StreamOffsetCommit{Group: "workers", Partition: 2, NextOffset: ^uint64(0)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.FetchWithIsolation(ctx, "orders", 2, ^uint64(0), 10, StreamReadUncommitted); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.PartitionAdvice(ctx, "orders", 1000, 1_048_576); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.ConsumeLongPoll(ctx, "orders", 2, 0, 10, StreamReadCommitted, StreamConsumerDedicated, "analytics-a", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.ConfigureCaptureSchedule(ctx, "orders", 2, "capture-schedule", "analytics", time.Minute, StreamCaptureJSONLines); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.CaptureSchedule(ctx, "orders", 2, "analytics"); err != nil {
+		t.Fatal(err)
+	}
+
+	producer := leader.requests[1]
+	if producer.Method != "POST" || !strings.HasSuffix(producer.Path, "/state") {
+		t.Fatalf("unexpected producer request: %#v", producer)
+	}
+	encoded, marshalErr := json.Marshal(producer.Body)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	var body map[string]any
+	if err = json.Unmarshal(encoded, &body); err != nil {
+		t.Fatal(err)
+	}
+	operation := body["operation"].(map[string]any)
+	if body["expected_term"] != "9" || operation["producer_epoch"] != "18446744073709551615" || operation["sequence"] != "18446744073709551615" {
+		t.Fatalf("advanced producer metadata was not exact: %#v", body)
+	}
+
+	commit := leader.requests[5]
+	encoded, marshalErr = json.Marshal(commit.Body)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if err = json.Unmarshal(encoded, &body); err != nil {
+		t.Fatal(err)
+	}
+	operation = body["operation"].(map[string]any)
+	offset := operation["offset_commit"].(map[string]any)
+	if offset["partition"] != float64(0) || offset["next_offset"] != "18446744073709551615" {
+		t.Fatalf("transaction offset was not local and exact: %#v", operation)
+	}
+
+	read := leader.requests[7]
+	if read.Query.Get("isolation") != "read_uncommitted" || read.Query.Get("offset") != "18446744073709551615" {
+		t.Fatalf("unexpected isolated fetch: %#v", read)
+	}
+	advice := leader.requests[9]
+	if !strings.HasSuffix(advice.Path, "/partitions/advice") || advice.Headers[regionalReadHeader] != "linearizable" {
+		t.Fatalf("unexpected partition advice request: %#v", advice)
+	}
+	consume := leader.requests[11]
+	if !strings.HasSuffix(consume.Path, "/records/consume") || consume.Query.Get("mode") != "dedicated" || consume.Query.Get("consumer_id") != "analytics-a" {
+		t.Fatalf("unexpected dedicated consume request: %#v", consume)
+	}
+	schedule := leader.requests[13]
+	encoded, marshalErr = json.Marshal(schedule.Body)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if err = json.Unmarshal(encoded, &body); err != nil {
+		t.Fatal(err)
+	}
+	operation = body["operation"].(map[string]any)
+	if operation["action"] != "configure_capture_schedule" || operation["interval_ms"] != "60000" {
+		t.Fatalf("unexpected automatic capture schedule: %#v", operation)
+	}
+	if !strings.HasSuffix(leader.requests[15].Path, "/capture-schedules/analytics") {
+		t.Fatalf("unexpected capture schedule read: %#v", leader.requests[15])
+	}
+}
+
+func TestRegionalStreamSuperstreamMergesIndependentShardsDeterministically(t *testing.T) {
+	leader := &regionalFakeTransport{
+		route: Document{
+			"resource_generation": "2", "tablet_epoch": "4", "term": "9", "accepts_writes": true,
+		},
+		operationResponses: []Document{
+			{"records": []any{
+				Document{"appended_at_ms": "20", "partition": 0, "offset": "4", "value": "a"},
+				Document{"appended_at_ms": "30", "partition": 0, "offset": "5", "value": "c"},
+			}},
+			{"records": []any{
+				Document{"appended_at_ms": "10", "partition": 1, "offset": "9", "value": "b"},
+			}},
+		},
+	}
+	client, err := NewRegionalStreamClientWithTransports(
+		[]Transport{leader}, "secret-token",
+		RegionalScope{Organization: "acme", Project: "shop", Environment: "dev", Namespace: "core"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, err := client.FetchSuperstream(context.Background(), []StreamSuperstreamMember{
+		{Name: "orders", Stream: "orders", Shard: 0, Offset: 4},
+		{Name: "audit", Stream: "audit", Shard: 1, Offset: 9},
+	}, 2, StreamReadCommitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := merged["records"].([]any)
+	first := records[0].(Document)
+	second := records[1].(Document)
+	if first["value"] != "b" || first["member"] != "audit" || second["value"] != "a" {
+		t.Fatalf("unexpected superstream order: %#v", records)
+	}
+	if merged["member_count"] != 2 || merged["snapshot_scope"] != "independently_linearizable_members" {
+		t.Fatalf("unexpected superstream metadata: %#v", merged)
+	}
+	if leader.requests[1].Query.Get("isolation") != "read_committed" {
+		t.Fatalf("superstream member fetch was not isolated: %#v", leader.requests[1])
+	}
+	requestCount := len(leader.requests)
+	_, err = client.FetchSuperstream(context.Background(), []StreamSuperstreamMember{
+		{Name: "same", Stream: "orders", Shard: 0},
+		{Name: "same", Stream: "audit", Shard: 0},
+	}, 10, StreamReadCommitted)
+	if err == nil || !strings.Contains(err.Error(), "duplicate superstream member") || len(leader.requests) != requestCount {
+		t.Fatalf("duplicate member must fail before network: err=%v requests=%d", err, len(leader.requests))
+	}
+}
+
 type regionalErrorTransport struct {
 	err      error
 	requests int

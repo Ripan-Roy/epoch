@@ -63,8 +63,12 @@ batches, and recovery evidence; exact-main CI `32398199013` and Pages
 `32398199351` pass. PR #79 and `v0.1.0-alpha.5` add required replicated
 resource governance, exact authorized filters, deterministic cost-driver
 attribution, console visibility, legacy recovery, and a real control/data-plane
-restart proof. The current `v0.1.0-alpha.6` feature candidate completes every
-non-deferred Cache row as the second release in the six-PR train. Stable
+restart proof. PR #80 plus stabilization PR #82 and `v0.1.0-alpha.6` complete
+every non-deferred Cache row as the second release in the six-PR train. The
+current Stream feature candidate completes STREAM-007–015 and closes the
+remaining development semantics across producer fencing, same-tablet
+transactions, compaction/tiering, automatic capture, expansion advice,
+consumer modes, replication ingress, and logical superstreams. Stable
 streaming protocols, replicated multi-instance hosted metadata, production
 identity, follower routing, dynamic membership/voter selection,
 repair/rebalance, and the broader M2 security/performance gates remain open.
@@ -304,8 +308,9 @@ campaign exercises two members after leader replacement; regional shard-zero
 leadership now expires the idle member without a client maintenance call and
 verifies the surviving assignment after voter catch-up and all-node reopen.
 This advances STREAM-003 but does not provide cooperative revoke,
-server-push consumption, sticky/rack-aware assignment, or atomic coupling to
-each shard's v3 checkpoint owner. See
+sticky/rack-aware assignment, or atomic coupling to each shard's v3 checkpoint
+owner. Command v7 separately provides bounded HTTP push/dedicated long poll and
+same-tablet transaction/offset commit. See
 [ADR-0025](adr/0025-stream-consumer-sessions.md).
 
 The latest Stream increment adds canonical command v6 and native snapshot v3 for

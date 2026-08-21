@@ -17,9 +17,8 @@ lock expiry, and Event Bus delivery-lease timeout. Passive reads remain pure,
 explicit maintenance APIs remain available, and topology exposes node-local
 scheduler counters. This closes the client-triggered timer gap for the regional
 alpha; it does not claim a real-time deadline SLA, dynamic or cross-region
-ownership, coordinated backups/PITR, Stream compaction/tiering, Cache
-byte-pressure/SLO evidence, Queue streaming receive, or Event Bus target
-execution. See ADR-0027.
+ownership, coordinated backups/PITR, production performance evidence, or a
+complete external integration plane. See ADR-0027.
 
 **Cache implementation note (21 August 2026):** The fixed-three-voter,
 single-shard regional Cache now implements the alpha contract for every
@@ -35,6 +34,19 @@ and the leader-loss/reopen campaign exercises it. Multi-shard routing,
 automatic coalescing, RESP compatibility, production performance/identity,
 managed backup scheduling/encryption, and CACHE-015 CRDTs remain open under
 their separate requirements. See ADR-0034.
+
+**Stream implementation note (21 August 2026):** The fixed-three-voter
+regional Stream now carries bounded producer epochs/sequences, tablet-local
+transactions with atomic offset commit and read isolation, keyed compaction,
+SHA-256 immutable historical objects, automatic JSON Lines/Array capture,
+expand-only partition advice, push/dedicated long poll, checkpointed
+cross-cluster ingress, and deterministic logical superstreams. The ordered log
+and advanced service state publish atomically, cross-validate at checkpoint
+and recovery, and are exposed consistently in Go, Java, and Python. The alpha
+keeps tier/capture bytes in replicated tablet state and treats dedicated mode
+as scheduling isolation; external cloud-object adapters, two-region transport
+and RPO/RTO drills, cross-shard transactions, and throughput SLOs remain
+production gates. See ADR-0035.
 
 **Recovery implementation note (13 August 2026):** Every healthy regional
 voter now schedules its own canonical native checkpoint for catalog and all

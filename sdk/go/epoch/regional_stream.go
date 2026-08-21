@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -29,6 +30,8 @@ const (
 	maxStreamBatchCompressed    = 360 * 1024
 	maxStreamBatchUncompressed  = 4 * 1024 * 1024
 	maxStreamClaimTransitions   = 4_096
+	minStreamCaptureInterval    = time.Second
+	maxStreamCaptureInterval    = 31 * 24 * time.Hour
 	streamPartitioner           = "fnv1a64_utf8_mod_n_v1"
 )
 
@@ -266,6 +269,61 @@ type StreamRetentionPolicy struct {
 	MaxAgeMS               uint64
 }
 
+// StreamReadIsolation controls whether pending transactional records are visible.
+type StreamReadIsolation string
+
+const (
+	StreamReadCommitted   StreamReadIsolation = "read_committed"
+	StreamReadUncommitted StreamReadIsolation = "read_uncommitted"
+)
+
+// StreamConsumerMode selects a shared push or independently identified long-poll lane.
+type StreamConsumerMode string
+
+const (
+	StreamConsumerPush      StreamConsumerMode = "push"
+	StreamConsumerDedicated StreamConsumerMode = "dedicated"
+)
+
+// StreamCaptureFormat selects one portable capture encoding.
+type StreamCaptureFormat string
+
+const (
+	StreamCaptureJSONLines StreamCaptureFormat = "json_lines"
+	StreamCaptureJSONArray StreamCaptureFormat = "json_array"
+)
+
+// StreamOffsetCommit is atomically committed with a Stream transaction.
+type StreamOffsetCommit struct {
+	Group      string
+	Partition  uint32
+	NextOffset uint64
+}
+
+// StreamReplicationRecord retains the source position and loop-prevention path.
+type StreamReplicationRecord struct {
+	SourceOffset      uint64
+	Envelope          EventEnvelope
+	TraversedClusters []string
+}
+
+// StreamReplicationBatch is one contiguous, checkpointed cross-cluster batch.
+type StreamReplicationBatch struct {
+	SourceCluster     string
+	SourceStream      string
+	SourcePartition   uint32
+	FirstSourceOffset uint64
+	Records           []StreamReplicationRecord
+}
+
+// StreamSuperstreamMember names one physical Stream shard and starting offset.
+type StreamSuperstreamMember struct {
+	Name   string
+	Stream string
+	Shard  uint32
+	Offset uint64
+}
+
 func (policy StreamRetentionPolicy) validate() error {
 	if policy.MaxRecordsPerPartition > maxStreamRetentionRecords {
 		return fmt.Errorf("epoch: Stream retention max records must be between 1 and %d when set", maxStreamRetentionRecords)
@@ -448,15 +506,447 @@ func StreamShardFor(partitionValue string, shardCount uint32) (uint32, error) {
 
 // Fetch performs a linearizable bounded read from one Stream shard.
 func (client *RegionalStreamClient) Fetch(ctx context.Context, stream string, shard uint32, offset uint64, limit uint32) (Document, error) {
+	return client.FetchWithIsolation(ctx, stream, shard, offset, limit, StreamReadCommitted)
+}
+
+// FetchWithIsolation performs a linearizable bounded read with explicit transaction visibility.
+func (client *RegionalStreamClient) FetchWithIsolation(ctx context.Context, stream string, shard uint32, offset uint64, limit uint32, isolation StreamReadIsolation) (Document, error) {
 	if limit == 0 || limit > maxRegionalFetchRecords {
 		return nil, fmt.Errorf("epoch: fetch limit must be between 1 and %d", maxRegionalFetchRecords)
 	}
+	if isolation != StreamReadCommitted && isolation != StreamReadUncommitted {
+		return nil, fmt.Errorf("epoch: unsupported Stream read isolation %q", isolation)
+	}
 	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, func(_ regionalRoute) Request {
 		return Request{Method: "GET", Path: "/records", Query: url.Values{
-			"offset": {strconv.FormatUint(offset, 10)},
-			"limit":  {strconv.FormatUint(uint64(limit), 10)},
+			"offset":    {strconv.FormatUint(offset, 10)},
+			"limit":     {strconv.FormatUint(uint64(limit), 10)},
+			"isolation": {string(isolation)},
 		}, Headers: map[string]string{regionalReadHeader: "linearizable"}}
 	})
+}
+
+// ConsumeLongPoll waits for visible records in a push or dedicated consumer lane.
+func (client *RegionalStreamClient) ConsumeLongPoll(ctx context.Context, stream string, shard uint32, offset uint64, limit uint32, isolation StreamReadIsolation, mode StreamConsumerMode, consumerID string, wait time.Duration) (Document, error) {
+	if limit == 0 || limit > maxRegionalFetchRecords {
+		return nil, fmt.Errorf("epoch: fetch limit must be between 1 and %d", maxRegionalFetchRecords)
+	}
+	if isolation != StreamReadCommitted && isolation != StreamReadUncommitted {
+		return nil, fmt.Errorf("epoch: unsupported Stream read isolation %q", isolation)
+	}
+	waitMS := wait.Milliseconds()
+	if waitMS < 1 || waitMS > 30_000 {
+		return nil, fmt.Errorf("epoch: consumer wait must be between 1ms and 30s")
+	}
+	if mode == StreamConsumerDedicated {
+		if strings.TrimSpace(consumerID) == "" {
+			return nil, fmt.Errorf("epoch: dedicated consumer ID is required")
+		}
+	} else if mode != StreamConsumerPush || consumerID != "" {
+		return nil, fmt.Errorf("epoch: push mode requires an empty consumer ID")
+	}
+	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, func(_ regionalRoute) Request {
+		query := url.Values{
+			"offset":    {strconv.FormatUint(offset, 10)},
+			"limit":     {strconv.FormatUint(uint64(limit), 10)},
+			"isolation": {string(isolation)},
+			"mode":      {string(mode)},
+			"wait_ms":   {strconv.FormatInt(waitMS, 10)},
+		}
+		if consumerID != "" {
+			query.Set("consumer_id", consumerID)
+		}
+		return Request{Method: "GET", Path: "/records/consume", Query: query, Headers: map[string]string{regionalReadHeader: "linearizable"}}
+	})
+}
+
+// AppendIdempotent appends one producer-epoch/sequence-fenced record.
+func (client *RegionalStreamClient) AppendIdempotent(ctx context.Context, stream string, shard uint32, idempotencyKey, producerID string, producerEpoch, sequence uint64, event EventEnvelope) (Document, error) {
+	event, err := event.normalized()
+	if err != nil {
+		return nil, err
+	}
+	if err = validateStreamProducer(producerID, producerEpoch); err != nil {
+		return nil, err
+	}
+	operation := struct {
+		Action        string        `json:"action"`
+		ProducerID    string        `json:"producer_id"`
+		ProducerEpoch string        `json:"producer_epoch"`
+		Sequence      string        `json:"sequence"`
+		Partition     uint32        `json:"partition"`
+		Envelope      EventEnvelope `json:"envelope"`
+	}{"append_idempotent", producerID, strconv.FormatUint(producerEpoch, 10), strconv.FormatUint(sequence, 10), 0, event}
+	return client.mutateState(ctx, stream, shard, idempotencyKey, operation)
+}
+
+// BeginTransaction opens or exactly replays a producer-fenced transaction.
+func (client *RegionalStreamClient) BeginTransaction(ctx context.Context, stream string, shard uint32, idempotencyKey, transactionID, producerID string, producerEpoch uint64) (Document, error) {
+	if err := validateStreamTransaction(transactionID); err != nil {
+		return nil, err
+	}
+	if err := validateStreamProducer(producerID, producerEpoch); err != nil {
+		return nil, err
+	}
+	operation := struct {
+		Action        string `json:"action"`
+		TransactionID string `json:"transaction_id"`
+		ProducerID    string `json:"producer_id"`
+		ProducerEpoch string `json:"producer_epoch"`
+	}{"begin_transaction", transactionID, producerID, strconv.FormatUint(producerEpoch, 10)}
+	return client.mutateState(ctx, stream, shard, idempotencyKey, operation)
+}
+
+// AppendTransaction atomically appends a bounded sequence inside an open transaction.
+func (client *RegionalStreamClient) AppendTransaction(ctx context.Context, stream string, shard uint32, idempotencyKey, transactionID, producerID string, producerEpoch, sequence uint64, events []EventEnvelope) (Document, error) {
+	if err := validateStreamTransaction(transactionID); err != nil {
+		return nil, err
+	}
+	if err := validateStreamProducer(producerID, producerEpoch); err != nil {
+		return nil, err
+	}
+	if len(events) == 0 || len(events) > 128 {
+		return nil, fmt.Errorf("epoch: Stream transaction append must contain between 1 and 128 records")
+	}
+	normalized := make([]EventEnvelope, 0, len(events))
+	for _, event := range events {
+		event, err := event.normalized()
+		if err != nil {
+			return nil, err
+		}
+		normalized = append(normalized, event)
+	}
+	operation := struct {
+		Action        string          `json:"action"`
+		TransactionID string          `json:"transaction_id"`
+		ProducerID    string          `json:"producer_id"`
+		ProducerEpoch string          `json:"producer_epoch"`
+		Sequence      string          `json:"sequence"`
+		Partition     uint32          `json:"partition"`
+		Envelopes     []EventEnvelope `json:"envelopes"`
+	}{"append_transaction", transactionID, producerID, strconv.FormatUint(producerEpoch, 10), strconv.FormatUint(sequence, 10), 0, normalized}
+	return client.mutateState(ctx, stream, shard, idempotencyKey, operation)
+}
+
+// CommitTransaction makes its records visible and optionally advances one group offset atomically.
+func (client *RegionalStreamClient) CommitTransaction(ctx context.Context, stream string, shard uint32, idempotencyKey, transactionID string, offsetCommit *StreamOffsetCommit) (Document, error) {
+	if err := validateStreamTransaction(transactionID); err != nil {
+		return nil, err
+	}
+	var commit any
+	if offsetCommit != nil {
+		if strings.TrimSpace(offsetCommit.Group) == "" || offsetCommit.Partition != shard {
+			return nil, fmt.Errorf("epoch: Stream transaction offset commit must name a group on shard %d", shard)
+		}
+		commit = struct {
+			Group      string `json:"group"`
+			Partition  uint32 `json:"partition"`
+			NextOffset string `json:"next_offset"`
+		}{offsetCommit.Group, 0, strconv.FormatUint(offsetCommit.NextOffset, 10)}
+	}
+	operation := struct {
+		Action        string `json:"action"`
+		TransactionID string `json:"transaction_id"`
+		OffsetCommit  any    `json:"offset_commit,omitempty"`
+	}{"commit_transaction", transactionID, commit}
+	return client.mutateState(ctx, stream, shard, idempotencyKey, operation)
+}
+
+// AbortTransaction permanently hides the transaction's records from read-committed consumers.
+func (client *RegionalStreamClient) AbortTransaction(ctx context.Context, stream string, shard uint32, idempotencyKey, transactionID string) (Document, error) {
+	if err := validateStreamTransaction(transactionID); err != nil {
+		return nil, err
+	}
+	operation := struct {
+		Action        string `json:"action"`
+		TransactionID string `json:"transaction_id"`
+	}{"abort_transaction", transactionID}
+	return client.mutateState(ctx, stream, shard, idempotencyKey, operation)
+}
+
+// Compact retains the latest committed record per key and expires old tombstones.
+func (client *RegionalStreamClient) Compact(ctx context.Context, stream string, shard uint32, idempotencyKey string, tombstoneRetention time.Duration) (Document, error) {
+	if tombstoneRetention <= 0 {
+		return nil, fmt.Errorf("epoch: tombstone retention must be positive")
+	}
+	operation := struct {
+		Action               string `json:"action"`
+		Partition            uint32 `json:"partition"`
+		TombstoneRetentionMS string `json:"tombstone_retention_ms"`
+	}{"compact", 0, strconv.FormatInt(tombstoneRetention.Milliseconds(), 10)}
+	return client.mutateState(ctx, stream, shard, idempotencyKey, operation)
+}
+
+// TierPrefix moves a committed hot prefix into one immutable, checksum-verified object.
+func (client *RegionalStreamClient) TierPrefix(ctx context.Context, stream string, shard uint32, idempotencyKey string, beforeOffset uint64, maxRecords uint32) (Document, error) {
+	if maxRecords == 0 || maxRecords > 1_024 {
+		return nil, fmt.Errorf("epoch: tier max records must be between 1 and 1024")
+	}
+	operation := struct {
+		Action       string `json:"action"`
+		Partition    uint32 `json:"partition"`
+		BeforeOffset string `json:"before_offset"`
+		MaxRecords   uint32 `json:"max_records"`
+	}{"tier_prefix", 0, strconv.FormatUint(beforeOffset, 10), maxRecords}
+	return client.mutateState(ctx, stream, shard, idempotencyKey, operation)
+}
+
+// Capture writes one bounded committed offset range in a portable open format.
+func (client *RegionalStreamClient) Capture(ctx context.Context, stream string, shard uint32, idempotencyKey, captureID string, firstOffset, endOffset uint64, format StreamCaptureFormat) (Document, error) {
+	if strings.TrimSpace(captureID) == "" || firstOffset > endOffset {
+		return nil, fmt.Errorf("epoch: capture ID is required and its offset range must be ordered")
+	}
+	if format != StreamCaptureJSONLines && format != StreamCaptureJSONArray {
+		return nil, fmt.Errorf("epoch: unsupported Stream capture format %q", format)
+	}
+	operation := struct {
+		Action      string              `json:"action"`
+		CaptureID   string              `json:"capture_id"`
+		Partition   uint32              `json:"partition"`
+		FirstOffset string              `json:"first_offset"`
+		EndOffset   string              `json:"end_offset"`
+		Format      StreamCaptureFormat `json:"format"`
+	}{"capture", captureID, 0, strconv.FormatUint(firstOffset, 10), strconv.FormatUint(endOffset, 10), format}
+	return client.mutateState(ctx, stream, shard, idempotencyKey, operation)
+}
+
+// Replicate applies one contiguous source batch with checkpoint and loop fencing.
+func (client *RegionalStreamClient) Replicate(ctx context.Context, stream string, shard uint32, idempotencyKey string, batch StreamReplicationBatch) (Document, error) {
+	if strings.TrimSpace(batch.SourceCluster) == "" || strings.TrimSpace(batch.SourceStream) == "" || len(batch.Records) == 0 || len(batch.Records) > 128 {
+		return nil, fmt.Errorf("epoch: replication requires source identity and between 1 and 128 records")
+	}
+	type wireRecord struct {
+		SourceOffset      string        `json:"source_offset"`
+		Envelope          EventEnvelope `json:"envelope"`
+		TraversedClusters []string      `json:"traversed_clusters"`
+	}
+	records := make([]wireRecord, 0, len(batch.Records))
+	for _, record := range batch.Records {
+		event, err := record.Envelope.normalized()
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, wireRecord{strconv.FormatUint(record.SourceOffset, 10), event, append([]string(nil), record.TraversedClusters...)})
+	}
+	operation := struct {
+		Action         string `json:"action"`
+		LocalPartition uint32 `json:"local_partition"`
+		Batch          any    `json:"batch"`
+	}{"replicate", 0, struct {
+		SourceCluster     string       `json:"source_cluster"`
+		SourceStream      string       `json:"source_stream"`
+		SourcePartition   uint32       `json:"source_partition"`
+		FirstSourceOffset string       `json:"first_source_offset"`
+		Records           []wireRecord `json:"records"`
+	}{batch.SourceCluster, batch.SourceStream, batch.SourcePartition, strconv.FormatUint(batch.FirstSourceOffset, 10), records}}
+	return client.mutateState(ctx, stream, shard, idempotencyKey, operation)
+}
+
+// Transaction returns one linearizable transaction observation.
+func (client *RegionalStreamClient) Transaction(ctx context.Context, stream string, shard uint32, transactionID string) (Document, error) {
+	segment, err := segment(transactionID, "transaction")
+	if err != nil {
+		return nil, err
+	}
+	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, func(_ regionalRoute) Request {
+		return Request{Method: "GET", Path: "/transactions/" + segment, Headers: map[string]string{regionalReadHeader: "linearizable"}}
+	})
+}
+
+// TierObjects lists immutable tier manifests for one shard.
+func (client *RegionalStreamClient) TierObjects(ctx context.Context, stream string, shard uint32) (Document, error) {
+	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, func(_ regionalRoute) Request {
+		return Request{Method: "GET", Path: "/tier/objects", Headers: map[string]string{regionalReadHeader: "linearizable"}}
+	})
+}
+
+// CaptureArtifact returns one retained capture artifact and checksum.
+func (client *RegionalStreamClient) CaptureArtifact(ctx context.Context, stream string, shard uint32, captureID string) (Document, error) {
+	segment, err := segment(captureID, "capture")
+	if err != nil {
+		return nil, err
+	}
+	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, func(_ regionalRoute) Request {
+		return Request{Method: "GET", Path: "/captures/" + segment, Headers: map[string]string{regionalReadHeader: "linearizable"}}
+	})
+}
+
+// ConfigureCaptureSchedule enables leader-driven periodic open-format capture.
+func (client *RegionalStreamClient) ConfigureCaptureSchedule(ctx context.Context, stream string, shard uint32, idempotencyKey, scheduleID string, interval time.Duration, format StreamCaptureFormat) (Document, error) {
+	if _, err := segment(scheduleID, "capture schedule"); err != nil {
+		return nil, err
+	}
+	if interval < minStreamCaptureInterval || interval > maxStreamCaptureInterval || interval%time.Millisecond != 0 {
+		return nil, fmt.Errorf("epoch: capture interval must be between %s and %s in whole milliseconds", minStreamCaptureInterval, maxStreamCaptureInterval)
+	}
+	if format != StreamCaptureJSONLines && format != StreamCaptureJSONArray {
+		return nil, fmt.Errorf("epoch: unsupported Stream capture format %q", format)
+	}
+	return client.mutateState(ctx, stream, shard, idempotencyKey, struct {
+		Action     string              `json:"action"`
+		ScheduleID string              `json:"schedule_id"`
+		Partition  uint32              `json:"partition"`
+		IntervalMS string              `json:"interval_ms"`
+		Format     StreamCaptureFormat `json:"format"`
+	}{"configure_capture_schedule", scheduleID, 0, strconv.FormatInt(interval.Milliseconds(), 10), format})
+}
+
+// CaptureSchedule returns the replicated schedule checkpoint and next deadline.
+func (client *RegionalStreamClient) CaptureSchedule(ctx context.Context, stream string, shard uint32, scheduleID string) (Document, error) {
+	segment, err := segment(scheduleID, "capture schedule")
+	if err != nil {
+		return nil, err
+	}
+	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, func(_ regionalRoute) Request {
+		return Request{Method: "GET", Path: "/capture-schedules/" + segment, Headers: map[string]string{regionalReadHeader: "linearizable"}}
+	})
+}
+
+// PartitionAdvice estimates an online expand-only partition target.
+func (client *RegionalStreamClient) PartitionAdvice(ctx context.Context, stream string, targetRecordsPerPartition, targetBytesPerPartition uint64) (Document, error) {
+	if targetRecordsPerPartition == 0 || targetBytesPerPartition == 0 {
+		return nil, fmt.Errorf("epoch: partition advice targets must be positive")
+	}
+	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, 0, func(_ regionalRoute) Request {
+		return Request{Method: "GET", Path: "/partitions/advice", Query: url.Values{
+			"target_records_per_partition": {strconv.FormatUint(targetRecordsPerPartition, 10)},
+			"target_bytes_per_partition":   {strconv.FormatUint(targetBytesPerPartition, 10)},
+		}, Headers: map[string]string{regionalReadHeader: "linearizable"}}
+	})
+}
+
+// FetchSuperstream creates a deterministic logical merge over independently linearizable shards.
+// The result is not an atomic cross-shard snapshot; each record retains its member identity.
+func (client *RegionalStreamClient) FetchSuperstream(ctx context.Context, members []StreamSuperstreamMember, limit uint32, isolation StreamReadIsolation) (Document, error) {
+	if len(members) == 0 || len(members) > 128 {
+		return nil, fmt.Errorf("epoch: superstream must contain between 1 and 128 members")
+	}
+	if limit == 0 || limit > maxRegionalFetchRecords {
+		return nil, fmt.Errorf("epoch: fetch limit must be between 1 and %d", maxRegionalFetchRecords)
+	}
+	type mergedRecord struct {
+		appendedAt uint64
+		member     string
+		partition  uint64
+		offset     uint64
+		document   Document
+	}
+	merged := make([]mergedRecord, 0)
+	seen := make(map[string]struct{}, len(members))
+	for _, member := range members {
+		if strings.TrimSpace(member.Name) == "" || strings.TrimSpace(member.Stream) == "" {
+			return nil, fmt.Errorf("epoch: superstream member name and Stream are required")
+		}
+		if _, duplicate := seen[member.Name]; duplicate {
+			return nil, fmt.Errorf("epoch: duplicate superstream member %q", member.Name)
+		}
+		seen[member.Name] = struct{}{}
+	}
+	for _, member := range members {
+		response, err := client.FetchWithIsolation(ctx, member.Stream, member.Shard, member.Offset, limit, isolation)
+		if err != nil {
+			return nil, err
+		}
+		records, ok := response["records"].([]any)
+		if !ok {
+			return nil, fmt.Errorf("epoch: superstream member %q response omitted records", member.Name)
+		}
+		for _, value := range records {
+			record, ok := value.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("epoch: superstream member %q returned an invalid record", member.Name)
+			}
+			appendedAt, err := streamResponseU64(record["appended_at_ms"], "appended_at_ms")
+			if err != nil {
+				return nil, err
+			}
+			partition, err := streamResponseU64(record["partition"], "partition")
+			if err != nil {
+				return nil, err
+			}
+			offset, err := streamResponseU64(record["offset"], "offset")
+			if err != nil {
+				return nil, err
+			}
+			copy := Document{"member": member.Name}
+			for key, item := range record {
+				copy[key] = item
+			}
+			merged = append(merged, mergedRecord{appendedAt, member.Name, partition, offset, copy})
+		}
+	}
+	sort.Slice(merged, func(left, right int) bool {
+		a, b := merged[left], merged[right]
+		if a.appendedAt != b.appendedAt {
+			return a.appendedAt < b.appendedAt
+		}
+		if a.member != b.member {
+			return a.member < b.member
+		}
+		if a.partition != b.partition {
+			return a.partition < b.partition
+		}
+		return a.offset < b.offset
+	})
+	if len(merged) > int(limit) {
+		merged = merged[:limit]
+	}
+	records := make([]any, len(merged))
+	for index, record := range merged {
+		records[index] = record.document
+	}
+	return Document{
+		"records":        records,
+		"member_count":   len(members),
+		"ordering":       "appended_at_member_partition_offset",
+		"snapshot_scope": "independently_linearizable_members",
+	}, nil
+}
+
+func streamResponseU64(value any, field string) (uint64, error) {
+	switch value := value.(type) {
+	case string:
+		parsed, err := strconv.ParseUint(value, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("epoch: Stream response %s is invalid: %w", field, err)
+		}
+		return parsed, nil
+	case float64:
+		const maxSafeJSONInteger = float64(9_007_199_254_740_991)
+		if value < 0 || value > maxSafeJSONInteger || value != float64(uint64(value)) {
+			return 0, fmt.Errorf("epoch: Stream response %s is invalid", field)
+		}
+		return uint64(value), nil
+	default:
+		return 0, fmt.Errorf("epoch: Stream response omitted %s", field)
+	}
+}
+
+func (client *RegionalStreamClient) mutateState(ctx context.Context, stream string, shard uint32, idempotencyKey string, operation any) (Document, error) {
+	if err := validateRegionalIdempotencyKey(idempotencyKey); err != nil {
+		return nil, err
+	}
+	return regionalCall[Document](ctx, client.regionalClient(), "streams", "stream", stream, shard, func(route regionalRoute) Request {
+		return Request{Method: "POST", Path: "/state", Body: struct {
+			IdempotencyKey string `json:"idempotency_key"`
+			ExpectedTerm   string `json:"expected_term"`
+			Operation      any    `json:"operation"`
+		}{idempotencyKey, route.Term, operation}}
+	})
+}
+
+func validateStreamProducer(producerID string, producerEpoch uint64) error {
+	if strings.TrimSpace(producerID) == "" || producerEpoch == 0 {
+		return fmt.Errorf("epoch: producer ID and non-zero epoch are required")
+	}
+	return nil
+}
+
+func validateStreamTransaction(transactionID string) error {
+	if strings.TrimSpace(transactionID) == "" {
+		return fmt.Errorf("epoch: transaction ID is required")
+	}
+	return nil
 }
 
 // CommitOffset commits or explicitly resets a generation-fenced next offset.

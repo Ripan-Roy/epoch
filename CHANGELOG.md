@@ -6,6 +6,40 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+## [0.1.0-alpha.7] - 2026-08-21
+
+### Added
+
+- Completed the Stream state-services development boundary with replicated
+  producer epochs/sequences, same-tablet transactions and atomic offset commit,
+  read-committed/uncommitted fetch, keyed compaction/tombstones, and immutable
+  SHA-256 historical tier objects.
+- Added pull, push long poll, consumer-identified dedicated long poll,
+  expand-only partition advice, automatic JSON Lines/Array capture with durable
+  schedule checkpoints, and contiguous loop-fenced cross-cluster replication
+  ingress.
+- Extended Go, Java, and Python with the complete advanced Stream API and a
+  deterministic logical superstream merge over independently linearizable
+  named members. Exact unsigned 64-bit fields remain browser-safe decimal
+  strings.
+- Added command v7, Stream snapshot v2/tablet snapshot v4 compatibility,
+  staged snapshotability and cross-component recovery validation, ADR-0035,
+  end-to-end SDK documentation, console coverage, and real three-voter
+  checkpoint/reopen evidence.
+- Added committed typed state rejections that preserve tablet availability,
+  leave staged log/service state unchanged, and survive exact retry, snapshot,
+  quorum replication, and all-node recovery.
+- Expanded the Docker regional campaign with a dedicated advanced Stream driven
+  through the Python SDK across process leader loss, voter catch-up, all-node
+  SIGKILL, and same-volume reopen.
+
+### Limitations
+
+- Stream transactions remain one-tablet operations. Alpha tier/capture bytes
+  remain embedded in replicated state, dedicated delivery is scheduling rather
+  than a throughput SLO, and deployment-specific external object-store and
+  inter-region workers remain production gates.
+
 ## [0.1.0-alpha.6] - 2026-08-21
 
 ### Added

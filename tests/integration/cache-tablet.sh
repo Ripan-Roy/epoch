@@ -488,7 +488,10 @@ import time
 
 deadline = int(sys.argv[1])
 maximum = float(sys.argv[2])
-delay = max(0.0, (deadline - time.time_ns() // 1_000_000 + 150) / 1000)
+# The deadline originates in one container and maintenance may be submitted by
+# a replacement leader. Keep a bounded handoff margin so scheduling/clock
+# sampling around the exact millisecond cannot turn the expiry proof flaky.
+delay = max(0.0, (deadline - time.time_ns() // 1_000_000 + 500) / 1000)
 if delay > maximum:
     raise SystemExit(f"deadline wait {delay:.3f}s exceeds bound {maximum:.3f}s")
 time.sleep(delay)

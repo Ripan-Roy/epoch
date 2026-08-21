@@ -166,7 +166,7 @@ export const docsPages: ReadonlyArray<DocsPageMeta> = [
     label: "Regional Stream",
     title: "Regional Stream SDK",
     summary:
-      "Route keys and coordinate consumers across replicated partitions, with the observed generation and tablet epoch carried on every request.",
+      "Build fenced producers, transactions, compaction, tiering, automatic capture, replication, and logical superstreams over replicated partitions.",
     headings: regionalHeadings,
     Body: RegionalStreamBody,
   },
