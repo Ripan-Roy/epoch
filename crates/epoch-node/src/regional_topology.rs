@@ -16,7 +16,8 @@ use crate::{
     epoch_target_delivery::EpochTargetDeliveryStatus,
     managed_target_delivery::ManagedTargetDeliveryStatus,
     regional_checkpoint::RegionalCheckpointStatus, regional_maintenance::RegionalMaintenanceStatus,
-    tablet_materializer::TabletDirectory, webhook_delivery::WebhookDeliveryStatus,
+    source_connector_delivery::SourceConnectorDeliveryStatus, tablet_materializer::TabletDirectory,
+    webhook_delivery::WebhookDeliveryStatus,
 };
 
 pub const REGIONAL_TOPOLOGY_PATH: &str = "/experimental/v1/regional/topology";
@@ -116,7 +117,38 @@ struct TopologyState {
     checkpoints: std::sync::Arc<RegionalCheckpointStatus>,
     epoch_targets: std::sync::Arc<EpochTargetDeliveryStatus>,
     managed_targets: std::sync::Arc<ManagedTargetDeliveryStatus>,
+    source_connectors: std::sync::Arc<SourceConnectorDeliveryStatus>,
     webhooks: std::sync::Arc<WebhookDeliveryStatus>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RegionalTopologyStatuses {
+    maintenance: std::sync::Arc<RegionalMaintenanceStatus>,
+    checkpoints: std::sync::Arc<RegionalCheckpointStatus>,
+    epoch_targets: std::sync::Arc<EpochTargetDeliveryStatus>,
+    managed_targets: std::sync::Arc<ManagedTargetDeliveryStatus>,
+    source_connectors: std::sync::Arc<SourceConnectorDeliveryStatus>,
+    webhooks: std::sync::Arc<WebhookDeliveryStatus>,
+}
+
+impl RegionalTopologyStatuses {
+    pub fn new(
+        maintenance: std::sync::Arc<RegionalMaintenanceStatus>,
+        checkpoints: std::sync::Arc<RegionalCheckpointStatus>,
+        epoch_targets: std::sync::Arc<EpochTargetDeliveryStatus>,
+        managed_targets: std::sync::Arc<ManagedTargetDeliveryStatus>,
+        source_connectors: std::sync::Arc<SourceConnectorDeliveryStatus>,
+        webhooks: std::sync::Arc<WebhookDeliveryStatus>,
+    ) -> Self {
+        Self {
+            maintenance,
+            checkpoints,
+            epoch_targets,
+            managed_targets,
+            source_connectors,
+            webhooks,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -131,6 +163,8 @@ struct TopologyResponse {
     checkpoints: crate::regional_checkpoint::RegionalCheckpointStatusSnapshot,
     epoch_target_delivery: crate::epoch_target_delivery::EpochTargetDeliveryStatusSnapshot,
     managed_target_delivery: crate::managed_target_delivery::ManagedTargetDeliveryStatusSnapshot,
+    source_connector_delivery:
+        crate::source_connector_delivery::SourceConnectorDeliveryStatusSnapshot,
     webhook_delivery: crate::webhook_delivery::WebhookDeliveryStatusSnapshot,
 }
 
@@ -155,22 +189,19 @@ struct TopologyErrorResponse {
 pub fn regional_topology_router(
     topology: NodeTopology,
     directory: TabletDirectory,
-    maintenance: std::sync::Arc<RegionalMaintenanceStatus>,
-    checkpoints: std::sync::Arc<RegionalCheckpointStatus>,
-    epoch_targets: std::sync::Arc<EpochTargetDeliveryStatus>,
-    managed_targets: std::sync::Arc<ManagedTargetDeliveryStatus>,
-    webhooks: std::sync::Arc<WebhookDeliveryStatus>,
+    statuses: RegionalTopologyStatuses,
 ) -> Router {
     Router::new()
         .route(REGIONAL_TOPOLOGY_PATH, get(get_topology))
         .with_state(TopologyState {
             topology,
             directory,
-            maintenance,
-            checkpoints,
-            epoch_targets,
-            managed_targets,
-            webhooks,
+            maintenance: statuses.maintenance,
+            checkpoints: statuses.checkpoints,
+            epoch_targets: statuses.epoch_targets,
+            managed_targets: statuses.managed_targets,
+            source_connectors: statuses.source_connectors,
+            webhooks: statuses.webhooks,
         })
 }
 
@@ -209,6 +240,7 @@ async fn get_topology(State(state): State<TopologyState>) -> Response {
         checkpoints: state.checkpoints.snapshot(),
         epoch_target_delivery: state.epoch_targets.snapshot(),
         managed_target_delivery: state.managed_targets.snapshot(),
+        source_connector_delivery: state.source_connectors.snapshot(),
         webhook_delivery: state.webhooks.snapshot(),
     })
     .into_response()

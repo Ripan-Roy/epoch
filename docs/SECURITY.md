@@ -520,6 +520,12 @@ baseline at the managed and regional public boundaries:
   source settlement. A real loopback OAuth/target test exercises the boundary;
   OS sandboxing, secret-manager identity, private egress, and penetration
   evidence remain open.
+- HTTP source ingestion reuses the same strict secret-reference, hostname
+  allowlist, public-address DNS validation/pinning, redirect/proxy suppression,
+  response-size, and timeout boundary. The worker validates the exact source
+  cursor before proposing data and never exposes secret bytes in replicated
+  connector state or topology. CDC/Kafka/storage adapters and independent
+  connector isolation/abuse certification remain open.
 - Governance metadata is bounded, non-secret desired state. New managed
   resources require canonical owner, cost center, classification, and tags;
   `epoch.io/` tag keys are reserved. The Go BFF filters tenant visibility before

@@ -4,6 +4,7 @@ import { repositoryUrl } from "./content";
 import {
   ClusterMilestoneBody,
   ConsensusRecoveryBody,
+  DeploymentBody,
   GuaranteesBody,
   OverviewBody,
   QuickstartBody,
@@ -23,6 +24,7 @@ export type DocsPageId =
   | "restart"
   | "guarantees"
   | "cluster-milestone"
+  | "deployment"
   | "consensus-recovery"
   | "resource-governance"
   | "regional-stream"
@@ -134,6 +136,21 @@ export const docsPages: ReadonlyArray<DocsPageMeta> = [
       { id: "proofs", label: "Run the proofs" },
     ],
     Body: ClusterMilestoneBody,
+  },
+  {
+    id: "deployment",
+    group: "Core concepts",
+    label: "Deploy & operate",
+    title: "Deploy and operate Epoch",
+    summary:
+      "Run the fixed-voter regional system through a real Kubernetes controller, manage it with the CLI, and ingest crash-safe HTTP source batches.",
+    headings: [
+      { id: "kubernetes", label: "Install on Kubernetes" },
+      { id: "cli", label: "Management CLI" },
+      { id: "source-connectors", label: "HTTP source connectors" },
+      { id: "operations", label: "Evidence and limits" },
+    ],
+    Body: DeploymentBody,
   },
   {
     id: "consensus-recovery",

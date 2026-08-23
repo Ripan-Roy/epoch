@@ -356,8 +356,8 @@ make test-bus-tablet
 
 Still required are replay-attempt lineage, bidirectional streaming push,
 unsigned legacy HTTP execution, an MQTT wire gateway, official schema/MQTT/
-CloudEvents conformance, automatic source-connector polling, active endpoint
-health restoration, private managed egress, secret manager/hot reload,
+CloudEvents conformance, CDC/Kafka/object-storage source adapters, active
+endpoint health restoration, private managed egress, secret manager/hot reload,
 user-exportable backups/PITR, production identity/TLS and security/scale
 evidence, generated response models, package publication, and multi-shard
 routing.

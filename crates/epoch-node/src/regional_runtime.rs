@@ -41,7 +41,11 @@ use crate::{
         DEFAULT_REGIONAL_READ_BARRIER_TIMEOUT, MAX_REGIONAL_READ_BARRIER_TIMEOUT,
         regional_tablet_router_with_read_timeout,
     },
-    regional_topology::{NodeTopology, regional_topology_router},
+    regional_topology::{NodeTopology, RegionalTopologyStatuses, regional_topology_router},
+    source_connector_delivery::{
+        DEFAULT_SOURCE_CONNECTOR_INTERVAL, SourceConnectorDeliveryStatus,
+        SourceConnectorDeliveryWorker, run_source_connector_delivery_pass,
+    },
     tablet_materializer::{RegionalTabletMaterializer, TabletMaterializerError},
     webhook_delivery::{
         WebhookDeliveryConfig, WebhookDeliveryStatus, WebhookDeliveryWorker,
@@ -71,6 +75,7 @@ pub struct RegionalRuntimeConfig {
     pub checkpoint_min_applied_entries: u64,
     pub epoch_target_delivery: EpochTargetDeliveryConfig,
     pub managed_target_delivery: ManagedTargetDeliveryConfig,
+    pub source_connector_interval: Duration,
     pub webhook_delivery: Option<WebhookDeliveryConfig>,
 }
 
@@ -93,6 +98,7 @@ impl fmt::Debug for RegionalRuntimeConfig {
             )
             .field("epoch_target_delivery", &self.epoch_target_delivery)
             .field("managed_target_delivery", &self.managed_target_delivery)
+            .field("source_connector_interval", &self.source_connector_interval)
             .finish_non_exhaustive()
     }
 }
@@ -127,6 +133,7 @@ impl RegionalRuntimeConfig {
             checkpoint_min_applied_entries: DEFAULT_REGIONAL_CHECKPOINT_MIN_APPLIED_ENTRIES,
             epoch_target_delivery: EpochTargetDeliveryConfig::default(),
             managed_target_delivery: ManagedTargetDeliveryConfig::default(),
+            source_connector_interval: DEFAULT_SOURCE_CONNECTOR_INTERVAL,
             webhook_delivery: None,
         }
     }
@@ -171,6 +178,12 @@ impl RegionalRuntimeConfig {
     #[must_use]
     pub fn with_managed_target_delivery(mut self, config: ManagedTargetDeliveryConfig) -> Self {
         self.managed_target_delivery = config;
+        self
+    }
+
+    #[must_use]
+    pub fn with_source_connector_interval(mut self, interval: Duration) -> Self {
+        self.source_connector_interval = interval;
         self
     }
 }
@@ -224,6 +237,8 @@ struct RegionalBackground {
     epoch_target_status: Arc<EpochTargetDeliveryStatus>,
     managed_target_worker: ManagedTargetDeliveryWorker,
     managed_target_status: Arc<ManagedTargetDeliveryStatus>,
+    source_connector_worker: SourceConnectorDeliveryWorker,
+    source_connector_status: Arc<SourceConnectorDeliveryStatus>,
     webhook_worker: Option<WebhookDeliveryWorker>,
     webhook_status: Arc<WebhookDeliveryStatus>,
 }
@@ -318,6 +333,14 @@ impl RegionalNodeRuntime {
         .map_err(|error| RegionalRuntimeError::InvalidConfiguration(error.to_string()))?;
         let managed_target_status =
             ManagedTargetDeliveryStatus::new(config.managed_target_delivery.interval);
+        let source_connector_worker = SourceConnectorDeliveryWorker::new(
+            config.source_connector_interval,
+            config.managed_target_delivery.clone(),
+            config.profile_commit_wait,
+        )
+        .map_err(|error| RegionalRuntimeError::InvalidConfiguration(error.to_string()))?;
+        let source_connector_status =
+            SourceConnectorDeliveryStatus::new(config.source_connector_interval);
         let webhook_worker = config
             .webhook_delivery
             .clone()
@@ -338,11 +361,14 @@ impl RegionalNodeRuntime {
             .merge(regional_topology_router(
                 config.topology,
                 directory.clone(),
-                Arc::clone(&maintenance_status),
-                Arc::clone(&checkpoint_status),
-                Arc::clone(&epoch_target_status),
-                Arc::clone(&managed_target_status),
-                Arc::clone(&webhook_status),
+                RegionalTopologyStatuses::new(
+                    Arc::clone(&maintenance_status),
+                    Arc::clone(&checkpoint_status),
+                    Arc::clone(&epoch_target_status),
+                    Arc::clone(&managed_target_status),
+                    Arc::clone(&source_connector_status),
+                    Arc::clone(&webhook_status),
+                ),
             ));
         let background_config = RegionalBackground {
             reconcile_state: catalog_state.clone(),
@@ -357,6 +383,8 @@ impl RegionalNodeRuntime {
             epoch_target_status,
             managed_target_worker,
             managed_target_status,
+            source_connector_worker,
+            source_connector_status,
             webhook_worker,
             webhook_status,
         };
@@ -451,6 +479,7 @@ struct BackgroundIntervals {
     checkpoints: tokio::time::Interval,
     epoch_targets: tokio::time::Interval,
     managed_targets: tokio::time::Interval,
+    source_connectors: tokio::time::Interval,
     webhooks: Option<tokio::time::Interval>,
 }
 
@@ -463,6 +492,7 @@ impl BackgroundIntervals {
             managed_targets: background_interval(
                 background.managed_target_worker.config().interval,
             ),
+            source_connectors: background_interval(background.source_connector_worker.interval()),
             webhooks: background
                 .webhook_worker
                 .as_ref()
@@ -537,6 +567,15 @@ fn spawn_background(
                         background.clock.as_ref(),
                     ).await;
                     background.managed_target_status.record(now_ms, pass, error);
+                }
+                _ = intervals.source_connectors.tick() => {
+                    let now_ms = background.clock.wall_time_ms();
+                    let (pass, error) = run_source_connector_delivery_pass(
+                        &background.directory,
+                        &background.source_connector_worker,
+                        background.clock.as_ref(),
+                    ).await;
+                    background.source_connector_status.record(now_ms, pass, error);
                 }
                 () = async {
                     if let Some(interval) = intervals.webhooks.as_mut() {

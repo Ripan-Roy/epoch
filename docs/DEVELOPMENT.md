@@ -165,6 +165,7 @@ make test-integration # real processes plus exact published SDK quickstarts
 make build            # compile all current components
 make check            # normal pre-commit gate
 make ci               # local deterministic CI gate
+make kubernetes-config # render and client-dry-run the operator Kustomize tree
 ```
 
 `make check` includes `make audit`; it therefore requires the pinned

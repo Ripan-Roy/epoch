@@ -8,7 +8,13 @@ use std::{
     time::Duration,
 };
 
-use axum::{Router, body::Bytes, extract::State, http::HeaderMap, routing::post};
+use axum::{
+    Json, Router,
+    body::Bytes,
+    extract::State,
+    http::HeaderMap,
+    routing::{get, post},
+};
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -59,6 +65,8 @@ impl NodeProcess {
                 "--regional-managed-target-delivery-interval-ms",
                 "20",
                 "--regional-managed-target-allow-http-loopback",
+                "--regional-source-connector-interval-ms",
+                "20",
                 "--regional-webhook-signing-keys-path",
                 self.webhook_signing_keys_path
                     .to_str()
@@ -904,6 +912,184 @@ async fn capture_managed_target(
     StatusCode::NO_CONTENT
 }
 
+#[derive(Default)]
+struct SourceConnectorState {
+    positions: Mutex<Vec<String>>,
+}
+
+struct TestSourceConnector {
+    address: SocketAddr,
+    state: Arc<SourceConnectorState>,
+    shutdown: oneshot::Sender<()>,
+    server: tokio::task::JoinHandle<std::io::Result<()>>,
+}
+
+impl TestSourceConnector {
+    async fn start() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("source connector should bind");
+        let address = listener
+            .local_addr()
+            .expect("source connector address should exist");
+        let state = Arc::new(SourceConnectorState::default());
+        let router = Router::new()
+            .route("/events", get(poll_source_connector))
+            .with_state(Arc::clone(&state));
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+        });
+        Self {
+            address,
+            state,
+            shutdown,
+            server,
+        }
+    }
+
+    async fn stop(self) {
+        let _ = self.shutdown.send(());
+        self.server
+            .await
+            .expect("source connector task should join")
+            .expect("source connector should stop cleanly");
+    }
+}
+
+async fn poll_source_connector(
+    State(state): State<Arc<SourceConnectorState>>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<Value>) {
+    let position = headers
+        .get("epoch-connector-position")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    state
+        .positions
+        .lock()
+        .expect("source positions lock should hold")
+        .push(position.clone());
+    if position != "cursor-10" {
+        return (StatusCode::NO_CONTENT, Json(Value::Null));
+    }
+    (
+        StatusCode::OK,
+        Json(json!({
+            "batch_id": "process-source-batch-11",
+            "source_from": "cursor-10",
+            "source_to": "cursor-11",
+            "events": [{
+                "id": "source-event-11",
+                "source": "urn:process-source",
+                "type": "source.imported",
+                "time_ms": 11,
+                "payload": {"order_id": 11}
+            }]
+        })),
+    )
+}
+
+async fn prove_source_connector_ingestion(
+    client: &Client,
+    cluster: &ProcessCluster,
+    indexes: &[usize],
+) {
+    let source = TestSourceConnector::start().await;
+    write_bus_mutation(
+        client,
+        cluster,
+        indexes,
+        "process-source-connector-v1",
+        &json!({
+            "kind": "apply_integration",
+            "operation": {
+                "kind": "upsert_connector",
+                "spec": {
+                    "name": "orders-source",
+                    "kind": "http",
+                    "direction": "source",
+                    "secret_refs": [],
+                    "outbound_allowlist": ["127.0.0.1"],
+                    "identity": "orders-source-reader",
+                    "config": {
+                        "source_url": format!("http://{}/events", source.address),
+                        "start_position": "cursor-10",
+                        "poll_timeout_ms": "1000"
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    wait_for_source_checkpoint(client, cluster, indexes).await;
+    let positions = source
+        .state
+        .positions
+        .lock()
+        .expect("source positions lock should hold")
+        .clone();
+    assert!(positions.iter().any(|position| position == "cursor-10"));
+    assert!(positions.iter().any(|position| position == "cursor-11"));
+    wait_for_profile_apply(client, cluster, "event-bus", "events", indexes, 21).await;
+    source.stop().await;
+}
+
+async fn wait_for_source_checkpoint(client: &Client, cluster: &ProcessCluster, indexes: &[usize]) {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            let mut converged = true;
+            for &index in indexes {
+                let response = client
+                    .get(data_url(
+                        &cluster.nodes[index],
+                        "event-bus",
+                        "events",
+                        "integration/state",
+                    ))
+                    .bearer_auth(ADMIN_TOKEN)
+                    .header("x-epoch-resource-generation", "1")
+                    .header("x-epoch-tablet-epoch", "1")
+                    .header("x-epoch-read-consistency", "local_stale")
+                    .send()
+                    .await;
+                let Ok(response) = response else {
+                    converged = false;
+                    break;
+                };
+                if response.status() != StatusCode::OK {
+                    converged = false;
+                    break;
+                }
+                let body = response.json::<Value>().await.expect("state should be JSON");
+                if body["state"]["connectors"]["connectors"]["orders-source"]["checkpoint"]
+                    ["source_position"]
+                    != "cursor-11"
+                {
+                    converged = false;
+                    break;
+                }
+            }
+            if converged {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "source connector checkpoint did not converge\n{}",
+            cluster.diagnostics()
+        )
+    });
+}
+
 async fn prove_managed_api_destination(
     client: &Client,
     cluster: &ProcessCluster,
@@ -1506,6 +1692,7 @@ async fn regional_processes_fail_over_reopen_and_converge() {
     wait_for_acknowledged_webhook(&client, &cluster, &all).await;
     prove_managed_api_destination(&client, &cluster, &all).await;
     wait_for_acknowledged_api_destination(&client, &cluster, &all).await;
+    prove_source_connector_ingestion(&client, &cluster, &all).await;
     wait_for_catalog_counts(&client, &cluster, 4).await;
 
     cluster.stop_all();
@@ -1516,7 +1703,7 @@ async fn regional_processes_fail_over_reopen_and_converge() {
     for (kind, name) in additional_profiles {
         wait_for_routes(&client, &cluster, kind, name, &all).await;
         let expected = match kind {
-            "event-bus" => 18,
+            "event-bus" => 21,
             "queue" => 2,
             _ => 1,
         };

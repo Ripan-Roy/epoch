@@ -1,0 +1,28 @@
+apiVersion: platform.epoch.dev/v1alpha1
+kind: EpochCluster
+metadata:
+  name: epoch
+  namespace: epoch-system
+spec:
+  nodeImage: ghcr.io/ripan-roy/epoch-node:v0.1.0-alpha.10
+  controlImage: ghcr.io/ripan-roy/epoch-control:v0.1.0-alpha.10
+  region: ap-south
+  nodeClass: general-purpose
+  replicas: 3
+  storage: 20Gi
+  authPolicyConfigMap: epoch-auth-policy
+  credentialSecret: epoch-control-credentials
+  serviceType: ClusterIP
+  allowedOrigins:
+    - https://console.example.com
+  nodeResources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      cpu: "4"
+      memory: 8Gi
+  controlResources:
+    requests:
+      cpu: 100m
+      memory: 128Mi

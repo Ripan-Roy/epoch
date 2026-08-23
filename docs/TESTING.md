@@ -356,11 +356,16 @@ source-settlement, and status counters. Seven focused worker tests include a
 real OAuth token and target receiver. The three-process campaign delivers a
 structured managed event, converges Ack, reopens every voter, and proves full
 state convergence.
+Source-connector tests cover direction/status eligibility, exact cursor
+progression, duplicate/oversized/malformed batch rejection, stable record
+proposal identities, real loopback headers/authentication, error routing,
+connector fairness, topology counters, and a real three-process checkpoint and
+all-voter reopen history.
 The container gate adds follower rejection,
 majority-before-success, acquire/ack replication, leader loss, catch-up,
 archive/outbox/digest agreement, all-node `SIGKILL`, and same-volume recovery.
 An MQTT wire/protocol corpus, official schema/CloudEvents conformance,
-automatic source polling, unsigned legacy target execution, and a broader
+CDC/Kafka/object-storage source adapters, unsigned legacy target execution, and a broader
 crash-at-every-network-boundary matrix remain open; see
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 

@@ -381,6 +381,12 @@ impl ConnectorRegistry {
         self.connectors.get(name)
     }
 
+    pub fn resources(&self) -> impl Iterator<Item = (&str, &ConnectorResource)> {
+        self.connectors
+            .iter()
+            .map(|(name, resource)| (name.as_str(), resource))
+    }
+
     pub fn checkpoint(&self, name: &str) -> Option<&ConnectorCheckpoint> {
         self.connectors
             .get(name)

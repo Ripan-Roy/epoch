@@ -450,14 +450,18 @@ and lease-capped timeouts fail closed. Actual endpoint egress failure commits
 unhealthy state before failover; connector success commits the batch outcome
 and checkpoint before source acknowledgement.
 
-Bidirectional streaming push, unsigned legacy HTTP/webhook execution, an MQTT
-wire gateway, automatic source-connector polling, private managed egress,
+Generic HTTP/CloudEvents source connectors are polled only by the active Bus
+leader. Stable per-record proposal identities and record-before-checkpoint
+ordering make a stable batch replay duplicate-safe inside the Bus. Bidirectional
+streaming push, unsigned legacy HTTP/webhook execution, an MQTT wire gateway,
+CDC/Kafka/object-storage source adapters, private managed egress,
 secret hot reload/manager integration, active endpoint health restoration,
 official schema/MQTT/CloudEvents conformance, and replay-origin lineage remain
 outside this alpha. See
 [ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md) and
 [ADR-0031](adr/0031-leader-owned-epoch-target-delivery.md), and
-[ADR-0037](adr/0037-event-integration-platform.md).
+[ADR-0037](adr/0037-event-integration-platform.md), and
+[ADR-0038](adr/0038-product-runtime-closure.md).
 
 ## 9. Pipes and cross-profile behavior
 
@@ -734,8 +738,8 @@ production latency/throughput SLO, and a public idempotency-retention contract; 
 The direct Bus profile intentionally lacks target executors. The regional
 workers execute signed HTTP/webhook, Epoch Queue/Stream, API destination,
 endpoint-pool, function, and target/bidirectional connector targets. Unsigned
-legacy HTTP execution, streaming push, automatic source polling,
-replay-attempt lineage, private egress, and full protocol conformance remain
+legacy HTTP execution, streaming push, CDC/Kafka/object-storage source
+adapters, replay-attempt lineage, private egress, and full protocol conformance remain
 open; see
 [BUS_TABLET.md](BUS_TABLET.md).
 

@@ -5,7 +5,9 @@ import {
   consensusCheckpoint,
   epochTargetLanguageGuides,
   governanceInventory,
+  kubernetesInstall,
   languageGuides,
+  managementCli,
   managedTargetLanguageGuides,
   nodeRestart,
   nodeStart,
@@ -25,6 +27,7 @@ import {
   repositoryDocsUrl,
   sdkSurface,
   signedWebhookLanguageGuides,
+  sourceConnectorContract,
   type LanguageId,
   type RegionalGuide,
 } from "./content";
@@ -546,6 +549,82 @@ export function ClusterMilestoneBody() {
             "make test-stream-tablet\nmake test-queue-tablet\nmake test-cache-tablet\nmake test-bus-tablet\nmake test-regional-runtime"
           }
         />
+      </Topic>
+    </>
+  );
+}
+
+export function DeploymentBody() {
+  return (
+    <>
+      <Note title="Alpha installation boundary">
+        The operator installs the current fixed three-voter runtime and one durable control owner. Dynamic
+        membership, automated backups, guarded rolling upgrades, TLS/mTLS, and published OCI images remain
+        beta-hardening gates.
+      </Note>
+
+      <Topic id="kubernetes" title="Install on Kubernetes">
+        <p>
+          The <code>EpochCluster</code> controller requires three distinct Kubernetes nodes, renders stable
+          peer identities, provisions one PVC per voter and the control owner, checks referenced policy and
+          credential objects before creating workloads, and reports observed readiness through status
+          conditions.
+        </p>
+        <CodeBlock label="shell" value={kubernetesInstall} />
+      </Topic>
+
+      <Topic id="cli" title="Use the management CLI">
+        <p>
+          The CLI uses the generated RegionalAdmin gRPC contract for fully qualified resource operations and
+          the HTTP health boundary for diagnostics. Apply and delete receive fresh idempotency tokens; delete
+          may also fence an expected generation.
+        </p>
+        <CodeBlock label="shell" value={managementCli} />
+      </Topic>
+
+      <Topic id="source-connectors" title="Ingest from an HTTP source connector">
+        <p>
+          Only the active Event Bus tablet leader polls. Every event receives a deterministic proposal
+          identity, and the connector checkpoint advances only after every record has a committed applied or
+          error-routed result. A crash before checkpoint replays the same identities without a duplicate Bus
+          event.
+        </p>
+        <CodeBlock label="http" value={sourceConnectorContract} />
+      </Topic>
+
+      <Topic id="operations" title="Operational evidence and limits">
+        <p>
+          Regional topology exposes source poll passes, batches, applied/error-routed records, checkpoints,
+          errors, and the last bounded error. The real three-process test proves cursor propagation,
+          checkpoint convergence, all-voter restart, and exact state reopen. Generic HTTP and CloudEvents
+          sources are implemented; CDC, Kafka, and object-store source adapters still require certification.
+        </p>
+        <div className="reference-grid">
+          <ReferenceCard
+            eyebrow="Operator guide"
+            title="Kubernetes installation and lifecycle"
+            description="Images, CRD, RBAC, secret delivery, status, storage, upgrade boundaries, and uninstall behavior."
+            href={`${repositoryDocsUrl}/KUBERNETES_OPERATOR.md`}
+          />
+          <ReferenceCard
+            eyebrow="CLI guide"
+            title="Management CLI"
+            description="Strict manifests, fully qualified names, idempotency, OCC, diagnostics, and transport limits."
+            href={`${repositoryDocsUrl}/CLI.md`}
+          />
+          <ReferenceCard
+            eyebrow="Source contract"
+            title="HTTP source connectors"
+            description="Poll protocol, security boundary, cursor invariants, failure ordering, and recovery proof."
+            href={`${repositoryDocsUrl}/SOURCE_CONNECTORS.md`}
+          />
+          <ReferenceCard
+            eyebrow="Architecture decision"
+            title="Product runtime closure"
+            description="Operator ownership, CLI contract, source commit ordering, consequences, verification, and beta gates."
+            href={`${repositoryDocsUrl}/adr/0038-product-runtime-closure.md`}
+          />
+        </div>
       </Topic>
     </>
   );
@@ -1500,9 +1579,9 @@ export function ReferenceBody() {
           />
           <ReferenceCard
             eyebrow="Release"
-            title="v0.1.0-alpha.9 release notes"
+            title="v0.1.0-alpha.10 release notes"
             description="Verified milestone highlights, source-only artifacts, compatibility guidance, and explicit alpha limitations."
-            href={`${repositoryDocsUrl}/releases/v0.1.0-alpha.9.md`}
+            href={`${repositoryDocsUrl}/releases/v0.1.0-alpha.10.md`}
           />
         </div>
       </Topic>

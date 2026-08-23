@@ -860,7 +860,13 @@ cache memory.
 
 The Kubernetes operator follows the same boundary: custom resources express
 desired state, while the Rust catalog is authoritative for live data-plane
-state.
+state. The current controller-runtime implementation accepts a namespaced
+`EpochCluster`, validates the exact three-voter topology and referenced policy/
+credential objects, then reconciles stable StatefulSets, Services, PVCs,
+anti-affinity, hardened security contexts, explicit region/node-class identity,
+and observed conditions. It uses Lease leader election and treats API-server
+defaults as a no-op while repairing operator-owned drift. It does not yet own
+dynamic membership, backup/restore, or guarded upgrades.
 
 The current Go alpha runs a real `RegionalAdminService` gRPC server and a
 periodic reconciler. Its multi-endpoint HTTP authority adapter first collects
@@ -994,7 +1000,7 @@ regular automated restore tests.
 |---|---|---|
 | Embedded | Rust library and process-local storage | Process-local or local-disk only |
 | Standalone | One `epoch-node` process with all roles | Machine-local persistence; no machine-loss survival |
-| Cluster | Three or more Rust nodes; optional Go operator | Quorum durability, failover, repair, partition scale |
+| Cluster | Exactly three fixed Rust voters plus optional Go control/operator in the alpha | Bounded quorum durability and failover; repair and dynamic scale remain open |
 | Managed | Rust regional clusters plus Go fleet/control services | Managed multi-zone, backup, autoscale, IAM, and optional geo DR |
 
 Non-Rust applications receive an embedded-like experience through a supervised

@@ -6,6 +6,33 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+## [0.1.0-alpha.10] - 2026-08-23
+
+### Added
+
+- Added active-leader HTTP/CloudEvents source connector polling with bounded
+  strict batches, safe shared egress, stable per-record proposal identities,
+  applied/error-routed outcomes, checkpoint-after-record ordering, observable
+  counters, and a real three-process failover/reopen proof.
+- Added a controller-runtime `EpochCluster` operator and Kustomize install for
+  the fixed three-voter regional runtime: stable peer identity, PVCs, Services,
+  required anti-affinity, explicit placement, hardened pods, referenced policy
+  and credentials, leader election, drift repair, and observed status.
+- Added a generated-contract Go `epoch` management CLI with strict JSON/YAML
+  apply, fully qualified get/list/delete, automatic retry tokens, optimistic
+  concurrency, stable protobuf JSON output, and HTTP plus authenticated-gRPC
+  diagnostics.
+- Added node/control/operator source-built OCI definitions, CI manifest and
+  image gates, ADR-0038, Kubernetes/CLI/source runbooks, deployment-focused
+  Pages documentation, updated traceability, and release notes.
+
+### Limitations
+
+- This remains a fixed-voter source alpha. TLS/mTLS/OIDC and workload identity,
+  automated backup/restore and guarded rolling upgrades, dynamic membership,
+  published OCI/package artifacts, CDC/Kafka/object-storage connectors, and
+  production load/soak/fault certification remain beta gates.
+
 ## [0.1.0-alpha.9] - 2026-08-23
 
 ### Added

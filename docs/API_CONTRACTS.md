@@ -853,7 +853,25 @@ settlement. Topology exposes delivery, retry/dead-letter, failover, checkpoint,
 and error counters. See
 [ADR-0037](adr/0037-event-integration-platform.md).
 
-### 12.5 Regional automatic consensus checkpoints
+### 12.5 Regional HTTP source connector worker
+
+Every regional node evaluates source/bidirectional connectors, but only the
+current source Bus leader performs external I/O. For generic HTTP/CloudEvents,
+the worker sends `Epoch-Connector-Position` and requires a strict 204 or a
+bounded 200 batch containing `batch_id`, exact `source_from`, advancing
+`source_to`, and 1–1,000 unique valid events. It reuses the managed-target
+secret, allowlist, public-address DNS pinning, timeout, no-proxy, and no-redirect
+boundary.
+
+Each connector/batch/index record gets a stable proposal identity. Every
+applied or error-routed result commits before the connector batch and cursor;
+therefore crash-before-checkpoint replay resolves existing records rather than
+appending duplicates. Topology publishes source passes, batches, records,
+checkpoints, errors, and the bounded last error. This is not a CDC, Kafka, or
+object-storage adapter contract. See [HTTP source connectors](SOURCE_CONNECTORS.md)
+and [ADR-0038](adr/0038-product-runtime-closure.md).
+
+### 12.6 Regional automatic consensus checkpoints
 
 Every regional node evaluates catalog plus all local profile groups on a
 configured interval. Every healthy voter may checkpoint its own recovery
