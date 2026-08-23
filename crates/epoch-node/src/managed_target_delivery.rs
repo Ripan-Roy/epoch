@@ -366,7 +366,7 @@ pub enum ManagedTargetDeliveryError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum AttemptDisposition {
+pub(crate) enum AttemptDisposition {
     Acknowledge,
     Retry(String),
     Reject(String),
@@ -403,6 +403,16 @@ pub struct ManagedTargetDeliveryWorker {
     oauth_tokens: RwLock<BTreeMap<String, OAuthToken>>,
 }
 
+pub(crate) struct ConnectorSourceFetch<'a> {
+    pub target: &'a Url,
+    pub secret_reference: Option<&'a str>,
+    pub connector_identity: &'a str,
+    pub source_position: &'a str,
+    pub timeout: Duration,
+    pub maximum_response_bytes: usize,
+    pub now_ms: u64,
+}
+
 impl ManagedTargetDeliveryWorker {
     pub fn new(
         config: ManagedTargetDeliveryConfig,
@@ -423,6 +433,67 @@ impl ManagedTargetDeliveryWorker {
 
     pub const fn config(&self) -> &ManagedTargetDeliveryConfig {
         &self.config
+    }
+
+    /// Fetches one bounded source-connector batch through the same credential,
+    /// DNS pinning, redirect, proxy, and timeout boundary as managed targets.
+    pub(crate) async fn fetch_connector_source(
+        &self,
+        request: ConnectorSourceFetch<'_>,
+    ) -> Result<Option<Vec<u8>>, AttemptDisposition> {
+        let mut headers = HeaderMap::new();
+        insert_header(&mut headers, "accept", "application/json")
+            .map_err(AttemptDisposition::Reject)?;
+        insert_header(
+            &mut headers,
+            "epoch-connector-identity",
+            request.connector_identity,
+        )
+        .map_err(AttemptDisposition::Reject)?;
+        insert_header(
+            &mut headers,
+            "epoch-connector-position",
+            request.source_position,
+        )
+        .map_err(AttemptDisposition::Reject)?;
+        if let Some(reference) = request.secret_reference {
+            self.apply_authentication(
+                &mut headers,
+                &AuthenticationPlan::SecretReference(reference.to_owned()),
+                request.now_ms,
+                request.timeout,
+            )
+            .await?;
+        }
+        let client = safe_http_client_for_target(request.target, self.config.allow_http_loopback)
+            .await
+            .map_err(|reason| {
+                if reason.starts_with("dns_") || reason == "request_client_failed" {
+                    AttemptDisposition::Retry(reason)
+                } else {
+                    AttemptDisposition::Reject(reason)
+                }
+            })?;
+        let response = tokio::time::timeout(
+            request.timeout,
+            client
+                .get(request.target.clone())
+                .headers(headers)
+                .timeout(request.timeout)
+                .send(),
+        )
+        .await
+        .map_err(|_| AttemptDisposition::Retry("source_request_timeout".into()))?
+        .map_err(|error| AttemptDisposition::Retry(request_reason(&error)))?;
+        if response.status() == StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+        if response.status() != StatusCode::OK {
+            return Err(classify_status(response.status()));
+        }
+        read_bounded_response_as(response, request.maximum_response_bytes, "source_response")
+            .await
+            .map(Some)
     }
 
     async fn execute(
@@ -1036,7 +1107,7 @@ fn resolve_safe_url(value: &str, allow_http_loopback: bool) -> Result<Url, Attem
         .map_err(|_| AttemptDisposition::Reject("unsafe_target".into()))
 }
 
-fn enforce_allowlist(
+pub(crate) fn enforce_allowlist(
     url: &Url,
     allowlist: &BTreeSet<String>,
     target_kind: &str,
@@ -1410,23 +1481,35 @@ fn insert_bearer(headers: &mut HeaderMap, token: &str) -> Result<(), String> {
 }
 
 async fn read_bounded_response(
+    response: reqwest::Response,
+    maximum: usize,
+) -> Result<Vec<u8>, AttemptDisposition> {
+    read_bounded_response_as(response, maximum, "oauth_response").await
+}
+
+async fn read_bounded_response_as(
     mut response: reqwest::Response,
     maximum: usize,
+    error_prefix: &str,
 ) -> Result<Vec<u8>, AttemptDisposition> {
     if response
         .content_length()
         .is_some_and(|length| length > u64::try_from(maximum).unwrap_or(u64::MAX))
     {
-        return Err(AttemptDisposition::Retry("oauth_response_too_large".into()));
+        return Err(AttemptDisposition::Retry(format!(
+            "{error_prefix}_too_large"
+        )));
     }
     let mut bytes = Vec::new();
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|_| AttemptDisposition::Retry("oauth_response_invalid".into()))?
+        .map_err(|_| AttemptDisposition::Retry(format!("{error_prefix}_invalid")))?
     {
         if bytes.len().saturating_add(chunk.len()) > maximum {
-            return Err(AttemptDisposition::Retry("oauth_response_too_large".into()));
+            return Err(AttemptDisposition::Retry(format!(
+                "{error_prefix}_too_large"
+            )));
         }
         bytes.extend_from_slice(&chunk);
     }

@@ -47,6 +47,29 @@ The Rust node must keep serving an already configured regional data path when
 the hosted Go management plane is unavailable. Go services must never read or
 mutate Epoch storage files directly.
 
+## Build and operate
+
+```shell
+make bootstrap-check
+make check
+make build
+
+# Management CLI
+go build -trimpath -o ./bin/epoch ./control/cmd/epoch
+EPOCH_TOKEN=epoch-dev-admin-v1 ./bin/epoch doctor
+
+# Validate the Kubernetes source installation
+make kubernetes-config
+```
+
+The [`EpochCluster` operator guide](docs/KUBERNETES_OPERATOR.md) covers the
+fixed-three-voter Kubernetes install, source image builds, credential and
+policy setup, status, storage, and lifecycle limits. The
+[management CLI guide](docs/CLI.md) covers declarative resource operations, and
+the [HTTP source connector guide](docs/SOURCE_CONNECTORS.md) specifies the
+poll/cursor/failure contract. This alpha is source-distributed; prebuilt images
+and package-manager artifacts are intentionally deferred.
+
 ## Workload profiles
 
 - **Cache and State:** memory-first values, TTL, eviction, atomic operations,
@@ -201,11 +224,14 @@ target-commit-before-source-Ack ordering. A second leader-owned worker executes
 API destinations, endpoint pools, functions, and target/bidirectional
 connectors with binary/structured CloudEvents, API-key/bearer/OAuth secret
 references, safe pinned egress, stable idempotency, endpoint failover, and
-connector-checkpoint-before-source-settlement ordering. Real three-process
-recovery preserves acknowledged state. Pull and unsigned legacy HTTP remain
-application-dispatched; MQTT wire compatibility, source-connector polling,
-private egress, cross-tablet atomicity, and exactly-once external side effects
-are not claimed. The regional Event Bus v1 adapter and
+connector-checkpoint-before-source-settlement ordering. An active-leader source
+worker polls bounded generic HTTP/CloudEvents batches through that same safe
+egress boundary, commits every applied/error-routed record before advancing the
+replicated cursor, and reuses stable record identities after crash. Real
+three-process recovery preserves target and source state. Pull and unsigned
+legacy HTTP remain application-dispatched; MQTT wire compatibility, CDC/Kafka/
+object-storage adapters, private egress, cross-tablet atomicity, and
+exactly-once external side effects are not claimed. The regional Event Bus v1 adapter and
 repository-local Go, Java, and Python clients expose subscription policy,
 publish, archive replay/maintenance, long-poll acquire, ack/fail/reject/redrive,
 delivery query, integration mutation/state, mutation lookup, and status through

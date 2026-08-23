@@ -216,6 +216,16 @@ secret file and
 normal API/function/connector/OAuth URLs require public HTTPS. See
 [ADR-0037](adr/0037-event-integration-platform.md).
 
+Topology also contains `source_connector_delivery`. Only the current Bus
+leader polls eligible HTTP/CloudEvents source connectors; counters cover
+passes, examined connectors, batches, applied/error-routed records,
+checkpoints, errors, and the bounded last error. Configure
+`EPOCH_REGIONAL_SOURCE_CONNECTOR_INTERVAL_MS` (default 500; 1–60,000). The
+worker reuses `EPOCH_REGIONAL_MANAGED_TARGET_SECRETS_PATH` and the managed
+target loopback-development switch. See
+[HTTP source connectors](SOURCE_CONNECTORS.md) and
+[ADR-0038](adr/0038-product-runtime-closure.md).
+
 ## Route and fence a data operation
 
 Discover a shard independently on each node:
@@ -484,6 +494,11 @@ SDK. It covers fenced producer retry and committed rejection, transaction
 isolation/abort/atomic offset commit, long poll, compaction and transparent tier
 reads, manual plus automatic capture, replication ingress replay, partition
 advice, and logical superstream merge before and after the all-node reopen.
+
+The native real-process campaign also serves two successive HTTP source
+batches, asserts the exact cursor header, waits for replicated checkpoint
+convergence, reopens every voter, and verifies that stable proposal identities
+did not duplicate Bus ingress.
 
 The campaign checks governance through the filtered Go BFF and every Rust
 catalog voter before and after the Go `SIGKILL`, then repeats it after all-node

@@ -1,0 +1,14 @@
+ARG GO_VERSION=1.26.5
+FROM golang:${GO_VERSION}-bookworm AS builder
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY control ./control
+COPY sdk/go ./sdk/go
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/epoch-control ./control/cmd/epoch-control
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=builder /out/epoch-control /usr/local/bin/epoch-control
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/epoch-control"]

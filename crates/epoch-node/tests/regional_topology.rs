@@ -4,7 +4,8 @@ use epoch_node::{
     managed_target_delivery::ManagedTargetDeliveryStatus,
     regional_checkpoint::RegionalCheckpointStatus,
     regional_maintenance::RegionalMaintenanceStatus,
-    regional_topology::{NodeTopology, regional_topology_router},
+    regional_topology::{NodeTopology, RegionalTopologyStatuses, regional_topology_router},
+    source_connector_delivery::SourceConnectorDeliveryStatus,
     tablet_materializer::TabletDirectory,
     webhook_delivery::WebhookDeliveryStatus,
 };
@@ -26,11 +27,14 @@ async fn topology_reports_fixed_voters_and_live_group_capacity() {
     let response = regional_topology_router(
         topology,
         TabletDirectory::default(),
-        RegionalMaintenanceStatus::new(100),
-        RegionalCheckpointStatus::new(1_000, 1_024),
-        EpochTargetDeliveryStatus::new(std::time::Duration::from_millis(100)),
-        ManagedTargetDeliveryStatus::new(std::time::Duration::from_millis(100)),
-        WebhookDeliveryStatus::disabled(),
+        RegionalTopologyStatuses::new(
+            RegionalMaintenanceStatus::new(100),
+            RegionalCheckpointStatus::new(1_000, 1_024),
+            EpochTargetDeliveryStatus::new(std::time::Duration::from_millis(100)),
+            ManagedTargetDeliveryStatus::new(std::time::Duration::from_millis(100)),
+            SourceConnectorDeliveryStatus::new(std::time::Duration::from_millis(500)),
+            WebhookDeliveryStatus::disabled(),
+        ),
     )
     .oneshot(
         Request::get("/experimental/v1/regional/topology")
@@ -68,6 +72,9 @@ async fn topology_reports_fixed_voters_and_live_group_capacity() {
     assert_eq!(body["managed_target_delivery"]["enabled"], true);
     assert_eq!(body["managed_target_delivery"]["interval_ms"], 100);
     assert_eq!(body["managed_target_delivery"]["passes"], 0);
+    assert_eq!(body["source_connector_delivery"]["enabled"], true);
+    assert_eq!(body["source_connector_delivery"]["interval_ms"], 500);
+    assert_eq!(body["source_connector_delivery"]["passes"], 0);
     assert_eq!(body["webhook_delivery"]["enabled"], false);
 }
 

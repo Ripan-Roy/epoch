@@ -8,7 +8,7 @@ NODE_LTS := $(if $(wildcard /opt/homebrew/opt/node@24/bin/node),/opt/homebrew/op
 PNPM_ENV := PATH="/opt/homebrew/opt/node@24/bin:$$PATH"
 JAVA_MVN := ./sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress
 
-.PHONY: help bootstrap-check generate generate-check release-check format format-check lint audit test test-unit test-retry-command test-consensus-process test-consensus-probe test-stream-tablet test-queue-tablet test-cache-tablet test-bus-tablet test-regional-runtime test-integration build check ci compose-config compose-up compose-down compose-probe-config compose-probe-up compose-probe-down compose-regional-config compose-regional-up compose-regional-down clean
+.PHONY: help bootstrap-check generate generate-check release-check format format-check lint audit test test-unit test-retry-command test-consensus-process test-consensus-probe test-stream-tablet test-queue-tablet test-cache-tablet test-bus-tablet test-regional-runtime test-integration build check ci kubernetes-config compose-config compose-up compose-down compose-probe-config compose-probe-up compose-probe-down compose-regional-config compose-regional-up compose-regional-down clean
 
 help: ## Show available commands.
 	@awk 'BEGIN {FS = ":.*## "; printf "Epoch development commands:\n\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -136,7 +136,14 @@ build: ## Build all available workspace components.
 
 check: generate-check release-check format-check lint test-unit audit ## Run the local pre-commit gate.
 
-ci: bootstrap-check check build test-integration compose-config compose-probe-config compose-regional-config ## Run the deterministic CI gate available locally.
+ci: bootstrap-check check build test-integration kubernetes-config compose-config compose-probe-config compose-regional-config ## Run the deterministic CI gate available locally.
+
+kubernetes-config: ## Render and strictly validate the Kubernetes operator installation offline.
+	@command -v kubectl >/dev/null || { echo "missing kubectl" >&2; exit 1; }
+	@epoch_kubernetes_render="$$(mktemp "$${TMPDIR:-/tmp}/epoch-kubernetes.XXXXXX")"; \
+	trap 'rm -f -- "$$epoch_kubernetes_render"' EXIT INT TERM; \
+	kubectl kustomize deploy/kubernetes/operator >"$$epoch_kubernetes_render"; \
+	go run ./operator/cmd/epoch-manifest-check <"$$epoch_kubernetes_render"
 
 compose-config: ## Validate the development Compose model.
 	docker compose -f deploy/compose/docker-compose.yml config --quiet

@@ -115,9 +115,27 @@ stable side-effect idempotency keys fail closed. Go, Java, and Python expose
 the regional lifecycle, and recovery revalidates all integration semantics and
 snapshot capacity. This completes the native alpha development contract for
 `BUS-001`–`BUS-015`; it does not claim an MQTT wire gateway, official schema or
-CloudEvents conformance, automatic source-connector polling, external secret
-manager/hot reload, private-network egress, exactly-once external side effects,
-or production scale/security evidence. See ADR-0037.
+CloudEvents conformance, external secret-manager hot reload, private-network
+egress, exactly-once external side effects, or production scale/security
+evidence. See ADR-0037.
+
+**Product-runtime implementation note (23 August 2026):** An active Bus leader
+now polls bounded generic HTTP/CloudEvents source connectors through the same
+allowlisted, public-address-only, DNS-pinned, no-proxy/no-redirect egress
+boundary as managed targets. Stable per-record proposal identities make replay
+after a crash duplicate-safe, while the replicated source checkpoint advances
+only after every record commits as applied or error-routed. A real
+three-process failover/reopen test proves cursor advancement and all-voter
+recovery. A Go `EpochCluster` controller now reconciles the fixed three-voter
+StatefulSet, durable control owner, Services, policy/credential mounts,
+anti-affinity, security contexts, placement identity, and readiness status; it
+fails closed before creating workloads when required configuration is absent.
+The generated-contract Go `epoch` CLI provides strict declarative apply,
+get/list/delete, OCC, idempotency, and two-boundary diagnostics. These are
+source-distributed alpha surfaces. TLS/mTLS and workload identity, automated
+backup/restore and rolling-upgrade orchestration, dynamic membership, published
+OCI images, CDC/Kafka/object-storage source adapters, and production
+load/soak/fault certification remain beta gates. See ADR-0038.
 
 ---
 

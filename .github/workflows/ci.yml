@@ -111,6 +111,8 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
       - run: go build ./...
+      - name: Render and validate Kubernetes operator resources
+        run: make kubernetes-config
       - name: Compile displayed Go quickstart
         run: go build -trimpath -o /tmp/epoch-go-quickstart ./console/src/quickstarts/quickstart.go
 
@@ -218,6 +220,8 @@ jobs:
       - run: docker compose -f deploy/compose/docker-compose.consensus-probe.yml config --quiet
       - run: docker compose -f deploy/compose/docker-compose.regional.yml config --quiet
       - run: docker build --file deploy/docker/Dockerfile.node --tag epoch/node:ci .
+      - run: docker build --file deploy/docker/Dockerfile.control --tag epoch/control:ci .
+      - run: docker build --file deploy/docker/Dockerfile.operator --tag epoch/operator:ci .
       - name: Prove Go-to-Rust regional BFF, four-profile failover, and all-node recovery
         env:
           EPOCH_REGIONAL_ARTIFACT_DIR: ${{ runner.temp }}/epoch-regional-runtime

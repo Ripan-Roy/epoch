@@ -16,6 +16,7 @@ pub mod regional_maintenance;
 pub mod regional_router;
 pub mod regional_runtime;
 pub mod regional_topology;
+pub mod source_connector_delivery;
 pub mod stream_tablet;
 mod tablet_http;
 pub mod tablet_materializer;

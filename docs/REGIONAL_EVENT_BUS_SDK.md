@@ -286,8 +286,10 @@ acknowledging the source delivery.
 Production URLs require HTTPS and public DNS/IP answers. Redirects and ambient
 proxies are disabled and the resolved address is pinned for the attempt. Set
 `EPOCH_REGIONAL_MANAGED_TARGET_ALLOW_HTTP_LOOPBACK=true` only for local
-loopback tests. Secret hot reload, an external secret manager, private-network
-destinations, and automatic source-connector polling are not in this release.
+loopback tests. Secret hot reload, an external secret manager, and private-network
+destinations are not in this release. Generic HTTP/CloudEvents source polling
+is automatic and documented in [HTTP source connectors](SOURCE_CONNECTORS.md);
+CDC, Kafka, and object-storage source adapters remain open.
 
 ## Replicated integration operations
 
@@ -484,8 +486,9 @@ with the same browser-safe encoding.
   every official format compiler;
 - MQTT session/QoS state is implemented, but no MQTT wire gateway or protocol
   conformance is claimed;
-- no key/secret hot reload, external secret manager, private egress profile,
-  automatic source-connector polling, or geo routing;
+- generic HTTP/CloudEvents source polling is implemented; no key/secret hot
+  reload, external secret manager, private egress profile, CDC/Kafka/object-
+  storage source adapter, or geo routing;
 - no built-in receiver replay store: the SDK verifier returns the identity the
   receiver must persist;
 - no exactly-once external-side-effect claim.
@@ -497,4 +500,5 @@ delivery by
 [ADR-0031](adr/0031-leader-owned-epoch-target-delivery.md). The lower-level
 integration and managed-delivery boundary is
 [ADR-0037](adr/0037-event-integration-platform.md). The lower-level state
-machine is documented in [BUS_TABLET.md](BUS_TABLET.md).
+machine is documented in [BUS_TABLET.md](BUS_TABLET.md). Source polling is
+defined by [ADR-0038](adr/0038-product-runtime-closure.md).

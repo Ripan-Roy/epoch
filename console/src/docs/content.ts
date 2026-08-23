@@ -16,7 +16,7 @@ import regionalBusPythonSource from "../quickstarts/regional_bus/quickstart.py?r
 
 export const repositoryUrl = "https://github.com/Ripan-Roy/epoch";
 export const repositoryDocsUrl = `${repositoryUrl}/blob/main/docs`;
-export const releaseVersion = "0.1.0-alpha.9";
+export const releaseVersion = "0.1.0-alpha.10";
 
 export type LanguageId = "go" | "java" | "python";
 
@@ -72,6 +72,55 @@ EPOCH_CONTROL_STATE_PATH=.epoch/control/registry.db \
 EPOCH_AUTH_POLICY_PATH=spec/auth/bootstrap-policy-v1.example.json \
 EPOCH_CONTROL_REGIONAL_TOKEN=epoch-dev-control-v1 \
 go run ./control/cmd/epoch-control`;
+
+export const kubernetesInstall = `# Build the three images into your registry
+docker build -f deploy/docker/Dockerfile.node -t registry.example/epoch-node:alpha.10 .
+docker build -f deploy/docker/Dockerfile.control -t registry.example/epoch-control:alpha.10 .
+docker build -f deploy/docker/Dockerfile.operator -t registry.example/epoch-operator:alpha.10 .
+
+# Install the CRD, least-privilege RBAC, and two-replica leader-elected operator
+kubectl apply -k deploy/kubernetes/operator
+
+# Supply policy and credential references without committing a bearer token
+kubectl -n epoch-system create configmap epoch-auth-policy \
+  --from-file=bootstrap-policy.json=spec/auth/bootstrap-policy-v1.example.json
+kubectl -n epoch-system create secret generic epoch-control-credentials \
+  --from-literal=regional-token="$EPOCH_CONTROL_REGIONAL_TOKEN"
+
+# Edit image names in the sample, then create the fixed three-voter cluster
+kubectl apply -f deploy/kubernetes/operator/sample-cluster.yaml
+kubectl -n epoch-system get epochclusters.platform.epoch.dev -w`;
+
+export const managementCli = `# Build and verify both management boundaries
+go build -o ./bin/epoch ./control/cmd/epoch
+EPOCH_TOKEN=epoch-dev-admin-v1 ./bin/epoch doctor
+
+# Apply strict protobuf JSON or YAML with an automatically generated retry token
+EPOCH_TOKEN=epoch-dev-admin-v1 ./bin/epoch apply --file resource.yaml
+
+# Read the fully qualified resource and preserve 64-bit generations
+EPOCH_TOKEN=epoch-dev-admin-v1 ./bin/epoch get \
+  acme/shop/dev/core/stream/orders`;
+
+export const sourceConnectorContract = `# The active Bus leader sends these headers
+GET /events HTTP/1.1
+Accept: application/json
+Epoch-Connector-Identity: orders-source-reader
+Epoch-Connector-Position: cursor-10
+
+# Return one bounded strict batch, or HTTP 204 when no work is ready
+{
+  "batch_id": "orders-11",
+  "source_from": "cursor-10",
+  "source_to": "cursor-11",
+  "events": [{
+    "id": "order-11",
+    "source": "urn:orders",
+    "type": "order.created",
+    "time_ms": 11,
+    "payload": {"order_id": 11}
+  }]
+}`;
 
 export const governanceInventory = `# Filter with exact AND semantics
 curl --fail --get http://127.0.0.1:8080/v1/regional/resources \\

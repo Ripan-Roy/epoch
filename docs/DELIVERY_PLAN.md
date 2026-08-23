@@ -35,7 +35,17 @@ into this train. A large PR can remain in development longer, but it does not
 merge until its whole row is locally working and its acceptance evidence is
 reviewable.
 
-The published `v0.1.0-alpha.5` release extends the authenticated regional
+Releases 1–5 of this train are shipped through `v0.1.0-alpha.9`: governance,
+complete non-deferred Cache, complete Stream, complete Queue, and the native
+Event/integration development platform. Release 6 is the current
+`v0.1.0-alpha.10` product/runtime closure: automatic HTTP source ingestion, a
+real Go Kubernetes operator and manifests, a generated-contract management
+CLI, deployment documentation, and container/CI evidence. The next and only
+priority after that merge is beta hardening: secure transport and workload
+identity, coordinated recovery and guarded upgrades, compatibility evidence,
+and load/soak/fault qualification.
+
+The published release train extends the authenticated regional
 multi-tablet M1/M2 boundary. Protected `main` evidence covers the consensus-backed catalog, durable
 single-owner hosted control, topology admission, quorum-confirmed leader reads,
 all four regional profile SDKs, multi-shard Stream routing, atomic batches,
@@ -68,10 +78,11 @@ every non-deferred Cache row as the second release in the six-PR train. The
 PR #83 and `v0.1.0-alpha.7` complete the Stream release in the six-PR train
 across producer fencing, same-tablet transactions, compaction/tiering,
 automatic capture, expansion advice, consumer modes, replication ingress, and
-logical superstreams. The current Queue candidate closes QUEUE-007–015 with
-bounded admission/overflow, idle expiry, FIFO session locks, priority aging,
-dispatch protection, deferred/request-reply state, and crash-safe Queue DLQ
-forwarding. Stable
+logical superstreams. `v0.1.0-alpha.8` closed QUEUE-007–015 with bounded
+admission/overflow, idle expiry, FIFO session locks, priority aging, dispatch
+protection, deferred/request-reply state, and crash-safe Queue DLQ forwarding.
+`v0.1.0-alpha.9` then closed the bounded Event/integration development surface.
+Stable
 streaming protocols, replicated multi-instance hosted metadata, production
 identity, follower routing, dynamic membership/voter selection,
 repair/rebalance, and the broader M2 security/performance gates remain open.
