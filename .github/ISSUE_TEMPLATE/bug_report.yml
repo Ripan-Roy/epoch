@@ -1,0 +1,89 @@
+name: Bug report
+description: Report a reproducible problem in Epoch
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Epoch. Do not report security vulnerabilities here; use the repository Security policy instead.
+
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: Prerequisites
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: This report contains no credentials, private data, or security-sensitive details.
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Epoch version or commit
+      description: Provide a release tag or full commit SHA.
+      placeholder: v0.1.0-alpha.9 or 88a3d33...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Rust data plane
+        - Go control plane
+        - Go SDK
+        - Java SDK
+        - Python SDK
+        - Console or documentation
+        - Deployment or CI
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, architecture, tool versions, deployment mode, and relevant configuration with secrets removed.
+      placeholder: macOS 15, arm64, Docker Desktop ..., Rust ..., Go ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: List deterministic commands or steps and the smallest configuration needed to reproduce the problem.
+      placeholder: |
+        1. Start ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and evidence
+      description: Include bounded logs, errors, or traces with secrets and customer data removed.
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact and recovery
+      description: State whether data safety, availability, compatibility, or only usability is affected, and whether a workaround exists.
+    validations:
+      required: true
