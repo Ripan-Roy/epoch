@@ -10,16 +10,29 @@ public final class SubscriptionTarget {
   private final String resource;
   private final String url;
   private final String signingKeyId;
+  private final String pool;
+  private final DestinationAuth auth;
+  private final String cloudEventsMode;
 
-  private SubscriptionTarget(String kind, String resource, String url, String signingKeyId) {
+  private SubscriptionTarget(
+      String kind,
+      String resource,
+      String url,
+      String signingKeyId,
+      String pool,
+      DestinationAuth auth,
+      String cloudEventsMode) {
     this.kind = kind;
     this.resource = resource;
     this.url = url;
     this.signingKeyId = signingKeyId;
+    this.pool = pool;
+    this.auth = auth;
+    this.cloudEventsMode = cloudEventsMode;
   }
 
   public static SubscriptionTarget pull() {
-    return new SubscriptionTarget("pull", null, null, null);
+    return new SubscriptionTarget("pull", null, null, null, null, null, null);
   }
 
   public static SubscriptionTarget queue(String resource) {
@@ -46,17 +59,63 @@ public final class SubscriptionTarget {
     return signedUrl("http", url, signingKeyId);
   }
 
+  public static SubscriptionTarget apiDestination(
+      String url, DestinationAuth auth, String cloudEventsMode) {
+    return new SubscriptionTarget(
+        "api_destination",
+        null,
+        required(url, "url"),
+        null,
+        null,
+        Objects.requireNonNull(auth, "auth"),
+        cloudEventsMode(cloudEventsMode));
+  }
+
+  public static SubscriptionTarget endpointPool(
+      String pool, DestinationAuth auth, String cloudEventsMode) {
+    return new SubscriptionTarget(
+        "endpoint_pool",
+        null,
+        null,
+        null,
+        resourceName(pool, "endpoint pool"),
+        Objects.requireNonNull(auth, "auth"),
+        cloudEventsMode(cloudEventsMode));
+  }
+
+  public static SubscriptionTarget function(String resource) {
+    return resource("function", resource);
+  }
+
+  public static SubscriptionTarget connector(String resource) {
+    return resource("connector", resource);
+  }
+
   private static SubscriptionTarget resource(String kind, String resource) {
-    return new SubscriptionTarget(kind, required(resource, "resource"), null, null);
+    return new SubscriptionTarget(
+        kind, required(resource, "resource"), null, null, null, null, null);
   }
 
   private static SubscriptionTarget url(String kind, String url) {
-    return new SubscriptionTarget(kind, null, required(url, "url"), null);
+    return new SubscriptionTarget(kind, null, required(url, "url"), null, null, null, null);
   }
 
   private static SubscriptionTarget signedUrl(String kind, String url, String signingKeyId) {
     return new SubscriptionTarget(
-        kind, null, required(url, "url"), resourceName(signingKeyId, "signing key ID"));
+        kind,
+        null,
+        required(url, "url"),
+        resourceName(signingKeyId, "signing key ID"),
+        null,
+        null,
+        null);
+  }
+
+  private static String cloudEventsMode(String value) {
+    if (!"binary".equals(value) && !"structured".equals(value)) {
+      throw new IllegalArgumentException("CloudEvents mode must be binary or structured");
+    }
+    return value;
   }
 
   private static String resourceName(String value, String name) {
@@ -94,6 +153,15 @@ public final class SubscriptionTarget {
     }
     if (signingKeyId != null) {
       value.put("signing_key_id", signingKeyId);
+    }
+    if (pool != null) {
+      value.put("pool", pool);
+    }
+    if (auth != null) {
+      value.set("auth", auth.toJson());
+    }
+    if (cloudEventsMode != null) {
+      value.put("cloud_events_mode", cloudEventsMode);
     }
     return value;
   }

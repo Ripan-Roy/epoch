@@ -1,7 +1,8 @@
 //! Versioned Event Bus tablet commands and their strict canonical codec.
 
 use epoch_bus::{
-    EpochTargetDestination, MAX_DELIVERY_ACQUIRE_BATCH, MAX_DELIVERY_REASON_BYTES, Subscription,
+    EpochTargetDestination, IntegrationOperation, MAX_DELIVERY_ACQUIRE_BATCH,
+    MAX_DELIVERY_REASON_BYTES, Subscription,
 };
 use epoch_core::{EventEnvelope, validate_resource_name};
 use serde::{Deserialize, Serialize};
@@ -9,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use crate::common::{proposal_id_from_domain, validate_idempotency_key};
 use crate::{TabletError, TabletResult, TabletScope};
 
-pub const BUS_TABLET_COMMAND_FORMAT_VERSION: u16 = 3;
+pub const BUS_TABLET_COMMAND_FORMAT_VERSION: u16 = 5;
+const INTEGRATION_BUS_TABLET_COMMAND_FORMAT_VERSION: u16 = 4;
+const EPOCH_TARGET_BUS_TABLET_COMMAND_FORMAT_VERSION: u16 = 3;
 const SIGNED_WEBHOOK_BUS_TABLET_COMMAND_FORMAT_VERSION: u16 = 2;
 const LEGACY_BUS_TABLET_COMMAND_FORMAT_VERSION: u16 = 1;
 pub const MAX_BUS_TABLET_COMMAND_BYTES: usize = 512 * 1024;
@@ -33,6 +36,9 @@ pub struct BusTabletCommand {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BusTabletOperation {
+    ApplyIntegration {
+        operation: Box<IntegrationOperation>,
+    },
     UpsertSubscription {
         subscription: Subscription,
     },
@@ -71,6 +77,12 @@ pub enum BusTabletOperation {
         dispatcher_epoch: u64,
         lease_token: String,
         reason: String,
+    },
+    RedriveDelivery {
+        delivery_id: String,
+    },
+    MaintainArchive {
+        max_events: u16,
     },
     MaintainDeliveries {
         max_deliveries: u16,
@@ -205,16 +217,23 @@ impl BusTabletCommand {
 impl BusTabletOperation {
     fn format_version(&self) -> u16 {
         match self {
+            Self::MaintainArchive { .. } => BUS_TABLET_COMMAND_FORMAT_VERSION,
+            Self::ApplyIntegration { .. } | Self::RedriveDelivery { .. } => {
+                INTEGRATION_BUS_TABLET_COMMAND_FORMAT_VERSION
+            }
             Self::AcquireDeliveries {
                 destination: Some(_),
                 ..
-            } => BUS_TABLET_COMMAND_FORMAT_VERSION,
+            } => EPOCH_TARGET_BUS_TABLET_COMMAND_FORMAT_VERSION,
             Self::RejectDelivery { .. }
             | Self::AcquireDeliveries {
                 expected_delivery_id: Some(_),
                 destination: None,
                 ..
             } => SIGNED_WEBHOOK_BUS_TABLET_COMMAND_FORMAT_VERSION,
+            Self::UpsertSubscription { subscription } if subscription_uses_v4(subscription) => {
+                BUS_TABLET_COMMAND_FORMAT_VERSION
+            }
             Self::UpsertSubscription { subscription }
                 if subscription.target.signing_key_id().is_some() =>
             {
@@ -237,6 +256,7 @@ impl BusTabletOperation {
 
 fn validate_operation(operation: &BusTabletOperation) -> TabletResult<()> {
     match operation {
+        BusTabletOperation::ApplyIntegration { .. } => Ok(()),
         BusTabletOperation::UpsertSubscription { subscription } => {
             subscription.validate()?;
             Ok(())
@@ -287,10 +307,37 @@ fn validate_operation(operation: &BusTabletOperation) -> TabletResult<()> {
             validate_delivery_settlement(delivery_id, dispatcher, *dispatcher_epoch, lease_token)?;
             validate_required_bounded("reason", reason, MAX_DELIVERY_REASON_BYTES)
         }
+        BusTabletOperation::RedriveDelivery { delivery_id } => {
+            validate_required_bounded("delivery_id", delivery_id, MAX_BUS_DELIVERY_ID_BYTES)
+        }
+        BusTabletOperation::MaintainArchive { max_events } => {
+            validate_archive_maintenance_batch(*max_events)
+        }
         BusTabletOperation::MaintainDeliveries { max_deliveries } => {
             validate_delivery_batch(*max_deliveries)
         }
     }
+}
+
+fn subscription_uses_v4(subscription: &Subscription) -> bool {
+    subscription.delivery_policy.rate_limit.is_some()
+        || subscription
+            .delivery_policy
+            .dead_letter_retention_ms
+            .is_some()
+        || !subscription.filter.topic_patterns.is_empty()
+        || !subscription.transform.rename_fields.is_empty()
+        || !subscription.transform.constants.is_empty()
+        || !subscription.transform.templates.is_empty()
+        || subscription.transform.enrichment_ref.is_some()
+        || subscription.transform.limits != epoch_bus::TransformLimits::default()
+        || matches!(
+            subscription.target,
+            epoch_bus::SubscriptionTarget::ApiDestination { .. }
+                | epoch_bus::SubscriptionTarget::EndpointPool { .. }
+                | epoch_bus::SubscriptionTarget::Function { .. }
+                | epoch_bus::SubscriptionTarget::Connector { .. }
+        )
 }
 
 fn validate_acquire(
@@ -355,6 +402,16 @@ fn validate_delivery_batch(max_deliveries: u16) -> TabletResult<()> {
     if max_deliveries == 0 || usize::from(max_deliveries) > MAX_DELIVERY_ACQUIRE_BATCH {
         return Err(TabletError::InvalidCommand(format!(
             "max_deliveries must be between 1 and {MAX_DELIVERY_ACQUIRE_BATCH}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_archive_maintenance_batch(max_events: u16) -> TabletResult<()> {
+    if max_events == 0 || usize::from(max_events) > epoch_bus::MAX_REPLAY_EVENTS {
+        return Err(TabletError::InvalidCommand(format!(
+            "max_events must be between 1 and {}",
+            epoch_bus::MAX_REPLAY_EVENTS
         )));
     }
     Ok(())

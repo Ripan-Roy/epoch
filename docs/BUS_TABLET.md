@@ -1,16 +1,18 @@
 # Experimental Replicated Event Bus Tablet
 
-**Status:** Working bounded fixed-three-voter ingress and per-subscription
-delivery-ledger profile with an authenticated regional v1 adapter and optional
-leader-owned signed HTTP/webhook plus automatic Epoch Queue/Stream execution
+**Status:** Working bounded fixed-three-voter ingress, delivery ledger, and
+integration-state profile with authenticated regional v1 APIs and leader-owned
+signed, Epoch, API, endpoint-pool, function, and connector execution
 
-`epoch-bus` and `epoch-tablet` implement a canonical Event Bus ingress and
-delivery-ledger boundary. The standalone engine owns validated subscriptions,
-deterministic filtering and transformation, checked publish positions, and
-bounded archive replay. The replicated tablet additionally enables a bounded
-outbox: each matched subscription receives a stable delivery ID, captured
-policy, independent lease/attempt history, retry eligibility, acknowledgement,
-and terminal dead-letter state. `BusTablet` applies strict commands only after
+`epoch-bus` and `epoch-tablet` implement a canonical Event Bus ingress,
+delivery-ledger, and integration-state boundary. The engine owns validated
+subscriptions, deterministic filtering/transformation/enrichment, schema
+policies, MQTT state, connectors/checkpoints, endpoint health, event catalog,
+functions, checked publish positions, archive retention/replay, rate-limited
+delivery, terminal retention, and redrive. The replicated tablet additionally
+enables a bounded outbox: each matched subscription receives a stable delivery
+ID, captured policy, independent lease/attempt history, retry eligibility,
+acknowledgement, and terminal dead-letter state. `BusTablet` applies strict commands only after
 consensus commit, records exact retry receipts, and chains every committed
 outcome into a deterministic state digest. `epoch-node` mounts that state
 machine as the one typed profile for a fixed consensus group and as one
@@ -21,19 +23,20 @@ histories still replay; committed application divergence fail-stops the group.
 ## Boundary
 
 ```text
-canonical BusTabletCommand v1/v2/v3
+canonical BusTabletCommand v1/v2/v3/v4/v5
   -> strict internal HTTP DTO and semantic idempotency validation
   -> current leader/term admission and fixed-voter majority persistence
   -> actor-owned committed metadata supplied to the tablet
   -> committed-order effective time
   -> operation on a cloned EventBus candidate
   -> applied result or deterministic rejected outcome
-  -> complete recoverable route, archive, outbox, dispatcher-epoch, and attempt digest
+  -> snapshot-capacity admission before candidate publication
+  -> complete recoverable route, integration, archive, outbox, rate, dispatcher-epoch, and attempt digest
   -> exact receipt replay and chained tablet transition digest
 ```
 
 The candidate is installed only after the operation and digest complete.
-Subscription, archive, and outbox capacity, malformed input, lease/retry
+Subscription, integration, archive, and outbox capacity, malformed input, lease/retry
 deadline overflow, and checked-counter exhaustion therefore leave the prior
 business state intact. A recordable business rejection still consumes its
 committed log index and is included in the tablet digest.
@@ -57,10 +60,11 @@ exist on the separate internal consensus listener:
 | Route | Contract |
 | --- | --- |
 | `GET /experimental/v1/tablets/bus/status` | Local consensus/profile positions, route/archive/outbox counters, complete digests, and explicit executor non-claims. |
-| `POST /experimental/v1/tablets/bus/mutations` | Strict route/publish plus `acquire_deliveries`, `acknowledge_delivery`, `fail_delivery`, and `maintain_deliveries` commands with an idempotency key and expected term. |
+| `POST /experimental/v1/tablets/bus/mutations` | Strict route/publish, integration, acquire/settle/redrive, and delivery/archive maintenance commands with an idempotency key and expected term. |
 | `GET /experimental/v1/tablets/bus/mutations/{proposal_id}` | Local `unknown`, `pending`, or `committed` outcome resolution. |
 | `POST /experimental/v1/tablets/bus/archive/replay` | Inclusive time-range and optional filtered replay from the local applied profile. |
 | `POST /experimental/v1/tablets/bus/deliveries/query` | Bounded local, stale-capable delivery-ledger and immutable attempt-history observation. |
+| `GET /experimental/v1/tablets/bus/integration/state` | Complete local, stale-capable schema/connector/MQTT/catalog/endpoint/function state. |
 
 All 64-bit JSON values are emitted as exact decimal strings. Mutation input
 accepts a JSON number or decimal string for `expected_term` and envelope time
@@ -69,16 +73,17 @@ filter, target, transform, and envelope boundaries. The leader owns
 `applied_at_ms`; retries compare only semantic input, so changing an expected
 term does not conflict while changing the operation does.
 
-The profile-local status reports `target_dispatch:
-regional_epoch_targets_and_configured_signed_webhooks`; the tablet itself still
-performs no I/O. Regional topology separately reports signed-webhook and
-always-enabled Epoch-target pass/lease/outcome/error counters. Status also
-reports `durable_target_outbox: true`. A publish receipt proves replicated ingress,
+The profile-local status reports the configured regional target-dispatch
+capability; the tablet itself still performs no I/O. Regional topology
+separately reports signed-webhook, Epoch-target, and managed-target
+pass/lease/outcome/failover/checkpoint/error counters. Status also reports
+`durable_target_outbox: true`. A publish receipt proves replicated ingress,
 the captured deterministic route plan, archive state, and durable delivery
 intent. An acknowledgement proves only that an internal dispatcher committed
 the target result it observed. The regional runtime executes signed
-HTTP/webhook and Epoch Queue/Stream targets; unsigned HTTP/webhook and network
-pull remain external.
+HTTP/webhook, Epoch Queue/Stream, API destination, endpoint-pool, function, and
+target/bidirectional connector records; pull and unsigned legacy HTTP/webhook
+intent remain externally dispatched.
 
 The regional runtime additionally maps the fully qualified authenticated v1
 route below to that same tablet without a second store or Go data proxy:
@@ -89,7 +94,7 @@ route below to that same tablet without a second store or Go data proxy:
 
 Go, Java, and Python `RegionalBusClient` implementations cover every command
 and read above with resource-generation, tablet-epoch, and leader-term fences.
-Archive replay, delivery query, mutation lookup, and status require a
+Archive replay, delivery query, integration state, mutation lookup, and status require a
 linearizable ReadIndex barrier; archive/query retain POST bodies but authorize
 as `data.read`. See [Regional Event Bus SDK](REGIONAL_EVENT_BUS_SDK.md) and
 [ADR-0020](adr/0020-regional-event-bus-v1-and-sdk-routing.md).
@@ -103,20 +108,26 @@ as `data.read`. See [Regional Event Bus SDK](REGIONAL_EVENT_BUS_SDK.md) and
 | --- | ---: | ---: | --- |
 | `max_subscriptions` | 1,024 | 100,000 | Named routes retained by one Bus |
 | `max_archive_events` | 100,000 | 10,000,000 | Archived ingress records retained in this in-memory slice |
+| `archive_retention.max_events` | unset | `max_archive_events` | Optional retained archive-count ceiling |
+| `archive_retention.max_age_ms` | unset | 10 years | Optional committed-time archive age ceiling |
 | `delivery_outbox` | `false` standalone; forced `true` by `BusTablet` | n/a | Retain independent delivery state for every matching subscription |
 | `max_outbox_deliveries` | 100,000 | 10,000,000 | All pending, in-flight, acknowledged, and dead-lettered records retained by the bounded ledger |
 
 All three capacity limits must be non-zero. Archive and outbox limits are
 validated even when their feature is disabled so enabling it never reveals an
 invalid latent configuration. Replay and delivery queries return at most
-10,000 records per call; acquisition and maintenance process at most 100.
+10,000 records per call; acquisition and delivery maintenance process at most
+100, archive maintenance at most 10,000, and long poll waits at most 30
+seconds. Replicated integration state is admitted at 2 MiB and the complete
+Event Bus/application image remains bounded by the 4-MiB snapshot contract.
 
 Each subscription has a backward-compatible `delivery_policy`. Its defaults
 are a 30-second attempt timeout, 16 in-flight records, exponential retry from
 1 to 60 seconds with 10% deterministic jitter, eight attempts, and no max age.
 The hard bounds are 1,000 in-flight records, 100 attempts, and seven days for
-timeout or maximum retry delay. The policy is captured into each delivery so a
-later route edit cannot retroactively change existing work.
+timeout or maximum retry delay. Optional committed delivery rate/burst and
+dead-letter retention are bounded independently. The policy is captured into
+each delivery so a later route edit cannot retroactively change existing work.
 
 One subscription permits at most 64 patterns in each pattern collection, 64
 header predicates, 64 JSON-equality predicates, 64 headers added by a
@@ -130,7 +141,9 @@ Every command binds a format version, tablet ID and epoch, resource name,
 idempotency key, candidate application time, and one operation. Existing
 unsigned operations retain their exact v1 bytes. A signed subscription,
 internal exact-delivery acquisition, or terminal rejection uses v2. An exact
-Queue/Stream acquisition containing a pinned destination uses additive v3:
+Queue/Stream acquisition containing a pinned destination uses additive v3;
+integration operations use v4; redrive, archive maintenance, rate/retention,
+and managed-target metadata use v5:
 
 | Operation | Deterministic result |
 | --- | --- |
@@ -141,7 +154,10 @@ Queue/Stream acquisition containing a pinned destination uses additive v3:
 | `acknowledge_delivery` | Fence by exact active lease and commit terminal acknowledgement. |
 | `fail_delivery` | Fence by exact active lease and commit deterministic retry eligibility or terminal dead-letter state. |
 | `reject_delivery` | Fence by exact active lease and immediately commit a bounded terminal dead-letter reason. |
+| `redrive_delivery` | Return one retained dead-letter record to pending while preserving immutable attempts. |
+| `apply_integration` | Atomically apply one strict schema/policy/enrichment/function/connector/MQTT/catalog/endpoint operation and advance the route-plan version. |
 | `maintain_deliveries` | Settle a bounded batch of expired leases as timeout failures. |
+| `maintain_archive` | Apply bounded count/age archive retention at committed time. |
 
 The public mutation DTO never accepts a destination binding. The regional
 source-leader worker alone submits an exact v3 acquire that binds target kind,
@@ -215,7 +231,11 @@ targets require a bounded absolute `http` or `https` URL with a host and no
 embedded credentials or fragment. An optional `signing_key_id` is a bounded
 resource name captured into every matching outbox record. Only a signed
 HTTP/webhook target is eligible for the network executor; Queue/Stream records
-are owned by the separate native-target executor.
+are owned by the separate native-target executor. API destinations carry
+strict API-key/OAuth credential references and a binary/structured CloudEvents
+mode. Endpoint pools reference replicated health observations. Function and
+connector targets resolve active replicated definitions with exact outbound
+allowlists and secret references.
 
 On each attempt the regional leader revalidates the URL, resolves every domain,
 rejects any non-public or mixed DNS answer, and pins the validated addresses.
@@ -227,8 +247,18 @@ HMAC-SHA-256 signature. See
 [ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md) for the canonical
 input, key rotation, replay identity, and non-claims.
 
-Transforms add bounded headers and optionally project named top-level output
-fields from deterministic JSON paths. Each publish receipt retains the route
+The managed-target worker applies the same URL, DNS, redirect, proxy, timeout,
+and lease controls. It emits binary or structured CloudEvents, supplies a
+stable `idempotency-key`, resolves API-key or OAuth client credentials, and may
+use an external API-key/bearer/OAuth secret for a function or connector.
+Endpoint-pool egress failure commits an unhealthy observation before a later
+failover attempt. Connector success commits its batch outcome/checkpoint before
+source acknowledgement. See
+[ADR-0037](adr/0037-event-integration-platform.md).
+
+Transforms add bounded headers, projection, rename, constants, templates, and
+optional deterministic lookup enrichment under operation/value/output/time
+limits with network access disabled. Each publish receipt retains the route
 plan version, position, delivery count, and versioned lowercase SHA-256 digest
 of the ordered fully transformed delivery list. The outbox separately retains
 the transformed envelope and captured target/policy required for later
@@ -249,8 +279,9 @@ records, receipt count, or digest. Reusing the proposal ID with different
 committed metadata fails closed.
 
 The latest business-state digest covers normalized configuration, sorted
-subscriptions, route-plan version, publish position, archive, every outbox
-record and attempt, and dispatcher epoch high-water marks. The v2 tablet
+subscriptions, route-plan version, publish position, archive/retention
+watermark, complete integration state, every outbox record/attempt/rate bucket,
+and dispatcher epoch high-water marks. The tablet
 transition digest additionally covers the prior tablet digest, proposal ID,
 term, log index, payload digest, effective application time, business-state
 digest, and canonical outcome. Deterministic rejection changes the tablet
@@ -261,13 +292,15 @@ Attempts are ordered by publish position and subscription, observe an inclusive
 retry-eligibility boundary, and use an exclusive lease deadline. A newer
 dispatcher epoch fences older settlement tokens; a leader-term change also
 fences the old lease. Failure of one record cannot mutate another target.
-Terminal records and immutable attempts remain in the bounded ledger; pruning,
-retention, and redrive are intentionally not implemented yet.
+Terminal records and immutable attempts remain in the bounded ledger until the
+captured dead-letter retention expires. Exact redrive preserves prior attempts,
+creates a new pending eligibility point, and is rejected after purge.
 
 Archive replay selects records by inclusive receive-time range, applies the
 same validated filter evaluator, preserves publish order, and enforces the
-response limit. It currently returns archived records only; it does not enqueue
-new durable subscription attempts or assign replay lineage.
+response limit. Count/age retention is leader-maintained using committed time.
+Replay returns archived records only; it does not enqueue new durable
+subscription attempts or assign replay lineage.
 
 ## Evidence and non-claims
 
@@ -285,6 +318,13 @@ The tests cover:
 - dispatcher/leader fencing, bounded in-flight isolation, exact lease
   acknowledgement, retry boundaries, timeout maintenance, attempt exhaustion,
   and dead-letter state;
+- committed rate/burst admission, bounded dead-letter retention/redrive,
+  archive count/age maintenance, and long-poll wakeup/timeout;
+- schema revision/compatibility/payload validation, transforms/enrichment,
+  connector checkpoint/replay/partial failures, MQTT sessions/retained/QoS/
+  shared subscriptions, catalog search, endpoint failover, and function state;
+- canonical 2-MiB integration admission plus semantic snapshot corruption
+  rejection after a valid recomputed digest;
 - identical results, archive state, positions, and digests across three
   independent tablets replaying one committed history;
 - strict DTOs, browser-safe metadata, semantic retry/conflict, actor-missed
@@ -295,6 +335,10 @@ The tests cover:
 - signed binary CloudEvents, exact HMAC vectors, strict/redacted rotating key
   files, special-address and mixed-DNS rejection, redirect/proxy suppression,
   invalid-header rejection, and a real loopback receiver;
+- managed binary/structured CloudEvents, API-key/OAuth/bearer secret handling,
+  OAuth caching, allowlists, stable idempotency, endpoint-health observation,
+  connector checkpoint-before-settlement, and a real loopback OAuth plus target
+  receiver;
 - three real HTTP consensus runtimes committing, converging, shutting down, and
   reopening from EPRS, including one 503/204 signed retry whose two-attempt
   acknowledged history survives full voter restart, plus Queue enqueue and
@@ -310,9 +354,10 @@ Reproduce the deployment proof with:
 make test-bus-tablet
 ```
 
-Still required are rate limiting, redrive and terminal-record retention, replay
-attempt lineage, unsigned HTTP writes, long-poll and
-push transports, OAuth/API-key destinations, private managed egress, secret
-manager/hot reload, broader CloudEvents conformance, user-exportable
-backups/PITR, production identity/TLS, generated response models, package
-publication, and multi-shard routing.
+Still required are replay-attempt lineage, bidirectional streaming push,
+unsigned legacy HTTP execution, an MQTT wire gateway, official schema/MQTT/
+CloudEvents conformance, automatic source-connector polling, active endpoint
+health restoration, private managed egress, secret manager/hot reload,
+user-exportable backups/PITR, production identity/TLS and security/scale
+evidence, generated response models, package publication, and multi-shard
+routing.

@@ -1,10 +1,13 @@
 # Regional Event Bus SDK
 
-**Status:** Repository-local, single-shard regional alpha with Epoch Queue/Stream and signed HTTPS delivery
+**Status:** Repository-local, single-shard regional alpha with replicated integrations and leader-owned managed delivery
 
 Epoch's Go, Java, and Python Event Bus clients call the same replicated tablet hosted by the Rust regional runtime. The clients discover the current leader, send generation and tablet fences, preserve caller-owned mutation identity across bounded rediscovery, and request linearizable archive, delivery, mutation, and status reads.
 
-This is the stable native boundary for the implemented Bus route-plan, archive, and delivery-ledger lifecycle. It is not the standalone `/v1/buses/...` API and does not route data through the Go control plane.
+This is the stable native boundary for the implemented Bus route plan,
+archive, delivery ledger, schema/enrichment/MQTT/catalog/connector state, and
+managed targets. It is not the standalone `/v1/buses/...` API and does not
+route data through the Go control plane.
 
 ## Resource identity
 
@@ -34,28 +37,34 @@ The current implementation accepts shard `0`; keeping the shard in the API preve
 | `acknowledge_delivery` | `acknowledge_delivery` | Permanently settle one fenced lease |
 | `fail_delivery` | `fail_delivery` | Record a retryable failure and transition to retry or attempt exhaustion |
 | `reject_delivery` | `reject_delivery` | Terminally dead-letter an acquired delivery without another retry |
+| `redrive_delivery` | `redrive_delivery` | Return one retained dead letter to pending with prior attempts preserved |
 | `maintain_deliveries` | `maintain_deliveries` | Explicitly process due retries and expired leases |
+| `maintain_archive` | `maintain_archive` | Explicitly enforce bounded archive count/age retention |
+| `apply_integration` | `apply_integration` | Commit one schema, policy, enrichment, function, connector, MQTT, catalog, or endpoint operation |
 | `mutation` | mutation lookup | Resolve one proposal ID |
 | `replay_archive` | `archive/replay` | Replay 1–10,000 archived events in an inclusive server-received time range |
 | `query_deliveries` | `deliveries/query` | Query 1–10,000 records by subscription/state |
+| `integration_state` | `integration/state` | Read the complete linearizable replicated integration state |
 | `status` | status | Observe consensus, route plan, archive, ledger counts, and digest |
 
-The regional materializer enables the replicated delivery outbox. Pull,
-unsigned webhook, and unsigned HTTP targets record durable intent for an
-external dispatcher. The source Bus leader automatically executes **Queue** and
-**Stream** targets. A separately configured leader-owned Rust worker executes
-**signed** webhook and HTTP targets; an HTTP response remains an external
-observation, not a consensus operation.
+The regional materializer enables the replicated delivery outbox. Pull targets
+remain application-dispatched. The source Bus leader automatically executes
+**Queue**, **Stream**, signed **webhook/HTTP**, **API destination**, **endpoint
+pool**, **function**, and target/bidirectional **connector** deliveries. An
+external response remains an observation; only the resulting acknowledgement,
+failure, endpoint-health update, and connector checkpoint are consensus state.
 
 ## Typed subscription policy
 
 A subscription combines:
 
 - event type, source, subject, header, and JSON-equality filters;
-- pull, Queue, Stream, webhook, or HTTP target metadata, with an optional
-  signing-key ID for HTTP/webhook;
-- deterministic added headers and payload projections;
-- timeout, maximum in-flight delivery count, and bounded retry policy.
+- pull, Queue, Stream, webhook, HTTP, API destination, endpoint pool, function,
+  or connector target metadata;
+- deterministic headers, projection, rename, constants, templates, and an
+  optional replicated enrichment reference;
+- timeout, maximum in-flight count, bounded retry, committed rate/burst, and
+  optional dead-letter retention.
 
 Default delivery policy:
 
@@ -63,6 +72,8 @@ Default delivery policy:
 {
   "timeout_ms": 30000,
   "max_in_flight": 16,
+  "rate_limit": null,
+  "dead_letter_retention_ms": null,
   "retry": {
     "strategy": "exponential",
     "initial_delay_ms": 1000,
@@ -129,6 +140,39 @@ client.upsert_subscription("events", 0, "upsert-orders-v1", subscription)
 
 The exact executable source is [quickstart.py](../console/src/quickstarts/regional_bus/quickstart.py).
 
+## Long poll, retention, and redrive
+
+Acquisition may wait for a committed eligible delivery for up to 30 seconds.
+The wait ends on a matching publish/retry transition, timeout, leadership
+change, or caller cancellation; it never weakens the lease fence.
+
+```go
+leases, err := client.AcquireDeliveries(ctx, "events", 0, "pull-42",
+    epoch.RegionalBusAcquireOptions{
+        Subscription: "orders", Dispatcher: "worker-a", DispatcherEpoch: 7,
+        MaxDeliveries: 10, Wait: 20 * time.Second,
+    })
+```
+
+```java
+JsonNode leases = client.acquireDeliveries(
+    "events", 0, "pull-42", "orders", "worker-a",
+    BigInteger.valueOf(7), 10, Duration.ofSeconds(20));
+```
+
+```python
+leases = client.acquire_deliveries(
+    "events", 0, "pull-42", subscription="orders", dispatcher="worker-a",
+    dispatcher_epoch=7, max_deliveries=10, wait_ms=20_000,
+)
+```
+
+Set `DeliveryRateLimit` and `dead_letter_retention_ms` on the subscription
+policy to bound committed starts and terminal history. `redrive_delivery`
+returns one retained dead letter to pending while preserving its attempts.
+`maintain_deliveries` and `maintain_archive` provide immediate bounded sweeps;
+the regional leader also schedules due delivery and archive-retention work.
+
 ## Epoch Queue and Stream delivery
 
 Create the destination Queue or Stream in the same
@@ -175,6 +219,119 @@ settled Queue/Stream records. Applications cannot submit that field through
 the acquire API. The executable quickstarts provision both destinations,
 publish a keyed event, and wait for both delivery records to become
 `acknowledged` with a pinned binding.
+
+## Managed API, endpoint-pool, function, and connector targets
+
+Every node loads the same externally distributed secret references and runs
+the worker; only the current Bus leader acts:
+
+```shell
+EPOCH_REGIONAL_MANAGED_TARGET_SECRETS_PATH=/etc/epoch/managed-target-secrets.json
+EPOCH_REGIONAL_MANAGED_TARGET_DELIVERY_INTERVAL_MS=100
+```
+
+The strict file is limited to 1 MiB/1,024 entries and is read at startup. It is
+never replicated or returned by status APIs:
+
+```json
+{
+  "format_version": 1,
+  "secrets": [
+    {"kind":"api_key","reference":"billing-key","value":"replace-me","header":"x-api-key"},
+    {"kind":"bearer","reference":"function-token","token":"replace-me"},
+    {"kind":"oauth2_client","reference":"orders-oauth","client_id":"epoch","client_secret":"replace-me","token_url":"https://identity.example/token","scopes":["orders.write"]}
+  ]
+}
+```
+
+An API destination carries only the credential reference and supports binary
+or structured CloudEvents:
+
+```go
+auth := epoch.DestinationAuth{Kind: "oauth2", SecretRef: "orders-oauth",
+    TokenURL: "https://identity.example/token", Scopes: []string{"orders.write"}}
+target := epoch.APIDestinationTarget("https://api.example/events", auth, "structured")
+```
+
+```java
+DestinationAuth auth = DestinationAuth.oauth2(
+    "orders-oauth", "https://identity.example/token", List.of("orders.write"));
+SubscriptionTarget target = SubscriptionTarget.apiDestination(
+    "https://api.example/events", auth, "structured");
+```
+
+```python
+auth = DestinationAuth.oauth2(
+    "orders-oauth", "https://identity.example/token", ("orders.write",)
+)
+target = SubscriptionTarget.api_destination(
+    "https://api.example/events", auth, "structured"
+)
+```
+
+API-key auth uses `DestinationAuth.api_key`/`apiKey` (or a Go
+`DestinationAuth{Kind: "api_key", ...}`). Endpoint-pool targets replace the
+URL with a replicated pool name. A real egress failure commits the chosen
+endpoint unhealthy before a later attempt selects the next deterministic
+healthy route; credential/configuration errors do not change endpoint health.
+
+Function and connector targets refer to replicated resources. Functions send
+structured CloudEvents to their allowlisted endpoint and may use one secret
+reference. A target/bidirectional connector requires an allowlisted
+`config.endpoint`, accepts optional `config.timeout_ms` and
+`config.cloud_events_mode`, and uses zero or one secret reference. After a
+successful connector request, Epoch commits the batch outcome/checkpoint before
+acknowledging the source delivery.
+
+Production URLs require HTTPS and public DNS/IP answers. Redirects and ambient
+proxies are disabled and the resolved address is pinned for the attempt. Set
+`EPOCH_REGIONAL_MANAGED_TARGET_ALLOW_HTTP_LOOPBACK=true` only for local
+loopback tests. Secret hot reload, an external secret manager, private-network
+destinations, and automatic source-connector polling are not in this release.
+
+## Replicated integration operations
+
+`apply_integration` accepts the same strict tagged JSON document in all three
+SDKs (`Document`, `JsonNode`, or `dict`). Supported `kind` values are:
+
+| Family | Operations |
+|---|---|
+| Schema | `register_schema`, `upsert_validation_policy`, `remove_validation_policy` |
+| Transform data | `upsert_enrichment`, `remove_enrichment` |
+| Function | `upsert_function`, `set_function_status` |
+| Connector | `upsert_connector`, `set_connector_status`, `commit_connector_batch`, `request_connector_replay`, `rotate_connector_secret` |
+| MQTT state | `mqtt_connect`, `mqtt_disconnect`, `mqtt_subscribe`, `mqtt_unsubscribe`, `mqtt_publish`, `mqtt_clear_retained`, `mqtt_expire_sessions` |
+| Discovery/routing | `upsert_catalog_entry`, `remove_catalog_entry`, `observe_endpoint` |
+
+For example, register a schema and bind broker validation:
+
+```json
+{"kind":"register_schema","registration":{"name":"order","format":"json_schema","definition":"{\"type\":\"object\"}","compatibility":"backward","fields":[{"path":"id","value_type":"string","required":true,"default":null}]}}
+```
+
+```json
+{"kind":"upsert_validation_policy","policy":{"name":"orders","event_type_pattern":"order.*","schema_ref":"order@1","mode":"broker"}}
+```
+
+Pass each document with a new caller-owned mutation identity:
+
+```go
+_, err := client.ApplyIntegration(ctx, "events", 0, "schema-order-v1", operation)
+```
+
+```java
+client.applyIntegration("events", 0, "schema-order-v1", operationNode);
+```
+
+```python
+client.apply_integration("events", 0, "schema-order-v1", operation)
+```
+
+Read `integration_state` after a linearizable barrier to inspect the exact
+replicated schemas, policies, enrichments, functions, connectors/checkpoints,
+MQTT sessions/retained messages, catalog, and endpoint observations. The
+integration image is atomically bounded to 2 MiB and is semantically
+revalidated during recovery.
 
 ## Signed webhook delivery
 
@@ -289,7 +446,7 @@ replicated lease, and an expired lease emits no request.
 
 ## Delivery worker sequence
 
-For pull/unsigned/custom targets:
+For application-dispatched pull or unsigned webhook/HTTP targets:
 
 1. Acquire a bounded batch for one subscription and dispatcher epoch.
 2. Perform the external operation using the delivery ID as downstream idempotency metadata where supported.
@@ -316,12 +473,19 @@ with the same browser-safe encoding.
 - one native Bus shard (`0`) per resource;
 - acquire/maintenance batches: 1–100;
 - archive/query results: 1–10,000;
+- long poll: 0–30,000 ms;
+- replicated integration image: at most 2 MiB inside the bounded native Bus snapshot;
 - dispatcher identity: bounded, caller-owned, non-session identity;
-- no push stream, long poll, automatic lease renewal, or dispatcher coordinator;
-- built-in execution covers Epoch Queue/Stream and signed HTTP/webhook targets;
-  unsigned HTTP/webhook, long-poll, and managed push executors remain open;
-- no OAuth/API-key target auth, key hot reload/secret manager, schema
-  validation, MQTT, private egress profile, or geo routing;
+- no bidirectional push stream, automatic lease renewal, or dispatcher coordinator;
+- built-in execution covers Epoch Queue/Stream, signed HTTP/webhook, API
+  destinations, endpoint pools, functions, and target/bidirectional connectors;
+  unsigned legacy HTTP/webhook intent remains application-dispatched;
+- schema validation uses Epoch's bounded structural field model rather than
+  every official format compiler;
+- MQTT session/QoS state is implemented, but no MQTT wire gateway or protocol
+  conformance is claimed;
+- no key/secret hot reload, external secret manager, private egress profile,
+  automatic source-connector polling, or geo routing;
 - no built-in receiver replay store: the SDK verifier returns the identity the
   receiver must persist;
 - no exactly-once external-side-effect claim.
@@ -331,4 +495,6 @@ signed delivery is defined by
 [ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md), and Epoch-target
 delivery by
 [ADR-0031](adr/0031-leader-owned-epoch-target-delivery.md). The lower-level
-state machine is documented in [BUS_TABLET.md](BUS_TABLET.md).
+integration and managed-delivery boundary is
+[ADR-0037](adr/0037-event-integration-platform.md). The lower-level state
+machine is documented in [BUS_TABLET.md](BUS_TABLET.md).

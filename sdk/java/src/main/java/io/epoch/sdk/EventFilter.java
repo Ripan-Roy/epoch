@@ -7,6 +7,7 @@ import java.util.Map;
 
 /** Typed Event Bus subscription filter. */
 public record EventFilter(
+    List<String> topicPatterns,
     List<String> eventTypePatterns,
     List<String> sourcePatterns,
     List<String> subjectPatterns,
@@ -14,6 +15,7 @@ public record EventFilter(
     Map<String, Object> jsonEquals) {
 
   public EventFilter {
+    topicPatterns = List.copyOf(topicPatterns);
     eventTypePatterns = List.copyOf(eventTypePatterns);
     sourcePatterns = List.copyOf(sourcePatterns);
     subjectPatterns = List.copyOf(subjectPatterns);
@@ -21,12 +23,22 @@ public record EventFilter(
     jsonEquals = Map.copyOf(jsonEquals);
   }
 
+  public EventFilter(
+      List<String> eventTypePatterns,
+      List<String> sourcePatterns,
+      List<String> subjectPatterns,
+      Map<String, String> headers,
+      Map<String, Object> jsonEquals) {
+    this(List.of(), eventTypePatterns, sourcePatterns, subjectPatterns, headers, jsonEquals);
+  }
+
   public static EventFilter empty() {
-    return new EventFilter(List.of(), List.of(), List.of(), Map.of(), Map.of());
+    return new EventFilter(List.of(), List.of(), List.of(), List.of(), Map.of(), Map.of());
   }
 
   ObjectNode toJson(ObjectMapper mapper) {
     ObjectNode value = mapper.createObjectNode();
+    value.set("topic_patterns", mapper.valueToTree(topicPatterns));
     value.set("event_type_patterns", mapper.valueToTree(eventTypePatterns));
     value.set("source_patterns", mapper.valueToTree(sourcePatterns));
     value.set("subject_patterns", mapper.valueToTree(subjectPatterns));

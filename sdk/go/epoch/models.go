@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"math"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -133,6 +134,7 @@ func NewEventEnvelope(source, eventType string, payload any) EventEnvelope {
 
 // EventFilter uses the native Event Bus matching vocabulary.
 type EventFilter struct {
+	TopicPatterns     []string          `json:"topic_patterns"`
 	EventTypePatterns []string          `json:"event_type_patterns"`
 	SourcePatterns    []string          `json:"source_patterns"`
 	SubjectPatterns   []string          `json:"subject_patterns"`
@@ -144,6 +146,20 @@ type EventFilter struct {
 type EventTransform struct {
 	AddHeaders        map[string]string `json:"add_headers"`
 	PayloadProjection map[string]string `json:"payload_projection"`
+	RenameFields      map[string]string `json:"rename_fields"`
+	Constants         map[string]any    `json:"constants"`
+	Templates         map[string]string `json:"templates"`
+	Limits            *TransformLimits  `json:"limits,omitempty"`
+	EnrichmentRef     string            `json:"enrichment_ref,omitempty"`
+}
+
+// TransformLimits bound deterministic transform CPU, memory, time, and network access.
+type TransformLimits struct {
+	MaxOperations  uint16 `json:"max_operations"`
+	MaxOutputBytes uint64 `json:"max_output_bytes"`
+	MaxValueBytes  uint64 `json:"max_value_bytes"`
+	TimeoutMS      uint64 `json:"timeout_ms"`
+	NetworkAccess  bool   `json:"network_access"`
 }
 
 // DeliveryBackoffStrategy controls deterministic Event Bus retry scheduling.
@@ -166,9 +182,17 @@ type DeliveryRetryPolicy struct {
 
 // DeliveryPolicy controls one subscription's replicated delivery ledger.
 type DeliveryPolicy struct {
-	TimeoutMS   uint64              `json:"timeout_ms"`
-	MaxInFlight uint16              `json:"max_in_flight"`
-	Retry       DeliveryRetryPolicy `json:"retry"`
+	TimeoutMS             uint64              `json:"timeout_ms"`
+	MaxInFlight           uint16              `json:"max_in_flight"`
+	Retry                 DeliveryRetryPolicy `json:"retry"`
+	RateLimit             *DeliveryRateLimit  `json:"rate_limit,omitempty"`
+	DeadLetterRetentionMS *uint64             `json:"dead_letter_retention_ms,omitempty"`
+}
+
+// DeliveryRateLimit bounds one subscription's committed delivery starts.
+type DeliveryRateLimit struct {
+	DeliveriesPerSecond uint32 `json:"deliveries_per_second"`
+	Burst               uint32 `json:"burst"`
 }
 
 // DefaultDeliveryPolicy returns the replicated Event Bus delivery defaults.
@@ -190,20 +214,36 @@ func DefaultDeliveryPolicy() DeliveryPolicy {
 type TargetKind string
 
 const (
-	PullTargetKind    TargetKind = "pull"
-	QueueTargetKind   TargetKind = "queue"
-	StreamTargetKind  TargetKind = "stream"
-	WebhookTargetKind TargetKind = "webhook"
-	HTTPTargetKind    TargetKind = "http"
+	PullTargetKind           TargetKind = "pull"
+	QueueTargetKind          TargetKind = "queue"
+	StreamTargetKind         TargetKind = "stream"
+	WebhookTargetKind        TargetKind = "webhook"
+	HTTPTargetKind           TargetKind = "http"
+	APIDestinationTargetKind TargetKind = "api_destination"
+	EndpointPoolTargetKind   TargetKind = "endpoint_pool"
+	FunctionTargetKind       TargetKind = "function"
+	ConnectorTargetKind      TargetKind = "connector"
 )
+
+// DestinationAuth references rotatable credentials without carrying secret values.
+type DestinationAuth struct {
+	Kind      string   `json:"kind"`
+	SecretRef string   `json:"secret_ref,omitempty"`
+	Header    string   `json:"header,omitempty"`
+	TokenURL  string   `json:"token_url,omitempty"`
+	Scopes    []string `json:"scopes,omitempty"`
+}
 
 // SubscriptionTarget is a typed Event Bus delivery destination.
 type SubscriptionTarget struct {
-	Kind           TargetKind `json:"kind"`
-	Resource       string     `json:"resource,omitempty"`
-	URL            string     `json:"url,omitempty"`
-	SigningKeyID   string     `json:"signing_key_id,omitempty"`
-	requireSigning bool
+	Kind            TargetKind       `json:"kind"`
+	Resource        string           `json:"resource,omitempty"`
+	URL             string           `json:"url,omitempty"`
+	SigningKeyID    string           `json:"signing_key_id,omitempty"`
+	Pool            string           `json:"pool,omitempty"`
+	Auth            *DestinationAuth `json:"auth,omitempty"`
+	CloudEventsMode string           `json:"cloud_events_mode,omitempty"`
+	requireSigning  bool
 }
 
 // PullTarget creates a subscription consumed through pull delivery.
@@ -243,6 +283,26 @@ func SignedHTTPTarget(targetURL, signingKeyID string) SubscriptionTarget {
 	return SubscriptionTarget{
 		Kind: HTTPTargetKind, URL: targetURL, SigningKeyID: signingKeyID, requireSigning: true,
 	}
+}
+
+// APIDestinationTarget routes through a rotatable API-key or OAuth credential reference.
+func APIDestinationTarget(targetURL string, auth DestinationAuth, mode string) SubscriptionTarget {
+	return SubscriptionTarget{Kind: APIDestinationTargetKind, URL: targetURL, Auth: &auth, CloudEventsMode: mode}
+}
+
+// EndpointPoolTarget selects the healthiest endpoint from one replicated pool.
+func EndpointPoolTarget(pool string, auth DestinationAuth, mode string) SubscriptionTarget {
+	return SubscriptionTarget{Kind: EndpointPoolTargetKind, Pool: pool, Auth: &auth, CloudEventsMode: mode}
+}
+
+// FunctionTarget routes matching events to a named function executor.
+func FunctionTarget(resource string) SubscriptionTarget {
+	return SubscriptionTarget{Kind: FunctionTargetKind, Resource: resource}
+}
+
+// ConnectorTarget routes matching events to a managed connector worker.
+func ConnectorTarget(resource string) SubscriptionTarget {
+	return SubscriptionTarget{Kind: ConnectorTargetKind, Resource: resource}
 }
 
 // Subscription is a typed Event Bus routing resource.
@@ -301,15 +361,15 @@ func (event EventEnvelope) normalized() (EventEnvelope, error) {
 func (target SubscriptionTarget) validate() error {
 	switch target.Kind {
 	case PullTargetKind:
-		if target.Resource != "" || target.URL != "" || target.SigningKeyID != "" {
+		if target.Resource != "" || target.URL != "" || target.SigningKeyID != "" || target.Pool != "" || target.Auth != nil {
 			return fmt.Errorf("epoch: pull targets do not accept a resource or URL")
 		}
-	case QueueTargetKind, StreamTargetKind:
-		if strings.TrimSpace(target.Resource) == "" || target.URL != "" || target.SigningKeyID != "" {
+	case QueueTargetKind, StreamTargetKind, FunctionTargetKind, ConnectorTargetKind:
+		if strings.TrimSpace(target.Resource) == "" || target.URL != "" || target.SigningKeyID != "" || target.Pool != "" || target.Auth != nil {
 			return fmt.Errorf("epoch: %s targets require only a resource", target.Kind)
 		}
 	case WebhookTargetKind, HTTPTargetKind:
-		if strings.TrimSpace(target.URL) == "" || target.Resource != "" {
+		if strings.TrimSpace(target.URL) == "" || target.Resource != "" || target.Pool != "" || target.Auth != nil {
 			return fmt.Errorf("epoch: %s targets require only a URL", target.Kind)
 		}
 		if target.requireSigning && target.SigningKeyID == "" {
@@ -318,10 +378,63 @@ func (target SubscriptionTarget) validate() error {
 		if target.SigningKeyID != "" && !validResourceName(target.SigningKeyID) {
 			return fmt.Errorf("epoch: signing key ID must be a 1-128 byte resource name")
 		}
+	case APIDestinationTargetKind:
+		if strings.TrimSpace(target.URL) == "" || target.Resource != "" || target.Pool != "" || target.SigningKeyID != "" || target.Auth == nil {
+			return fmt.Errorf("epoch: API destination targets require only a URL and auth reference")
+		}
+		if err := target.Auth.validate(); err != nil {
+			return err
+		}
+		if !validHTTPURL(target.URL) {
+			return fmt.Errorf("epoch: API destination requires an absolute HTTP(S) URL without credentials or fragments")
+		}
+		if target.CloudEventsMode != "" && target.CloudEventsMode != "binary" && target.CloudEventsMode != "structured" {
+			return fmt.Errorf("epoch: CloudEvents mode must be binary or structured")
+		}
+	case EndpointPoolTargetKind:
+		if strings.TrimSpace(target.Pool) == "" || target.Resource != "" || target.URL != "" || target.SigningKeyID != "" || target.Auth == nil {
+			return fmt.Errorf("epoch: endpoint pool targets require only a pool and auth reference")
+		}
+		if err := target.Auth.validate(); err != nil {
+			return err
+		}
+		if target.CloudEventsMode != "" && target.CloudEventsMode != "binary" && target.CloudEventsMode != "structured" {
+			return fmt.Errorf("epoch: CloudEvents mode must be binary or structured")
+		}
 	default:
 		return fmt.Errorf("epoch: unsupported subscription target %q", target.Kind)
 	}
 	return nil
+}
+
+func (auth DestinationAuth) validate() error {
+	switch auth.Kind {
+	case "none":
+		if auth.SecretRef != "" || auth.Header != "" || auth.TokenURL != "" || len(auth.Scopes) != 0 {
+			return fmt.Errorf("epoch: none destination auth cannot carry credential fields")
+		}
+	case "api_key":
+		if !validResourceName(auth.SecretRef) || strings.TrimSpace(auth.Header) == "" || auth.TokenURL != "" || len(auth.Scopes) != 0 {
+			return fmt.Errorf("epoch: API-key auth requires a secret reference and header")
+		}
+	case "oauth2":
+		if !validResourceName(auth.SecretRef) || !validHTTPURL(auth.TokenURL) || auth.Header != "" || len(auth.Scopes) > 64 {
+			return fmt.Errorf("epoch: OAuth2 auth requires a secret reference and token URL")
+		}
+		for _, scope := range auth.Scopes {
+			if strings.TrimSpace(scope) == "" || len(scope) > 4*1024 {
+				return fmt.Errorf("epoch: OAuth2 scopes must be non-empty and at most 4096 bytes")
+			}
+		}
+	default:
+		return fmt.Errorf("epoch: unsupported destination auth %q", auth.Kind)
+	}
+	return nil
+}
+
+func validHTTPURL(raw string) bool {
+	parsed, err := url.Parse(raw)
+	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != "" && parsed.User == nil && parsed.Fragment == ""
 }
 
 func validResourceName(value string) bool {
@@ -353,8 +466,30 @@ func (subscription Subscription) normalized() (Subscription, error) {
 		}
 		subscription.DeliveryPolicy = &policy
 	}
+	if subscription.Transform.Limits != nil {
+		limits := subscription.Transform.Limits
+		operations := len(subscription.Transform.AddHeaders) + len(subscription.Transform.PayloadProjection) + len(subscription.Transform.RenameFields) + len(subscription.Transform.Constants) + len(subscription.Transform.Templates)
+		if limits.MaxOperations == 0 || limits.MaxOperations > 256 || operations > int(limits.MaxOperations) {
+			return Subscription{}, fmt.Errorf("epoch: transform operations exceed the configured or platform limit")
+		}
+		if limits.MaxOutputBytes == 0 || limits.MaxOutputBytes > 1024*1024 || limits.MaxValueBytes == 0 || limits.MaxValueBytes > 256*1024 || limits.MaxValueBytes > limits.MaxOutputBytes {
+			return Subscription{}, fmt.Errorf("epoch: transform byte limits are invalid")
+		}
+		if limits.TimeoutMS == 0 || limits.TimeoutMS > 1_000 {
+			return Subscription{}, fmt.Errorf("epoch: transform timeout must be between 1 and 1000 milliseconds")
+		}
+		if limits.NetworkAccess {
+			return Subscription{}, fmt.Errorf("epoch: deterministic transforms cannot enable network access")
+		}
+	}
+	if subscription.Transform.EnrichmentRef != "" && !validResourceName(subscription.Transform.EnrichmentRef) {
+		return Subscription{}, fmt.Errorf("epoch: enrichment reference must be a resource name")
+	}
 	if subscription.Filter.EventTypePatterns == nil {
 		subscription.Filter.EventTypePatterns = []string{}
+	}
+	if subscription.Filter.TopicPatterns == nil {
+		subscription.Filter.TopicPatterns = []string{}
 	}
 	if subscription.Filter.SourcePatterns == nil {
 		subscription.Filter.SourcePatterns = []string{}
@@ -373,6 +508,15 @@ func (subscription Subscription) normalized() (Subscription, error) {
 	}
 	if subscription.Transform.PayloadProjection == nil {
 		subscription.Transform.PayloadProjection = map[string]string{}
+	}
+	if subscription.Transform.RenameFields == nil {
+		subscription.Transform.RenameFields = map[string]string{}
+	}
+	if subscription.Transform.Constants == nil {
+		subscription.Transform.Constants = map[string]any{}
+	}
+	if subscription.Transform.Templates == nil {
+		subscription.Transform.Templates = map[string]string{}
 	}
 	return subscription, nil
 }
@@ -402,6 +546,12 @@ func (policy DeliveryPolicy) validate() error {
 	}
 	if policy.Retry.MaxAgeMS != nil && *policy.Retry.MaxAgeMS == 0 {
 		return fmt.Errorf("epoch: delivery retry max age must be non-zero when provided")
+	}
+	if policy.RateLimit != nil && (policy.RateLimit.DeliveriesPerSecond == 0 || policy.RateLimit.DeliveriesPerSecond > 1_000_000 || policy.RateLimit.Burst == 0 || policy.RateLimit.Burst > 1_000_000) {
+		return fmt.Errorf("epoch: delivery rate and burst must be between 1 and 1000000")
+	}
+	if policy.DeadLetterRetentionMS != nil && (*policy.DeadLetterRetentionMS == 0 || *policy.DeadLetterRetentionMS > 31_536_000_000) {
+		return fmt.Errorf("epoch: dead-letter retention must be between 1 and 31536000000 milliseconds")
 	}
 	return nil
 }

@@ -382,15 +382,19 @@ kind, set/committed-get/delete/CAS/increment, atomic transactions/batches,
 deterministic eviction, fenced locks, explicit expiry, pure observation,
 mutation lookup, and status. The generic regional and direct
 tablet routes remain internal verification surfaces. Event Bus exposes
-subscription upsert/removal, publish, delivery acquire/ack/fail/reject/maintenance,
-mutation lookup, archive replay, delivery query, and status. Its regional
+subscription upsert/removal, publish, long-poll acquire, ack/fail/reject,
+redrive, archive/delivery maintenance, integration mutations/state, mutation
+lookup, archive replay, delivery query, and status. Its regional
 materialization enables the durable delivery outbox; regional source-leader
-workers execute signed HTTP/webhook and Epoch Queue/Stream targets outside the
-state machine, while pull and unsigned/custom targets remain dispatcher-owned. See
+workers execute signed HTTP/webhook, Epoch Queue/Stream, API destination,
+endpoint-pool, function, and target/bidirectional connector records outside the
+state machine, while pull and unsigned legacy HTTP targets remain
+dispatcher-owned. See
 [ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md),
 [ADR-0018](adr/0018-regional-queue-v1-and-sdk-routing.md), and
 [ADR-0019](adr/0019-regional-cache-v1-and-sdk-routing.md), and
-[ADR-0020](adr/0020-regional-event-bus-v1-and-sdk-routing.md).
+[ADR-0020](adr/0020-regional-event-bus-v1-and-sdk-routing.md) and
+[ADR-0037](adr/0037-event-integration-platform.md).
 
 The current placement remains fixed at three configured voters, but it is now
 topology-aware at admission. Every Rust node reports its authenticated
@@ -432,23 +436,29 @@ history before readiness, and exposes strict mutation, lookup, status, and pure
 local-observation routes only on the internal listener. See
 [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
 
-The Event Bus has a bounded typed ingress/outbox tablet. The standalone
+The Event Bus has a bounded typed ingress/outbox/integration tablet. The
 route engine stores subscriptions in canonical name order, validates bounded
-filters, transforms, resource targets, and absolute HTTP(S) targets, and uses
-checked route-plan and publish positions. `epoch-tablet::BusTablet` adds
-canonical route/publish plus fenced acquire/ack/fail/maintenance commands,
+filters, transforms/enrichment, schemas, MQTT state, connectors, catalog,
+endpoint/function resources, and absolute HTTP(S) targets, and uses checked
+route-plan and publish positions. `epoch-tablet::BusTablet` adds canonical
+route/publish/integration plus fenced acquire/ack/fail/reject/redrive and
+delivery/archive maintenance commands,
 scoped proposal IDs, committed-order time, exact receipt replay, recordable
 atomic capacity rejection, deterministic delivery-plan evidence, and a v2
-digest over route, archive, independent delivery, dispatcher-epoch, and attempt
-state. Destination-bound histories use additive command and snapshot v3 while
-legacy unsigned and signed histories retain their prior bytes. `epoch-node`
+digest over route, integration, archive, independent delivery/rate,
+dispatcher-epoch, and attempt state. Destination-bound, integration, and
+retention histories use additive command/snapshot versions while legacy
+unsigned and signed histories retain their prior bytes. Every staged tablet
+mutation must remain snapshot-encodable, and restore semantically revalidates
+the complete integration image. `epoch-node`
 mounts it as a fourth mutually exclusive typed profile,
 rebuilds it from EPRS before readiness, and exposes strict
 mutation/status/archive/delivery-query routes on the internal listener and the
 authenticated, fully qualified regional Event Bus v1 adapter.
 Real-runtime and container tests prove fixed-voter convergence, target
 isolation, leader replacement, catch-up, and all-node recovery. The regional
-runtime adds leader-owned signed HTTP/webhook and Epoch Queue/Stream execution;
+runtime adds leader-owned signed HTTP/webhook, Epoch Queue/Stream, API,
+endpoint-pool, function, and connector execution;
 the tablet itself remains I/O-free and a publish still proves durable intent,
 not target completion. See
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
@@ -686,16 +696,18 @@ subscription owns independent delivery state, retry, rate, and dead-letter
 policy. A publish acknowledgement means the ingress commit succeeded; it does
 not mean a webhook or external target completed.
 
-Filters compile into a bounded, deterministic representation. Network
-enrichment and connectors run outside the storage role with explicit timeout,
-memory, secret, and egress policy.
+Filters and transforms use a bounded deterministic representation. Replicated
+lookup enrichment runs without network access; external function/connector I/O
+runs outside the storage role with explicit timeout, size, secret-reference,
+allowlist, and egress policy.
 
 The regional Event Bus v1 adapter delegates directly to this tablet. Go, Java,
 and Python clients discover the leader, carry resource-generation/tablet-epoch
 and term fences, preserve every caller-owned mutation key across one bounded
-rediscovery, and request linearizable barriers for archive, delivery, mutation,
-and status reads. Settlement passes through the opaque lease token returned by
-acquire.
+rediscovery, and request linearizable barriers for archive, delivery,
+integration, mutation, and status reads. Settlement passes through the opaque
+lease token returned by acquire; acquisition may long-poll for at most 30
+seconds without weakening its fence.
 
 An optional leader-owned Rust worker executes signed HTTP/webhook records.
 It reads pure candidates, commits an exact acquisition and awaits its Raft
@@ -719,23 +731,35 @@ duplicate insertion after an unknown settlement outcome, but it is not an
 atomic cross-tablet transaction. See
 [ADR-0031](adr/0031-leader-owned-epoch-target-delivery.md).
 
+A second leader-owned worker executes API destinations, deterministic healthy
+endpoint-pool routes, active function resources, and active target/
+bidirectional connectors. It commits an exact lease before I/O, emits binary or
+structured CloudEvents with a stable side-effect idempotency key, and uses a
+strict external API-key/bearer/OAuth client secret store. Public-address DNS
+validation/pinning, exact host allowlists, no redirects/proxies, and lease-
+capped timeouts fail closed. Connector success commits its batch outcome and
+checkpoint before source acknowledgement; actual endpoint egress failures
+commit unhealthy state before failover. See
+[ADR-0037](adr/0037-event-integration-platform.md).
+
 The current core slice evaluates immutable in-memory route plans rather than a
 compiled filter bytecode. It bounds a resource to 100,000 subscriptions, each
 configured route to 64 patterns and 64 filter/transform entries per collection,
-replay/delivery-query responses to 10,000 records, acquisition/maintenance to
-100 records, and target URLs to 8 KiB. Resource configuration selects lower
+replay/delivery-query responses to 10,000 records, acquisition/delivery
+maintenance to 100 records, long poll to 30 seconds, integration state to 2
+MiB, and target URLs to 8 KiB. Resource configuration selects lower
 operational limits (defaults: 1,024 subscriptions, 100,000 archived events, and
 100,000 retained delivery records). Capacity, deadline, and `u64` position
 exhaustion reject before mutation; no ordering counter saturates or wraps.
 
 The experimental replicated profile persists each subscription mutation,
-publish ingress, and delivery-ledger transition through the fixed voter set
-before applying it locally. Each matched subscription receives a stable ID,
-captured timeout/max-in-flight/retry policy, term/dispatcher-fenced lease,
-immutable attempts, retry eligibility, acknowledgement, or dead-letter state.
-Status reports route/archive/outbox counters and complete digests, plus
-`target_dispatch: regional_epoch_targets_and_configured_signed_webhooks` and
-`durable_target_outbox: true`. Archive replay and delivery queries are
+publish ingress, integration mutation, and delivery-ledger transition through
+the fixed voter set before applying it locally. Each matched subscription
+receives a stable ID, captured timeout/max-in-flight/retry/rate/dead-letter
+policy, term/dispatcher-fenced lease, immutable attempts, retry eligibility,
+acknowledgement, or dead-letter state. Status reports route/integration/archive/
+outbox and executor counters plus complete digests and
+`durable_target_outbox: true`. Archive replay, delivery queries, and integration state are
 linearizable through the regional adapter and explicitly local/stale-capable on
 the direct tablet route. The delivery-plan digest and
 outbox prove which deterministic transformed targets were selected and what
@@ -1095,6 +1119,7 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0028: Automatic Regional Consensus Checkpoints](adr/0028-automatic-regional-consensus-checkpoints.md)
 - [ADR-0029: Session-Fenced Stream Consumption](adr/0029-stream-session-fenced-consumption.md)
 - [ADR-0030: Leader-Owned Signed Webhook Delivery](adr/0030-leader-owned-signed-webhook-delivery.md)
+- [ADR-0037: Replicated Event Integration Platform and Leader-Owned Delivery](adr/0037-event-integration-platform.md)
 - [ADR-0031: Leader-Owned Epoch Queue and Stream Target Delivery](adr/0031-leader-owned-epoch-target-delivery.md)
 - [ADR-0036: Replicated Queue State Services](adr/0036-queue-state-services.md)
 - [ADR-0032: Regional Cache Eviction and Committed Access Batches](adr/0032-regional-cache-eviction-and-access-batches.md)

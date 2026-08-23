@@ -96,7 +96,7 @@ test-unit: test-retry-command ## Run unit tests for Rust, Go, Java, Python, and 
 	@if [ -f Cargo.toml ]; then cargo test --locked --workspace --all-targets --all-features; fi
 	@if find control operator sdk/go -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then go test -race ./...; fi
 	@if [ -d sdk/python ]; then PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests -v; fi
-	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) test; fi
+	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) clean test; fi
 	@$(PNPM_ENV) pnpm run test
 
 test-retry-command: ## Prove bounded command retries and final-status preservation.

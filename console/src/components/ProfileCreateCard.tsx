@@ -210,13 +210,52 @@ function profileFields(profile: CreateProfile, prefix: string): ReactNode {
       );
     case "event_bus":
       return (
-        <label className="check-field" htmlFor={`${prefix}-archive`}>
-          <input id={`${prefix}-archive`} name="archive" type="checkbox" defaultChecked />
-          <span>
-            <strong>Keep a local replay archive</strong>
-            <small>Archive retention is process-local in this alpha slice.</small>
-          </span>
-        </label>
+        <>
+          <label className="check-field" htmlFor={`${prefix}-archive`}>
+            <input id={`${prefix}-archive`} name="archive" type="checkbox" defaultChecked />
+            <span>
+              <strong>Keep a local replay archive</strong>
+              <small>Count and age retention keep the standalone archive bounded.</small>
+            </span>
+          </label>
+          <NumberField
+            id={`${prefix}-max-subscriptions`}
+            label="Maximum subscriptions"
+            name="max_subscriptions"
+            defaultValue={1_024}
+            min={1}
+          />
+          <NumberField
+            id={`${prefix}-max-archive-events`}
+            label="Archive capacity"
+            name="max_archive_events"
+            defaultValue={100_000}
+            min={1}
+          />
+          <NumberField
+            id={`${prefix}-archive-retention-events`}
+            label="Retain newest events"
+            name="archive_retention_events"
+            placeholder="Optional count limit"
+            min={1}
+            optional
+          />
+          <NumberField
+            id={`${prefix}-archive-retention-age`}
+            label="Archive maximum age (ms)"
+            name="archive_retention_age_ms"
+            placeholder="Optional age limit"
+            min={1}
+            optional
+          />
+          <NumberField
+            id={`${prefix}-max-outbox-deliveries`}
+            label="Delivery outbox capacity"
+            name="max_outbox_deliveries"
+            defaultValue={100_000}
+            min={1}
+          />
+        </>
       );
   }
 }
@@ -330,6 +369,14 @@ function buildConfig(profile: CreateProfile, formData: FormData): ResourceConfig
       return {
         durability: "volatile",
         archive: formData.get("archive") === "on",
+        delivery_outbox: true,
+        max_subscriptions: readPositiveInteger(formData, "max_subscriptions"),
+        max_archive_events: readPositiveInteger(formData, "max_archive_events"),
+        archive_retention: {
+          max_events: readOptionalPositiveInteger(formData, "archive_retention_events"),
+          max_age_ms: readOptionalPositiveInteger(formData, "archive_retention_age_ms"),
+        },
+        max_outbox_deliveries: readPositiveInteger(formData, "max_outbox_deliveries"),
       } satisfies BusConfig;
   }
 }

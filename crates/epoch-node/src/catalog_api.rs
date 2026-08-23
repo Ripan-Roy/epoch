@@ -9,6 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use epoch_bus::{BusConfig, EventBus};
 use epoch_cache::{CacheConfig, EvictionPolicy};
 use epoch_catalog::{
     ApplyResource, CatalogCommand, CatalogError, CatalogMutation, DeleteResource,
@@ -412,6 +413,9 @@ fn normalize_profile_configuration(
     if kind == ResourceKind::Queue {
         return normalize_queue_configuration(resource, configuration);
     }
+    if kind == ResourceKind::EventBus {
+        return normalize_bus_configuration(configuration);
+    }
     if !matches!(kind, ResourceKind::Cache | ResourceKind::Table) {
         return Ok(None);
     }
@@ -474,6 +478,35 @@ fn normalize_profile_configuration(
     })
     .map(Some)
     .map_err(|error| RegionalCatalogApiError::Catalog(CatalogError::InvalidSpec(error.to_string())))
+}
+
+fn normalize_bus_configuration(
+    configuration: Option<serde_json::Value>,
+) -> Result<Option<serde_json::Value>, RegionalCatalogApiError> {
+    let Some(raw) = configuration else {
+        return Ok(None);
+    };
+    let mut configuration: BusConfig = serde_json::from_value(raw).map_err(|error| {
+        RegionalCatalogApiError::Catalog(CatalogError::InvalidSpec(format!(
+            "invalid Event Bus configuration: {error}"
+        )))
+    })?;
+    if configuration.durability != DurabilityProfile::QuorumDurable {
+        return Err(RegionalCatalogApiError::Catalog(CatalogError::InvalidSpec(
+            "regional Event Bus durability must be quorum_durable".into(),
+        )));
+    }
+    configuration.delivery_outbox = true;
+    EventBus::new(configuration.clone()).map_err(|error| {
+        RegionalCatalogApiError::Catalog(CatalogError::InvalidSpec(format!(
+            "invalid Event Bus configuration: {error}"
+        )))
+    })?;
+    serde_json::to_value(configuration)
+        .map(Some)
+        .map_err(|error| {
+            RegionalCatalogApiError::Catalog(CatalogError::InvalidSpec(error.to_string()))
+        })
 }
 
 fn normalize_queue_configuration(
@@ -998,6 +1031,18 @@ mod tests {
         ResourceName::new("acme", "shop", "dev", "core", ResourceKind::Queue, "jobs").unwrap()
     }
 
+    fn bus_resource_name() -> ResourceName {
+        ResourceName::new(
+            "acme",
+            "shop",
+            "dev",
+            "core",
+            ResourceKind::EventBus,
+            "events",
+        )
+        .unwrap()
+    }
+
     #[test]
     fn omitted_cache_configuration_preserves_the_legacy_catalog_contract() {
         assert_eq!(
@@ -1068,6 +1113,39 @@ mod tests {
         self_target["advanced"]["dead_letter_target"] = json!("jobs");
         assert!(
             normalize_profile_configuration(&queue_resource_name(), 1, Some(self_target)).is_err()
+        );
+    }
+
+    #[test]
+    fn event_bus_retention_configuration_is_validated_and_persisted_canonically() {
+        let raw = json!({
+            "durability": "quorum_durable",
+            "archive": true,
+            "max_subscriptions": 1000,
+            "max_archive_events": 10000,
+            "archive_retention": {
+                "max_events": 5000,
+                "max_age_ms": 86_400_000
+            },
+            "max_outbox_deliveries": 20000
+        });
+        let normalized = normalize_profile_configuration(&bus_resource_name(), 1, Some(raw))
+            .expect("Event Bus retention configuration should be accepted")
+            .expect("configured Event Bus should retain its configuration");
+        let config: BusConfig = serde_json::from_value(normalized.clone()).unwrap();
+        assert_eq!(config.durability, DurabilityProfile::QuorumDurable);
+        assert!(config.delivery_outbox);
+        assert_eq!(config.archive_retention.max_events, Some(5_000));
+        assert_eq!(config.archive_retention.max_age_ms, Some(86_400_000));
+
+        let mut volatile = normalized.clone();
+        volatile["durability"] = json!("volatile");
+        assert!(normalize_profile_configuration(&bus_resource_name(), 1, Some(volatile)).is_err());
+        let mut invalid_retention = normalized;
+        invalid_retention["archive_retention"]["max_events"] = json!(20_000);
+        assert!(
+            normalize_profile_configuration(&bus_resource_name(), 1, Some(invalid_retention))
+                .is_err()
         );
     }
 

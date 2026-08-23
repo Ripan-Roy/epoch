@@ -14,6 +14,7 @@ use thiserror::Error;
 
 use crate::{
     epoch_target_delivery::EpochTargetDeliveryStatus,
+    managed_target_delivery::ManagedTargetDeliveryStatus,
     regional_checkpoint::RegionalCheckpointStatus, regional_maintenance::RegionalMaintenanceStatus,
     tablet_materializer::TabletDirectory, webhook_delivery::WebhookDeliveryStatus,
 };
@@ -114,6 +115,7 @@ struct TopologyState {
     maintenance: std::sync::Arc<RegionalMaintenanceStatus>,
     checkpoints: std::sync::Arc<RegionalCheckpointStatus>,
     epoch_targets: std::sync::Arc<EpochTargetDeliveryStatus>,
+    managed_targets: std::sync::Arc<ManagedTargetDeliveryStatus>,
     webhooks: std::sync::Arc<WebhookDeliveryStatus>,
 }
 
@@ -128,6 +130,7 @@ struct TopologyResponse {
     maintenance: crate::regional_maintenance::RegionalMaintenanceStatusSnapshot,
     checkpoints: crate::regional_checkpoint::RegionalCheckpointStatusSnapshot,
     epoch_target_delivery: crate::epoch_target_delivery::EpochTargetDeliveryStatusSnapshot,
+    managed_target_delivery: crate::managed_target_delivery::ManagedTargetDeliveryStatusSnapshot,
     webhook_delivery: crate::webhook_delivery::WebhookDeliveryStatusSnapshot,
 }
 
@@ -155,6 +158,7 @@ pub fn regional_topology_router(
     maintenance: std::sync::Arc<RegionalMaintenanceStatus>,
     checkpoints: std::sync::Arc<RegionalCheckpointStatus>,
     epoch_targets: std::sync::Arc<EpochTargetDeliveryStatus>,
+    managed_targets: std::sync::Arc<ManagedTargetDeliveryStatus>,
     webhooks: std::sync::Arc<WebhookDeliveryStatus>,
 ) -> Router {
     Router::new()
@@ -165,6 +169,7 @@ pub fn regional_topology_router(
             maintenance,
             checkpoints,
             epoch_targets,
+            managed_targets,
             webhooks,
         })
 }
@@ -203,6 +208,7 @@ async fn get_topology(State(state): State<TopologyState>) -> Response {
         maintenance: state.maintenance.snapshot(),
         checkpoints: state.checkpoints.snapshot(),
         epoch_target_delivery: state.epoch_targets.snapshot(),
+        managed_target_delivery: state.managed_targets.snapshot(),
         webhook_delivery: state.webhooks.snapshot(),
     })
     .into_response()

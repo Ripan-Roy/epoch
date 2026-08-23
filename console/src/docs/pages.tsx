@@ -6,14 +6,17 @@ import {
   epochTargetLanguageGuides,
   governanceInventory,
   languageGuides,
+  managedTargetLanguageGuides,
   nodeRestart,
   nodeStart,
   regionalBusLanguageGuides,
+  regionalBusIntegrationOperation,
   regionalBusResource,
   regionalCacheLanguageGuides,
   regionalCacheResource,
   regionalControl,
   regionalLanguageGuides,
+  regionalManagedTargetConfiguration,
   regionalNodes,
   regionalQueueLanguageGuides,
   regionalQueueResource,
@@ -221,7 +224,7 @@ export function OverviewBody() {
           <a className="reference-card" href="#/docs/regional-bus">
             <span>SDK</span>
             <strong>Regional Event Bus</strong>
-            <p>Replicated ingress, delivery leases, retry and dead-letter transitions, and archive replay.</p>
+            <p>Long poll, redrive, schemas, connectors, and authenticated managed target delivery.</p>
             <em aria-hidden="true">Read →</em>
           </a>
         </div>
@@ -435,13 +438,14 @@ export function ClusterMilestoneBody() {
         </p>
         <p>
           Stream session assignment is coordinated but remains separate from each shard&apos;s
-          checkpoint-owner fence; Queue delivery and Event Bus pull remain request/response rather than
-          managed streaming sessions. An opt-in Event Bus worker now executes signed HTTP/webhook targets from
-          the current leader after a replicated lease. The current regional leaders also propose Stream
-          retention/session, Queue timer, Cache value/lock, and Event Bus lease-timeout commands at exact
-          replicated deadlines; topology reports node-local scheduler and webhook counters. Managed HTTP/gRPC
-          and regional HTTP require a shared deny-by-default bootstrap bearer policy, but that is not OIDC,
-          TLS/mTLS, credential expiry/revocation, or immutable audit export.
+          checkpoint-owner fence; Queue delivery and Event Bus pull/long poll remain request/response rather
+          than managed streaming sessions. Event Bus source leaders now execute signed HTTP/webhook,
+          Queue/Stream, API destination, endpoint-pool, function, and connector targets after a replicated
+          lease. The current regional leaders also propose Stream retention/session, Queue timer, Cache
+          value/lock, and Event Bus lease/archive-retention commands at exact replicated deadlines; topology
+          reports node-local scheduler and target-worker counters. Managed HTTP/gRPC and regional HTTP require
+          a shared deny-by-default bootstrap bearer policy, but that is not OIDC, TLS/mTLS, credential
+          expiry/revocation, or immutable audit export.
         </p>
       </Topic>
 
@@ -478,10 +482,10 @@ export function ClusterMilestoneBody() {
           </EvidenceCard>
           <EvidenceCard
             label="Event Bus SDK recovery"
-            claim="Ingress, delivery leases, retry, archive, and settlement survive leader loss."
+            claim="Ingress, integration state, managed delivery, and settlement survive leader loss."
           >
-            The Python client preserves exact publish and settlement identities while the same Docker campaign
-            replaces the Event Bus leader, catches up the old voter, and reopens every volume.
+            The real process campaign emits one structured managed CloudEvent, converges the acknowledgement,
+            reopens every voter, and recovers the full replicated integration state.
           </EvidenceCard>
           <EvidenceCard
             label="Signed webhook recovery"
@@ -1016,23 +1020,25 @@ export function RegionalBusBody() {
             label="Routing &amp; retry"
             claim="Discovery preserves the exact caller-owned mutation."
           >
-            Publish, subscription, delivery, maintenance, and settlement calls retain the same idempotency key
-            and body across one bounded leader rediscovery. A changed body is a conflict, not a second event.
+            Publish, subscription, integration, redrive, maintenance, and settlement calls retain the same
+            idempotency key and body across one bounded leader rediscovery. A changed body is a conflict, not
+            a second event.
           </EvidenceCard>
           <EvidenceCard
             label="Delivery fencing"
             claim="Policy is replicated; settlement requires the opaque lease token."
           >
-            Pull subscriptions bound timeout, concurrency, attempts, backoff, jitter, and age. Acquire returns
-            a fenced delivery intent; acknowledge and fail cannot settle a stale lease.
+            Pull subscriptions bind timeout, concurrency, attempts, backoff, jitter, age, rate/burst, and
+            dead-letter retention. Acquire may long-poll for 30 seconds and returns a fenced delivery intent;
+            settlement cannot use a stale lease.
           </EvidenceCard>
           <EvidenceCard
             label="Linearizable observation"
             claim="Query-shaped POST reads still require a leader barrier."
           >
-            Archive replay, delivery query, mutation lookup, and status explicitly request{" "}
-            <code>linearizable</code>. Maintenance advances retry or dead-letter state through a replicated
-            command.
+            Archive replay, delivery query, integration state, mutation lookup, and status explicitly request{" "}
+            <code>linearizable</code>. Maintenance advances retry, retention, or archive state through a
+            replicated command.
           </EvidenceCard>
           <EvidenceCard label="Signed HTTPS" claim="The leader leases before external I/O.">
             Signed HTTP/webhook targets carry only a replicated key ID. The current Bus leader awaits the
@@ -1043,6 +1049,18 @@ export function RegionalBusBody() {
             Queue and keyed multi-shard Stream writes are automatic. The source lease pins the exact target
             generation, shard, tablet, and epoch; a stable destination proposal prevents a second target
             record when source settlement is uncertain.
+          </EvidenceCard>
+          <EvidenceCard label="Managed targets" claim="The leader leases before authenticated external I/O.">
+            API destinations, endpoint pools, functions, and connectors emit binary or structured CloudEvents
+            through public-only pinned egress. Endpoint failure and connector checkpoint state commit before
+            failover or source settlement.
+          </EvidenceCard>
+          <EvidenceCard
+            label="Integration recovery"
+            claim="Registry semantics are checked, not only checksums."
+          >
+            Schemas, enrichment, MQTT state, connectors, catalog, endpoints, and functions are bounded to a 2
+            MiB integration image and revalidated during native snapshot restore.
           </EvidenceCard>
         </>
       }
@@ -1075,6 +1093,43 @@ export function RegionalBusBody() {
               proposal is stable across Bus attempts, but the two Raft-group commits are not one atomic
               cross-tablet transaction.
             </Note>
+          </Topic>
+          <Topic id="managed-targets" title="Deliver to an authenticated managed target">
+            <p>
+              Give every voter the same strict external secret-reference file. Replicated subscriptions carry
+              only an API-key or OAuth reference. The source leader commits the exact lease, sends binary or
+              structured CloudEvents with a stable idempotency key, then commits the observed outcome.
+            </p>
+            <CodeBlock label="Regional node configuration" value={regionalManagedTargetConfiguration} />
+            <CodeTabs
+              label="Create an OAuth API destination"
+              samples={regionalSamples(
+                managedTargetLanguageGuides,
+                (guide) => guide.source,
+                (guide) => guide.filename,
+              )}
+              collapsible={false}
+            />
+            <Note title="Egress boundary">
+              Production targets require public HTTPS. DNS answers are validated and pinned, redirects and
+              ambient proxies are disabled, and function/connector hosts must match their replicated
+              allowlist. Private egress and secret hot reload are not part of this alpha.
+            </Note>
+          </Topic>
+          <Topic id="integrations" title="Commit and inspect integration state">
+            <p>
+              <code>apply_integration</code> accepts one strict tagged document for schema, validation policy,
+              enrichment, function, connector/checkpoint/replay, MQTT session/retained/QoS, event catalog, or
+              endpoint-health state. Go uses <code>Document</code>, Java uses <code>JsonNode</code>, and
+              Python uses a <code>dict</code>; each call still requires a new caller-owned idempotency key.
+            </p>
+            <CodeBlock label="Register a JSON schema" value={regionalBusIntegrationOperation} />
+            <p>
+              Call <code>IntegrationState</code>, <code>integrationState</code>, or{" "}
+              <code>integration_state</code> for a linearizable view. The image is atomically capped at 2 MiB,
+              and restore revalidates identities, revisions, references, connector receipts/checkpoints, MQTT
+              state, endpoint URLs, canonical bytes, and digests.
+            </p>
           </Topic>
           <Topic id="signed-webhooks" title="Receive and verify a signed webhook">
             <p>
@@ -1125,9 +1180,11 @@ export function RegionalBusBody() {
       boundary={
         <p>
           Regional Event Bus v1 is a repository-local, single-shard alpha. Built-in execution covers Epoch
-          Queue/Stream and signed HTTP/webhook targets. Unsigned target workers, long-poll/push, target rate
-          limiting, private managed egress, hot key reload, cross-shard ordering, generated response models,
-          and public package-registry releases remain open.
+          Queue/Stream, signed HTTP/webhook, API destination, endpoint-pool, function, and
+          target/bidirectional connector targets. An MQTT wire gateway, official schema/MQTT/CloudEvents
+          conformance, unsigned legacy HTTP execution, streaming push, source-connector polling, private
+          managed egress, secret hot reload, cross-shard ordering, fully typed integration/response models,
+          and public package releases remain open.
         </p>
       }
     />
@@ -1255,7 +1312,7 @@ export function ReferenceBody() {
           <ReferenceCard
             eyebrow="SDK contract"
             title="Regional Event Bus SDK"
-            description="Subscription policy, replicated ingress, delivery leases, retry and dead-letter transitions, archive replay, exact retry, and three-language examples."
+            description="Long poll, rate/retention/redrive, schemas and connectors, authenticated managed targets, recovery semantics, and end-to-end three-language examples."
             href={`${repositoryDocsUrl}/REGIONAL_EVENT_BUS_SDK.md`}
           />
         </div>
@@ -1424,6 +1481,12 @@ export function ReferenceBody() {
             href={`${repositoryDocsUrl}/adr/0031-leader-owned-epoch-target-delivery.md`}
           />
           <ReferenceCard
+            eyebrow="Event integration"
+            title="Replicated integrations and managed delivery"
+            description="Schemas, enrichment, MQTT state, connectors/checkpoints, endpoint routing, secret references, safe leader-owned egress, snapshot admission, recovery, and non-claims."
+            href={`${repositoryDocsUrl}/adr/0037-event-integration-platform.md`}
+          />
+          <ReferenceCard
             eyebrow="Cache tablet"
             title="Experimental replicated Cache"
             description="Typed state, deterministic byte admission, atomic and multiplex mutations, changes, backup/PITR, Pub/Sub, cold reads, failover, and exact EPRS replay."
@@ -1432,14 +1495,14 @@ export function ReferenceBody() {
           <ReferenceCard
             eyebrow="Bus tablet"
             title="Experimental replicated Event Bus"
-            description="Replicated ingress, per-subscription outbox leases, retry/DLQ history, signed webhook execution, archive replay, failover, and EPRS recovery."
+            description="Replicated ingress/integrations, rate and retention, outbox leases, managed target execution, archive replay, failover, and EPRS recovery."
             href={`${repositoryDocsUrl}/BUS_TABLET.md`}
           />
           <ReferenceCard
             eyebrow="Release"
-            title="v0.1.0-alpha.8 release notes"
+            title="v0.1.0-alpha.9 release notes"
             description="Verified milestone highlights, source-only artifacts, compatibility guidance, and explicit alpha limitations."
-            href={`${repositoryDocsUrl}/releases/v0.1.0-alpha.8.md`}
+            href={`${repositoryDocsUrl}/releases/v0.1.0-alpha.9.md`}
           />
         </div>
       </Topic>

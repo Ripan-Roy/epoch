@@ -580,6 +580,30 @@ impl EpochEngine {
                         ),
                     }
                 }
+                SubscriptionTarget::ApiDestination { url, .. } => RouteExecution {
+                    subscription: delivery.subscription.clone(),
+                    target: url.clone(),
+                    status: RouteExecutionStatus::PendingExternalDelivery,
+                    detail: Some("API destination awaits a leader-owned executor".into()),
+                },
+                SubscriptionTarget::EndpointPool { pool, .. } => RouteExecution {
+                    subscription: delivery.subscription.clone(),
+                    target: format!("endpoint-pool:{pool}"),
+                    status: RouteExecutionStatus::PendingExternalDelivery,
+                    detail: Some("endpoint pool awaits a leader-owned executor".into()),
+                },
+                SubscriptionTarget::Function { resource } => RouteExecution {
+                    subscription: delivery.subscription.clone(),
+                    target: format!("function:{resource}"),
+                    status: RouteExecutionStatus::PendingExternalDelivery,
+                    detail: Some("function invocation awaits a leader-owned executor".into()),
+                },
+                SubscriptionTarget::Connector { resource } => RouteExecution {
+                    subscription: delivery.subscription.clone(),
+                    target: format!("connector:{resource}"),
+                    status: RouteExecutionStatus::PendingExternalDelivery,
+                    detail: Some("managed connector awaits a leader-owned executor".into()),
+                },
             })
             .collect();
         Ok(BusPublishOutcome { publish, routes })

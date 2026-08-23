@@ -14,6 +14,7 @@ import java.util.Objects;
 public final class RegionalBusClient {
   private static final int MAX_DELIVERY_BATCH = 100;
   private static final int MAX_READ_RESULTS = 10_000;
+  private static final long MAX_LONG_POLL_MS = 30_000;
 
   private final RegionalClientCore regional;
 
@@ -71,15 +72,45 @@ public final class RegionalBusClient {
       BigInteger dispatcherEpoch,
       int maxDeliveries)
       throws IOException, InterruptedException {
+    return acquireDeliveries(
+        bus,
+        shard,
+        idempotencyKey,
+        subscription,
+        dispatcher,
+        dispatcherEpoch,
+        maxDeliveries,
+        Duration.ZERO);
+  }
+
+  /** Long-polls and leases a bounded delivery batch to one dispatcher epoch. */
+  public JsonNode acquireDeliveries(
+      String bus,
+      int shard,
+      String idempotencyKey,
+      String subscription,
+      String dispatcher,
+      BigInteger dispatcherEpoch,
+      int maxDeliveries,
+      Duration wait)
+      throws IOException, InterruptedException {
     RegionalClientCore.required(subscription, "subscription name");
     RegionalClientCore.required(dispatcher, "dispatcher");
     RegionalClientCore.positiveU64(dispatcherEpoch, "dispatcher epoch");
     deliveryBatch(maxDeliveries);
+    Objects.requireNonNull(wait, "wait");
+    if (wait.isNegative()
+        || wait.compareTo(Duration.ofMillis(MAX_LONG_POLL_MS)) > 0
+        || wait.toNanosPart() % 1_000_000 != 0) {
+      throw new IllegalArgumentException(
+          "delivery wait must be a whole number of milliseconds between 0 and " + MAX_LONG_POLL_MS);
+    }
     ObjectNode operation = operation("acquire_deliveries");
     operation.put("subscription", subscription);
     operation.put("dispatcher", dispatcher);
     operation.put("dispatcher_epoch", dispatcherEpoch.toString());
     operation.put("max_deliveries", maxDeliveries);
+    operation.put("wait_ms", wait.toMillis());
     return mutate(bus, shard, idempotencyKey, operation);
   }
 
@@ -136,6 +167,15 @@ public final class RegionalBusClient {
     return mutate(bus, shard, idempotencyKey, operation);
   }
 
+  /** Returns one dead-lettered delivery to pending while preserving prior attempt history. */
+  public JsonNode redriveDelivery(String bus, int shard, String idempotencyKey, String deliveryId)
+      throws IOException, InterruptedException {
+    RegionalClientCore.required(deliveryId, "delivery ID");
+    ObjectNode operation = operation("redrive_delivery");
+    operation.put("delivery_id", deliveryId);
+    return mutate(bus, shard, idempotencyKey, operation);
+  }
+
   /** Applies due retry and expired-lease transitions explicitly. */
   public JsonNode maintainDeliveries(
       String bus, int shard, String idempotencyKey, int maxDeliveries)
@@ -143,6 +183,32 @@ public final class RegionalBusClient {
     deliveryBatch(maxDeliveries);
     ObjectNode operation = operation("maintain_deliveries");
     operation.put("max_deliveries", maxDeliveries);
+    return mutate(bus, shard, idempotencyKey, operation);
+  }
+
+  /** Applies bounded replicated archive age/count retention immediately. */
+  public JsonNode maintainArchive(String bus, int shard, String idempotencyKey, int maxEvents)
+      throws IOException, InterruptedException {
+    readLimit(maxEvents);
+    ObjectNode operation = operation("maintain_archive");
+    operation.put("max_events", maxEvents);
+    return mutate(bus, shard, idempotencyKey, operation);
+  }
+
+  /** Commits one schema, connector, MQTT, catalog, enrichment, or endpoint operation. */
+  public JsonNode applyIntegration(
+      String bus, int shard, String idempotencyKey, JsonNode integrationOperation)
+      throws IOException, InterruptedException {
+    Objects.requireNonNull(integrationOperation, "integrationOperation");
+    JsonNode kind = integrationOperation.get("kind");
+    if (!integrationOperation.isObject()
+        || kind == null
+        || !kind.isTextual()
+        || kind.asText().isBlank()) {
+      throw new IllegalArgumentException("integration operation kind is required");
+    }
+    ObjectNode operation = operation("apply_integration");
+    operation.set("operation", integrationOperation.deepCopy());
     return mutate(bus, shard, idempotencyKey, operation);
   }
 
@@ -192,6 +258,11 @@ public final class RegionalBusClient {
   /** Returns the linearizable Event Bus status and digest. */
   public JsonNode status(String bus, int shard) throws IOException, InterruptedException {
     return read(bus, shard, "GET", "/status", null);
+  }
+
+  /** Returns the complete linearizable Event Bus integration state. */
+  public JsonNode integrationState(String bus, int shard) throws IOException, InterruptedException {
+    return read(bus, shard, "GET", "/integration/state", null);
   }
 
   private JsonNode mutate(String bus, int shard, String idempotencyKey, ObjectNode operation)

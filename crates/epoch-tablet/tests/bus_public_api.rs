@@ -105,6 +105,6 @@ fn bus_route_plan_is_usable_through_the_public_crate_api() {
         encoded["write_evidence"],
         json!("fixed_voter_majority_persisted")
     );
-    assert_eq!(BUS_TABLET_COMMAND_FORMAT_VERSION, 3);
+    assert_eq!(BUS_TABLET_COMMAND_FORMAT_VERSION, 5);
     assert_eq!(MAX_BUS_TABLET_COMMAND_BYTES, 512 * 1024);
 }

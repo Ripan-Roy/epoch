@@ -16,7 +16,7 @@ import regionalBusPythonSource from "../quickstarts/regional_bus/quickstart.py?r
 
 export const repositoryUrl = "https://github.com/Ripan-Roy/epoch";
 export const repositoryDocsUrl = `${repositoryUrl}/blob/main/docs`;
-export const releaseVersion = "0.1.0-alpha.8";
+export const releaseVersion = "0.1.0-alpha.9";
 
 export type LanguageId = "go" | "java" | "python";
 
@@ -269,6 +269,70 @@ EPOCH_REGIONAL_WEBHOOK_DELIVERY_INTERVAL_MS=100
 
 # /etc/epoch/webhook-keys.json (development example only)
 {"format_version":1,"keys":[{"id":"primary","secret":"replace-with-at-least-32-byte-secret"}]}`;
+
+export const regionalManagedTargetConfiguration = `# On every regional node
+EPOCH_REGIONAL_MANAGED_TARGET_SECRETS_PATH=/etc/epoch/managed-target-secrets.json
+EPOCH_REGIONAL_MANAGED_TARGET_DELIVERY_INTERVAL_MS=100
+
+# /etc/epoch/managed-target-secrets.json (development example only)
+{"format_version":1,"secrets":[
+  {"kind":"api_key","reference":"billing-key","value":"replace-me","header":"x-api-key"},
+  {"kind":"oauth2_client","reference":"orders-oauth","client_id":"epoch","client_secret":"replace-me","token_url":"https://identity.example/token","scopes":["orders.write"]}
+]}`;
+
+export const managedTargetLanguageGuides: Record<LanguageId, RegionalGuide> = {
+  go: {
+    filename: "managed_target.go",
+    setup: "// Secret values remain in the node-local file; the subscription carries only references.",
+    source: `auth := epoch.DestinationAuth{Kind: "oauth2", SecretRef: "orders-oauth",
+    TokenURL: "https://identity.example/token", Scopes: []string{"orders.write"}}
+subscription := epoch.Subscription{
+    Name: "orders-api",
+    Target: epoch.APIDestinationTarget("https://api.example/events", auth, "structured"),
+}
+_, err := client.UpsertSubscription(ctx, "events", 0, "orders-api-v1", subscription)`,
+    run: "go test ./sdk/go/epoch -run RegionalBus -count=1",
+  },
+  java: {
+    filename: "ManagedTarget.java",
+    setup: "// DestinationAuth serializes a credential reference, never the secret value.",
+    source: `DestinationAuth auth = DestinationAuth.oauth2(
+    "orders-oauth", "https://identity.example/token", List.of("orders.write"));
+Subscription subscription = new Subscription(
+    "orders-api",
+    SubscriptionTarget.apiDestination("https://api.example/events", auth, "structured"));
+client.upsertSubscription("events", 0, "orders-api-v1", subscription);`,
+    run: "cd sdk/java && ./mvnw -q -Dtest=RegionalBusClientTest test",
+  },
+  python: {
+    filename: "managed_target.py",
+    setup: "# The SDK validates the reference, URL, and CloudEvents mode before discovery.",
+    source: `auth = DestinationAuth.oauth2(
+    "orders-oauth", "https://identity.example/token", ("orders.write",)
+)
+subscription = Subscription(
+    "orders-api",
+    SubscriptionTarget.api_destination(
+        "https://api.example/events", auth, "structured"
+    ),
+)
+client.upsert_subscription("events", 0, "orders-api-v1", subscription)`,
+    run: "cd sdk/python && PYTHONPATH=src python3 -m unittest tests.test_regional_bus -v",
+  },
+};
+
+export const regionalBusIntegrationOperation = `{
+  "kind": "register_schema",
+  "registration": {
+    "name": "order",
+    "format": "json_schema",
+    "definition": "{\\"type\\":\\"object\\"}",
+    "compatibility": "backward",
+    "fields": [
+      {"path":"id","value_type":"string","required":true,"default":null}
+    ]
+  }
+}`;
 
 export const languageGuides: ReadonlyArray<LanguageGuide> = [
   {
@@ -563,10 +627,10 @@ export const sdkSurface = [
   },
   {
     area: "Regional Event Bus",
-    go: "RegionalBusClient · SignedWebhookTarget · VerifyWebhookSignature · UpsertSubscription · RemoveSubscription · Publish · AcquireDeliveries · AcknowledgeDelivery · FailDelivery · RejectDelivery · MaintainDeliveries · Mutation · ReplayArchive · QueryDeliveries · Status",
-    java: "RegionalBusClient · SubscriptionTarget.signedWebhook · WebhookSignatures.verify · upsertSubscription · removeSubscription · publish · acquireDeliveries · acknowledgeDelivery · failDelivery · rejectDelivery · maintainDeliveries · mutation · replayArchive · queryDeliveries · status",
+    go: "RegionalBusClient · APIDestinationTarget · EndpointPoolTarget · FunctionTarget · ConnectorTarget · SignedWebhookTarget · VerifyWebhookSignature · UpsertSubscription · RemoveSubscription · Publish · AcquireDeliveries · AcknowledgeDelivery · FailDelivery · RejectDelivery · RedriveDelivery · MaintainDeliveries · MaintainArchive · ApplyIntegration · IntegrationState · Mutation · ReplayArchive · QueryDeliveries · Status",
+    java: "RegionalBusClient · SubscriptionTarget.apiDestination/endpointPool/function/connector/signedWebhook · WebhookSignatures.verify · upsertSubscription · removeSubscription · publish · acquireDeliveries · acknowledgeDelivery · failDelivery · rejectDelivery · redriveDelivery · maintainDeliveries · maintainArchive · applyIntegration · integrationState · mutation · replayArchive · queryDeliveries · status",
     python:
-      "RegionalBusClient · SubscriptionTarget.signed_webhook · verify_webhook_signature · upsert_subscription · remove_subscription · publish · acquire_deliveries · acknowledge_delivery · fail_delivery · reject_delivery · maintain_deliveries · mutation · replay_archive · query_deliveries · status",
+      "RegionalBusClient · SubscriptionTarget.api_destination/endpoint_pool/function/connector/signed_webhook · verify_webhook_signature · upsert_subscription · remove_subscription · publish · acquire_deliveries · acknowledge_delivery · fail_delivery · reject_delivery · redrive_delivery · maintain_deliveries · maintain_archive · apply_integration · integration_state · mutation · replay_archive · query_deliveries · status",
   },
   {
     area: "Queue",

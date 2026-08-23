@@ -14,9 +14,10 @@ use axum::{
 };
 use epoch_bus::{
     ArchivedEvent, BusConfig, DeliveryAttempt, DeliveryAttemptOutcome, DeliveryCounts,
-    DeliveryPolicy, DeliveryRecord, DeliveryRetryPolicy, DeliveryState, DeliveryStateKind,
-    EpochTargetDestination, EpochTargetKind, EventFilter, MAX_DELIVERY_QUERY_RESULTS,
-    MAX_REPLAY_EVENTS, Subscription, SubscriptionTarget,
+    DeliveryPolicy, DeliveryRateLimit, DeliveryRecord, DeliveryRedrive, DeliveryRetryPolicy,
+    DeliveryState, DeliveryStateKind, EpochTargetDestination, EpochTargetKind, EventFilter,
+    EventIntegrationState, IntegrationOperation, MAX_DELIVERY_LONG_POLL_MS,
+    MAX_DELIVERY_QUERY_RESULTS, MAX_REPLAY_EVENTS, Subscription, SubscriptionTarget,
 };
 use epoch_consensus::{
     ApplicationSnapshot, CommittedProposal, ConsensusError, ConsensusRole, ConsensusStatus,
@@ -47,6 +48,8 @@ pub const EXPERIMENTAL_BUS_TABLET_ARCHIVE_REPLAY_PATH: &str =
     "/experimental/v1/tablets/bus/archive/replay";
 pub const EXPERIMENTAL_BUS_TABLET_DELIVERY_QUERY_PATH: &str =
     "/experimental/v1/tablets/bus/deliveries/query";
+pub const EXPERIMENTAL_BUS_TABLET_INTEGRATION_STATE_PATH: &str =
+    "/experimental/v1/tablets/bus/integration/state";
 
 const TABLET_REQUEST_BODY_BYTES: usize = MAX_BUS_TABLET_COMMAND_BYTES + 16 * 1024;
 const DEFAULT_REPLAY_LIMIT: usize = 100;
@@ -90,29 +93,57 @@ impl BusTabletService {
             .tablet
             .read()
             .map_err(|_| "Event Bus tablet read lock was poisoned".to_owned())?;
-        let Some(due_at_ms) = tablet
+        let mut proposals = Vec::with_capacity(2);
+        if let Some(due_at_ms) = tablet
             .next_maintenance_deadline_ms()
             .filter(|deadline_ms| *deadline_ms <= now_ms)
-        else {
-            return Ok(Vec::new());
-        };
+        {
+            proposals.push(
+                self.maintenance_proposal(
+                    RegionalMaintenanceOperation::BusDeliveryLease,
+                    due_at_ms,
+                    tablet.last_applied_command_index(),
+                    BusTabletOperation::MaintainDeliveries {
+                        max_deliveries: u16::try_from(epoch_bus::MAX_DELIVERY_ACQUIRE_BATCH)
+                            .expect("delivery batch limit fits u16"),
+                    },
+                )?,
+            );
+        }
+        if let Some(due_at_ms) = tablet
+            .next_archive_retention_deadline_ms()
+            .filter(|deadline_ms| *deadline_ms <= now_ms)
+        {
+            proposals.push(
+                self.maintenance_proposal(
+                    RegionalMaintenanceOperation::BusArchiveRetention,
+                    due_at_ms,
+                    tablet.last_applied_command_index(),
+                    BusTabletOperation::MaintainArchive {
+                        max_events: u16::try_from(epoch_bus::MAX_REPLAY_EVENTS)
+                            .expect("archive maintenance batch limit fits u16"),
+                    },
+                )?,
+            );
+        }
+        Ok(proposals)
+    }
+
+    fn maintenance_proposal(
+        &self,
+        operation: RegionalMaintenanceOperation,
+        due_at_ms: u64,
+        last_applied_command_index: u64,
+        tablet_operation: BusTabletOperation,
+    ) -> Result<RegionalMaintenanceProposal, String> {
         let key = format!(
-            "epoch-auto-{}-{due_at_ms}-{}",
-            RegionalMaintenanceOperation::BusDeliveryLease.as_str(),
-            tablet.last_applied_command_index()
+            "epoch-auto-{}-{due_at_ms}-{last_applied_command_index}",
+            operation.as_str()
         );
-        let command = BusTabletCommand::new(
-            &self.scope,
-            key,
-            due_at_ms,
-            BusTabletOperation::MaintainDeliveries {
-                max_deliveries: u16::try_from(epoch_bus::MAX_DELIVERY_ACQUIRE_BATCH)
-                    .expect("delivery batch limit fits u16"),
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        Ok(vec![RegionalMaintenanceProposal {
-            operation: RegionalMaintenanceOperation::BusDeliveryLease,
+        let command = BusTabletCommand::new(&self.scope, key, due_at_ms, tablet_operation)
+            .map_err(|error| error.to_string())?;
+        Ok(RegionalMaintenanceProposal {
+            operation,
             due_at_ms,
             proposal_id: command
                 .proposal_id(&self.scope)
@@ -120,7 +151,7 @@ impl BusTabletService {
             payload: command
                 .encode(&self.scope)
                 .map_err(|error| error.to_string())?,
-        }])
+        })
     }
 
     pub fn last_profile_mutation_index(&self) -> Result<u64, String> {
@@ -273,6 +304,27 @@ impl BusTabletService {
         }
     }
 
+    pub(crate) fn integration_state(&self) -> Result<EventIntegrationState, String> {
+        self.ensure_healthy()?;
+        self.tablet
+            .read()
+            .map_err(|_| "Event Bus tablet read lock was poisoned".to_owned())
+            .map(|tablet| tablet.integration_state().clone())
+    }
+
+    fn has_acquirable_pull_delivery(
+        &self,
+        subscription: &str,
+        now_ms: u64,
+    ) -> Result<bool, String> {
+        self.ensure_healthy()?;
+        self.tablet
+            .read()
+            .map_err(|_| "Event Bus tablet read lock was poisoned".to_owned())?
+            .has_acquirable_pull_delivery(subscription, now_ms)
+            .map_err(|error| error.to_string())
+    }
+
     pub(crate) fn signed_webhook_delivery_candidates(
         &self,
         now_ms: u64,
@@ -294,6 +346,18 @@ impl BusTabletService {
             .read()
             .map_err(|_| "Event Bus tablet read lock was poisoned".to_owned())?
             .epoch_target_delivery_candidates(now_ms)
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn managed_target_delivery_candidates(
+        &self,
+        now_ms: u64,
+    ) -> Result<Vec<epoch_bus::ManagedTargetDeliveryCandidate>, String> {
+        self.ensure_healthy()?;
+        self.tablet
+            .read()
+            .map_err(|_| "Event Bus tablet read lock was poisoned".to_owned())?
+            .managed_target_delivery_candidates(now_ms)
             .map_err(|error| error.to_string())
     }
 }
@@ -468,6 +532,10 @@ pub fn router(
             EXPERIMENTAL_BUS_TABLET_DELIVERY_QUERY_PATH,
             post(query_deliveries),
         )
+        .route(
+            EXPERIMENTAL_BUS_TABLET_INTEGRATION_STATE_PATH,
+            get(integration_state),
+        )
         .layer(DefaultBodyLimit::max(TABLET_REQUEST_BODY_BYTES))
         .with_state(state)
 }
@@ -484,8 +552,11 @@ struct BusMutationRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum BusOperationRequest {
+    ApplyIntegration {
+        operation: Box<IntegrationOperation>,
+    },
     UpsertSubscription {
-        subscription: Subscription,
+        subscription: Box<Subscription>,
     },
     RemoveSubscription {
         name: String,
@@ -501,6 +572,8 @@ enum BusOperationRequest {
         max_deliveries: u16,
         #[serde(default)]
         expected_delivery_id: Option<String>,
+        #[serde(default, deserialize_with = "deserialize_u64_from_number_or_decimal")]
+        wait_ms: u64,
     },
     AcknowledgeDelivery {
         delivery_id: String,
@@ -525,6 +598,12 @@ enum BusOperationRequest {
         lease_token: String,
         reason: String,
     },
+    RedriveDelivery {
+        delivery_id: String,
+    },
+    MaintainArchive {
+        max_events: u16,
+    },
     MaintainDeliveries {
         max_deliveries: u16,
     },
@@ -533,8 +612,11 @@ enum BusOperationRequest {
 impl BusOperationRequest {
     fn to_tablet_operation(&self) -> BusTabletOperation {
         match self {
+            Self::ApplyIntegration { operation } => BusTabletOperation::ApplyIntegration {
+                operation: operation.clone(),
+            },
             Self::UpsertSubscription { subscription } => BusTabletOperation::UpsertSubscription {
-                subscription: subscription.clone(),
+                subscription: subscription.as_ref().clone(),
             },
             Self::RemoveSubscription { name } => {
                 BusTabletOperation::RemoveSubscription { name: name.clone() }
@@ -548,6 +630,7 @@ impl BusOperationRequest {
                 dispatcher_epoch,
                 max_deliveries,
                 expected_delivery_id,
+                wait_ms: _,
             } => BusTabletOperation::AcquireDeliveries {
                 subscription: subscription.clone(),
                 dispatcher: dispatcher.clone(),
@@ -593,9 +676,40 @@ impl BusOperationRequest {
                 lease_token: lease_token.clone(),
                 reason: reason.clone(),
             },
+            Self::RedriveDelivery { delivery_id } => BusTabletOperation::RedriveDelivery {
+                delivery_id: delivery_id.clone(),
+            },
+            Self::MaintainArchive { max_events } => BusTabletOperation::MaintainArchive {
+                max_events: *max_events,
+            },
             Self::MaintainDeliveries { max_deliveries } => BusTabletOperation::MaintainDeliveries {
                 max_deliveries: *max_deliveries,
             },
+        }
+    }
+
+    fn pull_long_poll(&self) -> Option<(&str, u64)> {
+        match self {
+            Self::AcquireDeliveries {
+                subscription,
+                expected_delivery_id: None,
+                wait_ms,
+                ..
+            } => Some((subscription, *wait_ms)),
+            Self::AcquireDeliveries {
+                expected_delivery_id: Some(_),
+                ..
+            }
+            | Self::ApplyIntegration { .. }
+            | Self::UpsertSubscription { .. }
+            | Self::RemoveSubscription { .. }
+            | Self::Publish { .. }
+            | Self::AcknowledgeDelivery { .. }
+            | Self::FailDelivery { .. }
+            | Self::RejectDelivery { .. }
+            | Self::RedriveDelivery { .. }
+            | Self::MaintainArchive { .. }
+            | Self::MaintainDeliveries { .. } => None,
         }
     }
 }
@@ -608,6 +722,23 @@ async fn submit_mutation(
         status: rejection.status(),
         message: rejection.body_text(),
     })?;
+    if let BusOperationRequest::AcquireDeliveries {
+        expected_delivery_id,
+        wait_ms,
+        ..
+    } = &request.operation
+    {
+        if *wait_ms > MAX_DELIVERY_LONG_POLL_MS {
+            return Err(TabletApiError::InvalidRequest(format!(
+                "wait_ms must not exceed {MAX_DELIVERY_LONG_POLL_MS}"
+            )));
+        }
+        if expected_delivery_id.is_some() && *wait_ms != 0 {
+            return Err(TabletApiError::InvalidRequest(
+                "wait_ms is supported only for pull acquisition".into(),
+            ));
+        }
+    }
     state
         .service
         .ensure_healthy()
@@ -620,6 +751,11 @@ async fn submit_mutation(
         operation.clone(),
     )?;
     let proposal_id = bus_proposal_id_for(state.service.scope(), &request.idempotency_key)?;
+    if let Some((subscription, wait_ms)) = request.operation.pull_long_poll()
+        && wait_ms > 0
+    {
+        wait_for_pull_delivery(&state, proposal_id, subscription, wait_ms).await?;
+    }
     let _write_guard = state.write_serial.lock().await;
     let commits = state.consensus.subscribe_commits();
 
@@ -660,6 +796,47 @@ async fn submit_mutation(
         return Ok((committed_http_status(replayed), Json(response)));
     }
     wait_for_committed_response(&state, commits, proposal_id, &request, replayed).await
+}
+
+async fn wait_for_pull_delivery(
+    state: &BusTabletApiState,
+    proposal_id: u64,
+    subscription: &str,
+    wait_ms: u64,
+) -> TabletApiResult<()> {
+    let mut commits = state.consensus.subscribe_commits();
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(wait_ms);
+    loop {
+        if !matches!(
+            state.consensus.lookup(proposal_id).await?,
+            ProposalLookup::Unknown
+        ) {
+            return Ok(());
+        }
+        let now_ms = state
+            .clock
+            .wall_time_ms()
+            .max(state.service.last_applied_time_ms()?);
+        if state
+            .service
+            .has_acquirable_pull_delivery(subscription, now_ms)?
+        {
+            return Ok(());
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Ok(());
+        }
+        let wait = (deadline - now).min(Duration::from_millis(50));
+        match tokio::time::timeout(wait, commits.recv()).await {
+            Ok(Err(broadcast::error::RecvError::Closed)) => {
+                return Err(TabletApiError::Consensus(
+                    ConsensusProbeError::ActorUnavailable,
+                ));
+            }
+            Ok(Ok(_) | Err(broadcast::error::RecvError::Lagged(_))) | Err(_) => {}
+        }
+    }
 }
 
 async fn wait_for_committed_response(
@@ -880,6 +1057,23 @@ async fn query_deliveries(
     }))
 }
 
+#[derive(Debug, Serialize)]
+struct BusIntegrationStateResponse {
+    #[serde(flatten)]
+    read: TabletReadMetadata,
+    state: EventIntegrationState,
+}
+
+async fn integration_state(
+    State(state): State<BusTabletApiState>,
+    read: Option<Extension<TabletReadMetadata>>,
+) -> TabletApiResult<Json<BusIntegrationStateResponse>> {
+    Ok(Json(BusIntegrationStateResponse {
+        read: tablet_read_metadata(read),
+        state: state.service.integration_state()?,
+    }))
+}
+
 async fn tablet_status(
     State(state): State<BusTabletApiState>,
     read: Option<Extension<TabletReadMetadata>>,
@@ -1092,6 +1286,8 @@ struct BusDeliveryRecordResponse {
     destination: Option<BusEpochTargetDestinationResponse>,
     state: BusDeliveryStateResponse,
     attempts: Vec<BusDeliveryAttemptResponse>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    redrives: Vec<BusDeliveryRedriveResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1113,6 +1309,20 @@ struct BusDeliveryPolicyResponse {
     timeout_ms: u64,
     max_in_flight: u16,
     retry: BusDeliveryRetryPolicyResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rate_limit: Option<DeliveryRateLimit>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_u64_as_decimal"
+    )]
+    dead_letter_retention_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct BusDeliveryRedriveResponse {
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    redriven_at_ms: u64,
+    previous_attempts: Vec<BusDeliveryAttemptResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1208,6 +1418,7 @@ impl From<DeliveryRecord> for BusDeliveryRecordResponse {
             destination: record.destination.map(Into::into),
             state: record.state.into(),
             attempts: record.attempts.into_iter().map(Into::into).collect(),
+            redrives: record.redrives.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -1231,6 +1442,21 @@ impl From<DeliveryPolicy> for BusDeliveryPolicyResponse {
             timeout_ms: policy.timeout_ms,
             max_in_flight: policy.max_in_flight,
             retry: policy.retry.into(),
+            rate_limit: policy.rate_limit,
+            dead_letter_retention_ms: policy.dead_letter_retention_ms,
+        }
+    }
+}
+
+impl From<DeliveryRedrive> for BusDeliveryRedriveResponse {
+    fn from(redrive: DeliveryRedrive) -> Self {
+        Self {
+            redriven_at_ms: redrive.redriven_at_ms,
+            previous_attempts: redrive
+                .previous_attempts
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         }
     }
 }
@@ -1494,6 +1720,39 @@ mod tests {
     }
 
     #[test]
+    fn automatic_bus_maintenance_proposes_replicated_archive_retention() {
+        let service = BusTabletService::new(
+            scope(),
+            BusConfig {
+                archive_retention: epoch_bus::ArchiveRetentionPolicy {
+                    max_events: None,
+                    max_age_ms: Some(10),
+                },
+                ..BusConfig::default()
+            },
+        )
+        .unwrap();
+        service
+            .apply(&publish("publish-retained", "event-1", 100, 1))
+            .unwrap();
+
+        assert!(service.maintenance_proposals(109).unwrap().is_empty());
+        let proposals = service.maintenance_proposals(110).unwrap();
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(
+            proposals[0].operation,
+            RegionalMaintenanceOperation::BusArchiveRetention
+        );
+        assert_eq!(proposals[0].due_at_ms, 110);
+        let command = BusTabletCommand::decode(&proposals[0].payload, &scope()).unwrap();
+        assert_eq!(command.format_version, 5);
+        assert!(matches!(
+            command.operation,
+            BusTabletOperation::MaintainArchive { max_events: 10_000 }
+        ));
+    }
+
+    #[test]
     fn mutation_request_is_strict_and_accepts_browser_safe_integers() {
         let request: BusMutationRequest = serde_json::from_value(json!({
             "idempotency_key": "publish-1",
@@ -1525,7 +1784,8 @@ mod tests {
                 "subscription": "sink",
                 "dispatcher": "sender",
                 "dispatcher_epoch": "9007199254740993",
-                "max_deliveries": 10
+                "max_deliveries": 10,
+                "wait_ms": "30000"
             }
         }))
         .unwrap();
@@ -1537,6 +1797,7 @@ mod tests {
                 ..
             }
         ));
+        assert_eq!(acquire.operation.pull_long_poll(), Some(("sink", 30_000)));
 
         assert!(
             serde_json::from_value::<BusMutationRequest>(json!({
@@ -1802,7 +2063,43 @@ mod tests {
 
     #[test]
     fn delivery_response_uses_browser_safe_integer_strings_through_attempt_history() {
-        let response = BusDeliveryRecordResponse::from(DeliveryRecord {
+        let response = BusDeliveryRecordResponse::from(max_integer_delivery_record());
+        let document = serde_json::to_value(response).unwrap();
+        assert_eq!(document["publish_position"], u64::MAX.to_string());
+        assert_eq!(document["policy"]["timeout_ms"], u64::MAX.to_string());
+        assert_eq!(
+            document["policy"]["dead_letter_retention_ms"],
+            u64::MAX.to_string()
+        );
+        assert_eq!(document["state"]["eligible_at_ms"], u64::MAX.to_string());
+        assert_eq!(
+            document["destination"]["resource_generation"],
+            u64::MAX.to_string()
+        );
+        assert_eq!(
+            document["destination"]["tablet_id"],
+            (u64::MAX - 4).to_string()
+        );
+        assert_eq!(
+            document["attempts"][0]["dispatcher_epoch"],
+            u64::MAX.to_string()
+        );
+        assert_eq!(
+            document["attempts"][0]["outcome"]["retry_at_ms"],
+            u64::MAX.to_string()
+        );
+        assert_eq!(
+            document["redrives"][0]["redriven_at_ms"],
+            (u64::MAX - 3).to_string()
+        );
+        assert_eq!(
+            document["redrives"][0]["previous_attempts"][0]["leader_term"],
+            (u64::MAX - 5).to_string()
+        );
+    }
+
+    fn max_integer_delivery_record() -> DeliveryRecord {
+        DeliveryRecord {
             delivery_id: "epoch.bus.delivery.v1.1.audit".into(),
             publish_position: u64::MAX,
             subscription: "audit".into(),
@@ -1814,6 +2111,11 @@ mod tests {
             policy: DeliveryPolicy {
                 timeout_ms: u64::MAX,
                 max_in_flight: 1,
+                rate_limit: Some(DeliveryRateLimit {
+                    deliveries_per_second: 10,
+                    burst: 20,
+                }),
+                dead_letter_retention_ms: Some(u64::MAX),
                 retry: DeliveryRetryPolicy {
                     strategy: epoch_bus::DeliveryBackoffStrategy::Fixed,
                     initial_delay_ms: u64::MAX - 3,
@@ -1850,27 +2152,23 @@ mod tests {
                     retry_at_ms: Some(u64::MAX),
                 },
             }],
-        });
-        let document = serde_json::to_value(response).unwrap();
-        assert_eq!(document["publish_position"], u64::MAX.to_string());
-        assert_eq!(document["policy"]["timeout_ms"], u64::MAX.to_string());
-        assert_eq!(document["state"]["eligible_at_ms"], u64::MAX.to_string());
-        assert_eq!(
-            document["destination"]["resource_generation"],
-            u64::MAX.to_string()
-        );
-        assert_eq!(
-            document["destination"]["tablet_id"],
-            (u64::MAX - 4).to_string()
-        );
-        assert_eq!(
-            document["attempts"][0]["dispatcher_epoch"],
-            u64::MAX.to_string()
-        );
-        assert_eq!(
-            document["attempts"][0]["outcome"]["retry_at_ms"],
-            u64::MAX.to_string()
-        );
+            redrives: vec![DeliveryRedrive {
+                redriven_at_ms: u64::MAX - 3,
+                previous_attempts: vec![DeliveryAttempt {
+                    attempt: 1,
+                    dispatcher: "previous-sender".into(),
+                    dispatcher_epoch: u64::MAX - 4,
+                    leader_term: u64::MAX - 5,
+                    started_at_ms: u64::MAX - 6,
+                    lease_deadline_ms: u64::MAX - 5,
+                    outcome: DeliveryAttemptOutcome::Failed {
+                        failed_at_ms: u64::MAX - 4,
+                        reason: "dead letter".into(),
+                        retry_at_ms: None,
+                    },
+                }],
+            }],
+        }
     }
 
     #[test]

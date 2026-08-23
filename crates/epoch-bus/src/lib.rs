@@ -2,7 +2,12 @@
 
 use std::collections::BTreeMap;
 
+mod catalog;
+mod connector;
 mod delivery;
+mod mqtt;
+mod platform;
+mod schema;
 
 use epoch_core::{
     AckMetadata, DurabilityProfile, EpochError, EpochResult, EventEnvelope, validate_resource_name,
@@ -12,25 +17,53 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::Url;
 
+pub use catalog::{
+    EndpointObservation, EndpointRegistry, EndpointRoute, EventCatalog, EventCatalogEntry,
+};
+pub use connector::{
+    ConnectorBatchCommit, ConnectorBatchReceipt, ConnectorCheckpoint, ConnectorDirection,
+    ConnectorKind, ConnectorRecordError, ConnectorRecordResult, ConnectorRegistry,
+    ConnectorReplayRequest, ConnectorResource, ConnectorSecretVersion, ConnectorSpec,
+    ConnectorStatus,
+};
 pub use delivery::{
     DEFAULT_MAX_OUTBOX_DELIVERIES, DeliveryAttempt, DeliveryAttemptOutcome,
     DeliveryBackoffStrategy, DeliveryCounts, DeliveryFence, DeliveryLease,
-    DeliveryMaintenanceResult, DeliveryPolicy, DeliveryRecord, DeliveryRetryPolicy, DeliveryState,
-    DeliveryStateKind, EpochTargetDeliveryCandidate, EpochTargetDestination, EpochTargetKind,
-    MAX_BUS_OUTBOX_DELIVERIES, MAX_DELIVERY_ACQUIRE_BATCH, MAX_DELIVERY_ATTEMPTS,
-    MAX_DELIVERY_IN_FLIGHT, MAX_DELIVERY_QUERY_RESULTS, MAX_DELIVERY_REASON_BYTES,
-    MAX_DELIVERY_TIMEOUT_MS, SignedWebhookDeliveryCandidate,
+    DeliveryMaintenanceResult, DeliveryPolicy, DeliveryRateLimit, DeliveryRecord, DeliveryRedrive,
+    DeliveryRetryPolicy, DeliveryState, DeliveryStateKind, EpochTargetDeliveryCandidate,
+    EpochTargetDestination, EpochTargetKind, MAX_BUS_OUTBOX_DELIVERIES, MAX_DELIVERY_ACQUIRE_BATCH,
+    MAX_DELIVERY_ATTEMPTS, MAX_DELIVERY_IN_FLIGHT, MAX_DELIVERY_LONG_POLL_MS,
+    MAX_DELIVERY_QUERY_RESULTS, MAX_DELIVERY_REASON_BYTES, MAX_DELIVERY_TIMEOUT_MS,
+    ManagedTargetDeliveryCandidate, SignedWebhookDeliveryCandidate,
 };
 use delivery::{DeliveryLedger, delivery_id};
+pub use mqtt::{
+    MqttBrokerState, MqttConnect, MqttDelivery, MqttPublish, MqttPublishPlan, MqttQos,
+    MqttRetainedMessage, MqttSession, MqttSubscription,
+};
+pub use platform::{
+    EnrichmentDefinition, EnrichmentLimits, EventIntegrationState, FunctionDefinition,
+    FunctionResource, FunctionStatus, IntegrationOperation, IntegrationOutcome,
+    MAX_EVENT_INTEGRATION_STATE_BYTES, SchemaValidationMode, SchemaValidationPolicy,
+};
+pub use schema::{
+    SchemaCompatibility, SchemaField, SchemaFormat, SchemaRegistration, SchemaRegistry,
+    SchemaRevision, SchemaValueType,
+};
 
 pub const DEFAULT_MAX_SUBSCRIPTIONS: usize = 1_024;
 pub const DEFAULT_MAX_ARCHIVE_EVENTS: usize = 100_000;
 pub const MAX_BUS_SUBSCRIPTIONS: usize = 100_000;
 pub const MAX_BUS_ARCHIVE_EVENTS: usize = 10_000_000;
+pub const MAX_ARCHIVE_RETENTION_MS: u64 = 10 * 365 * 24 * 60 * 60 * 1_000;
 pub const MAX_REPLAY_EVENTS: usize = 10_000;
 pub const MAX_FILTER_PATTERNS: usize = 64;
 pub const MAX_FILTER_ENTRIES: usize = 64;
 pub const MAX_TRANSFORM_ENTRIES: usize = 64;
+pub const MAX_TRANSFORM_OPERATIONS: u16 = 256;
+pub const MAX_TRANSFORM_OUTPUT_BYTES: usize = 1024 * 1024;
+pub const MAX_TRANSFORM_VALUE_BYTES: usize = 256 * 1024;
+pub const MAX_TRANSFORM_TIMEOUT_MS: u64 = 1_000;
 pub const MAX_PATTERN_BYTES: usize = 512;
 pub const MAX_HEADER_KEY_BYTES: usize = 256;
 pub const MAX_HEADER_VALUE_BYTES: usize = 4 * 1024;
@@ -38,7 +71,9 @@ pub const MAX_JSON_PATH_BYTES: usize = 1_024;
 pub const MAX_PROJECTED_FIELD_BYTES: usize = 256;
 pub const MAX_FILTER_VALUE_BYTES: usize = 64 * 1024;
 pub const MAX_TARGET_URL_BYTES: usize = 8 * 1024;
-pub const EVENT_BUS_SNAPSHOT_FORMAT_VERSION: u16 = 3;
+pub const EVENT_BUS_SNAPSHOT_FORMAT_VERSION: u16 = 5;
+const INTEGRATION_EVENT_BUS_SNAPSHOT_FORMAT_VERSION: u16 = 4;
+const EPOCH_TARGET_EVENT_BUS_SNAPSHOT_FORMAT_VERSION: u16 = 3;
 const SIGNED_WEBHOOK_EVENT_BUS_SNAPSHOT_FORMAT_VERSION: u16 = 2;
 const LEGACY_EVENT_BUS_SNAPSHOT_FORMAT_VERSION: u16 = 1;
 pub const MAX_EVENT_BUS_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
@@ -54,6 +89,8 @@ pub struct BusConfig {
     pub max_subscriptions: usize,
     #[serde(default = "default_max_archive_events")]
     pub max_archive_events: usize,
+    #[serde(default, skip_serializing_if = "ArchiveRetentionPolicy::is_default")]
+    pub archive_retention: ArchiveRetentionPolicy,
     #[serde(default = "default_max_outbox_deliveries")]
     pub max_outbox_deliveries: usize,
 }
@@ -66,9 +103,33 @@ impl Default for BusConfig {
             delivery_outbox: false,
             max_subscriptions: DEFAULT_MAX_SUBSCRIPTIONS,
             max_archive_events: DEFAULT_MAX_ARCHIVE_EVENTS,
+            archive_retention: ArchiveRetentionPolicy::default(),
             max_outbox_deliveries: DEFAULT_MAX_OUTBOX_DELIVERIES,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchiveRetentionPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_events: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age_ms: Option<u64>,
+}
+
+impl ArchiveRetentionPolicy {
+    const fn is_default(&self) -> bool {
+        self.max_events.is_none() && self.max_age_ms.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveMaintenanceResult {
+    pub as_of_ms: u64,
+    pub cutoff_ms: Option<u64>,
+    pub purged: usize,
+    pub archived_event_count: usize,
 }
 
 const fn default_max_subscriptions() -> usize {
@@ -87,6 +148,8 @@ const fn default_max_outbox_deliveries() -> usize {
 #[serde(deny_unknown_fields)]
 pub struct EventFilter {
     #[serde(default)]
+    pub topic_patterns: Vec<String>,
+    #[serde(default)]
     pub event_type_patterns: Vec<String>,
     #[serde(default)]
     pub source_patterns: Vec<String>,
@@ -100,7 +163,8 @@ pub struct EventFilter {
 
 impl EventFilter {
     pub fn matches(&self, event: &EventEnvelope) -> bool {
-        matches_patterns(&self.event_type_patterns, Some(&event.event_type))
+        matches_patterns(&self.topic_patterns, Some(event_topic(event)))
+            && matches_patterns(&self.event_type_patterns, Some(&event.event_type))
             && matches_patterns(&self.source_patterns, Some(&event.source))
             && matches_patterns(&self.subject_patterns, event.subject.as_deref())
             && self
@@ -113,6 +177,7 @@ impl EventFilter {
     }
 
     fn validate(&self) -> EpochResult<()> {
+        validate_patterns("topic_patterns", &self.topic_patterns)?;
         validate_patterns("event_type_patterns", &self.event_type_patterns)?;
         validate_patterns("source_patterns", &self.source_patterns)?;
         validate_patterns("subject_patterns", &self.subject_patterns)?;
@@ -162,6 +227,48 @@ pub enum SubscriptionTarget {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signing_key_id: Option<String>,
     },
+    ApiDestination {
+        url: String,
+        auth: DestinationAuth,
+        #[serde(default)]
+        cloud_events_mode: CloudEventsMode,
+    },
+    EndpointPool {
+        pool: String,
+        auth: DestinationAuth,
+        #[serde(default)]
+        cloud_events_mode: CloudEventsMode,
+    },
+    Function {
+        resource: String,
+    },
+    Connector {
+        resource: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DestinationAuth {
+    None,
+    ApiKey {
+        secret_ref: String,
+        header: String,
+    },
+    OAuth2 {
+        secret_ref: String,
+        token_url: String,
+        #[serde(default)]
+        scopes: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudEventsMode {
+    #[default]
+    Binary,
+    Structured,
 }
 
 impl SubscriptionTarget {
@@ -170,7 +277,13 @@ impl SubscriptionTarget {
             Self::Webhook { signing_key_id, .. } | Self::Http { signing_key_id, .. } => {
                 signing_key_id.as_deref()
             }
-            Self::Pull | Self::Queue { .. } | Self::Stream { .. } => None,
+            Self::Pull
+            | Self::Queue { .. }
+            | Self::Stream { .. }
+            | Self::ApiDestination { .. }
+            | Self::EndpointPool { .. }
+            | Self::Function { .. }
+            | Self::Connector { .. } => None,
         }
     }
 }
@@ -192,6 +305,10 @@ enum StrictSubscriptionTarget {
     Stream(StrictResourceTarget<StreamTargetKind>),
     Webhook(StrictSignedUrlTarget<WebhookTargetKind>),
     Http(StrictSignedUrlTarget<HttpTargetKind>),
+    ApiDestination(StrictApiDestinationTarget),
+    EndpointPool(StrictEndpointPoolTarget),
+    Function(StrictResourceTarget<FunctionTargetKind>),
+    Connector(StrictResourceTarget<ConnectorTargetKind>),
 }
 
 impl From<StrictSubscriptionTarget> for SubscriptionTarget {
@@ -211,6 +328,22 @@ impl From<StrictSubscriptionTarget> for SubscriptionTarget {
             StrictSubscriptionTarget::Http(target) => Self::Http {
                 url: target.url,
                 signing_key_id: target.signing_key_id,
+            },
+            StrictSubscriptionTarget::ApiDestination(target) => Self::ApiDestination {
+                url: target.url,
+                auth: target.auth,
+                cloud_events_mode: target.cloud_events_mode,
+            },
+            StrictSubscriptionTarget::EndpointPool(target) => Self::EndpointPool {
+                pool: target.pool,
+                auth: target.auth,
+                cloud_events_mode: target.cloud_events_mode,
+            },
+            StrictSubscriptionTarget::Function(target) => Self::Function {
+                resource: target.resource,
+            },
+            StrictSubscriptionTarget::Connector(target) => Self::Connector {
+                resource: target.resource,
             },
         }
     }
@@ -239,6 +372,28 @@ struct StrictSignedUrlTarget<Kind> {
     url: String,
     #[serde(default)]
     signing_key_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictApiDestinationTarget {
+    #[serde(rename = "kind")]
+    _kind: ApiDestinationTargetKind,
+    url: String,
+    auth: DestinationAuth,
+    #[serde(default)]
+    cloud_events_mode: CloudEventsMode,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictEndpointPoolTarget {
+    #[serde(rename = "kind")]
+    _kind: EndpointPoolTargetKind,
+    pool: String,
+    auth: DestinationAuth,
+    #[serde(default)]
+    cloud_events_mode: CloudEventsMode,
 }
 
 #[derive(Deserialize)]
@@ -271,6 +426,79 @@ enum HttpTargetKind {
     Http,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ApiDestinationTargetKind {
+    ApiDestination,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EndpointPoolTargetKind {
+    EndpointPool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FunctionTargetKind {
+    Function,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ConnectorTargetKind {
+    Connector,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransformLimits {
+    #[serde(default = "default_transform_operations")]
+    pub max_operations: u16,
+    #[serde(default = "default_transform_output_bytes")]
+    pub max_output_bytes: usize,
+    #[serde(default = "default_transform_value_bytes")]
+    pub max_value_bytes: usize,
+    #[serde(default = "default_transform_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub network_access: bool,
+}
+
+impl Default for TransformLimits {
+    fn default() -> Self {
+        Self {
+            max_operations: default_transform_operations(),
+            max_output_bytes: default_transform_output_bytes(),
+            max_value_bytes: default_transform_value_bytes(),
+            timeout_ms: default_transform_timeout_ms(),
+            network_access: false,
+        }
+    }
+}
+
+impl TransformLimits {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+const fn default_transform_operations() -> u16 {
+    64
+}
+
+const fn default_transform_output_bytes() -> usize {
+    256 * 1024
+}
+
+const fn default_transform_value_bytes() -> usize {
+    64 * 1024
+}
+
+const fn default_transform_timeout_ms() -> u64 {
+    100
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct EventTransform {
@@ -278,22 +506,58 @@ pub struct EventTransform {
     pub add_headers: BTreeMap<String, String>,
     #[serde(default)]
     pub payload_projection: BTreeMap<String, String>,
+    #[serde(default)]
+    pub rename_fields: BTreeMap<String, String>,
+    #[serde(default)]
+    pub constants: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub templates: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "TransformLimits::is_default")]
+    pub limits: TransformLimits,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrichment_ref: Option<String>,
 }
 
 impl EventTransform {
-    fn apply(&self, event: &EventEnvelope) -> EventEnvelope {
+    pub fn apply(&self, event: &EventEnvelope) -> EpochResult<EventEnvelope> {
+        self.validate()?;
         let mut output = event.clone();
         output.headers.extend(self.add_headers.clone());
-        if !self.payload_projection.is_empty() {
+        if !self.payload_projection.is_empty()
+            || !self.rename_fields.is_empty()
+            || !self.constants.is_empty()
+            || !self.templates.is_empty()
+        {
             let mut projected = serde_json::Map::new();
             for (output_field, source_path) in &self.payload_projection {
                 if let Some(value) = json_path(&event.payload, source_path) {
                     projected.insert(output_field.clone(), value.clone());
                 }
             }
+            for (source_path, output_field) in &self.rename_fields {
+                if let Some(value) = json_path(&event.payload, source_path) {
+                    projected.insert(output_field.clone(), value.clone());
+                }
+            }
+            projected.extend(self.constants.clone());
+            for (output_field, template) in &self.templates {
+                projected.insert(
+                    output_field.clone(),
+                    Value::String(render_template(template, &event.payload)?),
+                );
+            }
             output.payload = Value::Object(projected);
         }
-        output
+        let encoded = serde_json::to_vec(&output.payload)
+            .map_err(|error| EpochError::InvalidArgument(error.to_string()))?;
+        if encoded.len() > self.limits.max_output_bytes {
+            return Err(EpochError::Capacity(format!(
+                "transform output is {} bytes; configured maximum is {}",
+                encoded.len(),
+                self.limits.max_output_bytes
+            )));
+        }
+        Ok(output)
     }
 
     fn validate(&self) -> EpochResult<()> {
@@ -312,17 +576,67 @@ impl EventTransform {
             MAX_TRANSFORM_ENTRIES,
         )?;
         for (output_field, source_path) in &self.payload_projection {
-            validate_text(
-                "projected output field",
-                output_field,
-                MAX_PROJECTED_FIELD_BYTES,
-            )?;
-            if output_field.contains('.') {
-                return Err(EpochError::InvalidArgument(
-                    "projected output fields cannot contain dots".into(),
-                ));
-            }
+            validate_output_field(output_field)?;
             validate_json_path(source_path)?;
+        }
+        validate_map_capacity(
+            "rename_fields",
+            self.rename_fields.len(),
+            MAX_TRANSFORM_ENTRIES,
+        )?;
+        for (source_path, output_field) in &self.rename_fields {
+            validate_json_path(source_path)?;
+            validate_output_field(output_field)?;
+        }
+        validate_map_capacity("constants", self.constants.len(), MAX_TRANSFORM_ENTRIES)?;
+        for (output_field, value) in &self.constants {
+            validate_output_field(output_field)?;
+            validate_transform_value(value, self.limits.max_value_bytes)?;
+        }
+        validate_map_capacity("templates", self.templates.len(), MAX_TRANSFORM_ENTRIES)?;
+        for (output_field, template) in &self.templates {
+            validate_output_field(output_field)?;
+            validate_text("transform template", template, MAX_HEADER_VALUE_BYTES)?;
+            validate_template(template)?;
+        }
+        let operation_count = self
+            .add_headers
+            .len()
+            .checked_add(self.payload_projection.len())
+            .and_then(|count| count.checked_add(self.rename_fields.len()))
+            .and_then(|count| count.checked_add(self.constants.len()))
+            .and_then(|count| count.checked_add(self.templates.len()))
+            .ok_or_else(|| EpochError::Capacity("transform operation count overflow".into()))?;
+        if self.limits.max_operations == 0
+            || self.limits.max_operations > MAX_TRANSFORM_OPERATIONS
+            || operation_count > usize::from(self.limits.max_operations)
+        {
+            return Err(EpochError::InvalidArgument(format!(
+                "transform operations must fit configured max_operations between 1 and {MAX_TRANSFORM_OPERATIONS}"
+            )));
+        }
+        if self.limits.max_output_bytes == 0
+            || self.limits.max_output_bytes > MAX_TRANSFORM_OUTPUT_BYTES
+            || self.limits.max_value_bytes == 0
+            || self.limits.max_value_bytes > MAX_TRANSFORM_VALUE_BYTES
+            || self.limits.max_value_bytes > self.limits.max_output_bytes
+        {
+            return Err(EpochError::InvalidArgument(
+                "transform memory limits are invalid".into(),
+            ));
+        }
+        if self.limits.timeout_ms == 0 || self.limits.timeout_ms > MAX_TRANSFORM_TIMEOUT_MS {
+            return Err(EpochError::InvalidArgument(format!(
+                "transform timeout_ms must be between 1 and {MAX_TRANSFORM_TIMEOUT_MS}"
+            )));
+        }
+        if self.limits.network_access {
+            return Err(EpochError::InvalidArgument(
+                "deterministic transforms cannot enable network access".into(),
+            ));
+        }
+        if let Some(enrichment_ref) = &self.enrichment_ref {
+            validate_resource_name(enrichment_ref)?;
         }
         Ok(())
     }
@@ -348,7 +662,10 @@ impl Subscription {
         self.delivery_policy.validate()?;
         match &self.target {
             SubscriptionTarget::Pull => {}
-            SubscriptionTarget::Queue { resource } | SubscriptionTarget::Stream { resource } => {
+            SubscriptionTarget::Queue { resource }
+            | SubscriptionTarget::Stream { resource }
+            | SubscriptionTarget::Function { resource }
+            | SubscriptionTarget::Connector { resource } => {
                 validate_resource_name(resource)?;
             }
             SubscriptionTarget::Webhook {
@@ -363,6 +680,14 @@ impl Subscription {
                 if let Some(signing_key_id) = signing_key_id {
                     validate_resource_name(signing_key_id)?;
                 }
+            }
+            SubscriptionTarget::ApiDestination { url, auth, .. } => {
+                validate_http_target(url)?;
+                validate_destination_auth(auth)?;
+            }
+            SubscriptionTarget::EndpointPool { pool, auth, .. } => {
+                validate_resource_name(pool)?;
+                validate_destination_auth(auth)?;
             }
         }
         Ok(())
@@ -400,7 +725,9 @@ pub struct EventBus {
     route_plan_version: u64,
     commit_position: u64,
     archive: Vec<ArchivedEvent>,
+    archive_retention_watermark_ms: Option<u64>,
     delivery_ledger: DeliveryLedger,
+    integration: EventIntegrationState,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -412,7 +739,11 @@ struct VersionedEventBusSnapshot {
     route_plan_version: u64,
     commit_position: u64,
     archive: Vec<ArchivedEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    archive_retention_watermark_ms: Option<u64>,
     delivery_ledger: DeliveryLedger,
+    #[serde(default, skip_serializing_if = "EventIntegrationState::is_empty")]
+    integration: EventIntegrationState,
     state_digest: [u8; 32],
 }
 
@@ -427,7 +758,9 @@ impl EventBus {
             route_plan_version: 1,
             commit_position: 0,
             archive: Vec::new(),
+            archive_retention_watermark_ms: None,
             delivery_ledger,
+            integration: EventIntegrationState::default(),
         })
     }
 
@@ -437,6 +770,13 @@ impl EventBus {
 
     pub fn upsert_subscription(&mut self, subscription: Subscription) -> EpochResult<u64> {
         subscription.validate()?;
+        if let Some(enrichment_ref) = &subscription.transform.enrichment_ref
+            && self.integration.enrichment(enrichment_ref).is_none()
+        {
+            return Err(EpochError::NotFound(format!(
+                "enrichment {enrichment_ref} is not registered"
+            )));
+        }
         if !self.subscriptions.contains_key(&subscription.name)
             && self.subscriptions.len() >= self.config.max_subscriptions
         {
@@ -471,41 +811,66 @@ impl EventBus {
 
     pub fn publish(&mut self, event: EventEnvelope, now_ms: u64) -> EpochResult<PublishResult> {
         event.validate()?;
+        self.integration.validate_for_broker(&event)?;
         let position = self
             .commit_position
             .checked_add(1)
             .ok_or_else(|| EpochError::Capacity("event bus commit position overflow".into()))?;
-        if self.config.archive && self.archive.len() >= self.config.max_archive_events {
-            return Err(EpochError::Capacity(format!(
-                "event archive reached its {} event limit",
-                self.config.max_archive_events
-            )));
-        }
         let route_plan_version = self.route_plan_version;
         let deliveries = self
             .subscriptions
             .values()
             .filter(|subscription| subscription.filter.matches(&event))
-            .map(|subscription| RoutedDelivery {
-                delivery_id: delivery_id(position, &subscription.name),
-                subscription: subscription.name.clone(),
-                target: subscription.target.clone(),
-                envelope: subscription.transform.apply(&event),
-                route_plan_version,
-                delivery_policy: subscription.delivery_policy.clone(),
+            .map(|subscription| {
+                let enriched = if let Some(enrichment_ref) = &subscription.transform.enrichment_ref
+                {
+                    self.integration.enrich(enrichment_ref, &event)?
+                } else {
+                    event.clone()
+                };
+                Ok(RoutedDelivery {
+                    delivery_id: delivery_id(position, &subscription.name),
+                    subscription: subscription.name.clone(),
+                    target: subscription.target.clone(),
+                    envelope: subscription.transform.apply(&enriched)?,
+                    route_plan_version,
+                    delivery_policy: subscription.delivery_policy.clone(),
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<EpochResult<Vec<_>>>()?;
         let mut next_delivery_ledger = self.delivery_ledger.clone();
         next_delivery_ledger.append_publish(position, now_ms, &deliveries)?;
-        self.commit_position = position;
+        let mut next_archive = self.archive.clone();
+        let mut next_retention_watermark_ms = self.archive_retention_watermark_ms;
         if self.config.archive {
-            self.archive.push(ArchivedEvent {
+            let received_at_ms = effective_archive_time(
+                self.config.archive_retention,
+                next_retention_watermark_ms,
+                now_ms,
+            );
+            next_archive.push(ArchivedEvent {
                 position,
-                received_at_ms: now_ms,
+                received_at_ms,
                 route_plan_version,
                 envelope: event,
             });
+            maintain_archive_records(
+                &mut next_archive,
+                self.config.archive_retention,
+                &mut next_retention_watermark_ms,
+                received_at_ms,
+                usize::MAX,
+            );
+            if next_archive.len() > self.config.max_archive_events {
+                return Err(EpochError::Capacity(format!(
+                    "event archive reached its {} event limit",
+                    self.config.max_archive_events
+                )));
+            }
         }
+        self.commit_position = position;
+        self.archive = next_archive;
+        self.archive_retention_watermark_ms = next_retention_watermark_ms;
         self.delivery_ledger = next_delivery_ledger;
         Ok(PublishResult {
             acknowledgement: AckMetadata::standalone(position, self.config.durability),
@@ -562,6 +927,46 @@ impl EventBus {
         self.archive.len()
     }
 
+    pub const fn archive_retention_watermark_ms(&self) -> Option<u64> {
+        self.archive_retention_watermark_ms
+    }
+
+    pub fn maintain_archive(
+        &mut self,
+        now_ms: u64,
+        max_events: usize,
+    ) -> EpochResult<ArchiveMaintenanceResult> {
+        if max_events == 0 || max_events > MAX_REPLAY_EVENTS {
+            return Err(EpochError::InvalidArgument(format!(
+                "archive maintenance max_events must be between 1 and {MAX_REPLAY_EVENTS}"
+            )));
+        }
+        if !self.config.archive {
+            return Err(EpochError::Conflict(
+                "archive maintenance requires an enabled Event Bus archive".into(),
+            ));
+        }
+        let effective_now_ms = effective_archive_time(
+            self.config.archive_retention,
+            self.archive_retention_watermark_ms,
+            now_ms,
+        );
+        Ok(maintain_archive_records(
+            &mut self.archive,
+            self.config.archive_retention,
+            &mut self.archive_retention_watermark_ms,
+            effective_now_ms,
+            max_events,
+        ))
+    }
+
+    pub fn next_archive_retention_deadline_ms(&self) -> Option<u64> {
+        let max_age_ms = self.config.archive_retention.max_age_ms?;
+        self.archive
+            .first()
+            .and_then(|record| record.received_at_ms.checked_add(max_age_ms))
+    }
+
     pub fn acquire_deliveries(
         &mut self,
         subscription: &str,
@@ -575,6 +980,15 @@ impl EventBus {
             candidate.acquire(subscription, dispatcher, max_deliveries, now_ms, fence)?;
         self.delivery_ledger = candidate;
         Ok(deliveries)
+    }
+
+    pub fn has_acquirable_pull_delivery(
+        &self,
+        subscription: &str,
+        now_ms: u64,
+    ) -> EpochResult<bool> {
+        let mut candidate = self.delivery_ledger.clone();
+        candidate.has_acquirable_pull(subscription, now_ms)
     }
 
     pub fn acquire_specific_delivery(
@@ -665,6 +1079,17 @@ impl EventBus {
         Ok(record)
     }
 
+    pub fn redrive_delivery(
+        &mut self,
+        delivery_id: &str,
+        now_ms: u64,
+    ) -> EpochResult<DeliveryRecord> {
+        let mut candidate = self.delivery_ledger.clone();
+        let record = candidate.redrive(delivery_id, now_ms)?;
+        self.delivery_ledger = candidate;
+        Ok(record)
+    }
+
     pub fn maintain_deliveries(
         &mut self,
         now_ms: u64,
@@ -696,6 +1121,13 @@ impl EventBus {
         self.delivery_ledger.epoch_target_candidates(now_ms)
     }
 
+    pub fn managed_target_delivery_candidates(
+        &self,
+        now_ms: u64,
+    ) -> EpochResult<Vec<ManagedTargetDeliveryCandidate>> {
+        self.delivery_ledger.managed_target_candidates(now_ms)
+    }
+
     pub fn delivery(&self, delivery_id: &str) -> Option<DeliveryRecord> {
         self.delivery_ledger.get(delivery_id)
     }
@@ -713,19 +1145,68 @@ impl EventBus {
         self.delivery_ledger.counts()
     }
 
+    pub fn integration(&self) -> &EventIntegrationState {
+        &self.integration
+    }
+
+    pub fn integration_mut(&mut self) -> &mut EventIntegrationState {
+        &mut self.integration
+    }
+
+    pub fn apply_integration(
+        &mut self,
+        operation: IntegrationOperation,
+        applied_at_ms: u64,
+    ) -> EpochResult<IntegrationOutcome> {
+        let next_version = self
+            .route_plan_version
+            .checked_add(1)
+            .ok_or_else(|| EpochError::Capacity("route plan version overflow".into()))?;
+        let mut candidate = self.integration.clone();
+        let outcome = candidate.apply(operation, applied_at_ms)?;
+        self.integration = candidate;
+        self.route_plan_version = next_version;
+        Ok(outcome)
+    }
+
     /// Deterministic digest of all state required to rebuild route and replay behavior.
     pub fn recovery_state_digest(&self) -> EpochResult<[u8; 32]> {
-        let encoded = serde_json::to_vec(&(
-            &self.config,
-            &self.subscriptions,
-            self.route_plan_version,
-            self.commit_position,
-            &self.archive,
-            &self.delivery_ledger,
-        ))
-        .map_err(|error| EpochError::Internal(error.to_string()))?;
         let mut hasher = Sha256::new();
-        hasher.update(b"epoch/event-bus/recovery-state/v2\0");
+        let encoded = if self.archive_retention_is_active() {
+            hasher.update(b"epoch/event-bus/recovery-state/v4\0");
+            serde_json::to_vec(&(
+                &self.config,
+                &self.subscriptions,
+                self.route_plan_version,
+                self.commit_position,
+                &self.archive,
+                self.archive_retention_watermark_ms,
+                &self.delivery_ledger,
+                &self.integration,
+            ))
+        } else if self.integration.is_empty() {
+            hasher.update(b"epoch/event-bus/recovery-state/v2\0");
+            serde_json::to_vec(&(
+                &self.config,
+                &self.subscriptions,
+                self.route_plan_version,
+                self.commit_position,
+                &self.archive,
+                &self.delivery_ledger,
+            ))
+        } else {
+            hasher.update(b"epoch/event-bus/recovery-state/v3\0");
+            serde_json::to_vec(&(
+                &self.config,
+                &self.subscriptions,
+                self.route_plan_version,
+                self.commit_position,
+                &self.archive,
+                &self.delivery_ledger,
+                &self.integration,
+            ))
+        }
+        .map_err(|error| EpochError::Internal(error.to_string()))?;
         hasher.update(encoded);
         Ok(hasher.finalize().into())
     }
@@ -733,8 +1214,12 @@ impl EventBus {
     /// Encodes the complete routing, archive, and delivery-ledger state as a
     /// canonical versioned application snapshot.
     pub fn encode_snapshot(&self) -> EpochResult<Vec<u8>> {
-        let format_version = if self.uses_epoch_target_format() {
+        let format_version = if self.archive_retention_is_active() {
             EVENT_BUS_SNAPSHOT_FORMAT_VERSION
+        } else if !self.integration.is_empty() {
+            INTEGRATION_EVENT_BUS_SNAPSHOT_FORMAT_VERSION
+        } else if self.uses_epoch_target_format() {
+            EPOCH_TARGET_EVENT_BUS_SNAPSHOT_FORMAT_VERSION
         } else if self.uses_signed_webhook_format() {
             SIGNED_WEBHOOK_EVENT_BUS_SNAPSHOT_FORMAT_VERSION
         } else {
@@ -747,7 +1232,9 @@ impl EventBus {
             route_plan_version: self.route_plan_version,
             commit_position: self.commit_position,
             archive: self.archive.clone(),
+            archive_retention_watermark_ms: self.archive_retention_watermark_ms,
             delivery_ledger: self.delivery_ledger.clone(),
+            integration: self.integration.clone(),
             state_digest: self.recovery_state_digest()?,
         })
         .map_err(|error| EpochError::InvalidArgument(error.to_string()))?;
@@ -778,7 +1265,9 @@ impl EventBus {
             route_plan_version: snapshot.route_plan_version,
             commit_position: snapshot.commit_position,
             archive: snapshot.archive,
+            archive_retention_watermark_ms: snapshot.archive_retention_watermark_ms,
             delivery_ledger: snapshot.delivery_ledger,
+            integration: snapshot.integration,
         };
         if bus.recovery_state_digest()? != snapshot.state_digest {
             return Err(EpochError::InvalidArgument(
@@ -802,6 +1291,10 @@ impl EventBus {
     fn uses_epoch_target_format(&self) -> bool {
         self.delivery_ledger.has_epoch_target_bindings()
     }
+
+    fn archive_retention_is_active(&self) -> bool {
+        !self.config.archive_retention.is_default() || self.archive_retention_watermark_ms.is_some()
+    }
 }
 
 fn validate_snapshot_document(
@@ -812,6 +1305,8 @@ fn validate_snapshot_document(
         snapshot.format_version,
         LEGACY_EVENT_BUS_SNAPSHOT_FORMAT_VERSION
             | SIGNED_WEBHOOK_EVENT_BUS_SNAPSHOT_FORMAT_VERSION
+            | EPOCH_TARGET_EVENT_BUS_SNAPSHOT_FORMAT_VERSION
+            | INTEGRATION_EVENT_BUS_SNAPSHOT_FORMAT_VERSION
             | EVENT_BUS_SNAPSHOT_FORMAT_VERSION
     ) {
         return Err(EpochError::InvalidArgument(format!(
@@ -843,19 +1338,37 @@ fn validate_snapshot_document(
         }
         subscription.validate()?;
     }
+    let retention_active = !snapshot.config.archive_retention.is_default()
+        || snapshot.archive_retention_watermark_ms.is_some();
     if (snapshot.config.archive
+        && !retention_active
         && u64::try_from(snapshot.archive.len()).ok() != Some(snapshot.commit_position))
-        || (!snapshot.config.archive && !snapshot.archive.is_empty())
+        || (!snapshot.config.archive
+            && (!snapshot.archive.is_empty() || snapshot.archive_retention_watermark_ms.is_some()))
         || snapshot.archive.len() > snapshot.config.max_archive_events
+        || snapshot.archive.len() > usize::try_from(snapshot.commit_position).unwrap_or(usize::MAX)
+        || (snapshot.config.archive_retention.max_age_ms.is_none()
+            && snapshot.archive_retention_watermark_ms.is_some())
     {
         return Err(EpochError::InvalidArgument(
             "Event Bus snapshot archive configuration is invalid".into(),
         ));
     }
-    for (position, event) in snapshot.archive.iter().enumerate() {
-        if u64::try_from(position + 1).ok() != Some(event.position)
+    let first_retained_position = snapshot
+        .commit_position
+        .checked_sub(u64::try_from(snapshot.archive.len()).map_err(|_| {
+            EpochError::InvalidArgument("Event Bus snapshot archive length is invalid".into())
+        })?)
+        .and_then(|position| position.checked_add(1));
+    for (index, event) in snapshot.archive.iter().enumerate() {
+        let expected_position = first_retained_position
+            .and_then(|position| position.checked_add(u64::try_from(index).ok()?));
+        if expected_position != Some(event.position)
             || event.route_plan_version == 0
             || event.route_plan_version > snapshot.route_plan_version
+            || snapshot
+                .archive_retention_watermark_ms
+                .is_some_and(|watermark| event.received_at_ms > watermark)
         {
             return Err(EpochError::InvalidArgument(
                 "Event Bus snapshot archive position is invalid".into(),
@@ -869,6 +1382,7 @@ fn validate_snapshot_document(
         snapshot.commit_position,
         snapshot.route_plan_version,
     )?;
+    snapshot.integration.validate_snapshot()?;
     validate_snapshot_format_for_targets(snapshot)
 }
 
@@ -878,8 +1392,14 @@ fn validate_snapshot_format_for_targets(snapshot: &VersionedEventBusSnapshot) ->
         .values()
         .any(|subscription| subscription.target.signing_key_id().is_some())
         || snapshot.delivery_ledger.has_signed_webhook_targets();
-    let expected_format_version = if snapshot.delivery_ledger.has_epoch_target_bindings() {
+    let expected_format_version = if !snapshot.config.archive_retention.is_default()
+        || snapshot.archive_retention_watermark_ms.is_some()
+    {
         EVENT_BUS_SNAPSHOT_FORMAT_VERSION
+    } else if !snapshot.integration.is_empty() {
+        INTEGRATION_EVENT_BUS_SNAPSHOT_FORMAT_VERSION
+    } else if snapshot.delivery_ledger.has_epoch_target_bindings() {
+        EPOCH_TARGET_EVENT_BUS_SNAPSHOT_FORMAT_VERSION
     } else if uses_signed_webhook_format {
         SIGNED_WEBHOOK_EVENT_BUS_SNAPSHOT_FORMAT_VERSION
     } else {
@@ -909,7 +1429,78 @@ fn validate_config(config: &BusConfig) -> EpochResult<()> {
         "max_outbox_deliveries",
         config.max_outbox_deliveries,
         MAX_BUS_OUTBOX_DELIVERIES,
-    )
+    )?;
+    if config
+        .archive_retention
+        .max_events
+        .is_some_and(|limit| limit == 0 || limit > config.max_archive_events)
+    {
+        return Err(EpochError::InvalidArgument(format!(
+            "archive retention max_events must be between 1 and {}",
+            config.max_archive_events
+        )));
+    }
+    if config
+        .archive_retention
+        .max_age_ms
+        .is_some_and(|limit| limit == 0 || limit > MAX_ARCHIVE_RETENTION_MS)
+    {
+        return Err(EpochError::InvalidArgument(format!(
+            "archive retention max_age_ms must be between 1 and {MAX_ARCHIVE_RETENTION_MS}"
+        )));
+    }
+    if !config.archive && !config.archive_retention.is_default() {
+        return Err(EpochError::InvalidArgument(
+            "archive retention requires archive=true".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn effective_archive_time(
+    policy: ArchiveRetentionPolicy,
+    watermark_ms: Option<u64>,
+    now_ms: u64,
+) -> u64 {
+    if policy.max_age_ms.is_some() {
+        watermark_ms.unwrap_or(now_ms).max(now_ms)
+    } else {
+        now_ms
+    }
+}
+
+fn maintain_archive_records(
+    archive: &mut Vec<ArchivedEvent>,
+    policy: ArchiveRetentionPolicy,
+    watermark_ms: &mut Option<u64>,
+    now_ms: u64,
+    max_removals: usize,
+) -> ArchiveMaintenanceResult {
+    let cutoff_ms = policy
+        .max_age_ms
+        .and_then(|max_age_ms| now_ms.checked_sub(max_age_ms));
+    if policy.max_age_ms.is_some() {
+        *watermark_ms = Some(watermark_ms.unwrap_or(now_ms).max(now_ms));
+    }
+    let age_removals = cutoff_ms.map_or(0, |cutoff_ms| {
+        archive
+            .iter()
+            .take_while(|record| record.received_at_ms <= cutoff_ms)
+            .count()
+    });
+    let count_removals = policy
+        .max_events
+        .map_or(0, |limit| archive.len().saturating_sub(limit));
+    let purged = age_removals.max(count_removals).min(max_removals);
+    if purged > 0 {
+        archive.drain(..purged);
+    }
+    ArchiveMaintenanceResult {
+        as_of_ms: now_ms,
+        cutoff_ms,
+        purged,
+        archived_event_count: archive.len(),
+    }
 }
 
 fn validate_capacity(field: &str, value: usize, maximum: usize) -> EpochResult<()> {
@@ -975,6 +1566,86 @@ fn validate_json_path(path: &str) -> EpochResult<()> {
     Ok(())
 }
 
+fn validate_output_field(field: &str) -> EpochResult<()> {
+    validate_text("transform output field", field, MAX_PROJECTED_FIELD_BYTES)?;
+    if field.contains('.') {
+        return Err(EpochError::InvalidArgument(
+            "transform output fields cannot contain dots".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_transform_value(value: &Value, maximum: usize) -> EpochResult<()> {
+    let encoded = serde_json::to_vec(value)
+        .map_err(|error| EpochError::InvalidArgument(error.to_string()))?;
+    if encoded.len() > maximum {
+        return Err(EpochError::InvalidArgument(format!(
+            "transform value is {} bytes; configured maximum is {maximum}",
+            encoded.len()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_template(template: &str) -> EpochResult<()> {
+    let mut remainder = template;
+    let mut placeholders = 0_u16;
+    while let Some(start) = remainder.find("{{") {
+        let after_start = &remainder[start + 2..];
+        let Some(end) = after_start.find("}}") else {
+            return Err(EpochError::InvalidArgument(
+                "transform template has an unclosed placeholder".into(),
+            ));
+        };
+        let path = &after_start[..end];
+        validate_json_path(path)?;
+        placeholders = placeholders
+            .checked_add(1)
+            .ok_or_else(|| EpochError::Capacity("transform placeholder overflow".into()))?;
+        if placeholders > MAX_TRANSFORM_OPERATIONS {
+            return Err(EpochError::InvalidArgument(
+                "transform template has too many placeholders".into(),
+            ));
+        }
+        remainder = &after_start[end + 2..];
+    }
+    if remainder.contains("}}") {
+        return Err(EpochError::InvalidArgument(
+            "transform template has an unmatched closing delimiter".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn render_template(template: &str, payload: &Value) -> EpochResult<String> {
+    let mut output = String::new();
+    let mut remainder = template;
+    while let Some(start) = remainder.find("{{") {
+        output.push_str(&remainder[..start]);
+        let after_start = &remainder[start + 2..];
+        let end = after_start.find("}}").ok_or_else(|| {
+            EpochError::InvalidArgument("transform template has an unclosed placeholder".into())
+        })?;
+        let path = &after_start[..end];
+        let value = json_path(payload, path).ok_or_else(|| {
+            EpochError::InvalidArgument(format!("transform template path {path} does not exist"))
+        })?;
+        match value {
+            Value::String(value) => output.push_str(value),
+            Value::Null | Value::Bool(_) | Value::Number(_) => output.push_str(&value.to_string()),
+            Value::Array(_) | Value::Object(_) => {
+                return Err(EpochError::InvalidArgument(format!(
+                    "transform template path {path} must resolve to a scalar"
+                )));
+            }
+        }
+        remainder = &after_start[end + 2..];
+    }
+    output.push_str(remainder);
+    Ok(output)
+}
+
 fn validate_http_target(value: &str) -> EpochResult<()> {
     validate_text("HTTP target URL", value, MAX_TARGET_URL_BYTES)?;
     let parsed = Url::parse(value).map_err(|error| {
@@ -998,6 +1669,34 @@ fn validate_http_target(value: &str) -> EpochResult<()> {
     Ok(())
 }
 
+fn validate_destination_auth(auth: &DestinationAuth) -> EpochResult<()> {
+    match auth {
+        DestinationAuth::None => Ok(()),
+        DestinationAuth::ApiKey { secret_ref, header } => {
+            validate_resource_name(secret_ref)?;
+            validate_text("API key header", header, MAX_HEADER_KEY_BYTES)
+        }
+        DestinationAuth::OAuth2 {
+            secret_ref,
+            token_url,
+            scopes,
+        } => {
+            validate_resource_name(secret_ref)?;
+            validate_http_target(token_url)?;
+            if scopes.len() > MAX_FILTER_ENTRIES {
+                return Err(EpochError::InvalidArgument(format!(
+                    "OAuth scopes have {} entries; maximum is {MAX_FILTER_ENTRIES}",
+                    scopes.len()
+                )));
+            }
+            for scope in scopes {
+                validate_text("OAuth scope", scope, MAX_HEADER_VALUE_BYTES)?;
+            }
+            Ok(())
+        }
+    }
+}
+
 fn json_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
     let path = path.strip_prefix("$.").unwrap_or(path);
     if path.is_empty() || path == "$" {
@@ -1006,6 +1705,14 @@ fn json_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
     path.split('.').try_fold(value, |current, segment| {
         current.as_object().and_then(|object| object.get(segment))
     })
+}
+
+fn event_topic(event: &EventEnvelope) -> &str {
+    event
+        .extensions
+        .get("topic")
+        .and_then(Value::as_str)
+        .unwrap_or(&event.event_type)
 }
 
 fn glob_matches(pattern: &str, value: &str) -> bool {
@@ -1090,6 +1797,7 @@ mod tests {
             transform: EventTransform {
                 add_headers: BTreeMap::from([("routed-by".into(), "epoch".into())]),
                 payload_projection: BTreeMap::from([("total".into(), "order.total".into())]),
+                ..EventTransform::default()
             },
             delivery_policy: DeliveryPolicy::default(),
         })
@@ -1115,6 +1823,62 @@ mod tests {
         let replay = bus.replay(0, 100, Some(&filter), 10).unwrap();
         assert_eq!(replay.len(), 1);
         assert_eq!(replay[0].envelope.event_type, "order.cancelled");
+    }
+
+    #[test]
+    fn archive_retention_is_bounded_monotonic_and_snapshot_recoverable() {
+        let mut bus = EventBus::new(BusConfig {
+            max_archive_events: 3,
+            archive_retention: ArchiveRetentionPolicy {
+                max_events: Some(2),
+                max_age_ms: Some(10),
+            },
+            ..BusConfig::default()
+        })
+        .unwrap();
+        bus.publish(event("order.one"), 100).unwrap();
+        bus.publish(event("order.two"), 105).unwrap();
+        bus.publish(event("order.three"), 109).unwrap();
+
+        let retained = bus.replay(0, u64::MAX, None, 10).unwrap();
+        assert_eq!(
+            retained
+                .iter()
+                .map(|record| record.position)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert_eq!(bus.next_archive_retention_deadline_ms(), Some(115));
+
+        let early = bus.maintain_archive(114, 10).unwrap();
+        assert_eq!(early.purged, 0);
+        let due = bus.maintain_archive(115, 1).unwrap();
+        assert_eq!(due.purged, 1);
+        assert_eq!(due.cutoff_ms, Some(105));
+        assert_eq!(bus.archive_retention_watermark_ms(), Some(115));
+
+        bus.publish(event("order.four"), 110).unwrap();
+        let retained = bus.replay(0, u64::MAX, None, 10).unwrap();
+        assert_eq!(
+            retained
+                .iter()
+                .map(|record| record.position)
+                .collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+        assert_eq!(retained[1].received_at_ms, 115);
+
+        let snapshot = bus.encode_snapshot().unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&snapshot).unwrap()["format_version"],
+            EVENT_BUS_SNAPSHOT_FORMAT_VERSION
+        );
+        let restored = EventBus::decode_snapshot(&snapshot).unwrap();
+        assert_eq!(
+            restored.recovery_state_digest().unwrap(),
+            bus.recovery_state_digest().unwrap()
+        );
+        assert_eq!(restored.archive_retention_watermark_ms(), Some(115));
     }
 
     #[test]
@@ -1174,6 +1938,7 @@ mod tests {
     #[test]
     fn route_truth_table_requires_every_filter_dimension() {
         let filter = EventFilter {
+            topic_patterns: Vec::new(),
             event_type_patterns: vec!["order.*".into(), "refund.*".into()],
             source_patterns: vec!["check?ut".into()],
             subject_patterns: vec!["tenant-*".into()],
@@ -1472,6 +2237,44 @@ mod tests {
     }
 
     #[test]
+    fn native_snapshot_revalidates_integration_semantics_after_digest_verification() {
+        let invalid_integration: EventIntegrationState = serde_json::from_value(json!({
+            "functions": {
+                "wrong-key": {
+                    "definition": {
+                        "name": "actual-name",
+                        "endpoint": "https://example.com/invoke",
+                        "identity": "runner",
+                        "timeout_ms": 100,
+                        "max_input_bytes": 1024,
+                        "outbound_allowlist": ["example.com"]
+                    },
+                    "revision": 1,
+                    "status": "active",
+                    "updated_at_ms": 1
+                }
+            }
+        }))
+        .unwrap();
+        let mut bus = EventBus::new(BusConfig::default()).unwrap();
+        bus.integration = invalid_integration;
+        let snapshot = VersionedEventBusSnapshot {
+            format_version: INTEGRATION_EVENT_BUS_SNAPSHOT_FORMAT_VERSION,
+            config: bus.config.clone(),
+            subscriptions: bus.subscriptions.clone(),
+            route_plan_version: bus.route_plan_version,
+            commit_position: bus.commit_position,
+            archive: bus.archive.clone(),
+            archive_retention_watermark_ms: bus.archive_retention_watermark_ms,
+            delivery_ledger: bus.delivery_ledger.clone(),
+            integration: bus.integration.clone(),
+            state_digest: bus.recovery_state_digest().unwrap(),
+        };
+
+        assert!(EventBus::decode_snapshot(&serde_json::to_vec(&snapshot).unwrap()).is_err());
+    }
+
+    #[test]
     fn publish_persists_a_bounded_lexical_delivery_outbox_atomically() {
         let mut bus = EventBus::new(BusConfig {
             delivery_outbox: true,
@@ -1537,6 +2340,8 @@ mod tests {
                     max_attempts: 2,
                     max_age_ms: None,
                 },
+                rate_limit: None,
+                dead_letter_retention_ms: None,
             };
             bus.upsert_subscription(route).unwrap();
         }
@@ -1828,8 +2633,11 @@ mod tests {
 
         let encoded = bus.encode_snapshot().unwrap();
         let snapshot: VersionedEventBusSnapshot = serde_json::from_slice(&encoded).unwrap();
-        assert_eq!(snapshot.format_version, EVENT_BUS_SNAPSHOT_FORMAT_VERSION);
-        assert_eq!(EVENT_BUS_SNAPSHOT_FORMAT_VERSION, 3);
+        assert_eq!(
+            snapshot.format_version,
+            EPOCH_TARGET_EVENT_BUS_SNAPSHOT_FORMAT_VERSION
+        );
+        assert_eq!(EPOCH_TARGET_EVENT_BUS_SNAPSHOT_FORMAT_VERSION, 3);
         let restored = EventBus::decode_snapshot(&encoded).unwrap();
         assert_eq!(restored.encode_snapshot().unwrap(), encoded);
         assert_eq!(
@@ -1861,6 +2669,8 @@ mod tests {
                 max_attempts: 2,
                 max_age_ms: None,
             },
+            rate_limit: None,
+            dead_letter_retention_ms: None,
         };
         bus.upsert_subscription(route).unwrap();
         bus.publish(event("order.created"), 100).unwrap();
@@ -1880,6 +2690,110 @@ mod tests {
             }
         ));
         assert_eq!(bus.next_delivery_maintenance_deadline_ms(), None);
+    }
+
+    #[test]
+    fn per_subscription_rate_limit_redrive_and_dead_letter_retention_are_replicated() {
+        let mut bus = EventBus::new(BusConfig {
+            delivery_outbox: true,
+            ..BusConfig::default()
+        })
+        .unwrap();
+        let mut route = subscription("audit", SubscriptionTarget::Pull);
+        route.delivery_policy = DeliveryPolicy {
+            rate_limit: Some(DeliveryRateLimit {
+                deliveries_per_second: 1,
+                burst: 1,
+            }),
+            dead_letter_retention_ms: Some(10),
+            retry: DeliveryRetryPolicy {
+                max_attempts: 1,
+                ..DeliveryRetryPolicy::default()
+            },
+            ..DeliveryPolicy::default()
+        };
+        bus.upsert_subscription(route).unwrap();
+        bus.publish(event("order.one"), 0).unwrap();
+        bus.publish(event("order.two"), 0).unwrap();
+        assert!(bus.has_acquirable_pull_delivery("audit", 0).unwrap());
+        let fence = DeliveryFence::new(7, 3, 2, 1).unwrap();
+        let first = bus
+            .acquire_deliveries("audit", "worker", 2, 0, fence)
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        assert!(!bus.has_acquirable_pull_delivery("audit", 0).unwrap());
+        bus.reject_delivery(
+            &first[0].delivery_id,
+            "worker",
+            &first[0].lease_token,
+            fence,
+            "invalid",
+            1,
+        )
+        .unwrap();
+        bus.redrive_delivery(&first[0].delivery_id, 2).unwrap();
+        assert!(
+            bus.acquire_deliveries("audit", "worker", 2, 999, fence)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!bus.has_acquirable_pull_delivery("audit", 999).unwrap());
+        assert!(bus.has_acquirable_pull_delivery("audit", 1_000).unwrap());
+        let redriven = bus
+            .acquire_deliveries("audit", "worker", 2, 1_000, fence)
+            .unwrap();
+        assert_eq!(redriven.len(), 1);
+        assert_eq!(redriven[0].delivery_id, first[0].delivery_id);
+        bus.reject_delivery(
+            &redriven[0].delivery_id,
+            "worker",
+            &redriven[0].lease_token,
+            fence,
+            "still invalid",
+            1_001,
+        )
+        .unwrap();
+        let maintenance = bus.maintain_deliveries(1_011, 10).unwrap();
+        assert_eq!(maintenance.purged, 1);
+        assert!(bus.delivery(&redriven[0].delivery_id).is_none());
+    }
+
+    #[test]
+    fn pull_acquisition_never_steals_push_or_managed_target_work() {
+        let mut bus = EventBus::new(BusConfig {
+            delivery_outbox: true,
+            ..BusConfig::default()
+        })
+        .unwrap();
+        for (name, target) in [
+            (
+                "webhook",
+                SubscriptionTarget::Webhook {
+                    url: "https://example.com/events".into(),
+                    signing_key_id: Some("primary".into()),
+                },
+            ),
+            (
+                "api",
+                SubscriptionTarget::ApiDestination {
+                    url: "https://example.com/api".into(),
+                    auth: DestinationAuth::None,
+                    cloud_events_mode: CloudEventsMode::Binary,
+                },
+            ),
+        ] {
+            bus.upsert_subscription(subscription(name, target)).unwrap();
+        }
+        bus.publish(event("order.created"), 10).unwrap();
+        let fence = DeliveryFence::new(7, 3, 2, 1).unwrap();
+        for subscription in ["webhook", "api"] {
+            assert!(!bus.has_acquirable_pull_delivery(subscription, 10).unwrap());
+            assert!(
+                bus.acquire_deliveries(subscription, "pull-worker", 10, 10, fence)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 
     #[test]

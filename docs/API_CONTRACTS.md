@@ -762,9 +762,10 @@ GET  /v1/organizations/{org}/projects/{project}/environments/{environment}/names
 *    /v1/organizations/{org}/projects/{project}/environments/{environment}/namespaces/{namespace}/buses/{name}/shards/{shard}/{operation}
 ```
 
-The adapter exposes subscription upsert/removal, publish, delivery
-acquire/ack/fail/reject/maintenance, mutation lookup, archive replay, delivery query,
-and status for shard `0`. Archive replay and delivery query are query-shaped
+The adapter exposes subscription upsert/removal, publish, long-poll delivery
+acquire/ack/fail/reject/redrive, delivery/archive maintenance, strict integration
+operations/state, mutation lookup, archive replay, delivery query, and status
+for shard `0`. Archive replay, delivery query, and integration state are read operations
 POST reads: they require `data.read` and a linearizable barrier, not
 `data.write`. Regional materialization enables the durable delivery outbox;
 the adapter delegates to the replicated Event Bus tablet and owns no bus state.
@@ -786,7 +787,8 @@ identity so bounded work remaining at one deadline can continue safely.
 
 The scheduler covers Stream age retention per shard, Stream consumer-session
 expiry on shard 0, Queue scheduled/TTL/max-age/dedupe/lease transitions, Cache
-value and lock expiry, and Event Bus in-flight delivery-lease expiry. It does
+value and lock expiry, and Event Bus in-flight delivery-lease plus archive
+retention expiry. It does
 not run on follower authority, mutate through reads, or depend on Go or an SDK.
 The interval is configured by `EPOCH_REGIONAL_MAINTENANCE_INTERVAL_MS`, defaults
 to 100, and must be 1–60,000. Explicit maintenance routes remain supported.
@@ -831,7 +833,27 @@ the 1–60,000 ms scan with
 publishes the counters above. See
 [ADR-0031](adr/0031-leader-owned-epoch-target-delivery.md).
 
-### 12.4 Regional automatic consensus checkpoints
+### 12.4 Regional managed target worker
+
+Every regional node runs the managed-target scheduler; only the current source
+Bus leader acts. It covers API destinations, deterministic healthy endpoint-
+pool routes, active function resources, and active target/bidirectional
+connectors. The worker commits and awaits an exact lease before I/O, emits
+CloudEvents 1.0 binary or structured JSON plus a stable `idempotency-key`, then
+commits acknowledgement, retry, or terminal rejection.
+
+API-key/OAuth references and function/connector API-key/bearer/OAuth secrets
+resolve from a strict, bounded startup file named by
+`EPOCH_REGIONAL_MANAGED_TARGET_SECRETS_PATH`. URLs and OAuth token endpoints
+reuse public-only DNS validation/address pinning, disabled redirects/proxies,
+and lease-capped timeouts; function/connector hosts must match their replicated
+allowlist. Actual endpoint egress failure commits an unhealthy observation.
+Connector success commits its batch outcome/checkpoint before source
+settlement. Topology exposes delivery, retry/dead-letter, failover, checkpoint,
+and error counters. See
+[ADR-0037](adr/0037-event-integration-platform.md).
+
+### 12.5 Regional automatic consensus checkpoints
 
 Every regional node evaluates catalog plus all local profile groups on a
 configured interval. Every healthy voter may checkpoint its own recovery
@@ -1200,8 +1222,8 @@ ingress/outbox tablet on the internal listener:
 - `POST /experimental/v1/tablets/bus/mutations` submits a strict
   `upsert_subscription`, `remove_subscription`, `publish`,
   `acquire_deliveries`, `acknowledge_delivery`, `fail_delivery`,
-  `reject_delivery`, or
-  `maintain_deliveries` operation;
+  `reject_delivery`, `redrive_delivery`, `maintain_deliveries`,
+  `maintain_archive`, or `apply_integration` operation;
 - `GET /experimental/v1/tablets/bus/mutations/{proposal_id}` resolves local
   unknown, pending, or committed state;
 - `GET /experimental/v1/tablets/bus/status` reports consensus/profile
@@ -1212,20 +1234,24 @@ ingress/outbox tablet on the internal listener:
   and
 - `POST /experimental/v1/tablets/bus/deliveries/query` returns a bounded,
   explicitly local and stale-capable view of delivery state and attempt
-  history.
+  history; and
+- `GET /experimental/v1/tablets/bus/integration/state` returns the complete
+  explicitly local and stale-capable integration registry image.
 
 The same strict idempotency, server-owned non-regressing time, browser-safe
 64-bit JSON, majority-before-success, recovery-before-readiness, and fail-stop
 rules apply. A publish receipt includes the route-plan version, ingress
 position, delivery count, and SHA-256 digest of the transformed ordered
 delivery plan. Every match also creates a stable per-subscription record with
-captured timeout/max-in-flight/retry policy. Acquires are fenced by leader term
-and dispatcher epoch; ack, failure, retry, timeout maintenance, and dead-letter
-state are replicated and recovered. The tablet-local status therefore reports
-`target_dispatch: regional_epoch_targets_and_configured_signed_webhooks` and
-`durable_target_outbox: true`. Regional workers execute signed HTTP/webhook and
-Epoch Queue/Stream records outside the tablet; unsigned HTTP/webhook and pull
-delivery remain external. A dispatcher acknowledgement is not proof
+captured timeout/max-in-flight/retry/rate/dead-letter policy. Acquires are
+fenced by leader term and dispatcher epoch; ack, failure, retry, timeout/archive
+maintenance, retention, redrive, schemas, enrichment, MQTT, catalog,
+endpoints, functions, and connector checkpoints are replicated and recovered.
+The tablet-local status reports `durable_target_outbox: true`; topology reports
+the signed, Epoch, and managed executors. Regional workers execute signed
+HTTP/webhook, Epoch Queue/Stream, API, endpoint-pool, function, and connector
+records outside the tablet; pull and unsigned legacy HTTP delivery remain
+external. A dispatcher acknowledgement is not proof
 of an arbitrary external business side effect. See
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 

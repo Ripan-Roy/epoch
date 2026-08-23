@@ -261,6 +261,14 @@ execution time or from a short bounded cache. Rotation does not require storing
 plaintext in resource specs. Secrets are redacted from errors, traces, audit
 events, process arguments, environment dumps, and support bundles.
 
+The regional alpha implements a narrower file-backed boundary for managed Bus
+targets. Every node reads one strict, at-most-1-MiB/1,024-entry API-key,
+bearer-token, or OAuth-client file at startup; replicated state stores only its
+reference. Debug/status output lists references and redacts values. OAuth
+access tokens use a bounded in-process expiry cache. There is no hot reload,
+external secret-manager identity, or durable token cache yet, so operators must
+restart nodes after rotating this development file.
+
 ## 8. Audit model
 
 Audit events are immutable, exportable, tenant-scoped records. Each event
@@ -297,7 +305,7 @@ silently proceed without its required audit record.
 Audit data never contains payloads, bearer tokens, private keys, webhook
 signing secrets, full connector credentials, or unrestricted user headers.
 
-## 9. Webhook SSRF and replay controls
+## 9. Webhook and managed-target SSRF/replay controls
 
 The regional alpha now has a dedicated leader-owned worker for signed
 HTTP/webhook targets. Target syntax is validated when the subscription is
@@ -324,6 +332,14 @@ configured, and the network boundary is validated again on every attempt:
 These checks defend against DNS rebinding and IPv4/IPv6 encoding tricks. Mixed
 public/private DNS answers fail closed. A private destination will require a
 future explicit tenant network/egress policy; this alpha does not provide one.
+
+API destinations, endpoint pools, functions, connectors, and OAuth token URLs
+reuse the same address-validation, pinning, redirect/proxy, and lease-timeout
+boundary. Function/connector URLs must additionally match their exact
+replicated host allowlist. Every managed request carries a stable side-effect
+idempotency key. An actual endpoint-pool egress failure commits an unhealthy
+observation before failover; authentication/configuration failures do not
+change endpoint health.
 
 The worker constructs its own fixed delivery/CloudEvents header set. Every
 user-derived header value is parsed through the HTTP library and control
@@ -353,20 +369,29 @@ delivery; it does not make processing exactly once. See
 
 ## 10. Connector and transform isolation
 
-Connector and delivery roles do not run inside the storage role in managed
-deployments. They use a non-root, read-only, least-privilege runtime with bounded
+Connector and delivery roles do not run inside the storage state machine. A
+production managed deployment must place them in a non-root, read-only,
+least-privilege runtime with bounded
 CPU, memory, file descriptors, concurrency, disk, and execution time. Their
 network namespace or egress proxy enforces the connector's destination policy.
 
 A deterministic WebAssembly transform has no network, ambient filesystem,
 process, environment, wall-clock, or random access by default. Input, output,
-memory, instruction/fuel, nesting, and expansion are bounded. Network enrichment
-runs as a separately classified connector step with retry and idempotency state.
+memory, instruction/fuel, nesting, and expansion are bounded. The current
+deterministic lookup enrichment forbids network access. A future network
+enrichment runs as a separately classified connector step with retry and
+idempotency state.
 
 Connector checkpoints bind source resource/position, connector generation,
 target idempotency metadata, and secret version. An older connector generation
 is fenced. Partial-batch results route individual failures without leaking one
 tenant's record into another tenant's error path.
+
+In alpha.9 the managed target worker runs in the `epoch-node` process, although
+all network I/O remains outside committed state application. The validation,
+allowlist, and SSRF boundary is implemented; OS/container sandbox separation,
+a network-level egress proxy, and connector certification remain production
+gates.
 
 ## 11. Tenant isolation
 
@@ -488,6 +513,13 @@ baseline at the managed and regional public boundaries:
   credentials. This is same-runtime routing, not a substitute for authenticated
   peer transport or per-target authorization: the current fixed voter set and
   bootstrap trust boundary must remain private.
+- Event Bus managed delivery acquires a replicated leader/lease fence before
+  egress, reuses public-only DNS validation/pinning with redirects/proxies
+  disabled, enforces function/connector host allowlists, keeps secret values
+  out of replicated/status state, and commits connector checkpoint before
+  source settlement. A real loopback OAuth/target test exercises the boundary;
+  OS sandboxing, secret-manager identity, private egress, and penetration
+  evidence remain open.
 - Governance metadata is bounded, non-secret desired state. New managed
   resources require canonical owner, cost center, classification, and tags;
   `epoch.io/` tag keys are reserved. The Go BFF filters tenant visibility before
@@ -505,14 +537,14 @@ set narrow accidental misconfiguration but are not a substitute for mTLS.
 This is not the complete security architecture above. There is still no OIDC,
 credential expiry/revocation service, TLS/mTLS identity, signed forwarded
 context, replicated or hot-reloaded regional policy, envelope encryption, KMS
-integration, immutable audit pipeline/export, tenant scheduler, secret manager,
-private managed webhook egress, connector sandbox, quota system, or support
+integration, immutable audit pipeline/export, tenant scheduler, external secret
+manager/hot reload, private managed webhook egress, connector OS sandbox, quota system, or support
 workflow. Signed public HTTPS delivery has request-local SSRF enforcement but
 not a network-level egress proxy or tenant egress policy. The example policy tokens are public development fixtures, and
 environment-variable injection of the Go-to-Rust token is not a production
 secret-delivery design.
 
-Unsigned Bus HTTP targets remain durable intent only. The current local WAL
+Unsigned legacy Bus HTTP targets remain durable intent only. The current local WAL
 checksum detects accidental corruption; it is not encryption, tamper-proofing,
 replication, or a compliance control.
 

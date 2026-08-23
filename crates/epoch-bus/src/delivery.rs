@@ -17,11 +17,16 @@ pub const DEFAULT_MAX_OUTBOX_DELIVERIES: usize = 100_000;
 pub const MAX_BUS_OUTBOX_DELIVERIES: usize = 10_000_000;
 pub const MAX_DELIVERY_QUERY_RESULTS: usize = 10_000;
 pub const MAX_DELIVERY_ACQUIRE_BATCH: usize = 100;
+pub const MAX_DELIVERY_LONG_POLL_MS: u64 = 30_000;
 pub const MAX_DELIVERY_ATTEMPTS: u32 = 100;
+pub const MAX_DELIVERY_REDRIVES: usize = 100;
 pub const MAX_DELIVERY_IN_FLIGHT: u16 = 1_000;
 pub const MAX_DELIVERY_TIMEOUT_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 pub const MAX_DELIVERY_REASON_BYTES: usize = 4 * 1_024;
 pub const MAX_DISPATCHER_BYTES: usize = 128;
+pub const MAX_DELIVERY_RATE_PER_SECOND: u32 = 1_000_000;
+pub const MAX_DELIVERY_RATE_BURST: u32 = 1_000_000;
+pub const MAX_DEAD_LETTER_RETENTION_MS: u64 = 365 * 24 * 60 * 60 * 1_000;
 
 const DELIVERY_ID_PREFIX: &str = "epoch.bus.delivery.v1";
 const DELIVERY_LEASE_PREFIX: &str = "epoch.bus.delivery.lease.v1.";
@@ -98,7 +103,11 @@ impl EpochTargetDestination {
             }
             SubscriptionTarget::Pull
             | SubscriptionTarget::Webhook { .. }
-            | SubscriptionTarget::Http { .. } => false,
+            | SubscriptionTarget::Http { .. }
+            | SubscriptionTarget::ApiDestination { .. }
+            | SubscriptionTarget::EndpointPool { .. }
+            | SubscriptionTarget::Function { .. }
+            | SubscriptionTarget::Connector { .. } => false,
         };
         if matches {
             Ok(())
@@ -144,11 +153,22 @@ impl Default for DeliveryRetryPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct DeliveryRateLimit {
+    pub deliveries_per_second: u32,
+    pub burst: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeliveryPolicy {
     pub timeout_ms: u64,
     pub max_in_flight: u16,
     #[serde(default)]
     pub retry: DeliveryRetryPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<DeliveryRateLimit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dead_letter_retention_ms: Option<u64>,
 }
 
 impl Default for DeliveryPolicy {
@@ -157,6 +177,8 @@ impl Default for DeliveryPolicy {
             timeout_ms: 30_000,
             max_in_flight: 16,
             retry: DeliveryRetryPolicy::default(),
+            rate_limit: None,
+            dead_letter_retention_ms: None,
         }
     }
 }
@@ -201,6 +223,24 @@ impl DeliveryPolicy {
             return Err(EpochError::InvalidArgument(
                 "delivery retry max_age_ms must be greater than zero".into(),
             ));
+        }
+        if let Some(rate) = &self.rate_limit
+            && (rate.deliveries_per_second == 0
+                || rate.deliveries_per_second > MAX_DELIVERY_RATE_PER_SECOND
+                || rate.burst == 0
+                || rate.burst > MAX_DELIVERY_RATE_BURST)
+        {
+            return Err(EpochError::InvalidArgument(format!(
+                "delivery rate and burst must be between 1 and {MAX_DELIVERY_RATE_PER_SECOND}"
+            )));
+        }
+        if self
+            .dead_letter_retention_ms
+            .is_some_and(|retention| retention == 0 || retention > MAX_DEAD_LETTER_RETENTION_MS)
+        {
+            return Err(EpochError::InvalidArgument(format!(
+                "dead-letter retention must be between 1 and {MAX_DEAD_LETTER_RETENTION_MS} ms"
+            )));
         }
         Ok(())
     }
@@ -336,6 +376,15 @@ pub struct DeliveryRecord {
     pub destination: Option<EpochTargetDestination>,
     pub state: DeliveryState,
     pub attempts: Vec<DeliveryAttempt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redrives: Vec<DeliveryRedrive>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryRedrive {
+    pub redriven_at_ms: u64,
+    pub previous_attempts: Vec<DeliveryAttempt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -379,6 +428,16 @@ pub struct EpochTargetDeliveryCandidate {
     pub destination: Option<EpochTargetDestination>,
 }
 
+/// The oldest due API destination, endpoint pool, function, or connector
+/// delivery that the leader-owned managed-target worker may lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedTargetDeliveryCandidate {
+    pub delivery_id: String,
+    pub subscription: String,
+    pub next_attempt: u32,
+    pub target: SubscriptionTarget,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliveryCounts {
     pub pending: usize,
@@ -392,6 +451,7 @@ pub struct DeliveryMaintenanceResult {
     pub processed: usize,
     pub retried: usize,
     pub dead_lettered: usize,
+    pub purged: usize,
     pub counts: DeliveryCounts,
 }
 
@@ -402,6 +462,15 @@ pub(crate) struct DeliveryLedger {
     max_deliveries: usize,
     records: BTreeMap<String, DeliveryRecord>,
     dispatcher_epochs: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    rate_states: BTreeMap<String, DeliveryRateState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeliveryRateState {
+    milli_tokens: u64,
+    last_refill_at_ms: u64,
 }
 
 impl DeliveryLedger {
@@ -411,6 +480,7 @@ impl DeliveryLedger {
             max_deliveries,
             records: BTreeMap::new(),
             dispatcher_epochs: BTreeMap::new(),
+            rate_states: BTreeMap::new(),
         }
     }
 
@@ -475,6 +545,7 @@ impl DeliveryLedger {
                         eligible_at_ms: created_at_ms,
                     },
                     attempts: Vec::new(),
+                    redrives: Vec::new(),
                 },
             ));
         }
@@ -528,19 +599,23 @@ impl DeliveryLedger {
             if leases.len() >= max_deliveries {
                 break;
             }
+            let candidate = self
+                .records
+                .get(&delivery_id)
+                .ok_or_else(|| EpochError::Internal("delivery candidate disappeared".into()))?;
+            if !matches!(candidate.target, SubscriptionTarget::Pull) {
+                // Push and managed targets are leased only by their dedicated
+                // leader-owned executors through exact-ID acquisition.
+                break;
+            }
+            let policy = candidate.policy.clone();
+            if !self.rate_slot_available(subscription, &policy, now_ms)? {
+                break;
+            }
             let record = self
                 .records
                 .get_mut(&delivery_id)
                 .ok_or_else(|| EpochError::Internal("delivery candidate disappeared".into()))?;
-            if matches!(
-                record.target,
-                SubscriptionTarget::Queue { .. } | SubscriptionTarget::Stream { .. }
-            ) {
-                // Built-in Epoch targets require an exact v3 acquisition that
-                // durably binds their destination. Do not skip them or expose
-                // them to the legacy pull dispatcher.
-                break;
-            }
             let effective_in_flight = initial_in_flight
                 .checked_add(leases.len())
                 .ok_or_else(|| EpochError::Capacity("delivery in-flight count overflow".into()))?;
@@ -548,8 +623,48 @@ impl DeliveryLedger {
                 break;
             }
             leases.push(begin_delivery_attempt(record, dispatcher, now_ms, fence)?);
+            self.charge_rate_slot(subscription, &policy)?;
         }
         Ok(leases)
+    }
+
+    pub(crate) fn has_acquirable_pull(
+        &mut self,
+        subscription: &str,
+        now_ms: u64,
+    ) -> EpochResult<bool> {
+        ensure_enabled(self.enabled)?;
+        validate_resource_name(subscription)?;
+        let Some(record) = self
+            .records
+            .values()
+            .filter(|record| {
+                record.subscription == subscription
+                    && matches!(
+                        record.state,
+                        DeliveryState::Pending { eligible_at_ms } if eligible_at_ms <= now_ms
+                    )
+            })
+            .min_by_key(|record| (record.publish_position, &record.delivery_id))
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        if !matches!(record.target, SubscriptionTarget::Pull) {
+            return Ok(false);
+        }
+        let in_flight = self
+            .records
+            .values()
+            .filter(|candidate| {
+                candidate.subscription == subscription
+                    && candidate.state.kind() == DeliveryStateKind::InFlight
+            })
+            .count();
+        if in_flight >= usize::from(record.policy.max_in_flight) {
+            return Ok(false);
+        }
+        self.rate_slot_available(subscription, &record.policy, now_ms)
     }
 
     pub(crate) fn acquire_specific(
@@ -575,33 +690,7 @@ impl DeliveryLedger {
                 "expected delivery does not belong to the requested subscription".into(),
             ));
         }
-        match (&record.target, destination.as_ref()) {
-            (
-                SubscriptionTarget::Queue { .. } | SubscriptionTarget::Stream { .. },
-                Some(destination),
-            ) => destination.validate_for_target(&record.target)?,
-            (SubscriptionTarget::Queue { .. } | SubscriptionTarget::Stream { .. }, None) => {
-                return Err(EpochError::Conflict(
-                    "Epoch Queue and Stream targets require a bound destination".into(),
-                ));
-            }
-            (
-                SubscriptionTarget::Pull
-                | SubscriptionTarget::Webhook { .. }
-                | SubscriptionTarget::Http { .. },
-                Some(_),
-            ) => {
-                return Err(EpochError::Conflict(
-                    "only Epoch Queue and Stream targets accept a destination binding".into(),
-                ));
-            }
-            (
-                SubscriptionTarget::Pull
-                | SubscriptionTarget::Webhook { .. }
-                | SubscriptionTarget::Http { .. },
-                None,
-            ) => {}
-        }
+        validate_requested_destination(&record.target, destination.as_ref())?;
         if let (Some(bound), Some(requested)) = (&record.destination, destination.as_ref())
             && bound != requested
         {
@@ -641,6 +730,10 @@ impl DeliveryLedger {
         if in_flight >= usize::from(record.policy.max_in_flight) {
             return Ok(None);
         }
+        let policy = record.policy.clone();
+        if !self.rate_slot_available(subscription, &policy, now_ms)? {
+            return Ok(None);
+        }
         let record = self
             .records
             .get_mut(delivery_id)
@@ -648,7 +741,9 @@ impl DeliveryLedger {
         if record.destination.is_none() {
             record.destination = destination;
         }
-        begin_delivery_attempt(record, dispatcher, now_ms, fence).map(Some)
+        let lease = begin_delivery_attempt(record, dispatcher, now_ms, fence)?;
+        self.charge_rate_slot(subscription, &policy)?;
+        Ok(Some(lease))
     }
 
     pub(crate) fn acknowledge(
@@ -729,6 +824,37 @@ impl DeliveryLedger {
         Ok(record.clone())
     }
 
+    pub(crate) fn redrive(
+        &mut self,
+        delivery_id: &str,
+        now_ms: u64,
+    ) -> EpochResult<DeliveryRecord> {
+        ensure_enabled(self.enabled)?;
+        let record = self
+            .records
+            .get_mut(delivery_id)
+            .ok_or_else(|| EpochError::NotFound(delivery_id.to_owned()))?;
+        if !matches!(record.state, DeliveryState::DeadLettered { .. }) {
+            return Err(EpochError::Conflict(
+                "only dead-lettered Event Bus deliveries can be redriven".into(),
+            ));
+        }
+        if record.redrives.len() >= MAX_DELIVERY_REDRIVES {
+            return Err(EpochError::Capacity(format!(
+                "delivery reached its {MAX_DELIVERY_REDRIVES} redrive history limit"
+            )));
+        }
+        let previous_attempts = std::mem::take(&mut record.attempts);
+        record.redrives.push(DeliveryRedrive {
+            redriven_at_ms: now_ms,
+            previous_attempts,
+        });
+        record.state = DeliveryState::Pending {
+            eligible_at_ms: now_ms,
+        };
+        Ok(record.clone())
+    }
+
     pub(crate) fn maintain(
         &mut self,
         now_ms: u64,
@@ -736,23 +862,49 @@ impl DeliveryLedger {
     ) -> EpochResult<DeliveryMaintenanceResult> {
         ensure_enabled(self.enabled)?;
         validate_batch_limit(max_deliveries, MAX_DELIVERY_ACQUIRE_BATCH)?;
-        let mut expired = self
-            .records
-            .values()
-            .filter_map(|record| match record.state {
+        let mut due = Vec::<(u64, bool, String)>::new();
+        for record in self.records.values() {
+            match record.state {
                 DeliveryState::InFlight {
                     lease_deadline_ms, ..
                 } if lease_deadline_ms <= now_ms => {
-                    Some((lease_deadline_ms, record.delivery_id.clone()))
+                    due.push((lease_deadline_ms, false, record.delivery_id.clone()));
                 }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        expired.sort();
-        expired.truncate(max_deliveries);
+                DeliveryState::DeadLettered {
+                    dead_lettered_at_ms,
+                    ..
+                } => {
+                    if let Some(retention_ms) = record.policy.dead_letter_retention_ms {
+                        let purge_at_ms = dead_lettered_at_ms
+                            .checked_add(retention_ms)
+                            .ok_or_else(|| {
+                                EpochError::Capacity(
+                                    "dead-letter retention deadline overflow".into(),
+                                )
+                            })?;
+                        if purge_at_ms <= now_ms {
+                            due.push((purge_at_ms, true, record.delivery_id.clone()));
+                        }
+                    }
+                }
+                DeliveryState::Pending { .. }
+                | DeliveryState::InFlight { .. }
+                | DeliveryState::Acknowledged { .. } => {}
+            }
+        }
+        due.sort();
+        due.truncate(max_deliveries);
 
         let mut result = DeliveryMaintenanceResult::default();
-        for (_, delivery_id) in expired {
+        for (_, purge, delivery_id) in due {
+            if purge {
+                self.records.remove(&delivery_id).ok_or_else(|| {
+                    EpochError::Internal("dead-letter purge candidate disappeared".into())
+                })?;
+                result.processed += 1;
+                result.purged += 1;
+                continue;
+            }
             let settled = self.settle_failure(&delivery_id, "delivery_lease_timeout", now_ms)?;
             result.processed += 1;
             match settled.state {
@@ -776,7 +928,14 @@ impl DeliveryLedger {
                 DeliveryState::InFlight {
                     lease_deadline_ms, ..
                 } => Some(lease_deadline_ms),
-                _ => None,
+                DeliveryState::DeadLettered {
+                    dead_lettered_at_ms,
+                    ..
+                } => record
+                    .policy
+                    .dead_letter_retention_ms
+                    .and_then(|retention_ms| dead_lettered_at_ms.checked_add(retention_ms)),
+                DeliveryState::Pending { .. } | DeliveryState::Acknowledged { .. } => None,
             })
             .min()
     }
@@ -841,7 +1000,11 @@ impl DeliveryLedger {
                 | SubscriptionTarget::Http {
                     signing_key_id: None,
                     ..
-                } => continue,
+                }
+                | SubscriptionTarget::ApiDestination { .. }
+                | SubscriptionTarget::EndpointPool { .. }
+                | SubscriptionTarget::Function { .. }
+                | SubscriptionTarget::Connector { .. } => continue,
             };
             if in_flight
                 .get(record.subscription.as_str())
@@ -936,6 +1099,73 @@ impl DeliveryLedger {
         Ok(candidates)
     }
 
+    pub(crate) fn managed_target_candidates(
+        &self,
+        now_ms: u64,
+    ) -> EpochResult<Vec<ManagedTargetDeliveryCandidate>> {
+        ensure_enabled(self.enabled)?;
+        let mut in_flight = BTreeMap::<&str, usize>::new();
+        for record in self.records.values() {
+            if record.state.kind() == DeliveryStateKind::InFlight {
+                *in_flight.entry(&record.subscription).or_default() += 1;
+            }
+        }
+        let mut pending = self
+            .records
+            .values()
+            .filter(|record| {
+                matches!(
+                    record.state,
+                    DeliveryState::Pending { eligible_at_ms } if eligible_at_ms <= now_ms
+                )
+            })
+            .collect::<Vec<_>>();
+        pending.sort_by(|left, right| {
+            (&left.subscription, left.publish_position, &left.delivery_id).cmp(&(
+                &right.subscription,
+                right.publish_position,
+                &right.delivery_id,
+            ))
+        });
+
+        let mut candidates = Vec::new();
+        let mut previous_subscription = None::<&str>;
+        for record in pending {
+            if previous_subscription == Some(record.subscription.as_str()) {
+                continue;
+            }
+            previous_subscription = Some(&record.subscription);
+            if !matches!(
+                record.target,
+                SubscriptionTarget::ApiDestination { .. }
+                    | SubscriptionTarget::EndpointPool { .. }
+                    | SubscriptionTarget::Function { .. }
+                    | SubscriptionTarget::Connector { .. }
+            ) {
+                continue;
+            }
+            if in_flight
+                .get(record.subscription.as_str())
+                .copied()
+                .unwrap_or_default()
+                >= usize::from(record.policy.max_in_flight)
+            {
+                continue;
+            }
+            let next_attempt = u32::try_from(record.attempts.len())
+                .map_err(|_| EpochError::Capacity("delivery attempt count overflow".into()))?
+                .checked_add(1)
+                .ok_or_else(|| EpochError::Capacity("delivery attempt count overflow".into()))?;
+            candidates.push(ManagedTargetDeliveryCandidate {
+                delivery_id: record.delivery_id.clone(),
+                subscription: record.subscription.clone(),
+                next_attempt,
+                target: record.target.clone(),
+            });
+        }
+        Ok(candidates)
+    }
+
     pub(crate) fn has_signed_webhook_targets(&self) -> bool {
         self.records
             .values()
@@ -1003,7 +1233,10 @@ impl DeliveryLedger {
         if self.enabled != enabled
             || self.max_deliveries != max_deliveries
             || self.records.len() > self.max_deliveries
-            || (!self.enabled && (!self.records.is_empty() || !self.dispatcher_epochs.is_empty()))
+            || (!self.enabled
+                && (!self.records.is_empty()
+                    || !self.dispatcher_epochs.is_empty()
+                    || !self.rate_states.is_empty()))
         {
             return Err(EpochError::InvalidArgument(
                 "event bus snapshot delivery-ledger configuration is invalid".into(),
@@ -1017,6 +1250,14 @@ impl DeliveryLedger {
                 ));
             }
         }
+        for (subscription, state) in &self.rate_states {
+            validate_resource_name(subscription)?;
+            if state.milli_tokens > u64::from(MAX_DELIVERY_RATE_BURST) * 1_000 {
+                return Err(EpochError::InvalidArgument(
+                    "event bus snapshot delivery rate state is invalid".into(),
+                ));
+            }
+        }
         for (delivery_id_key, record) in &self.records {
             if delivery_id_key != &record.delivery_id
                 || record.delivery_id != delivery_id(record.publish_position, &record.subscription)
@@ -1026,12 +1267,23 @@ impl DeliveryLedger {
                 || record.route_plan_version > route_plan_version
                 || record.attempts.len()
                     > usize::try_from(record.policy.retry.max_attempts).unwrap_or(usize::MAX)
+                || record.redrives.len() > MAX_DELIVERY_REDRIVES
             {
                 return Err(EpochError::InvalidArgument(
                     "event bus snapshot delivery record identity is invalid".into(),
                 ));
             }
             record.envelope.validate()?;
+            for redrive in &record.redrives {
+                if redrive.previous_attempts.is_empty()
+                    || redrive.previous_attempts.len()
+                        > usize::try_from(record.policy.retry.max_attempts).unwrap_or(usize::MAX)
+                {
+                    return Err(EpochError::InvalidArgument(
+                        "event bus snapshot redrive history is invalid".into(),
+                    ));
+                }
+            }
             Subscription {
                 name: record.subscription.clone(),
                 filter: EventFilter::default(),
@@ -1080,6 +1332,53 @@ impl DeliveryLedger {
                 Ok(())
             }
         }
+    }
+
+    fn rate_slot_available(
+        &mut self,
+        subscription: &str,
+        policy: &DeliveryPolicy,
+        now_ms: u64,
+    ) -> EpochResult<bool> {
+        let Some(rate) = &policy.rate_limit else {
+            return Ok(true);
+        };
+        let capacity = u64::from(rate.burst)
+            .checked_mul(1_000)
+            .ok_or_else(|| EpochError::Capacity("delivery rate capacity overflow".into()))?;
+        let state = self
+            .rate_states
+            .entry(subscription.to_owned())
+            .or_insert(DeliveryRateState {
+                milli_tokens: capacity,
+                last_refill_at_ms: now_ms,
+            });
+        if now_ms < state.last_refill_at_ms {
+            return Err(EpochError::Conflict(
+                "delivery rate clock cannot move backwards".into(),
+            ));
+        }
+        let elapsed_ms = now_ms - state.last_refill_at_ms;
+        let refill = elapsed_ms
+            .checked_mul(u64::from(rate.deliveries_per_second))
+            .ok_or_else(|| EpochError::Capacity("delivery rate refill overflow".into()))?;
+        state.milli_tokens = state.milli_tokens.saturating_add(refill).min(capacity);
+        state.last_refill_at_ms = now_ms;
+        Ok(state.milli_tokens >= 1_000)
+    }
+
+    fn charge_rate_slot(&mut self, subscription: &str, policy: &DeliveryPolicy) -> EpochResult<()> {
+        if policy.rate_limit.is_none() {
+            return Ok(());
+        }
+        let state = self.rate_states.get_mut(subscription).ok_or_else(|| {
+            EpochError::Internal("delivery rate state was not initialized".into())
+        })?;
+        state.milli_tokens = state
+            .milli_tokens
+            .checked_sub(1_000)
+            .ok_or_else(|| EpochError::Internal("delivery rate token underflow".into()))?;
+        Ok(())
     }
 
     fn authorize(
@@ -1223,6 +1522,45 @@ fn begin_delivery_attempt(
         lease_token,
         lease_deadline_ms,
     })
+}
+
+fn validate_requested_destination(
+    target: &SubscriptionTarget,
+    destination: Option<&EpochTargetDestination>,
+) -> EpochResult<()> {
+    match (target, destination) {
+        (
+            SubscriptionTarget::Queue { .. } | SubscriptionTarget::Stream { .. },
+            Some(destination),
+        ) => destination.validate_for_target(target),
+        (SubscriptionTarget::Queue { .. } | SubscriptionTarget::Stream { .. }, None) => {
+            Err(EpochError::Conflict(
+                "Epoch Queue and Stream targets require a bound destination".into(),
+            ))
+        }
+        (
+            SubscriptionTarget::Pull
+            | SubscriptionTarget::Webhook { .. }
+            | SubscriptionTarget::Http { .. }
+            | SubscriptionTarget::ApiDestination { .. }
+            | SubscriptionTarget::EndpointPool { .. }
+            | SubscriptionTarget::Function { .. }
+            | SubscriptionTarget::Connector { .. },
+            Some(_),
+        ) => Err(EpochError::Conflict(
+            "only Epoch Queue and Stream targets accept a destination binding".into(),
+        )),
+        (
+            SubscriptionTarget::Pull
+            | SubscriptionTarget::Webhook { .. }
+            | SubscriptionTarget::Http { .. }
+            | SubscriptionTarget::ApiDestination { .. }
+            | SubscriptionTarget::EndpointPool { .. }
+            | SubscriptionTarget::Function { .. }
+            | SubscriptionTarget::Connector { .. },
+            None,
+        ) => Ok(()),
+    }
 }
 
 fn validate_snapshot_attempts(

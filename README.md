@@ -86,9 +86,11 @@ profile client plus separate authenticated, leader- and fence-aware regional
 Stream, Queue, Cache, and Event Bus v1 clients. Generated response types,
 background/cooperative streaming sessions, atomic assignment-plus-offset
 handoff, and full native streaming parity remain tracked by DX-001.
-The Event Bus models include Queue, Stream, and signed HTTP/webhook targets.
-Every SDK ships the same exact-body HMAC verifier and replay identity, and its
-displayed regional Bus example exercises automatic Queue/Stream delivery.
+The Event Bus models include Queue, Stream, signed HTTP/webhook, API
+destination, endpoint-pool, function, and connector targets plus rate,
+retention, transform, and credential-reference policies. Every SDK ships the
+same exact-body HMAC verifier/replay identity and exposes long poll, redrive,
+archive maintenance, and strict integration operations.
 
 `crates/epoch-testkit` is the no-sleep correctness harness for the replicated
 foundation: seeded scheduling, independent wall/monotonic time, scripted fault
@@ -176,12 +178,15 @@ reads to a leader ReadIndex; repository-local Go, Java, and Python clients expos
 the complete implemented lifecycle and survive active-leader loss. The direct
 tablet listener remains experimental, stale-read capable, and unauthenticated.
 
-The Event Bus ingress/outbox tablet is the fourth opt-in typed profile. It
-replicates subscription changes and publish ingress, atomically creates one
+The Event Bus ingress/outbox/integration tablet is the fourth opt-in typed profile. It
+replicates subscription changes, publish ingress, schemas/policies,
+enrichment, MQTT state, connectors/checkpoints, catalog/endpoints, and
+functions; it atomically creates one
 durable delivery record per matching subscription, and rebuilds route, archive,
-lease, retry, acknowledgement, dead-letter, and attempt-history state from EPRS
+lease, rate, retry, acknowledgement, dead-letter retention/redrive, and attempt-history state from EPRS
 before serving. Strict internal mutations cover fenced acquire/ack/fail/reject and
-bounded timeout maintenance; a bounded local query exposes the ledger.
+bounded delivery/archive maintenance; long poll and bounded queries expose the
+ledger and integration state.
 Real-runtime and container gates prove retry/conflict behavior, target
 isolation, leader failover, convergence, and all-node recovery. An opt-in
 regional worker now executes signed HTTP/webhook targets from the current
@@ -192,13 +197,19 @@ and records retry/Ack/rejection back into the ledger. A real 503/204 campaign
 proves distinct signed attempts and all-voter reopen. An always-enabled
 source-leader worker also pins and executes Epoch Queue/Stream targets through
 the destination group's known leader, with stable target idempotency and
-target-commit-before-source-Ack ordering. Real three-process recovery preserves
-one destination record. Unsigned HTTP/webhook and network pull executors remain
-open, and neither cross-tablet atomicity nor exactly-once external side effects
-are claimed. The regional Event Bus v1 adapter and
+target-commit-before-source-Ack ordering. A second leader-owned worker executes
+API destinations, endpoint pools, functions, and target/bidirectional
+connectors with binary/structured CloudEvents, API-key/bearer/OAuth secret
+references, safe pinned egress, stable idempotency, endpoint failover, and
+connector-checkpoint-before-source-settlement ordering. Real three-process
+recovery preserves acknowledged state. Pull and unsigned legacy HTTP remain
+application-dispatched; MQTT wire compatibility, source-connector polling,
+private egress, cross-tablet atomicity, and exactly-once external side effects
+are not claimed. The regional Event Bus v1 adapter and
 repository-local Go, Java, and Python clients expose subscription policy,
-publish, archive replay, delivery acquire/ack/fail/reject/maintenance, delivery query,
-mutation lookup, and status through the same authenticated discovery, fencing,
+publish, archive replay/maintenance, long-poll acquire, ack/fail/reject/redrive,
+delivery query, integration mutation/state, mutation lookup, and status through
+the same authenticated discovery, fencing,
 exact-retry, and linearizable-read contract as the other profiles. See the
 [Cache tablet guide](docs/CACHE_TABLET.md),
 [Queue tablet guide](docs/QUEUE_TABLET.md),
@@ -211,12 +222,13 @@ exact-retry, and linearizable-read contract as the other profiles. See the
 [regional Event Bus SDK guide](docs/REGIONAL_EVENT_BUS_SDK.md),
 [signed webhook decision](docs/adr/0030-leader-owned-signed-webhook-delivery.md),
 [Epoch target decision](docs/adr/0031-leader-owned-epoch-target-delivery.md),
+[Event integration decision](docs/adr/0037-event-integration-platform.md),
 [consensus checkpoint guide](docs/CONSENSUS_CHECKPOINTS.md),
 [probe guide](docs/CONSENSUS_PROBE.md), [spike report](docs/CONSENSUS_SPIKE.md),
 and proposed [ADR-0003](docs/adr/0003-consensus-adapter.md). An exhaustive crash
 matrix, user-exportable snapshots/backups, membership/epoch transitions, follower read routing,
-authenticated peer transport, dynamic/zone-aware placement, and external Event
-Bus target breadth remain open.
+authenticated peer transport, dynamic/zone-aware placement, automatic external
+source polling, and production protocol gateways remain open.
 
 ## Quick start
 

@@ -15,6 +15,9 @@ use epoch_node::{
         CommittedProposalApplier, ConsensusProbeConfig, ConsensusProbeError, ConsensusProbeRuntime,
     },
     epoch_target_delivery::EpochTargetDeliveryConfig,
+    managed_target_delivery::{
+        DEFAULT_MANAGED_TARGET_DELIVERY_INTERVAL, ManagedSecretStore, ManagedTargetDeliveryConfig,
+    },
     queue_tablet::{self, DEFAULT_COMMIT_WAIT as QUEUE_DEFAULT_COMMIT_WAIT, QueueTabletService},
     regional_auth::with_regional_auth,
     regional_runtime::{RegionalNodeRuntime, RegionalRuntimeConfig},
@@ -120,6 +123,17 @@ struct Args {
         value_parser = clap::value_parser!(u64).range(1..=60_000)
     )]
     regional_epoch_target_delivery_interval_ms: u64,
+    #[arg(long, env = "EPOCH_REGIONAL_MANAGED_TARGET_SECRETS_PATH")]
+    regional_managed_target_secrets_path: Option<PathBuf>,
+    #[arg(
+        long,
+        env = "EPOCH_REGIONAL_MANAGED_TARGET_DELIVERY_INTERVAL_MS",
+        default_value_t = DEFAULT_MANAGED_TARGET_DELIVERY_INTERVAL.as_millis() as u64,
+        value_parser = clap::value_parser!(u64).range(1..=60_000)
+    )]
+    regional_managed_target_delivery_interval_ms: u64,
+    #[arg(long, env = "EPOCH_REGIONAL_MANAGED_TARGET_ALLOW_HTTP_LOOPBACK")]
+    regional_managed_target_allow_http_loopback: bool,
     #[arg(long, env = "EPOCH_REGIONAL_WEBHOOK_SIGNING_KEYS_PATH")]
     regional_webhook_signing_keys_path: Option<PathBuf>,
     #[arg(
@@ -237,6 +251,7 @@ struct RegionalRuntimeLaunch {
     checkpoint_interval: Duration,
     checkpoint_min_applied_entries: u64,
     epoch_target_delivery: EpochTargetDeliveryConfig,
+    managed_target_delivery: ManagedTargetDeliveryConfig,
     topology: NodeTopology,
     webhook_delivery: Option<WebhookDeliveryConfig>,
 }
@@ -352,6 +367,7 @@ async fn serve_regional_mode(
                 launch.checkpoint_min_applied_entries,
             )
             .with_epoch_target_delivery(launch.epoch_target_delivery.clone())
+            .with_managed_target_delivery(launch.managed_target_delivery.clone())
             .with_webhook_delivery(launch.webhook_delivery),
     )
     .await?;
@@ -372,6 +388,7 @@ async fn serve_regional_mode(
         checkpoint_interval_ms = launch.checkpoint_interval.as_millis(),
         checkpoint_min_applied_entries = launch.checkpoint_min_applied_entries,
         epoch_target_delivery_interval_ms = launch.epoch_target_delivery.interval.as_millis(),
+        managed_target_delivery_interval_ms = launch.managed_target_delivery.interval.as_millis(),
         region = launch.topology.region(),
         zone = launch.topology.zone(),
         node_class = launch.topology.node_class(),
@@ -616,6 +633,13 @@ fn regional_runtime_launch(
                 .map_err(|error| ConsensusProbeError::InvalidConfiguration(error.to_string()))
         })
         .transpose()?;
+    let managed_target_secrets = args
+        .regional_managed_target_secrets_path
+        .as_ref()
+        .map(ManagedSecretStore::load)
+        .transpose()
+        .map_err(|error| ConsensusProbeError::InvalidConfiguration(error.to_string()))?
+        .unwrap_or_default();
     Ok(Some(RegionalRuntimeLaunch {
         config,
         listen: args.consensus_listen,
@@ -628,6 +652,11 @@ fn regional_runtime_launch(
         checkpoint_min_applied_entries: args.regional_checkpoint_min_applied_entries,
         epoch_target_delivery: EpochTargetDeliveryConfig {
             interval: Duration::from_millis(args.regional_epoch_target_delivery_interval_ms),
+        },
+        managed_target_delivery: ManagedTargetDeliveryConfig {
+            interval: Duration::from_millis(args.regional_managed_target_delivery_interval_ms),
+            allow_http_loopback: args.regional_managed_target_allow_http_loopback,
+            secrets: Arc::new(managed_target_secrets),
         },
         topology,
         webhook_delivery,
