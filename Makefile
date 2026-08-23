@@ -138,12 +138,12 @@ check: generate-check release-check format-check lint test-unit audit ## Run the
 
 ci: bootstrap-check check build test-integration kubernetes-config compose-config compose-probe-config compose-regional-config ## Run the deterministic CI gate available locally.
 
-kubernetes-config: ## Render and client-validate the Kubernetes operator installation.
+kubernetes-config: ## Render and strictly validate the Kubernetes operator installation offline.
 	@command -v kubectl >/dev/null || { echo "missing kubectl" >&2; exit 1; }
 	@epoch_kubernetes_render="$$(mktemp "$${TMPDIR:-/tmp}/epoch-kubernetes.XXXXXX")"; \
 	trap 'rm -f -- "$$epoch_kubernetes_render"' EXIT INT TERM; \
 	kubectl kustomize deploy/kubernetes/operator >"$$epoch_kubernetes_render"; \
-	kubectl apply --dry-run=client --validate=false -f "$$epoch_kubernetes_render" >/dev/null
+	go run ./operator/cmd/epoch-manifest-check <"$$epoch_kubernetes_render"
 
 compose-config: ## Validate the development Compose model.
 	docker compose -f deploy/compose/docker-compose.yml config --quiet
