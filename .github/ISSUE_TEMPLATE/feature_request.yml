@@ -1,0 +1,78 @@
+name: Feature request
+description: Propose a bounded improvement to Epoch
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        External contributions must stay small and maintainer-scoped. Start with the problem and acceptance boundary; broad cross-stack features are planned by maintainers.
+
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: Prerequisites
+      options:
+        - label: I searched the PRD, delivery checklist, and existing issues for this capability.
+          required: true
+        - label: I am proposing a problem and acceptance boundary, not an unreviewed broad rewrite.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the user or operator problem and why current behavior is insufficient.
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Define observable behavior and who benefits from it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Include success, rejection, limits, recovery, and documentation expectations where relevant.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Primary area
+      options:
+        - Cache
+        - Stream
+        - Queue
+        - Event Bus and integrations
+        - Control plane and operations
+        - SDKs
+        - Console and documentation
+        - Deployment and CI
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility, security, and operational considerations
+      description: Note any public API, persisted format, resource, security, migration, or rollout impact. Write "None known" when appropriate.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include current workarounds or smaller solutions.

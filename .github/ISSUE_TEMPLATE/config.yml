@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Ripan-Roy/epoch/security/policy
+    about: Follow the private reporting instructions in the Security policy; do not open a public issue.
+  - name: Contribution guide
+    url: https://github.com/Ripan-Roy/epoch/blob/main/CONTRIBUTING.md
+    about: Read the development, testing, and external-contribution boundaries before proposing work.
