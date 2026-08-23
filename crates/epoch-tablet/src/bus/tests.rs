@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use epoch_bus::{
-    BusConfig, DeliveryBackoffStrategy, DeliveryPolicy, DeliveryRetryPolicy, DeliveryState,
-    EpochTargetDestination, EpochTargetKind, EventFilter, EventTransform, Subscription,
-    SubscriptionTarget,
+    ArchiveRetentionPolicy, BusConfig, DeliveryBackoffStrategy, DeliveryPolicy,
+    DeliveryRetryPolicy, DeliveryState, EpochTargetDestination, EpochTargetKind, EventFilter,
+    EventTransform, IntegrationOperation, SchemaCompatibility, SchemaField, SchemaFormat,
+    SchemaRegistration, SchemaValueType, Subscription, SubscriptionTarget,
 };
 use epoch_core::{EpochError, EventEnvelope};
 use serde_json::{Value, json};
@@ -230,6 +231,114 @@ fn exact_epoch_target_acquisition_uses_canonical_v3_destination_binding() {
 }
 
 #[test]
+fn integration_commands_use_v4_and_schema_state_survives_the_tablet_snapshot() {
+    let operation = IntegrationOperation::RegisterSchema {
+        registration: SchemaRegistration {
+            name: "order-event".into(),
+            format: SchemaFormat::JsonSchema,
+            definition: r#"{"type":"object"}"#.into(),
+            compatibility: SchemaCompatibility::Backward,
+            fields: vec![SchemaField {
+                path: "order.id".into(),
+                value_type: SchemaValueType::String,
+                required: true,
+                default: None,
+            }],
+        },
+    };
+    let command = BusTabletCommand::new(
+        &scope(),
+        "schema-order-v1",
+        12,
+        BusTabletOperation::ApplyIntegration {
+            operation: Box::new(operation),
+        },
+    )
+    .unwrap();
+    assert_eq!(command.format_version, 4);
+    let (proposal_id, payload) = encoded(&command);
+    let mut tablet = BusTablet::new(scope(), BusConfig::default()).unwrap();
+    let receipt = tablet
+        .apply(committed(proposal_id, 2, 4, &payload))
+        .unwrap();
+    assert!(matches!(
+        receipt.outcome,
+        BusTabletOutcome::Applied {
+            result: BusTabletOperationResult::IntegrationApplied { .. }
+        }
+    ));
+    assert_eq!(tablet.integration_state().schemas().schema_count(), 1);
+
+    let snapshot = tablet
+        .encode_snapshot(&BTreeSet::from([proposal_id]))
+        .unwrap();
+    let restored = BusTablet::decode_snapshot(&scope(), &snapshot).unwrap();
+    assert_eq!(restored.integration_state().schemas().schema_count(), 1);
+    assert_eq!(
+        restored.business_state_digest(),
+        tablet.business_state_digest()
+    );
+}
+
+#[test]
+fn archive_retention_uses_v5_and_survives_the_tablet_snapshot() {
+    let config = BusConfig {
+        archive_retention: ArchiveRetentionPolicy {
+            max_events: None,
+            max_age_ms: Some(10),
+        },
+        ..BusConfig::default()
+    };
+    let mut tablet = BusTablet::new(scope(), config).unwrap();
+    let publish = BusTabletCommand::publish(
+        &scope(),
+        "publish-retained",
+        event("evt-1", "order.created"),
+        100,
+    )
+    .unwrap();
+    let (publish_id, publish_payload) = encoded(&publish);
+    tablet
+        .apply(committed(publish_id, 2, 1, &publish_payload))
+        .unwrap();
+    assert_eq!(tablet.next_archive_retention_deadline_ms(), Some(110));
+
+    let maintain = BusTabletCommand::new(
+        &scope(),
+        "maintain-archive-110",
+        110,
+        BusTabletOperation::MaintainArchive { max_events: 100 },
+    )
+    .unwrap();
+    assert_eq!(maintain.format_version, 5);
+    let (maintain_id, maintain_payload) = encoded(&maintain);
+    let receipt = tablet
+        .apply(committed(maintain_id, 2, 2, &maintain_payload))
+        .unwrap();
+    assert!(matches!(
+        receipt.outcome,
+        BusTabletOutcome::Applied {
+            result: BusTabletOperationResult::ArchiveMaintained {
+                purged: 1,
+                archived_event_count: 0,
+                cutoff_ms: Some(100),
+                ..
+            }
+        }
+    ));
+
+    let snapshot = tablet
+        .encode_snapshot(&BTreeSet::from([publish_id, maintain_id]))
+        .unwrap();
+    let restored = BusTablet::decode_snapshot(&scope(), &snapshot).unwrap();
+    assert_eq!(restored.archived_event_count(), 0);
+    assert_eq!(
+        restored.business_state_digest(),
+        tablet.business_state_digest()
+    );
+}
+
+#[test]
 fn committed_route_plan_is_sorted_captured_and_transformation_stable() {
     let mut tablet = BusTablet::new(scope(), BusConfig::default()).unwrap();
     let worker = BusTabletCommand::upsert_subscription(
@@ -248,6 +357,7 @@ fn committed_route_plan_is_sorted_captured_and_transformation_stable() {
     audit_subscription.transform = EventTransform {
         add_headers: BTreeMap::from([("routed-by".into(), "epoch".into())]),
         payload_projection: BTreeMap::from([("order_id".into(), "order.id".into())]),
+        ..EventTransform::default()
     };
     let audit =
         BusTabletCommand::upsert_subscription(&scope(), "route-audit", audit_subscription, 12)
@@ -552,6 +662,8 @@ fn delivery_commands_are_fenced_retriable_and_recoverable() {
     route.delivery_policy = DeliveryPolicy {
         timeout_ms: 10,
         max_in_flight: 1,
+        rate_limit: None,
+        dead_letter_retention_ms: None,
         retry: DeliveryRetryPolicy {
             strategy: DeliveryBackoffStrategy::Fixed,
             initial_delay_ms: 5,

@@ -10,6 +10,7 @@ import (
 const (
 	maxRegionalBusDeliveryBatch = 100
 	maxRegionalBusReadResults   = 10_000
+	maxRegionalBusLongPoll      = 30 * time.Second
 )
 
 // RegionalBusAcquireOptions identifies one bounded dispatcher lease request.
@@ -18,6 +19,7 @@ type RegionalBusAcquireOptions struct {
 	Dispatcher      string
 	DispatcherEpoch uint64
 	MaxDeliveries   uint16
+	Wait            time.Duration
 }
 
 // RegionalBusReplayOptions bounds one linearizable archive replay.
@@ -118,13 +120,17 @@ func (client *RegionalBusClient) AcquireDeliveries(ctx context.Context, bus stri
 	if err := validateBusDeliveryBatch(options.MaxDeliveries); err != nil {
 		return nil, err
 	}
+	if options.Wait < 0 || options.Wait > maxRegionalBusLongPoll || options.Wait%time.Millisecond != 0 {
+		return nil, fmt.Errorf("epoch: delivery wait must be a whole number of milliseconds between 0 and %d", maxRegionalBusLongPoll.Milliseconds())
+	}
 	return client.mutate(ctx, bus, shard, idempotencyKey, struct {
 		Kind            string `json:"kind"`
 		Subscription    string `json:"subscription"`
 		Dispatcher      string `json:"dispatcher"`
 		DispatcherEpoch string `json:"dispatcher_epoch"`
 		MaxDeliveries   uint16 `json:"max_deliveries"`
-	}{"acquire_deliveries", options.Subscription, options.Dispatcher, fmt.Sprintf("%d", options.DispatcherEpoch), options.MaxDeliveries})
+		WaitMS          int64  `json:"wait_ms"`
+	}{"acquire_deliveries", options.Subscription, options.Dispatcher, fmt.Sprintf("%d", options.DispatcherEpoch), options.MaxDeliveries, options.Wait.Milliseconds()})
 }
 
 // AcknowledgeDelivery permanently settles one fenced delivery lease.
@@ -162,6 +168,17 @@ func (client *RegionalBusClient) RejectDelivery(ctx context.Context, bus string,
 	return client.mutate(ctx, bus, shard, idempotencyKey, operation)
 }
 
+// RedriveDelivery returns one dead-lettered record to pending delivery with preserved history.
+func (client *RegionalBusClient) RedriveDelivery(ctx context.Context, bus string, shard uint32, idempotencyKey, deliveryID string) (Document, error) {
+	if strings.TrimSpace(deliveryID) == "" {
+		return nil, fmt.Errorf("epoch: delivery ID is required")
+	}
+	return client.mutate(ctx, bus, shard, idempotencyKey, struct {
+		Kind       string `json:"kind"`
+		DeliveryID string `json:"delivery_id"`
+	}{"redrive_delivery", deliveryID})
+}
+
 // MaintainDeliveries applies due retry and expired-lease transitions explicitly.
 func (client *RegionalBusClient) MaintainDeliveries(ctx context.Context, bus string, shard uint32, idempotencyKey string, maxDeliveries uint16) (Document, error) {
 	if err := validateBusDeliveryBatch(maxDeliveries); err != nil {
@@ -171,6 +188,32 @@ func (client *RegionalBusClient) MaintainDeliveries(ctx context.Context, bus str
 		Kind          string `json:"kind"`
 		MaxDeliveries uint16 `json:"max_deliveries"`
 	}{"maintain_deliveries", maxDeliveries})
+}
+
+// MaintainArchive applies bounded replicated age/count retention immediately.
+func (client *RegionalBusClient) MaintainArchive(ctx context.Context, bus string, shard uint32, idempotencyKey string, maxEvents uint16) (Document, error) {
+	if err := validateBusReadLimit(maxEvents); err != nil {
+		return nil, err
+	}
+	return client.mutate(ctx, bus, shard, idempotencyKey, struct {
+		Kind      string `json:"kind"`
+		MaxEvents uint16 `json:"max_events"`
+	}{"maintain_archive", maxEvents})
+}
+
+// ApplyIntegration commits one typed schema, connector, MQTT, catalog, enrichment, or endpoint operation.
+func (client *RegionalBusClient) ApplyIntegration(ctx context.Context, bus string, shard uint32, idempotencyKey string, operation Document) (Document, error) {
+	if operation == nil {
+		return nil, fmt.Errorf("epoch: integration operation is required")
+	}
+	kind, ok := operation["kind"].(string)
+	if !ok || strings.TrimSpace(kind) == "" {
+		return nil, fmt.Errorf("epoch: integration operation kind is required")
+	}
+	return client.mutate(ctx, bus, shard, idempotencyKey, struct {
+		Kind      string   `json:"kind"`
+		Operation Document `json:"operation"`
+	}{"apply_integration", operation})
 }
 
 // Mutation resolves one proposal from the current leader.
@@ -217,6 +260,11 @@ func (client *RegionalBusClient) QueryDeliveries(ctx context.Context, bus string
 // Status returns the linearizable Event Bus tablet status and digest.
 func (client *RegionalBusClient) Status(ctx context.Context, bus string, shard uint32) (Document, error) {
 	return client.read(ctx, bus, shard, "GET", "/status", nil)
+}
+
+// IntegrationState returns the complete linearizable schema, connector, MQTT, catalog, and endpoint state.
+func (client *RegionalBusClient) IntegrationState(ctx context.Context, bus string, shard uint32) (Document, error) {
+	return client.read(ctx, bus, shard, "GET", "/integration/state", nil)
 }
 
 func (client *RegionalBusClient) mutate(ctx context.Context, bus string, shard uint32, idempotencyKey string, operation any) (Document, error) {

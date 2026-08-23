@@ -9,10 +9,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use epoch_bus::{
     ArchivedEvent, BusConfig, DeliveryCounts, DeliveryFence, DeliveryRecord, DeliveryState,
-    DeliveryStateKind, EpochTargetDeliveryCandidate, EventBus, EventFilter,
-    SignedWebhookDeliveryCandidate,
+    DeliveryStateKind, EpochTargetDeliveryCandidate, EventBus, EventFilter, EventIntegrationState,
+    IntegrationOperation, ManagedTargetDeliveryCandidate, SignedWebhookDeliveryCandidate,
+    Subscription,
 };
-use epoch_core::{DurabilityProfile, EpochError, EpochResult};
+use epoch_core::{DurabilityProfile, EpochError, EpochResult, EventEnvelope};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{AppliedCommand, validate_committed_command_scope};
@@ -121,7 +122,13 @@ impl BusTablet {
             committed,
             command.operation,
             applied_at_ms,
-        );
+        )
+        .and_then(|result| {
+            // A committed mutation must never leave the profile in a state
+            // that consensus cannot checkpoint and recover.
+            candidate.encode_snapshot()?;
+            Ok(result)
+        });
         let (outcome, next_bus) = match execution {
             Ok(result) => (BusTabletOutcome::Applied { result }, Some(candidate)),
             Err(error) => (recordable_rejected_outcome(error)?, None),
@@ -218,6 +225,10 @@ impl BusTablet {
         self.bus.config()
     }
 
+    pub fn integration_state(&self) -> &EventIntegrationState {
+        self.bus.integration()
+    }
+
     pub const fn commit_position(&self) -> u64 {
         self.bus.commit_position()
     }
@@ -243,6 +254,16 @@ impl BusTablet {
         self.bus.delivery_counts()
     }
 
+    pub fn has_acquirable_pull_delivery(
+        &self,
+        subscription: &str,
+        now_ms: u64,
+    ) -> TabletResult<bool> {
+        Ok(self
+            .bus
+            .has_acquirable_pull_delivery(subscription, now_ms)?)
+    }
+
     pub fn signed_webhook_delivery_candidates(
         &self,
         now_ms: u64,
@@ -257,8 +278,19 @@ impl BusTablet {
         Ok(self.bus.epoch_target_delivery_candidates(now_ms)?)
     }
 
+    pub fn managed_target_delivery_candidates(
+        &self,
+        now_ms: u64,
+    ) -> TabletResult<Vec<ManagedTargetDeliveryCandidate>> {
+        Ok(self.bus.managed_target_delivery_candidates(now_ms)?)
+    }
+
     pub fn next_maintenance_deadline_ms(&self) -> Option<u64> {
         self.bus.next_delivery_maintenance_deadline_ms()
+    }
+
+    pub fn next_archive_retention_deadline_ms(&self) -> Option<u64> {
+        self.bus.next_archive_retention_deadline_ms()
     }
 
     pub const fn business_state_digest(&self) -> [u8; 32] {
@@ -402,33 +434,14 @@ fn execute(
     applied_at_ms: u64,
 ) -> EpochResult<BusTabletOperationResult> {
     match operation {
+        BusTabletOperation::ApplyIntegration { operation } => {
+            execute_integration(bus, *operation, applied_at_ms)
+        }
         BusTabletOperation::UpsertSubscription { subscription } => {
-            let name = subscription.name.clone();
-            let replaced = bus.has_subscription(&name);
-            let route_plan_version = bus.upsert_subscription(subscription)?;
-            Ok(BusTabletOperationResult::SubscriptionUpserted {
-                name,
-                replaced,
-                route_plan_version,
-            })
+            execute_subscription_upsert(bus, subscription)
         }
-        BusTabletOperation::RemoveSubscription { name } => {
-            let removed = bus.remove_subscription(&name)?;
-            Ok(BusTabletOperationResult::SubscriptionRemoved {
-                name,
-                removed,
-                route_plan_version: bus.route_plan_version(),
-            })
-        }
-        BusTabletOperation::Publish { envelope } => {
-            let result = bus.publish(envelope, applied_at_ms)?;
-            Ok(BusTabletOperationResult::Published {
-                position: result.acknowledgement.commit_position,
-                route_plan_version: bus.route_plan_version(),
-                delivery_count: result.deliveries.len(),
-                delivery_plan_digest: delivery_plan_digest(&result.deliveries)?,
-            })
-        }
+        BusTabletOperation::RemoveSubscription { name } => execute_subscription_removal(bus, name),
+        BusTabletOperation::Publish { envelope } => execute_publish(bus, envelope, applied_at_ms),
         BusTabletOperation::AcquireDeliveries {
             subscription,
             dispatcher,
@@ -491,10 +504,86 @@ fn execute(
             &lease_token,
             &reason,
         ),
+        BusTabletOperation::RedriveDelivery { delivery_id } => {
+            bus.redrive_delivery(&delivery_id, applied_at_ms)?;
+            Ok(BusTabletOperationResult::DeliveryRedriven { delivery_id })
+        }
+        BusTabletOperation::MaintainArchive { max_events } => {
+            execute_archive_maintenance(bus, max_events, applied_at_ms)
+        }
         BusTabletOperation::MaintainDeliveries { max_deliveries } => {
             execute_maintenance(bus, max_deliveries, applied_at_ms)
         }
     }
+}
+
+fn execute_integration(
+    bus: &mut EventBus,
+    operation: IntegrationOperation,
+    applied_at_ms: u64,
+) -> EpochResult<BusTabletOperationResult> {
+    let outcome = bus.apply_integration(operation, applied_at_ms)?;
+    let outcome =
+        serde_json::to_value(outcome).map_err(|error| EpochError::Internal(error.to_string()))?;
+    Ok(BusTabletOperationResult::IntegrationApplied {
+        outcome,
+        route_plan_version: bus.route_plan_version(),
+    })
+}
+
+fn execute_subscription_upsert(
+    bus: &mut EventBus,
+    subscription: Subscription,
+) -> EpochResult<BusTabletOperationResult> {
+    let name = subscription.name.clone();
+    let replaced = bus.has_subscription(&name);
+    let route_plan_version = bus.upsert_subscription(subscription)?;
+    Ok(BusTabletOperationResult::SubscriptionUpserted {
+        name,
+        replaced,
+        route_plan_version,
+    })
+}
+
+fn execute_subscription_removal(
+    bus: &mut EventBus,
+    name: String,
+) -> EpochResult<BusTabletOperationResult> {
+    let removed = bus.remove_subscription(&name)?;
+    Ok(BusTabletOperationResult::SubscriptionRemoved {
+        name,
+        removed,
+        route_plan_version: bus.route_plan_version(),
+    })
+}
+
+fn execute_publish(
+    bus: &mut EventBus,
+    envelope: EventEnvelope,
+    applied_at_ms: u64,
+) -> EpochResult<BusTabletOperationResult> {
+    let result = bus.publish(envelope, applied_at_ms)?;
+    Ok(BusTabletOperationResult::Published {
+        position: result.acknowledgement.commit_position,
+        route_plan_version: bus.route_plan_version(),
+        delivery_count: result.deliveries.len(),
+        delivery_plan_digest: delivery_plan_digest(&result.deliveries)?,
+    })
+}
+
+fn execute_archive_maintenance(
+    bus: &mut EventBus,
+    max_events: u16,
+    applied_at_ms: u64,
+) -> EpochResult<BusTabletOperationResult> {
+    let result = bus.maintain_archive(applied_at_ms, usize::from(max_events))?;
+    Ok(BusTabletOperationResult::ArchiveMaintained {
+        purged: count_as_u16(result.purged, "archive retention purge")?,
+        archived_event_count: u64::try_from(result.archived_event_count)
+            .map_err(|_| EpochError::Internal("archive retained event count exceeds u64".into()))?,
+        as_of_ms: result.as_of_ms,
+        cutoff_ms: result.cutoff_ms,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -673,6 +762,7 @@ fn execute_maintenance(
         processed: count_as_u16(result.processed, "delivery maintenance")?,
         retried: count_as_u16(result.retried, "delivery retry")?,
         dead_lettered: count_as_u16(result.dead_lettered, "delivery dead-letter")?,
+        purged: count_as_u16(result.purged, "delivery dead-letter purge")?,
         counts: result.counts.try_into()?,
     })
 }

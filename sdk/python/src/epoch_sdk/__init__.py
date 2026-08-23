@@ -4,13 +4,16 @@ from .client import EpochClient
 from .errors import EpochAPIError
 from .models import (
     DeliveryPolicy,
+    DeliveryRateLimit,
     DeliveryRetryPolicy,
+    DestinationAuth,
     DurabilityProfile,
     EventEnvelope,
     EventFilter,
     EventTransform,
     Subscription,
     SubscriptionTarget,
+    TransformLimits,
 )
 from .regional import (
     RegionalScope,
@@ -44,7 +47,9 @@ from .webhook import WebhookVerification, verify_webhook_signature
 
 __all__ = [
     "DeliveryPolicy",
+    "DeliveryRateLimit",
     "DeliveryRetryPolicy",
+    "DestinationAuth",
     "DurabilityProfile",
     "EpochAPIError",
     "EpochClient",
@@ -75,6 +80,7 @@ __all__ = [
     "StreamSuperstreamMember",
     "Subscription",
     "SubscriptionTarget",
+    "TransformLimits",
     "Transport",
     "UrllibTransport",
     "WebhookVerification",

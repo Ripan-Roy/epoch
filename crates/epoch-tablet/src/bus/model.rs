@@ -50,6 +50,14 @@ pub enum BusTabletRejectionCode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BusTabletOperationResult {
+    IntegrationApplied {
+        outcome: serde_json::Value,
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
+        route_plan_version: u64,
+    },
     SubscriptionUpserted {
         name: String,
         replaced: bool,
@@ -103,12 +111,41 @@ pub enum BusTabletOperationResult {
         delivery_id: String,
         state: DeliveryStateKind,
     },
+    DeliveryRedriven {
+        delivery_id: String,
+    },
+    ArchiveMaintained {
+        purged: u16,
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
+        archived_event_count: u64,
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
+        as_of_ms: u64,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "serialize_optional_u64_as_decimal",
+            deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
+        )]
+        cutoff_ms: Option<u64>,
+    },
     DeliveriesMaintained {
         processed: u16,
         retried: u16,
         dead_lettered: u16,
+        #[serde(default, skip_serializing_if = "is_default")]
+        purged: u16,
         counts: BusTabletDeliveryCounts,
     },
+}
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    value == &T::default()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

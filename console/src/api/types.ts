@@ -232,8 +232,14 @@ export interface QueueConfig {
 export interface BusConfig {
   durability: "volatile";
   archive: boolean;
+  delivery_outbox: boolean;
   max_subscriptions?: number;
   max_archive_events?: number;
+  archive_retention?: {
+    max_events: number | null;
+    max_age_ms: number | null;
+  };
+  max_outbox_deliveries?: number;
 }
 
 export type ResourceConfig = CacheConfig | StreamConfig | QueueConfig | BusConfig;

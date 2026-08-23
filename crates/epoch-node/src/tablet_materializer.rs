@@ -484,10 +484,7 @@ impl RegionalTabletMaterializer {
             )?),
             WorkloadProfile::EventBus => PendingTabletService::Bus(BusTabletService::new(
                 BusTabletScope::clone(&scope),
-                BusConfig {
-                    delivery_outbox: true,
-                    ..BusConfig::default()
-                },
+                bus_config(&metadata)?,
             )?),
         };
         let stable_path = stable_directory.join(format!("node-{}.wal", config.node_id().get()));
@@ -657,6 +654,22 @@ fn queue_config(metadata: &MaterializedTabletMetadata) -> TabletMaterializerResu
         None => Ok(QueueConfig {
             durability: DurabilityProfile::QuorumDurable,
             ..QueueConfig::default()
+        }),
+    }
+}
+
+fn bus_config(metadata: &MaterializedTabletMetadata) -> TabletMaterializerResult<BusConfig> {
+    match metadata.configuration.clone() {
+        Some(configuration) => serde_json::from_value(configuration).map_err(|error| {
+            TabletMaterializerError::InvalidCatalog(format!(
+                "Event Bus tablet {} configuration is invalid: {error}",
+                metadata.descriptor.tablet_id
+            ))
+        }),
+        None => Ok(BusConfig {
+            durability: DurabilityProfile::QuorumDurable,
+            delivery_outbox: true,
+            ..BusConfig::default()
         }),
     }
 }
@@ -858,6 +871,51 @@ mod tests {
             queue_config(&unconfigured).unwrap().durability,
             DurabilityProfile::QuorumDurable
         );
+    }
+
+    #[test]
+    fn event_bus_materialization_retains_archive_policy_and_enables_the_outbox() {
+        let configured: BusConfig = serde_json::from_value(serde_json::json!({
+            "durability": "quorum_durable",
+            "archive": true,
+            "delivery_outbox": true,
+            "max_subscriptions": 1000,
+            "max_archive_events": 10000,
+            "archive_retention": {
+                "max_events": 5000,
+                "max_age_ms": 86_400_000
+            },
+            "max_outbox_deliveries": 20000
+        }))
+        .unwrap();
+        let metadata = MaterializedTabletMetadata {
+            resource: ResourceName::new(
+                "acme",
+                "shop",
+                "dev",
+                "core",
+                ResourceKind::EventBus,
+                "events",
+            )
+            .unwrap(),
+            shard_count: 1,
+            configuration: Some(serde_json::to_value(&configured).unwrap()),
+            descriptor: TabletDescriptor {
+                tablet_id: 42,
+                consensus_group_id: 42,
+                shard_index: 0,
+                tablet_epoch: 1,
+                resource_generation: 1,
+                workload_profile: WorkloadProfile::EventBus,
+                replica_count: SUPPORTED_REPLICA_COUNT,
+            },
+        };
+        assert_eq!(bus_config(&metadata).unwrap(), configured);
+        let mut unconfigured = metadata;
+        unconfigured.configuration = None;
+        let defaults = bus_config(&unconfigured).unwrap();
+        assert_eq!(defaults.durability, DurabilityProfile::QuorumDurable);
+        assert!(defaults.delivery_outbox);
     }
 
     #[tokio::test]

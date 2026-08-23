@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.math.BigInteger;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -36,7 +37,9 @@ final class RegionalBusClientTest {
                     BigInteger.valueOf(60_000),
                     10,
                     8,
-                    null)));
+                    null),
+                new DeliveryRateLimit(25, 50),
+                BigInteger.valueOf(86_400_000)));
     EventEnvelope event =
         EventEnvelope.builder("java-regional-sdk", "order.created", Map.of("id", 2))
             .id("order-2")
@@ -46,7 +49,15 @@ final class RegionalBusClientTest {
 
     client.upsertSubscription(bus, 0, "upsert-1", subscription);
     client.publish(bus, 0, "publish-1", event);
-    client.acquireDeliveries(bus, 0, "acquire-1", "orders", "worker-a", BigInteger.valueOf(7), 10);
+    client.acquireDeliveries(
+        bus,
+        0,
+        "acquire-1",
+        "orders",
+        "worker-a",
+        BigInteger.valueOf(7),
+        10,
+        Duration.ofSeconds(5));
     client.acknowledgeDelivery(
         bus, 0, "ack-1", "delivery-1", "worker-a", BigInteger.valueOf(7), "lease-1");
     client.failDelivery(
@@ -67,12 +78,23 @@ final class RegionalBusClientTest {
         BigInteger.valueOf(7),
         "lease-3",
         "http status 400");
+    client.redriveDelivery(bus, 0, "redrive-1", "delivery-3");
     client.maintainDeliveries(bus, 0, "maintain-1", 100);
+    client.maintainArchive(bus, 0, "archive-retention-1", 100);
+    client.applyIntegration(
+        bus,
+        0,
+        "schema-1",
+        MAPPER
+            .createObjectNode()
+            .put("kind", "register_schema")
+            .set("registration", MAPPER.createObjectNode().put("name", "orders")));
     client.removeSubscription(bus, 0, "remove-1", "orders");
     client.mutation(bus, 0, BigInteger.valueOf(12));
     client.replayArchive(bus, 0, BigInteger.ONE, BigInteger.TEN, 100, subscription.filter());
     client.queryDeliveries(bus, 0, "orders", RegionalBusDeliveryState.IN_FLIGHT, 100);
     client.status(bus, 0);
+    client.integrationState(bus, 0);
 
     String base =
         "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core"
@@ -81,7 +103,7 @@ final class RegionalBusClientTest {
     for (int index = 1; index < transport.requests.size(); index += 2) {
       operations.add(transport.requests.get(index));
     }
-    assertEquals(12, operations.size());
+    assertEquals(16, operations.size());
     assertEquals(base + "/mutations", operations.get(0).path());
     assertEquals(
         "fixed",
@@ -105,11 +127,40 @@ final class RegionalBusClientTest {
             .path("signing_key_id")
             .asText());
     assertEquals(
+        50,
+        operations
+            .get(0)
+            .body()
+            .path("operation")
+            .path("subscription")
+            .path("delivery_policy")
+            .path("rate_limit")
+            .path("burst")
+            .asInt());
+    assertEquals(
+        "86400000",
+        operations
+            .get(0)
+            .body()
+            .path("operation")
+            .path("subscription")
+            .path("delivery_policy")
+            .path("dead_letter_retention_ms")
+            .asText());
+    assertEquals(5000, operations.get(2).body().path("operation").path("wait_ms").asInt());
+    assertEquals(
         "reject_delivery", operations.get(5).body().path("operation").path("kind").asText());
-    assertEquals(base + "/mutations/12", operations.get(8).path());
-    assertEquals("1", operations.get(9).body().path("from_ms").asText());
-    assertEquals("in_flight", operations.get(10).body().path("state").asText());
-    for (Request request : operations.subList(8, operations.size())) {
+    assertEquals(
+        "redrive_delivery", operations.get(6).body().path("operation").path("kind").asText());
+    assertEquals(
+        "maintain_archive", operations.get(8).body().path("operation").path("kind").asText());
+    assertEquals(
+        "apply_integration", operations.get(9).body().path("operation").path("kind").asText());
+    assertEquals(base + "/mutations/12", operations.get(11).path());
+    assertEquals("1", operations.get(12).body().path("from_ms").asText());
+    assertEquals("in_flight", operations.get(13).body().path("state").asText());
+    assertEquals(base + "/integration/state", operations.get(15).path());
+    for (Request request : operations.subList(11, operations.size())) {
       assertEquals("linearizable", request.headers().get("x-epoch-read-consistency"));
     }
   }
@@ -128,6 +179,18 @@ final class RegionalBusClientTest {
                 "events", 0, "acquire", "orders", "worker", BigInteger.ONE, 0));
     assertThrows(
         IllegalArgumentException.class,
+        () ->
+            client.acquireDeliveries(
+                "events",
+                0,
+                "acquire-wait",
+                "orders",
+                "worker",
+                BigInteger.ONE,
+                1,
+                Duration.ofMillis(30_001)));
+    assertThrows(
+        IllegalArgumentException.class,
         () -> client.replayArchive("events", 0, BigInteger.TEN, BigInteger.ONE, 1, null));
     assertThrows(
         IllegalArgumentException.class,
@@ -137,6 +200,15 @@ final class RegionalBusClientTest {
     assertThrows(
         IllegalArgumentException.class,
         () -> SubscriptionTarget.signedWebhook("https://example.com/orders", "bad/key"));
+    assertThrows(IllegalArgumentException.class, () -> new DeliveryRateLimit(0, 1));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new TransformLimits(64, 256 * 1024, 64 * 1024, 100, true));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> DestinationAuth.oauth2("oauth", "file:///token", List.of()));
+    assertThrows(
+        IllegalArgumentException.class, () -> client.redriveDelivery("events", 0, "redrive", ""));
     assertEquals(List.of(), transport.requests);
   }
 

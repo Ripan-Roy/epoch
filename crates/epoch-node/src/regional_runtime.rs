@@ -31,6 +31,10 @@ use crate::{
         EpochTargetDeliveryConfig, EpochTargetDeliveryStatus, EpochTargetDeliveryWorker,
         run_epoch_target_delivery_pass,
     },
+    managed_target_delivery::{
+        ManagedTargetDeliveryConfig, ManagedTargetDeliveryStatus, ManagedTargetDeliveryWorker,
+        run_managed_target_delivery_pass,
+    },
     regional_checkpoint::{RegionalCheckpointStatus, run_regional_checkpoint_pass},
     regional_maintenance::{RegionalMaintenanceStatus, run_regional_maintenance_pass},
     regional_router::{
@@ -66,6 +70,7 @@ pub struct RegionalRuntimeConfig {
     pub checkpoint_interval: Duration,
     pub checkpoint_min_applied_entries: u64,
     pub epoch_target_delivery: EpochTargetDeliveryConfig,
+    pub managed_target_delivery: ManagedTargetDeliveryConfig,
     pub webhook_delivery: Option<WebhookDeliveryConfig>,
 }
 
@@ -87,6 +92,7 @@ impl fmt::Debug for RegionalRuntimeConfig {
                 &self.checkpoint_min_applied_entries,
             )
             .field("epoch_target_delivery", &self.epoch_target_delivery)
+            .field("managed_target_delivery", &self.managed_target_delivery)
             .finish_non_exhaustive()
     }
 }
@@ -120,6 +126,7 @@ impl RegionalRuntimeConfig {
             checkpoint_interval: DEFAULT_REGIONAL_CHECKPOINT_INTERVAL,
             checkpoint_min_applied_entries: DEFAULT_REGIONAL_CHECKPOINT_MIN_APPLIED_ENTRIES,
             epoch_target_delivery: EpochTargetDeliveryConfig::default(),
+            managed_target_delivery: ManagedTargetDeliveryConfig::default(),
             webhook_delivery: None,
         }
     }
@@ -158,6 +165,12 @@ impl RegionalRuntimeConfig {
     #[must_use]
     pub fn with_epoch_target_delivery(mut self, config: EpochTargetDeliveryConfig) -> Self {
         self.epoch_target_delivery = config;
+        self
+    }
+
+    #[must_use]
+    pub fn with_managed_target_delivery(mut self, config: ManagedTargetDeliveryConfig) -> Self {
+        self.managed_target_delivery = config;
         self
     }
 }
@@ -209,6 +222,8 @@ struct RegionalBackground {
     checkpoint_status: Arc<RegionalCheckpointStatus>,
     epoch_target_worker: EpochTargetDeliveryWorker,
     epoch_target_status: Arc<EpochTargetDeliveryStatus>,
+    managed_target_worker: ManagedTargetDeliveryWorker,
+    managed_target_status: Arc<ManagedTargetDeliveryStatus>,
     webhook_worker: Option<WebhookDeliveryWorker>,
     webhook_status: Arc<WebhookDeliveryStatus>,
 }
@@ -296,6 +311,13 @@ impl RegionalNodeRuntime {
         .map_err(|error| RegionalRuntimeError::InvalidConfiguration(error.to_string()))?;
         let epoch_target_status =
             EpochTargetDeliveryStatus::new(config.epoch_target_delivery.interval);
+        let managed_target_worker = ManagedTargetDeliveryWorker::new(
+            config.managed_target_delivery.clone(),
+            config.profile_commit_wait,
+        )
+        .map_err(|error| RegionalRuntimeError::InvalidConfiguration(error.to_string()))?;
+        let managed_target_status =
+            ManagedTargetDeliveryStatus::new(config.managed_target_delivery.interval);
         let webhook_worker = config
             .webhook_delivery
             .clone()
@@ -319,6 +341,7 @@ impl RegionalNodeRuntime {
                 Arc::clone(&maintenance_status),
                 Arc::clone(&checkpoint_status),
                 Arc::clone(&epoch_target_status),
+                Arc::clone(&managed_target_status),
                 Arc::clone(&webhook_status),
             ));
         let background_config = RegionalBackground {
@@ -332,6 +355,8 @@ impl RegionalNodeRuntime {
             checkpoint_status,
             epoch_target_worker,
             epoch_target_status,
+            managed_target_worker,
+            managed_target_status,
             webhook_worker,
             webhook_status,
         };
@@ -414,7 +439,42 @@ fn validate_config(config: &RegionalRuntimeConfig) -> Result<(), RegionalRuntime
         .epoch_target_delivery
         .validate()
         .map_err(|error| RegionalRuntimeError::InvalidConfiguration(error.to_string()))?;
+    config
+        .managed_target_delivery
+        .validate()
+        .map_err(|error| RegionalRuntimeError::InvalidConfiguration(error.to_string()))?;
     Ok(())
+}
+
+struct BackgroundIntervals {
+    maintenance: tokio::time::Interval,
+    checkpoints: tokio::time::Interval,
+    epoch_targets: tokio::time::Interval,
+    managed_targets: tokio::time::Interval,
+    webhooks: Option<tokio::time::Interval>,
+}
+
+impl BackgroundIntervals {
+    fn new(background: &RegionalBackground) -> Self {
+        Self {
+            maintenance: background_interval(background.maintenance_interval),
+            checkpoints: background_interval(background.checkpoint_interval),
+            epoch_targets: background_interval(background.epoch_target_worker.config().interval),
+            managed_targets: background_interval(
+                background.managed_target_worker.config().interval,
+            ),
+            webhooks: background
+                .webhook_worker
+                .as_ref()
+                .map(|worker| background_interval(worker.config().interval)),
+        }
+    }
+}
+
+fn background_interval(period: Duration) -> tokio::time::Interval {
+    let mut interval = tokio::time::interval(period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval
 }
 
 fn spawn_background(
@@ -429,18 +489,7 @@ fn spawn_background(
     let (stop, mut stopped) = watch::channel(false);
     let (failure_tx, failure) = watch::channel(None);
     let background = tokio::spawn(async move {
-        let mut maintenance = tokio::time::interval(background.maintenance_interval);
-        maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut checkpoints = tokio::time::interval(background.checkpoint_interval);
-        checkpoints.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut epoch_targets =
-            tokio::time::interval(background.epoch_target_worker.config().interval);
-        epoch_targets.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut webhooks = background.webhook_worker.as_ref().map(|worker| {
-            let mut interval = tokio::time::interval(worker.config().interval);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            interval
-        });
+        let mut intervals = BackgroundIntervals::new(&background);
         loop {
             tokio::select! {
                 biased;
@@ -457,12 +506,12 @@ fn spawn_background(
                     failure_tx.send_replace(Some(failure));
                     return;
                 }
-                _ = maintenance.tick() => {
+                _ = intervals.maintenance.tick() => {
                     let now_ms = background.clock.wall_time_ms();
                     let (pass, error) = run_regional_maintenance_pass(&background.directory, now_ms).await;
                     background.maintenance_status.record(now_ms, pass, error);
                 }
-                _ = checkpoints.tick() => {
+                _ = intervals.checkpoints.tick() => {
                     let now_ms = background.clock.wall_time_ms();
                     let (pass, groups, error) = run_regional_checkpoint_pass(
                         &background.reconcile_state.consensus_handle(),
@@ -471,7 +520,7 @@ fn spawn_background(
                     ).await;
                     background.checkpoint_status.record(now_ms, pass, groups, error);
                 }
-                _ = epoch_targets.tick() => {
+                _ = intervals.epoch_targets.tick() => {
                     let now_ms = background.clock.wall_time_ms();
                     let (pass, error) = run_epoch_target_delivery_pass(
                         &background.directory,
@@ -480,8 +529,17 @@ fn spawn_background(
                     ).await;
                     background.epoch_target_status.record(now_ms, pass, error);
                 }
+                _ = intervals.managed_targets.tick() => {
+                    let now_ms = background.clock.wall_time_ms();
+                    let (pass, error) = run_managed_target_delivery_pass(
+                        &background.directory,
+                        &background.managed_target_worker,
+                        background.clock.as_ref(),
+                    ).await;
+                    background.managed_target_status.record(now_ms, pass, error);
+                }
                 () = async {
-                    if let Some(interval) = webhooks.as_mut() {
+                    if let Some(interval) = intervals.webhooks.as_mut() {
                         interval.tick().await;
                     } else {
                         std::future::pending::<()>().await;

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestRegionalBusClientRoutesCompleteMutationAndReadContracts(t *testing.T) {
@@ -20,6 +21,9 @@ func TestRegionalBusClientRoutesCompleteMutationAndReadContracts(t *testing.T) {
 	}
 	policy := DefaultDeliveryPolicy()
 	policy.Retry.Strategy = FixedDeliveryBackoff
+	retentionMS := uint64(86_400_000)
+	policy.RateLimit = &DeliveryRateLimit{DeliveriesPerSecond: 25, Burst: 50}
+	policy.DeadLetterRetentionMS = &retentionMS
 	subscription := Subscription{
 		Name:           "orders",
 		Filter:         EventFilter{EventTypePatterns: []string{"order.*"}},
@@ -36,7 +40,7 @@ func TestRegionalBusClientRoutesCompleteMutationAndReadContracts(t *testing.T) {
 	if _, err = client.Publish(ctx, bus, 0, "publish-1", event); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = client.AcquireDeliveries(ctx, bus, 0, "acquire-1", RegionalBusAcquireOptions{Subscription: "orders", Dispatcher: "worker-a", DispatcherEpoch: 7, MaxDeliveries: 10}); err != nil {
+	if _, err = client.AcquireDeliveries(ctx, bus, 0, "acquire-1", RegionalBusAcquireOptions{Subscription: "orders", Dispatcher: "worker-a", DispatcherEpoch: 7, MaxDeliveries: 10, Wait: 5 * time.Second}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = client.AcknowledgeDelivery(ctx, bus, 0, "ack-1", "delivery-1", "worker-a", 7, "lease-1"); err != nil {
@@ -48,7 +52,16 @@ func TestRegionalBusClientRoutesCompleteMutationAndReadContracts(t *testing.T) {
 	if _, err = client.RejectDelivery(ctx, bus, 0, "reject-1", "delivery-3", "worker-a", 7, "lease-3", "http status 400"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err = client.RedriveDelivery(ctx, bus, 0, "redrive-1", "delivery-3"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = client.MaintainDeliveries(ctx, bus, 0, "maintain-1", 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.MaintainArchive(ctx, bus, 0, "archive-retention-1", 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.ApplyIntegration(ctx, bus, 0, "schema-1", Document{"kind": "register_schema", "registration": Document{"name": "orders"}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = client.RemoveSubscription(ctx, bus, 0, "remove-1", "orders"); err != nil {
@@ -67,16 +80,19 @@ func TestRegionalBusClientRoutesCompleteMutationAndReadContracts(t *testing.T) {
 	if _, err = client.Status(ctx, bus, 0); err != nil {
 		t.Fatal(err)
 	}
+	if _, err = client.IntegrationState(ctx, bus, 0); err != nil {
+		t.Fatal(err)
+	}
 
 	base := "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/buses/events%2Feu/shards/0"
 	var operations []Request
 	for index := 1; index < len(leader.requests); index += 2 {
 		operations = append(operations, leader.requests[index])
 	}
-	if len(operations) != 12 {
-		t.Fatalf("expected 12 operations, got %d", len(operations))
+	if len(operations) != 16 {
+		t.Fatalf("expected 16 operations, got %d", len(operations))
 	}
-	if operations[0].Path != base+"/mutations" || operations[8].Path != base+"/mutations/12" {
+	if operations[0].Path != base+"/mutations" || operations[11].Path != base+"/mutations/12" {
 		t.Fatalf("unexpected Bus paths: %#v", operations)
 	}
 	var upsert map[string]any
@@ -95,6 +111,21 @@ func TestRegionalBusClientRoutesCompleteMutationAndReadContracts(t *testing.T) {
 	if target["signing_key_id"] != "primary" {
 		t.Fatalf("signed target was not serialized: %#v", target)
 	}
+	deliveryPolicy := operation["subscription"].(map[string]any)["delivery_policy"].(map[string]any)
+	if deliveryPolicy["dead_letter_retention_ms"] != float64(retentionMS) || deliveryPolicy["rate_limit"].(map[string]any)["burst"] != float64(50) {
+		t.Fatalf("delivery controls were not serialized: %#v", deliveryPolicy)
+	}
+	var acquire map[string]any
+	payload, err = json.Marshal(operations[2].Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal(payload, &acquire); err != nil {
+		t.Fatal(err)
+	}
+	if acquire["operation"].(map[string]any)["wait_ms"] != float64(5_000) {
+		t.Fatalf("long-poll wait was not serialized: %#v", acquire)
+	}
 	var rejection map[string]any
 	payload, err = json.Marshal(operations[5].Body)
 	if err != nil {
@@ -106,10 +137,43 @@ func TestRegionalBusClientRoutesCompleteMutationAndReadContracts(t *testing.T) {
 	if rejection["operation"].(map[string]any)["kind"] != "reject_delivery" {
 		t.Fatalf("unexpected rejection operation: %#v", rejection)
 	}
-	if operations[9].Path != base+"/archive/replay" || operations[10].Path != base+"/deliveries/query" {
-		t.Fatalf("unexpected Bus read paths: %#v", operations[9:])
+	var redrive map[string]any
+	payload, err = json.Marshal(operations[6].Body)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, request := range operations[8:] {
+	if err = json.Unmarshal(payload, &redrive); err != nil {
+		t.Fatal(err)
+	}
+	if redrive["operation"].(map[string]any)["kind"] != "redrive_delivery" {
+		t.Fatalf("unexpected redrive operation: %#v", redrive)
+	}
+	var integration map[string]any
+	payload, err = json.Marshal(operations[9].Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal(payload, &integration); err != nil {
+		t.Fatal(err)
+	}
+	if integration["operation"].(map[string]any)["kind"] != "apply_integration" {
+		t.Fatalf("unexpected integration operation: %#v", integration)
+	}
+	var archiveMaintenance map[string]any
+	payload, err = json.Marshal(operations[8].Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal(payload, &archiveMaintenance); err != nil {
+		t.Fatal(err)
+	}
+	if archiveMaintenance["operation"].(map[string]any)["kind"] != "maintain_archive" {
+		t.Fatalf("unexpected archive maintenance operation: %#v", archiveMaintenance)
+	}
+	if operations[12].Path != base+"/archive/replay" || operations[13].Path != base+"/deliveries/query" || operations[15].Path != base+"/integration/state" {
+		t.Fatalf("unexpected Bus read paths: %#v", operations[12:])
+	}
+	for _, request := range operations[11:] {
 		if request.Headers[regionalReadHeader] != "linearizable" {
 			t.Fatalf("read %q was not linearizable", request.Path)
 		}
@@ -131,6 +195,9 @@ func TestRegionalBusClientRejectsInvalidBoundsBeforeNetwork(t *testing.T) {
 	if _, err = client.AcquireDeliveries(ctx, "events", 0, "acquire", RegionalBusAcquireOptions{Subscription: "orders", Dispatcher: "worker", DispatcherEpoch: 1, MaxDeliveries: 0}); err == nil {
 		t.Fatal("zero acquire bound should fail")
 	}
+	if _, err = client.AcquireDeliveries(ctx, "events", 0, "acquire-wait", RegionalBusAcquireOptions{Subscription: "orders", Dispatcher: "worker", DispatcherEpoch: 1, MaxDeliveries: 1, Wait: 30*time.Second + time.Millisecond}); err == nil {
+		t.Fatal("oversized long poll should fail")
+	}
 	if _, err = client.ReplayArchive(ctx, "events", 0, RegionalBusReplayOptions{FromMS: 10, ToMS: 1, Limit: 1}); err == nil {
 		t.Fatal("reversed replay range should fail")
 	}
@@ -139,11 +206,30 @@ func TestRegionalBusClientRejectsInvalidBoundsBeforeNetwork(t *testing.T) {
 	if _, err = client.UpsertSubscription(ctx, "events", 0, "upsert", Subscription{Name: "orders", Target: PullTarget(), DeliveryPolicy: &badPolicy}); err == nil {
 		t.Fatal("invalid delivery retry range should fail")
 	}
+	badRatePolicy := DefaultDeliveryPolicy()
+	badRatePolicy.RateLimit = &DeliveryRateLimit{}
+	if _, err = client.UpsertSubscription(ctx, "events", 0, "upsert-rate", Subscription{Name: "orders", Target: PullTarget(), DeliveryPolicy: &badRatePolicy}); err == nil {
+		t.Fatal("invalid delivery rate should fail")
+	}
+	if _, err = client.RedriveDelivery(ctx, "events", 0, "redrive", ""); err == nil {
+		t.Fatal("empty delivery ID should fail")
+	}
 	if _, err = client.UpsertSubscription(ctx, "events", 0, "upsert-signed", Subscription{Name: "orders", Target: SignedWebhookTarget("https://example.com/orders", "bad/key")}); err == nil {
 		t.Fatal("invalid signing key ID should fail")
 	}
 	if _, err = client.UpsertSubscription(ctx, "events", 0, "upsert-empty-key", Subscription{Name: "orders", Target: SignedWebhookTarget("https://example.com/orders", "")}); err == nil {
 		t.Fatal("empty signing key ID should fail")
+	}
+	if _, err = client.UpsertSubscription(ctx, "events", 0, "upsert-transform", Subscription{
+		Name: "orders", Target: PullTarget(),
+		Transform: EventTransform{Limits: &TransformLimits{MaxOperations: 64, MaxOutputBytes: 256 * 1024, MaxValueBytes: 64 * 1024, TimeoutMS: 100, NetworkAccess: true}},
+	}); err == nil {
+		t.Fatal("network-enabled deterministic transform should fail")
+	}
+	if _, err = client.UpsertSubscription(ctx, "events", 0, "upsert-auth", Subscription{
+		Name: "orders", Target: APIDestinationTarget("https://example.com/orders", DestinationAuth{Kind: "oauth2", SecretRef: "oauth", TokenURL: "file:///token"}, "binary"),
+	}); err == nil {
+		t.Fatal("non-HTTP OAuth token URL should fail")
 	}
 	if !reflect.DeepEqual(leader.requests, []Request(nil)) {
 		t.Fatalf("invalid calls reached network: %#v", leader.requests)

@@ -438,6 +438,41 @@ fn http_client_builder() -> reqwest::ClientBuilder {
         .connect_timeout(Duration::from_secs(5))
 }
 
+pub(crate) fn safe_http_target(raw: &str, allow_http_loopback: bool) -> Result<Url, String> {
+    validate_target(raw, allow_http_loopback).map_err(|error| error.to_string())
+}
+
+pub(crate) async fn safe_http_client_for_target(
+    target: &Url,
+    allow_http_loopback: bool,
+) -> Result<Client, String> {
+    let base = http_client_builder()
+        .build()
+        .map_err(|error| error.to_string())?;
+    let Some(Host::Domain(domain)) = target.host() else {
+        return Ok(base);
+    };
+    let port = target
+        .port_or_known_default()
+        .ok_or_else(|| "unsafe_target_port".to_owned())?;
+    let addresses = tokio::net::lookup_host((domain, port))
+        .await
+        .map_err(|_| "dns_resolution_failed".to_owned())?
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    validate_resolved_addresses(target, &addresses, allow_http_loopback).map_err(
+        |disposition| match disposition {
+            AttemptDisposition::Retry(reason) | AttemptDisposition::Reject(reason) => reason,
+            AttemptDisposition::Acknowledge => "unexpected_egress_disposition".into(),
+        },
+    )?;
+    http_client_builder()
+        .resolve_to_addrs(domain, &addresses)
+        .build()
+        .map_err(|_| "request_client_failed".into())
+}
+
 pub async fn run_webhook_delivery_pass(
     directory: &TabletDirectory,
     worker: &WebhookDeliveryWorker,
@@ -759,7 +794,11 @@ fn prepare_attempt(
         ),
         SubscriptionTarget::Pull
         | SubscriptionTarget::Queue { .. }
-        | SubscriptionTarget::Stream { .. } => {
+        | SubscriptionTarget::Stream { .. }
+        | SubscriptionTarget::ApiDestination { .. }
+        | SubscriptionTarget::EndpointPool { .. }
+        | SubscriptionTarget::Function { .. }
+        | SubscriptionTarget::Connector { .. } => {
             return Err(WebhookDeliveryError::State(
                 "delivery worker received a non-HTTP target".into(),
             ));

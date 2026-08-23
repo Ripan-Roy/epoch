@@ -323,7 +323,8 @@ Tablet tests add canonical command decoding, scoped proposal identity, exact
 replay, conflicting and out-of-order commit rejection, recordable capacity
 failure, atomic lexical outbox creation, term/dispatcher fencing, independent
 target failure, retry eligibility, attempt exhaustion, dead-letter state,
-bounded lease-expiry maintenance, complete business-state digests, and
+committed rate/burst, redrive/terminal retention, archive retention, long-poll
+wakeup/timeout, bounded lease-expiry maintenance, complete business-state digests, and
 three-independent-tablet convergence. Node tests add strict recursive DTOs,
 browser-safe attempt history, semantic retry/conflict, fail-stop behavior,
 committed acquire/ack, bounded delivery queries, three real HTTP runtimes, and
@@ -341,11 +342,26 @@ source/destination-scoped target identity, and internal proposal forwarding.
 The same real-process gate writes one event to Queue and a keyed multi-shard
 Stream through independently led groups, acknowledges both source records,
 and verifies one destination record after every voter reopens.
+Integration-platform tests cover schema formats/revisions/compatibility and
+payload policies; bounded transform/lookup enrichment; connector partial
+outcomes, crash-idempotent checkpoint replay and secret versions; MQTT
+session/expiry/retained/QoS/shared routing; catalog search, endpoint failover,
+and function revisions/status. Snapshot tests recompute a digest over malformed
+integration state and still require semantic restore rejection; capacity tests
+prove atomic rejection at 2 MiB and tablet mutations must remain snapshotable.
+Managed-target tests cover binary/structured CloudEvents, API-key/bearer/OAuth
+secrets, OAuth caching/response bounds, safe DNS-pinned loopback, allowlists,
+stable idempotency, endpoint failure observation, connector checkpoint-before-
+source-settlement, and status counters. Seven focused worker tests include a
+real OAuth token and target receiver. The three-process campaign delivers a
+structured managed event, converges Ack, reopens every voter, and proves full
+state convergence.
 The container gate adds follower rejection,
 majority-before-success, acquire/ack replication, leader loss, catch-up,
 archive/outbox/digest agreement, all-node `SIGKILL`, and same-volume recovery.
-Unsigned target executors, rate limiting, redrive/retention, and a
-broader crash-at-every-network-boundary matrix remain open; see
+An MQTT wire/protocol corpus, official schema/CloudEvents conformance,
+automatic source polling, unsigned legacy target execution, and a broader
+crash-at-every-network-boundary matrix remain open; see
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 The `epoch-catalog` unit suite begins at the regional multi-tablet boundary. It
@@ -359,8 +375,8 @@ after command replay.
 Node integration tests extend that state machine through dedicated catalog
 consensus, shared peer-frame group/epoch demultiplexing, bounded multi-group
 supervision, catalog-driven typed tablet materialization, and resource/shard
-routing. `regional_process` additionally launches signed-webhook and
-Epoch-target workers on every real process, retries through a real receiver,
+routing. `regional_process` additionally launches signed-webhook, Epoch-target,
+and managed-target workers on every real process, retries through real receivers,
 forwards Queue and Stream writes to their independently elected leaders, and
 proves converged acknowledgement plus duplicate-free destination state after
 all three storage directories reopen. The suites reject unknown group/epoch,
@@ -692,6 +708,9 @@ The implemented security slices currently contribute:
   mixed-answer DNS failure, per-attempt address pinning, disabled redirects and
   ambient proxies, invalid header values, lease-bounded timeout, and real
   retry/recovery; and
+- managed-target tests for strict/redacted API-key/bearer/OAuth files, token
+  response/expiry bounds, function/connector allowlists, shared SSRF controls,
+  stable idempotency, endpoint health mutation, and checkpoint ordering; and
 - console tests proving the managed credential stays session-scoped and that
   empty, whitespace-bearing, or oversized values are rejected.
 

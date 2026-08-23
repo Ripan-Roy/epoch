@@ -1119,7 +1119,11 @@ fn target_resource(
         }
         SubscriptionTarget::Pull
         | SubscriptionTarget::Webhook { .. }
-        | SubscriptionTarget::Http { .. } => {
+        | SubscriptionTarget::Http { .. }
+        | SubscriptionTarget::ApiDestination { .. }
+        | SubscriptionTarget::EndpointPool { .. }
+        | SubscriptionTarget::Function { .. }
+        | SubscriptionTarget::Connector { .. } => {
             return Err("candidate is not an Epoch Queue or Stream target".into());
         }
     };

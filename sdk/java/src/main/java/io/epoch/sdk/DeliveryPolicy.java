@@ -5,7 +5,12 @@ import java.math.BigInteger;
 import java.util.Objects;
 
 /** Timeout, concurrency, and retry bounds for one Event Bus subscription. */
-public record DeliveryPolicy(BigInteger timeoutMs, int maxInFlight, DeliveryRetryPolicy retry) {
+public record DeliveryPolicy(
+    BigInteger timeoutMs,
+    int maxInFlight,
+    DeliveryRetryPolicy retry,
+    DeliveryRateLimit rateLimit,
+    BigInteger deadLetterRetentionMs) {
   private static final BigInteger MAX_TIMEOUT_MS = BigInteger.valueOf(604_800_000);
 
   public DeliveryPolicy {
@@ -17,11 +22,23 @@ public record DeliveryPolicy(BigInteger timeoutMs, int maxInFlight, DeliveryRetr
       throw new IllegalArgumentException("delivery max in flight must be between 1 and 1000");
     }
     Objects.requireNonNull(retry, "retry");
+    if (deadLetterRetentionMs != null) {
+      RegionalClientCore.positiveU64(deadLetterRetentionMs, "dead-letter retention");
+      if (deadLetterRetentionMs.compareTo(BigInteger.valueOf(31_536_000_000L)) > 0) {
+        throw new IllegalArgumentException(
+            "dead-letter retention must not exceed 31536000000 milliseconds");
+      }
+    }
+  }
+
+  public DeliveryPolicy(BigInteger timeoutMs, int maxInFlight, DeliveryRetryPolicy retry) {
+    this(timeoutMs, maxInFlight, retry, null, null);
   }
 
   /** Returns the server defaults. */
   public static DeliveryPolicy defaults() {
-    return new DeliveryPolicy(BigInteger.valueOf(30_000), 16, DeliveryRetryPolicy.defaults());
+    return new DeliveryPolicy(
+        BigInteger.valueOf(30_000), 16, DeliveryRetryPolicy.defaults(), null, null);
   }
 
   ObjectNode toJson() {
@@ -29,6 +46,12 @@ public record DeliveryPolicy(BigInteger timeoutMs, int maxInFlight, DeliveryRetr
     value.put("timeout_ms", timeoutMs);
     value.put("max_in_flight", maxInFlight);
     value.set("retry", retry.toJson());
+    if (rateLimit != null) {
+      value.set("rate_limit", rateLimit.toJson());
+    }
+    if (deadLetterRetentionMs != null) {
+      value.put("dead_letter_retention_ms", deadLetterRetentionMs);
+    }
     return value;
   }
 }

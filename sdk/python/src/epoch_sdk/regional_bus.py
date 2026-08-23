@@ -11,6 +11,7 @@ DeliveryState = Literal["pending", "in_flight", "acknowledged", "dead_lettered"]
 _DELIVERY_STATES = frozenset({"pending", "in_flight", "acknowledged", "dead_lettered"})
 _MAX_DELIVERY_BATCH = 100
 _MAX_READ_RESULTS = 10_000
+_MAX_LONG_POLL_MS = 30_000
 _LINEARIZABLE = {"x-epoch-read-consistency": "linearizable"}
 
 
@@ -73,11 +74,15 @@ class RegionalBusClient(RegionalClient):
         dispatcher: str,
         dispatcher_epoch: int,
         max_deliveries: int,
+        wait_ms: int = 0,
     ) -> dict[str, Any]:
         _required(subscription, "subscription name")
         _required(dispatcher, "dispatcher")
         _positive(dispatcher_epoch, "dispatcher epoch")
         _delivery_batch(max_deliveries)
+        _non_negative(wait_ms, "delivery wait")
+        if wait_ms > _MAX_LONG_POLL_MS:
+            raise ValueError(f"delivery wait must not exceed {_MAX_LONG_POLL_MS} milliseconds")
         return self._mutate(
             bus,
             shard,
@@ -88,6 +93,7 @@ class RegionalBusClient(RegionalClient):
                 "dispatcher": dispatcher,
                 "dispatcher_epoch": str(dispatcher_epoch),
                 "max_deliveries": max_deliveries,
+                "wait_ms": wait_ms,
             },
         )
 
@@ -150,6 +156,22 @@ class RegionalBusClient(RegionalClient):
         operation["reason"] = reason
         return self._mutate(bus, shard, idempotency_key, operation)
 
+    def redrive_delivery(
+        self,
+        bus: str,
+        shard: int,
+        idempotency_key: str,
+        delivery_id: str,
+    ) -> dict[str, Any]:
+        """Return one dead-lettered delivery to pending with preserved history."""
+        _required(delivery_id, "delivery ID")
+        return self._mutate(
+            bus,
+            shard,
+            idempotency_key,
+            {"kind": "redrive_delivery", "delivery_id": delivery_id},
+        )
+
     def maintain_deliveries(
         self,
         bus: str,
@@ -164,6 +186,41 @@ class RegionalBusClient(RegionalClient):
             shard,
             idempotency_key,
             {"kind": "maintain_deliveries", "max_deliveries": max_deliveries},
+        )
+
+    def maintain_archive(
+        self,
+        bus: str,
+        shard: int,
+        idempotency_key: str,
+        *,
+        max_events: int = _MAX_READ_RESULTS,
+    ) -> dict[str, Any]:
+        """Apply bounded replicated archive age/count retention immediately."""
+        _read_limit(max_events)
+        return self._mutate(
+            bus,
+            shard,
+            idempotency_key,
+            {"kind": "maintain_archive", "max_events": max_events},
+        )
+
+    def apply_integration(
+        self,
+        bus: str,
+        shard: int,
+        idempotency_key: str,
+        operation: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Commit one schema, connector, MQTT, catalog, enrichment, or endpoint operation."""
+        if not isinstance(operation, dict) or not isinstance(operation.get("kind"), str):
+            raise ValueError("integration operation kind is required")
+        _required(operation["kind"], "integration operation kind")
+        return self._mutate(
+            bus,
+            shard,
+            idempotency_key,
+            {"kind": "apply_integration", "operation": dict(operation)},
         )
 
     def mutation(self, bus: str, shard: int, proposal_id: int) -> dict[str, Any]:
@@ -218,6 +275,10 @@ class RegionalBusClient(RegionalClient):
 
     def status(self, bus: str, shard: int) -> dict[str, Any]:
         return self._read(bus, shard, "GET", "/status")
+
+    def integration_state(self, bus: str, shard: int) -> dict[str, Any]:
+        """Return the complete linearizable Event Bus integration state."""
+        return self._read(bus, shard, "GET", "/integration/state")
 
     def _mutate(
         self, bus: str, shard: int, idempotency_key: str, operation: dict[str, Any]

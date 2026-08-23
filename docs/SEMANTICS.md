@@ -393,20 +393,25 @@ target returned a 2xx status, not that its business side effect occurred.
 Webhook attempts carry a stable delivery ID and an explicit attempt number.
 Receivers verify the exact body and make `(delivery ID, attempt)` durable before
 side effects. Target retry, timeout, and dead-letter policy are per
-subscription. Rate limiting is not implemented yet. Transform failure is a
-target failure with an observable reason; it must not silently drop the record.
+subscription. A replicated integer token bucket bounds committed delivery
+starts; terminal records may have bounded retention and may be redriven while
+retained. Transform/enrichment failure is a target failure with an observable
+reason; it must not silently drop the record.
 
-Archive replay creates new delivery attempts linked to the archived origin.
-Replay and redrive preview count, target, rate, duplicate exposure, and cost
-before execution.
+The current archive replay API returns retained origin records by inclusive
+receive-time/filter range; it does not create new attempts. Count/age retention
+advances only through committed leader maintenance. A future replay-to-delivery
+operation must preview count, target, rate, duplicate exposure, and cost and
+link every new attempt to its archived origin.
 
 The implemented tablet core now atomically creates one bounded delivery record
-per matched subscription. It captures target and timeout/max-in-flight/retry
+per matched subscription. It captures target and timeout/max-in-flight/retry/rate/dead-letter
 policy, assigns a stable ID, fences leases by leader term and dispatcher epoch,
 retains immutable attempts, schedules deterministic retry, and records terminal
-acknowledgement or dead-letter state. Expired leases advance only through a
-committed bounded maintenance operation. The complete ledger participates in
-EPRS replay and the v2 recovery digest, and a bounded local query exposes it.
+acknowledgement or dead-letter state. Exact redrive preserves attempt history.
+Expired leases and terminal retention advance only through committed bounded
+maintenance. The complete ledger participates in EPRS replay and the recovery
+digest, and a bounded local query exposes it.
 
 The regional runtime now executes signed HTTP/webhook records outside the state
 machine. It first commits an exact lease, waits for that proposal to apply,
@@ -435,12 +440,24 @@ transaction; a permanently unavailable bound target follows the captured Bus
 retry/dead-letter policy. An unbound target that is not yet materialized stays
 pending and is reported through worker status until it can be resolved.
 
-Unsigned HTTP/webhook execution, public pull/long-poll,
-rate limiting, redrive and terminal retention, OAuth/API-key destinations,
-private managed egress, archive retention, and replay-origin lineage remain
-required before the full durable semantics above are a product claim. See
+The managed-target worker uses the same leader/lease/settlement ordering for
+API destinations, endpoint pools, functions, and target/bidirectional
+connectors. It emits CloudEvents binary or structured JSON plus a stable
+side-effect idempotency key. API-key/OAuth references and function/connector
+API-key/bearer/OAuth secrets resolve only from a bounded node-local store.
+Public-address validation, exact allowlists, DNS pinning, no redirects/proxies,
+and lease-capped timeouts fail closed. Actual endpoint egress failure commits
+unhealthy state before failover; connector success commits the batch outcome
+and checkpoint before source acknowledgement.
+
+Bidirectional streaming push, unsigned legacy HTTP/webhook execution, an MQTT
+wire gateway, automatic source-connector polling, private managed egress,
+secret hot reload/manager integration, active endpoint health restoration,
+official schema/MQTT/CloudEvents conformance, and replay-origin lineage remain
+outside this alpha. See
 [ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md) and
-[ADR-0031](adr/0031-leader-owned-epoch-target-delivery.md).
+[ADR-0031](adr/0031-leader-owned-epoch-target-delivery.md), and
+[ADR-0037](adr/0037-event-integration-platform.md).
 
 ## 9. Pipes and cross-profile behavior
 
@@ -668,28 +685,28 @@ make the standalone Cache durable or establish placement-aware public quorum dur
 See [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
 
 The Event Bus profile mounts the same committed-command boundary for canonical
-subscription changes, publish ingress, and independent delivery state. Each
+subscription changes, publish ingress, integration registries/checkpoints, and
+independent delivery state. Each
 voter deterministically derives the captured route-plan version, transformed
 ordered delivery-plan digest, archive record, publish position, per-subscription
-outbox record, fenced attempt history, retry/dead-letter state, and chained
-digest. Startup installs the canonical native voter checkpoint when present,
+outbox record, rate bucket, fenced attempt history, retry/dead-letter/retention
+state, and chained digest. Startup installs and semantically revalidates the
+canonical native voter checkpoint when present,
 then applies only its retained EPRS tail before the internal listener is
 returned; legacy histories still replay. Archive replay and delivery-ledger
 queries are local and stale-capable. Internal dispatchers acquire under both
 leader term and
 dispatcher epoch, then commit an acknowledgement or failure; lease expiry is an
 explicit bounded maintenance command. Status reports
-`durable_target_outbox: true` and
-`target_dispatch: regional_epoch_targets_and_configured_signed_webhooks`. Thus a committed publish
+`durable_target_outbox: true` plus signed, Epoch, and managed worker counters. Thus a committed publish
 means replicated ingress and durable delivery intent, never by itself a
-webhook/Queue/Stream/HTTP side effect. See
+webhook/Queue/Stream/API/function/connector side effect. See
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 Epoch does **not** yet provide a production clustered durability contract,
 dynamic regional placement/membership, managed scheduled/encrypted backup/PITR,
 consumer-group coordination, bounded transactions, object tier, geo
-replication, native Protobuf data services, compatibility gateways, durable
-webhook delivery, connector execution, or the production security controls in
+replication, native Protobuf data services, compatibility gateways, or the production security controls in
 [SECURITY.md](SECURITY.md).
 The direct experimental Stream, Queue, Cache, and Event Bus profile routes also
 lack a read barrier, authenticated transport, multiple tablets, and bounded
@@ -702,7 +719,8 @@ retention policy operations, and shard-zero consumer-session coordination.
 They do not turn fixed-voter evidence into a production durability claim or
 atomically couple assignment with per-shard offsets. SDK subscription and
 publish calls create replicated intent; separate source-leader workers own
-signed webhook and Epoch Queue/Stream target execution. See
+signed webhook, Epoch Queue/Stream, API destination, endpoint-pool, function,
+and connector target execution. See
 [REGIONAL_STREAM_SDK.md](REGIONAL_STREAM_SDK.md),
 [REGIONAL_QUEUE_SDK.md](REGIONAL_QUEUE_SDK.md),
 [REGIONAL_CACHE_SDK.md](REGIONAL_CACHE_SDK.md),
@@ -713,11 +731,12 @@ The Cache tablet additionally lacks automatic client-side batch coalescing,
 multi-shard routing, RESP compatibility, heap-offloading flash capacity, a
 production latency/throughput SLO, and a public idempotency-retention contract; see
 [CACHE_TABLET.md](CACHE_TABLET.md).
-The direct Bus profile additionally lacks target executors. The regional
-workers execute signed HTTP/webhook and Epoch Queue/Stream targets; unsigned
-HTTP/webhook execution, rate
-limiting, redrive/terminal retention, replay-attempt lineage, public pull/push,
-private egress, and target authentication remain open; see
+The direct Bus profile intentionally lacks target executors. The regional
+workers execute signed HTTP/webhook, Epoch Queue/Stream, API destination,
+endpoint-pool, function, and target/bidirectional connector targets. Unsigned
+legacy HTTP execution, streaming push, automatic source polling,
+replay-attempt lineage, private egress, and full protocol conformance remain
+open; see
 [BUS_TABLET.md](BUS_TABLET.md).
 
 The replicated core separately supports bounded **consensus checkpoints**: a

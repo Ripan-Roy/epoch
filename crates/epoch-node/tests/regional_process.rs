@@ -56,6 +56,9 @@ impl NodeProcess {
                 "16",
                 "--regional-epoch-target-delivery-interval-ms",
                 "20",
+                "--regional-managed-target-delivery-interval-ms",
+                "20",
+                "--regional-managed-target-allow-http-loopback",
                 "--regional-webhook-signing-keys-path",
                 self.webhook_signing_keys_path
                     .to_str()
@@ -804,6 +807,174 @@ async fn capture_webhook(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CapturedManagedTarget {
+    body: Value,
+    delivery_id: String,
+    idempotency_key: String,
+    content_type: String,
+}
+
+type CapturedManagedTargets = Arc<Mutex<Vec<CapturedManagedTarget>>>;
+
+struct TestManagedTargetReceiver {
+    address: SocketAddr,
+    captured: CapturedManagedTargets,
+    shutdown: oneshot::Sender<()>,
+    server: tokio::task::JoinHandle<std::io::Result<()>>,
+}
+
+impl TestManagedTargetReceiver {
+    async fn start() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("managed-target receiver should bind");
+        let address = listener
+            .local_addr()
+            .expect("managed-target receiver address should exist");
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let receiver = Router::new()
+            .route("/orders", post(capture_managed_target))
+            .with_state(Arc::clone(&captured));
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, receiver)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+        });
+        Self {
+            address,
+            captured,
+            shutdown,
+            server,
+        }
+    }
+
+    async fn delivery(&self) -> Result<CapturedManagedTarget, tokio::time::error::Elapsed> {
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            loop {
+                if let Some(delivery) = self
+                    .captured
+                    .lock()
+                    .expect("managed-target capture lock should hold")
+                    .first()
+                    .cloned()
+                {
+                    return delivery;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+    }
+
+    async fn stop(self) {
+        let _ = self.shutdown.send(());
+        self.server
+            .await
+            .expect("managed-target receiver task should join")
+            .expect("managed-target receiver should stop cleanly");
+    }
+}
+
+async fn capture_managed_target(
+    State(captured): State<CapturedManagedTargets>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> StatusCode {
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let body = serde_json::from_slice(&body).expect("managed target should receive JSON");
+    captured
+        .lock()
+        .expect("managed-target capture lock should hold")
+        .push(CapturedManagedTarget {
+            body,
+            delivery_id: header("epoch-delivery-id"),
+            idempotency_key: header("idempotency-key"),
+            content_type: header("content-type"),
+        });
+    StatusCode::NO_CONTENT
+}
+
+async fn prove_managed_api_destination(
+    client: &Client,
+    cluster: &ProcessCluster,
+    indexes: &[usize],
+) {
+    let receiver = TestManagedTargetReceiver::start().await;
+    write_bus_mutation(
+        client,
+        cluster,
+        indexes,
+        "process-bus-upsert-api-destination-v1",
+        &json!({
+            "kind": "upsert_subscription",
+            "subscription": {
+                "name": "api-orders",
+                "filter": {"event_type_patterns": ["invoice.*"]},
+                "target": {
+                    "kind": "api_destination",
+                    "url": format!("http://{}/orders", receiver.address),
+                    "auth": {"kind": "none"},
+                    "cloud_events_mode": "structured"
+                },
+                "delivery_policy": {
+                    "timeout_ms": 1000,
+                    "max_in_flight": 1,
+                    "retry": {
+                        "strategy": "fixed",
+                        "initial_delay_ms": 0,
+                        "max_delay_ms": 0,
+                        "jitter_percent": 0,
+                        "max_attempts": 2,
+                        "max_age_ms": null
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    write_bus_mutation(
+        client,
+        cluster,
+        indexes,
+        "process-bus-publish-api-destination-v1",
+        &json!({
+            "kind": "publish",
+            "envelope": {
+                "id": "api-destination-event-1",
+                "source": "regional-process-test",
+                "type": "invoice.created",
+                "time_ms": "3",
+                "payload": {"invoice_id": 3}
+            }
+        }),
+    )
+    .await;
+    let delivery = receiver.delivery().await.unwrap_or_else(|_| {
+        panic!(
+            "managed API destination was not delivered\n{}",
+            cluster.diagnostics()
+        )
+    });
+    assert_eq!(delivery.body["specversion"], "1.0");
+    assert_eq!(delivery.body["id"], "api-destination-event-1");
+    assert_eq!(delivery.body["data"]["invoice_id"], 3);
+    assert!(!delivery.delivery_id.is_empty());
+    assert!(delivery.idempotency_key.starts_with("epoch-"));
+    assert_eq!(delivery.content_type, "application/cloudevents+json");
+    wait_for_profile_apply(client, cluster, "event-bus", "events", indexes, 18).await;
+    receiver.stop().await;
+}
+
 async fn webhook_diagnostics(client: &Client, cluster: &ProcessCluster) -> String {
     let mut output = Vec::new();
     for node in &cluster.nodes {
@@ -1088,6 +1259,76 @@ async fn wait_for_acknowledged_webhook(
     });
 }
 
+async fn wait_for_acknowledged_api_destination(
+    client: &Client,
+    cluster: &ProcessCluster,
+    indexes: &[usize],
+) {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            let mut converged = true;
+            for &index in indexes {
+                let response = client
+                    .post(data_url(
+                        &cluster.nodes[index],
+                        "event-bus",
+                        "events",
+                        "deliveries/query",
+                    ))
+                    .bearer_auth(ADMIN_TOKEN)
+                    .header("x-epoch-resource-generation", "1")
+                    .header("x-epoch-tablet-epoch", "1")
+                    .header("x-epoch-read-consistency", "local_stale")
+                    .json(&json!({
+                        "subscription": "api-orders",
+                        "state": "acknowledged",
+                        "limit": 10
+                    }))
+                    .send()
+                    .await;
+                let Ok(response) = response else {
+                    converged = false;
+                    break;
+                };
+                if response.status() != StatusCode::OK {
+                    converged = false;
+                    break;
+                }
+                let body = response
+                    .json::<Value>()
+                    .await
+                    .expect("delivery query should be JSON");
+                let Some(record) = body["records"]
+                    .as_array()
+                    .and_then(|records| (records.len() == 1).then(|| &records[0]))
+                else {
+                    converged = false;
+                    break;
+                };
+                if record["envelope"]["id"] != "api-destination-event-1"
+                    || record["state"]["kind"] != "acknowledged"
+                    || record["attempts"].as_array().map(Vec::len) != Some(1)
+                    || record["attempts"][0]["outcome"]["kind"] != "acknowledged"
+                {
+                    converged = false;
+                    break;
+                }
+            }
+            if converged {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "managed API destination acknowledgement did not converge\n{}",
+            cluster.diagnostics()
+        )
+    });
+}
+
 async fn wait_for_catalog_counts(client: &Client, cluster: &ProcessCluster, expected: u64) {
     tokio::time::timeout(TEST_TIMEOUT, async {
         loop {
@@ -1263,6 +1504,8 @@ async fn regional_processes_fail_over_reopen_and_converge() {
     prove_epoch_queue_and_stream_targets(&client, &cluster, &all).await;
     prove_signed_webhook_retry(&client, &cluster, &all).await;
     wait_for_acknowledged_webhook(&client, &cluster, &all).await;
+    prove_managed_api_destination(&client, &cluster, &all).await;
+    wait_for_acknowledged_api_destination(&client, &cluster, &all).await;
     wait_for_catalog_counts(&client, &cluster, 4).await;
 
     cluster.stop_all();
@@ -1273,7 +1516,7 @@ async fn regional_processes_fail_over_reopen_and_converge() {
     for (kind, name) in additional_profiles {
         wait_for_routes(&client, &cluster, kind, name, &all).await;
         let expected = match kind {
-            "event-bus" => 14,
+            "event-bus" => 18,
             "queue" => 2,
             _ => 1,
         };
@@ -1282,5 +1525,6 @@ async fn regional_processes_fail_over_reopen_and_converge() {
     wait_for_record_count(&client, &cluster, &all, 3).await;
     wait_for_acknowledged_epoch_targets(&client, &cluster, &all).await;
     wait_for_acknowledged_webhook(&client, &cluster, &all).await;
+    wait_for_acknowledged_api_destination(&client, &cluster, &all).await;
     wait_for_catalog_counts(&client, &cluster, 4).await;
 }

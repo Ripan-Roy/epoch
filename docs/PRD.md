@@ -99,6 +99,26 @@ This is effectively-once insertion into the pinned Epoch target incarnation,
 not an atomic cross-tablet transaction or an exactly-once external side-effect
 claim. See ADR-0031.
 
+**Event integration implementation note (23 August 2026):** The fixed-three-
+voter regional Event Bus now owns bounded replicated schema revisions and
+validation policies, declarative transforms and lookup enrichment, MQTT
+session/retained/QoS/shared-route state, connector lifecycle/checkpoints/replay
+intent, endpoint health, event-catalog metadata, and managed-function
+definitions. Delivery adds committed rate limits, dead-letter retention and
+redrive, archive retention, bounded long polling, CloudEvents binary and
+structured HTTP, API-key/bearer/OAuth client credentials, endpoint-pool
+failover, and leader-owned API/function/managed-connector target execution.
+The executor acquires an exact replicated lease before I/O and commits target
+outcome/checkpoint before source settlement; public-address validation,
+allowlists, DNS pinning, redirect/proxy suppression, bounded secret files, and
+stable side-effect idempotency keys fail closed. Go, Java, and Python expose
+the regional lifecycle, and recovery revalidates all integration semantics and
+snapshot capacity. This completes the native alpha development contract for
+`BUS-001`–`BUS-015`; it does not claim an MQTT wire gateway, official schema or
+CloudEvents conformance, automatic source-connector polling, external secret
+manager/hot reload, private-network egress, exactly-once external side effects,
+or production scale/security evidence. See ADR-0037.
+
 ---
 
 ## 0. Executive decision

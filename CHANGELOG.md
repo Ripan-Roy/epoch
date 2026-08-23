@@ -6,6 +6,35 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+## [0.1.0-alpha.9] - 2026-08-23
+
+### Added
+
+- Completed the native Event Bus development surface with committed rate/burst,
+  bounded long poll, dead-letter retention/redrive, archive count/age
+  retention, broader declarative transforms, and deterministic no-network
+  enrichment.
+- Added bounded replicated schema revisions/validation policies, MQTT session/
+  retained/QoS/shared-route state, connector lifecycle/checkpoints/replay/
+  partial errors, event catalog, endpoint health, and managed function state.
+- Added leader-owned API destination, endpoint-pool, function, and target/
+  bidirectional connector delivery with binary/structured CloudEvents,
+  API-key/bearer/OAuth external secrets, safe DNS-pinned/allowlisted egress,
+  stable idempotency, endpoint failover, and checkpoint-before-source-
+  settlement ordering.
+- Added atomic 2-MiB integration-state admission, snapshotability checks on
+  successful tablet mutations, semantic restore validation, real OAuth/target
+  and three-voter reopen tests, complete Go/Java/Python lifecycle coverage,
+  ADR-0037, end-to-end Pages documentation, traceability, and release notes.
+
+### Limitations
+
+- Event Bus remains one logical shard. MQTT wire compatibility, official
+  schema/MQTT/CloudEvents conformance, streaming push, automatic source-
+  connector polling, active health restoration, private egress, secret-manager
+  hot reload, connector OS isolation/certification, production scale/security
+  evidence, and exactly-once arbitrary external side effects remain open.
+
 ## [0.1.0-alpha.8] - 2026-08-21
 
 ### Added

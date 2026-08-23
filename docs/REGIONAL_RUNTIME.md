@@ -205,6 +205,17 @@ tablet leader submits work. Configure
 normal targets require public HTTPS. See
 [ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md).
 
+Topology always contains `managed_target_delivery`. It reports passes,
+examined tablets/leaders/subscriptions, acquired leases, delivered/retried/
+dead-lettered outcomes, endpoint failovers, connector checkpoints, errors, and
+the last pass/error. Configure
+`EPOCH_REGIONAL_MANAGED_TARGET_SECRETS_PATH` for the optional strict external
+secret file and
+`EPOCH_REGIONAL_MANAGED_TARGET_DELIVERY_INTERVAL_MS` (default 100; 1–60,000).
+`EPOCH_REGIONAL_MANAGED_TARGET_ALLOW_HTTP_LOOPBACK=true` is development-only;
+normal API/function/connector/OAuth URLs require public HTTPS. See
+[ADR-0037](adr/0037-event-integration-platform.md).
+
 ## Route and fence a data operation
 
 Discover a shard independently on each node:
@@ -350,10 +361,12 @@ The Event Bus client uses the fully qualified versioned shard route:
 
 Go, Java, and Python expose `RegionalBusClient` over the same authenticated
 discovery, fencing, linearizable-read, and one-rediscovery core. Mutations cover
-subscription upsert/removal, publish, delivery acquire/ack/fail/reject/maintenance;
-reads cover mutation lookup, archive replay, delivery query, and status.
-Subscriptions carry bounded timeout, concurrency, attempts, backoff, jitter,
-and age policy. Settlement requires the opaque lease token returned by acquire.
+subscription upsert/removal, publish, long-poll acquire, ack/fail/reject,
+redrive, delivery/archive maintenance, and strict integration operations;
+reads cover mutation lookup, archive replay, delivery query, integration state,
+and status. Subscriptions carry bounded timeout, concurrency, attempts,
+backoff, jitter, age, committed rate/burst, and dead-letter retention policy.
+Settlement requires the opaque lease token returned by acquire.
 
 Queue and Stream subscription targets are executed automatically. The source
 leader commits a lease that pins the exact target generation/shard/tablet/epoch,
@@ -377,6 +390,16 @@ acknowledged, and reopens every voter without a duplicate destination record.
 The broader container campaign also kills
 the Event Bus leader before running the Python pull lifecycle. Neither proof
 claims exactly-once business effects.
+
+API destination, endpoint-pool, function, and target/bidirectional connector
+records use the managed worker. It follows the same exact lease-before-I/O and
+settlement ordering, supports binary/structured CloudEvents plus API-key/OAuth
+references, commits endpoint failure observations, and commits connector batch
+checkpoint before source acknowledgement. The regional state also includes
+schemas/policies, deterministic enrichment, MQTT session/retained/QoS state,
+catalog entries, endpoint health, function resources, and connector lifecycle.
+The complete three-language surface and secret-file contract are in
+[Regional Event Bus SDK](REGIONAL_EVENT_BUS_SDK.md).
 
 Regional reads are linearizable by default and therefore must target the
 current leader. Epoch submits a safe Raft `ReadIndex`, waits for majority
@@ -498,8 +521,10 @@ same-volume reopen. See [Resource Governance](RESOURCE_GOVERNANCE.md).
   batches, retention
   configure/maintain/observe, generation-pinned key routing, and coordinated
   session membership/assignment. They remain repository-local alpha source;
-  Event Bus targets and exact-body signature verification are aligned across
-  all three languages. Package publication, generated models, transactional assignment/offset
+  Event Bus rate/retention/redrive, managed targets/auth/CloudEvents models,
+  integration operations, and exact-body signature verification are aligned
+  across all three languages. Package publication, fully generated response and
+  integration-operation models, transactional assignment/offset
   handoff, safe remapping, and production transport remain open.
 - The BFF reports policy-protected configured-endpoint region/zone/class and
   group-capacity evidence. Plain HTTP still lacks Rust server identity.

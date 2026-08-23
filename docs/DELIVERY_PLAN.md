@@ -386,17 +386,19 @@ open under separate requirements. See
 [Experimental Replicated Cache Tablet](CACHE_TABLET.md).
 
 The Event Bus application work now runs behind the same actor-owned persistent
-boundary. Strict internal routes cover subscription mutation, publish ingress,
-fenced delivery acquisition and settlement, bounded timeout maintenance,
-mutation lookup, status, delivery-ledger observation, and filtered archive
-replay. Every match atomically creates a stable per-subscription outbox record
-with captured timeout/max-in-flight/retry policy and immutable attempt history.
+boundary. Strict internal routes cover subscription/integration mutation,
+publish ingress, long-poll fenced delivery acquisition and settlement,
+redrive, bounded delivery/archive maintenance, mutation/status/integration
+observation, delivery-ledger query, and filtered archive replay. Every match
+atomically creates a stable per-subscription outbox record with captured
+timeout/max-in-flight/retry/rate/dead-letter policy and immutable attempt history.
 Real-runtime and container gates prove majority-before-success, target-isolated
 retry/DLQ state, semantic retry/conflict, follower rejection, leader
 replacement, catch-up, digest/archive/outbox convergence, and all-node EPRS
 recovery. A fully qualified authenticated regional Event Bus v1 route maps to
 that same tablet. Repository-local Go, Java, and Python clients cover
-subscription policy/removal, publish, acquire/ack/fail/reject/maintenance, mutation
+subscription policy/removal, publish, acquire/ack/fail/reject/redrive,
+delivery/archive maintenance, strict integration operations/state, mutation
 lookup, archive replay, delivery query, and status with exact same-key retry and
 linearizable observations. Contract tests, exact compiled Pages examples, and
 a real Python lifecycle after Event Bus leader loss automatically time out an
@@ -420,15 +422,33 @@ and keyed multi-shard Stream whose groups have independent leaders, then reopens
 all voters without adding another destination record. The pair of commits is
 not advertised as one cross-tablet transaction.
 
-This advances BUS-001, BUS-003–BUS-006, BUS-011, and DX-001/DX-002. Unsigned
-target executors, broad CloudEvents conformance, rate limiting,
-redrive/retention, OAuth/API-key destinations, private managed egress, generated
-models, package publication, backups/PITR, and production placement remain
-open. See
+The same tablet now replicates schema revisions/validation policies,
+deterministic transform/enrichment state, MQTT sessions/retained/QoS/shared
+routes, connector lifecycle/checkpoints/replay/partial errors, endpoint health,
+event-catalog lineage, and function resources. Integration mutations are
+atomically bounded to 2 MiB; every successful tablet transition must remain
+snapshot-encodable and restore revalidates semantics in addition to canonical
+bytes and digests.
+
+A managed source-leader worker executes API destinations, endpoint pools,
+functions, and target/bidirectional connectors. Exact lease-before-I/O,
+binary/structured CloudEvents, API-key/bearer/OAuth external secrets,
+public-address DNS pinning, allowlists, no redirects/proxies, stable
+idempotency, endpoint failure observation, and connector checkpoint-before-
+source-settlement ordering pass focused and real-target tests.
+
+This completes the native alpha development surface for BUS-001–BUS-015 and
+DX-001/DX-002. An MQTT wire gateway, official schema/MQTT/CloudEvents
+conformance, unsigned legacy HTTP execution, streaming push, automatic source-
+connector polling, active health restoration, private managed egress, secret
+manager/hot reload, fully typed/generated integration response models, package
+publication, backups/PITR, and production placement/security/scale evidence
+remain open. See
 [Regional Event Bus SDK](REGIONAL_EVENT_BUS_SDK.md),
 [ADR-0020](adr/0020-regional-event-bus-v1-and-sdk-routing.md), and
 [ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md),
 [ADR-0031](adr/0031-leader-owned-epoch-target-delivery.md), and
+[ADR-0037](adr/0037-event-integration-platform.md), and
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 ADR-0027 unifies those profile timers in the regional node. State machines

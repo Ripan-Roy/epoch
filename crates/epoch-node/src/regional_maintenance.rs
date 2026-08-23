@@ -21,6 +21,7 @@ pub enum RegionalMaintenanceOperation {
     QueueTimers,
     CacheExpiry,
     BusDeliveryLease,
+    BusArchiveRetention,
 }
 
 impl RegionalMaintenanceOperation {
@@ -32,6 +33,7 @@ impl RegionalMaintenanceOperation {
             Self::QueueTimers => "queue_timers",
             Self::CacheExpiry => "cache_expiry",
             Self::BusDeliveryLease => "bus_delivery_lease",
+            Self::BusArchiveRetention => "bus_archive_retention",
         }
     }
 }
