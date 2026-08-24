@@ -2148,9 +2148,9 @@ export function ReferenceBody() {
           />
           <ReferenceCard
             eyebrow="Release"
-            title="v0.2.0-beta.4 release notes"
-            description="Compiler-backed schemas, typed SDK validation, compatibility guidance, and explicit beta limitations."
-            href={`${repositoryDocsUrl}/releases/v0.2.0-beta.4.md`}
+            title="v0.2.0-beta.5 release notes"
+            description="Bounded Redis, Kafka, and RabbitMQ gateways, exact released-client evidence, migration guidance, and explicit beta limitations."
+            href={`${repositoryDocsUrl}/releases/v0.2.0-beta.5.md`}
           />
         </div>
       </Topic>

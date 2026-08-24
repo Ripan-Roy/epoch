@@ -6,6 +6,46 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+## [0.2.0-beta.5] - 2026-08-24
+
+### Added
+
+- Added the separate `epoch-compat` Rust gateway with bounded RESP2/RESP3,
+  Kafka broker-protocol, and AMQP 0-9-1 listeners over one authenticated,
+  generation/tablet/term-fenced native semantic adapter.
+- Added a documented Redis strings/counters/TTL subset, Kafka producer/manual
+  consumer/metadata/checkpoint subset with gzip, Snappy, LZ4, and Zstandard,
+  and RabbitMQ direct publish/confirm/push-or-pull consume/settlement subset.
+- Added exact wire conformance for Redis CLI 8.8.2, Apache Kafka Java client
+  4.3.1, and RabbitMQ Java client 5.34.0, plus parser/semantic/native-adapter
+  tests and a dedicated protected CI job.
+- Added `epoch-compat scan` with the versioned
+  `epoch.compatibility-scan/v1` report, conservative support levels, source-line
+  retention, and CI failure thresholds.
+- Added the fifth exact-tag, non-root amd64/arm64 OCI component with PR SBOM
+  inspection and tag-only provenance, per-platform SBOM, and signing coverage.
+- Added ADR-0042, the exact public support matrix, runnable client examples,
+  migration/security/retry guidance, and a visible documentation-site page.
+
+### Security and correctness
+
+- Kafka record counts are checked before allocation and all supported
+  compression codecs share a cumulative 4 MiB expansion ceiling. Each Produce
+  partition is translated into one canonical atomic native Stream batch.
+- Runtime backend and AMQP secrets have no embedded defaults and are redacted
+  from configuration debug output. Backend URLs reject credentials and path
+  ambiguity, native HTTP bodies stream under a hard limit, and unsupported AMQP
+  exchange semantics fail closed.
+
+### Limitations
+
+- Redis structures, transactions/scripts, Pub/Sub, Streams, and clustering;
+  Kafka group membership, idempotence/transactions/admin/SASL; and broader AMQP
+  routing, transactions, AMQP 1.0, and TLS termination remain unsupported.
+- Combined exact-client conformance against a faulted real regional cluster,
+  differential/fuzz suites, MQTT, comparative performance, and production SLO
+  evidence remain beta promotion gates.
+
 ## [0.2.0-beta.4] - 2026-08-24
 
 ### Added

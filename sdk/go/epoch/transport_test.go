@@ -171,7 +171,7 @@ func TestHTTPTransportSendsJSONAndDecodesSuccess(t *testing.T) {
 		if request.URL.Query().Get("partition") != "1" {
 			t.Errorf("unexpected query: %s", request.URL.RawQuery)
 		}
-		if request.Header.Get("User-Agent") != "epoch-go/0.2.0-beta.4" {
+		if request.Header.Get("User-Agent") != "epoch-go/0.2.0-beta.5" {
 			t.Errorf("unexpected user agent: %s", request.Header.Get("User-Agent"))
 		}
 		body, err := io.ReadAll(request.Body)

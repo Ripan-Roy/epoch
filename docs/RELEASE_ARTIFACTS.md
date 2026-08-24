@@ -64,7 +64,7 @@ Choose a concrete tag and resolve the manifest digest. Do not copy a digest
 from an untrusted issue, log, or chat message.
 
 ```bash
-export EPOCH_RELEASE_TAG=v0.2.0-beta.4
+export EPOCH_RELEASE_TAG=v0.2.0-beta.5
 export EPOCH_COMPONENT=node
 export EPOCH_IMAGE="ghcr.io/ripan-roy/epoch-${EPOCH_COMPONENT}"
 

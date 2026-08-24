@@ -1,8 +1,8 @@
 # Epoch Delivery Checklist
 
 **Last reviewed:** 24 August 2026
-**Current release target:** `v0.2.0-beta.4`
-**Current core target:** Alpha exit: secure transport, recovery, membership, connectors, supply chain, and operating evidence
+**Current release target:** `v0.2.0-beta.5`
+**Current core target:** Private-beta Redis, Kafka, and RabbitMQ compatibility through bounded native gateways
 
 This is the operational checklist for turning PRD scope into verified,
 releasable increments. [PRD.md](PRD.md) owns product scope,
@@ -576,19 +576,19 @@ complete.
 
 | Order | Release action | Required evidence | State for next release |
 |---:|---|---|---:|
-| 1 | Select a completed, merged milestone boundary | Compiler-backed schema registry, regional validation, three SDKs, docs, and traceability pass locally; protected merge remains | 🟡 |
-| 2 | Choose the next semantic prerelease version | `v0.2.0-beta.4` is the next feature release and does not already exist | ✅ |
-| 3 | Synchronize Rust, Go, Java, Python, TypeScript, SDK user agents, and lockfiles | `./scripts/check-release-version.sh` passes locally at `0.2.0-beta.4`; protected verification remains | 🟡 |
-| 4 | Write curated, version-controlled release notes | `docs/releases/v0.2.0-beta.4.md` names behavior, artifacts, migration, verification, compatibility, and beta limitations; merge remains | 🟡 |
+| 1 | Select a completed, merged milestone boundary | Bounded Redis/Kafka/AMQP gateways, native adapter, scanner, exact-client conformance, fifth OCI image, docs, and traceability pass locally; protected merge remains | 🟡 |
+| 2 | Choose the next semantic prerelease version | `v0.2.0-beta.5` is the next feature release and does not already exist | ✅ |
+| 3 | Synchronize Rust, Go, Java, Python, TypeScript, SDK user agents, and lockfiles | `./scripts/check-release-version.sh` passes locally at `0.2.0-beta.5`; protected verification remains | 🟡 |
+| 4 | Write curated, version-controlled release notes | `docs/releases/v0.2.0-beta.5.md` names behavior, artifacts, migration, verification, compatibility, and beta limitations; merge remains | 🟡 |
 | 5 | Pass protected `main` CI and main-only Pages | Both workflow runs green at the same commit | ⬜ |
-| 6 | Verify the live docs show the release and governance/SDK content | Public Pages bundle assertions | ⬜ |
+| 6 | Verify the live docs show the release, exact compatibility matrix, scanner, and client examples | Public Pages bundle assertions | ⬜ |
 | 7 | Create an annotated tag at the exact current `main` commit | Local and remote commit IDs match | ⬜ |
 | 8 | Pass tag/version/main provenance workflow | Release-tag workflow green | ⬜ |
-| 9 | Publish the GitHub release from the checked-in notes | GitHub prerelease targets `v0.2.0-beta.4` | ⬜ |
-| 10 | Verify downloads and package claims | Four OCI manifests and eight platform SBOM assets match the notes; package-manager publication remains deferred | ⬜ |
+| 9 | Publish the GitHub release from the checked-in notes | GitHub prerelease targets `v0.2.0-beta.5` | ⬜ |
+| 10 | Verify downloads and package claims | Five OCI manifests and ten platform SBOM assets match the notes; package-manager publication remains deferred | ⬜ |
 | 11 | Start the next `Unreleased` section | Changelog prepared for continued delivery | ✅ |
 
-After `v0.2.0-beta.4` completes this sequence, the table above intentionally
+After `v0.2.0-beta.5` completes this sequence, the table above intentionally
 resets for the next release.
 
 ## Feature delivery template
