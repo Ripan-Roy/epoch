@@ -789,7 +789,7 @@ upgrade/rollback, and abuse/load campaigns remain open.
 
 Current dependency gates include Cargo advisory/license policy, Go and Python
 vulnerability scanning, JavaScript dependency scanning, and secret scanning.
-The `v0.2.0-beta.1` workflow candidate additionally pins every action by full commit,
+The `v0.2.0-beta.2` workflow candidate additionally pins every action by full commit,
 builds and inspects four images without publishing on pull requests, generates
 four SPDX documents, and defines exact-main/tag-only multi-architecture
 publication with manifest provenance, per-platform SBOM attestations, and

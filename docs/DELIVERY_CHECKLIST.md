@@ -1,7 +1,7 @@
 # Epoch Delivery Checklist
 
 **Last reviewed:** 24 August 2026
-**Current release target:** `v0.2.0-beta.1`
+**Current release target:** `v0.2.0-beta.2`
 **Current core target:** Alpha exit: secure transport, recovery, membership, connectors, supply chain, and operating evidence
 
 This is the operational checklist for turning PRD scope into verified,
@@ -38,7 +38,7 @@ protected-branch evidence agree.
 | G7 | Data services and integrations | 🟡 | Schemas, pipes, connectors, target execution, checkpoints, transaction boundaries | Alpha.9 shipped replicated schemas/validation, transforms/enrichment, MQTT state, catalogs/endpoints, connector checkpoints/replay, and leader-owned signed/Epoch/API/function/managed-target execution. Alpha.10 added HTTP/CloudEvents source polling; the alpha-exit branch adds bounded immutable-object, PostgreSQL, MySQL, and Kafka readers behind the same durable checkpoint contract plus real MinIO/database/broker conformance locally. Private egress, official protocol conformance, live Azure/GCS identity, load/soak, broader crash certification, and protected evidence remain open. |
 | G8 | Managed operations | 🟡 | Durable Go reconciliation, operator, autoscaling, backup, metering, billing, private networking | The leader-elected operator now reconciles 3–1,024 physical nodes, independent three/five-voter placements, a durable control owner, stable storage/network identity, encrypted backup/restore, guarded upgrade, and learner-first replacement. One exact-source four-node lifecycle passes locally; protected/cloud CSI evidence, autoscaling, metering/billing, and private networking remain open. |
 | G9 | Geo | ⬜ | Replication, RPO/RTO, promotion, failback, residency, split-brain drills | Not implemented |
-| G10 | Release readiness | 🟡 | Synchronized versions, CI, Pages, notes, verified tag provenance, artifacts, security and compatibility statements | `v0.2.0-beta.1` is synchronized locally with curated notes. Four non-root images, PR SPDX evidence, exact-main/tag-only GHCR publication, manifest provenance, per-platform SBOM attestations, keyless signing, and a clean exact-source Kubernetes lifecycle are implemented. Protected execution, exact-main/published-digest proof, raw signed binaries, package-manager artifacts, and GA operating evidence remain open. |
+| G10 | Release readiness | 🟡 | Synchronized versions, CI, Pages, notes, verified tag provenance, artifacts, security and compatibility statements | `v0.2.0-beta.2` is synchronized locally with curated notes. Four non-root images, PR SPDX evidence, exact-main/tag-only GHCR publication, manifest provenance, per-platform SBOM attestations, keyless signing, and a clean exact-source Kubernetes lifecycle are implemented. Protected execution, exact-main/published-digest proof, raw signed binaries, package-manager artifacts, and GA operating evidence remain open. |
 
 ## Milestone readiness
 
@@ -550,18 +550,18 @@ complete.
 | Order | Release action | Required evidence | State for next release |
 |---:|---|---|---:|
 | 1 | Select a completed, merged milestone boundary | Traceability and changelog agree with `main` | 🟡 |
-| 2 | Choose the next semantic prerelease version | `v0.2.0-beta.1` follows the published alpha.10 and does not already exist | ✅ |
-| 3 | Synchronize Rust, Go, Java, Python, TypeScript, SDK user agents, and lockfiles | `./scripts/check-release-version.sh` passes locally at `0.2.0-beta.1`; protected verification remains | 🟡 |
-| 4 | Write curated, version-controlled release notes | `docs/releases/v0.2.0-beta.1.md` names behavior, artifacts, verification, compatibility, and beta limitations; merge remains | 🟡 |
+| 2 | Choose the next semantic prerelease version | `v0.2.0-beta.2` supersedes the incomplete immutable beta.1 tag and does not already exist | ✅ |
+| 3 | Synchronize Rust, Go, Java, Python, TypeScript, SDK user agents, and lockfiles | `./scripts/check-release-version.sh` passes locally at `0.2.0-beta.2`; protected verification remains | 🟡 |
+| 4 | Write curated, version-controlled release notes | `docs/releases/v0.2.0-beta.2.md` names behavior, artifacts, verification, compatibility, and beta limitations; merge remains | 🟡 |
 | 5 | Pass protected `main` CI and main-only Pages | Both workflow runs green at the same commit | ⬜ |
 | 6 | Verify the live docs show the release and governance/SDK content | Public Pages bundle assertions | ⬜ |
 | 7 | Create an annotated tag at the exact current `main` commit | Local and remote commit IDs match | ⬜ |
 | 8 | Pass tag/version/main provenance workflow | Release-tag workflow green | ⬜ |
-| 9 | Publish the GitHub release from the checked-in notes | GitHub prerelease targets `v0.2.0-beta.1` | ⬜ |
+| 9 | Publish the GitHub release from the checked-in notes | GitHub prerelease targets `v0.2.0-beta.2` | ⬜ |
 | 10 | Verify downloads and package claims | Four OCI manifests and eight platform SBOM assets match the notes; package-manager publication remains deferred | ⬜ |
 | 11 | Start the next `Unreleased` section | Changelog prepared for continued delivery | ✅ |
 
-After `v0.2.0-beta.1` completes this sequence, the table above intentionally
+After `v0.2.0-beta.2` completes this sequence, the table above intentionally
 resets for the next release.
 
 ## Feature delivery template

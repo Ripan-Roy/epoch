@@ -7,7 +7,7 @@ never broadens the guarantees proved by its tests.
 ## Current release class
 
 Published alpha tags through `v0.1.0-alpha.10` are source previews. The
-`v0.2.0-beta.1` workflow candidate adds four official OCI images: node, control
+`v0.2.0-beta.2` workflow candidate adds four official OCI images: node, control
 plane, operator, and management CLI. A release is not
 described as an OCI release until the exact tag workflow has published and
 verified those immutable manifests.

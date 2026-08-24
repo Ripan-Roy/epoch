@@ -52,7 +52,7 @@ Dependency gates are:
 
 The release path checks one repository version against Rust, Go, Java, Python,
 and TypeScript metadata, accepts release tags only at the current `main` commit,
-and keeps curated notes in the repository. The `v0.2.0-beta.1` candidate additionally
+and keeps curated notes in the repository. The `v0.2.0-beta.2` candidate additionally
 builds four exact-tag, non-root multi-architecture OCI images, inspects them in
 pull requests, generates per-platform SPDX SBOMs, attaches provenance, and
 keylessly signs immutable manifests. This is partial G10 evidence until the

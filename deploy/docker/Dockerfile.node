@@ -6,8 +6,14 @@ FROM rust:${RUST_VERSION}-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da4
 WORKDIR /workspace
 
 RUN apt-get update && \
-    apt-get install --yes --no-install-recommends cmake && \
+    apt-get install --yes --no-install-recommends cmake protobuf-compiler && \
     rm -rf /var/lib/apt/lists/*
+
+# raft-proto's protobuf-build fallback compiles and executes a vendored protoc.
+# Under QEMU that fallback can start without producing a parseable version,
+# causing protobuf-build to panic. Use Debian's target-native compiler on every
+# platform so code generation is deterministic for amd64 and arm64 alike.
+ENV PROTOC=/usr/bin/protoc
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
