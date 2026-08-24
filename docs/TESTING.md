@@ -789,14 +789,17 @@ upgrade/rollback, and abuse/load campaigns remain open.
 
 Current dependency gates include Cargo advisory/license policy, Go and Python
 vulnerability scanning, JavaScript dependency scanning, and secret scanning.
-The `v0.2.0-beta.2` workflow candidate additionally pins every action by full commit,
-builds and inspects four images without publishing on pull requests, generates
-four SPDX documents, and defines exact-main/tag-only multi-architecture
-publication with manifest provenance, per-platform SBOM attestations, and
-keyless signing. Local image inspection and four standalone Syft inventories
-pass, as does one clean exact-source local Kubernetes lifecycle. Protected
-pull-request/tag execution, exact-main rerun, and clean published-digest pulls
-remain alpha-exit release gates.
+The `v0.2.0-beta.3` workflow candidate additionally pins every action by full
+commit, builds and inspects four images without publishing on pull requests,
+generates four SPDX documents, and defines exact-main/tag-only
+multi-architecture publication with native per-platform runners, digest-only
+handoff, manifest provenance, per-platform SBOM attestations, and keyless
+signing. An executable contract rejects QEMU, mutable tags, missing runner
+bindings, or lost evidence gates. A disposable local registry proves that two
+BuildKit provenance/SBOM-bearing platform outputs assemble into exactly one
+amd64 and one arm64 runtime manifest. Protected pull-request/tag execution,
+exact-main rerun, and clean published-digest pulls remain alpha-exit release
+gates.
 
 ## Test organization
 

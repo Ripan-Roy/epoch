@@ -79,38 +79,37 @@ jobs:
           wait_for_workflow ci.yml CI
           wait_for_workflow pages.yml Pages
 
-  publish-images:
-    name: Publish ${{ matrix.component }} image
+  build-platform-images:
+    name: Build ${{ matrix.component.name }} image (${{ matrix.platform.arch }})
     needs: verify
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 30
     permissions:
-      attestations: write
       contents: read
-      id-token: write
       packages: write
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - component: node
-            title: Epoch node
-            entrypoint: /usr/local/bin/epoch-node
-          - component: control
-            title: Epoch control plane
-            entrypoint: /usr/local/bin/epoch-control
-          - component: operator
-            title: Epoch operator
-            entrypoint: /usr/local/bin/epoch-operator
-          - component: cli
-            title: Epoch CLI
-            entrypoint: /usr/local/bin/epoch
+        component:
+          - name: node
+          - name: control
+          - name: operator
+          - name: cli
+        platform:
+          - name: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+            machine: x86_64
+          - name: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            machine: aarch64
     steps:
       - name: Check out tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set up multi-platform emulation
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+      - name: Require the matching native runner
+        run: test "$(uname -m)" = "${{ matrix.platform.machine }}"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
@@ -126,85 +125,157 @@ jobs:
         id: metadata
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Build and publish exact-tag manifest
+      - name: Build and publish immutable platform image
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
-          file: deploy/docker/Dockerfile.${{ matrix.component }}
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ghcr.io/ripan-roy/epoch-${{ matrix.component }}:${{ github.ref_name }}
+          file: deploy/docker/Dockerfile.${{ matrix.component.name }}
+          platforms: ${{ matrix.platform.name }}
+          outputs: type=image,name=ghcr.io/ripan-roy/epoch-${{ matrix.component.name }},push-by-digest=true,name-canonical=true,push=true
           build-args: |
             EPOCH_VERSION=${{ steps.metadata.outputs.version }}
             VCS_REF=${{ github.sha }}
           provenance: mode=max
           sbom: true
+          cache-from: type=gha,scope=release-${{ matrix.component.name }}-${{ matrix.platform.arch }}
+          cache-to: type=gha,scope=release-${{ matrix.component.name }}-${{ matrix.platform.arch }},mode=max
 
-      - name: Resolve immutable platform digests
-        id: platforms
+      - name: Export immutable platform digest
         env:
-          IMAGE: ghcr.io/ripan-roy/epoch-${{ matrix.component }}
           DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ghcr.io/ripan-roy/epoch-${{ matrix.component.name }}
         run: |
-          docker buildx imagetools inspect "${IMAGE}@${DIGEST}" --raw > /tmp/manifest.json
-          amd64="$(jq -er '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest' /tmp/manifest.json)"
-          arm64="$(jq -er '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64") | .digest' /tmp/manifest.json)"
-          echo "amd64=${amd64}" >> "$GITHUB_OUTPUT"
-          echo "arm64=${arm64}" >> "$GITHUB_OUTPUT"
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "build did not return a valid sha256 digest: $DIGEST" >&2
+            exit 1
+          }
+          docker buildx imagetools inspect "${IMAGE}@${DIGEST}" >/dev/null
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload immutable platform digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: epoch-${{ matrix.component.name }}-digest-${{ matrix.platform.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-images:
+    name: Publish ${{ matrix.component.name }} manifest
+    needs: build-platform-images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          - name: node
+            title: Epoch node
+            entrypoint: /usr/local/bin/epoch-node
+          - name: control
+            title: Epoch control plane
+            entrypoint: /usr/local/bin/epoch-control
+          - name: operator
+            title: Epoch operator
+            entrypoint: /usr/local/bin/epoch-operator
+          - name: cli
+            title: Epoch CLI
+            entrypoint: /usr/local/bin/epoch
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve synchronized release metadata
+        id: metadata
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download immutable platform digests
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: epoch-${{ matrix.component.name }}-digest-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: Create exact-tag multi-platform manifest
+        id: manifest
+        env:
+          IMAGE: ghcr.io/ripan-roy/epoch-${{ matrix.component.name }}
+        run: >-
+          ./scripts/create-release-manifest.sh
+          "$IMAGE"
+          "$GITHUB_REF_NAME"
+          /tmp/digests
+          "$GITHUB_OUTPUT"
 
       - name: Inspect published amd64 runtime and OCI metadata
         env:
-          IMAGE: ghcr.io/ripan-roy/epoch-${{ matrix.component }}
-          DIGEST: ${{ steps.platforms.outputs.amd64 }}
+          IMAGE: ghcr.io/ripan-roy/epoch-${{ matrix.component.name }}
+          DIGEST: ${{ steps.manifest.outputs.amd64 }}
         run: |
           docker pull --platform linux/amd64 "${IMAGE}@${DIGEST}"
           ./scripts/inspect-oci-image.sh \
             "${IMAGE}@${DIGEST}" \
             "${{ steps.metadata.outputs.version }}" \
             "$GITHUB_SHA" \
-            "${{ matrix.entrypoint }}" \
-            "${{ matrix.title }}"
+            "${{ matrix.component.entrypoint }}" \
+            "${{ matrix.component.title }}"
 
       - name: Generate amd64 SPDX SBOM from published digest
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
-          image: ghcr.io/ripan-roy/epoch-${{ matrix.component }}@${{ steps.platforms.outputs.amd64 }}
+          image: ghcr.io/ripan-roy/epoch-${{ matrix.component.name }}@${{ steps.manifest.outputs.amd64 }}
           format: spdx-json
-          output-file: epoch-${{ matrix.component }}-${{ github.ref_name }}-linux-amd64.spdx.json
+          output-file: epoch-${{ matrix.component.name }}-${{ github.ref_name }}-linux-amd64.spdx.json
           upload-artifact: false
           upload-release-assets: false
 
       - name: Generate arm64 SPDX SBOM from published digest
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
-          image: ghcr.io/ripan-roy/epoch-${{ matrix.component }}@${{ steps.platforms.outputs.arm64 }}
+          image: ghcr.io/ripan-roy/epoch-${{ matrix.component.name }}@${{ steps.manifest.outputs.arm64 }}
           format: spdx-json
-          output-file: epoch-${{ matrix.component }}-${{ github.ref_name }}-linux-arm64.spdx.json
+          output-file: epoch-${{ matrix.component.name }}-${{ github.ref_name }}-linux-arm64.spdx.json
           upload-artifact: false
           upload-release-assets: false
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
-          subject-name: ghcr.io/ripan-roy/epoch-${{ matrix.component }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-name: ghcr.io/ripan-roy/epoch-${{ matrix.component.name }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
           push-to-registry: true
 
       - name: Attest amd64 SPDX SBOM
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-name: ghcr.io/ripan-roy/epoch-${{ matrix.component }}
-          subject-digest: ${{ steps.platforms.outputs.amd64 }}
-          sbom-path: epoch-${{ matrix.component }}-${{ github.ref_name }}-linux-amd64.spdx.json
+          subject-name: ghcr.io/ripan-roy/epoch-${{ matrix.component.name }}
+          subject-digest: ${{ steps.manifest.outputs.amd64 }}
+          sbom-path: epoch-${{ matrix.component.name }}-${{ github.ref_name }}-linux-amd64.spdx.json
           push-to-registry: true
 
       - name: Attest arm64 SPDX SBOM
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-name: ghcr.io/ripan-roy/epoch-${{ matrix.component }}
-          subject-digest: ${{ steps.platforms.outputs.arm64 }}
-          sbom-path: epoch-${{ matrix.component }}-${{ github.ref_name }}-linux-arm64.spdx.json
+          subject-name: ghcr.io/ripan-roy/epoch-${{ matrix.component.name }}
+          subject-digest: ${{ steps.manifest.outputs.arm64 }}
+          sbom-path: epoch-${{ matrix.component.name }}-${{ github.ref_name }}-linux-arm64.spdx.json
           push-to-registry: true
 
       - name: Install pinned Cosign
@@ -214,8 +285,8 @@ jobs:
 
       - name: Sign and verify the immutable digest
         env:
-          IMAGE: ghcr.io/ripan-roy/epoch-${{ matrix.component }}
-          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ghcr.io/ripan-roy/epoch-${{ matrix.component.name }}
+          DIGEST: ${{ steps.manifest.outputs.digest }}
         run: |
           identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-tag.yml@${GITHUB_REF}"
           cosign sign --yes "${IMAGE}@${DIGEST}"
@@ -227,15 +298,15 @@ jobs:
       - name: Verify GitHub attestations
         env:
           GH_TOKEN: ${{ github.token }}
-          IMAGE: ghcr.io/ripan-roy/epoch-${{ matrix.component }}
-          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ghcr.io/ripan-roy/epoch-${{ matrix.component.name }}
+          DIGEST: ${{ steps.manifest.outputs.digest }}
         run: gh attestation verify "oci://${IMAGE}@${DIGEST}" --repo "$GITHUB_REPOSITORY"
 
       - name: Upload release SBOM
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: epoch-${{ matrix.component }}-sbom
-          path: epoch-${{ matrix.component }}-${{ github.ref_name }}-linux-*.spdx.json
+          name: epoch-${{ matrix.component.name }}-sbom
+          path: epoch-${{ matrix.component.name }}-${{ github.ref_name }}-linux-*.spdx.json
           if-no-files-found: error
           retention-days: 90
 

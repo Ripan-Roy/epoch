@@ -97,6 +97,8 @@ jobs:
         run: |
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color
           shellcheck scripts/*.sh tests/integration/*.sh
+      - name: Verify release workflow contracts
+        run: make test-release-manifest test-release-workflow
       - name: Verify synchronized release metadata
         run: ./scripts/check-release-version.sh
       - name: Check Go formatting

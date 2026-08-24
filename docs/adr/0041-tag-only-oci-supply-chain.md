@@ -33,10 +33,12 @@ insufficient evidence.
 4. Pull requests perform the same four builds and strict runtime inspection but
    never log in or push. They generate short-lived SPDX JSON evidence for every
    candidate image.
-5. The tag workflow attaches BuildKit provenance and a GitHub build-provenance
-   attestation to the manifest digest. It generates and attests a separate SPDX
-   JSON SBOM for each platform digest and retains all eight SBOMs with the
-   GitHub release.
+5. The tag workflow distributes every component/architecture pair to a matching
+   native runner, publishes untagged immutable platform results, and requires
+   exactly one amd64 and one arm64 digest before assembling the public tag. It
+   attaches BuildKit provenance and a GitHub build-provenance attestation to
+   the manifest, generates and attests a separate SPDX JSON SBOM for each
+   platform digest, and retains all eight SBOMs with the GitHub release.
 6. Each manifest digest is signed keylessly with Sigstore. Verification pins
    the exact repository workflow identity at the version tag and the GitHub
    Actions OIDC issuer. GitHub registry attestations are also verified before
@@ -51,10 +53,13 @@ requests. A tag behind or ahead of `main` fails, so release preparation must be
 merged before tagging. Each component and platform has independently reviewable
 package evidence.
 
-The first multi-architecture build may be slower because it uses emulation and
-does not share an untrusted registry cache. Base-image digest pinning improves
-input stability but does not claim bit-for-bit reproducibility: language
-registries and compiler output still require future hermetic-build evidence.
+Native amd64 and arm64 builds run concurrently and use component/architecture
+scoped GitHub Actions caches written only by the verified tag path. Immutable
+digest artifacts are the sole cross-job handoff, and manifest assembly fails
+unless both target architectures are present exactly once. Base-image digest
+pinning improves input stability but does not claim bit-for-bit
+reproducibility: language registries and compiler output still require future
+hermetic-build evidence.
 
 This decision does not publish package-manager SDKs, OS packages, Helm charts,
 or standalone binary archives. It also does not claim that an authenticated

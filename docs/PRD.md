@@ -8,16 +8,19 @@
 **Status:** Implementation-backed private beta candidate; later managed-service milestones remain open
 **Audience:** Founders, product, distributed-systems engineering, infrastructure, security, and design
 
-**Beta implementation note (24 August 2026):** The `v0.2.0-beta.2` candidate
+**Beta implementation note (24 August 2026):** The `v0.2.0-beta.3` candidate
 closes the alpha operational boundary with fail-closed TLS/mTLS, portable
 encrypted regional backup and fresh restore, durable three/five-voter
 membership and learner-first replacement, guarded Kubernetes rollout, bounded
 object/PostgreSQL/MySQL/Kafka source adapters, four signed non-root OCI images,
 a resumable signed fault harness, and one exact-source four-node Kubernetes
-backup/replacement/upgrade/restore proof. This establishes a locally tested
-native private-beta distribution. It does not complete the later compatibility,
-geo, managed-service, 30-day, package-manager, production SLO, or GA rows in
-this PRD. See ADR-0039 and the alpha-exit checklist.
+backup/replacement/upgrade/restore proof. Native amd64 and arm64 release jobs
+assemble exact-tag manifests from immutable platform digests without QEMU and
+retain manifest provenance, signatures, and per-platform SBOM attestations.
+This establishes a locally tested native private-beta distribution. It does
+not complete the later compatibility, geo, managed-service, 30-day,
+package-manager, production SLO, or GA rows in this PRD. See ADR-0039 and the
+alpha-exit checklist.
 
 **Implementation note (13 August 2026):** The fixed-three-voter regional Rust
 runtime now owns automatic maintenance for the implemented time-driven profile

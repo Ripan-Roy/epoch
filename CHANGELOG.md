@@ -6,6 +6,29 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+## [0.2.0-beta.3] - 2026-08-24
+
+### Fixed
+
+- Replaced the tag workflow's emulated two-platform image builds with eight
+  concurrent native builds: amd64 uses an x86_64 runner and arm64 uses
+  GitHub's `ubuntu-24.04-arm` runner.
+- Added digest-only platform handoff and a fail-closed manifest assembly stage,
+  retaining BuildKit provenance, exact platform resolution, per-platform SPDX
+  attestations, keyless manifest signing, and eight release SBOM assets.
+- Added architecture-scoped GitHub Actions caches and an executable release
+  workflow contract that rejects QEMU, mutable tags, missing native runners,
+  or weakened release evidence.
+
+### Release notes
+
+- `v0.2.0-beta.2` passed protected source, exact-main, Pages, Kubernetes,
+  connector, soak, and native-arm64 checks, but the tag workflow still compiled
+  the arm64 Rust node through QEMU and reached its 90-minute timeout. The
+  immutable tag was not moved and no GitHub prerelease was created. Beta.3
+  supersedes that incomplete publication attempt without changing product
+  scope.
+
 ## [0.2.0-beta.2] - 2026-08-24
 
 ### Fixed
@@ -22,9 +45,10 @@ notes explicitly list additional verified artifacts.
 
 - `v0.2.0-beta.1` passed source, exact-main, Pages, Kubernetes, connector, and
   amd64 image checks, but its tag workflow aborted while building the arm64 node
-  image. The immutable tag was not moved; beta.2 supersedes that incomplete
-  publication attempt with the same product scope and the repaired release
-  toolchain.
+  image. Beta.2 repaired that compiler selection and passed a protected native
+  arm64 image gate. Its tag publication nevertheless timed out because the
+  separate release workflow still used QEMU for arm64 Rust compilation. The
+  immutable beta.2 tag was not moved and no GitHub prerelease was created.
 
 ## [0.2.0-beta.1] - 2026-08-24
 
