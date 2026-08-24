@@ -92,7 +92,7 @@ audit: ## Reject Rust dependency advisories except the documented Raft exception
 
 test: test-unit ## Run the default local test suite.
 
-test-unit: test-retry-command test-soak-runner test-kubernetes-runner ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
+test-unit: test-retry-command test-soak-runner test-kubernetes-runner test-regional-runtime-runner ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
 	@if [ -f Cargo.toml ]; then cargo test --locked --workspace --all-targets --all-features; fi
 	@if find control operator sdk/go -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then go test -race ./...; fi
 	@if [ -d sdk/python ]; then PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests -v; fi
@@ -107,6 +107,9 @@ test-soak-runner: ## Prove soak resumption, duration gating, signatures, and tam
 
 test-kubernetes-runner: ## Prove the disposable Kubernetes campaign's fail-closed contracts.
 	@PYTHONPATH=tests/integration python3 -m unittest tests/integration/test_kubernetes_alpha_exit.py -v
+
+test-regional-runtime-runner: ## Prove regional recovery deadlines and diagnostics.
+	@PYTHONPATH=tests/integration python3 -m unittest tests/integration/test_regional_runtime.py -v
 
 test-consensus-process: ## Prove persistent three-voter behavior across real SIGKILL/reopen cycles.
 	cargo test --locked -p epoch-consensus --test multiprocess persistent_three_node_partition_and_sigkill_reopen -- --ignored --nocapture --test-threads=1

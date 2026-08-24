@@ -30,6 +30,13 @@ managed-intent replay, higher-term fencing, idempotent retry preservation, and
 automatic-checkpoint reopen. Missing, false, duplicate, or unknown-shape
 evidence fails the round.
 
+Faults are sequential, not overlapping. Docker health proves only that a
+process can serve HTTP; before the next leader is killed, the driver separately
+requires the restarted voter to match the exact applied-command count and state
+digest for the affected Raft groups. Ordinary observations retain a 30-second
+deadline. Restart catch-up has a separate bounded 90-second deadline, and a
+failure records every node's final HTTP status, applied count, and digest.
+
 ## Evidence model
 
 `tests/soak/epoch_soak.py` checkpoints `state.json` atomically after a round

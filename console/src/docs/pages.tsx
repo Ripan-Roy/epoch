@@ -1916,9 +1916,9 @@ export function ReferenceBody() {
           />
           <ReferenceCard
             eyebrow="Release"
-            title="v0.2.0-beta.1 release notes"
+            title="v0.2.0-beta.2 release notes"
             description="Alpha-exit behavior, verified OCI artifacts, compatibility guidance, and explicit beta limitations."
-            href={`${repositoryDocsUrl}/releases/v0.2.0-beta.1.md`}
+            href={`${repositoryDocsUrl}/releases/v0.2.0-beta.2.md`}
           />
         </div>
       </Topic>

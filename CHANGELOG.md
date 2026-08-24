@@ -6,6 +6,26 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+## [0.2.0-beta.2] - 2026-08-24
+
+### Fixed
+
+- Made the node image use an explicit target-native Protobuf compiler, avoiding
+  `protobuf-build`'s vendored compiler fallback under arm64 emulation.
+- Added a native `linux/arm64` node-image build and OCI inspection to protected
+  CI so both release architectures are proven before another tag is created.
+- Made the accelerated regional campaign close each restarted voter's
+  per-group recovery window before injecting the next leader fault, and report
+  every node's last applied count and digest on a bounded recovery timeout.
+
+### Release notes
+
+- `v0.2.0-beta.1` passed source, exact-main, Pages, Kubernetes, connector, and
+  amd64 image checks, but its tag workflow aborted while building the arm64 node
+  image. The immutable tag was not moved; beta.2 supersedes that incomplete
+  publication attempt with the same product scope and the repaired release
+  toolchain.
+
 ## [0.2.0-beta.1] - 2026-08-24
 
 ### Added

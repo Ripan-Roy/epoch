@@ -8,7 +8,7 @@
 **Status:** Implementation-backed private beta candidate; later managed-service milestones remain open
 **Audience:** Founders, product, distributed-systems engineering, infrastructure, security, and design
 
-**Beta implementation note (24 August 2026):** The `v0.2.0-beta.1` candidate
+**Beta implementation note (24 August 2026):** The `v0.2.0-beta.2` candidate
 closes the alpha operational boundary with fail-closed TLS/mTLS, portable
 encrypted regional backup and fresh restore, durable three/five-voter
 membership and learner-first replacement, guarded Kubernetes rollout, bounded

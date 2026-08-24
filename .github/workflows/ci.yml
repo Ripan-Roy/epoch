@@ -148,6 +148,10 @@ jobs:
         run: >-
           PYTHONPATH=tests/integration python -m unittest
           tests/integration/test_kubernetes_alpha_exit.py -v
+      - name: Run regional fault campaign contract tests
+        run: >-
+          PYTHONPATH=tests/integration python -m unittest
+          tests/integration/test_regional_runtime.py -v
       - name: Build an installable SDK wheel
         run: python -m pip wheel --no-deps --wheel-dir /tmp/epoch-python-wheel sdk/python
 
@@ -305,6 +309,34 @@ jobs:
           path: ${{ runner.temp }}/epoch-kubernetes-alpha-exit-evidence
           if-no-files-found: error
           retention-days: 30
+
+  container-arm64:
+    name: Native arm64 node image
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require a native arm64 runner
+        run: test "$(uname -m)" = aarch64
+      - name: Build the release node image natively
+        run: |
+          version="$(cat VERSION)"
+          docker build \
+            --platform linux/arm64 \
+            --file deploy/docker/Dockerfile.node \
+            --build-arg "EPOCH_VERSION=${version}" \
+            --build-arg "VCS_REF=${GITHUB_SHA}" \
+            --tag epoch/node:ci-arm64 .
+      - name: Inspect arm64 runtime and OCI metadata
+        run: |
+          test "$(docker image inspect epoch/node:ci-arm64 --format '{{.Architecture}}')" = arm64
+          version="$(cat VERSION)"
+          ./scripts/inspect-oci-image.sh \
+            epoch/node:ci-arm64 \
+            "$version" \
+            "$GITHUB_SHA" \
+            /usr/local/bin/epoch-node \
+            "Epoch node"
 
   container:
     name: Container and Compose
