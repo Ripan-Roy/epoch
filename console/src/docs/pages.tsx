@@ -167,7 +167,7 @@ export function OverviewBody() {
         </div>
       </dl>
 
-      <Note title="Private alpha access">
+      <Note title="Private beta access">
         Running these examples requires access to the repository checkout. The SDK packages are not published
         to public registries yet; the exact reviewed source remains embedded in each guide.
       </Note>
@@ -268,8 +268,8 @@ export function QuickstartBody() {
 
       <Step index={2} id="install-sdk" title="Install the SDK">
         <p>
-          The SDKs are pre-alpha and repository-local. These setup commands use the checked-in package rather
-          than implying a public registry release.
+          The SDKs are beta candidates and repository-local. These setup commands use the checked-in package
+          rather than implying a public registry release.
         </p>
         <CodeTabs
           label="SDK setup"
@@ -946,7 +946,7 @@ export function BackupRestoreBody() {
         <p>
           This is a complete semantic snapshot, not cross-tablet transactional time or log-based PITR. The
           initial managed backend is an encrypted RWX PVC. Cloud-object destinations, external KMS, automated
-          restore drills, and measured RPO/RTO remain alpha-exit work.
+          scheduled restore drills and measured RPO/RTO remain beta hardening work.
         </p>
         <div className="reference-grid">
           <ReferenceCard
@@ -1325,7 +1325,7 @@ export function RegionalQueueBody() {
       }
       boundary={
         <p>
-          Regional Queue v1 is a repository-local, single-partition alpha. Native bidirectional receive,
+          Regional Queue v1 is a repository-local, single-partition beta. Native bidirectional receive,
           automatic prefetch, timer/throughput/fairness load evidence, dynamic placement, generated response
           models, cross-Queue transactions, and public package-registry releases remain open. Read the exact
           method matrix and limits in the{" "}
@@ -1407,7 +1407,7 @@ export function RegionalCacheBody() {
       }
       boundary={
         <p>
-          Regional Cache v1 is a repository-local, fixed-topology single-shard alpha. Multi-shard routing and
+          Regional Cache v1 is a repository-local, fixed-topology single-shard beta. Multi-shard routing and
           transactions, automatic client coalescing, RESP compatibility, generated response models, dynamic
           placement, production scale/SLO evidence, CRDTs, managed backup scheduling, and package-registry
           releases remain open.
@@ -1529,7 +1529,7 @@ export function RegionalBusBody() {
             <Note title="Egress boundary">
               Production targets require public HTTPS. DNS answers are validated and pinned, redirects and
               ambient proxies are disabled, and function/connector hosts must match their replicated
-              allowlist. Private egress and secret hot reload are not part of this alpha.
+              allowlist. Private egress and secret hot reload are not part of this beta.
             </Note>
           </Topic>
           <Topic id="integrations" title="Commit and inspect integration state">
@@ -1595,12 +1595,12 @@ export function RegionalBusBody() {
       }
       boundary={
         <p>
-          Regional Event Bus v1 is a repository-local, single-shard alpha. Built-in execution covers Epoch
-          Queue/Stream, signed HTTP/webhook, API destination, endpoint-pool, function, and
-          target/bidirectional connector targets. An MQTT wire gateway, official schema/MQTT/CloudEvents
-          conformance, unsigned legacy HTTP execution, streaming push, source-connector polling, private
-          managed egress, secret hot reload, cross-shard ordering, fully typed integration/response models,
-          and public package releases remain open.
+          Regional Event Bus v1 is a repository-local, single-shard beta. Built-in execution covers Epoch
+          Queue/Stream, signed HTTP/webhook, API destination, endpoint-pool, function, target/bidirectional
+          connector targets, and checkpoint-coupled object, PostgreSQL, MySQL, and Kafka sources. An MQTT wire
+          gateway, official schema/MQTT/CloudEvents conformance, unsigned legacy HTTP execution, streaming
+          push, private managed egress, secret hot reload, cross-shard ordering, fully typed
+          integration/response models, and public package releases remain open.
         </p>
       }
     />
@@ -1681,7 +1681,7 @@ export function ReferenceBody() {
           <ReferenceCard
             eyebrow="Surface"
             title="API contracts"
-            description="Routes, envelopes, errors, pagination, health, and the implemented alpha slice."
+            description="Routes, envelopes, errors, pagination, health, and the implemented beta slice."
             href={`${repositoryDocsUrl}/API_CONTRACTS.md`}
           />
           <ReferenceCard
@@ -1851,7 +1851,7 @@ export function ReferenceBody() {
           <ReferenceCard
             eyebrow="Queue design"
             title="Regional Queue routing decision"
-            description="Native v1 route shape, shared discovery and retry contract, lease-token handling, authorization, recovery evidence, and explicit alpha boundaries."
+            description="Native v1 route shape, shared discovery and retry contract, lease-token handling, authorization, recovery evidence, and explicit beta boundaries."
             href={`${repositoryDocsUrl}/adr/0018-regional-queue-v1-and-sdk-routing.md`}
           />
           <ReferenceCard
@@ -1863,7 +1863,7 @@ export function ReferenceBody() {
           <ReferenceCard
             eyebrow="Cache design"
             title="Regional Cache routing decision"
-            description="Native v1 route shape, strict values and mutations, CAS/transaction/expiry/lock semantics, shared retry contract, and alpha boundaries."
+            description="Native v1 route shape, strict values and mutations, CAS/transaction/expiry/lock semantics, shared retry contract, and beta boundaries."
             href={`${repositoryDocsUrl}/adr/0019-regional-cache-v1-and-sdk-routing.md`}
           />
           <ReferenceCard

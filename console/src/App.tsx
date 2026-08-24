@@ -76,7 +76,7 @@ function DocumentationApp() {
   }, []);
 
   useEffect(() => {
-    document.title = "Epoch Docs · Alpha";
+    document.title = "Epoch Docs · Beta";
   }, []);
 
   return (
@@ -171,7 +171,7 @@ function EpochApp() {
   }, []);
 
   useEffect(() => {
-    document.title = route.page === "docs" ? "Epoch Docs · Alpha" : "Epoch Console · Alpha";
+    document.title = route.page === "docs" ? "Epoch Docs · Beta" : "Epoch Console · Beta";
   }, [route.page]);
 
   useEffect(() => {
@@ -272,12 +272,12 @@ function EpochApp() {
       ) : (
         <main id="main-content" tabIndex={-1}>
           <div className="shell" id="top">
-            <aside className="alpha-banner" aria-label="Alpha limitations">
+            <aside className="release-banner" aria-label="Beta limitations">
               <strong>Evidence before promises.</strong>
               <span>
                 Local resources and managed regional placement are reported separately. The Go control plane
                 reports only Rust routes and configured topology it actually observed; physical failure-domain
-                identity and dynamic membership remain explicit non-claims.
+                identity and automatic topology rebalancing remain explicit non-claims.
               </span>
             </aside>
 
@@ -602,7 +602,7 @@ function EpochApp() {
                   <h2 id="create-title">Choose behavior, not a vendor analogy</h2>
                 </div>
                 <p>
-                  These alpha forms target the standalone node API; regional desired state uses RegionalAdmin.
+                  These beta forms target the standalone node API; regional desired state uses RegionalAdmin.
                 </p>
               </div>
               <div className="profile-grid">
