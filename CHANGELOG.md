@@ -14,6 +14,9 @@ notes explicitly list additional verified artifacts.
   `protobuf-build`'s vendored compiler fallback under arm64 emulation.
 - Added a native `linux/arm64` node-image build and OCI inspection to protected
   CI so both release architectures are proven before another tag is created.
+- Made the accelerated regional campaign close each restarted voter's
+  per-group recovery window before injecting the next leader fault, and report
+  every node's last applied count and digest on a bounded recovery timeout.
 
 ### Release notes
 

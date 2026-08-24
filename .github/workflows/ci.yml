@@ -148,6 +148,10 @@ jobs:
         run: >-
           PYTHONPATH=tests/integration python -m unittest
           tests/integration/test_kubernetes_alpha_exit.py -v
+      - name: Run regional fault campaign contract tests
+        run: >-
+          PYTHONPATH=tests/integration python -m unittest
+          tests/integration/test_regional_runtime.py -v
       - name: Build an installable SDK wheel
         run: python -m pip wheel --no-deps --wheel-dir /tmp/epoch-python-wheel sdk/python
 

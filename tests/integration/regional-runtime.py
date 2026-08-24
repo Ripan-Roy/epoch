@@ -31,6 +31,7 @@ LOCAL_STALE_FENCE_HEADERS = {
     "x-epoch-read-consistency": "local_stale",
 }
 TIMEOUT_SECONDS = 30.0
+RECOVERY_TIMEOUT_SECONDS = 90.0
 ADMIN_TOKEN = "epoch-dev-admin-v1"
 CONTROL_TOKEN = "epoch-dev-control-v1"
 AUTH_POLICY_PATH = REPO_ROOT / "spec/auth/bootstrap-policy-v1.example.json"
@@ -133,8 +134,15 @@ def exact_int(value: object) -> int | None:
     return None
 
 
-def wait_until(description: str, check: Callable[[], Any]) -> Any:
-    deadline = time.monotonic() + TIMEOUT_SECONDS
+def wait_until(
+    description: str,
+    check: Callable[[], Any],
+    *,
+    timeout_seconds: float = TIMEOUT_SECONDS,
+) -> Any:
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    deadline = time.monotonic() + timeout_seconds
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         try:
@@ -1014,9 +1022,10 @@ def wait_for_profile_apply(
     expected: int,
     nodes: tuple[int, ...] = NODES,
     shard: int = 0,
+    timeout_seconds: float = TIMEOUT_SECONDS,
 ) -> str:
     def converged() -> str | None:
-        digests: list[str] = []
+        observations: dict[int, dict[str, object]] = {}
         for node in nodes:
             response = cluster.request(
                 node,
@@ -1024,19 +1033,52 @@ def wait_for_profile_apply(
                 f"{resource.route_path_for(shard)}/data/status",
                 headers=LOCAL_STALE_FENCE_HEADERS,
             )
-            if response.status != 200:
-                return None
-            if exact_int(response.document.get("applied_command_count")) != expected:
-                return None
+            applied = exact_int(response.document.get("applied_command_count"))
             digest = response.document.get("state_digest")
-            if not isinstance(digest, str):
-                return None
-            digests.append(digest)
-        return digests[0] if len(set(digests)) == 1 else None
+            observations[node] = {
+                "status": response.status,
+                "applied_command_count": applied,
+                "state_digest": digest,
+            }
+        digests = [observation["state_digest"] for observation in observations.values()]
+        if (
+            any(observation["status"] != 200 for observation in observations.values())
+            or any(
+                observation["applied_command_count"] != expected
+                for observation in observations.values()
+            )
+            or any(not isinstance(digest, str) for digest in digests)
+            or len(set(digests)) != 1
+        ):
+            raise AssertionError(
+                "last observations: "
+                + json.dumps(observations, sort_keys=True, separators=(",", ":"))
+            )
+        return str(digests[0])
 
     return wait_until(
         f"{resource.kind}/{resource.name} shard {shard} to apply {expected} commands on {nodes}",
         converged,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def wait_for_profile_recovery(
+    cluster: RegionalCluster,
+    resource: Resource,
+    expected: int,
+    nodes: tuple[int, ...] = NODES,
+    shard: int = 0,
+) -> str:
+    """Wait for a restarted voter to rejoin an exact replicated state."""
+
+    return wait_for_profile_apply(
+        cluster,
+        resource,
+        expected,
+        nodes,
+        shard,
+        timeout_seconds=RECOVERY_TIMEOUT_SECONDS,
     )
 
 
@@ -2931,9 +2973,9 @@ def run_campaign(cluster: RegionalCluster) -> dict[str, Any]:
 
     cluster.start_node(old_leader)
     wait_for_nodes(cluster)
-    wait_for_profile_apply(cluster, stream, 11)
-    wait_for_profile_apply(cluster, stream, 5, shard=1)
-    wait_for_profile_apply(cluster, stream, 4, shard=2)
+    wait_for_profile_recovery(cluster, stream, 11)
+    wait_for_profile_recovery(cluster, stream, 5, shard=1)
+    wait_for_profile_recovery(cluster, stream, 4, shard=2)
     assert_python_sdk_consumer_session(cluster, stream)
     assert_python_sdk_stream_batch(cluster, stream)
     assert_python_sdk_fenced_consumption(cluster, stream)
@@ -2954,7 +2996,13 @@ def run_campaign(cluster: RegionalCluster) -> dict[str, Any]:
     wait_for_profile_apply(cluster, queue, 12, queue_survivors)
     cluster.start_node(queue_old_leader)
     wait_for_nodes(cluster)
-    wait_for_profile_apply(cluster, queue, 12)
+    wait_for_profile_recovery(cluster, queue, 12)
+
+    # A healthy HTTP endpoint is not yet proof that every Raft group has
+    # caught up. Close the previous recovery window before faulting the next
+    # group's leader so the campaign remains a sequence of single-node faults.
+    wait_for_profile_recovery(cluster, ADVANCED_QUEUE, 1)
+    wait_for_profile_recovery(cluster, FAILED_QUEUE, 1)
 
     advanced_queue_old_leader, advanced_queue_old_term = wait_for_routes(
         cluster, ADVANCED_QUEUE
@@ -2968,6 +3016,10 @@ def run_campaign(cluster: RegionalCluster) -> dict[str, Any]:
     )
     assert advanced_queue_new_leader != advanced_queue_old_leader
     assert advanced_queue_new_term > advanced_queue_old_term
+    # The advanced Queue proof also drains and redrives the independent DLQ.
+    # Its Raft group may elect a different survivor, so prove both routes are
+    # stable before asking the SDK to execute the multi-group workflow.
+    wait_for_routes(cluster, FAILED_QUEUE, advanced_queue_survivors)
     prove_python_sdk_advanced_queue_after_failover(cluster, ADVANCED_QUEUE)
     advanced_queue_applied = wait_for_profile_convergence(
         cluster, ADVANCED_QUEUE, 20, advanced_queue_survivors
@@ -2977,10 +3029,11 @@ def run_campaign(cluster: RegionalCluster) -> dict[str, Any]:
     )
     cluster.start_node(advanced_queue_old_leader)
     wait_for_nodes(cluster)
-    wait_for_profile_apply(cluster, ADVANCED_QUEUE, advanced_queue_applied)
-    wait_for_profile_apply(cluster, FAILED_QUEUE, failed_queue_applied)
+    wait_for_profile_recovery(cluster, ADVANCED_QUEUE, advanced_queue_applied)
+    wait_for_profile_recovery(cluster, FAILED_QUEUE, failed_queue_applied)
 
     cache = next(resource for resource in RESOURCES if resource.kind == "cache")
+    wait_for_profile_recovery(cluster, cache, 1)
     cache_old_leader, cache_old_term = wait_for_routes(cluster, cache)
     cluster.stop_node(cache_old_leader)
     cache_survivors = tuple(node for node in NODES if node != cache_old_leader)
@@ -2991,9 +3044,10 @@ def run_campaign(cluster: RegionalCluster) -> dict[str, Any]:
     wait_for_profile_apply(cluster, cache, 28, cache_survivors)
     cluster.start_node(cache_old_leader)
     wait_for_nodes(cluster)
-    wait_for_profile_apply(cluster, cache, 28)
+    wait_for_profile_recovery(cluster, cache, 28)
 
     bus = next(resource for resource in RESOURCES if resource.kind == "event-bus")
+    wait_for_profile_recovery(cluster, bus, 1)
     bus_old_leader, bus_old_term = wait_for_routes(cluster, bus)
     cluster.stop_node(bus_old_leader)
     bus_survivors = tuple(node for node in NODES if node != bus_old_leader)
@@ -3004,7 +3058,7 @@ def run_campaign(cluster: RegionalCluster) -> dict[str, Any]:
     wait_for_profile_apply(cluster, bus, 8, bus_survivors)
     cluster.start_node(bus_old_leader)
     wait_for_nodes(cluster)
-    wait_for_profile_apply(cluster, bus, 8)
+    wait_for_profile_recovery(cluster, bus, 8)
 
     wait_for_automatic_checkpoints(cluster, 1 + expected_tablets, False)
 
