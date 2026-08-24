@@ -9,6 +9,16 @@ epoch_fixture_log="${EPOCH_COMPAT_LOG:-${epoch_compat_tmp}/fixture.log}"
 epoch_fixture_pid=""
 epoch_redis_image="redis@sha256:2b42a93631132be6df7a31f843b91ea8a907011e955b03395b7edbb13a20a99d"
 epoch_docker_host="${EPOCH_COMPAT_DOCKER_HOST:-host.docker.internal}"
+epoch_docker_network_args=(--add-host host.docker.internal:host-gateway)
+
+# A Linux container's host-gateway address cannot reach a process bound only to
+# host loopback. Keep the fixture private and put only the disposable Redis CLI
+# container in the host network. Docker Desktop continues to use its supported
+# host.docker.internal mapping.
+if [[ "$(uname -s)" == Linux ]]; then
+  epoch_docker_host="${EPOCH_COMPAT_DOCKER_HOST:-127.0.0.1}"
+  epoch_docker_network_args=(--network host)
+fi
 
 cleanup() {
   epoch_status=$?
@@ -65,7 +75,7 @@ PY
 
 redis_cli() {
   docker run --rm \
-    --add-host host.docker.internal:host-gateway \
+    "${epoch_docker_network_args[@]}" \
     "$epoch_redis_image" \
     redis-cli --raw --no-auth-warning \
     -h "$epoch_docker_host" \
@@ -118,7 +128,7 @@ if (( epoch_ttl <= 0 || epoch_ttl > 60000 )); then
 fi
 
 printf 'binary\0value' | docker run --rm --interactive \
-  --add-host host.docker.internal:host-gateway \
+  "${epoch_docker_network_args[@]}" \
   "$epoch_redis_image" \
   redis-cli --raw --no-auth-warning \
   -h "$epoch_docker_host" \
@@ -137,7 +147,7 @@ if actual != b"binary\x00value\n":
 PY
 
 assert_equal PONG "$(docker run --rm \
-  --add-host host.docker.internal:host-gateway \
+  "${epoch_docker_network_args[@]}" \
   "$epoch_redis_image" \
   redis-cli -3 --raw --no-auth-warning \
   -h "$epoch_docker_host" \
