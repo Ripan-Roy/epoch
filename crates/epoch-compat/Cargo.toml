@@ -1,0 +1,53 @@
+[package]
+name = "epoch-compat"
+description = "Bounded Redis, Kafka, and RabbitMQ protocol gateways for Epoch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+default-run = "epoch-compat"
+
+[[bin]]
+name = "epoch-compat"
+path = "src/main.rs"
+
+[[bin]]
+name = "epoch-compat-fixture"
+path = "src/bin/epoch-compat-fixture.rs"
+required-features = ["test-support"]
+
+[features]
+test-support = []
+
+[dependencies]
+amq-protocol.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+bytes.workspace = true
+clap.workspace = true
+epoch-core = { path = "../epoch-core" }
+flate2.workspace = true
+futures-util.workspace = true
+kafka-protocol.workspace = true
+lz4.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+snap.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "sync"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+uuid.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+epoch-tablet = { path = "../epoch-tablet" }
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,62 @@
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+
+ARG RUST_VERSION=1.97.1
+
+FROM rust:${RUST_VERSION}-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS builder
+WORKDIR /workspace
+
+RUN apt-get update && \
+    apt-get install --yes --no-install-recommends cmake protobuf-compiler && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV PROTOC=/usr/bin/protoc
+
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates ./crates
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/workspace/target \
+    cargo build --locked --release -p epoch-compat --bin epoch-compat && \
+    cp /workspace/target/release/epoch-compat /tmp/epoch-compat
+
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS runtime
+
+ARG EPOCH_VERSION=dev
+ARG VCS_REF=unknown
+ARG SOURCE_URL=https://github.com/Ripan-Roy/epoch
+
+LABEL org.opencontainers.image.title="Epoch compatibility gateway" \
+    org.opencontainers.image.description="Bounded Redis, Kafka, and RabbitMQ protocol gateways for Epoch" \
+    org.opencontainers.image.url="${SOURCE_URL}" \
+    org.opencontainers.image.source="${SOURCE_URL}" \
+    org.opencontainers.image.documentation="${SOURCE_URL}/blob/main/docs/PROTOCOL_COMPATIBILITY.md" \
+    org.opencontainers.image.revision="${VCS_REF}" \
+    org.opencontainers.image.version="${EPOCH_VERSION}" \
+    org.opencontainers.image.licenses="MIT" \
+    org.opencontainers.image.vendor="Epoch"
+
+RUN apt-get update && \
+    apt-get install --yes --no-install-recommends ca-certificates tini && \
+    rm -rf /var/lib/apt/lists/* && \
+    groupadd --system --gid 10001 epoch && \
+    useradd --system --uid 10001 --gid epoch --home-dir /var/lib/epoch epoch
+
+COPY --from=builder --chown=root:root /tmp/epoch-compat /usr/local/bin/epoch-compat
+
+USER 10001:10001
+WORKDIR /var/lib/epoch
+
+ENV EPOCH_COMPAT_ENDPOINTS=http://epoch-node:7601 \
+    EPOCH_COMPAT_REDIS_LISTEN=0.0.0.0:6379 \
+    EPOCH_COMPAT_KAFKA_LISTEN=0.0.0.0:9092 \
+    EPOCH_COMPAT_KAFKA_ADVERTISED_HOST=epoch-compat \
+    EPOCH_COMPAT_KAFKA_ADVERTISED_PORT=9092 \
+    EPOCH_COMPAT_AMQP_LISTEN=0.0.0.0:5672 \
+    EPOCH_LOG=info
+
+EXPOSE 6379 9092 5672
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD ["/usr/local/bin/epoch-compat", "--version"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/epoch-compat"]

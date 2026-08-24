@@ -276,6 +276,38 @@ jobs:
           docker compose -f deploy/compose/docker-compose.connectors.yml
           down --volumes --remove-orphans
 
+  protocol-conformance:
+    name: Redis, Kafka, and RabbitMQ client conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [rust]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Install native Rust build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends cmake libcurl4-openssl-dev
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+          cache-dependency-path: tests/compatibility/java/pom.xml
+      - name: Run exact released protocol clients
+        env:
+          EPOCH_COMPAT_LOG: /tmp/epoch-protocol-compatibility.log
+        run: bash tests/integration/protocol-compatibility.sh
+      - name: Upload protocol failure evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: protocol-compatibility
+          path: /tmp/epoch-protocol-compatibility.log
+          if-no-files-found: ignore
+          retention-days: 7
+
   kubernetes-alpha-exit:
     name: Live Kubernetes alpha-exit lifecycle
     runs-on: ubuntu-latest
@@ -357,7 +389,7 @@ jobs:
       - name: Build the exact non-publishing OCI image set
         run: |
           version="$(cat VERSION)"
-          for component in node control operator cli; do
+          for component in node control operator cli compat; do
             docker build \
               --file "deploy/docker/Dockerfile.${component}" \
               --build-arg "EPOCH_VERSION=${version}" \
@@ -371,6 +403,7 @@ jobs:
           ./scripts/inspect-oci-image.sh epoch/control:ci "$version" "$GITHUB_SHA" /usr/local/bin/epoch-control "Epoch control plane"
           ./scripts/inspect-oci-image.sh epoch/operator:ci "$version" "$GITHUB_SHA" /usr/local/bin/epoch-operator "Epoch operator"
           ./scripts/inspect-oci-image.sh epoch/cli:ci "$version" "$GITHUB_SHA" /usr/local/bin/epoch "Epoch CLI"
+          ./scripts/inspect-oci-image.sh epoch/compat:ci "$version" "$GITHUB_SHA" /usr/local/bin/epoch-compat "Epoch compatibility gateway"
       - name: Prove OCI inspection fails closed
         run: tests/integration/oci-image-inspection.sh
       - name: Generate node SPDX SBOM
@@ -403,6 +436,14 @@ jobs:
           image: epoch/cli:ci
           format: spdx-json
           output-file: /tmp/epoch-cli.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - name: Generate compatibility gateway SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: epoch/compat:ci
+          format: spdx-json
+          output-file: /tmp/epoch-compat.spdx.json
           upload-artifact: false
           upload-release-assets: false
       - name: Validate and upload PR SBOM evidence

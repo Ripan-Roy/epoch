@@ -2,14 +2,14 @@
 
 - Status: Accepted
 - Date: 2026-08-24
-- Owners: release engineering, data plane, control plane, operator
+- Owners: release engineering, data plane, control plane, operator, compatibility
 
 ## Context
 
 Epoch's source prereleases did not publish an installable, authenticated runtime
-artifact. The alpha-exit boundary requires node, control, operator, and CLI
-images without allowing a pull-request workflow, stale tag, mutable tag, or
-untrusted registry digest to become an accidental release.
+artifact. The release boundary requires node, control, operator, CLI, and
+protocol-compatibility images without allowing a pull-request workflow, stale
+tag, mutable tag, or untrusted registry digest to become an accidental release.
 
 A multi-architecture image also has two distinct integrity levels: the top-level
 manifest selected by an operator and each platform image that contains the
@@ -22,15 +22,15 @@ insufficient evidence.
    version and checked-in notes must pass, its commit must equal the current
    remote `main`, and the exact commit's main CI and Pages workflows must both
    succeed before publication proceeds.
-2. Epoch publishes exactly four GHCR repositories: `epoch-node`,
-   `epoch-control`, `epoch-operator`, and `epoch-cli`. Each release publishes
-   one exact version tag containing Linux amd64 and arm64. No `latest` tag is
-   created.
+2. Epoch publishes exactly five GHCR repositories: `epoch-node`,
+   `epoch-control`, `epoch-operator`, `epoch-cli`, and `epoch-compat`. Each
+   release publishes one exact version tag containing Linux amd64 and arm64. No
+   `latest` tag is created.
 3. Every Dockerfile pins builder and runtime bases by manifest digest, produces
    an explicit non-root runtime, and records exact version/revision/source/
    license/documentation OCI metadata. Secrets never enter image arguments,
    labels, or default environment variables.
-4. Pull requests perform the same four builds and strict runtime inspection but
+4. Pull requests perform the same five builds and strict runtime inspection but
    never log in or push. They generate short-lived SPDX JSON evidence for every
    candidate image.
 5. The tag workflow distributes every component/architecture pair to a matching
@@ -38,7 +38,7 @@ insufficient evidence.
    exactly one amd64 and one arm64 digest before assembling the public tag. It
    attaches BuildKit provenance and a GitHub build-provenance attestation to
    the manifest, generates and attests a separate SPDX JSON SBOM for each
-   platform digest, and retains all eight SBOMs with the GitHub release.
+   platform digest, and retains all ten SBOMs with the GitHub release.
 6. Each manifest digest is signed keylessly with Sigstore. Verification pins
    the exact repository workflow identity at the version tag and the GitHub
    Actions OIDC issuer. GitHub registry attestations are also verified before

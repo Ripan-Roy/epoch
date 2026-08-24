@@ -8,20 +8,22 @@
 **Status:** Implementation-backed private beta candidate; later managed-service milestones remain open
 **Audience:** Founders, product, distributed-systems engineering, infrastructure, security, and design
 
-**Beta implementation note (24 August 2026):** The `v0.2.0-beta.4` candidate
+**Beta implementation note (24 August 2026):** The `v0.2.0-beta.5` candidate
 retains the alpha-exit TLS/mTLS, encrypted recovery, durable three/five-voter
 membership, guarded Kubernetes rollout, bounded source adapters, signed
 multi-architecture OCI distribution, fault harness, and exact-source
 Kubernetes lifecycle. It adds compiler-backed Avro, JSON Schema, and
 self-contained Protobuf registration, format-derived adjacent-revision
 compatibility, producer/broker validation modes, deterministic recovery, and
-typed Go/Java/Python schema lifecycle APIs. Native amd64 and arm64 release jobs
-assemble exact-tag manifests from immutable platform digests without QEMU and
-retain manifest provenance, signatures, and per-platform SBOM attestations.
-This is a locally tested native private-beta distribution; it does not complete
-the later Redis/Kafka/AMQP compatibility, geo, managed-service, 30-day,
-package-manager, production SLO, or GA rows in this PRD. See ADR-0039,
-ADR-0037, and the delivery checklist.
+typed Go/Java/Python schema lifecycle APIs. It now also adds the bounded
+Redis/Kafka/AMQP compatibility gateway, named exact-client conformance,
+migration scanner, fifth signed non-root OCI image, and public matrix. Native
+amd64 and arm64 release jobs assemble exact-tag manifests from immutable
+platform digests without QEMU and retain manifest provenance, signatures, and
+per-platform SBOM attestations. This is a locally tested private-beta
+distribution; full protocol parity, combined regional/fault certification,
+geo, managed-service, 30-day, package-manager, production SLO, and GA rows
+remain open. See ADR-0039, ADR-0037, ADR-0042, and the delivery checklist.
 
 **Implementation note (13 August 2026):** The fixed-three-voter regional Rust
 runtime now owns automatic maintenance for the implemented time-driven profile
@@ -158,12 +160,24 @@ backup-gated serialized rollout, fresh-cluster restore, exact state digests,
 and post-restore writes across four physical nodes. The protected exact-commit
 rerun remains mandatory, and the same-binary retagged rollout does not claim
 mixed-version compatibility, RPO/RTO, or a production SLO.
-The release candidate builds four exact-tag, non-root Linux amd64/arm64 OCI
-manifests (node, control, operator, and CLI), generates per-platform SPDX SBOMs,
-attaches provenance, and signs immutable manifest digests only when the tag is
-the current `main`. It never publishes `latest`; raw signed binary archives and
-package-manager distributions remain separate PKG-005/DX-001 evidence. See
-ADR-0039, ADR-0040, and ADR-0041.
+The release candidate builds five exact-tag, non-root Linux amd64/arm64 OCI
+manifests (node, control, operator, CLI, and compatibility gateway), generates
+per-platform SPDX SBOMs, attaches provenance, and signs immutable manifest
+digests only when the tag is the current `main`. It never publishes `latest`;
+raw signed binary archives and package-manager distributions remain separate
+PKG-005/DX-001 evidence. See ADR-0039, ADR-0040, and ADR-0041.
+
+**Protocol-compatibility implementation note (24 August 2026):** A separate
+bounded Rust gateway now exposes the documented RESP2/RESP3, Kafka, and AMQP
+0-9-1 subsets through one authenticated and generation/tablet/term-fenced
+semantic adapter. Redis CLI 8.8.2, Kafka Java 4.3.1, and RabbitMQ Java 5.34.0
+pass exact wire-client flows. Kafka record counts are preflighted, compression
+expansion is capped, and each Produce partition becomes one canonical atomic
+native Stream batch. The versioned migration scanner, public matrix, Pages UI,
+CI conformance job, and fifth OCI component are included. This is partial G6
+evidence: richer commands/APIs, fuzz and differential suites, combined
+real-regional fault certification, MQTT, and performance parity remain open.
+See [ADR-0042](adr/0042-bounded-protocol-compatibility-gateways.md).
 
 The same candidate adds a resumable four-profile fault runner. Each round
 executes the real regional control/data/SDK campaign, emits a strict invariant

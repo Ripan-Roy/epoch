@@ -1688,6 +1688,220 @@ export function SdkReferenceBody() {
 }
 
 /* --------------------------------------------------------------------------
+   Protocol compatibility
+   -------------------------------------------------------------------------- */
+
+const compatibilityGatewayRun = `cargo run -p epoch-compat -- \\
+  --endpoints http://127.0.0.1:7601 \\
+  --token epoch-dev-admin-v1 \\
+  --redis-cache sessions \\
+  --redis-password local-redis-password \\
+  --kafka-advertised-host 127.0.0.1 \\
+  --amqp-username epoch \\
+  --amqp-password local-amqp-password`;
+
+const compatibilityRedisPython = `import redis
+
+client = redis.Redis(
+    host="127.0.0.1",
+    port=6379,
+    password="local-redis-password",
+    protocol=3,
+    decode_responses=False,
+)
+
+client.set(b"session:42", b"binary\\x00value", px=30_000, nx=True)
+assert client.get(b"session:42") == b"binary\\x00value"
+assert client.incrby("requests", 5) == 5`;
+
+const compatibilityKafkaJava = `var properties = new java.util.HashMap<String, Object>();
+properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "127.0.0.1:9092");
+properties.put(ConsumerConfig.GROUP_ID_CONFIG, "billing");
+properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
+properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class);
+properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class);
+
+try (var consumer = new KafkaConsumer<byte[], byte[]>(properties)) {
+  var partition = new TopicPartition("events", 0);
+  consumer.assign(java.util.List.of(partition));
+  consumer.seek(partition, 0L);
+  var records = consumer.poll(java.time.Duration.ofSeconds(1));
+  records.forEach(record -> System.out.println(record.offset()));
+  consumer.commitSync();
+}`;
+
+const compatibilityAmqpJava = `var factory = new ConnectionFactory();
+factory.setHost("127.0.0.1");
+factory.setPort(5672);
+factory.setUsername("epoch");
+factory.setPassword("local-amqp-password");
+
+try (var connection = factory.newConnection(); var channel = connection.createChannel()) {
+  channel.queueDeclare("jobs", true, false, false, java.util.Map.of());
+  channel.confirmSelect();
+  channel.basicPublish("", "jobs", null, "work".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+  channel.waitForConfirmsOrDie(5_000);
+  channel.basicQos(16);
+  channel.basicConsume("jobs", false, (tag, delivery) ->
+    channel.basicAck(delivery.getEnvelope().getDeliveryTag(), false), tag -> {});
+}`;
+
+const compatibilityScan = `# compatibility-usage.txt
+redis SET NX PX
+redis EVAL
+kafka Produce 9
+kafka JoinGroup 9
+amqp basic.publish
+amqp tx.commit
+
+# Emit epoch.compatibility-scan/v1 JSON and reject known blockers.
+cargo run -p epoch-compat -- scan \\
+  --format json \\
+  --fail-on unsupported \\
+  compatibility-usage.txt > compatibility-report.json`;
+
+export function ProtocolCompatibilityBody() {
+  return (
+    <>
+      <Note title="Partial compatibility, stated precisely">
+        The gateway does not claim full Redis, Kafka, or RabbitMQ parity. It advertises only implemented Kafka
+        APIs, bounds every parser and connection pool, and maps successful writes to native replicated Epoch
+        mutations. CI pins Redis CLI 8.8.2, Kafka Java 4.3.1, and RabbitMQ Java 5.34.0 on their supported
+        paths.
+      </Note>
+
+      <Topic id="run" title="Run the gateway">
+        <p>
+          First provision <code>sessions</code> as a Cache, <code>events</code> as a Stream, and{" "}
+          <code>jobs</code> as a Queue in <code>acme/shop/dev/core</code>. Then start all three listeners from
+          one stateless process.
+        </p>
+        <CodeBlock label="shell" value={compatibilityGatewayRun} />
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Listener</th>
+                <th scope="col">Default</th>
+                <th scope="col">Native resource</th>
+                <th scope="col">Conformance target</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row">Redis RESP2/RESP3</th>
+                <td>
+                  <code>6379</code>
+                </td>
+                <td>Configured Cache</td>
+                <td>Redis CLI 8.8.2</td>
+              </tr>
+              <tr>
+                <th scope="row">Kafka broker protocol</th>
+                <td>
+                  <code>9092</code>
+                </td>
+                <td>Topic → Stream</td>
+                <td>Apache Kafka Java 4.3.1</td>
+              </tr>
+              <tr>
+                <th scope="row">AMQP 0-9-1</th>
+                <td>
+                  <code>5672</code>
+                </td>
+                <td>Queue → Queue</td>
+                <td>RabbitMQ Java 5.34.0</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </Topic>
+
+      <Topic id="redis" title="Redis / RESP2 and RESP3">
+        <p>
+          Supported today: connection negotiation and authentication, binary-safe strings, conditional{" "}
+          <code>SET</code>, multi-get/set, deletion and existence, signed counters, TTL/PTTL, expire and
+          persist, pipelining, and client setup commands used by current SDKs.
+        </p>
+        <p>
+          Hashes, lists, sets, sorted sets, Pub/Sub, Streams, blocking calls, cluster mode, modules, Lua, and{" "}
+          <code>MULTI</code>/<code>EXEC</code> are not exposed yet. Multi-key writes are independently
+          committed.
+        </p>
+        <CodeBlock label="python · redis-py" value={compatibilityRedisPython} />
+      </Topic>
+
+      <Topic id="kafka" title="Apache Kafka producer and manual consumer">
+        <p>
+          Produce, Fetch, Metadata, ListOffsets, ApiVersions, FindCoordinator, OffsetCommit, and OffsetFetch
+          are implemented. gzip, Snappy, LZ4, and Zstd batches translate into native Stream records while
+          keys, nullable values, timestamps, and headers round-trip.
+        </p>
+        <p>
+          Each Produce partition is submitted as one canonical native batch and becomes visible atomically. It
+          must contain 1–1,000 records, remain within 4 MiB after bounded decompression, and fit the native
+          360 KiB compressed proposal boundary.
+        </p>
+        <p>
+          Manual partition assignment is the current consumer contract. Group membership/rebalancing,
+          idempotent and transactional producers, admin mutations, SASL, ACLs, auto-creation, and timestamp
+          offset lookup remain unsupported and are not advertised.
+        </p>
+        <CodeBlock label="java · KafkaConsumer" value={compatibilityKafkaJava} />
+      </Topic>
+
+      <Topic id="amqp" title="RabbitMQ / AMQP 0-9-1">
+        <p>
+          Existing Queue declaration, connection-local direct exchanges and bindings, publish, confirms, push
+          consumers, basic.get, prefetch, automatic/manual acknowledgement, nack/reject, cancellation,
+          heartbeats, and content/correlation/reply metadata are implemented.
+        </p>
+        <p>
+          AMQP 1.0, fanout/topic/header routing, server-named queues, policy arguments, mandatory returns,
+          transactions, and RabbitMQ plugins remain unsupported.
+        </p>
+        <CodeBlock label="java · RabbitMQ client" value={compatibilityAmqpJava} />
+      </Topic>
+
+      <Topic id="migration-scan" title="Scan before cutover">
+        <p>
+          Feed <code>epoch-compat scan</code> a newline-delimited feature manifest before changing client
+          endpoints. It reports supported, partial, unknown, and unsupported uses with their source lines and
+          can fail CI at the threshold your migration requires.
+        </p>
+        <CodeBlock label="text + shell" value={compatibilityScan} />
+        <p>
+          Kafka entries include an API version; Redis entries may name relevant options. The scanner is
+          conservative and read-only—it assesses a declared manifest and does not capture production traffic
+          or prove workload semantics.
+        </p>
+      </Topic>
+
+      <Topic id="security" title="Security and operating boundary">
+        <p>
+          <code>EPOCH_COMPAT_TOKEN</code> is the gateway&apos;s scoped backend identity. Redis authentication
+          is optional, AMQP uses PLAIN, and the initial Kafka listener has no SASL support. Keep listeners
+          private or terminate TLS and client identity at an ingress/proxy. Direct public exposure is not
+          supported. The backend token and AMQP password are required at startup and have no embedded
+          defaults.
+        </p>
+        <p>
+          Frames are capped at 8 MiB, message bodies and cumulative Kafka decompression at 4 MiB, logical
+          request items at 1,024, and connections at 1,024 by default. Kafka record counts are preflighted and
+          Zstandard windows are bounded. Performance parity is not claimed by this beta slice.
+        </p>
+        <p className="docs-nextstep">
+          See the{" "}
+          <a href={`${repositoryDocsUrl}/PROTOCOL_COMPATIBILITY.md`} target="_blank" rel="noreferrer">
+            complete command/API matrix and end-to-end client examples ↗
+          </a>
+        </p>
+      </Topic>
+    </>
+  );
+}
+
+/* --------------------------------------------------------------------------
    Design reference
    -------------------------------------------------------------------------- */
 
@@ -1934,9 +2148,9 @@ export function ReferenceBody() {
           />
           <ReferenceCard
             eyebrow="Release"
-            title="v0.2.0-beta.4 release notes"
-            description="Compiler-backed schemas, typed SDK validation, compatibility guidance, and explicit beta limitations."
-            href={`${repositoryDocsUrl}/releases/v0.2.0-beta.4.md`}
+            title="v0.2.0-beta.5 release notes"
+            description="Bounded Redis, Kafka, and RabbitMQ gateways, exact released-client evidence, migration guidance, and explicit beta limitations."
+            href={`${repositoryDocsUrl}/releases/v0.2.0-beta.5.md`}
           />
         </div>
       </Topic>

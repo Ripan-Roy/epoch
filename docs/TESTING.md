@@ -779,7 +779,7 @@ The implemented security slices currently contribute:
   data, stops the removed host, and reopens on the new voter set; and
 - console tests proving the managed credential stays session-scoped and that
   empty, whitespace-bearing, or oversized values are rejected; and
-- OCI candidate checks that build node/control/operator/CLI from pinned bases,
+- OCI candidate checks that build node/control/operator/CLI/compatibility from pinned bases,
   reject root users, wrong entrypoints, source/version/revision/license label
   drift, and credential-shaped defaults; a scratch-fixture regression proves
   root identity and revision drift fail closed; and local evidence generates a
@@ -794,9 +794,9 @@ upgrade/rollback, and abuse/load campaigns remain open.
 
 Current dependency gates include Cargo advisory/license policy, Go and Python
 vulnerability scanning, JavaScript dependency scanning, and secret scanning.
-The `v0.2.0-beta.3` workflow candidate additionally pins every action by full
-commit, builds and inspects four images without publishing on pull requests,
-generates four SPDX documents, and defines exact-main/tag-only
+The release workflow additionally pins every action by full commit, builds and
+inspects five images without publishing on pull requests, generates five SPDX
+documents, and defines exact-main/tag-only
 multi-architecture publication with native per-platform runners, digest-only
 handoff, manifest provenance, per-platform SBOM attestations, and keyless
 signing. An executable contract rejects QEMU, mutable tags, missing runner

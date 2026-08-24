@@ -473,10 +473,11 @@ separate SHA-256 values for x86_64 and aarch64, requires an explicit destination
 that does not already exist, verifies the extracted compiler version, and fails
 closed.
 
-The alpha-exit artifact path builds node, control, operator, and CLI images from
-digest-pinned bases with exact version/revision OCI labels and explicit non-root
-users. Pull requests inspect those four images and generate one SPDX JSON SBOM
-per candidate without registry credentials. Only a `v*` tag whose commit equals
+The release artifact path builds node, control, operator, CLI, and compatibility
+gateway images from digest-pinned bases with exact version/revision OCI labels
+and explicit non-root users. Pull requests inspect those five images and
+generate one SPDX JSON SBOM per candidate without registry credentials. Only a
+`v*` tag whose commit equals
 the current `main` may publish Linux amd64/arm64 manifests to GHCR; it never
 publishes `latest`. Matching native runners build each architecture and pass
 only immutable digests to the manifest stage, avoiding QEMU in the trusted

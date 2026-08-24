@@ -6,9 +6,9 @@ never broadens the guarantees proved by its tests.
 
 ## Current release class
 
-Published alpha tags through `v0.1.0-alpha.10` are source previews. The beta
-workflow publishes four official OCI images: node, control plane, operator,
-and management CLI. A release is not
+Published alpha tags through `v0.1.0-alpha.10` are source previews. The current
+beta workflow publishes five official OCI images: node, control plane,
+operator, management CLI, and protocol-compatibility gateway. A release is not
 described as an OCI release until the exact tag workflow has published and
 verified those immutable manifests.
 
@@ -36,7 +36,7 @@ checks.
    commit.
 7. Wait for **Release tag verification** to prove the tag/version match and
    main provenance.
-8. Let the tag workflow publish all four exact-version OCI manifests, attach
+8. Let the tag workflow publish all five exact-version OCI manifests, attach
    provenance and per-platform SBOM attestations, keylessly sign each manifest,
    and create the GitHub prerelease from the version-controlled notes.
 9. Independently verify each immutable digest, signature identity,
@@ -61,5 +61,5 @@ stale package metadata is not releasable.
 
 The workflow never publishes `latest`. Operators promote an exact tag or,
 preferably, the verified manifest digest. Pull requests build and inspect the
-same four Dockerfiles and retain SPDX evidence without authenticating to or
+same five Dockerfiles and retain SPDX evidence without authenticating to or
 writing to a registry.
