@@ -140,14 +140,20 @@ client. Profile kind and immutable identity cannot change in place.
 - tablet ID and consensus-group ID as separate nonzero identities;
 - shard index, immutable workload profile, tablet epoch, and resource
   generation;
-- desired replica count separately from observed voter node IDs;
-- observed leader node ID and tablet lifecycle phase.
+- desired replica count separately from assigned and observed voter node IDs;
+- immutable bootstrap voters and an optional learner-first target voter set;
+- reachable committed voters, observed leader node ID, and tablet lifecycle
+  phase.
 
 An empty voter list or leader ID does not mean the desired placement has been
 achieved. Callers must use the phase and conditions, and data requests must
 carry the resource generation and tablet epoch returned by routing. The
 experimental regional runtime now allocates, commits, materializes, discovers,
-and generation/epoch-fences these identities across several fixed-voter groups.
+and generation/epoch-fences these identities across several independent
+three- or five-voter groups. Membership maintenance does not consume a customer
+resource generation: an active target makes control status `pending`, while
+group epoch, exact resource generation, and the committed Catalog plan fence
+every step.
 Its `/experimental/v1/regional/*` routes remain an alpha verification surface,
 not the versioned application contract. The separate fully qualified regional
 Stream v1 route is the first authenticated native adapter over those same
@@ -356,10 +362,11 @@ metering, rates, currency, or billing. See
 [Resource Governance](RESOURCE_GOVERNANCE.md).
 
 The optional `placement` object contains the requested region/zone/class
-constraints, achieved zone count, and policy-protected configured-endpoint topology plus
-maximum/used/available consensus-group counts. Node and voter IDs remain
-decimal strings. These fields prove the fixed-voter admission decision; they do
-not claim rack separation, dynamic membership, or online rebalancing.
+constraints, achieved zone count, and policy-protected configured-endpoint
+topology plus maximum/used/available consensus-group counts. Node and voter IDs
+remain decimal strings. These fields prove the placement admission decision
+and expose one learner-first voter transition; they do not claim rack
+separation, automatic multi-tablet rebalancing, or a general repair solver.
 
 The Rust node-local alpha inventory used by Go is:
 
@@ -658,9 +665,19 @@ GET    /experimental/v1/regional/catalog
 GET    /experimental/v1/regional/catalog/resources/{org}/{project}/{environment}/{namespace}/{kind}/{name}
 PUT    /experimental/v1/regional/catalog/resources/{org}/{project}/{environment}/{namespace}/{kind}/{name}
 DELETE /experimental/v1/regional/catalog/resources/{org}/{project}/{environment}/{namespace}/{kind}/{name}
+POST   /experimental/v1/regional/catalog/tablets/{tablet_id}/membership
 GET    /experimental/v1/regional/resources/{org}/{project}/{environment}/{namespace}/{kind}/{name}/shards/{shard}
 *      /experimental/v1/regional/resources/{org}/{project}/{environment}/{namespace}/{kind}/{name}/shards/{shard}/data/{operation}
 ```
+
+The membership request requires cluster-scoped `catalog.apply` authorization,
+an idempotency token, the exact tablet epoch and resource generation, and one
+sorted three- or five-node target. It must replace exactly one current voter.
+Epoch commits the plan first; the regional controller then adds the incoming
+node as a learner, verifies it through the leader commit index, commits joint
+consensus, and finalizes Catalog state. Concurrent, stale, multi-voter, and
+direct placement changes fail closed. See
+[Learner-first voter replacement](VOTER_REPLACEMENT.md).
 
 The versioned regional Stream application route is:
 
@@ -853,23 +870,28 @@ settlement. Topology exposes delivery, retry/dead-letter, failover, checkpoint,
 and error counters. See
 [ADR-0037](adr/0037-event-integration-platform.md).
 
-### 12.5 Regional HTTP source connector worker
+### 12.5 Regional source connector worker
 
 Every regional node evaluates source/bidirectional connectors, but only the
-current source Bus leader performs external I/O. For generic HTTP/CloudEvents,
-the worker sends `Epoch-Connector-Position` and requires a strict 204 or a
-bounded 200 batch containing `batch_id`, exact `source_from`, advancing
-`source_to`, and 1–1,000 unique valid events. It reuses the managed-target
-secret, allowlist, public-address DNS pinning, timeout, no-proxy, and no-redirect
-boundary.
+current source Bus leader performs external I/O. A small adapter boundary
+normalizes HTTP/CloudEvents, immutable object storage, PostgreSQL logical
+replication, MySQL row binlogs, and Kafka records into one bounded source batch.
+HTTP sends `Epoch-Connector-Position` and requires a strict 204 or a bounded
+200 response. Object storage checkpoints key plus immutable version evidence;
+PostgreSQL checkpoints a committed LSN; MySQL checkpoints the complete
+transaction's binlog filename/position; Kafka checkpoints the next offset for
+each assigned topic/partition.
 
 Each connector/batch/index record gets a stable proposal identity. Every
 applied or error-routed result commits before the connector batch and cursor;
 therefore crash-before-checkpoint replay resolves existing records rather than
-appending duplicates. Topology publishes source passes, batches, records,
-checkpoints, errors, and the bounded last error. This is not a CDC, Kafka, or
-object-storage adapter contract. See [HTTP source connectors](SOURCE_CONNECTORS.md)
-and [ADR-0038](adr/0038-product-runtime-closure.md).
+appending duplicates. PostgreSQL applied-LSN feedback and Kafka group-offset
+commit occur only after that Epoch checkpoint. Leadership loss, connector
+pause/deletion, or route loss closes stateful replication/consumer sessions.
+Topology publishes source passes, batches, records, checkpoints, errors, and
+the bounded last error. See [Source connectors](SOURCE_CONNECTORS.md),
+[ADR-0039](adr/0039-alpha-exit-beta-readiness.md), and
+[ADR-0040](adr/0040-initial-source-adapter-checkpoint-coupling.md).
 
 ### 12.6 Regional automatic consensus checkpoints
 
@@ -883,12 +905,87 @@ business-state mutation.
 
 `EPOCH_REGIONAL_CHECKPOINT_INTERVAL_MS` defaults to 1,000 and accepts
 1–600,000. `EPOCH_REGIONAL_CHECKPOINT_MIN_APPLIED_ENTRIES` defaults to 1,024.
-This is not a cluster-wide checkpoint, downloadable backup, or PITR contract.
+This local maintenance route is not itself a cluster-wide downloadable backup
+or PITR contract. The separate semantic regional artifact below composes these
+native state images through quorum barriers.
 See [ADR-0028](adr/0028-automatic-regional-consensus-checkpoints.md).
 
+### 12.7 Regional semantic backup and fresh-cluster restore
+
+`POST /v1/admin/backups` requires the cluster-scoped `backup.create` action and
+is served only by the current Catalog leader. A follower returns retryable HTTP
+409 `backup_coordinator_not_leader`; the caller may try another configured
+node. HTTP 201 returns one canonical JSON artifact bounded to 128 MiB.
+
+The coordinator first completes a Catalog `ReadIndex` barrier and exports its
+canonical consensus checkpoint. It derives the exact resource/tablet inventory
+from that captured Catalog image—not from a concurrent live read—and asks the
+current leader of every declared group for its own barriered checkpoint over
+the configured peer mTLS client. Tablet leaders may be distributed across
+different physical nodes. A missing, stale, unavailable, noncanonical, or
+identity-mismatched group fails the entire capture.
+
+The format carries:
+
+- format and Epoch versions, capture time, coordinator, and manifest SHA-256;
+- the Catalog group followed by every tablet group in stable group-ID order;
+- group/epoch, quorum read/applied indexes, committed membership, resource and
+  placement identity, application format/version/digest, and canonical
+  consensus restore checkpoint; and
+- independent payload digests plus one canonical manifest digest.
+
+`epoch-backup capture` validates that artifact, encrypts it as `EPBKAE01` with
+AES-256-GCM, publishes without overwrite, applies bounded retention, and emits
+a strict Job receipt. `epoch-backup decrypt` authenticates both the envelope
+and semantic manifest before publishing plaintext without overwrite. Node
+startup accepts `EPOCH_REGIONAL_RESTORE_PATH` only for a fresh regional
+consensus directory, validates the complete Catalog/tablet inventory before
+mutation, restores only groups assigned to that physical node, and rejects a
+second restore over existing state. This is a complete semantic snapshot, not
+cross-tablet transactional time or log-based point-in-time replay. See
+[Regional backup and restore](REGIONAL_BACKUP_RESTORE.md) and
+[ADR-0039](adr/0039-alpha-exit-beta-readiness.md).
+
+### 12.8 Internal maintenance and guarded upgrade
+
+The peer mTLS router exposes two operator-only maintenance operations; neither
+is mounted on the public regional router:
+
+```text
+GET  /internal/v1/maintenance/groups
+POST /internal/v1/maintenance/groups/{group_id}/leadership
+```
+
+Inventory returns the physical `node_id` and a group-ID-sorted vector. Each
+group carries its group/epoch, role, leader, term, commit/applied/checkpoint
+indexes, fail-stop flag, complete committed membership, and leader-only peer
+replication progress. Unknown JSON fields fail decoding. All identifiers and
+indexes are native unsigned integers on this internal machine contract, not a
+browser API.
+
+Leadership transfer requires exactly `group_epoch`, `expected_term`, and
+`target_node_id`. Registry lookup fences the epoch and the consensus actor
+compares the term atomically before invoking Raft transfer. The accepted HTTP
+202 receipt repeats every fence and target. A follower, stale term/epoch,
+unknown group, or invalid target fails without an accepted receipt.
+
+`epoch-maintenance verify` collects a bounded canonical inventory from every
+configured HTTPS authority and validates every group cluster-wide. It requires
+stable identical three/five-voter membership, exactly one leader and term view,
+all-voter apply/catch-up evidence, no pending snapshot, and no fail-stop.
+`drain` additionally moves every group led by the selected node to a caught-up
+active voter and succeeds only after a later inventory proves the node leads
+nothing. The operator accepts the Job only when its strict termination receipt
+names the exact operation/target and all physical node IDs.
+
+The custom-resource upgrade phases, StatefulSet partition semantics, timeout,
+failure, retry, and rollback rules are specified in
+[Guarded data-plane upgrades](GUARDED_UPGRADES.md).
+
 Catalog mutations require a bounded `request_token`, expected generation,
-shard count, and the currently fixed replica count of three. The exact token
-and semantic request replay their committed result; token rebinding conflicts.
+shard count, and an explicit three- or five-voter placement selected from the
+configured physical node capacity. The exact token and semantic request replay
+their committed result; token rebinding conflicts.
 Delete commits a monotonic tombstone, so recreation never reuses prior
 tablet/group identities. Discovery returns the local node/role, observed
 leader, term, resource generation, tablet/group IDs, and tablet epoch. Every
@@ -949,9 +1046,11 @@ See [ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md),
 [Regional Event Bus SDK](REGIONAL_EVENT_BUS_SDK.md).
 
 The fence and consistency headers are included in the node's exact-origin CORS
-allowlist. Regional HTTP is bootstrap-authenticated and action-authorized, but
-still lacks TLS/OIDC/mTLS server and peer identity; it must not be exposed as a
-production management or data surface.
+allowlist. Regional HTTP is bootstrap-authenticated and action-authorized. The
+supported Kubernetes deployment additionally requires public TLS plus
+peer/control mTLS, strict trust roots, and hostname verification. Plaintext
+remains an explicit local-development mode; OIDC, credential expiry/revocation,
+certificate issuance, and production security certification remain open.
 
 When explicitly enabled, a separate internal listener exposes the experimental
 fixed-voter consensus probe:
@@ -969,9 +1068,11 @@ fixed-voter consensus probe:
 - `GET /experimental/v1/consensus/proposals/{proposal_id}` distinguishes a
   local `unknown`, `pending`, or `committed` observation.
 
-These routes have no CORS layer, TLS, authentication, SDK commitment, or
-product-profile semantics. They do not change the standalone API's receipt or
-durability contract. See [Experimental Consensus Probe](CONSENSUS_PROBE.md).
+These routes have no CORS or public SDK commitment. In managed regional mode
+the internal peer listener inherits required mTLS; the explicitly enabled
+standalone diagnostic probe remains plaintext development-only. The routes do
+not change the standalone API's receipt or durability contract. See
+[Experimental Consensus Probe](CONSENSUS_PROBE.md).
 
 When `EPOCH_EXPERIMENTAL_STREAM_TABLET_ENABLED=true`, opaque proposal routes are
 not mounted on that group. The listener instead exposes:

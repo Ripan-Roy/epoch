@@ -13,8 +13,8 @@ use epoch_bus::{BusConfig, EventBus};
 use epoch_cache::{CacheConfig, EvictionPolicy};
 use epoch_catalog::{
     ApplyResource, CatalogCommand, CatalogError, CatalogMutation, DeleteResource,
-    ResourceGovernance, ResourceName, ResourceRecord, ResourceSpec, TabletDescriptor,
-    catalog_proposal_id_for,
+    FinalizeTabletMembership, PlanTabletMembership, ResourceGovernance, ResourceName,
+    ResourceRecord, ResourceSpec, TabletDescriptor, TabletPlacement, catalog_proposal_id_for,
 };
 use epoch_consensus::{CommittedProposal, ConsensusError, ProposalLookup};
 use epoch_core::{DurabilityProfile, ResourceKind, WorkloadProfile};
@@ -25,9 +25,12 @@ use thiserror::Error;
 use tokio::sync::{Mutex, broadcast};
 
 use crate::{
-    catalog_tablet::{CatalogTabletReceipt, CatalogTabletService},
+    catalog_tablet::{CatalogTabletReceipt, CatalogTabletService, CatalogTabletSnapshot},
     consensus::{ConsensusProbeApiError, ConsensusProbeError, ConsensusProbeHandle},
-    tablet_http::{deserialize_optional_u64_from_number_or_decimal, serialize_u64_as_decimal},
+    tablet_http::{
+        deserialize_optional_u64_from_number_or_decimal, deserialize_u64_from_number_or_decimal,
+        deserialize_vec_u64_from_number_or_decimal, serialize_u64_as_decimal,
+    },
     tablet_materializer::{
         RegionalTabletMaterializer, TabletMaterializerError, TabletReconcileOutcome,
     },
@@ -35,6 +38,8 @@ use crate::{
 
 pub const REGIONAL_CATALOG_PATH: &str = "/experimental/v1/regional/catalog";
 pub const REGIONAL_CATALOG_RESOURCE_PATH: &str = "/experimental/v1/regional/catalog/resources/{organization}/{project}/{environment}/{namespace}/{kind}/{name}";
+pub const REGIONAL_CATALOG_TABLET_MEMBERSHIP_PATH: &str =
+    "/experimental/v1/regional/catalog/tablets/{tablet_id}/membership";
 const CATALOG_REQUEST_BODY_BYTES: usize = 64 * 1024;
 pub const DEFAULT_CATALOG_COMMIT_WAIT: Duration = Duration::from_secs(5);
 
@@ -79,6 +84,24 @@ impl RegionalCatalogState {
 
     pub(crate) fn consensus_handle(&self) -> ConsensusProbeHandle {
         self.consensus.clone()
+    }
+
+    pub(crate) fn catalog_snapshot(&self) -> Result<CatalogTabletSnapshot, String> {
+        self.catalog.snapshot()
+    }
+
+    pub(crate) async fn finalize_membership(
+        &self,
+        request: FinalizeTabletMembership,
+    ) -> Result<CatalogTabletReceipt, RegionalCatalogApiError> {
+        let (receipt, _) = commit_command_with_mode(
+            self,
+            CatalogCommand::FinalizeMembership(request),
+            CatalogSubmissionMode::Forwarded,
+        )
+        .await?;
+        self.reconcile_latest().await?;
+        Ok(receipt)
     }
 
     pub async fn reconcile_latest(
@@ -133,6 +156,8 @@ struct ApplyResourceRequest {
     shard_count: u32,
     replica_count: u16,
     #[serde(default)]
+    tablet_placements: Vec<TabletPlacement>,
+    #[serde(default)]
     configuration: Option<serde_json::Value>,
     #[serde(default)]
     governance: Option<ResourceGovernance>,
@@ -176,6 +201,18 @@ struct DeleteResourceRequest {
     expected_generation: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlanTabletMembershipRequest {
+    request_token: String,
+    #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+    expected_tablet_epoch: u64,
+    #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
+    expected_resource_generation: u64,
+    #[serde(deserialize_with = "deserialize_vec_u64_from_number_or_decimal")]
+    target_voter_node_ids: Vec<u64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CatalogTabletResponse {
     #[serde(serialize_with = "serialize_u64_as_decimal")]
@@ -189,6 +226,9 @@ pub struct CatalogTabletResponse {
     pub resource_generation: u64,
     pub workload_profile: WorkloadProfile,
     pub replica_count: u16,
+    pub voter_node_ids: Vec<String>,
+    pub bootstrap_voter_node_ids: Vec<String>,
+    pub target_voter_node_ids: Vec<String>,
 }
 
 impl From<&TabletDescriptor> for CatalogTabletResponse {
@@ -201,6 +241,21 @@ impl From<&TabletDescriptor> for CatalogTabletResponse {
             resource_generation: descriptor.resource_generation,
             workload_profile: descriptor.workload_profile,
             replica_count: descriptor.replica_count,
+            voter_node_ids: descriptor
+                .voter_node_ids
+                .iter()
+                .map(u64::to_string)
+                .collect(),
+            bootstrap_voter_node_ids: descriptor
+                .bootstrap_voter_node_ids
+                .iter()
+                .map(u64::to_string)
+                .collect(),
+            target_voter_node_ids: descriptor
+                .target_voter_node_ids
+                .iter()
+                .map(u64::to_string)
+                .collect(),
         }
     }
 }
@@ -323,6 +378,10 @@ pub fn regional_catalog_router(state: RegionalCatalogState) -> Router {
                 .put(apply_resource)
                 .delete(delete_resource),
         )
+        .route(
+            REGIONAL_CATALOG_TABLET_MEMBERSHIP_PATH,
+            axum::routing::post(plan_tablet_membership),
+        )
         .layer(DefaultBodyLimit::max(CATALOG_REQUEST_BODY_BYTES))
         .with_state(state)
 }
@@ -387,6 +446,7 @@ async fn apply_resource(
             configuration,
             governance: request.governance,
         },
+        tablet_placements: request.tablet_placements,
     });
     let (receipt, request_replayed) = commit_command(&state, command).await?;
     let materialization = state.reconcile_latest().await?;
@@ -575,6 +635,31 @@ async fn delete_resource(
     )))
 }
 
+async fn plan_tablet_membership(
+    State(state): State<RegionalCatalogState>,
+    Path(tablet_id): Path<u64>,
+    request: Result<Json<PlanTabletMembershipRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<CatalogMutationReceiptResponse>), RegionalCatalogApiError> {
+    let Json(request) = request.map_err(|rejection| request_body_error(&rejection))?;
+    let command = CatalogCommand::PlanMembership(PlanTabletMembership {
+        request_token: request.request_token,
+        tablet_id,
+        expected_tablet_epoch: request.expected_tablet_epoch,
+        expected_resource_generation: request.expected_resource_generation,
+        target_voter_node_ids: request.target_voter_node_ids,
+    });
+    let (receipt, request_replayed) = commit_command(&state, command).await?;
+    let materialization = state.reconcile_latest().await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(mutation_response(
+            receipt,
+            request_replayed,
+            materialization,
+        )),
+    ))
+}
+
 fn mutation_response(
     receipt: CatalogTabletReceipt,
     request_replayed: bool,
@@ -595,14 +680,25 @@ async fn commit_command(
     state: &RegionalCatalogState,
     command: CatalogCommand,
 ) -> Result<(CatalogTabletReceipt, bool), RegionalCatalogApiError> {
+    commit_command_with_mode(state, command, CatalogSubmissionMode::LeaderOnly).await
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CatalogSubmissionMode {
+    LeaderOnly,
+    Forwarded,
+}
+
+async fn commit_command_with_mode(
+    state: &RegionalCatalogState,
+    command: CatalogCommand,
+    mode: CatalogSubmissionMode,
+) -> Result<(CatalogTabletReceipt, bool), RegionalCatalogApiError> {
     state
         .catalog
         .ensure_healthy()
         .map_err(RegionalCatalogApiError::CatalogState)?;
-    let request_token = match &command {
-        CatalogCommand::Apply(request) => &request.request_token,
-        CatalogCommand::Delete(request) => &request.request_token,
-    };
+    let request_token = command.request_token();
     let proposal_id = catalog_proposal_id_for(
         state.catalog.scope().group_id(),
         state.catalog.scope().group_epoch(),
@@ -615,10 +711,20 @@ async fn commit_command(
     match initial {
         ProposalLookup::Unknown => {
             let status = state.consensus.status().await?;
-            state
-                .consensus
-                .propose(proposal_id, status.term.get(), payload.clone())
-                .await?;
+            match mode {
+                CatalogSubmissionMode::LeaderOnly => {
+                    state
+                        .consensus
+                        .propose(proposal_id, status.term.get(), payload.clone())
+                        .await?;
+                }
+                CatalogSubmissionMode::Forwarded => {
+                    state
+                        .consensus
+                        .forward_propose(proposal_id, status.term.get(), payload.clone())
+                        .await?;
+                }
+            }
         }
         ProposalLookup::Pending {
             payload: ref tracked,

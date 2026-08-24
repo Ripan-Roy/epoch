@@ -20,7 +20,7 @@ import java.util.StringJoiner;
 
 /** JDK HTTP client transport with no networking dependency beyond Java itself. */
 public final class HttpTransport implements Transport {
-  private static final String USER_AGENT = "epoch-java/0.1.0-alpha.10";
+  private static final String USER_AGENT = "epoch-java/0.2.0-beta.1";
 
   private final String baseUrl;
   private final Duration timeout;
@@ -28,6 +28,10 @@ public final class HttpTransport implements Transport {
   private final ObjectMapper mapper;
 
   public HttpTransport(URI baseUri, Duration timeout) {
+    this(baseUri, timeout, null);
+  }
+
+  public HttpTransport(URI baseUri, Duration timeout, TlsConfig tls) {
     Objects.requireNonNull(baseUri, "baseUri");
     if (!("http".equals(baseUri.getScheme()) || "https".equals(baseUri.getScheme()))
         || baseUri.getHost() == null
@@ -39,13 +43,21 @@ public final class HttpTransport implements Transport {
     if (Objects.requireNonNull(timeout, "timeout").isZero() || timeout.isNegative()) {
       throw new IllegalArgumentException("timeout must be greater than zero");
     }
+    if (tls != null && !"https".equals(baseUri.getScheme())) {
+      throw new IllegalArgumentException("a TLS-configured transport requires an https baseUri");
+    }
     baseUrl = stripTrailingSlash(baseUri.toString());
     this.timeout = timeout;
-    client =
-        HttpClient.newBuilder()
-            .connectTimeout(timeout)
-            .followRedirects(HttpClient.Redirect.NEVER)
-            .build();
+    HttpClient.Builder clientBuilder =
+        HttpClient.newBuilder().connectTimeout(timeout).followRedirects(HttpClient.Redirect.NEVER);
+    if (tls != null) {
+      try {
+        clientBuilder.sslContext(tls.sslContext());
+      } catch (IOException error) {
+        throw new IllegalArgumentException("invalid Epoch TLS configuration", error);
+      }
+    }
+    client = clientBuilder.build();
     mapper = new ObjectMapper();
   }
 

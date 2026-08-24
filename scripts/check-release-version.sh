@@ -6,12 +6,17 @@ repository_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repository_root"
 
 release_version=$(tr -d '\r\n' < VERSION)
-python_version=$(printf '%s' "$release_version" | sed 's/-alpha\./a/')
 
 case "$release_version" in
-  [0-9]*.[0-9]*.[0-9]*-alpha.[0-9]*) ;;
+  [0-9]*.[0-9]*.[0-9]*-alpha.[0-9]*)
+    python_version=$(printf '%s' "$release_version" | sed 's/-alpha\./a/')
+    ;;
+  [0-9]*.[0-9]*.[0-9]*-beta.[0-9]*)
+    python_version=$(printf '%s' "$release_version" | sed 's/-beta\./b/')
+    ;;
   *)
-    printf 'VERSION must contain an alpha SemVer, got %s\n' "$release_version" >&2
+    printf 'VERSION must contain a supported alpha or beta SemVer, got %s\n' \
+      "$release_version" >&2
     exit 1
     ;;
 esac

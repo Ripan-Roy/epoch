@@ -28,6 +28,11 @@ public final class RegionalCacheClient {
     this.regional = RegionalClientCore.forEndpoints(endpoints, token, scope, timeout);
   }
 
+  public RegionalCacheClient(
+      List<URI> endpoints, String token, RegionalScope scope, Duration timeout, TlsConfig tls) {
+    this.regional = RegionalClientCore.forEndpoints(endpoints, token, scope, timeout, tls);
+  }
+
   private RegionalCacheClient(List<Transport> transports, String token, RegionalScope scope) {
     this.regional = RegionalClientCore.forTransports(transports, token, scope);
   }

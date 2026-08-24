@@ -2,8 +2,10 @@ use std::collections::BTreeMap;
 
 use epoch_catalog::{
     ApplyResource, CATALOG_COMMAND_FORMAT_VERSION, CATALOG_CONFIG_COMMAND_FORMAT_VERSION,
-    CATALOG_GOVERNANCE_COMMAND_FORMAT_VERSION, Catalog, CatalogCommand, CatalogError,
-    DataClassification, ResourceGovernance, ResourceName, ResourceSpec, catalog_proposal_id_for,
+    CATALOG_GOVERNANCE_COMMAND_FORMAT_VERSION, CATALOG_MEMBERSHIP_COMMAND_FORMAT_VERSION,
+    CATALOG_PLACEMENT_COMMAND_FORMAT_VERSION, CATALOG_PLACEMENT_SNAPSHOT_FORMAT_VERSION, Catalog,
+    CatalogCommand, CatalogError, DataClassification, ResourceGovernance, ResourceName,
+    ResourceSpec, TabletPlacement, catalog_proposal_id_for,
 };
 use epoch_core::{ResourceKind, WorkloadProfile};
 
@@ -23,6 +25,7 @@ fn apply(kind: ResourceKind, profile: WorkloadProfile) -> CatalogCommand {
             configuration: None,
             governance: None,
         },
+        tablet_placements: Vec::new(),
     })
 }
 
@@ -35,6 +38,100 @@ fn governance() -> ResourceGovernance {
             ("service".into(), "checkout".into()),
             ("tier".into(), "critical".into()),
         ]),
+    }
+}
+
+#[test]
+fn explicit_per_shard_placement_is_canonical_durable_and_bounded() {
+    let mut command = apply(ResourceKind::Stream, WorkloadProfile::StreamLog);
+    let CatalogCommand::Apply(request) = &mut command else {
+        unreachable!();
+    };
+    request.spec.shard_count = 2;
+    request.tablet_placements = vec![
+        TabletPlacement {
+            shard_index: 0,
+            voter_node_ids: vec![1, 3, 5],
+        },
+        TabletPlacement {
+            shard_index: 1,
+            voter_node_ids: vec![2, 4, 6],
+        },
+    ];
+
+    let encoded = command.encode().unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(
+        document["format_version"],
+        CATALOG_PLACEMENT_COMMAND_FORMAT_VERSION
+    );
+    assert_eq!(CatalogCommand::decode(&encoded).unwrap(), command);
+
+    let mut catalog = Catalog::new();
+    let mutation = catalog.apply(command).unwrap();
+    let tablets = mutation.resource().unwrap().tablets.clone();
+    assert_eq!(tablets[0].voter_node_ids, [1, 3, 5]);
+    assert_eq!(tablets[1].voter_node_ids, [2, 4, 6]);
+
+    let snapshot = catalog.encode_snapshot().unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
+    assert_eq!(
+        document["format_version"],
+        CATALOG_PLACEMENT_SNAPSHOT_FORMAT_VERSION
+    );
+    let reopened = Catalog::decode_snapshot(&snapshot).unwrap();
+    assert_eq!(
+        reopened.state_digest().unwrap(),
+        catalog.state_digest().unwrap()
+    );
+    assert_eq!(
+        reopened
+            .resource(&name(ResourceKind::Stream))
+            .unwrap()
+            .tablets,
+        tablets
+    );
+}
+
+#[test]
+fn explicit_placement_rejects_partial_duplicate_and_replica_mismatched_assignments() {
+    let invalid = [
+        vec![TabletPlacement {
+            shard_index: 0,
+            voter_node_ids: vec![1, 2, 3],
+        }],
+        vec![
+            TabletPlacement {
+                shard_index: 0,
+                voter_node_ids: vec![1, 2, 3],
+            },
+            TabletPlacement {
+                shard_index: 0,
+                voter_node_ids: vec![4, 5, 6],
+            },
+        ],
+        vec![
+            TabletPlacement {
+                shard_index: 0,
+                voter_node_ids: vec![1, 1, 3],
+            },
+            TabletPlacement {
+                shard_index: 1,
+                voter_node_ids: vec![4, 5, 6],
+            },
+        ],
+    ];
+    for placements in invalid {
+        let mut command = apply(ResourceKind::Stream, WorkloadProfile::StreamLog);
+        let CatalogCommand::Apply(request) = &mut command else {
+            unreachable!();
+        };
+        request.spec.shard_count = 2;
+        request.tablet_placements = placements;
+        assert!(matches!(
+            Catalog::new().apply(command),
+            Err(CatalogError::InvalidSpec(_))
+        ));
     }
 }
 
@@ -96,12 +193,12 @@ fn versioned_command_decoder_rejects_unknown_versions_and_unknown_fields() {
     let command = apply(ResourceKind::Stream, WorkloadProfile::StreamLog);
     let encoded = command.encode().unwrap();
     let mut document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-    document["format_version"] = serde_json::json!(CATALOG_COMMAND_FORMAT_VERSION + 1);
+    document["format_version"] = serde_json::json!(CATALOG_MEMBERSHIP_COMMAND_FORMAT_VERSION + 1);
     let unsupported = serde_json::to_vec(&document).unwrap();
     assert!(matches!(
         CatalogCommand::decode(&unsupported),
         Err(CatalogError::UnsupportedCommandVersion(version))
-            if version == CATALOG_COMMAND_FORMAT_VERSION + 1
+            if version == CATALOG_MEMBERSHIP_COMMAND_FORMAT_VERSION + 1
     ));
 
     document["format_version"] = serde_json::json!(CATALOG_COMMAND_FORMAT_VERSION);

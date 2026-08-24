@@ -6,6 +6,7 @@ import (
 	"os"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -33,6 +34,7 @@ func main() {
 	scheme := runtime.NewScheme()
 	must(clientgoscheme.AddToScheme(scheme))
 	must(appsv1.AddToScheme(scheme))
+	must(batchv1.AddToScheme(scheme))
 	must(corev1.AddToScheme(scheme))
 	must(epochv1alpha1.AddToScheme(scheme))
 	manager, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{

@@ -1,5 +1,6 @@
 package io.epoch.sdk;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -14,9 +15,11 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -99,6 +102,26 @@ final class HttpTransportTest {
     assertTrue(new EpochApiException(500, "internal", "failed", body).retryable());
     assertTrue(new EpochApiException(400, "unavailable", "transient", body).retryable());
     assertFalse(new EpochApiException(400, "invalid_argument", "invalid", body).retryable());
+  }
+
+  @Test
+  void secureTransportLoadsExplicitTrustAndFailsClosedForPlaintextOrPartialIdentity()
+      throws Exception {
+    Path trustRoot =
+        Path.of(
+            Objects.requireNonNull(HttpTransportTest.class.getResource("/epoch-test-ca.crt"))
+                .toURI());
+    TlsConfig trust = new TlsConfig(trustRoot);
+
+    assertDoesNotThrow(
+        () ->
+            new HttpTransport(URI.create("https://localhost:7601"), Duration.ofSeconds(2), trust));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new HttpTransport(URI.create("http://localhost:7601"), Duration.ofSeconds(2), trust));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new TlsConfig(trustRoot, trustRoot.resolveSibling("client.p12"), null));
   }
 
   private void handleSuccess(HttpExchange exchange) throws IOException {

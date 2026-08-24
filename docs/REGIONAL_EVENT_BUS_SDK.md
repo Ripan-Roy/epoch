@@ -288,8 +288,10 @@ proxies are disabled and the resolved address is pinned for the attempt. Set
 `EPOCH_REGIONAL_MANAGED_TARGET_ALLOW_HTTP_LOOPBACK=true` only for local
 loopback tests. Secret hot reload, an external secret manager, and private-network
 destinations are not in this release. Generic HTTP/CloudEvents source polling
-is automatic and documented in [HTTP source connectors](SOURCE_CONNECTORS.md);
-CDC, Kafka, and object-storage source adapters remain open.
+plus immutable-object, PostgreSQL, MySQL, and Kafka ingestion is automatic and
+documented in [Source connectors](SOURCE_CONNECTORS.md). The SDK integration
+lifecycle creates and observes those replicated connector resources; source
+network I/O remains leader-owned inside the Rust regional runtime.
 
 ## Replicated integration operations
 
@@ -486,9 +488,10 @@ with the same browser-safe encoding.
   every official format compiler;
 - MQTT session/QoS state is implemented, but no MQTT wire gateway or protocol
   conformance is claimed;
-- generic HTTP/CloudEvents source polling is implemented; no key/secret hot
-  reload, external secret manager, private egress profile, CDC/Kafka/object-
-  storage source adapter, or geo routing;
+- HTTP/CloudEvents, immutable-object, PostgreSQL, MySQL, and Kafka source
+  ingestion is implemented; no key/secret hot reload, external secret manager,
+  private egress profile, live Azure/GCS cloud certification, production
+  connector load certification, or geo routing;
 - no built-in receiver replay store: the SDK verifier returns the identity the
   receiver must persist;
 - no exactly-once external-side-effect claim.

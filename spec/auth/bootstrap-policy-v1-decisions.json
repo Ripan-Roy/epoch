@@ -74,6 +74,18 @@
       "allowed": true
     },
     {
+      "name": "control service may create a regional backup",
+      "token": "epoch-dev-control-v1",
+      "action": "backup.create",
+      "scope": {
+        "organization": "",
+        "project": "",
+        "environment": "",
+        "namespace": ""
+      },
+      "allowed": true
+    },
+    {
       "name": "control service may not mutate data",
       "token": "epoch-dev-control-v1",
       "action": "data.write",

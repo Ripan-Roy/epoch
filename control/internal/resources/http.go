@@ -269,14 +269,18 @@ type regionalCacheConfigurationView struct {
 }
 
 type regionalTabletView struct {
-	TabletID           string   `json:"tablet_id"`
-	ConsensusGroupID   string   `json:"consensus_group_id"`
-	ShardIndex         uint32   `json:"shard_index"`
-	TabletEpoch        string   `json:"tablet_epoch"`
-	ResourceGeneration string   `json:"resource_generation"`
-	DesiredReplicas    uint32   `json:"desired_replicas"`
-	VoterNodeIDs       []string `json:"voter_node_ids"`
-	LeaderNodeID       *string  `json:"leader_node_id"`
+	TabletID              string   `json:"tablet_id"`
+	ConsensusGroupID      string   `json:"consensus_group_id"`
+	ShardIndex            uint32   `json:"shard_index"`
+	TabletEpoch           string   `json:"tablet_epoch"`
+	ResourceGeneration    string   `json:"resource_generation"`
+	DesiredReplicas       uint32   `json:"desired_replicas"`
+	AssignedNodeIDs       []string `json:"assigned_node_ids"`
+	BootstrapVoterNodeIDs []string `json:"bootstrap_voter_node_ids,omitempty"`
+	TargetVoterNodeIDs    []string `json:"target_voter_node_ids,omitempty"`
+	VoterNodeIDs          []string `json:"voter_node_ids"`
+	ReachableVoterNodeIDs []string `json:"reachable_voter_node_ids"`
+	LeaderNodeID          *string  `json:"leader_node_id"`
 }
 
 type regionalPlacementView struct {
@@ -347,9 +351,25 @@ func (handler *httpHandler) regionalInventory(writer http.ResponseWriter, reques
 func regionalResourceForBrowser(resource Resource) regionalResourceView {
 	tablets := make([]regionalTabletView, 0, len(resource.Status.Tablets))
 	for _, tablet := range resource.Status.Tablets {
+		assigned := make([]string, 0, len(tablet.AssignedNodeIDs))
+		for _, nodeID := range tablet.AssignedNodeIDs {
+			assigned = append(assigned, strconv.FormatUint(nodeID, 10))
+		}
 		voters := make([]string, 0, len(tablet.VoterNodeIDs))
 		for _, voter := range tablet.VoterNodeIDs {
 			voters = append(voters, strconv.FormatUint(voter, 10))
+		}
+		bootstrap := make([]string, 0, len(tablet.BootstrapVoterNodeIDs))
+		for _, nodeID := range tablet.BootstrapVoterNodeIDs {
+			bootstrap = append(bootstrap, strconv.FormatUint(nodeID, 10))
+		}
+		target := make([]string, 0, len(tablet.TargetVoterNodeIDs))
+		for _, nodeID := range tablet.TargetVoterNodeIDs {
+			target = append(target, strconv.FormatUint(nodeID, 10))
+		}
+		reachable := make([]string, 0, len(tablet.ReachableVoterNodeIDs))
+		for _, nodeID := range tablet.ReachableVoterNodeIDs {
+			reachable = append(reachable, strconv.FormatUint(nodeID, 10))
 		}
 		var leader *string
 		if tablet.LeaderNodeID != 0 {
@@ -357,14 +377,18 @@ func regionalResourceForBrowser(resource Resource) regionalResourceView {
 			leader = &encoded
 		}
 		tablets = append(tablets, regionalTabletView{
-			TabletID:           strconv.FormatUint(tablet.TabletID, 10),
-			ConsensusGroupID:   strconv.FormatUint(tablet.ConsensusGroupID, 10),
-			ShardIndex:         tablet.ShardIndex,
-			TabletEpoch:        strconv.FormatUint(tablet.TabletEpoch, 10),
-			ResourceGeneration: strconv.FormatUint(tablet.ResourceGeneration, 10),
-			DesiredReplicas:    tablet.DesiredReplicas,
-			VoterNodeIDs:       voters,
-			LeaderNodeID:       leader,
+			TabletID:              strconv.FormatUint(tablet.TabletID, 10),
+			ConsensusGroupID:      strconv.FormatUint(tablet.ConsensusGroupID, 10),
+			ShardIndex:            tablet.ShardIndex,
+			TabletEpoch:           strconv.FormatUint(tablet.TabletEpoch, 10),
+			ResourceGeneration:    strconv.FormatUint(tablet.ResourceGeneration, 10),
+			DesiredReplicas:       tablet.DesiredReplicas,
+			AssignedNodeIDs:       assigned,
+			BootstrapVoterNodeIDs: bootstrap,
+			TargetVoterNodeIDs:    target,
+			VoterNodeIDs:          voters,
+			ReachableVoterNodeIDs: reachable,
+			LeaderNodeID:          leader,
 		})
 	}
 	return regionalResourceView{

@@ -2,9 +2,11 @@ import type { ReactNode } from "react";
 
 import { repositoryUrl } from "./content";
 import {
+  BackupRestoreBody,
   ClusterMilestoneBody,
   ConsensusRecoveryBody,
   DeploymentBody,
+  GuardedUpgradeBody,
   GuaranteesBody,
   OverviewBody,
   QuickstartBody,
@@ -16,6 +18,7 @@ import {
   RegionalStreamBody,
   RestartBody,
   SdkReferenceBody,
+  VoterReplacementBody,
 } from "./pages";
 
 export type DocsPageId =
@@ -25,6 +28,9 @@ export type DocsPageId =
   | "guarantees"
   | "cluster-milestone"
   | "deployment"
+  | "guarded-upgrades"
+  | "voter-replacement"
+  | "backup-restore"
   | "consensus-recovery"
   | "resource-governance"
   | "regional-stream"
@@ -129,7 +135,7 @@ export const docsPages: ReadonlyArray<DocsPageMeta> = [
     label: "Regional runtime",
     title: "Regional runtime milestone",
     summary:
-      "One catalog materializes four profile-specific groups in every node. This page records what that does and does not mean today.",
+      "One Catalog assigns independent three- or five-voter profile groups across N physical nodes. This page records what that does and does not mean today.",
     headings: [
       { id: "scope", label: "What it does today" },
       { id: "evidence", label: "Observed evidence" },
@@ -143,21 +149,69 @@ export const docsPages: ReadonlyArray<DocsPageMeta> = [
     label: "Deploy & operate",
     title: "Deploy and operate Epoch",
     summary:
-      "Run the fixed-voter regional system through a real Kubernetes controller, manage it with the CLI, and ingest crash-safe HTTP source batches.",
+      "Run the secured N-node regional system, manage it with the CLI, and ingest crash-safe HTTP, object, CDC, and Kafka sources.",
     headings: [
       { id: "kubernetes", label: "Install on Kubernetes" },
+      { id: "live-campaign", label: "Live lifecycle proof" },
+      { id: "release-artifacts", label: "Release artifacts" },
       { id: "cli", label: "Management CLI" },
-      { id: "source-connectors", label: "HTTP source connectors" },
+      { id: "source-connectors", label: "Source connectors" },
+      { id: "soak", label: "Fault & soak evidence" },
       { id: "operations", label: "Evidence and limits" },
     ],
     Body: DeploymentBody,
+  },
+  {
+    id: "backup-restore",
+    group: "Core concepts",
+    label: "Backup & restore",
+    title: "Regional backup and restore",
+    summary:
+      "Capture every distributed tablet at a quorum-confirmed boundary, encrypt the semantic artifact, and restore a fresh regional cluster.",
+    headings: [
+      { id: "capture", label: "Distributed capture" },
+      { id: "encryption", label: "Encryption & retention" },
+      { id: "restore", label: "Fresh-cluster restore" },
+      { id: "limits", label: "Current limits" },
+    ],
+    Body: BackupRestoreBody,
+  },
+  {
+    id: "guarded-upgrades",
+    group: "Core concepts",
+    label: "Guarded upgrades",
+    title: "Guarded data-plane upgrades",
+    summary:
+      "Gate every image transition on a fresh backup, cluster-wide Raft evidence, leader drain, one ordinal, readiness, verification, and guarded rollback.",
+    headings: [
+      { id: "configure", label: "Configure guardrails" },
+      { id: "forward", label: "One-ordinal path" },
+      { id: "rollback", label: "Stop & rollback" },
+      { id: "observe", label: "Observe the plan" },
+    ],
+    Body: GuardedUpgradeBody,
+  },
+  {
+    id: "voter-replacement",
+    group: "Core concepts",
+    label: "Voter replacement",
+    title: "Learner-first voter replacement",
+    summary:
+      "Commit one exact target, catch up the incoming learner, enter joint consensus, finalize Catalog, stop the removed host, and reopen the new voter set.",
+    headings: [
+      { id: "contract", label: "Safety contract" },
+      { id: "plan", label: "Commit a plan" },
+      { id: "observe", label: "Observe transition" },
+      { id: "recovery", label: "Recovery & limits" },
+    ],
+    Body: VoterReplacementBody,
   },
   {
     id: "consensus-recovery",
     group: "Core concepts",
     label: "Consensus recovery",
     title: "Consensus recovery",
-    summary: "Checkpoint, compact, catch up, and reopen — from the fixed-voter recovery core.",
+    summary: "Checkpoint, compact, catch up, and reopen from durable three- or five-voter groups.",
     headings: [
       { id: "how-it-works", label: "How a checkpoint is taken" },
       { id: "inspect", label: "Inspect a local checkpoint" },

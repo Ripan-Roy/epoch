@@ -28,6 +28,7 @@ type AuthorityApplyRequest struct {
 	ExpectedGeneration uint64
 	ShardCount         uint32
 	ReplicaCount       uint16
+	TabletPlacements   []TabletPlacement
 	Configuration      map[string]any
 	Governance         *resources.ResourceGovernance
 }
@@ -156,28 +157,34 @@ func (reconciler *Reconciler) Reconcile(
 	if err != nil {
 		return reconciler.fail(resource, false, err)
 	}
-	existingShards := resource.Status.ObservedShardCount
-	if existingShards == 0 {
-		existingShards = uint32(len(resource.Status.Tablets))
-	}
-	placement, err := reconciler.admit(ctx, resource, spec, existingShards)
-	if err != nil {
-		return reconciler.fail(resource, IsRetryable(err), err)
-	}
-
 	var observation AuthorityObservation
+	var placement PlacementDecision
 	if resource.Status.ObservedGeneration < resource.Generation {
+		existingPlacements := placementsFromStatus(resource.Status.Tablets)
+		placement, err = reconciler.admit(ctx, resource, spec, existingPlacements)
+		if err != nil {
+			return reconciler.fail(resource, IsRetryable(err), err)
+		}
 		observation, err = reconciler.authority.Apply(ctx, AuthorityApplyRequest{
 			RequestToken:       applyToken(resource),
 			Key:                resource.ResourceKey,
 			ExpectedGeneration: resource.Status.ObservedGeneration,
 			ShardCount:         spec.ShardCount,
 			ReplicaCount:       spec.ReplicaCount,
+			TabletPlacements:   cloneTabletPlacements(placement.TabletPlacements),
 			Configuration:      spec.Configuration,
 			Governance:         resource.Governance,
 		})
 	} else {
 		observation, err = reconciler.authority.Observe(ctx, resource.ResourceKey)
+		if err == nil {
+			placement, err = reconciler.admit(
+				ctx,
+				resource,
+				spec,
+				placementsFromObservation(observation),
+			)
+		}
 	}
 	if err != nil {
 		return reconciler.fail(resource, IsRetryable(err), err)
@@ -198,11 +205,26 @@ func (reconciler *Reconciler) Reconcile(
 	return updated, nil
 }
 
+func placementsFromObservation(observation AuthorityObservation) []TabletPlacement {
+	placements := make([]TabletPlacement, 0, len(observation.Tablets))
+	for _, tablet := range observation.Tablets {
+		voters := tablet.AssignedNodeIDs
+		if len(tablet.TargetVoterNodeIDs) > 0 {
+			voters = tablet.TargetVoterNodeIDs
+		}
+		placements = append(placements, TabletPlacement{
+			ShardIndex:   tablet.ShardIndex,
+			VoterNodeIDs: append([]uint64(nil), voters...),
+		})
+	}
+	return placements
+}
+
 func (reconciler *Reconciler) admit(
 	ctx context.Context,
 	resource resources.Resource,
 	spec desiredSpec,
-	existingShards uint32,
+	existing []TabletPlacement,
 ) (PlacementDecision, error) {
 	inventory, inventoryErr := reconciler.authority.Inventory(ctx)
 	if inventoryErr == nil {
@@ -210,7 +232,7 @@ func (reconciler *Reconciler) admit(
 			spec.Placement,
 			uint32(spec.ReplicaCount),
 			spec.ShardCount,
-			existingShards,
+			existing,
 			inventory,
 		)
 	}
@@ -227,7 +249,7 @@ func (reconciler *Reconciler) admit(
 		spec.Placement,
 		uint32(spec.ReplicaCount),
 		spec.ShardCount,
-		existingShards,
+		existing,
 		inventoryFromStatus(resource.Status.Placement),
 	)
 }
@@ -247,6 +269,36 @@ func inventoryFromStatus(status *resources.PlacementStatus) NodeInventory {
 		})
 	}
 	return NodeInventory{Nodes: nodes}
+}
+
+func placementsFromStatus(tablets []resources.TabletStatus) []TabletPlacement {
+	placements := make([]TabletPlacement, 0, len(tablets))
+	for _, tablet := range tablets {
+		assigned := tablet.AssignedNodeIDs
+		if len(assigned) == 0 && len(tablet.VoterNodeIDs) == int(tablet.DesiredReplicas) {
+			// Backward-compatible recovery of pre-placement status. A partial
+			// serving sample is never promoted into desired placement.
+			assigned = tablet.VoterNodeIDs
+		}
+		placements = append(placements, TabletPlacement{
+			ShardIndex:   tablet.ShardIndex,
+			VoterNodeIDs: append([]uint64(nil), assigned...),
+		})
+	}
+	sort.Slice(placements, func(left, right int) bool {
+		return placements[left].ShardIndex < placements[right].ShardIndex
+	})
+	return placements
+}
+
+func placementForShard(placements []TabletPlacement, shard uint32) (TabletPlacement, bool) {
+	index := sort.Search(len(placements), func(index int) bool {
+		return placements[index].ShardIndex >= shard
+	})
+	if index == len(placements) || placements[index].ShardIndex != shard {
+		return TabletPlacement{}, false
+	}
+	return placements[index], true
 }
 
 // Delete removes observed regional state before deleting Go desired metadata.
@@ -365,9 +417,9 @@ func decodeDesiredSpec(raw json.RawMessage) (desiredSpec, error) {
 	if spec.ShardCount == 0 {
 		return desiredSpec{}, invalidAuthorityError("shard_count must be non-zero")
 	}
-	if spec.ReplicaCount != 3 {
+	if spec.ReplicaCount != 3 && spec.ReplicaCount != 5 {
 		return desiredSpec{}, invalidAuthorityError(
-			"the current regional runtime requires replica_count 3",
+			"the regional runtime requires replica_count 3 or 5",
 		)
 	}
 	return spec, nil
@@ -444,15 +496,62 @@ func validateObservation(
 				"regional tablet generation or desired replicas do not match the resource",
 			)
 		}
-		for _, voter := range tablet.VoterNodeIDs {
-			if !slices.Contains(placement.VoterNodeIDs, voter) {
+		expected, ok := placementForShard(placement.TabletPlacements, tablet.ShardIndex)
+		if !ok {
+			return invalidAuthorityError(
+				"regional tablet has no admitted placement",
+			)
+		}
+		transitioning := len(tablet.TargetVoterNodeIDs) > 0
+		if transitioning {
+			if !slices.Equal(tablet.TargetVoterNodeIDs, expected.VoterNodeIDs) ||
+				!singleVoterReplacement(tablet.AssignedNodeIDs, tablet.TargetVoterNodeIDs) {
 				return invalidAuthorityError(
-					"regional tablet reported a voter outside the admitted fixed voter set",
+					"regional tablet membership target does not match a single-voter admitted replacement",
+				)
+			}
+		} else if !slices.Equal(tablet.AssignedNodeIDs, expected.VoterNodeIDs) {
+			return invalidAuthorityError(
+				"regional tablet assignment does not match the admitted placement",
+			)
+		}
+		if len(tablet.VoterNodeIDs) > 0 &&
+			!slices.Equal(tablet.VoterNodeIDs, tablet.AssignedNodeIDs) &&
+			(!transitioning || !slices.Equal(tablet.VoterNodeIDs, tablet.TargetVoterNodeIDs)) {
+			return invalidAuthorityError(
+				"regional tablet reported membership matching neither its current nor target assignment",
+			)
+		}
+		for _, reachable := range tablet.ReachableVoterNodeIDs {
+			if !slices.Contains(tablet.VoterNodeIDs, reachable) {
+				return invalidAuthorityError(
+					"regional tablet reported a reachable node outside committed membership",
 				)
 			}
 		}
 	}
 	return nil
+}
+
+func singleVoterReplacement(current, target []uint64) bool {
+	if len(current) != len(target) || len(current) == 0 ||
+		!slices.IsSorted(current) || !slices.IsSorted(target) ||
+		hasAdjacentDuplicate(current) || hasAdjacentDuplicate(target) {
+		return false
+	}
+	removed := 0
+	for _, nodeID := range current {
+		if !slices.Contains(target, nodeID) {
+			removed++
+		}
+	}
+	added := 0
+	for _, nodeID := range target {
+		if !slices.Contains(current, nodeID) {
+			added++
+		}
+	}
+	return removed == 1 && added == 1
 }
 
 func statusFromObservation(
@@ -463,15 +562,38 @@ func statusFromObservation(
 ) resources.ResourceStatus {
 	tablets := append([]resources.TabletStatus(nil), observation.Tablets...)
 	ready := true
+	transitioning := false
 	for index := range tablets {
+		expected, ok := placementForShard(placement.TabletPlacements, tablets[index].ShardIndex)
 		tablets[index].VoterNodeIDs = append([]uint64(nil), tablets[index].VoterNodeIDs...)
+		tablets[index].AssignedNodeIDs = append([]uint64(nil), tablets[index].AssignedNodeIDs...)
+		tablets[index].BootstrapVoterNodeIDs = append(
+			[]uint64(nil),
+			tablets[index].BootstrapVoterNodeIDs...,
+		)
+		tablets[index].TargetVoterNodeIDs = append(
+			[]uint64(nil),
+			tablets[index].TargetVoterNodeIDs...,
+		)
+		tablets[index].ReachableVoterNodeIDs = append(
+			[]uint64(nil),
+			tablets[index].ReachableVoterNodeIDs...,
+		)
+		transitioning = transitioning || len(tablets[index].TargetVoterNodeIDs) > 0
 		ready = ready &&
-			len(tablets[index].VoterNodeIDs) >= int(spec.ReplicaCount) &&
+			ok &&
+			len(tablets[index].TargetVoterNodeIDs) == 0 &&
+			slices.Equal(tablets[index].AssignedNodeIDs, expected.VoterNodeIDs) &&
+			slices.Equal(tablets[index].VoterNodeIDs, expected.VoterNodeIDs) &&
+			slices.Equal(tablets[index].ReachableVoterNodeIDs, expected.VoterNodeIDs) &&
 			tablets[index].LeaderNodeID != 0
 	}
 	phase := resources.PhaseReady
 	message := "regional catalog generation and serving placement converged"
-	if !ready {
+	if transitioning {
+		phase = resources.PhasePending
+		message = "regional catalog generation converged; learner-first voter replacement is in progress"
+	} else if !ready {
 		phase = resources.PhaseDegraded
 		message = "regional catalog applied; serving placement is incomplete"
 	}
@@ -488,8 +610,9 @@ func statusFromObservation(
 func placementStatus(decision PlacementDecision) *resources.PlacementStatus {
 	nodes := make([]resources.RegionalNodeStatus, 0, len(decision.Nodes))
 	for _, node := range decision.Nodes {
-		used := node.UsedConsensusGroups + decision.AdditionalGroupsPerNode
-		available := node.AvailableConsensusGroups - decision.AdditionalGroupsPerNode
+		additional := decision.AdditionalGroupsByNode[node.NodeID]
+		used := node.UsedConsensusGroups + additional
+		available := node.AvailableConsensusGroups - additional
 		nodes = append(nodes, resources.RegionalNodeStatus{
 			NodeID:                   node.NodeID,
 			Region:                   node.Region,

@@ -31,6 +31,8 @@ primary CI and container target. The current repository pins or validates:
 | Node.js | 24 LTS | `.node-version` pins 24.18.0 |
 | pnpm | 10.28.0 | Pinned by the root `package.json` |
 | Docker | 29 or newer | Docker Desktop and Compose v2 |
+| Kind | 0.32.0 | Required only by the disposable live Kubernetes release gate |
+| kubectl | 1.34.0 | Required by offline manifests and the live Kubernetes release gate |
 | GNU Make | 3.81 or newer | Root task interface; `just` is not required |
 
 The project intentionally uses Node 24 LTS. The current machine also has Node
@@ -54,7 +56,7 @@ brew upgrade node@24
 Homebrew is the lowest-risk path for the current workstation:
 
 ```shell
-brew install go rust protobuf buf pkgconf openjdk@25 node@24 pnpm actionlint shellcheck
+brew install go rust protobuf buf pkgconf openjdk@25 node@24 pnpm actionlint shellcheck kind kubectl
 python3 -m pip install ruff==0.15.19
 ```
 
@@ -166,12 +168,19 @@ make build            # compile all current components
 make check            # normal pre-commit gate
 make ci               # local deterministic CI gate
 make kubernetes-config # render and strictly type-check the operator Kustomize tree offline
+make test-kubernetes-runner # unit-test live-campaign contracts without Docker
+make test-kubernetes-live # exact-source disposable four-node managed lifecycle
 ```
 
 `make check` includes `make audit`; it therefore requires the pinned
 `cargo-audit` installation above. The Make targets remain thin wrappers. When
 debugging a failure, rerun the native command printed by Make rather than adding
 behavior that exists only in the wrapper.
+
+The live Kubernetes target is intentionally separate from `make check` because
+it builds three images and creates five Kind containers. Final alpha-exit/beta
+evidence must run it on the frozen candidate; `--skip-build` is diagnostic only.
+See [Live Kubernetes alpha-exit campaign](KUBERNETES_ALPHA_EXIT.md).
 
 ## Protobuf contracts
 
@@ -205,6 +214,21 @@ Buf's breaking check against the default branch or a published registry label.
 Managed regional resource fixtures must include the governance object described
 in [Resource Governance](RESOURCE_GOVERNANCE.md). Direct local/legacy fixtures
 may omit it only when the test explicitly covers backward-compatible recovery.
+
+## OCI artifact development
+
+Pull requests build the node, control, operator, and CLI Dockerfiles but never
+publish them. Each image must include synchronized version and exact Git
+revision labels, run as an explicit non-root user, expose the expected
+entrypoint, and contain no credential-shaped default environment value.
+
+Build and inspect the four candidates with the commands in
+[Release artifacts](RELEASE_ARTIFACTS.md). CI uses the pinned Anchore SBOM
+action; a local standalone Syft may generate equivalent SPDX JSON evidence. Do
+not commit generated SBOMs, image archives, credentials, or runtime volumes.
+Only the exact-main tag workflow can authenticate to GHCR. All workflow actions
+are pinned by full commit SHA, and a version comment records the reviewed tag.
+See [ADR-0041](adr/0041-tag-only-oci-supply-chain.md).
 
 ## Runtime configuration and local ports
 

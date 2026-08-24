@@ -450,18 +450,20 @@ and lease-capped timeouts fail closed. Actual endpoint egress failure commits
 unhealthy state before failover; connector success commits the batch outcome
 and checkpoint before source acknowledgement.
 
-Generic HTTP/CloudEvents source connectors are polled only by the active Bus
-leader. Stable per-record proposal identities and record-before-checkpoint
-ordering make a stable batch replay duplicate-safe inside the Bus. Bidirectional
-streaming push, unsigned legacy HTTP/webhook execution, an MQTT wire gateway,
-CDC/Kafka/object-storage source adapters, private managed egress,
-secret hot reload/manager integration, active endpoint health restoration,
-official schema/MQTT/CloudEvents conformance, and replay-origin lineage remain
-outside this alpha. See
+HTTP/CloudEvents, immutable-object, PostgreSQL, MySQL, and Kafka source
+connectors are read only by the active Bus leader. Every adapter produces the
+same bounded batch; stable per-record proposal identities and record-before-
+checkpoint ordering make a stable batch replay duplicate-safe inside the Bus.
+PostgreSQL feedback and Kafka group commits occur after the Epoch checkpoint,
+and loss of eligibility closes their stateful sessions. Bidirectional streaming
+push, unsigned legacy HTTP/webhook execution, an MQTT wire gateway, private
+managed egress, secret hot reload/manager integration, active endpoint health
+restoration, official protocol conformance, Azure/GCS live-cloud certification,
+and replay-origin lineage remain outside this beta implementation. See
 [ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md) and
 [ADR-0031](adr/0031-leader-owned-epoch-target-delivery.md), and
 [ADR-0037](adr/0037-event-integration-platform.md), and
-[ADR-0038](adr/0038-product-runtime-closure.md).
+[ADR-0040](adr/0040-initial-source-adapter-checkpoint-coupling.md).
 
 ## 9. Pipes and cross-profile behavior
 
@@ -737,9 +739,10 @@ production latency/throughput SLO, and a public idempotency-retention contract; 
 [CACHE_TABLET.md](CACHE_TABLET.md).
 The direct Bus profile intentionally lacks target executors. The regional
 workers execute signed HTTP/webhook, Epoch Queue/Stream, API destination,
-endpoint-pool, function, and target/bidirectional connector targets. Unsigned
-legacy HTTP execution, streaming push, CDC/Kafka/object-storage source
-adapters, replay-attempt lineage, private egress, and full protocol conformance remain
+endpoint-pool, function, and target/bidirectional connector targets and ingest
+HTTP/CloudEvents, immutable objects, PostgreSQL, MySQL, and Kafka sources.
+Unsigned legacy HTTP execution, streaming push, replay-attempt lineage, private
+egress, live Azure/GCS certification, and full protocol conformance remain
 open; see
 [BUS_TABLET.md](BUS_TABLET.md).
 

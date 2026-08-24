@@ -91,8 +91,10 @@ GitHub Pages contain no credential.
 
 These named values are public development fixtures whose SHA-256 fingerprints
 appear in the example policy. Replace the policy and credentials for any
-non-disposable environment. This baseline still lacks TLS, expiry/revocation,
-OIDC, mTLS, and production secret delivery.
+non-disposable environment. This Compose quickstart intentionally remains a
+loopback plaintext development mode. The supported Kubernetes deployment
+requires public TLS, peer/control mTLS, hostname verification, and Secret
+mounts; expiry/revocation and OIDC remain open.
 
 ## Apply one managed resource
 
@@ -146,11 +148,14 @@ curl --fail-with-body \
   http://127.0.0.1:8080/v1/regional/resources
 ```
 
-A ready tablet has three distinct `voter_node_ids` and a `leader_node_id` that
+A ready tablet has three or five distinct `voter_node_ids` and a `leader_node_id` that
 belongs to that observed voter set. Desired replicas never count as observed
-voters. Resource generations, observed generations, tablet/group IDs, epochs,
-voter IDs, and leader IDs are decimal JSON strings so JavaScript cannot round
-them. `placement` reports requested constraints, achieved zones, and per-node
+voters. During replacement the row is `pending` and exposes
+`assigned_node_ids`, immutable `bootstrap_voter_node_ids`, and
+`target_voter_node_ids` separately from committed and reachable voters.
+Resource generations, observed generations, tablet/group IDs, epochs, voter
+IDs, and leader IDs are decimal JSON strings so JavaScript cannot round them.
+`placement` reports requested constraints, achieved zones, and per-node
 capacity separately from the tablet routes.
 
 Inspect one node directly:
@@ -217,14 +222,17 @@ normal API/function/connector/OAuth URLs require public HTTPS. See
 [ADR-0037](adr/0037-event-integration-platform.md).
 
 Topology also contains `source_connector_delivery`. Only the current Bus
-leader polls eligible HTTP/CloudEvents source connectors; counters cover
-passes, examined connectors, batches, applied/error-routed records,
-checkpoints, errors, and the bounded last error. Configure
+leader reads eligible HTTP/CloudEvents, immutable-object, PostgreSQL, MySQL,
+and Kafka sources; counters cover passes, examined connectors, batches,
+applied/error-routed records, checkpoints, errors, and the bounded last error.
+PostgreSQL and Kafka keep a stateful session only while the local node remains
+the eligible source leader; upstream acknowledgements follow the replicated
+Epoch checkpoint. Configure
 `EPOCH_REGIONAL_SOURCE_CONNECTOR_INTERVAL_MS` (default 500; 1–60,000). The
-worker reuses `EPOCH_REGIONAL_MANAGED_TARGET_SECRETS_PATH` and the managed
-target loopback-development switch. See
-[HTTP source connectors](SOURCE_CONNECTORS.md) and
-[ADR-0038](adr/0038-product-runtime-closure.md).
+worker reuses `EPOCH_REGIONAL_MANAGED_TARGET_SECRETS_PATH` for bounded typed
+credentials and the managed-target loopback-development switch. See
+[Source connectors](SOURCE_CONNECTORS.md) and
+[ADR-0040](adr/0040-initial-source-adapter-checkpoint-coupling.md).
 
 ## Route and fence a data operation
 
@@ -498,7 +506,10 @@ advice, and logical superstream merge before and after the all-node reopen.
 The native real-process campaign also serves two successive HTTP source
 batches, asserts the exact cursor header, waits for replicated checkpoint
 convergence, reopens every voter, and verifies that stable proposal identities
-did not duplicate Bus ingress.
+did not duplicate Bus ingress. A separate pinned Compose matrix exercises
+MinIO/S3, PostgreSQL logical replication, MySQL row binlogs, and Kafka group
+consumption against real protocol servers, including post-checkpoint upstream
+acknowledgement and stateful-session release.
 
 The campaign checks governance through the filtered Go BFF and every Rust
 catalog voter before and after the Go `SIGKILL`, then repeats it after all-node
@@ -506,11 +517,20 @@ same-volume reopen. See [Resource Governance](RESOURCE_GOVERNANCE.md).
 
 ## Current boundaries
 
-- Placement is exactly three configured voters. Region, zone count, and node
-  class are validated, but there is no general voter-selection or rack-aware
-  solver.
-- Membership changes, online rebalance, repair, split/merge, user-exportable
-  backups/PITR are absent. Automatic local native voter checkpoints, physical
+- A region accepts 3–1,024 configured physical nodes. Each Catalog/profile
+  group records an explicit odd voter set of exactly three or five, and nodes
+  materialize only locally assigned groups. Region, zone count, node class,
+  group capacity, and placement membership are validated. One explicit target
+  may replace exactly one voter through Catalog plan, learner catch-up, joint
+  consensus, finalization, removed-node shutdown, and durable reopen. Rack-aware
+  solving, automatic multi-tablet rebalance, and general repair planning remain
+  open.
+- Regional semantic backup and fresh-cluster restore are implemented: one
+  Catalog leader gathers quorum-barriered checkpoints from distributed tablet
+  leaders; the operator schedules AES-256-GCM encrypted RWX-PVC artifacts with
+  retention/status and an immutable restore reference. Log-based semantic PITR,
+  object-storage destinations, automated restore drills, and RPO/RTO claims
+  remain open. Automatic local native voter checkpoints, physical
   EPRS reclamation, replicated Stream
   time/size/combined logical retention, and leader-owned regional maintenance
   are implemented. Stream key compaction and embedded immutable tier reads are
@@ -521,10 +541,15 @@ same-volume reopen. See [Resource Governance](RESOURCE_GOVERNANCE.md).
   cooperative revoke, and atomic cross-shard checkpoint handoff are not. Read
   barriers are leader-only and regional-only;
   follower forwarding remains absent.
-- Rust regional HTTP and Go management enforce the bootstrap policy, and the
-  console supplies a session-only credential. They still have no TLS/OIDC/mTLS,
-  token expiry/revocation, rate limiting, replicated policy, or immutable audit
-  export. Peer port 7701 and the standalone local API remain unauthenticated.
+- Rust regional HTTP and Go management enforce the bootstrap policy, including
+  the dedicated `backup.create` action, and the console supplies a session-only
+  credential. The Kubernetes operator requires TLS on public Go/Rust listeners
+  and mTLS on peer/control paths; Go, Java, Python, and the CLI accept custom CA
+  and optional client identities without disabling hostname verification. OIDC,
+  token/certificate expiry and revocation, rate limiting, replicated policy,
+  immutable audit export, and certificate issuance remain open. The standalone
+  local API and loopback Compose profile remain unauthenticated development
+  surfaces.
 - Go management metadata is durable for one process and one bbolt file. It is
   not replicated, multi-instance linearizable, backed up automatically, or
   protected by management leader election.
@@ -541,10 +566,10 @@ same-volume reopen. See [Resource Governance](RESOURCE_GOVERNANCE.md).
   across all three languages. Package publication, fully generated response and
   integration-operation models, transactional assignment/offset
   handoff, safe remapping, and production transport remain open.
-- The BFF reports policy-protected configured-endpoint region/zone/class and
-  group-capacity evidence. Plain HTTP still lacks Rust server identity.
-  Rack separation, dynamic membership, and online rebalancing remain
-  explicitly unverified.
+- The BFF reports policy-protected configured-endpoint region/zone/class,
+  group-capacity, and current/target membership evidence. The supported
+  operator path uses TLS/mTLS; loopback HTTP is development-only. Rack
+  separation and automatic online rebalancing remain explicitly unverified.
 
 Stop the development topology with:
 

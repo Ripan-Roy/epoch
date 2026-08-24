@@ -8,7 +8,7 @@ NODE_LTS := $(if $(wildcard /opt/homebrew/opt/node@24/bin/node),/opt/homebrew/op
 PNPM_ENV := PATH="/opt/homebrew/opt/node@24/bin:$$PATH"
 JAVA_MVN := ./sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress
 
-.PHONY: help bootstrap-check generate generate-check release-check format format-check lint audit test test-unit test-retry-command test-consensus-process test-consensus-probe test-stream-tablet test-queue-tablet test-cache-tablet test-bus-tablet test-regional-runtime test-integration build check ci kubernetes-config compose-config compose-up compose-down compose-probe-config compose-probe-up compose-probe-down compose-regional-config compose-regional-up compose-regional-down clean
+.PHONY: help bootstrap-check generate generate-check release-check format format-check lint audit test test-unit test-retry-command test-soak-runner test-kubernetes-runner test-consensus-process test-consensus-probe test-stream-tablet test-queue-tablet test-cache-tablet test-bus-tablet test-regional-runtime test-kubernetes-live test-integration build check ci kubernetes-config compose-config compose-up compose-down compose-probe-config compose-probe-up compose-probe-down compose-regional-config compose-regional-up compose-regional-down clean
 
 help: ## Show available commands.
 	@awk 'BEGIN {FS = ":.*## "; printf "Epoch development commands:\n\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -61,14 +61,14 @@ release-check: ## Verify synchronized cross-language release metadata.
 format: ## Format Rust, Go, Java, Python, and JavaScript/TypeScript sources.
 	@if [ -f Cargo.toml ]; then cargo fmt --all; fi
 	@files="$$(find control operator sdk/go console/src/quickstarts -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then gofmt -w $$files; fi
-	@if [ -d sdk/python ]; then ruff format sdk/python; fi
+	@if [ -d sdk/python ]; then ruff format sdk/python tests/soak tests/integration/*.py; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) spotless:apply; fi
 	@$(PNPM_ENV) pnpm run format
 
 format-check: ## Check formatting without changing files.
 	@if [ -f Cargo.toml ]; then cargo fmt --all --check; fi
 	@files="$$(find control operator sdk/go console/src/quickstarts -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then unformatted="$$(gofmt -l $$files)"; test -z "$$unformatted" || { printf '%s\n' "$$unformatted"; exit 1; }; fi
-	@if [ -d sdk/python ]; then ruff format --check sdk/python; fi
+	@if [ -d sdk/python ]; then ruff format --check sdk/python tests/soak tests/integration/*.py; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) spotless:check; fi
 	@$(PNPM_ENV) pnpm run format:check
 
@@ -76,7 +76,7 @@ lint: ## Run static checks for every language and contract.
 	@if [ -f Cargo.toml ]; then cargo clippy --locked --workspace --all-targets --all-features -- -D warnings; fi
 	@if [ -f Cargo.toml ]; then RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --all-features --no-deps; fi
 	@if find control operator sdk/go -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then go vet ./...; fi
-	@if [ -d sdk/python ]; then ruff check sdk/python; fi
+	@if [ -d sdk/python ]; then ruff check sdk/python tests/soak tests/integration/*.py; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) -DskipTests verify; fi
 	@if [ -d .github/workflows ]; then actionlint; fi
 	@if [ -d tests/integration ]; then shellcheck scripts/*.sh tests/integration/*.sh; fi
@@ -92,7 +92,7 @@ audit: ## Reject Rust dependency advisories except the documented Raft exception
 
 test: test-unit ## Run the default local test suite.
 
-test-unit: test-retry-command ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
+test-unit: test-retry-command test-soak-runner test-kubernetes-runner ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
 	@if [ -f Cargo.toml ]; then cargo test --locked --workspace --all-targets --all-features; fi
 	@if find control operator sdk/go -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then go test -race ./...; fi
 	@if [ -d sdk/python ]; then PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests -v; fi
@@ -101,6 +101,12 @@ test-unit: test-retry-command ## Run unit tests for Rust, Go, Java, Python, and 
 
 test-retry-command: ## Prove bounded command retries and final-status preservation.
 	@bash tests/integration/retry-command.sh
+
+test-soak-runner: ## Prove soak resumption, duration gating, signatures, and tamper rejection.
+	@python3 -m unittest discover -s tests/soak -p 'test_*.py' -v
+
+test-kubernetes-runner: ## Prove the disposable Kubernetes campaign's fail-closed contracts.
+	@PYTHONPATH=tests/integration python3 -m unittest tests/integration/test_kubernetes_alpha_exit.py -v
 
 test-consensus-process: ## Prove persistent three-voter behavior across real SIGKILL/reopen cycles.
 	cargo test --locked -p epoch-consensus --test multiprocess persistent_three_node_partition_and_sigkill_reopen -- --ignored --nocapture --test-threads=1
@@ -122,6 +128,9 @@ test-bus-tablet: ## Prove Event Bus ingress/outbox settlement, failover, and SIG
 
 test-regional-runtime: ## Prove Go-to-Rust regional BFF, four-profile failover, and all-node recovery.
 	@python3 tests/integration/regional-runtime.py
+
+test-kubernetes-live: ## Run the disposable four-node install, traffic, replacement, upgrade, backup, and restore campaign.
+	@tests/integration/kubernetes_alpha_exit.py
 
 test-integration: test-consensus-process test-consensus-probe test-stream-tablet test-queue-tablet test-cache-tablet test-bus-tablet test-regional-runtime ## Exercise real processes through consensus, the CLI, and Go/Java/Python SDKs.
 	@bash tests/integration/smoke.sh

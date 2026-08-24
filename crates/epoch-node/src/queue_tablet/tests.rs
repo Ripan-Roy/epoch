@@ -557,6 +557,7 @@ fn queue_status_rejects_profile_ahead_and_serializes_all_u64_as_strings() {
         checkpoint_index: LogIndex::ZERO,
         retained_log_first_index: LogIndex::new(1),
         voter_count: 3,
+        replication_progress: Vec::new(),
         fail_stopped: false,
     };
     let snapshot = QueueTabletSnapshot {

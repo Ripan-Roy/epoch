@@ -5,8 +5,19 @@
 **Tagline:** One runtime. Every real-time workload.  
 **Document version:** 0.3  
 **Date:** 22 July 2026  
-**Status:** Product concept with approved brand and implementation direction  
+**Status:** Implementation-backed private beta candidate; later managed-service milestones remain open
 **Audience:** Founders, product, distributed-systems engineering, infrastructure, security, and design
+
+**Beta implementation note (24 August 2026):** The `v0.2.0-beta.1` candidate
+closes the alpha operational boundary with fail-closed TLS/mTLS, portable
+encrypted regional backup and fresh restore, durable three/five-voter
+membership and learner-first replacement, guarded Kubernetes rollout, bounded
+object/PostgreSQL/MySQL/Kafka source adapters, four signed non-root OCI images,
+a resumable signed fault harness, and one exact-source four-node Kubernetes
+backup/replacement/upgrade/restore proof. This establishes a locally tested
+native private-beta distribution. It does not complete the later compatibility,
+geo, managed-service, 30-day, package-manager, production SLO, or GA rows in
+this PRD. See ADR-0039 and the alpha-exit checklist.
 
 **Implementation note (13 August 2026):** The fixed-three-voter regional Rust
 runtime now owns automatic maintenance for the implemented time-driven profile
@@ -119,23 +130,42 @@ CloudEvents conformance, external secret-manager hot reload, private-network
 egress, exactly-once external side effects, or production scale/security
 evidence. See ADR-0037.
 
-**Product-runtime implementation note (23 August 2026):** An active Bus leader
-now polls bounded generic HTTP/CloudEvents source connectors through the same
-allowlisted, public-address-only, DNS-pinned, no-proxy/no-redirect egress
-boundary as managed targets. Stable per-record proposal identities make replay
-after a crash duplicate-safe, while the replicated source checkpoint advances
-only after every record commits as applied or error-routed. A real
-three-process failover/reopen test proves cursor advancement and all-voter
-recovery. A Go `EpochCluster` controller now reconciles the fixed three-voter
-StatefulSet, durable control owner, Services, policy/credential mounts,
-anti-affinity, security contexts, placement identity, and readiness status; it
-fails closed before creating workloads when required configuration is absent.
-The generated-contract Go `epoch` CLI provides strict declarative apply,
-get/list/delete, OCC, idempotency, and two-boundary diagnostics. These are
-source-distributed alpha surfaces. TLS/mTLS and workload identity, automated
-backup/restore and rolling-upgrade orchestration, dynamic membership, published
-OCI images, CDC/Kafka/object-storage source adapters, and production
-load/soak/fault certification remain beta gates. See ADR-0038.
+**Alpha-exit implementation note (24 August 2026):** The active Bus leader now
+reads bounded HTTP/CloudEvents, immutable-object (S3-compatible, Azure Blob/Data
+Lake, and GCS), PostgreSQL logical-replication, MySQL row-binlog, and Kafka
+sources through a shared record-before-checkpoint pipeline. Stable per-record
+proposal identities make replay after a crash duplicate-safe; every applied or
+error-routed result commits before the exact object, LSN, binlog, or partition-
+offset cursor. PostgreSQL feedback and Kafka group commits occur only after the
+Epoch checkpoint. Deterministic tests and a pinned MinIO/PostgreSQL/MySQL/Kafka
+Compose matrix exercise real protocols locally; live Azure/GCS cloud identity,
+sustained load/soak, and the broader crash-point matrix remain release evidence.
+The same branch adds mandatory TLS/mTLS deployment wiring, secure Go/Java/Python
+and CLI transport, versioned regional backup/fresh-cluster restore, scheduled
+encrypted operator backups, guarded upgrades, and learner-first joint-consensus
+voter replacement. These remain beta candidates until the complete local,
+protected CI/Pages, OCI/SBOM/provenance, and release gates pass. One clean local
+live-Kubernetes campaign now proves mTLS installation, all-profile traffic,
+encrypted backup, compacted-log learner catch-up and joint replacement,
+backup-gated serialized rollout, fresh-cluster restore, exact state digests,
+and post-restore writes across four physical nodes. The protected exact-commit
+rerun remains mandatory, and the same-binary retagged rollout does not claim
+mixed-version compatibility, RPO/RTO, or a production SLO.
+The release candidate builds four exact-tag, non-root Linux amd64/arm64 OCI
+manifests (node, control, operator, and CLI), generates per-platform SPDX SBOMs,
+attaches provenance, and signs immutable manifest digests only when the tag is
+the current `main`. It never publishes `latest`; raw signed binary archives and
+package-manager distributions remain separate PKG-005/DX-001 evidence. See
+ADR-0039, ADR-0040, and ADR-0041.
+
+The same candidate adds a resumable four-profile fault runner. Each round
+executes the real regional control/data/SDK campaign, emits a strict invariant
+receipt, atomically checkpoints attempts, hashes all artifacts, and signs the
+canonical completion manifest with Ed25519. The accelerated CI profile proves
+the harness only. The separate 30-day profile counts successful active campaign
+time, rejects source/runtime drift on resume, and cannot produce completion
+evidence early; the actual elapsed campaign and production SLO evidence remain
+operating gates.
 
 ---
 

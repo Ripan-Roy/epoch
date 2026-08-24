@@ -16,7 +16,7 @@ import regionalBusPythonSource from "../quickstarts/regional_bus/quickstart.py?r
 
 export const repositoryUrl = "https://github.com/Ripan-Roy/epoch";
 export const repositoryDocsUrl = `${repositoryUrl}/blob/main/docs`;
-export const releaseVersion = "0.1.0-alpha.10";
+export const releaseVersion = "0.2.0-beta.1";
 
 export type LanguageId = "go" | "java" | "python";
 
@@ -73,23 +73,163 @@ EPOCH_AUTH_POLICY_PATH=spec/auth/bootstrap-policy-v1.example.json \
 EPOCH_CONTROL_REGIONAL_TOKEN=epoch-dev-control-v1 \
 go run ./control/cmd/epoch-control`;
 
-export const kubernetesInstall = `# Build the three images into your registry
-docker build -f deploy/docker/Dockerfile.node -t registry.example/epoch-node:alpha.10 .
-docker build -f deploy/docker/Dockerfile.control -t registry.example/epoch-control:alpha.10 .
-docker build -f deploy/docker/Dockerfile.operator -t registry.example/epoch-operator:alpha.10 .
+export const kubernetesInstall = `# Build the cluster images and optional containerized CLI
+docker build -f deploy/docker/Dockerfile.node -t registry.example/epoch-node:beta.1 .
+docker build -f deploy/docker/Dockerfile.control -t registry.example/epoch-control:beta.1 .
+docker build -f deploy/docker/Dockerfile.operator -t registry.example/epoch-operator:beta.1 .
+docker build -f deploy/docker/Dockerfile.cli -t registry.example/epoch-cli:beta.1 .
 
 # Install the CRD, least-privilege RBAC, and two-replica leader-elected operator
+kubectl create namespace epoch-system
 kubectl apply -k deploy/kubernetes/operator
 
-# Supply policy and credential references without committing a bearer token
+# Supply policy, credential, and CA-issued workload identity references
 kubectl -n epoch-system create configmap epoch-auth-policy \
   --from-file=bootstrap-policy.json=spec/auth/bootstrap-policy-v1.example.json
 kubectl -n epoch-system create secret generic epoch-control-credentials \
   --from-literal=regional-token="$EPOCH_CONTROL_REGIONAL_TOKEN"
+kubectl -n epoch-system create secret generic epoch-data-plane-tls \
+  --from-file=ca.crt=/secure/epoch-ca.crt \
+  --from-file=tls.crt=/secure/epoch-data-plane.crt \
+  --from-file=tls.key=/secure/epoch-data-plane.key
+kubectl -n epoch-system create secret generic epoch-control-plane-tls \
+  --from-file=ca.crt=/secure/epoch-ca.crt \
+  --from-file=tls.crt=/secure/epoch-control-plane.crt \
+  --from-file=tls.key=/secure/epoch-control-plane.key
 
-# Edit image names in the sample, then create the fixed three-voter cluster
+# Supply the encrypted semantic-backup destination and 32-byte key
+umask 077
+head -c 32 /dev/urandom > epoch-backup.key
+kubectl -n epoch-system create secret generic epoch-backup-key \
+  --from-file=encryption.key=epoch-backup.key
+rm -f epoch-backup.key
+kubectl apply -f deploy/kubernetes/operator/sample-backup-pvc.yaml
+
+# Edit image names in the sample, then create the regional cluster
 kubectl apply -f deploy/kubernetes/operator/sample-cluster.yaml
 kubectl -n epoch-system get epochclusters.platform.epoch.dev -w`;
+
+export const kubernetesAlphaExitCampaign = `# Contract tests do not require a cluster.
+make test-kubernetes-runner
+
+# Build exact local images, create a disposable one-control/four-worker Kind
+# cluster, run the complete managed lifecycle, write evidence, and clean up.
+tests/integration/kubernetes_alpha_exit.py \\
+  --cluster-name epoch-alpha-exit-local \\
+  --evidence-dir /secure/evidence/epoch-kubernetes-alpha-exit
+
+# Verify every retained evidence file against the bundle manifest.
+cd /secure/evidence/epoch-kubernetes-alpha-exit
+sha256sum --check manifest.sha256`;
+
+export const releaseArtifactVerification = `# Exact tags are discovery handles; deploy the verified digest.
+export EPOCH_RELEASE_TAG=v0.2.0-beta.1
+export EPOCH_IMAGE=ghcr.io/ripan-roy/epoch-node
+
+docker buildx imagetools inspect "$EPOCH_IMAGE:$EPOCH_RELEASE_TAG"
+export EPOCH_IMAGE_DIGEST=sha256:replace-with-the-inspected-manifest-digest
+
+cosign verify \
+  --certificate-identity \
+  "https://github.com/Ripan-Roy/epoch/.github/workflows/release-tag.yml@refs/tags/$EPOCH_RELEASE_TAG" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "$EPOCH_IMAGE@$EPOCH_IMAGE_DIGEST"
+
+gh attestation verify \
+  "oci://$EPOCH_IMAGE@$EPOCH_IMAGE_DIGEST" \
+  --repo Ripan-Roy/epoch
+
+docker pull "$EPOCH_IMAGE@$EPOCH_IMAGE_DIGEST"`;
+
+export const soakCampaign = `# The fast profile proves the resumable harness, not a 30-day SLO.
+export EPOCH_SOAK_DIR=/secure/evidence/epoch-accelerated
+export EPOCH_SOAK_KEY=/run/secrets/epoch-soak-ed25519.pem
+
+python3 tests/soak/epoch_soak.py run \
+  --profile accelerated \
+  --state-dir "$EPOCH_SOAK_DIR" \
+  --signing-key "$EPOCH_SOAK_KEY"
+
+python3 tests/soak/epoch_soak.py verify \
+  --manifest "$EPOCH_SOAK_DIR/evidence.json" \
+  --public-key "$EPOCH_SOAK_DIR/evidence-public.pem"
+
+# The long profile resumes only with the exact same source, image, and plan.
+python3 tests/soak/epoch_soak.py run \
+  --profile thirty-day \
+  --state-dir /secure/evidence/epoch-thirty-day \
+  --signing-key "$EPOCH_SOAK_KEY"`;
+
+export const backupRestoreSpec = `spec:
+  backup:
+    schedule: "*/15 * * * *"
+    destinationPVC: epoch-backups
+    encryptionSecret: epoch-backup-key-current
+    keyID: backup-key-2026-09
+    retentionCount: 7
+  restore:
+    objectName: 1787520000000-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.epoch-backup.enc
+    encryptionSecret: epoch-backup-key-2026-08`;
+
+export const backupStatus = `# Observe schedule, Jobs, and the exact encrypted object receipt
+kubectl -n epoch-system get cronjob epoch-backup
+kubectl -n epoch-system get jobs \
+  -l platform.epoch.dev/backup-owner=epoch
+kubectl -n epoch-system get epochcluster epoch \
+  -o jsonpath='{.status.backup}'
+
+# Authenticate and decode one artifact in a controlled admin environment
+epoch-backup decrypt \
+  --input /backups/OBJECT.epoch-backup.enc \
+  --encryption-key /secure/epoch-backup.key \
+  --output /tmp/epoch-regional-backup.json`;
+
+export const guardedUpgradeSpec = `spec:
+  nodeImage: ghcr.io/ripan-roy/epoch-node:v0.2.0-beta.1
+  upgrade:
+    backupMaxAgeSeconds: 3600
+    stepDeadlineSeconds: 900
+    rollbackOnFailure: true
+    # Change only to retry the same failed target image.
+    retryToken: attempt-2`;
+
+export const guardedUpgradeStatus = `# Durable phase, image, ordinal, deadline, and rollback state
+kubectl -n epoch-system get epochcluster epoch \\
+  -o jsonpath='{.status.upgrade}'
+
+# Immutable mTLS verification/drain Jobs for this plan
+kubectl -n epoch-system get jobs \\
+  -l platform.epoch.dev/upgrade-owner=epoch
+
+# The operator lowers this by exactly one only after drain succeeds
+kubectl -n epoch-system get statefulset epoch-node \\
+  -o jsonpath='{.spec.updateStrategy.rollingUpdate.partition}'`;
+
+export const voterReplacementPlan = `# Discover the tablet ID, epoch, generation, and current voters first.
+# The supported deployment uses TLS/mTLS and a principal with catalog.apply.
+curl --fail-with-body --request POST \
+  https://epoch.example/experimental/v1/regional/catalog/tablets/41/membership \
+  --cacert /secure/epoch-ca.crt \
+  --cert /secure/epoch-admin.crt \
+  --key /secure/epoch-admin.key \
+  --header "authorization: Bearer $EPOCH_TOKEN" \
+  --header 'content-type: application/json' \
+  --data '{
+    "request_token": "replace-orders-3-with-4-v1",
+    "expected_tablet_epoch": "1",
+    "expected_resource_generation": "7",
+    "target_voter_node_ids": ["1", "2", "4"]
+  }'`;
+
+export const voterReplacementStatus = `# During catch-up this reports pending with current and target voters.
+curl --fail-with-body \
+  https://epoch-control.example/v1/regional/resources \
+  --cacert /secure/epoch-ca.crt \
+  --header "authorization: Bearer $EPOCH_TOKEN"
+
+# Focused four-node plan → catch-up → finalize → reopen proof
+cargo test -p epoch-node --lib \
+  catalog_planned_voter_replacement_catches_up_finalizes_and_reopens`;
 
 export const managementCli = `# Build and verify both management boundaries
 go build -o ./bin/epoch ./control/cmd/epoch
@@ -263,8 +403,8 @@ curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
     "expected_generation":0,
     "resource":{
       "organization":"acme","project":"shop","environment":"dev","namespace":"core",
-      "kind":"event-bus","name":"events",
-      "governance":{"owner":"team:platform","cost_center":"cc-1042","classification":"internal","tags":{"service":"events","profile":"event-bus"}},
+      "kind":"event_bus","name":"events",
+      "governance":{"owner":"team:platform","cost_center":"cc-1042","classification":"internal","tags":{"service":"events","profile":"event_bus"}},
       "spec":{"shard_count":1,"replica_count":3,"placement":{
         "allowed_regions":["ap-south"],"minimum_zones":3,
         "required_node_class":"general-purpose"

@@ -11,7 +11,7 @@ use axum::{
     routing::{any, get},
 };
 use epoch_catalog::ResourceName;
-use epoch_consensus::{ConsensusError, ConsensusRole, ConsensusStatus};
+use epoch_consensus::{ConsensusError, ConsensusMembership, ConsensusRole, ConsensusStatus};
 use epoch_core::{ResourceKind, WorkloadProfile};
 use epoch_stream::STREAM_PARTITIONER;
 use serde::{Deserialize, Serialize};
@@ -299,6 +299,7 @@ pub struct RegionalRouteResponse {
     pub tablet_epoch: u64,
     pub workload_profile: WorkloadProfile,
     pub replica_count: u16,
+    pub voter_node_ids: Vec<String>,
     #[serde(serialize_with = "serialize_u64_as_decimal")]
     pub local_node_id: u64,
     pub local_role: ConsensusProbeRole,
@@ -321,7 +322,11 @@ pub struct StreamPartitioningResponse {
 }
 
 impl RegionalRouteResponse {
-    fn new(route: &MaterializedTabletRoute, consensus: &ConsensusStatus) -> Self {
+    fn new(
+        route: &MaterializedTabletRoute,
+        consensus: &ConsensusStatus,
+        membership: &ConsensusMembership,
+    ) -> Self {
         let descriptor = &route.metadata().descriptor;
         Self {
             resource: route.metadata().resource.clone(),
@@ -332,6 +337,7 @@ impl RegionalRouteResponse {
             tablet_epoch: descriptor.tablet_epoch,
             workload_profile: descriptor.workload_profile,
             replica_count: descriptor.replica_count,
+            voter_node_ids: membership.voters.iter().map(ToString::to_string).collect(),
             local_node_id: consensus.node_id.get(),
             local_role: consensus.role.into(),
             leader_node_id: consensus.leader_id.map(epoch_consensus::NodeId::get),
@@ -530,12 +536,20 @@ async fn resolve_route(
     Path(path): Path<RegionalResourcePath>,
 ) -> Result<Json<RegionalRouteResponse>, RegionalRouterError> {
     let (route, _) = resolve_local_route(&state.directory, &path)?;
-    let consensus = route
-        .consensus()
+    let handle = route.consensus();
+    let consensus = handle
         .status()
         .await
         .map_err(|error| RegionalRouterError::unavailable(error.to_string()))?;
-    Ok(Json(RegionalRouteResponse::new(&route, &consensus)))
+    let membership = handle
+        .membership()
+        .await
+        .map_err(|error| RegionalRouterError::unavailable(error.to_string()))?;
+    Ok(Json(RegionalRouteResponse::new(
+        &route,
+        &consensus,
+        &membership,
+    )))
 }
 
 async fn resolve_stream_route(
@@ -937,6 +951,9 @@ mod tests {
                     resource_generation: 5,
                     workload_profile,
                     replica_count: 3,
+                    voter_node_ids: Vec::new(),
+                    bootstrap_voter_node_ids: Vec::new(),
+                    target_voter_node_ids: Vec::new(),
                 })
                 .collect(),
         };

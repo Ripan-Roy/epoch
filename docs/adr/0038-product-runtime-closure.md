@@ -52,6 +52,13 @@ Kustomize tree and builds every image.
   object-store adapters, private egress, and connector certification remain
   separate breadth/hardening work.
 
+## Superseding implementation update
+
+ADR-0039 promoted the initial storage/CDC/Kafka adapters into the alpha-exit
+gate. ADR-0040 now defines the implemented shared source-reader and checkpoint-
+coupling contract. The historical boundary above remains accurate for
+`v0.1.0-alpha.10`; it is not the current beta-candidate boundary.
+
 ## Verification
 
 - Rust focused parser/network/status tests plus the real three-process

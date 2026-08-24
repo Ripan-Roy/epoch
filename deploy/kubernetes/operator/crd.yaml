@@ -22,6 +22,9 @@ spec:
         - name: Endpoint
           type: string
           jsonPath: .status.endpoint
+        - name: Upgrade
+          type: string
+          jsonPath: .status.upgrade.phase
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp
@@ -47,6 +50,8 @@ spec:
                 - storage
                 - authPolicyConfigMap
                 - credentialSecret
+                - transportSecurity
+                - backup
               properties:
                 nodeImage:
                   type: string
@@ -66,7 +71,14 @@ spec:
                   type: integer
                   format: int32
                   minimum: 3
-                  maximum: 3
+                  maximum: 1024
+                catalogReplicas:
+                  type: integer
+                  format: int32
+                  default: 3
+                  enum:
+                    - 3
+                    - 5
                 storage:
                   anyOf:
                     - type: integer
@@ -81,6 +93,80 @@ spec:
                 credentialSecret:
                   type: string
                   minLength: 1
+                transportSecurity:
+                  type: object
+                  required:
+                    - dataPlaneSecret
+                    - controlPlaneSecret
+                    - regionalServerName
+                  properties:
+                    dataPlaneSecret:
+                      type: string
+                      minLength: 1
+                    controlPlaneSecret:
+                      type: string
+                      minLength: 1
+                    regionalServerName:
+                      type: string
+                      minLength: 1
+                backup:
+                  type: object
+                  required: [schedule, destinationPVC, encryptionSecret, keyID, retentionCount]
+                  properties:
+                    schedule:
+                      type: string
+                      minLength: 1
+                      maxLength: 128
+                    destinationPVC:
+                      type: string
+                      minLength: 1
+                    encryptionSecret:
+                      type: string
+                      minLength: 1
+                    keyID:
+                      type: string
+                      minLength: 1
+                      maxLength: 128
+                      pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                    retentionCount:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                      maximum: 10000
+                restore:
+                  type: object
+                  required: [objectName, encryptionSecret]
+                  properties:
+                    objectName:
+                      type: string
+                      minLength: 1
+                      maxLength: 255
+                      pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*\.epoch-backup\.enc$
+                    encryptionSecret:
+                      type: string
+                      minLength: 1
+                upgrade:
+                  type: object
+                  properties:
+                    backupMaxAgeSeconds:
+                      type: integer
+                      format: int64
+                      minimum: 60
+                      maximum: 604800
+                      default: 3600
+                    stepDeadlineSeconds:
+                      type: integer
+                      format: int64
+                      minimum: 30
+                      maximum: 86400
+                      default: 900
+                    rollbackOnFailure:
+                      type: boolean
+                      default: true
+                    retryToken:
+                      type: string
+                      maxLength: 128
+                      pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
                 serviceType:
                   type: string
                   enum: [ClusterIP, NodePort, LoadBalancer]
@@ -121,6 +207,77 @@ spec:
                   type: boolean
                 endpoint:
                   type: string
+                initialized:
+                  type: boolean
+                restoreObject:
+                  type: string
+                restoreEncryptionSecret:
+                  type: string
+                backup:
+                  type: object
+                  properties:
+                    observedSchedule:
+                      type: string
+                    lastSuccessfulTime:
+                      type: string
+                      format: date-time
+                    lastSuccessfulObject:
+                      type: string
+                    lastManifestSHA256:
+                      type: string
+                    lastKeyID:
+                      type: string
+                    lastFailureTime:
+                      type: string
+                      format: date-time
+                    lastFailureMessage:
+                      type: string
+                    retainedObjects:
+                      type: integer
+                      format: int32
+                upgrade:
+                  type: object
+                  properties:
+                    currentNodeImage:
+                      type: string
+                    targetNodeImage:
+                      type: string
+                    requestID:
+                      type: string
+                    phase:
+                      type: string
+                      enum:
+                        - Stable
+                        - WaitingForBackup
+                        - Preflight
+                        - Draining
+                        - Updating
+                        - Verifying
+                        - RollbackPreflight
+                        - RollbackDraining
+                        - RollbackUpdating
+                        - RollbackVerifying
+                        - Failed
+                    targetOrdinal:
+                      type: integer
+                      format: int32
+                      minimum: 0
+                    startedAt:
+                      type: string
+                      format: date-time
+                    stepStartedAt:
+                      type: string
+                      format: date-time
+                    failureMessage:
+                      type: string
+                    message:
+                      type: string
+                    updatedNodes:
+                      type: integer
+                      format: int32
+                      minimum: 0
+                    targetOrdinalUpdated:
+                      type: boolean
                 conditions:
                   type: array
                   x-kubernetes-list-type: map

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -80,6 +81,11 @@ func TestReconcilerAppliesThenObservesCurrentRegionalState(t *testing.T) {
 			if request.ExpectedGeneration != 0 || request.ShardCount != 2 || request.ReplicaCount != 3 {
 				t.Fatalf("Apply request = %+v", request)
 			}
+			if len(request.TabletPlacements) != 2 ||
+				!slices.Equal(request.TabletPlacements[0].VoterNodeIDs, []uint64{1, 2, 3}) ||
+				!slices.Equal(request.TabletPlacements[1].VoterNodeIDs, []uint64{1, 2, 3}) {
+				t.Fatalf("tablet placements = %+v", request.TabletPlacements)
+			}
 			return observation, nil
 		},
 		observe: func(resources.ResourceKey) (AuthorityObservation, error) {
@@ -100,6 +106,76 @@ func TestReconcilerAppliesThenObservesCurrentRegionalState(t *testing.T) {
 	assertReady(t, again, 2)
 	if len(authority.applyCalls) != 1 || len(authority.observeCalls) != 1 {
 		t.Fatalf("calls = apply %d, observe %d", len(authority.applyCalls), len(authority.observeCalls))
+	}
+}
+
+func TestReconcilerAdoptsACompletedPolicyCompliantVoterReplacement(t *testing.T) {
+	registry := resources.NewRegistry()
+	resource := applyDesired(
+		t,
+		registry,
+		"create-replaceable-orders",
+		regionalKey(resources.KindStream, "replaceable-orders"),
+		1,
+		3,
+	)
+	initial := servingObservation(resource.Generation, 1, 3)
+	planned := initial
+	planned.Tablets = append([]resources.TabletStatus(nil), initial.Tablets...)
+	planned.Tablets[0].BootstrapVoterNodeIDs = []uint64{1, 2, 3}
+	planned.Tablets[0].TargetVoterNodeIDs = []uint64{1, 2, 4}
+	replaced := initial
+	replaced.Tablets = append([]resources.TabletStatus(nil), initial.Tablets...)
+	replaced.Tablets[0].AssignedNodeIDs = []uint64{1, 2, 4}
+	replaced.Tablets[0].BootstrapVoterNodeIDs = []uint64{1, 2, 3}
+	replaced.Tablets[0].VoterNodeIDs = []uint64{1, 2, 4}
+	replaced.Tablets[0].ReachableVoterNodeIDs = []uint64{1, 2, 4}
+	stage := 0
+	authority := &fakeAuthority{
+		inventory: func() (NodeInventory, error) {
+			return regionalInventory(4, 8), nil
+		},
+		apply: func(AuthorityApplyRequest) (AuthorityObservation, error) {
+			return initial, nil
+		},
+		observe: func(resources.ResourceKey) (AuthorityObservation, error) {
+			switch stage {
+			case 1:
+				return planned, nil
+			case 2:
+				return replaced, nil
+			default:
+				return initial, nil
+			}
+		},
+	}
+	reconciler := NewReconciler(registry, authority)
+	if _, err := reconciler.Reconcile(t.Context(), resource.ResourceKey); err != nil {
+		t.Fatalf("initial Reconcile() error = %v", err)
+	}
+
+	stage = 1
+	pending, err := reconciler.Reconcile(t.Context(), resource.ResourceKey)
+	if err != nil {
+		t.Fatalf("planned replacement Reconcile() error = %v", err)
+	}
+	if pending.Status.Phase != resources.PhasePending ||
+		!slices.Equal(pending.Status.Tablets[0].TargetVoterNodeIDs, []uint64{1, 2, 4}) {
+		t.Fatalf("planned replacement status = %+v", pending.Status)
+	}
+
+	stage = 2
+	updated, err := reconciler.Reconcile(t.Context(), resource.ResourceKey)
+	if err != nil {
+		t.Fatalf("replacement Reconcile() error = %v", err)
+	}
+	assertReady(t, updated, 1)
+	if !slices.Equal(updated.Status.Tablets[0].AssignedNodeIDs, []uint64{1, 2, 4}) ||
+		!slices.Equal(updated.Status.Tablets[0].VoterNodeIDs, []uint64{1, 2, 4}) {
+		t.Fatalf("replacement status = %+v", updated.Status.Tablets[0])
+	}
+	if len(authority.applyCalls) != 1 {
+		t.Fatalf("replacement triggered %d catalog applies, want one initial apply", len(authority.applyCalls))
 	}
 }
 
@@ -339,7 +415,7 @@ func TestReconcilerUsesAdmittedTopologyButCurrentRoutesDuringPartialOutage(t *te
 		},
 		observe: func(resources.ResourceKey) (AuthorityObservation, error) {
 			observation := servingObservation(resource.Generation, 1, 3)
-			observation.Tablets[0].VoterNodeIDs = []uint64{1, 2}
+			observation.Tablets[0].ReachableVoterNodeIDs = []uint64{1, 2}
 			observation.Tablets[0].LeaderNodeID = 2
 			return observation, nil
 		},
@@ -356,7 +432,8 @@ func TestReconcilerUsesAdmittedTopologyButCurrentRoutesDuringPartialOutage(t *te
 		t.Fatalf("partial-outage Reconcile() error = %v", err)
 	}
 	if degraded.Status.Phase != resources.PhaseDegraded ||
-		len(degraded.Status.Tablets[0].VoterNodeIDs) != 2 ||
+		len(degraded.Status.Tablets[0].VoterNodeIDs) != 3 ||
+		len(degraded.Status.Tablets[0].ReachableVoterNodeIDs) != 2 ||
 		degraded.Status.Placement == nil ||
 		degraded.Status.Placement.AchievedZones != 3 {
 		t.Fatalf("partial-outage status = %+v", degraded.Status)
@@ -496,16 +573,22 @@ func regionalKey(kind resources.Kind, name string) resources.ResourceKey {
 
 func servingObservation(generation uint64, shards uint32, replicas uint16) AuthorityObservation {
 	tablets := make([]resources.TabletStatus, shards)
+	voters := make([]uint64, replicas)
+	for index := range voters {
+		voters[index] = uint64(index + 1)
+	}
 	for shard := range shards {
 		tablets[shard] = resources.TabletStatus{
-			TabletID:           uint64(shard) + 10,
-			ConsensusGroupID:   uint64(shard) + 20,
-			ShardIndex:         shard,
-			TabletEpoch:        1,
-			ResourceGeneration: generation,
-			DesiredReplicas:    uint32(replicas),
-			VoterNodeIDs:       []uint64{1, 2, 3},
-			LeaderNodeID:       1,
+			TabletID:              uint64(shard) + 10,
+			ConsensusGroupID:      uint64(shard) + 20,
+			ShardIndex:            shard,
+			TabletEpoch:           1,
+			ResourceGeneration:    generation,
+			DesiredReplicas:       uint32(replicas),
+			AssignedNodeIDs:       append([]uint64(nil), voters...),
+			VoterNodeIDs:          append([]uint64(nil), voters...),
+			ReachableVoterNodeIDs: append([]uint64(nil), voters...),
+			LeaderNodeID:          1,
 		}
 	}
 	return AuthorityObservation{Generation: generation, Tablets: tablets}

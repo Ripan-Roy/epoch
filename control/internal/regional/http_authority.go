@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -120,6 +121,7 @@ type applyAuthorityBody struct {
 	ExpectedGeneration string                        `json:"expected_generation"`
 	ShardCount         uint32                        `json:"shard_count"`
 	ReplicaCount       uint16                        `json:"replica_count"`
+	TabletPlacements   []TabletPlacement             `json:"tablet_placements"`
 	Configuration      map[string]any                `json:"configuration,omitempty"`
 	Governance         *resources.ResourceGovernance `json:"governance,omitempty"`
 }
@@ -151,22 +153,26 @@ type catalogResourceDocument struct {
 }
 
 type catalogTabletDocument struct {
-	TabletID           decimalUint64 `json:"tablet_id"`
-	ConsensusGroupID   decimalUint64 `json:"consensus_group_id"`
-	ShardIndex         uint32        `json:"shard_index"`
-	TabletEpoch        decimalUint64 `json:"tablet_epoch"`
-	ResourceGeneration decimalUint64 `json:"resource_generation"`
-	ReplicaCount       uint16        `json:"replica_count"`
+	TabletID           decimalUint64   `json:"tablet_id"`
+	ConsensusGroupID   decimalUint64   `json:"consensus_group_id"`
+	ShardIndex         uint32          `json:"shard_index"`
+	TabletEpoch        decimalUint64   `json:"tablet_epoch"`
+	ResourceGeneration decimalUint64   `json:"resource_generation"`
+	ReplicaCount       uint16          `json:"replica_count"`
+	VoterNodeIDs       []decimalUint64 `json:"voter_node_ids"`
+	BootstrapVoterIDs  []decimalUint64 `json:"bootstrap_voter_node_ids"`
+	TargetVoterNodeIDs []decimalUint64 `json:"target_voter_node_ids"`
 }
 
 type routeDocument struct {
-	ResourceGeneration decimalUint64  `json:"resource_generation"`
-	TabletID           decimalUint64  `json:"tablet_id"`
-	ConsensusGroupID   decimalUint64  `json:"consensus_group_id"`
-	TabletEpoch        decimalUint64  `json:"tablet_epoch"`
-	LocalNodeID        decimalUint64  `json:"local_node_id"`
-	LeaderNodeID       *decimalUint64 `json:"leader_node_id"`
-	AcceptsWrites      bool           `json:"accepts_writes"`
+	ResourceGeneration decimalUint64   `json:"resource_generation"`
+	TabletID           decimalUint64   `json:"tablet_id"`
+	ConsensusGroupID   decimalUint64   `json:"consensus_group_id"`
+	TabletEpoch        decimalUint64   `json:"tablet_epoch"`
+	LocalNodeID        decimalUint64   `json:"local_node_id"`
+	LeaderNodeID       *decimalUint64  `json:"leader_node_id"`
+	VoterNodeIDs       []decimalUint64 `json:"voter_node_ids"`
+	AcceptsWrites      bool            `json:"accepts_writes"`
 }
 
 type topologyDocument struct {
@@ -263,6 +269,7 @@ func (authority *HTTPAuthority) Apply(
 		ExpectedGeneration: strconv.FormatUint(request.ExpectedGeneration, 10),
 		ShardCount:         request.ShardCount,
 		ReplicaCount:       request.ReplicaCount,
+		TabletPlacements:   cloneTabletPlacements(request.TabletPlacements),
 		Configuration:      request.Configuration,
 		Governance:         request.Governance,
 	}
@@ -364,27 +371,60 @@ func (authority *HTTPAuthority) observePlacement(
 			ResourceGeneration: uint64(catalogTablet.ResourceGeneration),
 			DesiredReplicas:    uint32(catalogTablet.ReplicaCount),
 		}
+		for _, nodeID := range catalogTablet.VoterNodeIDs {
+			tablet.AssignedNodeIDs = append(tablet.AssignedNodeIDs, uint64(nodeID))
+		}
+		for _, nodeID := range catalogTablet.BootstrapVoterIDs {
+			tablet.BootstrapVoterNodeIDs = append(
+				tablet.BootstrapVoterNodeIDs,
+				uint64(nodeID),
+			)
+		}
+		for _, nodeID := range catalogTablet.TargetVoterNodeIDs {
+			tablet.TargetVoterNodeIDs = append(tablet.TargetVoterNodeIDs, uint64(nodeID))
+		}
 		leaders := make(map[uint64]struct{})
-		voters := make(map[uint64]struct{})
+		reachable := make(map[uint64]struct{})
+		var committed []uint64
+		membershipConsistent := true
 		for _, endpoint := range authority.endpoints {
 			route, ok := authority.observeRoute(ctx, endpoint, key, tablet)
 			if !ok {
 				continue
 			}
-			voters[uint64(route.LocalNodeID)] = struct{}{}
+			routeVoters := make([]uint64, 0, len(route.VoterNodeIDs))
+			for _, nodeID := range route.VoterNodeIDs {
+				routeVoters = append(routeVoters, uint64(nodeID))
+			}
+			if !matchesRequestedVoterSet(routeVoters, tablet.DesiredReplicas) ||
+				!slices.Contains(routeVoters, uint64(route.LocalNodeID)) {
+				continue
+			}
+			if committed == nil {
+				committed = routeVoters
+			} else if !slices.Equal(committed, routeVoters) {
+				membershipConsistent = false
+			}
+			reachable[uint64(route.LocalNodeID)] = struct{}{}
 			if route.LeaderNodeID != nil {
 				leaders[uint64(*route.LeaderNodeID)] = struct{}{}
 			}
 		}
-		for voter := range voters {
-			tablet.VoterNodeIDs = append(tablet.VoterNodeIDs, voter)
+		if membershipConsistent {
+			tablet.VoterNodeIDs = append(tablet.VoterNodeIDs, committed...)
 		}
-		sort.Slice(tablet.VoterNodeIDs, func(left, right int) bool {
-			return tablet.VoterNodeIDs[left] < tablet.VoterNodeIDs[right]
+		if len(tablet.AssignedNodeIDs) == 0 {
+			tablet.AssignedNodeIDs = append(tablet.AssignedNodeIDs, tablet.VoterNodeIDs...)
+		}
+		for voter := range reachable {
+			tablet.ReachableVoterNodeIDs = append(tablet.ReachableVoterNodeIDs, voter)
+		}
+		sort.Slice(tablet.ReachableVoterNodeIDs, func(left, right int) bool {
+			return tablet.ReachableVoterNodeIDs[left] < tablet.ReachableVoterNodeIDs[right]
 		})
 		if len(leaders) == 1 {
 			for leader := range leaders {
-				if _, observed := voters[leader]; observed {
+				if _, observed := reachable[leader]; observed && slices.Contains(tablet.VoterNodeIDs, leader) {
 					tablet.LeaderNodeID = leader
 				}
 			}
@@ -398,6 +438,14 @@ func (authority *HTTPAuthority) observePlacement(
 		Generation: uint64(resource.Generation),
 		Tablets:    tablets,
 	}, nil
+}
+
+func matchesRequestedVoterSet(voters []uint64, replicas uint32) bool {
+	return len(voters) == int(replicas) &&
+		len(voters) > 0 &&
+		voters[0] != 0 &&
+		slices.IsSorted(voters) &&
+		!hasAdjacentDuplicate(voters)
 }
 
 func (authority *HTTPAuthority) observeRoute(

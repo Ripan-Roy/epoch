@@ -16,15 +16,23 @@ jobs:
   verify:
     name: Verify version and main provenance
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 35
+    permissions:
+      actions: read
+      contents: read
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
       - name: Verify synchronized version and tag
-        run: ./scripts/check-release-version.sh "$GITHUB_REF_NAME"
+        run: |
+          ./scripts/check-release-version.sh "$GITHUB_REF_NAME"
+          test -f "docs/releases/${GITHUB_REF_NAME}.md" || {
+            echo "version-controlled release notes are required before publication" >&2
+            exit 1
+          }
 
       - name: Require the current main commit
         run: |
@@ -35,3 +43,238 @@ jobs:
             echo "release tag must point at the current main commit" >&2
             exit 1
           }
+
+      - name: Require successful exact-main CI and Pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          wait_for_workflow() {
+            workflow="$1"
+            label="$2"
+            for attempt in $(seq 1 90); do
+              run_state="$(gh run list \
+                --workflow "$workflow" \
+                --commit "$GITHUB_SHA" \
+                --event push \
+                --limit 10 \
+                --json status,conclusion \
+                --jq '.[0] | [.status, (.conclusion // "")] | @tsv')"
+              status="${run_state%%$'\t'*}"
+              conclusion="${run_state#*$'\t'}"
+              if [[ "$status" == "completed" ]]; then
+                test "$conclusion" = "success" || {
+                  echo "$label did not succeed at $GITHUB_SHA: $conclusion" >&2
+                  exit 1
+                }
+                echo "$label succeeded at $GITHUB_SHA"
+                return 0
+              fi
+              echo "waiting for $label at $GITHUB_SHA (attempt $attempt/90)"
+              sleep 20
+            done
+            echo "$label did not complete at $GITHUB_SHA before publication timeout" >&2
+            return 1
+          }
+
+          wait_for_workflow ci.yml CI
+          wait_for_workflow pages.yml Pages
+
+  publish-images:
+    name: Publish ${{ matrix.component }} image
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: node
+            title: Epoch node
+            entrypoint: /usr/local/bin/epoch-node
+          - component: control
+            title: Epoch control plane
+            entrypoint: /usr/local/bin/epoch-control
+          - component: operator
+            title: Epoch operator
+            entrypoint: /usr/local/bin/epoch-operator
+          - component: cli
+            title: Epoch CLI
+            entrypoint: /usr/local/bin/epoch
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up multi-platform emulation
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve synchronized release metadata
+        id: metadata
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and publish exact-tag manifest
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.${{ matrix.component }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/ripan-roy/epoch-${{ matrix.component }}:${{ github.ref_name }}
+          build-args: |
+            EPOCH_VERSION=${{ steps.metadata.outputs.version }}
+            VCS_REF=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Resolve immutable platform digests
+        id: platforms
+        env:
+          IMAGE: ghcr.io/ripan-roy/epoch-${{ matrix.component }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker buildx imagetools inspect "${IMAGE}@${DIGEST}" --raw > /tmp/manifest.json
+          amd64="$(jq -er '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest' /tmp/manifest.json)"
+          arm64="$(jq -er '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64") | .digest' /tmp/manifest.json)"
+          echo "amd64=${amd64}" >> "$GITHUB_OUTPUT"
+          echo "arm64=${arm64}" >> "$GITHUB_OUTPUT"
+
+      - name: Inspect published amd64 runtime and OCI metadata
+        env:
+          IMAGE: ghcr.io/ripan-roy/epoch-${{ matrix.component }}
+          DIGEST: ${{ steps.platforms.outputs.amd64 }}
+        run: |
+          docker pull --platform linux/amd64 "${IMAGE}@${DIGEST}"
+          ./scripts/inspect-oci-image.sh \
+            "${IMAGE}@${DIGEST}" \
+            "${{ steps.metadata.outputs.version }}" \
+            "$GITHUB_SHA" \
+            "${{ matrix.entrypoint }}" \
+            "${{ matrix.title }}"
+
+      - name: Generate amd64 SPDX SBOM from published digest
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ghcr.io/ripan-roy/epoch-${{ matrix.component }}@${{ steps.platforms.outputs.amd64 }}
+          format: spdx-json
+          output-file: epoch-${{ matrix.component }}-${{ github.ref_name }}-linux-amd64.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Generate arm64 SPDX SBOM from published digest
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ghcr.io/ripan-roy/epoch-${{ matrix.component }}@${{ steps.platforms.outputs.arm64 }}
+          format: spdx-json
+          output-file: epoch-${{ matrix.component }}-${{ github.ref_name }}-linux-arm64.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ghcr.io/ripan-roy/epoch-${{ matrix.component }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest amd64 SPDX SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/ripan-roy/epoch-${{ matrix.component }}
+          subject-digest: ${{ steps.platforms.outputs.amd64 }}
+          sbom-path: epoch-${{ matrix.component }}-${{ github.ref_name }}-linux-amd64.spdx.json
+          push-to-registry: true
+
+      - name: Attest arm64 SPDX SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/ripan-roy/epoch-${{ matrix.component }}
+          subject-digest: ${{ steps.platforms.outputs.arm64 }}
+          sbom-path: epoch-${{ matrix.component }}-${{ github.ref_name }}-linux-arm64.spdx.json
+          push-to-registry: true
+
+      - name: Install pinned Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.0.6
+
+      - name: Sign and verify the immutable digest
+        env:
+          IMAGE: ghcr.io/ripan-roy/epoch-${{ matrix.component }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-tag.yml@${GITHUB_REF}"
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+          cosign verify \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${IMAGE}@${DIGEST}"
+
+      - name: Verify GitHub attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ghcr.io/ripan-roy/epoch-${{ matrix.component }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: gh attestation verify "oci://${IMAGE}@${DIGEST}" --repo "$GITHUB_REPOSITORY"
+
+      - name: Upload release SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: epoch-${{ matrix.component }}-sbom
+          path: epoch-${{ matrix.component }}-${{ github.ref_name }}-linux-*.spdx.json
+          if-no-files-found: error
+          retention-days: 90
+
+  publish-release:
+    name: Publish curated prerelease
+    needs: publish-images
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download release SBOMs
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: epoch-*-sbom
+          path: release-sboms
+          merge-multiple: true
+
+      - name: Publish release notes and SBOM assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="docs/releases/${GITHUB_REF_NAME}.md"
+          test -f "$notes"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" \
+              --prerelease \
+              --title "Epoch ${GITHUB_REF_NAME}" \
+              --notes-file "$notes"
+            gh release upload "$GITHUB_REF_NAME" --clobber release-sboms/*.spdx.json
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --prerelease \
+              --title "Epoch ${GITHUB_REF_NAME}" \
+              --notes-file "$notes" \
+              release-sboms/*.spdx.json
+          fi

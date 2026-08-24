@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -70,7 +71,8 @@ spec:
 	if client.apply.Name.GetKind() != epochv1.ResourceKind_RESOURCE_KIND_STREAM || client.apply.Spec.GetReplicas() != 3 {
 		t.Fatalf("typed request was not preserved: %#v", client.apply)
 	}
-	if !strings.Contains(output.String(), `"created": true`) {
+	var rendered map[string]any
+	if err := json.Unmarshal(output.Bytes(), &rendered); err != nil || rendered["created"] != true {
 		t.Fatalf("response was not rendered: %s", output.String())
 	}
 }

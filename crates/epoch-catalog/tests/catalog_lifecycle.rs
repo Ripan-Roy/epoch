@@ -24,6 +24,7 @@ fn stream(name: &str, shards: u32) -> CatalogCommand {
             configuration: None,
             governance: None,
         },
+        tablet_placements: Vec::new(),
     })
 }
 

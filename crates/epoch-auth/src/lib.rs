@@ -27,6 +27,8 @@ const MAX_AUDIT_FIELD_BYTES: usize = 256;
 /// One stable authorization verb shared by Go and Rust.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub enum Action {
+    #[serde(rename = "backup.create")]
+    BackupCreate,
     #[serde(rename = "catalog.apply")]
     CatalogApply,
     #[serde(rename = "catalog.delete")]
@@ -53,6 +55,7 @@ impl Action {
     /// Returns the stable wire representation.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::BackupCreate => "backup.create",
             Self::CatalogApply => "catalog.apply",
             Self::CatalogDelete => "catalog.delete",
             Self::CatalogRead => "catalog.read",

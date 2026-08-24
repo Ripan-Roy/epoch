@@ -12,9 +12,12 @@ use tower::ServiceExt;
 
 const POLICY: &[u8] = include_bytes!("../../../spec/auth/bootstrap-policy-v1.example.json");
 const CATALOG_RESOURCE: &str = "/experimental/v1/regional/catalog/resources/{organization}/{project}/{environment}/{namespace}/{kind}/{name}";
+const CATALOG_TABLET_MEMBERSHIP: &str =
+    "/experimental/v1/regional/catalog/tablets/{tablet_id}/membership";
 const RESOURCE_ROUTE: &str = "/experimental/v1/regional/resources/{organization}/{project}/{environment}/{namespace}/{kind}/{name}/shards/{shard}";
 const DATA_ROUTE: &str = "/experimental/v1/regional/resources/{organization}/{project}/{environment}/{namespace}/{kind}/{name}/shards/{shard}/data/{*operation}";
 const TOPOLOGY_ROUTE: &str = "/experimental/v1/regional/topology";
+const BACKUP_ROUTE: &str = "/v1/admin/backups";
 const NATIVE_STREAM_ROUTE: &str = "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/streams/{name}/shards/{shard}";
 const NATIVE_STREAM_DATA: &str = "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/streams/{name}/shards/{shard}/{*operation}";
 const NATIVE_QUEUE_ROUTE: &str = "/v1/organizations/{organization}/projects/{project}/environments/{environment}/namespaces/{namespace}/queues/{name}/shards/{shard}";
@@ -27,6 +30,10 @@ const NATIVE_BUS_DATA: &str = "/v1/organizations/{organization}/projects/{projec
 fn protected_router() -> Router {
     let router = Router::new()
         .route(CATALOG_RESOURCE, any(|| async { StatusCode::NO_CONTENT }))
+        .route(
+            CATALOG_TABLET_MEMBERSHIP,
+            any(|| async { StatusCode::NO_CONTENT }),
+        )
         .route(RESOURCE_ROUTE, any(|| async { StatusCode::NO_CONTENT }))
         .route(DATA_ROUTE, any(|| async { StatusCode::NO_CONTENT }))
         .route(
@@ -40,7 +47,8 @@ fn protected_router() -> Router {
         .route(NATIVE_CACHE_DATA, any(|| async { StatusCode::NO_CONTENT }))
         .route(NATIVE_BUS_ROUTE, any(|| async { StatusCode::NO_CONTENT }))
         .route(NATIVE_BUS_DATA, any(|| async { StatusCode::NO_CONTENT }))
-        .route(TOPOLOGY_ROUTE, any(|| async { StatusCode::NO_CONTENT }));
+        .route(TOPOLOGY_ROUTE, any(|| async { StatusCode::NO_CONTENT }))
+        .route(BACKUP_ROUTE, any(|| async { StatusCode::NO_CONTENT }));
     let policy = BootstrapPolicy::from_json(POLICY).unwrap();
     with_regional_auth(router, Arc::new(policy))
 }
@@ -116,6 +124,23 @@ async fn regional_control_workload_can_reconcile_catalog_but_not_data() {
     .await;
     assert_eq!(catalog.status(), StatusCode::NO_CONTENT);
 
+    let replacement = call(
+        router.clone(),
+        Method::POST,
+        "/experimental/v1/regional/catalog/tablets/41/membership",
+        Some("epoch-dev-control-v1"),
+    )
+    .await;
+    assert_eq!(replacement.status(), StatusCode::NO_CONTENT);
+    let reader_replacement = call(
+        router.clone(),
+        Method::POST,
+        "/experimental/v1/regional/catalog/tablets/41/membership",
+        Some("epoch-dev-reader-v1"),
+    )
+    .await;
+    assert_eq!(reader_replacement.status(), StatusCode::FORBIDDEN);
+
     let topology = call(
         router.clone(),
         Method::GET,
@@ -124,6 +149,23 @@ async fn regional_control_workload_can_reconcile_catalog_but_not_data() {
     )
     .await;
     assert_eq!(topology.status(), StatusCode::NO_CONTENT);
+
+    let backup = call(
+        router.clone(),
+        Method::POST,
+        BACKUP_ROUTE,
+        Some("epoch-dev-control-v1"),
+    )
+    .await;
+    assert_eq!(backup.status(), StatusCode::NO_CONTENT);
+    let reader_backup = call(
+        router.clone(),
+        Method::POST,
+        BACKUP_ROUTE,
+        Some("epoch-dev-reader-v1"),
+    )
+    .await;
+    assert_eq!(reader_backup.status(), StatusCode::FORBIDDEN);
 
     let resource_named_data = call(
         router.clone(),

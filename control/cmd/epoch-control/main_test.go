@@ -62,6 +62,42 @@ func TestLoadConfigRequiresAuthPolicyAndRegionalWorkloadCredential(t *testing.T)
 	}
 }
 
+func TestLoadConfigRequiresCompleteSecureRegionalTransport(t *testing.T) {
+	t.Setenv("EPOCH_AUTH_POLICY_PATH", "/etc/epoch/bootstrap-policy.json")
+	t.Setenv("EPOCH_CONTROL_REGIONAL_TOKEN", "control-workload-token")
+	t.Setenv("EPOCH_CONTROL_TLS_REQUIRED", "true")
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("required TLS succeeded without certificate material")
+	}
+
+	t.Setenv("EPOCH_CONTROL_TLS_CERT_PATH", "/etc/epoch/tls/tls.crt")
+	t.Setenv("EPOCH_CONTROL_TLS_KEY_PATH", "/etc/epoch/tls/tls.key")
+	t.Setenv("EPOCH_CONTROL_REGIONAL_TLS_CA_PATH", "/etc/epoch/tls/ca.crt")
+	t.Setenv("EPOCH_CONTROL_REGIONAL_TLS_CERT_PATH", "/etc/epoch/tls/tls.crt")
+	t.Setenv("EPOCH_CONTROL_REGIONAL_TLS_KEY_PATH", "/etc/epoch/tls/tls.key")
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("required TLS accepted a plaintext regional endpoint")
+	}
+
+	t.Setenv("EPOCH_CONTROL_REGIONAL_ENDPOINTS", "https://node-1:7601,https://node-2:7601")
+	config, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !config.serverTLS.Required || !config.regionalTLS.Required {
+		t.Fatalf("required secure transport was not propagated: %+v", config)
+	}
+}
+
+func TestLoadConfigRejectsMalformedTLSRequirement(t *testing.T) {
+	t.Setenv("EPOCH_AUTH_POLICY_PATH", "/etc/epoch/bootstrap-policy.json")
+	t.Setenv("EPOCH_CONTROL_REGIONAL_TOKEN", "control-workload-token")
+	t.Setenv("EPOCH_CONTROL_TLS_REQUIRED", "sometimes")
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("malformed TLS requirement was accepted")
+	}
+}
+
 func TestControlSecretFormattingIsAlwaysRedacted(t *testing.T) {
 	credential := secret("must-never-be-formatted")
 	if got := credential.String(); got != "[redacted]" {

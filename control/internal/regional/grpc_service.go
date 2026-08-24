@@ -506,7 +506,9 @@ func statusToProto(observed resources.ResourceStatus) *epochv1.ResourceStatus {
 	for _, tablet := range observed.Tablets {
 		phase := epochv1.TabletPhase_TABLET_PHASE_PENDING
 		if tablet.LeaderNodeID != 0 &&
-			len(tablet.VoterNodeIDs) >= int(tablet.DesiredReplicas) {
+			len(tablet.TargetVoterNodeIDs) == 0 &&
+			len(tablet.VoterNodeIDs) == int(tablet.DesiredReplicas) &&
+			len(tablet.ReachableVoterNodeIDs) == int(tablet.DesiredReplicas) {
 			phase = epochv1.TabletPhase_TABLET_PHASE_SERVING
 		}
 		tablets = append(tablets, &epochv1.TabletDescriptor{
@@ -519,6 +521,16 @@ func statusToProto(observed resources.ResourceStatus) *epochv1.ResourceStatus {
 			VoterNodeIds:       append([]uint64(nil), tablet.VoterNodeIDs...),
 			LeaderNodeId:       tablet.LeaderNodeID,
 			Phase:              phase,
+			AssignedNodeIds:    append([]uint64(nil), tablet.AssignedNodeIDs...),
+			ReachableVoterNodeIds: append(
+				[]uint64(nil),
+				tablet.ReachableVoterNodeIDs...,
+			),
+			BootstrapVoterNodeIds: append(
+				[]uint64(nil),
+				tablet.BootstrapVoterNodeIDs...,
+			),
+			TargetVoterNodeIds: append([]uint64(nil), tablet.TargetVoterNodeIDs...),
 		})
 	}
 	conditionState := epochv1.ConditionState_CONDITION_STATE_UNKNOWN

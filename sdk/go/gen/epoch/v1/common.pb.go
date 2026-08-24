@@ -1295,19 +1295,23 @@ func (x *Condition) GetLastTransitionTime() *timestamppb.Timestamp {
 // consensus-group identifiers are separate contracts even when the first
 // allocator advances them together.
 type TabletDescriptor struct {
-	state              protoimpl.MessageState `protogen:"open.v1"`
-	TabletId           uint64                 `protobuf:"varint,1,opt,name=tablet_id,json=tabletId,proto3" json:"tablet_id,omitempty"`
-	ConsensusGroupId   uint64                 `protobuf:"varint,2,opt,name=consensus_group_id,json=consensusGroupId,proto3" json:"consensus_group_id,omitempty"`
-	ShardIndex         uint32                 `protobuf:"varint,3,opt,name=shard_index,json=shardIndex,proto3" json:"shard_index,omitempty"`
-	WorkloadProfile    WorkloadProfile        `protobuf:"varint,4,opt,name=workload_profile,json=workloadProfile,proto3,enum=epoch.v1.WorkloadProfile" json:"workload_profile,omitempty"`
-	TabletEpoch        uint64                 `protobuf:"varint,5,opt,name=tablet_epoch,json=tabletEpoch,proto3" json:"tablet_epoch,omitempty"`
-	ResourceGeneration uint64                 `protobuf:"varint,6,opt,name=resource_generation,json=resourceGeneration,proto3" json:"resource_generation,omitempty"`
-	DesiredReplicas    uint32                 `protobuf:"varint,7,opt,name=desired_replicas,json=desiredReplicas,proto3" json:"desired_replicas,omitempty"`
-	VoterNodeIds       []uint64               `protobuf:"varint,8,rep,packed,name=voter_node_ids,json=voterNodeIds,proto3" json:"voter_node_ids,omitempty"`
-	LeaderNodeId       uint64                 `protobuf:"varint,9,opt,name=leader_node_id,json=leaderNodeId,proto3" json:"leader_node_id,omitempty"`
-	Phase              TabletPhase            `protobuf:"varint,10,opt,name=phase,proto3,enum=epoch.v1.TabletPhase" json:"phase,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	state                 protoimpl.MessageState `protogen:"open.v1"`
+	TabletId              uint64                 `protobuf:"varint,1,opt,name=tablet_id,json=tabletId,proto3" json:"tablet_id,omitempty"`
+	ConsensusGroupId      uint64                 `protobuf:"varint,2,opt,name=consensus_group_id,json=consensusGroupId,proto3" json:"consensus_group_id,omitempty"`
+	ShardIndex            uint32                 `protobuf:"varint,3,opt,name=shard_index,json=shardIndex,proto3" json:"shard_index,omitempty"`
+	WorkloadProfile       WorkloadProfile        `protobuf:"varint,4,opt,name=workload_profile,json=workloadProfile,proto3,enum=epoch.v1.WorkloadProfile" json:"workload_profile,omitempty"`
+	TabletEpoch           uint64                 `protobuf:"varint,5,opt,name=tablet_epoch,json=tabletEpoch,proto3" json:"tablet_epoch,omitempty"`
+	ResourceGeneration    uint64                 `protobuf:"varint,6,opt,name=resource_generation,json=resourceGeneration,proto3" json:"resource_generation,omitempty"`
+	DesiredReplicas       uint32                 `protobuf:"varint,7,opt,name=desired_replicas,json=desiredReplicas,proto3" json:"desired_replicas,omitempty"`
+	VoterNodeIds          []uint64               `protobuf:"varint,8,rep,packed,name=voter_node_ids,json=voterNodeIds,proto3" json:"voter_node_ids,omitempty"`
+	LeaderNodeId          uint64                 `protobuf:"varint,9,opt,name=leader_node_id,json=leaderNodeId,proto3" json:"leader_node_id,omitempty"`
+	Phase                 TabletPhase            `protobuf:"varint,10,opt,name=phase,proto3,enum=epoch.v1.TabletPhase" json:"phase,omitempty"`
+	AssignedNodeIds       []uint64               `protobuf:"varint,11,rep,packed,name=assigned_node_ids,json=assignedNodeIds,proto3" json:"assigned_node_ids,omitempty"`
+	ReachableVoterNodeIds []uint64               `protobuf:"varint,12,rep,packed,name=reachable_voter_node_ids,json=reachableVoterNodeIds,proto3" json:"reachable_voter_node_ids,omitempty"`
+	BootstrapVoterNodeIds []uint64               `protobuf:"varint,13,rep,packed,name=bootstrap_voter_node_ids,json=bootstrapVoterNodeIds,proto3" json:"bootstrap_voter_node_ids,omitempty"`
+	TargetVoterNodeIds    []uint64               `protobuf:"varint,14,rep,packed,name=target_voter_node_ids,json=targetVoterNodeIds,proto3" json:"target_voter_node_ids,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *TabletDescriptor) Reset() {
@@ -1408,6 +1412,34 @@ func (x *TabletDescriptor) GetPhase() TabletPhase {
 		return x.Phase
 	}
 	return TabletPhase_TABLET_PHASE_UNSPECIFIED
+}
+
+func (x *TabletDescriptor) GetAssignedNodeIds() []uint64 {
+	if x != nil {
+		return x.AssignedNodeIds
+	}
+	return nil
+}
+
+func (x *TabletDescriptor) GetReachableVoterNodeIds() []uint64 {
+	if x != nil {
+		return x.ReachableVoterNodeIds
+	}
+	return nil
+}
+
+func (x *TabletDescriptor) GetBootstrapVoterNodeIds() []uint64 {
+	if x != nil {
+		return x.BootstrapVoterNodeIds
+	}
+	return nil
+}
+
+func (x *TabletDescriptor) GetTargetVoterNodeIds() []uint64 {
+	if x != nil {
+		return x.TargetVoterNodeIds
+	}
+	return nil
 }
 
 // RegionalNodeObservation is one policy-protected configured-endpoint topology
@@ -1860,7 +1892,7 @@ const file_epoch_v1_common_proto_rawDesc = "" +
 	"\x06reason\x18\x03 \x01(\tR\x06reason\x12\x18\n" +
 	"\amessage\x18\x04 \x01(\tR\amessage\x12/\n" +
 	"\x13observed_generation\x18\x05 \x01(\x04R\x12observedGeneration\x12L\n" +
-	"\x14last_transition_time\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\x12lastTransitionTime\"\xbc\x03\n" +
+	"\x14last_transition_time\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\x12lastTransitionTime\"\x8d\x05\n" +
 	"\x10TabletDescriptor\x12\x1b\n" +
 	"\ttablet_id\x18\x01 \x01(\x04R\btabletId\x12,\n" +
 	"\x12consensus_group_id\x18\x02 \x01(\x04R\x10consensusGroupId\x12\x1f\n" +
@@ -1873,7 +1905,11 @@ const file_epoch_v1_common_proto_rawDesc = "" +
 	"\x0evoter_node_ids\x18\b \x03(\x04R\fvoterNodeIds\x12$\n" +
 	"\x0eleader_node_id\x18\t \x01(\x04R\fleaderNodeId\x12+\n" +
 	"\x05phase\x18\n" +
-	" \x01(\x0e2\x15.epoch.v1.TabletPhaseR\x05phase\"\xda\x02\n" +
+	" \x01(\x0e2\x15.epoch.v1.TabletPhaseR\x05phase\x12*\n" +
+	"\x11assigned_node_ids\x18\v \x03(\x04R\x0fassignedNodeIds\x127\n" +
+	"\x18reachable_voter_node_ids\x18\f \x03(\x04R\x15reachableVoterNodeIds\x127\n" +
+	"\x18bootstrap_voter_node_ids\x18\r \x03(\x04R\x15bootstrapVoterNodeIds\x121\n" +
+	"\x15target_voter_node_ids\x18\x0e \x03(\x04R\x12targetVoterNodeIds\"\xda\x02\n" +
 	"\x17RegionalNodeObservation\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\x04R\x06nodeId\x12\x16\n" +
 	"\x06region\x18\x02 \x01(\tR\x06region\x12\x12\n" +

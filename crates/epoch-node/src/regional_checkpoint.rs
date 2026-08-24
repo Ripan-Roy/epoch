@@ -251,6 +251,7 @@ mod tests {
             checkpoint_index: LogIndex::new(checkpoint_index),
             retained_log_first_index: LogIndex::new(checkpoint_index.saturating_add(1).max(1)),
             voter_count: 3,
+            replication_progress: Vec::new(),
             fail_stopped: false,
         }
     }

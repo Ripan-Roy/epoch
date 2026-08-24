@@ -2,16 +2,166 @@ package epoch
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestSecureHTTPTransportPerformsMutualTLSAndRejectsAnonymousClient(t *testing.T) {
+	material := generateMutualTLSMaterial(t)
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(material.caPEM) {
+		t.Fatal("test CA did not parse")
+	}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	server.TLS = &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{material.serverIdentity},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    roots,
+	}
+	server.StartTLS()
+	defer server.Close()
+
+	secure, err := NewSecureHTTPTransport(server.URL, 2*time.Second, TLSConfig{
+		RootCAPath:      material.caPath,
+		CertificatePath: material.clientCertificatePath,
+		PrivateKeyPath:  material.clientPrivateKeyPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := secure.Do(context.Background(), Request{Method: "GET", Path: "/healthz"}, nil); err != nil {
+		t.Fatalf("trusted mTLS request failed: %v", err)
+	}
+
+	anonymous, err := NewSecureHTTPTransport(server.URL, 2*time.Second, TLSConfig{RootCAPath: material.caPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := anonymous.Do(context.Background(), Request{Method: "GET", Path: "/healthz"}, nil); err == nil {
+		t.Fatal("server accepted an anonymous TLS client")
+	}
+}
+
+type mutualTLSMaterial struct {
+	caPEM                 []byte
+	caPath                string
+	serverIdentity        tls.Certificate
+	clientCertificatePath string
+	clientPrivateKeyPath  string
+}
+
+func generateMutualTLSMaterial(t *testing.T) mutualTLSMaterial {
+	t.Helper()
+	now := time.Now()
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Epoch test CA"},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})
+
+	serverTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "localhost"},
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{"localhost"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	serverCertificate, serverPrivateKey := issueTestIdentity(t, serverTemplate, caTemplate, caKey)
+	serverIdentity, err := tls.X509KeyPair(serverCertificate, serverPrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	clientTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(3),
+		Subject:      pkix.Name{CommonName: "epoch-test-client"},
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	clientCertificate, clientPrivateKey := issueTestIdentity(t, clientTemplate, caTemplate, caKey)
+	directory := t.TempDir()
+	caPath := filepath.Join(directory, "ca.crt")
+	clientCertificatePath := filepath.Join(directory, "client.crt")
+	clientPrivateKeyPath := filepath.Join(directory, "client.key")
+	for path, contents := range map[string][]byte{
+		caPath: caPEM, clientCertificatePath: clientCertificate, clientPrivateKeyPath: clientPrivateKey,
+	} {
+		if err := os.WriteFile(path, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return mutualTLSMaterial{
+		caPEM:                 caPEM,
+		caPath:                caPath,
+		serverIdentity:        serverIdentity,
+		clientCertificatePath: clientCertificatePath,
+		clientPrivateKeyPath:  clientPrivateKeyPath,
+	}
+}
+
+func issueTestIdentity(
+	t *testing.T,
+	template *x509.Certificate,
+	caTemplate *x509.Certificate,
+	caKey *ecdsa.PrivateKey,
+) ([]byte, []byte) {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificateDER, err := x509.CreateCertificate(
+		rand.Reader, template, caTemplate, &privateKey.PublicKey, caKey,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKeyDER, err := x509.MarshalECPrivateKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificateDER}),
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: privateKeyDER})
+}
 
 func TestHTTPTransportSendsJSONAndDecodesSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -21,7 +171,7 @@ func TestHTTPTransportSendsJSONAndDecodesSuccess(t *testing.T) {
 		if request.URL.Query().Get("partition") != "1" {
 			t.Errorf("unexpected query: %s", request.URL.RawQuery)
 		}
-		if request.Header.Get("User-Agent") != "epoch-go/0.1.0-alpha.10" {
+		if request.Header.Get("User-Agent") != "epoch-go/0.2.0-beta.1" {
 			t.Errorf("unexpected user agent: %s", request.Header.Get("User-Agent"))
 		}
 		body, err := io.ReadAll(request.Body)

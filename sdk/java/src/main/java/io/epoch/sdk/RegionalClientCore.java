@@ -36,13 +36,21 @@ final class RegionalClientCore {
 
   static RegionalClientCore forEndpoints(
       List<URI> endpoints, String token, RegionalScope scope, Duration timeout) {
+    return forEndpoints(endpoints, token, scope, timeout, null);
+  }
+
+  static RegionalClientCore forEndpoints(
+      List<URI> endpoints, String token, RegionalScope scope, Duration timeout, TlsConfig tls) {
     Objects.requireNonNull(endpoints, "endpoints");
     if (endpoints.isEmpty()) {
       throw new IllegalArgumentException("at least one regional endpoint is required");
     }
     List<Transport> transports = new ArrayList<>(endpoints.size());
     for (URI endpoint : endpoints) {
-      transports.add(new HttpTransport(endpoint, timeout));
+      transports.add(
+          tls == null
+              ? new HttpTransport(endpoint, timeout)
+              : new HttpTransport(endpoint, timeout, tls));
     }
     return new RegionalClientCore(transports, token, scope);
   }

@@ -211,6 +211,10 @@ message TabletDescriptor {
   repeated uint64 voter_node_ids = 8;
   uint64 leader_node_id = 9;
   TabletPhase phase = 10;
+  repeated uint64 assigned_node_ids = 11;
+  repeated uint64 reachable_voter_node_ids = 12;
+  repeated uint64 bootstrap_voter_node_ids = 13;
+  repeated uint64 target_voter_node_ids = 14;
 }
 
 // RegionalNodeObservation is one policy-protected configured-endpoint topology

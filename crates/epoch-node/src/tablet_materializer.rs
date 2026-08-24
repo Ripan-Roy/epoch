@@ -17,7 +17,7 @@ use epoch_queue::QueueConfig;
 use epoch_tablet::{
     BusTabletScope, CacheTabletScope, QueueTabletScope, StreamTabletScope, TabletError,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
@@ -28,13 +28,15 @@ use crate::{
     },
     consensus_groups::{ConsensusGroupSupervisor, ConsensusGroupSupervisorError},
     queue_tablet::{self, QueueTabletService},
+    regional_backup_api::RegionalBackupArtifact,
     regional_maintenance::RegionalMaintenanceProposal,
     stream_tablet::{self, StreamTabletService},
 };
 
-const SUPPORTED_REPLICA_COUNT: u16 = 3;
+#[cfg(test)]
+const TEST_REPLICA_COUNT: u16 = 3;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MaterializedTabletMetadata {
     pub resource: ResourceName,
     pub shard_count: u32,
@@ -243,6 +245,8 @@ pub enum TabletMaterializerError {
     Directory(#[from] TabletDirectoryError),
     #[error("tablet stable directory could not be prepared: {0}")]
     Storage(String),
+    #[error("tablet semantic restore failed: {0}")]
+    Restore(String),
     #[error("tablet reconciliation rollback failed: {0}")]
     Rollback(String),
 }
@@ -311,6 +315,7 @@ pub struct RegionalTabletMaterializer {
     clock: Arc<dyn Clock>,
     commit_wait: Duration,
     cluster_id: String,
+    restore_artifact: Option<Arc<RegionalBackupArtifact>>,
 }
 
 impl fmt::Debug for RegionalTabletMaterializer {
@@ -322,6 +327,7 @@ impl fmt::Debug for RegionalTabletMaterializer {
             .field("group_template", &self.group_template)
             .field("data_dir", &self.data_dir)
             .field("commit_wait", &self.commit_wait)
+            .field("restore_pending", &self.restore_artifact.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -352,6 +358,26 @@ impl RegionalTabletMaterializer {
         commit_wait: Duration,
         cluster_id: impl Into<String>,
     ) -> TabletMaterializerResult<Self> {
+        Self::new_with_cluster_id_and_restore(
+            supervisor,
+            group_template,
+            data_dir,
+            clock,
+            commit_wait,
+            cluster_id,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_cluster_id_and_restore(
+        supervisor: ConsensusGroupSupervisor,
+        group_template: ConsensusProbeConfig,
+        data_dir: impl Into<PathBuf>,
+        clock: Arc<dyn Clock>,
+        commit_wait: Duration,
+        cluster_id: impl Into<String>,
+        restore_artifact: Option<Arc<RegionalBackupArtifact>>,
+    ) -> TabletMaterializerResult<Self> {
         if supervisor.registry().node_id() != group_template.node_id().get() {
             return Err(TabletMaterializerError::InvalidCatalog(format!(
                 "group template belongs to node {}; supervisor belongs to node {}",
@@ -372,6 +398,7 @@ impl RegionalTabletMaterializer {
             clock,
             commit_wait,
             cluster_id: cluster_id.into(),
+            restore_artifact,
         })
     }
 
@@ -394,7 +421,12 @@ impl RegionalTabletMaterializer {
         &mut self,
         resources: &[ResourceRecord],
     ) -> TabletMaterializerResult<TabletReconcileOutcome> {
-        let desired = validate_desired_tablets(resources)?;
+        if let Some(artifact) = self.restore_artifact.as_ref() {
+            artifact
+                .validate_catalog_resources(resources)
+                .map_err(|error| TabletMaterializerError::Restore(error.to_string()))?;
+        }
+        let desired = validate_desired_tablets(resources, &self.group_template)?;
         let current = self.directory.snapshot()?;
 
         for (tablet_id, route) in &current {
@@ -439,6 +471,7 @@ impl RegionalTabletMaterializer {
                 outcome.stopped += 1;
             }
         }
+        self.restore_artifact = None;
         Ok(outcome)
     }
 
@@ -455,7 +488,8 @@ impl RegionalTabletMaterializer {
         )?;
         let config = self
             .group_template
-            .for_group(descriptor.consensus_group_id, descriptor.tablet_epoch)?;
+            .for_group(descriptor.consensus_group_id, descriptor.tablet_epoch)?
+            .with_initial_voters(tablet_bootstrap_voters(descriptor, &self.group_template))?;
         let stable_directory = self
             .data_dir
             .join("consensus")
@@ -488,6 +522,11 @@ impl RegionalTabletMaterializer {
             )?),
         };
         let stable_path = stable_directory.join(format!("node-{}.wal", config.node_id().get()));
+        if let Some(artifact) = self.restore_artifact.as_ref() {
+            artifact
+                .restore_group(&config, &stable_path)
+                .map_err(|error| TabletMaterializerError::Restore(error.to_string()))?;
+        }
         let consensus = self
             .supervisor
             .start_group(config, stable_path, Some(service.applier()))
@@ -520,11 +559,22 @@ impl RegionalTabletMaterializer {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "catalog tablet validation is one fail-closed pass over mutually dependent identity, placement, and local-hosting invariants"
+)]
 fn validate_desired_tablets(
     resources: &[ResourceRecord],
+    group_template: &ConsensusProbeConfig,
 ) -> TabletMaterializerResult<BTreeMap<u64, MaterializedTabletMetadata>> {
     let mut desired = BTreeMap::new();
     let mut consensus_groups = BTreeSet::new();
+    let mut tablet_ids = BTreeSet::new();
+    let provisioned_members = group_template
+        .members()
+        .map(epoch_consensus::NodeId::get)
+        .collect::<BTreeSet<_>>();
+    let local_node_id = group_template.node_id().get();
     for resource in resources {
         resource
             .name
@@ -581,11 +631,53 @@ fn validate_desired_tablets(
                     descriptor.tablet_id
                 )));
             }
-            if descriptor.replica_count != SUPPORTED_REPLICA_COUNT {
+            if !matches!(descriptor.replica_count, 3 | 5) {
                 return Err(TabletMaterializerError::InvalidCatalog(format!(
-                    "tablet {} requests {} replicas; the current regional runtime requires {SUPPORTED_REPLICA_COUNT}",
+                    "tablet {} requests {}; data groups require exactly three or five replicas",
                     descriptor.tablet_id, descriptor.replica_count
                 )));
+            }
+            let voters = tablet_voters(descriptor, group_template);
+            if voters.len() != usize::from(descriptor.replica_count)
+                || !voters.windows(2).all(|pair| pair[0] < pair[1])
+                || voters
+                    .iter()
+                    .any(|node_id| !provisioned_members.contains(node_id))
+            {
+                return Err(TabletMaterializerError::InvalidCatalog(format!(
+                    "tablet {} voter assignment must match replica_count and the provisioned regional member directory",
+                    descriptor.tablet_id
+                )));
+            }
+            let bootstrap_voters = tablet_bootstrap_voters(descriptor, group_template);
+            if bootstrap_voters.len() != usize::from(descriptor.replica_count)
+                || !bootstrap_voters.windows(2).all(|pair| pair[0] < pair[1])
+                || bootstrap_voters
+                    .iter()
+                    .any(|node_id| !provisioned_members.contains(node_id))
+            {
+                return Err(TabletMaterializerError::InvalidCatalog(format!(
+                    "tablet {} bootstrap voter assignment is invalid",
+                    descriptor.tablet_id
+                )));
+            }
+            if !descriptor.target_voter_node_ids.is_empty() {
+                let target = &descriptor.target_voter_node_ids;
+                let current = voters.iter().copied().collect::<BTreeSet<_>>();
+                let target_set = target.iter().copied().collect::<BTreeSet<_>>();
+                if target.len() != usize::from(descriptor.replica_count)
+                    || !target.windows(2).all(|pair| pair[0] < pair[1])
+                    || target
+                        .iter()
+                        .any(|node_id| !provisioned_members.contains(node_id))
+                    || current.difference(&target_set).count() != 1
+                    || target_set.difference(&current).count() != 1
+                {
+                    return Err(TabletMaterializerError::InvalidCatalog(format!(
+                        "tablet {} membership target must replace exactly one provisioned voter",
+                        descriptor.tablet_id
+                    )));
+                }
             }
             if !consensus_groups.insert(descriptor.consensus_group_id) {
                 return Err(TabletMaterializerError::InvalidCatalog(format!(
@@ -593,8 +685,16 @@ fn validate_desired_tablets(
                     descriptor.consensus_group_id
                 )));
             }
-            if desired
-                .insert(
+            if !tablet_ids.insert(descriptor.tablet_id) {
+                return Err(TabletMaterializerError::InvalidCatalog(format!(
+                    "tablet {} is assigned more than once",
+                    descriptor.tablet_id
+                )));
+            }
+            if voters.contains(&local_node_id)
+                || descriptor.target_voter_node_ids.contains(&local_node_id)
+            {
+                let replaced = desired.insert(
                     descriptor.tablet_id,
                     MaterializedTabletMetadata {
                         resource: resource.name.clone(),
@@ -602,17 +702,43 @@ fn validate_desired_tablets(
                         configuration: resource.spec.configuration.clone(),
                         descriptor: descriptor.clone(),
                     },
-                )
-                .is_some()
-            {
-                return Err(TabletMaterializerError::InvalidCatalog(format!(
-                    "tablet {} is assigned more than once",
-                    descriptor.tablet_id
-                )));
+                );
+                debug_assert!(replaced.is_none(), "validated tablet IDs are unique");
             }
         }
     }
     Ok(desired)
+}
+
+fn tablet_bootstrap_voters(
+    descriptor: &TabletDescriptor,
+    group_template: &ConsensusProbeConfig,
+) -> Vec<u64> {
+    if descriptor.bootstrap_voter_node_ids.is_empty() {
+        tablet_voters(descriptor, group_template)
+    } else {
+        descriptor.bootstrap_voter_node_ids.clone()
+    }
+}
+
+fn descriptor_bootstrap_voters(descriptor: &TabletDescriptor) -> &[u64] {
+    if descriptor.bootstrap_voter_node_ids.is_empty() {
+        &descriptor.voter_node_ids
+    } else {
+        &descriptor.bootstrap_voter_node_ids
+    }
+}
+
+fn tablet_voters(descriptor: &TabletDescriptor, group_template: &ConsensusProbeConfig) -> Vec<u64> {
+    if descriptor.voter_node_ids.is_empty() {
+        group_template
+            .voters()
+            .iter()
+            .map(|node_id| node_id.get())
+            .collect()
+    } else {
+        descriptor.voter_node_ids.clone()
+    }
 }
 
 fn same_runtime_identity(
@@ -626,6 +752,8 @@ fn same_runtime_identity(
         && current.descriptor.shard_index == desired.descriptor.shard_index
         && current.descriptor.tablet_epoch == desired.descriptor.tablet_epoch
         && current.descriptor.workload_profile == desired.descriptor.workload_profile
+        && descriptor_bootstrap_voters(&current.descriptor)
+            == descriptor_bootstrap_voters(&desired.descriptor)
 }
 
 fn cache_config(metadata: &MaterializedTabletMetadata) -> TabletMaterializerResult<CacheConfig> {
@@ -714,6 +842,19 @@ mod tests {
         .expect("group template should be valid")
     }
 
+    fn seven_node_group_template(local_node_id: u64) -> ConsensusProbeConfig {
+        ConsensusProbeConfig::new(
+            local_node_id,
+            900,
+            1,
+            (1..=7).map(|node_id| (node_id, peer_url(40_000 + u16::try_from(node_id).unwrap()))),
+            Duration::from_mins(1),
+        )
+        .expect("regional member directory should be valid")
+        .with_initial_voters([1, 2, 3])
+        .expect("catalog voters should be valid")
+    }
+
     fn resource_command(
         token: &str,
         kind: ResourceKind,
@@ -730,10 +871,11 @@ mod tests {
             spec: ResourceSpec {
                 workload_profile: profile,
                 shard_count: shards,
-                replica_count: SUPPORTED_REPLICA_COUNT,
+                replica_count: TEST_REPLICA_COUNT,
                 configuration: None,
                 governance: None,
             },
+            tablet_placements: Vec::new(),
         })
     }
 
@@ -860,7 +1002,10 @@ mod tests {
                 tablet_epoch: 1,
                 resource_generation: 1,
                 workload_profile: WorkloadProfile::WorkQueue,
-                replica_count: SUPPORTED_REPLICA_COUNT,
+                replica_count: TEST_REPLICA_COUNT,
+                voter_node_ids: Vec::new(),
+                bootstrap_voter_node_ids: Vec::new(),
+                target_voter_node_ids: Vec::new(),
             },
         };
 
@@ -907,7 +1052,10 @@ mod tests {
                 tablet_epoch: 1,
                 resource_generation: 1,
                 workload_profile: WorkloadProfile::EventBus,
-                replica_count: SUPPORTED_REPLICA_COUNT,
+                replica_count: TEST_REPLICA_COUNT,
+                voter_node_ids: Vec::new(),
+                bootstrap_voter_node_ids: Vec::new(),
+                target_voter_node_ids: Vec::new(),
             },
         };
         assert_eq!(bus_config(&metadata).unwrap(), configured);
@@ -1018,6 +1166,64 @@ mod tests {
             .shutdown()
             .await
             .expect("expanded recovery should stop cleanly");
+    }
+
+    #[tokio::test]
+    async fn n_node_runtime_materializes_only_locally_assigned_tablet_groups() {
+        let directory = TempDir::new().expect("temp directory should be created");
+        let catalog = CatalogTabletService::new(CatalogTabletScope::new(900, 1).unwrap());
+        let mut command = resource_command(
+            "placed-stream-v1",
+            ResourceKind::Stream,
+            "placed-orders",
+            WorkloadProfile::StreamLog,
+            2,
+            None,
+        );
+        let CatalogCommand::Apply(request) = &mut command else {
+            unreachable!();
+        };
+        request.tablet_placements = vec![
+            epoch_catalog::TabletPlacement {
+                shard_index: 0,
+                voter_node_ids: vec![1, 2, 3],
+            },
+            epoch_catalog::TabletPlacement {
+                shard_index: 1,
+                voter_node_ids: vec![4, 5, 6],
+            },
+        ];
+        catalog.apply(&committed(1, &command)).unwrap();
+
+        let mut materializer = RegionalTabletMaterializer::new(
+            ConsensusGroupSupervisor::new(4, 16).unwrap(),
+            seven_node_group_template(4),
+            directory.path(),
+            Arc::new(ManualClock::new(1_000)),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let outcome = materializer
+            .reconcile(&catalog.snapshot().unwrap().resources)
+            .await
+            .unwrap();
+        assert_eq!(outcome.started, 1);
+        let routes = materializer.directory().routes().unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].metadata().descriptor.shard_index, 1);
+        assert_eq!(
+            routes[0]
+                .consensus()
+                .membership()
+                .await
+                .unwrap()
+                .voters
+                .into_iter()
+                .map(epoch_consensus::NodeId::get)
+                .collect::<Vec<_>>(),
+            [4, 5, 6]
+        );
+        materializer.shutdown().await.unwrap();
     }
 
     fn assert_stream_shards(directory: &TabletDirectory, expected: u32) {

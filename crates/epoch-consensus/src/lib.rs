@@ -4,25 +4,31 @@
 //! [`PersistentRaftAdapter`] journals each stable Raft transition and its
 //! publishable application checkpoint through Epoch's checksummed WAL before it
 //! releases persisted messages or commit receipts. The persistent adapter is
-//! still a fixed-voter feasibility slice: it supports bounded native-profile
+//! keeps each Raft quorum bounded to three or five voters while allowing a
+//! larger provisioned member directory for horizontal tablet placement,
+//! bounded native-profile
 //! snapshots and physical journal compaction, while membership changes,
 //! production transport, backup/PITR, and general repair remain disabled.
 
+mod membership;
 mod stable;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt::{self, Display, Formatter},
-    path::Path,
+    fs,
+    path::{Path, PathBuf},
     sync::RwLockWriteGuard,
 };
 
 use prost::Message as ProstMessage;
 use raft::{
-    Config, GetEntriesContext, RaftState, RawNode, StateRole, Storage,
+    Config, Error as RaftError, GetEntriesContext, RaftState, RawNode, SnapshotStatus, StateRole,
+    Storage,
     prelude::{
-        ConfState, Entry, EntryType, HardState, Message as RaftMessage, MessageType, Snapshot,
+        ConfChangeType, ConfChangeV2, ConfState, Entry, EntryType, HardState,
+        Message as RaftMessage, MessageType, Snapshot,
     },
     storage::{MemStorage, MemStorageCore},
 };
@@ -63,6 +69,12 @@ pub const MAX_SNAPSHOT_DATA_BYTES: usize = 6 * 1024 * 1024;
 pub const MAX_V1_SNAPSHOT_DATA_BYTES: usize = 768 * 1024;
 /// Maximum canonical profile payload embedded in an EPSN v2 checkpoint.
 pub const MAX_APPLICATION_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
+pub const MIN_VOTER_COUNT: usize = 3;
+pub const MAX_VOTER_COUNT: usize = 5;
+/// Maximum physical members addressable by one regional group configuration.
+/// Only three or five may be voters at once; the remainder are placement or
+/// learner candidates and consume no quorum votes.
+pub const MAX_PROVISIONED_MEMBERS: usize = 1_024;
 /// Maximum exact-retry entries retained in an EPSN v2 checkpoint.
 pub const MAX_CHECKPOINT_RETRY_PROPOSALS: usize = 1_024;
 /// Maximum encoded exact-retry suffix retained in an EPSN v2 checkpoint.
@@ -383,7 +395,30 @@ pub struct ConsensusStatus {
     /// First Raft log index still retained after logical prefix compaction.
     pub retained_log_first_index: LogIndex,
     pub voter_count: usize,
+    /// Leader-only replication evidence for every provisioned member currently
+    /// tracked by Raft. Followers expose an empty vector rather than guessing.
+    pub replication_progress: Vec<ConsensusPeerProgress>,
     pub fail_stopped: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsensusPeerProgress {
+    pub node_id: NodeId,
+    pub matched_index: LogIndex,
+    pub committed_index: LogIndex,
+    pub pending_snapshot_index: LogIndex,
+    pub recent_active: bool,
+}
+
+/// Canonical committed membership for one consensus group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsensusMembership {
+    pub allowed_members: Vec<NodeId>,
+    pub voters: Vec<NodeId>,
+    pub outgoing_voters: Vec<NodeId>,
+    pub learners: Vec<NodeId>,
+    pub staged_learners: Vec<NodeId>,
+    pub auto_leave: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -612,6 +647,121 @@ impl ApplicationSnapshot {
     }
 }
 
+/// Canonical consensus and application state required to bootstrap one group
+/// into a fresh stable journal. The checkpoint bytes remain opaque outside the
+/// consensus crate; callers may persist them in a checksummed regional backup
+/// artifact and later pass the validated value to
+/// [`PersistentRaftAdapter::restore_from_snapshot_with_members`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsensusRestoreSnapshot {
+    group_id: GroupId,
+    group_epoch: GroupEpoch,
+    checkpoint_index: LogIndex,
+    checkpoint_term: Term,
+    hard_state_term: Term,
+    membership: ConsensusMembership,
+    checkpoint: Vec<u8>,
+}
+
+impl ConsensusRestoreSnapshot {
+    pub const fn group_id(&self) -> GroupId {
+        self.group_id
+    }
+
+    pub const fn group_epoch(&self) -> GroupEpoch {
+        self.group_epoch
+    }
+
+    pub const fn checkpoint_index(&self) -> LogIndex {
+        self.checkpoint_index
+    }
+
+    pub const fn checkpoint_term(&self) -> Term {
+        self.checkpoint_term
+    }
+
+    pub const fn hard_state_term(&self) -> Term {
+        self.hard_state_term
+    }
+
+    pub const fn membership(&self) -> &ConsensusMembership {
+        &self.membership
+    }
+
+    pub fn checkpoint_bytes(&self) -> &[u8] {
+        &self.checkpoint
+    }
+
+    pub fn application_snapshot(&self) -> ConsensusResult<ApplicationSnapshot> {
+        self.validate()?.application_snapshot.ok_or_else(|| {
+            ConsensusError::InvalidState("restore image has no application snapshot".into())
+        })
+    }
+
+    pub fn consensus_state_digest(&self) -> ConsensusResult<StateDigest> {
+        self.validate().map(|image| image.state_digest)
+    }
+
+    /// Reconstructs and validates an opaque restore snapshot decoded from an
+    /// independently checksummed backup manifest.
+    pub fn from_parts(
+        group_id: GroupId,
+        group_epoch: GroupEpoch,
+        checkpoint_index: LogIndex,
+        checkpoint_term: Term,
+        hard_state_term: Term,
+        membership: ConsensusMembership,
+        checkpoint: Vec<u8>,
+    ) -> ConsensusResult<Self> {
+        let snapshot = Self {
+            group_id,
+            group_epoch,
+            checkpoint_index,
+            checkpoint_term,
+            hard_state_term,
+            membership,
+            checkpoint,
+        };
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+
+    fn validate(&self) -> ConsensusResult<CheckpointImage> {
+        if self.hard_state_term < self.checkpoint_term {
+            return Err(ConsensusError::InvalidState(
+                "restore HardState term is below the checkpoint term".into(),
+            ));
+        }
+        if !self.membership.outgoing_voters.is_empty()
+            || !self.membership.staged_learners.is_empty()
+            || self.membership.auto_leave
+        {
+            return Err(ConsensusError::InvalidState(
+                "a restore snapshot cannot capture an unfinished joint-consensus transition".into(),
+            ));
+        }
+        let conf_state = conf_state_from_membership(&self.membership);
+        membership::validate_conf_state(&conf_state, &self.membership.allowed_members)?;
+        let image = decode_checkpoint_image(&self.checkpoint)?;
+        if image.group_id != self.group_id
+            || image.group_epoch != self.group_epoch
+            || image.index != self.checkpoint_index
+            || image.term != self.checkpoint_term
+            || image.application_snapshot.is_none()
+        {
+            return Err(ConsensusError::InvalidState(
+                "restore checkpoint scope, index, term, or application image is invalid".into(),
+            ));
+        }
+        if encode_checkpoint_image(&image)? != self.checkpoint {
+            return Err(ConsensusError::InvalidState(
+                "restore checkpoint is not canonically encoded".into(),
+            ));
+        }
+        Ok(image)
+    }
+}
+
 pub trait ConsensusAdapter {
     fn status(&self) -> ConsensusStatus;
 
@@ -662,6 +812,11 @@ pub enum ConsensusError {
     CheckpointTooLarge {
         observed_bytes: usize,
         max_bytes: usize,
+    },
+    LearnerNotCaughtUp {
+        learner: NodeId,
+        matched_index: LogIndex,
+        required_index: LogIndex,
     },
     Poisoned(String),
     InvalidMessage(String),
@@ -731,6 +886,14 @@ impl Display for ConsensusError {
                 formatter,
                 "consensus checkpoint is {observed_bytes} bytes; maximum is {max_bytes}"
             ),
+            Self::LearnerNotCaughtUp {
+                learner,
+                matched_index,
+                required_index,
+            } => write!(
+                formatter,
+                "learner {learner} is not caught up: matched index {matched_index}, required {required_index}"
+            ),
         }
     }
 }
@@ -746,7 +909,7 @@ pub struct MemoryStableState {
     node_id: NodeId,
     group_id: GroupId,
     group_epoch: GroupEpoch,
-    voters: [NodeId; 3],
+    voters: Vec<NodeId>,
     storage: EpochRaftStorage,
     applied_index: LogIndex,
     applied: Vec<CommittedProposal>,
@@ -795,6 +958,8 @@ struct PendingReadBarrier {
 struct PlannedEntry {
     log_index: LogIndex,
     committed: Option<CommittedProposal>,
+    membership_change: Option<ConfChangeV2>,
+    resulting_membership: Option<ConfState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -815,13 +980,13 @@ struct CheckpointImage {
     application_snapshot: Option<ApplicationSnapshot>,
 }
 
-/// A fixed-three-voter, in-memory adapter used only to establish the Epoch
+/// A bounded odd-voter, in-memory adapter used only to establish the Epoch
 /// consensus boundary and exercise failure histories.
 pub struct InMemoryRaftAdapter {
     node_id: NodeId,
     group_id: GroupId,
     group_epoch: GroupEpoch,
-    voters: [NodeId; 3],
+    voters: Vec<NodeId>,
     raw_node: RawNode<EpochRaftStorage>,
     applied_index: LogIndex,
     applied: Vec<CommittedProposal>,
@@ -862,7 +1027,7 @@ pub struct PersistentRecovery {
     pub repaired_partial_tail: bool,
 }
 
-/// A fixed-three-voter adapter whose Raft stable state and publishable
+/// A bounded odd-voter adapter whose Raft stable state and publishable
 /// application checkpoint are written to a checksummed local journal.
 ///
 /// This establishes local crash recovery for the consensus boundary. The
@@ -898,9 +1063,24 @@ impl InMemoryRaftAdapter {
         node_id: NodeId,
         group_id: GroupId,
         group_epoch: GroupEpoch,
-        voters: [NodeId; 3],
+        voters: impl Into<Vec<NodeId>>,
     ) -> ConsensusResult<Self> {
-        validate_voters(node_id, voters)?;
+        let voters = voters.into();
+        Self::new_with_members(node_id, group_id, group_epoch, voters.clone(), voters)
+    }
+
+    /// Creates a member that may begin outside the active voter set, allowing
+    /// it to join as a learner before a joint-consensus promotion.
+    pub fn new_with_members(
+        node_id: NodeId,
+        group_id: GroupId,
+        group_epoch: GroupEpoch,
+        initial_voters: impl Into<Vec<NodeId>>,
+        allowed_members: impl Into<Vec<NodeId>>,
+    ) -> ConsensusResult<Self> {
+        let voters = initial_voters.into();
+        let allowed_members = allowed_members.into();
+        validate_initial_membership(node_id, &voters, &allowed_members)?;
         let storage = EpochRaftStorage::new_with_conf_state((
             voters.iter().map(|voter| voter.get()).collect::<Vec<_>>(),
             Vec::<u64>::new(),
@@ -909,7 +1089,7 @@ impl InMemoryRaftAdapter {
             node_id,
             group_id,
             group_epoch,
-            voters,
+            voters: allowed_members,
             storage,
             applied_index: LogIndex::ZERO,
             applied: Vec::new(),
@@ -932,7 +1112,7 @@ impl InMemoryRaftAdapter {
             node_id: stable.node_id,
             group_id: stable.group_id,
             group_epoch: stable.group_epoch,
-            voters: stable.voters,
+            voters: &stable.voters,
             storage: &stable.storage,
             applied_index: stable.applied_index,
             applied: &stable.applied,
@@ -993,7 +1173,7 @@ impl InMemoryRaftAdapter {
             node_id: stable.node_id,
             group_id: stable.group_id,
             group_epoch: stable.group_epoch,
-            voters: stable.voters,
+            voters: &stable.voters,
             storage: &stable.storage,
             applied_index: stable.applied_index,
             applied: &stable.applied,
@@ -1008,6 +1188,80 @@ impl InMemoryRaftAdapter {
 
     pub fn applied_proposals(&self) -> &[CommittedProposal] {
         &self.applied
+    }
+
+    pub fn membership(&self) -> ConsensusResult<ConsensusMembership> {
+        let state = self.current_conf_state()?;
+        membership::validate_conf_state(&state, &self.voters)?;
+        membership_from_conf_state(&state, &self.voters)
+    }
+
+    /// Proposes a non-voting member only after the caller has provisioned its
+    /// transport identity and storage. Promotion is a separate guarded step.
+    pub fn add_learner(&mut self, learner: NodeId) -> ConsensusResult<ConsensusOutput> {
+        self.ensure_membership_leader()?;
+        let state = self.current_conf_state()?;
+        let change = membership::plan_add_learner(&state, learner, &self.voters)?;
+        self.raw_node
+            .propose_conf_change(Vec::new(), change)
+            .map_err(|error| ConsensusError::Library(error.to_string()))?;
+        self.process_ready()
+    }
+
+    /// Proposes a bounded voter target. Every newly promoted voter must already
+    /// be a committed learner so orchestration can prove it caught up first.
+    pub fn reconfigure_voters(
+        &mut self,
+        target_voters: impl Into<Vec<NodeId>>,
+    ) -> ConsensusResult<ConsensusOutput> {
+        self.ensure_membership_leader()?;
+        let state = self.current_conf_state()?;
+        let target_voters = target_voters.into();
+        let change = membership::plan_voter_reconfiguration(&state, &target_voters, &self.voters)?;
+        let current_voters = state.voters.iter().copied().collect::<BTreeSet<_>>();
+        let required_index = self.raw_node.status().hs.commit;
+        let progress = self
+            .raw_node
+            .status()
+            .progress
+            .expect("membership leader always exposes Raft progress");
+        for promoted in target_voters
+            .iter()
+            .filter(|node_id| !current_voters.contains(&node_id.get()))
+        {
+            let matched = progress.get(promoted.get()).map_or(0, |peer| peer.matched);
+            if matched < required_index {
+                return Err(ConsensusError::LearnerNotCaughtUp {
+                    learner: *promoted,
+                    matched_index: LogIndex::new(matched),
+                    required_index: LogIndex::new(required_index),
+                });
+            }
+        }
+        self.raw_node
+            .propose_conf_change(Vec::new(), change)
+            .map_err(|error| ConsensusError::Library(error.to_string()))?;
+        self.process_ready()
+    }
+
+    fn current_conf_state(&self) -> ConsensusResult<ConfState> {
+        self.raw_node
+            .store()
+            .initial_state()
+            .map(|state| state.conf_state)
+            .map_err(|error| ConsensusError::Storage(error.to_string()))
+    }
+
+    fn ensure_membership_leader(&self) -> ConsensusResult<()> {
+        self.ensure_healthy()?;
+        let status = self.status();
+        if status.role == ConsensusRole::Leader {
+            Ok(())
+        } else {
+            Err(ConsensusError::NotLeader {
+                leader_hint: status.leader_id,
+            })
+        }
     }
 
     fn checkpoint_retry_proposals(&self) -> ConsensusResult<Vec<CommittedProposal>> {
@@ -1045,6 +1299,41 @@ impl InMemoryRaftAdapter {
             })
             .transpose()
             .map(Option::flatten)
+    }
+
+    fn export_restore_snapshot(
+        &self,
+        application_snapshot: ApplicationSnapshot,
+    ) -> ConsensusResult<ConsensusRestoreSnapshot> {
+        self.ensure_healthy()?;
+        if self.raw_node.has_ready() {
+            return Err(ConsensusError::InvalidState(
+                "cannot export a restore snapshot while RawNode still has Ready work".into(),
+            ));
+        }
+        if application_snapshot.checkpoint_index() != self.applied_index {
+            return Err(ConsensusError::InvalidState(format!(
+                "application snapshot index {} does not equal adapter applied index {}",
+                application_snapshot.checkpoint_index(),
+                self.applied_index
+            )));
+        }
+        let image = self.build_checkpoint_image(Some(application_snapshot))?;
+        let raft_state = self
+            .raw_node
+            .store()
+            .initial_state()
+            .map_err(|error| ConsensusError::Storage(error.to_string()))?;
+        let membership = membership_from_conf_state(&raft_state.conf_state, &self.voters)?;
+        ConsensusRestoreSnapshot::from_parts(
+            self.group_id,
+            self.group_epoch,
+            image.index,
+            image.term,
+            Term::new(raft_state.hard_state.term),
+            membership,
+            encode_checkpoint_image(&image)?,
+        )
     }
 
     /// Creates a durable checkpoint at the current applied index and compacts
@@ -1097,7 +1386,9 @@ impl InMemoryRaftAdapter {
         application_snapshot: Option<ApplicationSnapshot>,
     ) -> ConsensusResult<ConsensusCheckpoint> {
         let image = self.build_checkpoint_image(application_snapshot)?;
-        let snapshot = checkpoint_snapshot(&image, self.voters)?;
+        let conf_state = self.current_conf_state()?;
+        membership::validate_conf_state(&conf_state, &self.voters)?;
+        let snapshot = checkpoint_snapshot(&image, &conf_state)?;
         let checkpoint = ConsensusCheckpoint {
             index: image.index,
             term: image.term,
@@ -1120,13 +1411,33 @@ impl InMemoryRaftAdapter {
                 image.index
             )));
         }
+        let checkpoint_index = checkpoint.index;
         let (hard_state, tail) = self.checkpoint_storage_material(image.index)?;
         let transaction =
             self.persist_and_install_checkpoint(&image, snapshot, checkpoint, hard_state, &tail);
-        if let Err(error) = &transaction {
-            self.poisoned = Some(error.to_string());
+        match transaction {
+            Ok(checkpoint) => {
+                let stale_snapshots = self
+                    .status()
+                    .replication_progress
+                    .into_iter()
+                    .filter(|progress| {
+                        progress.pending_snapshot_index != LogIndex::ZERO
+                            && progress.pending_snapshot_index < checkpoint_index
+                    })
+                    .map(|progress| progress.node_id)
+                    .collect::<Vec<_>>();
+                for peer in stale_snapshots {
+                    self.raw_node
+                        .report_snapshot(peer.get(), SnapshotStatus::Failure);
+                }
+                Ok(checkpoint)
+            }
+            Err(error) => {
+                self.poisoned = Some(error.to_string());
+                Err(error)
+            }
         }
-        transaction
     }
 
     fn build_checkpoint_image(
@@ -1219,10 +1530,19 @@ impl InMemoryRaftAdapter {
             state_digest: image.state_digest,
         };
         let generation = self.next_stable_generation()?;
+        let conf_state = snapshot
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.conf_state.as_ref())
+            .cloned()
+            .ok_or_else(|| {
+                ConsensusError::InvalidState("checkpoint snapshot has no membership state".into())
+            })?;
         if let Some(store) = self.disk_store.as_mut() {
             let observed = store.persist_checkpoint(
                 generation,
                 &hard_state,
+                &conf_state,
                 image,
                 tail,
                 stable_checkpoint,
@@ -1249,7 +1569,7 @@ impl InMemoryRaftAdapter {
             node_id: self.node_id,
             group_id: self.group_id,
             group_epoch: self.group_epoch,
-            voters: self.voters,
+            voters: &self.voters,
             storage: self.raw_node.store(),
             applied_index: self.applied_index,
             applied: &self.applied,
@@ -1468,7 +1788,7 @@ impl InMemoryRaftAdapter {
                         ready.snapshot(),
                         self.group_id,
                         self.group_epoch,
-                        self.voters,
+                        &self.voters,
                     )?)
                 } else {
                     None
@@ -1494,7 +1814,7 @@ impl InMemoryRaftAdapter {
                 let ready_plan = self.prevalidate_committed_batch(&ready_committed)?;
                 let ready_checkpoint = self.project_checkpoint(&ready_plan)?;
                 let barrier = self.persist_ready(&ready, ready_checkpoint)?;
-                self.apply_prevalidated_batch(ready_plan, ready_checkpoint, &mut commits);
+                self.apply_prevalidated_batch(ready_plan, ready_checkpoint, &mut commits)?;
                 barrier
             };
             if !persisted_messages_raw.is_empty() && ready_barrier.is_none() {
@@ -1520,7 +1840,7 @@ impl InMemoryRaftAdapter {
             )?;
             let light_messages = self.wrap_messages(light_messages_raw, light_barrier)?;
             outbound.extend(light_messages);
-            self.apply_prevalidated_batch(light_plan, light_checkpoint, &mut commits);
+            self.apply_prevalidated_batch(light_plan, light_checkpoint, &mut commits)?;
             self.raw_node.advance_apply();
             self.submit_pending_read_barriers()?;
         }
@@ -1529,7 +1849,7 @@ impl InMemoryRaftAdapter {
             node_id: self.node_id,
             group_id: self.group_id,
             group_epoch: self.group_epoch,
-            voters: self.voters,
+            voters: &self.voters,
             storage: self.raw_node.store(),
             applied_index: self.applied_index,
             applied: &self.applied,
@@ -1592,7 +1912,7 @@ impl InMemoryRaftAdapter {
             self.raw_node.store(),
             self.applied_index,
             &self.applied,
-            self.voters,
+            &self.voters,
         )?;
         Ok(barrier)
     }
@@ -1630,9 +1950,23 @@ impl InMemoryRaftAdapter {
             state_digest: image.state_digest,
         };
         let generation = self.next_stable_generation()?;
+        let conf_state = snapshot
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.conf_state.as_ref())
+            .cloned()
+            .ok_or_else(|| {
+                ConsensusError::InvalidState("incoming snapshot has no membership state".into())
+            })?;
         if let Some(store) = self.disk_store.as_mut() {
-            let observed =
-                store.persist_checkpoint(generation, &hard_state, &image, &entries, checkpoint)?;
+            let observed = store.persist_checkpoint(
+                generation,
+                &hard_state,
+                &conf_state,
+                &image,
+                &entries,
+                checkpoint,
+            )?;
             if observed != generation {
                 return Err(ConsensusError::InvalidState(format!(
                     "stable store returned generation {observed}; expected {generation}"
@@ -1650,7 +1984,7 @@ impl InMemoryRaftAdapter {
             node_id: self.node_id,
             group_id: self.group_id,
             group_epoch: self.group_epoch,
-            voters: self.voters,
+            voters: &self.voters,
             storage: self.raw_node.store(),
             applied_index: self.applied_index,
             applied: &self.applied,
@@ -1806,7 +2140,7 @@ impl InMemoryRaftAdapter {
                         self.node_id
                     )));
                 }
-                validate_transport_membership(self.voters, from, to)?;
+                validate_transport_membership(&self.voters, from, to)?;
                 let peer_message = PeerMessage {
                     group_id: self.group_id,
                     group_epoch: self.group_epoch,
@@ -1836,6 +2170,7 @@ impl InMemoryRaftAdapter {
     fn prevalidate_committed_batch(&self, entries: &[Entry]) -> ConsensusResult<Vec<PlannedEntry>> {
         let mut planned = Vec::with_capacity(entries.len());
         let mut projected_index = self.applied_index;
+        let mut projected_membership = self.current_conf_state()?;
         let mut seen = self
             .applied
             .iter()
@@ -1857,40 +2192,64 @@ impl InMemoryRaftAdapter {
                 )));
             }
             let log_index = LogIndex::new(entry.index);
-            if entry.entry_type != EntryType::EntryNormal as i32 {
-                return Err(ConsensusError::Unsupported(
-                    "membership changes are outside this fixed-voter feasibility adapter".into(),
-                ));
-            }
-
-            let committed = if entry.data.is_empty() {
-                None
-            } else {
-                let command = decode_command(&entry.data)?;
-                validate_command_scope(self.group_id, self.group_epoch, &command)?;
-                match seen.get(&command.proposal_id) {
-                    Some(payload) if *payload != command.payload => {
-                        return Err(ConsensusError::ConflictingProposal(command.proposal_id));
-                    }
-                    Some(_) => None,
-                    None => {
-                        seen.insert(command.proposal_id, command.payload.clone());
-                        Some(CommittedProposal {
-                            receipt: CommitReceipt {
-                                group_id: self.group_id,
-                                group_epoch: self.group_epoch,
-                                proposal_id: command.proposal_id,
-                                term: Term::new(entry.term),
-                                log_index,
-                            },
-                            payload: command.payload,
-                        })
-                    }
+            let entry_type = EntryType::from_i32(entry.entry_type).ok_or_else(|| {
+                ConsensusError::InvalidState(format!(
+                    "committed entry {} has unknown type {}",
+                    entry.index, entry.entry_type
+                ))
+            })?;
+            let (committed, membership_change, resulting_membership) = match entry_type {
+                EntryType::EntryNormal => {
+                    let committed = if entry.data.is_empty() {
+                        None
+                    } else {
+                        let command = decode_command(&entry.data)?;
+                        validate_command_scope(self.group_id, self.group_epoch, &command)?;
+                        match seen.get(&command.proposal_id) {
+                            Some(payload) if *payload != command.payload => {
+                                return Err(ConsensusError::ConflictingProposal(
+                                    command.proposal_id,
+                                ));
+                            }
+                            Some(_) => None,
+                            None => {
+                                seen.insert(command.proposal_id, command.payload.clone());
+                                Some(CommittedProposal {
+                                    receipt: CommitReceipt {
+                                        group_id: self.group_id,
+                                        group_epoch: self.group_epoch,
+                                        proposal_id: command.proposal_id,
+                                        term: Term::new(entry.term),
+                                        log_index,
+                                    },
+                                    payload: command.payload,
+                                })
+                            }
+                        }
+                    };
+                    (committed, None, None)
+                }
+                EntryType::EntryConfChangeV2 => {
+                    let change = decode_membership_change(entry.data.as_ref())?;
+                    let resulting = membership::apply_conf_change(
+                        &projected_membership,
+                        &change,
+                        &self.voters,
+                    )?;
+                    projected_membership.clone_from(&resulting);
+                    (None, Some(change), Some(resulting))
+                }
+                EntryType::EntryConfChange => {
+                    return Err(ConsensusError::Unsupported(
+                        "legacy membership entries are unsupported; use ConfChangeV2".into(),
+                    ));
                 }
             };
             planned.push(PlannedEntry {
                 log_index,
                 committed,
+                membership_change,
+                resulting_membership,
             });
             projected_index = log_index;
         }
@@ -1902,7 +2261,7 @@ impl InMemoryRaftAdapter {
         planned: Vec<PlannedEntry>,
         checkpoint: StableCheckpoint,
         new_commits: &mut Vec<CommittedProposal>,
-    ) {
+    ) -> ConsensusResult<()> {
         debug_assert_eq!(
             checkpoint.applied_index,
             planned
@@ -1913,7 +2272,27 @@ impl InMemoryRaftAdapter {
         debug_assert!(self.disk_store.as_ref().is_none_or(|store| {
             store.stable_generation() == self.stable_generation && store.checkpoint() == checkpoint
         }));
+        let mut propose_auto_leave = false;
         for planned_entry in planned {
+            if let Some(change) = planned_entry.membership_change {
+                let mut observed = self
+                    .raw_node
+                    .apply_conf_change(&change)
+                    .map_err(|error| ConsensusError::Library(error.to_string()))?;
+                membership::canonicalize_conf_state(&mut observed);
+                if planned_entry.resulting_membership.as_ref() != Some(&observed) {
+                    return Err(ConsensusError::InvalidState(format!(
+                        "Raft membership applied at index {} disagrees with its validated projection: observed {observed:?}, expected {:?}",
+                        planned_entry.log_index, planned_entry.resulting_membership
+                    )));
+                }
+                membership::validate_conf_state(&observed, &self.voters)?;
+                self.raw_node
+                    .mut_store()
+                    .wl()
+                    .set_conf_state(observed.clone());
+                propose_auto_leave |= observed.auto_leave;
+            }
             if let Some(committed) = planned_entry.committed {
                 self.proposals.insert(
                     committed.receipt.proposal_id,
@@ -1932,6 +2311,12 @@ impl InMemoryRaftAdapter {
                 .push(ProcessingTrace::Applied(planned_entry.log_index));
         }
         self.state_digest = checkpoint.state_digest;
+        if propose_auto_leave && self.status().role == ConsensusRole::Leader {
+            self.raw_node
+                .propose_conf_change(Vec::new(), ConfChangeV2::default())
+                .map_err(|error| ConsensusError::Library(error.to_string()))?;
+        }
+        Ok(())
     }
 
     fn validate_proposal_common(&self, proposal: &Proposal) -> ConsensusResult<ConsensusStatus> {
@@ -1996,6 +2381,27 @@ impl InMemoryRaftAdapter {
 impl ConsensusAdapter for InMemoryRaftAdapter {
     fn status(&self) -> ConsensusStatus {
         let status = self.raw_node.status();
+        let voter_count = self
+            .raw_node
+            .store()
+            .initial_state()
+            .map_or(0, |state| state.conf_state.voters.len());
+        let replication_progress = status.progress.map_or_else(Vec::new, |progress| {
+            self.voters
+                .iter()
+                .filter_map(|node_id| {
+                    progress
+                        .get(node_id.get())
+                        .map(|peer| ConsensusPeerProgress {
+                            node_id: *node_id,
+                            matched_index: LogIndex::new(peer.matched),
+                            committed_index: LogIndex::new(peer.committed_index),
+                            pending_snapshot_index: LogIndex::new(peer.pending_snapshot),
+                            recent_active: peer.recent_active,
+                        })
+                })
+                .collect()
+        });
         ConsensusStatus {
             node_id: self.node_id,
             group_id: self.group_id,
@@ -2007,7 +2413,8 @@ impl ConsensusAdapter for InMemoryRaftAdapter {
             applied_index: LogIndex::new(status.applied),
             checkpoint_index: self.raw_node.store().checkpoint_index(),
             retained_log_first_index: self.raw_node.store().retained_log_first_index(),
-            voter_count: self.voters.len(),
+            voter_count,
+            replication_progress,
             fail_stopped: self.poisoned.is_some(),
         }
     }
@@ -2084,7 +2491,7 @@ impl ConsensusAdapter for InMemoryRaftAdapter {
                 message.to, self.node_id
             )));
         }
-        validate_transport_membership(self.voters, message.from, message.to)?;
+        validate_transport_membership(&self.voters, message.from, message.to)?;
         if message.from == self.node_id {
             return Err(ConsensusError::InvalidMessage(
                 "self-originated peer messages must not enter the transport".into(),
@@ -2095,11 +2502,18 @@ impl ConsensusAdapter for InMemoryRaftAdapter {
             let snapshot = raft_message.snapshot.as_ref().ok_or_else(|| {
                 ConsensusError::InvalidMessage("snapshot message has no snapshot".into())
             })?;
-            decode_checkpoint_snapshot(snapshot, self.group_id, self.group_epoch, self.voters)?;
+            decode_checkpoint_snapshot(snapshot, self.group_id, self.group_epoch, &self.voters)?;
         }
-        self.raw_node
-            .step(raft_message)
-            .map_err(|error| ConsensusError::Library(error.to_string()))?;
+        if let Err(error) = self.raw_node.step(raft_message) {
+            let membership = self.membership()?;
+            let sender_is_active = membership.voters.contains(&message.from)
+                || membership.outgoing_voters.contains(&message.from)
+                || membership.learners.contains(&message.from)
+                || membership.staged_learners.contains(&message.from);
+            if error != RaftError::StepPeerNotFound || sender_is_active {
+                return Err(ConsensusError::Library(error.to_string()));
+            }
+        }
         self.process_ready()
     }
 
@@ -2111,7 +2525,7 @@ impl ConsensusAdapter for InMemoryRaftAdapter {
                 leader_hint: status.leader_id,
             });
         }
-        if target == self.node_id || !self.voters.contains(&target) {
+        if target == self.node_id || !self.membership()?.voters.contains(&target) {
             return Err(ConsensusError::InvalidVoterSet(format!(
                 "leadership target {target} is not another voter"
             )));
@@ -2119,6 +2533,95 @@ impl ConsensusAdapter for InMemoryRaftAdapter {
         self.raw_node.transfer_leader(target.get());
         self.process_ready()
     }
+}
+
+fn fresh_restore_paths(path: &Path) -> ConsensusResult<(PathBuf, PathBuf)> {
+    if path
+        .try_exists()
+        .map_err(|error| ConsensusError::Storage(error.to_string()))?
+    {
+        return Err(ConsensusError::InvalidState(format!(
+            "restore destination {} already exists",
+            path.display()
+        )));
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| {
+            ConsensusError::InvalidState("restore destination has no parent directory".into())
+        })?;
+    if !parent.is_dir() {
+        return Err(ConsensusError::InvalidState(format!(
+            "restore parent {} is not a directory",
+            parent.display()
+        )));
+    }
+    let file_name = path.file_name().ok_or_else(|| {
+        ConsensusError::InvalidState("restore destination has no file name".into())
+    })?;
+    let staging = parent.join(format!(
+        ".{}.epoch-restore-{}",
+        file_name.to_string_lossy(),
+        std::process::id()
+    ));
+    if staging
+        .try_exists()
+        .map_err(|error| ConsensusError::Storage(error.to_string()))?
+    {
+        return Err(ConsensusError::InvalidState(format!(
+            "restore staging path {} already exists",
+            staging.display()
+        )));
+    }
+    Ok((parent.to_path_buf(), staging))
+}
+
+fn write_and_publish_restore(
+    staging: &Path,
+    destination: &Path,
+    parent: &Path,
+    identity: StableIdentity,
+    snapshot: &ConsensusRestoreSnapshot,
+    image: &CheckpointImage,
+) -> ConsensusResult<()> {
+    let recovered = DiskStableStore::open(staging, identity)?;
+    if recovered.stable_generation != 0 || recovered.checkpoint.applied_index != LogIndex::ZERO {
+        return Err(ConsensusError::InvalidState(
+            "restore staging journal was not fresh".into(),
+        ));
+    }
+    let mut store = recovered.store;
+    let hard_state = HardState {
+        term: snapshot.hard_state_term.get(),
+        vote: 0,
+        commit: image.index.get(),
+    };
+    let conf_state = conf_state_from_membership(&snapshot.membership);
+    store.persist_checkpoint(
+        1,
+        &hard_state,
+        &conf_state,
+        image,
+        &[],
+        StableCheckpoint {
+            applied_index: image.index,
+            publishable_index: image.index,
+            state_digest: image.state_digest,
+        },
+    )?;
+    drop(store);
+    fs::hard_link(staging, destination)
+        .map_err(|error| ConsensusError::Storage(error.to_string()))?;
+    sync_directory(parent)?;
+    fs::remove_file(staging).map_err(|error| ConsensusError::Storage(error.to_string()))?;
+    sync_directory(parent)
+}
+
+fn sync_directory(path: &Path) -> ConsensusResult<()> {
+    fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| ConsensusError::Storage(error.to_string()))
 }
 
 impl PersistentRaftAdapter {
@@ -2131,13 +2634,33 @@ impl PersistentRaftAdapter {
         node_id: NodeId,
         group_id: GroupId,
         group_epoch: GroupEpoch,
-        voters: [NodeId; 3],
+        voters: impl Into<Vec<NodeId>>,
     ) -> ConsensusResult<PersistentOpenResult> {
+        let voters = voters.into();
+        Self::open_with_members(path, node_id, group_id, group_epoch, voters.clone(), voters)
+    }
+
+    /// Opens a journal with an immutable provisioned member allowlist that may
+    /// be larger than the bootstrap voter set. This is the durable counterpart
+    /// of [`InMemoryRaftAdapter::new_with_members`] and permits learner-first
+    /// replacement without changing identity on restart.
+    pub fn open_with_members(
+        path: impl AsRef<Path>,
+        node_id: NodeId,
+        group_id: GroupId,
+        group_epoch: GroupEpoch,
+        initial_voters: impl Into<Vec<NodeId>>,
+        allowed_members: impl Into<Vec<NodeId>>,
+    ) -> ConsensusResult<PersistentOpenResult> {
+        let initial_voters = initial_voters.into();
+        let allowed_members = allowed_members.into();
+        validate_initial_membership(node_id, &initial_voters, &allowed_members)?;
         let identity = StableIdentity {
             node_id,
             group_id,
             group_epoch,
-            voters,
+            initial_voters,
+            voters: allowed_members.clone(),
         };
         let recovered = DiskStableStore::open(path.as_ref(), identity)?;
         let recovery = PersistentRecovery {
@@ -2150,7 +2673,7 @@ impl PersistentRaftAdapter {
             node_id,
             group_id,
             group_epoch,
-            voters,
+            voters: allowed_members,
             storage: recovered.storage,
             applied_index: recovered.checkpoint.applied_index,
             applied: recovered.applied,
@@ -2161,6 +2684,47 @@ impl PersistentRaftAdapter {
         let mut adapter = Self { inner, recovery };
         let output = adapter.inner.process_ready()?;
         Ok(PersistentOpenResult { adapter, output })
+    }
+
+    /// Atomically creates one fresh stable journal from a validated semantic
+    /// checkpoint. Existing journals are never overwritten, and a failed
+    /// validation or write leaves the destination absent.
+    pub fn restore_from_snapshot_with_members(
+        path: impl AsRef<Path>,
+        node_id: NodeId,
+        group_id: GroupId,
+        group_epoch: GroupEpoch,
+        initial_voters: impl Into<Vec<NodeId>>,
+        allowed_members: impl Into<Vec<NodeId>>,
+        snapshot: &ConsensusRestoreSnapshot,
+    ) -> ConsensusResult<()> {
+        let path = path.as_ref();
+        let initial_voters = initial_voters.into();
+        let allowed_members = allowed_members.into();
+        validate_initial_membership(node_id, &initial_voters, &allowed_members)?;
+        let image = snapshot.validate()?;
+        if snapshot.group_id != group_id
+            || snapshot.group_epoch != group_epoch
+            || snapshot.membership.allowed_members != allowed_members
+        {
+            return Err(ConsensusError::InvalidState(
+                "restore snapshot does not match the destination group or member directory".into(),
+            ));
+        }
+        let (parent, staging) = fresh_restore_paths(path)?;
+        let identity = StableIdentity {
+            node_id,
+            group_id,
+            group_epoch,
+            initial_voters,
+            voters: allowed_members,
+        };
+        let restore =
+            write_and_publish_restore(&staging, path, &parent, identity, snapshot, &image);
+        if restore.is_err() {
+            let _ = fs::remove_file(&staging);
+        }
+        restore
     }
 
     pub const fn recovery(&self) -> PersistentRecovery {
@@ -2175,6 +2739,21 @@ impl PersistentRaftAdapter {
         self.inner.applied_proposals()
     }
 
+    pub fn membership(&self) -> ConsensusResult<ConsensusMembership> {
+        self.inner.membership()
+    }
+
+    pub fn add_learner(&mut self, learner: NodeId) -> ConsensusResult<ConsensusOutput> {
+        self.inner.add_learner(learner)
+    }
+
+    pub fn reconfigure_voters(
+        &mut self,
+        target_voters: impl Into<Vec<NodeId>>,
+    ) -> ConsensusResult<ConsensusOutput> {
+        self.inner.reconfigure_voters(target_voters)
+    }
+
     pub fn checkpoint_retry_proposals(&self) -> ConsensusResult<Vec<CommittedProposal>> {
         self.inner.checkpoint_retry_proposals()
     }
@@ -2185,6 +2764,15 @@ impl PersistentRaftAdapter {
 
     pub fn application_snapshot(&self) -> ConsensusResult<Option<ApplicationSnapshot>> {
         self.inner.application_snapshot()
+    }
+
+    pub fn export_restore_snapshot(
+        &mut self,
+        application_snapshot: ApplicationSnapshot,
+    ) -> ConsensusResult<ConsensusRestoreSnapshot> {
+        self.inner
+            .checkpoint_with_application(application_snapshot.clone())?;
+        self.inner.export_restore_snapshot(application_snapshot)
     }
 
     pub fn lookup_proposal(&self, proposal_id: ProposalId) -> ProposalLookup {
@@ -2264,26 +2852,77 @@ fn raft_config(node_id: NodeId, applied_index: LogIndex) -> ConsensusResult<Conf
     Ok(config)
 }
 
-fn validate_voters(node_id: NodeId, voters: [NodeId; 3]) -> ConsensusResult<()> {
-    let unique = voters.into_iter().collect::<BTreeSet<_>>();
-    if unique.len() != voters.len() {
-        return Err(ConsensusError::InvalidVoterSet(
-            "the fixed voter set must contain three distinct nodes".into(),
-        ));
-    }
-    if !unique.contains(&node_id) {
+fn validate_initial_membership(
+    node_id: NodeId,
+    initial_voters: &[NodeId],
+    allowed_members: &[NodeId],
+) -> ConsensusResult<()> {
+    validate_member_directory(node_id, allowed_members)?;
+    membership::validate_conf_state(&expected_conf_state(initial_voters), allowed_members)
+}
+
+fn validate_member_directory(node_id: NodeId, allowed_members: &[NodeId]) -> ConsensusResult<()> {
+    membership::validate_allowed_members(allowed_members)?;
+    if !allowed_members.contains(&node_id) {
         return Err(ConsensusError::InvalidVoterSet(format!(
-            "local node {node_id} is absent from its voter set"
+            "local node {node_id} is absent from the configured member directory"
         )));
     }
     Ok(())
 }
 
-fn expected_conf_state(voters: [NodeId; 3]) -> ConfState {
+fn expected_conf_state(voters: &[NodeId]) -> ConfState {
     ConfState::from((
         voters.iter().map(|voter| voter.get()).collect::<Vec<_>>(),
         Vec::<u64>::new(),
     ))
+}
+
+fn membership_from_conf_state(
+    state: &ConfState,
+    allowed_members: &[NodeId],
+) -> ConsensusResult<ConsensusMembership> {
+    let convert = |values: &[u64]| {
+        values
+            .iter()
+            .copied()
+            .map(NodeId::new)
+            .collect::<ConsensusResult<Vec<_>>>()
+    };
+    Ok(ConsensusMembership {
+        allowed_members: allowed_members.to_vec(),
+        voters: convert(&state.voters)?,
+        outgoing_voters: convert(&state.voters_outgoing)?,
+        learners: convert(&state.learners)?,
+        staged_learners: convert(&state.learners_next)?,
+        auto_leave: state.auto_leave,
+    })
+}
+
+fn conf_state_from_membership(membership: &ConsensusMembership) -> ConfState {
+    ConfState {
+        voters: membership
+            .voters
+            .iter()
+            .map(|node_id| node_id.get())
+            .collect(),
+        learners: membership
+            .learners
+            .iter()
+            .map(|node_id| node_id.get())
+            .collect(),
+        voters_outgoing: membership
+            .outgoing_voters
+            .iter()
+            .map(|node_id| node_id.get())
+            .collect(),
+        learners_next: membership
+            .staged_learners
+            .iter()
+            .map(|node_id| node_id.get())
+            .collect(),
+        auto_leave: membership.auto_leave,
+    }
 }
 
 fn validate_application_snapshot(snapshot: &ApplicationSnapshot) -> ConsensusResult<()> {
@@ -2763,7 +3402,10 @@ fn decode_checkpoint_proposals(
     Ok(applied)
 }
 
-fn checkpoint_snapshot(image: &CheckpointImage, voters: [NodeId; 3]) -> ConsensusResult<Snapshot> {
+fn checkpoint_snapshot(
+    image: &CheckpointImage,
+    conf_state: &ConfState,
+) -> ConsensusResult<Snapshot> {
     let mut snapshot = Snapshot {
         data: encode_checkpoint_image(image)?,
         ..Snapshot::default()
@@ -2771,7 +3413,7 @@ fn checkpoint_snapshot(image: &CheckpointImage, voters: [NodeId; 3]) -> Consensu
     let metadata = snapshot.mut_metadata();
     metadata.index = image.index.get();
     metadata.term = image.term.get();
-    metadata.set_conf_state(expected_conf_state(voters));
+    metadata.set_conf_state(conf_state.clone());
     Ok(snapshot)
 }
 
@@ -2779,16 +3421,16 @@ fn decode_checkpoint_snapshot(
     snapshot: &Snapshot,
     group_id: GroupId,
     group_epoch: GroupEpoch,
-    voters: [NodeId; 3],
+    voters: &[NodeId],
 ) -> ConsensusResult<CheckpointImage> {
     let metadata = snapshot.metadata.as_ref().ok_or_else(|| {
         ConsensusError::InvalidMessage("consensus snapshot has no metadata".into())
     })?;
-    if metadata.conf_state.as_ref() != Some(&expected_conf_state(voters)) {
-        return Err(ConsensusError::InvalidMessage(
-            "consensus snapshot voter set does not match the fixed group".into(),
-        ));
-    }
+    let conf_state = metadata.conf_state.as_ref().ok_or_else(|| {
+        ConsensusError::InvalidMessage("consensus snapshot has no membership state".into())
+    })?;
+    membership::validate_conf_state(conf_state, voters)
+        .map_err(|error| ConsensusError::InvalidMessage(error.to_string()))?;
     let image = decode_checkpoint_image(snapshot.data.as_ref())?;
     if image.group_id != group_id || image.group_epoch != group_epoch {
         return Err(ConsensusError::InvalidMessage(
@@ -2859,7 +3501,7 @@ impl<'a> SnapshotReader<'a> {
 }
 
 fn validate_transport_membership(
-    voters: [NodeId; 3],
+    voters: &[NodeId],
     from: NodeId,
     to: NodeId,
 ) -> ConsensusResult<()> {
@@ -2870,7 +3512,7 @@ fn validate_transport_membership(
     }
     if !voters.contains(&from) || !voters.contains(&to) {
         return Err(ConsensusError::InvalidMessage(format!(
-            "peer-message route {from}->{to} is outside the fixed voter set"
+            "peer-message route {from}->{to} is outside the configured voter set"
         )));
     }
     Ok(())
@@ -2937,23 +3579,19 @@ fn validate_embedded_message(message: &PeerMessage) -> ConsensusResult<RaftMessa
         let conf_state = metadata.conf_state.as_ref().ok_or_else(|| {
             ConsensusError::InvalidMessage("snapshot message has no voter state".into())
         })?;
-        let voters = conf_state
+        let allowed_members = conf_state
             .voters
             .iter()
+            .chain(&conf_state.learners)
+            .chain(&conf_state.voters_outgoing)
+            .chain(&conf_state.learners_next)
             .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .map(NodeId::new)
             .collect::<ConsensusResult<Vec<_>>>()?;
-        if voters.len() != 3
-            || !conf_state.learners.is_empty()
-            || !conf_state.voters_outgoing.is_empty()
-            || !conf_state.learners_next.is_empty()
-            || conf_state.auto_leave
-            || voters.iter().copied().collect::<BTreeSet<_>>().len() != 3
-        {
-            return Err(ConsensusError::InvalidMessage(
-                "snapshot message does not contain one fixed three-voter state".into(),
-            ));
-        }
+        membership::validate_conf_state(conf_state, &allowed_members)
+            .map_err(|error| ConsensusError::InvalidMessage(error.to_string()))?;
         let image = decode_checkpoint_image(snapshot.data.as_ref())?;
         if image.group_id != message.group_id
             || image.group_epoch != message.group_epoch
@@ -2969,14 +3607,24 @@ fn validate_embedded_message(message: &PeerMessage) -> ConsensusResult<RaftMessa
             "non-snapshot peer message carries snapshot data".into(),
         ));
     }
-    if raft_message
-        .entries
-        .iter()
-        .any(|entry| entry.entry_type != EntryType::EntryNormal as i32)
-    {
-        return Err(ConsensusError::Unsupported(
-            "membership-changing entries are not valid in the fixed-voter transport".into(),
-        ));
+    for entry in &raft_message.entries {
+        match EntryType::from_i32(entry.entry_type) {
+            Some(EntryType::EntryNormal) => {}
+            Some(EntryType::EntryConfChangeV2) => {
+                decode_membership_change(entry.data.as_ref())?;
+            }
+            Some(EntryType::EntryConfChange) => {
+                return Err(ConsensusError::Unsupported(
+                    "legacy membership entries are not valid on the Epoch transport".into(),
+                ));
+            }
+            None => {
+                return Err(ConsensusError::InvalidMessage(format!(
+                    "Raft entry has unknown type {}",
+                    entry.entry_type
+                )));
+            }
+        }
     }
     Ok(raft_message)
 }
@@ -2986,6 +3634,36 @@ struct EncodedCommand {
     group_epoch: GroupEpoch,
     proposal_id: ProposalId,
     payload: Vec<u8>,
+}
+
+fn decode_membership_change(encoded: &[u8]) -> ConsensusResult<ConfChangeV2> {
+    let change = ConfChangeV2::decode(encoded).map_err(|error| {
+        ConsensusError::InvalidMessage(format!("invalid ConfChangeV2 payload: {error}"))
+    })?;
+    if change.encode_to_vec() != encoded {
+        return Err(ConsensusError::InvalidMessage(
+            "ConfChangeV2 payload is not canonically encoded".into(),
+        ));
+    }
+    if change.changes.len() > MAX_VOTER_COUNT.saturating_mul(2) {
+        return Err(ConsensusError::InvalidMessage(format!(
+            "ConfChangeV2 contains {} steps; maximum is {}",
+            change.changes.len(),
+            MAX_VOTER_COUNT * 2
+        )));
+    }
+    let mut changed_nodes = BTreeSet::new();
+    for step in &change.changes {
+        if step.node_id == 0
+            || ConfChangeType::from_i32(step.change_type).is_none()
+            || !changed_nodes.insert(step.node_id)
+        {
+            return Err(ConsensusError::InvalidMessage(
+                "ConfChangeV2 steps require distinct nonzero nodes and known change types".into(),
+            ));
+        }
+    }
+    Ok(change)
 }
 
 fn encode_command(proposal: &Proposal) -> ConsensusResult<Vec<u8>> {
@@ -3097,7 +3775,7 @@ struct PersistedStateView<'a> {
     node_id: NodeId,
     group_id: GroupId,
     group_epoch: GroupEpoch,
-    voters: [NodeId; 3],
+    voters: &'a [NodeId],
     storage: &'a EpochRaftStorage,
     applied_index: LogIndex,
     applied: &'a [CommittedProposal],
@@ -3140,24 +3818,14 @@ fn validate_persisted_state(
 fn validate_persisted_storage(
     state: PersistedStateView<'_>,
 ) -> ConsensusResult<Option<CheckpointImage>> {
-    validate_voters(state.node_id, state.voters)?;
+    validate_member_directory(state.node_id, state.voters)?;
     let raft_state = state
         .storage
         .initial_state()
         .map_err(|error| ConsensusError::Storage(error.to_string()))?;
-    let expected_conf_state = ConfState::from((
-        state
-            .voters
-            .iter()
-            .map(|voter| voter.get())
-            .collect::<Vec<_>>(),
-        Vec::<u64>::new(),
-    ));
-    if raft_state.conf_state != expected_conf_state {
-        return Err(ConsensusError::InvalidState(
-            "stored ConfState does not exactly match the fixed voter set".into(),
-        ));
-    }
+    membership::validate_conf_state(&raft_state.conf_state, state.voters).map_err(|error| {
+        ConsensusError::InvalidState(format!("persisted Raft membership is invalid: {error}"))
+    })?;
     validate_hard_state(&raft_state.hard_state, state.voters)?;
     let first_index = state
         .storage
@@ -3254,10 +3922,10 @@ fn validate_persisted_digest(
     Ok((scheme, command_count))
 }
 
-fn validate_hard_state(hard_state: &HardState, voters: [NodeId; 3]) -> ConsensusResult<()> {
+fn validate_hard_state(hard_state: &HardState, voters: &[NodeId]) -> ConsensusResult<()> {
     if hard_state.vote != 0 && !voters.iter().any(|voter| voter.get() == hard_state.vote) {
         return Err(ConsensusError::InvalidState(format!(
-            "stored vote {} is outside the fixed voter set",
+            "stored vote {} is outside the configured voter set",
             hard_state.vote
         )));
     }
@@ -3308,7 +3976,7 @@ fn build_proposal_tracking(
     storage: &EpochRaftStorage,
     applied_index: LogIndex,
     applied: &[CommittedProposal],
-    voters: [NodeId; 3],
+    voters: &[NodeId],
 ) -> ConsensusResult<BTreeMap<ProposalId, TrackedProposal>> {
     let (entries, checkpoint_image) =
         validated_retained_log(storage, group_id, group_epoch, voters)?;
@@ -3340,9 +4008,13 @@ fn build_proposal_tracking(
     });
 
     for entry in entries {
+        if entry.entry_type == EntryType::EntryConfChangeV2 as i32 {
+            decode_membership_change(entry.data.as_ref())?;
+            continue;
+        }
         if entry.entry_type != EntryType::EntryNormal as i32 {
             return Err(ConsensusError::Unsupported(
-                "stored membership change found in fixed-voter feasibility adapter".into(),
+                "stored legacy or unknown membership entry is unsupported".into(),
             ));
         }
         if entry.data.is_empty() {
@@ -3414,7 +4086,7 @@ fn validated_retained_log(
     storage: &EpochRaftStorage,
     group_id: GroupId,
     group_epoch: GroupEpoch,
-    voters: [NodeId; 3],
+    voters: &[NodeId],
 ) -> ConsensusResult<(Vec<Entry>, Option<CheckpointImage>)> {
     let raft_state = storage
         .initial_state()

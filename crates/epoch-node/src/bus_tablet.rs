@@ -1,4 +1,4 @@
-//! Experimental Event Bus ingress/outbox tablet over fixed-voter consensus.
+//! Experimental Event Bus ingress/outbox tablet over bounded-voter consensus.
 
 use std::{
     collections::BTreeSet,
