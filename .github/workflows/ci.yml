@@ -29,6 +29,10 @@ jobs:
           --profile minimal
           --component clippy
           --component rustfmt
+      - name: Install native Rust build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends cmake libcurl4-openssl-dev
       - name: Install checksum-pinned protoc
         run: |
           protoc_root="${RUNNER_TEMP}/protoc-35.1"
