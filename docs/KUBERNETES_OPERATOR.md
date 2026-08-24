@@ -207,7 +207,7 @@ and postflight verification. Only then does it release the next lower ordinal.
 
 ```yaml
 spec:
-  nodeImage: registry.example/epoch-node:v0.2.0-beta.2
+  nodeImage: registry.example/epoch-node:v0.2.0-beta.3
   upgrade:
     backupMaxAgeSeconds: 3600
     stepDeadlineSeconds: 900

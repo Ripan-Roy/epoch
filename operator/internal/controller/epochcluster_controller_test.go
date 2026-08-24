@@ -350,7 +350,7 @@ func TestUpgradeWaitsForPostRequestEncryptedBackup(t *testing.T) {
 	scheme := testScheme(t)
 	cluster := validCluster()
 	cluster.Status.Upgrade.CurrentNodeImage = cluster.Spec.NodeImage
-	cluster.Spec.NodeImage = "ghcr.io/ripan-roy/epoch-node:v0.2.0-beta.2"
+	cluster.Spec.NodeImage = "ghcr.io/ripan-roy/epoch-node:v0.2.0-beta.3"
 	startUpgradeRequest(cluster, upgradeRequestID(cluster.Spec.NodeImage, ""))
 	started := cluster.Status.Upgrade.StartedAt.DeepCopy()
 	oldBackup := metav1.NewTime(started.Add(-time.Minute))
@@ -393,7 +393,7 @@ func TestUpgradeAdvancesExactlyOneOrdinalAfterDrainReadinessAndVerification(t *t
 	cluster := validCluster()
 	oldImage := cluster.Spec.NodeImage
 	cluster.Status.Upgrade.CurrentNodeImage = oldImage
-	cluster.Spec.NodeImage = "ghcr.io/ripan-roy/epoch-node:v0.2.0-beta.2"
+	cluster.Spec.NodeImage = "ghcr.io/ripan-roy/epoch-node:v0.2.0-beta.3"
 	cluster.Status.Upgrade.TargetNodeImage = cluster.Spec.NodeImage
 	cluster.Status.Upgrade.RequestID = upgradeRequestID(cluster.Spec.NodeImage, "")
 	cluster.Status.Upgrade.Phase = epochv1alpha1.UpgradePhasePreflight
@@ -463,7 +463,7 @@ func TestUpgradeFailureStartsGuardedRollbackWithoutReleasingAnotherNode(t *testi
 	cluster := validCluster()
 	oldImage := cluster.Spec.NodeImage
 	cluster.Status.Upgrade.CurrentNodeImage = oldImage
-	cluster.Spec.NodeImage = "ghcr.io/ripan-roy/epoch-node:v0.2.0-beta.2"
+	cluster.Spec.NodeImage = "ghcr.io/ripan-roy/epoch-node:v0.2.0-beta.3"
 	cluster.Status.Upgrade.TargetNodeImage = cluster.Spec.NodeImage
 	cluster.Status.Upgrade.RequestID = upgradeRequestID(cluster.Spec.NodeImage, "")
 	cluster.Status.Upgrade.Phase = epochv1alpha1.UpgradePhaseVerifying

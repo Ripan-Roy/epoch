@@ -38,10 +38,14 @@ backup, and maintenance binaries.
 3. The exact commit's `main` CI and Pages push workflows must both complete
    successfully; publication waits for them for a bounded interval and fails
    closed on timeout or a non-success conclusion.
-4. BuildKit builds both supported Linux architectures from that tagged tree.
-5. GHCR receives only the exact version tag.
-6. The workflow resolves and records the immutable manifest and platform
-   digests, then inspects the published amd64 runtime.
+4. BuildKit builds each component separately on matching native amd64 and arm64
+   runners. Architecture-scoped caches are written only by this verified tag
+   path; QEMU is not in the publication path.
+5. Each native job pushes an untagged immutable platform result. A bounded
+   finalize job requires exactly two digest artifacts and creates the only
+   public exact-version tag; `latest` is never created.
+6. The workflow resolves and records the immutable assembled manifest and both
+   platform digests, then inspects the published amd64 runtime.
 7. Build provenance is attached to the manifest digest. SPDX JSON SBOMs are
    generated and attested separately for the amd64 and arm64 digests.
 8. Sigstore keyless signing binds the manifest digest to the exact tag workflow
@@ -59,7 +63,7 @@ Choose a concrete tag and resolve the manifest digest. Do not copy a digest
 from an untrusted issue, log, or chat message.
 
 ```bash
-export EPOCH_RELEASE_TAG=v0.2.0-beta.2
+export EPOCH_RELEASE_TAG=v0.2.0-beta.3
 export EPOCH_COMPONENT=node
 export EPOCH_IMAGE="ghcr.io/ripan-roy/epoch-${EPOCH_COMPONENT}"
 

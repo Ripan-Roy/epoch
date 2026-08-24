@@ -478,7 +478,9 @@ digest-pinned bases with exact version/revision OCI labels and explicit non-root
 users. Pull requests inspect those four images and generate one SPDX JSON SBOM
 per candidate without registry credentials. Only a `v*` tag whose commit equals
 the current `main` may publish Linux amd64/arm64 manifests to GHCR; it never
-publishes `latest`. The tag workflow attaches manifest provenance, attests each
+publishes `latest`. Matching native runners build each architecture and pass
+only immutable digests to the manifest stage, avoiding QEMU in the trusted
+publication path. The tag workflow attaches manifest provenance, attests each
 platform SBOM, signs the immutable manifest digest through GitHub Actions OIDC,
 and verifies both the Sigstore workflow identity and GitHub attestation before
 creating the release. [Release artifacts](RELEASE_ARTIFACTS.md) defines the

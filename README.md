@@ -69,7 +69,7 @@ policy setup, status, storage, and lifecycle limits. The
 [management CLI guide](docs/CLI.md) covers declarative resource operations, and
 the [source connector guide](docs/SOURCE_CONNECTORS.md) specifies HTTP,
 immutable object, PostgreSQL/MySQL CDC, and Kafka cursor/failure contracts.
-The `v0.2.0-beta.2` tag workflow publishes verified node, control, operator, and
+The `v0.2.0-beta.3` tag workflow publishes verified node, control, operator, and
 CLI images after protected-main evidence passes. Package-manager artifacts are
 intentionally deferred.
 
@@ -366,10 +366,12 @@ releases.
 Verified milestones are published as
 [GitHub prereleases](https://github.com/Ripan-Roy/epoch/releases) from tagged
 `main` commits with version-controlled release notes. Published alpha releases
-through `v0.1.0-alpha.10` remain source-only. The `v0.2.0-beta.2` candidate adds
+through `v0.1.0-alpha.10` remain source-only. The `v0.2.0-beta.3` candidate adds
 exact-tag, Linux amd64/arm64 GHCR images for the node, control plane, operator,
 and CLI with keyless manifest signatures, build provenance, and per-platform
-SPDX SBOMs; it is not a published claim until the protected tag workflow passes.
+SPDX SBOMs. Its native per-platform release builds supersede the immutable
+beta.1 compiler failure and beta.2 QEMU timeout; it is not a published claim
+until the protected tag workflow passes.
 See [Release artifacts](docs/RELEASE_ARTIFACTS.md),
 [Releasing](docs/RELEASING.md), and the [Changelog](CHANGELOG.md).
 

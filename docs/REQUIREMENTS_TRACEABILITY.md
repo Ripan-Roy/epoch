@@ -52,13 +52,14 @@ Dependency gates are:
 
 The release path checks one repository version against Rust, Go, Java, Python,
 and TypeScript metadata, accepts release tags only at the current `main` commit,
-and keeps curated notes in the repository. The `v0.2.0-beta.2` candidate additionally
-builds four exact-tag, non-root multi-architecture OCI images, inspects them in
-pull requests, generates per-platform SPDX SBOMs, attaches provenance, and
-keylessly signs immutable manifests. This is partial G10 evidence until the
-protected/tag jobs publish and independently verify it; raw signed binaries,
-package-manager distributions, installation matrices, migration support, and
-production support limits remain open.
+and keeps curated notes in the repository. The `v0.2.0-beta.3` candidate
+additionally builds four exact-tag, non-root multi-architecture OCI images on
+native amd64 and arm64 runners, inspects them in pull requests, assembles exact
+manifests from immutable platform digests, generates per-platform SPDX SBOMs,
+attaches provenance, and keylessly signs immutable manifests. This is partial
+G10 evidence until the protected/tag jobs publish and independently verify it;
+raw signed binaries, package-manager distributions, installation matrices,
+migration support, and production support limits remain open.
 
 The bootstrap trust slice supplies partial G5 evidence. Go and Rust parse the
 same bounded fingerprint-only policy and decision corpus; managed HTTP/gRPC and
@@ -339,7 +340,7 @@ durability.
 | PKG-002 | P0 | Shared engine/format standalone and cluster | M1 → M2 | Slice | G1, G2, G3, G10 | Checksummed segmented standalone format plus canonical typed Stream, Queue, Cache, and Event Bus commands applied from EPRS without a second clustered WAL; pending: supported standalone-to-cluster format/migration equivalence |
 | PKG-003 | P0 | Standalone without hosted Go services | M1 | Slice | G1, G2, G10 | Rust node restart/recovery test; pending: extended disconnected lifecycle suite |
 | PKG-004 | P0 | Three-node quorum/failover/placement | M1 prototype → M2 | Slice | G2, G3, G10 | Deterministic, real-process, and three-container evidence covers a dedicated Catalog, authenticated zones, live group capacity, independently replicated shards and profiles, generation/epoch fencing, majority commit, leader loss, Go-observed degradation, entry/snapshot catch-up, and same-volume all-node recovery. The alpha-exit four-node campaign adds explicit one-voter selection, learner catch-up including refreshed snapshots after compaction, joint consensus, data continuity, removed-host shutdown, reopen on the new voter set, and one clean live-Kubernetes lifecycle locally. Pending: rack placement, stable public repair APIs, exhaustive faults, protected Kubernetes evidence, and a published SLO report. |
-| PKG-005 | P0 | OCI, Kubernetes dev, signed binaries | M1 dev → M2 | Slice | G1, G5, G10 | Four digest-base-pinned, exact-version, non-root node/control/operator/CLI Dockerfiles build and pass strict local inspection. PR CI builds without publishing and generates structurally validated SPDX JSON evidence. The exact-main tag workflow publishes only Linux amd64/arm64 exact tags to GHCR, attaches manifest provenance plus per-platform SBOM attestations, keylessly signs/verifies each manifest, and retains eight release SBOMs. ADR-0041 and the release-artifact guide freeze consumer verification. Pending: protected/tag execution, clean digest-pull Kubernetes evidence, raw signed binary archives, and wider install/vulnerability/reproducibility matrices. |
+| PKG-005 | P0 | OCI, Kubernetes dev, signed binaries | M1 dev → M2 | Slice | G1, G5, G10 | Four digest-base-pinned, exact-version, non-root node/control/operator/CLI Dockerfiles build and pass strict local inspection. PR CI builds without publishing and generates structurally validated SPDX JSON evidence. The exact-main tag workflow builds Linux amd64/arm64 concurrently on matching native runners, transfers only immutable digests, assembles exact tags in a bounded finalize stage, attaches manifest provenance plus per-platform SBOM attestations, keylessly signs/verifies each manifest, and retains eight release SBOMs. ADR-0041 and the release-artifact guide freeze consumer verification. Pending: protected/tag execution, clean digest-pull Kubernetes evidence, raw signed binary archives, and wider install/vulnerability/reproducibility matrices. |
 | PKG-006 | P1 | Rust embedded engine with guarantee ceiling | M2 experimental → M3 | Planned | G0, G1, G2, G10 | Pending: lifecycle/persistence contract suite |
 | PKG-007 | P1 | Supervised sidecar/child for other languages | M2 → M3 | Planned | G1, G5, G10 | Pending: crash/isolation/upgrade matrix |
 | PKG-008 | P1 | Deterministic parent lifecycle controls | M2 → M3 | Planned | G1, G2, G10 | Pending: process state-machine suite |
