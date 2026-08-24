@@ -52,14 +52,27 @@ Dependency gates are:
 
 The release path checks one repository version against Rust, Go, Java, Python,
 and TypeScript metadata, accepts release tags only at the current `main` commit,
-and keeps curated notes in the repository. The `v0.2.0-beta.3` candidate
-additionally builds four exact-tag, non-root multi-architecture OCI images on
+and keeps curated notes in the repository. The current beta candidate
+additionally builds five exact-tag, non-root multi-architecture OCI images on
 native amd64 and arm64 runners, inspects them in pull requests, assembles exact
 manifests from immutable platform digests, generates per-platform SPDX SBOMs,
 attaches provenance, and keylessly signs immutable manifests. This is partial
 G10 evidence until the protected/tag jobs publish and independently verify it;
 raw signed binaries, package-manager distributions, installation matrices,
 migration support, and production support limits remain open.
+
+The protocol-compatibility candidate supplies partial G6 evidence. A separate
+bounded Rust process translates a named RESP2/RESP3 string/counter/TTL subset,
+Kafka producer/manual-consumer metadata and checkpoint APIs, and AMQP 0-9-1
+direct Queue publish/confirm/consume/settlement into the fenced native regional
+ports. Redis CLI 8.8.2, Kafka Java 4.3.1, and RabbitMQ Java 5.34.0 execute the
+real wire listeners; native adapter contracts separately prove bearer identity,
+generation/tablet/term fences, routes, payloads, and responses. Parser/semantic
+tests, all four Kafka compression paths, the DX-007 versioned migration scanner,
+the public matrix, Pages UI, and a fifth signed non-root OCI component are local.
+Combined real-regional conformance, differential and fuzz evidence, richer
+Redis types, Kafka membership/transactions, broader AMQP routing/1.0, MQTT, and
+performance parity remain open; no G6 completion is claimed.
 
 The bootstrap trust slice supplies partial G5 evidence. Go and Rust parse the
 same bounded fingerprint-only policy and decision corpus; managed HTTP/gRPC and
@@ -312,12 +325,12 @@ durability.
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
 | DX-001 | P0 | Official Go, Java, and Python SDKs | M1 one SDK → M2 | Slice | G0, G1, G4, G10 | Go/Java/Python standalone tests and exact-source restart quickstarts remain green. All three share regional Stream, Queue, Event Bus, and the complete non-deferred Cache lifecycle: ordinary/advanced state, atomic batch, independent multiplex, locks/TTL, changes, backup/PITR, typed query, lossy Pub/Sub, cold status, discovery/auth/fence/retry/read-barrier contracts. Stream additionally exposes keyed routing, batches, sessions, and claim/fenced fetch. The real Python campaign executes all four profiles after leader loss. Pending: generated response types, persistent native streaming/cooperative revoke, package publication, and the complete native contract/version matrix |
-| DX-002 | P0 | Generated guarantee-aware API docs | M1 → M2 | Slice | G0, G1, G10 | Hand-authored guarantee/error guidance, exact executable standalone quickstarts, and exact compilable regional Stream/Queue/Cache/Event Bus Go/Java/Python sources are built into the docs-only Pages artifact. ADR-0034 plus the Cache guide/examples cover the complete non-deferred state/recovery/query/SDK contract and non-claims; main-only publication is pending. Pending: generated API reference and full doc lint |
+| DX-002 | P0 | Generated guarantee-aware API docs | M1 → M2 | Slice | G0, G1, G10 | Hand-authored guarantee/error guidance, exact executable standalone quickstarts, and exact compilable regional Stream/Queue/Cache/Event Bus Go/Java/Python sources are built into the docs-only Pages artifact. The compatibility page adds the bounded Redis/Kafka/AMQP architecture, security boundary, exact version targets, supported and unsupported surfaces, and end-to-end standard-client examples. ADR-0034 plus the Cache guide/examples cover the complete non-deferred state/recovery/query/SDK contract and non-claims; main-only compatibility publication is pending. Pending: generated API reference and full doc lint |
 | DX-003 | P0 | Deterministic single-binary emulator | M1 → M2 | Slice | G1, G2, G4, G10 | Seeded scheduler, virtual clocks/fault plan/transport, golden EPTR history, fixed-voter consensus, real-process EPRS/SIGKILL, and typed Stream/Queue/Cache/Bus runtimes; pending: executable replay bundle and runnable emulator controls |
 | DX-004 | P0 | Test containers and ephemeral namespaces | M1 → M2 | Slice | G1, G5, G10 | A unique three-node Compose project uses independent volumes, dynamic loopback ports, mounted policy, Go recovery, simultaneous four-profile failover/catch-up/all-node recovery, and post-failover Python lifecycles. The alpha-exit runner makes that real campaign resumable across exact-identity rounds, requires typed profile/fault/invariant receipts, hashes every artifact, duration-gates completion, signs canonical evidence with Ed25519, and passes one 48,434-ms accelerated round locally. A separate digest-pinned Kind campaign passes four-node mTLS install, all-profile traffic, backup, compacted-log voter replacement, guarded rollout, fresh restore, exact digests, and post-restore writes locally. Pending: protected evidence, elapsed 30-day operation, parallel campaigns, Go/Java live regional execution, and injected disk/network matrices. |
 | DX-005 | P1 | Audited/redacted console message browser | M3 → M4 | Planned | G5, G7, G8 | Pending: access/redaction/action audit matrix |
 | DX-006 | P0 | Explain live guarantees and cost drivers | M1 basic → M2 | Slice | G0, G3, G5 | The TypeScript console consumes only the Go BFF with an interactively entered session-only bearer, displays desired versus observed generation, per-shard voters/leader, verified region/zone/class evidence, per-node group capacity, exact governance filters, and authorized resource/shard attribution by cost center and classification. Pending: OIDC/session exchange, achieved durability, usage/rate/currency inputs, browser accessibility evidence, and historical topology context |
-| DX-007 | P1 | Compatibility usage scanner | M3 | Planned | G0, G6 | Pending: unsupported-feature fixture corpus |
+| DX-007 | P1 | Compatibility usage scanner | M3 | Slice | G0, G6 | `epoch-compat scan` accepts bounded auto/fixed-protocol newline manifests, preserves source lines, evaluates Kafka API versions and Redis option/database boundaries, emits the versioned `epoch.compatibility-scan/v1` text/JSON report, and fails CI at partial/unknown/unsupported thresholds. The unsupported/unknown fixture corpus passes locally; live traffic capture and protected evidence remain open. |
 | DX-008 | P1 | End-to-end event trace | M4 | Planned | G1, G4, G5, G7 | Pending: trace/history reconciliation |
 | DX-009 | P1 | TypeScript, Rust, .NET SDKs | M3 | Planned | G0, G1, G6, G10 | Pending: multi-language client matrix |
 
@@ -340,7 +353,7 @@ durability.
 | PKG-002 | P0 | Shared engine/format standalone and cluster | M1 → M2 | Slice | G1, G2, G3, G10 | Checksummed segmented standalone format plus canonical typed Stream, Queue, Cache, and Event Bus commands applied from EPRS without a second clustered WAL; pending: supported standalone-to-cluster format/migration equivalence |
 | PKG-003 | P0 | Standalone without hosted Go services | M1 | Slice | G1, G2, G10 | Rust node restart/recovery test; pending: extended disconnected lifecycle suite |
 | PKG-004 | P0 | Three-node quorum/failover/placement | M1 prototype → M2 | Slice | G2, G3, G10 | Deterministic, real-process, and three-container evidence covers a dedicated Catalog, authenticated zones, live group capacity, independently replicated shards and profiles, generation/epoch fencing, majority commit, leader loss, Go-observed degradation, entry/snapshot catch-up, and same-volume all-node recovery. The alpha-exit four-node campaign adds explicit one-voter selection, learner catch-up including refreshed snapshots after compaction, joint consensus, data continuity, removed-host shutdown, reopen on the new voter set, and one clean live-Kubernetes lifecycle locally. Pending: rack placement, stable public repair APIs, exhaustive faults, protected Kubernetes evidence, and a published SLO report. |
-| PKG-005 | P0 | OCI, Kubernetes dev, signed binaries | M1 dev → M2 | Slice | G1, G5, G10 | Four digest-base-pinned, exact-version, non-root node/control/operator/CLI Dockerfiles build and pass strict local inspection. PR CI builds without publishing and generates structurally validated SPDX JSON evidence. The exact-main tag workflow builds Linux amd64/arm64 concurrently on matching native runners, transfers only immutable digests, assembles exact tags in a bounded finalize stage, attaches manifest provenance plus per-platform SBOM attestations, keylessly signs/verifies each manifest, and retains eight release SBOMs. ADR-0041 and the release-artifact guide freeze consumer verification. Pending: protected/tag execution, clean digest-pull Kubernetes evidence, raw signed binary archives, and wider install/vulnerability/reproducibility matrices. |
+| PKG-005 | P0 | OCI, Kubernetes dev, signed binaries | M1 dev → M2 | Slice | G1, G5, G10 | Five digest-base-pinned, exact-version, non-root node/control/operator/CLI/compatibility Dockerfiles build and pass strict local inspection. PR CI builds without publishing and generates structurally validated SPDX JSON evidence. The exact-main tag workflow builds Linux amd64/arm64 concurrently on matching native runners, transfers only immutable digests, assembles exact tags in a bounded finalize stage, attaches manifest provenance plus per-platform SBOM attestations, keylessly signs/verifies each manifest, and retains ten release SBOMs. ADR-0041 and the release-artifact guide freeze consumer verification. Pending: protected/tag execution, clean digest-pull Kubernetes evidence, raw signed binary archives, and wider install/vulnerability/reproducibility matrices. |
 | PKG-006 | P1 | Rust embedded engine with guarantee ceiling | M2 experimental → M3 | Planned | G0, G1, G2, G10 | Pending: lifecycle/persistence contract suite |
 | PKG-007 | P1 | Supervised sidecar/child for other languages | M2 → M3 | Planned | G1, G5, G10 | Pending: crash/isolation/upgrade matrix |
 | PKG-008 | P1 | Deterministic parent lifecycle controls | M2 → M3 | Planned | G1, G2, G10 | Pending: process state-machine suite |

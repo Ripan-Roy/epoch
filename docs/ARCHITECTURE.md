@@ -801,6 +801,27 @@ counting, garbage collection, retention coupling, and ambiguous recovery.
 Co-located immutable references may be added later after evidence and a separate
 format decision.
 
+### 8.6 Protocol-compatibility gateways
+
+Compatibility is an edge translation layer, not another profile engine. The
+separate `epoch-compat` Rust process terminates the documented RESP2/RESP3,
+Kafka, and AMQP 0-9-1 subsets and calls a narrow semantic Cache, Stream, or Queue
+port. The production adapter routes through the same authenticated regional API
+as native clients, including resource-generation/tablet-epoch fences, leader
+terms, and linearizable reads. It owns no durable state.
+
+Wire input is bounded before allocation or decompression. Kafka record counts
+are preflighted, all supported compression codecs share a cumulative expansion
+ceiling, and one Produce partition becomes one canonical native Stream batch so
+it cannot partially commit record-by-record. AMQP confirms follow native Queue
+commit, while Redis multi-key operations explicitly remain independent per key.
+Unknown mutation outcomes are surfaced rather than retried under a new identity.
+
+Discovery and documentation are allowlists: Kafka `ApiVersions`, Redis
+`COMMAND`, the scanner, and the published exact-client matrix must match the
+implemented dispatch. See [Protocol compatibility](PROTOCOL_COMPATIBILITY.md)
+and [ADR-0042](adr/0042-bounded-protocol-compatibility-gateways.md).
+
 ## 9. Time, leases, and fencing
 
 Engines depend on an injectable clock and never call wall time directly. The
@@ -1201,3 +1222,4 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0039: Alpha Exit and Beta-Readiness Boundary](adr/0039-alpha-exit-beta-readiness.md)
 - [ADR-0040: Initial Source Adapters and Checkpoint Coupling](adr/0040-initial-source-adapter-checkpoint-coupling.md)
 - [ADR-0041: Tag-only OCI Supply Chain](adr/0041-tag-only-oci-supply-chain.md)
+- [ADR-0042: Bounded Protocol-Compatibility Gateways](adr/0042-bounded-protocol-compatibility-gateways.md)

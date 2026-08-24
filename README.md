@@ -30,6 +30,8 @@ without erasing the semantics that make each model useful.
   when the Go management plane is unavailable.
 - **Typed SDKs.** Go, Java, and Python clients provide leader discovery, fencing,
   idempotent retries, and profile-specific operations.
+- **Bounded migration gateways.** Documented Redis, Kafka, and RabbitMQ client
+  subsets translate into the same fenced native Cache, Stream, and Queue paths.
 
 | Profile | Built for |
 | --- | --- |
@@ -90,6 +92,7 @@ physical-node inventory. Go services do not read or mutate Epoch storage files.
 - [Queue SDK](docs/REGIONAL_QUEUE_SDK.md)
 - [Cache SDK](docs/REGIONAL_CACHE_SDK.md)
 - [Event Bus SDK](docs/REGIONAL_EVENT_BUS_SDK.md)
+- [Redis, Kafka, and RabbitMQ compatibility](docs/PROTOCOL_COMPATIBILITY.md)
 - [Kubernetes operator](docs/KUBERNETES_OPERATOR.md)
 - [Testing and release evidence](docs/TESTING.md)
 - [Security policy](docs/SECURITY.md)

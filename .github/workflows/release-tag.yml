@@ -95,6 +95,7 @@ jobs:
           - name: control
           - name: operator
           - name: cli
+          - name: compat
         platform:
           - name: linux/amd64
             arch: amd64
@@ -188,6 +189,9 @@ jobs:
           - name: cli
             title: Epoch CLI
             entrypoint: /usr/local/bin/epoch
+          - name: compat
+            title: Epoch compatibility gateway
+            entrypoint: /usr/local/bin/epoch-compat
     steps:
       - name: Check out tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

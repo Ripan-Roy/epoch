@@ -16,6 +16,7 @@ green.
 | Go regional control plane | `ghcr.io/ripan-roy/epoch-control:<tag>` | `/usr/local/bin/epoch-control` | distroless non-root |
 | Go Kubernetes operator | `ghcr.io/ripan-roy/epoch-operator:<tag>` | `/usr/local/bin/epoch-operator` | distroless non-root |
 | Go management CLI | `ghcr.io/ripan-roy/epoch-cli:<tag>` | `/usr/local/bin/epoch` | distroless non-root |
+| Rust Redis/Kafka/AMQP gateway | `ghcr.io/ripan-roy/epoch-compat:<tag>` | `/usr/local/bin/epoch-compat` | non-root `epoch` user |
 
 Each tag is one OCI manifest containing only `linux/amd64` and `linux/arm64`.
 Epoch deliberately does not publish a mutable `latest` tag. The OCI labels bind
@@ -50,7 +51,7 @@ backup, and maintenance binaries.
    generated and attested separately for the amd64 and arm64 digests.
 8. Sigstore keyless signing binds the manifest digest to the exact tag workflow
    identity and GitHub Actions OIDC issuer.
-9. GitHub verifies the registry attestations, and the release retains the eight
+9. GitHub verifies the registry attestations, and the release retains the ten
    platform-specific SBOM files as downloadable assets.
 
 The workflow is tag-only, has no `workflow_dispatch` publication entry point,
@@ -117,7 +118,7 @@ image, and a manifest signature does not replace platform-specific SBOM review.
 
 ## Pull-request and local evidence
 
-The container CI job builds the four images without `push`, validates Linux
+The container CI job builds the five images without `push`, validates Linux
 architecture, explicit non-root identity, entrypoint, credential-free runtime
 environment, and required OCI metadata, then generates and structurally checks
 an SPDX JSON SBOM for each image. It uploads those SBOMs as short-lived CI
@@ -136,7 +137,7 @@ To reproduce the metadata inspection locally:
 version="$(cat VERSION)"
 revision="$(git rev-parse HEAD)"
 
-for component in node control operator cli; do
+for component in node control operator cli compat; do
   docker build \
     --file "deploy/docker/Dockerfile.${component}" \
     --build-arg "EPOCH_VERSION=${version}" \
@@ -148,6 +149,7 @@ done
 ./scripts/inspect-oci-image.sh epoch/control:verify "$version" "$revision" /usr/local/bin/epoch-control "Epoch control plane"
 ./scripts/inspect-oci-image.sh epoch/operator:verify "$version" "$revision" /usr/local/bin/epoch-operator "Epoch operator"
 ./scripts/inspect-oci-image.sh epoch/cli:verify "$version" "$revision" /usr/local/bin/epoch "Epoch CLI"
+./scripts/inspect-oci-image.sh epoch/compat:verify "$version" "$revision" /usr/local/bin/epoch-compat "Epoch compatibility gateway"
 ```
 
 Local inspection proves the candidate Dockerfiles and metadata. Only the

@@ -9,6 +9,7 @@ import {
   GuardedUpgradeBody,
   GuaranteesBody,
   OverviewBody,
+  ProtocolCompatibilityBody,
   QuickstartBody,
   ReferenceBody,
   ResourceGovernanceBody,
@@ -37,6 +38,7 @@ export type DocsPageId =
   | "regional-queue"
   | "regional-cache"
   | "regional-bus"
+  | "protocol-compatibility"
   | "sdk-reference"
   | "reference";
 
@@ -284,6 +286,23 @@ export const docsPages: ReadonlyArray<DocsPageMeta> = [
       { id: "conventions", label: "Conventions" },
     ],
     Body: SdkReferenceBody,
+  },
+  {
+    id: "protocol-compatibility",
+    group: "Reference",
+    label: "Redis, Kafka & AMQP",
+    title: "Protocol compatibility",
+    summary:
+      "Connect selected Redis, Apache Kafka, and RabbitMQ clients to Epoch through one bounded, stateless gateway — with an exact support matrix.",
+    headings: [
+      { id: "run", label: "Run the gateway" },
+      { id: "redis", label: "Redis / RESP" },
+      { id: "kafka", label: "Apache Kafka" },
+      { id: "amqp", label: "RabbitMQ / AMQP" },
+      { id: "migration-scan", label: "Migration scanner" },
+      { id: "security", label: "Security & boundaries" },
+    ],
+    Body: ProtocolCompatibilityBody,
   },
   {
     id: "reference",

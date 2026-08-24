@@ -158,12 +158,24 @@ backup-gated serialized rollout, fresh-cluster restore, exact state digests,
 and post-restore writes across four physical nodes. The protected exact-commit
 rerun remains mandatory, and the same-binary retagged rollout does not claim
 mixed-version compatibility, RPO/RTO, or a production SLO.
-The release candidate builds four exact-tag, non-root Linux amd64/arm64 OCI
-manifests (node, control, operator, and CLI), generates per-platform SPDX SBOMs,
-attaches provenance, and signs immutable manifest digests only when the tag is
-the current `main`. It never publishes `latest`; raw signed binary archives and
-package-manager distributions remain separate PKG-005/DX-001 evidence. See
-ADR-0039, ADR-0040, and ADR-0041.
+The release candidate builds five exact-tag, non-root Linux amd64/arm64 OCI
+manifests (node, control, operator, CLI, and compatibility gateway), generates
+per-platform SPDX SBOMs, attaches provenance, and signs immutable manifest
+digests only when the tag is the current `main`. It never publishes `latest`;
+raw signed binary archives and package-manager distributions remain separate
+PKG-005/DX-001 evidence. See ADR-0039, ADR-0040, and ADR-0041.
+
+**Protocol-compatibility implementation note (24 August 2026):** A separate
+bounded Rust gateway now exposes the documented RESP2/RESP3, Kafka, and AMQP
+0-9-1 subsets through one authenticated and generation/tablet/term-fenced
+semantic adapter. Redis CLI 8.8.2, Kafka Java 4.3.1, and RabbitMQ Java 5.34.0
+pass exact wire-client flows. Kafka record counts are preflighted, compression
+expansion is capped, and each Produce partition becomes one canonical atomic
+native Stream batch. The versioned migration scanner, public matrix, Pages UI,
+CI conformance job, and fifth OCI component are included. This is partial G6
+evidence: richer commands/APIs, fuzz and differential suites, combined
+real-regional fault certification, MQTT, and performance parity remain open.
+See [ADR-0042](adr/0042-bounded-protocol-compatibility-gateways.md).
 
 The same candidate adds a resumable four-profile fault runner. Each round
 executes the real regional control/data/SDK campaign, emits a strict invariant

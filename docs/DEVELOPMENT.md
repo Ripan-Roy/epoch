@@ -217,12 +217,13 @@ may omit it only when the test explicitly covers backward-compatible recovery.
 
 ## OCI artifact development
 
-Pull requests build the node, control, operator, and CLI Dockerfiles but never
-publish them. Each image must include synchronized version and exact Git
-revision labels, run as an explicit non-root user, expose the expected
-entrypoint, and contain no credential-shaped default environment value.
+Pull requests build the node, control, operator, CLI, and compatibility gateway
+Dockerfiles but never publish them. Each image must include synchronized version
+and exact Git revision labels, run as an explicit non-root user, expose the
+expected entrypoint, and contain no credential-shaped default environment
+value.
 
-Build and inspect the four candidates with the commands in
+Build and inspect the five candidates with the commands in
 [Release artifacts](RELEASE_ARTIFACTS.md). CI uses the pinned Anchore SBOM
 action; a local standalone Syft may generate equivalent SPDX JSON evidence. Do
 not commit generated SBOMs, image archives, credentials, or runtime volumes.
