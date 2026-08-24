@@ -238,7 +238,6 @@ fn integration_commands_use_v4_and_schema_state_survives_the_tablet_snapshot() {
             format: SchemaFormat::JsonSchema,
             definition: r#"{"type":"object"}"#.into(),
             compatibility: SchemaCompatibility::Backward,
-            root_message: None,
             fields: vec![SchemaField {
                 path: "order.id".into(),
                 value_type: SchemaValueType::String,
