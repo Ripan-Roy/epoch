@@ -7,9 +7,9 @@ profiles: Cache and State, Stream Log, Work Queue, and Event Bus. The profiles
 share identity, policy, observability, storage primitives, and operational
 tooling while retaining the distinct semantics that make each workload useful.
 
-Epoch is currently an early engineering scaffold. Interfaces, storage formats,
-and compatibility claims are not stable, and no production guarantee is
-implied yet. The source of truth for product scope is [the PRD](docs/PRD.md).
+Epoch is currently a private-beta candidate. Native interfaces and storage
+formats remain provisional, and no production SLO or GA compatibility guarantee
+is implied. The source of truth for product scope is [the PRD](docs/PRD.md).
 Delivery status and release gates are tracked in the
 [delivery checklist](docs/DELIVERY_CHECKLIST.md).
 The runnable node supports volatile resources for all four profiles and an
@@ -23,13 +23,14 @@ Epoch is available under the [MIT License](LICENSE). See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the TDD, clean-code, verification, and
 feature pull-request workflow.
 
-An opt-in regional alpha also runs a three-voter catalog plus several
-profile-specific consensus groups in each Rust node. It is fixed-topology
-engineering evidence, not a production or multi-zone guarantee. Its replicated
+The regional runtime runs a three- or five-voter catalog plus independent
+profile-specific consensus groups across a bounded physical-node inventory. It
+is private-beta engineering evidence, not a production or multi-zone guarantee. Its replicated
 core now supports bounded canonical consensus checkpoints, logical Raft-prefix
 compaction, lagging-voter snapshot catch-up, native Catalog/Stream/Queue/Cache/Bus
-state images, checkpoint-plus-tail reopen, and physical EPRS reclamation. These
-are internal voter-recovery primitives, not downloadable backups or PITR. The
+state images, checkpoint-plus-tail reopen, and physical EPRS reclamation. Those
+voter primitives now also feed a versioned, checksummed, encrypted semantic
+backup and validated fresh-cluster restore; log-based PITR remains open. The
 regional runtime automatically applies the checkpoint policy to catalog and
 every profile group on each healthy voter after configurable applied-index
 growth; authorized topology exposes the exact local retained boundaries.
@@ -63,12 +64,14 @@ make kubernetes-config
 ```
 
 The [`EpochCluster` operator guide](docs/KUBERNETES_OPERATOR.md) covers the
-fixed-three-voter Kubernetes install, source image builds, credential and
+3–1,024-node Kubernetes install with bounded three/five-voter groups, image builds, credential and
 policy setup, status, storage, and lifecycle limits. The
 [management CLI guide](docs/CLI.md) covers declarative resource operations, and
-the [HTTP source connector guide](docs/SOURCE_CONNECTORS.md) specifies the
-poll/cursor/failure contract. This alpha is source-distributed; prebuilt images
-and package-manager artifacts are intentionally deferred.
+the [source connector guide](docs/SOURCE_CONNECTORS.md) specifies HTTP,
+immutable object, PostgreSQL/MySQL CDC, and Kafka cursor/failure contracts.
+The `v0.2.0-beta.1` tag workflow publishes verified node, control, operator, and
+CLI images after protected-main evidence passes. Package-manager artifacts are
+intentionally deferred.
 
 ## Workload profiles
 
@@ -225,12 +228,14 @@ API destinations, endpoint pools, functions, and target/bidirectional
 connectors with binary/structured CloudEvents, API-key/bearer/OAuth secret
 references, safe pinned egress, stable idempotency, endpoint failover, and
 connector-checkpoint-before-source-settlement ordering. An active-leader source
-worker polls bounded generic HTTP/CloudEvents batches through that same safe
-egress boundary, commits every applied/error-routed record before advancing the
-replicated cursor, and reuses stable record identities after crash. Real
-three-process recovery preserves target and source state. Pull and unsigned
-legacy HTTP remain application-dispatched; MQTT wire compatibility, CDC/Kafka/
-object-storage adapters, private egress, cross-tablet atomicity, and
+worker ingests bounded HTTP/CloudEvents, immutable-object, PostgreSQL, MySQL,
+and Kafka batches, commits every applied/error-routed record before advancing
+the replicated source cursor, and reuses stable record identities after crash.
+PostgreSQL feedback and Kafka offset commits occur after that checkpoint. Real
+three-process HTTP recovery plus pinned MinIO/database/broker conformance cover
+the current source path. Pull and unsigned legacy HTTP remain application-
+dispatched; MQTT wire compatibility, private egress, live Azure/GCS cloud
+identity, cross-tablet atomicity, production connector certification, and
 exactly-once external side effects are not claimed. The regional Event Bus v1 adapter and
 repository-local Go, Java, and Python clients expose subscription policy,
 publish, archive replay/maintenance, long-poll acquire, ack/fail/reject/redrive,
@@ -354,16 +359,19 @@ before deployment. The regional container gate additionally runs each Python
 regional client after its profile leader is lost and through all-voter recovery. Pull
 requests build and verify the same artifact but never publish it; deployment is
 permitted only from `main` (including a manual dispatch that targets `main`).
-The public site is live with enforced HTTPS. The SDKs remain repository-local
-pre-alpha packages and are not presented as registry releases.
+The public site is live with enforced HTTPS. The beta SDKs remain
+repository-local provisional packages and are not presented as registry
+releases.
 
 Verified milestones are published as
 [GitHub prereleases](https://github.com/Ripan-Roy/epoch/releases) from tagged
-`main` commits with version-controlled release notes. The current alpha
-releases remain source-only: they do not publish registry packages, container
-images, installers, or signed binaries. See
-[Releasing](docs/RELEASING.md) for the protected release procedure and
-[Changelog](CHANGELOG.md) for the release history.
+`main` commits with version-controlled release notes. Published alpha releases
+through `v0.1.0-alpha.10` remain source-only. The `v0.2.0-beta.1` candidate adds
+exact-tag, Linux amd64/arm64 GHCR images for the node, control plane, operator,
+and CLI with keyless manifest signatures, build provenance, and per-platform
+SPDX SBOMs; it is not a published claim until the protected tag workflow passes.
+See [Release artifacts](docs/RELEASE_ARTIFACTS.md),
+[Releasing](docs/RELEASING.md), and the [Changelog](CHANGELOG.md).
 
 Run the local verification suite:
 
@@ -377,6 +385,18 @@ Run the disposable Go-to-Rust multi-tablet failure/recovery proof with:
 make test-regional-runtime
 ```
 
+Run the clean four-node Kubernetes install/traffic/backup/replacement/upgrade/
+restore proof with:
+
+```shell
+make test-kubernetes-runner
+make test-kubernetes-live
+```
+
+The campaign writes SHA-256-bound evidence, cleans up its pinned Kind cluster on
+every exit path, and does not claim mixed-version compatibility or production
+SLOs. See the [live Kubernetes alpha-exit guide](docs/KUBERNETES_ALPHA_EXIT.md).
+
 Build and inspect the development container configuration:
 
 ```shell
@@ -385,7 +405,10 @@ make compose-up
 ```
 
 See [Development](docs/DEVELOPMENT.md) for toolchain setup and
-[Testing](docs/TESTING.md) for the test layers and required gates.
+[Testing](docs/TESTING.md) for the test layers and required gates. The
+[resumable soak guide](docs/SOAK_TESTING.md) covers accelerated CI evidence,
+30-day continuation, artifact hashing, signature verification, and explicit
+SLO non-claims.
 All changes follow the repository's [engineering standards](docs/ENGINEERING_STANDARDS.md),
 including test-driven development, SOLID dependency boundaries, and clean-code
 definition-of-done checks.
@@ -414,5 +437,6 @@ These ports are development defaults, not a public compatibility promise.
 
 The repository source is licensed under MIT. Epoch remains a working name
 pending formal trademark, domain, and package-registry clearance. Package
-publication is intentionally deferred until its release, provenance, and
-support gates are complete.
+manager publication is intentionally deferred until its release, provenance,
+and support gates are complete. Official versioned OCI images use the same MIT
+license once explicitly listed by a verified release.

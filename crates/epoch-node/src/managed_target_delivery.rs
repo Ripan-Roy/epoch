@@ -49,6 +49,7 @@ const DISPATCHER: &str = "epoch-managed-target-v1";
 const DISPATCHER_EPOCH: u64 = 1;
 const MAX_SECRET_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_SECRETS: usize = 1_024;
+const MAX_CONNECTOR_CREDENTIAL_PROPERTIES: usize = 64;
 const MAX_SECRET_BYTES: usize = 64 * 1024;
 const MAX_METADATA_BYTES: usize = 4 * 1024;
 const MAX_OAUTH_RESPONSE_BYTES: usize = 128 * 1024;
@@ -86,6 +87,10 @@ enum SecretEntry {
         #[serde(default)]
         scopes: Vec<String>,
     },
+    ConnectorCredentials {
+        reference: String,
+        values: BTreeMap<String, String>,
+    },
 }
 
 impl SecretEntry {
@@ -93,7 +98,8 @@ impl SecretEntry {
         match self {
             Self::ApiKey { reference, .. }
             | Self::Bearer { reference, .. }
-            | Self::Oauth2Client { reference, .. } => reference,
+            | Self::Oauth2Client { reference, .. }
+            | Self::ConnectorCredentials { reference, .. } => reference,
         }
     }
 
@@ -126,6 +132,17 @@ impl SecretEntry {
                 }
                 for scope in scopes {
                     validate_metadata("OAuth scope", scope)?;
+                }
+            }
+            Self::ConnectorCredentials { values, .. } => {
+                if values.is_empty() || values.len() > MAX_CONNECTOR_CREDENTIAL_PROPERTIES {
+                    return Err(ManagedTargetDeliveryError::Configuration(format!(
+                        "connector credentials must contain 1-{MAX_CONNECTOR_CREDENTIAL_PROPERTIES} properties"
+                    )));
+                }
+                for (key, value) in values {
+                    validate_identifier("connector credential property", key)?;
+                    validate_secret("connector credential value", value)?;
                 }
             }
         }
@@ -203,6 +220,21 @@ impl ManagedSecretStore {
 
     fn get(&self, reference: &str) -> Option<&SecretEntry> {
         self.entries.get(reference)
+    }
+
+    pub(crate) fn connector_credentials(
+        &self,
+        reference: &str,
+    ) -> Result<&BTreeMap<String, String>, ManagedTargetDeliveryError> {
+        match self.get(reference) {
+            Some(SecretEntry::ConnectorCredentials { values, .. }) => Ok(values),
+            Some(_) => Err(ManagedTargetDeliveryError::Configuration(format!(
+                "connector secret reference {reference} has the wrong kind"
+            ))),
+            None => Err(ManagedTargetDeliveryError::Configuration(format!(
+                "connector secret reference {reference} is unavailable"
+            ))),
+        }
     }
 }
 
@@ -596,6 +628,9 @@ impl ManagedTargetDeliveryWorker {
                         .oauth_token(reference, token_url.as_deref(), scopes, now_ms, timeout)
                         .await?;
                     insert_bearer(headers, &token).map_err(AttemptDisposition::Reject)
+                }
+                SecretEntry::ConnectorCredentials { .. } => {
+                    Err(AttemptDisposition::Retry("secret_kind_mismatch".into()))
                 }
             },
         }
@@ -1742,6 +1777,38 @@ mod tests {
         let debug = format!("{store:?}");
         assert!(debug.contains("payments"));
         assert!(!debug.contains("super-secret-value"));
+    }
+
+    #[test]
+    fn connector_credentials_are_typed_accessible_and_redacted() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(
+            file,
+            "{}",
+            json!({
+                "format_version": 1,
+                "secrets": [{
+                    "kind": "connector_credentials",
+                    "reference": "orders-database",
+                    "values": {
+                        "username": "epoch-reader",
+                        "password": "database-super-secret"
+                    }
+                }]
+            })
+        )
+        .unwrap();
+        let store = ManagedSecretStore::load(file.path()).unwrap();
+
+        assert_eq!(
+            store.connector_credentials("orders-database").unwrap()["username"],
+            "epoch-reader"
+        );
+        let debug = format!("{store:?}");
+        assert!(debug.contains("orders-database"));
+        assert!(!debug.contains("epoch-reader"));
+        assert!(!debug.contains("database-super-secret"));
+        assert!(store.connector_credentials("missing").is_err());
     }
 
     #[test]

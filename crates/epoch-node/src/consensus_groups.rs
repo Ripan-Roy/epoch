@@ -167,6 +167,49 @@ impl ConsensusGroupRegistry {
             })
     }
 
+    pub fn handles(&self) -> ConsensusGroupRegistryResult<Vec<ConsensusProbeHandle>> {
+        self.groups
+            .read()
+            .map_err(|_| ConsensusGroupRegistryError::RegistryUnavailable)
+            .map(|groups| {
+                groups
+                    .values()
+                    .map(|registered| registered.handle.clone())
+                    .collect()
+            })
+    }
+
+    pub fn handle(
+        &self,
+        group_id: u64,
+        group_epoch: u64,
+    ) -> ConsensusGroupRegistryResult<ConsensusProbeHandle> {
+        let group_id = GroupId::new(group_id)
+            .map_err(ConsensusProbeError::from)
+            .map_err(ConsensusGroupRegistryError::from)?;
+        let observed_epoch = GroupEpoch::new(group_epoch)
+            .map_err(ConsensusProbeError::from)
+            .map_err(ConsensusGroupRegistryError::from)?;
+        let groups = self
+            .groups
+            .read()
+            .map_err(|_| ConsensusGroupRegistryError::RegistryUnavailable)?;
+        let registered =
+            groups
+                .get(&group_id)
+                .ok_or(ConsensusGroupRegistryError::UnknownGroup {
+                    group_id: group_id.get(),
+                })?;
+        if registered.epoch != observed_epoch {
+            return Err(ConsensusGroupRegistryError::FencedEpoch {
+                group_id: group_id.get(),
+                expected: registered.epoch.get(),
+                observed: observed_epoch.get(),
+            });
+        }
+        Ok(registered.handle.clone())
+    }
+
     pub async fn receive_wire(
         &self,
         frame: &[u8],

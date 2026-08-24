@@ -1,0 +1,29 @@
+ARG GO_VERSION=1.26.5
+FROM golang:${GO_VERSION}-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd AS builder
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY control ./control
+COPY sdk/go ./sdk/go
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/epoch ./control/cmd/epoch
+
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
+
+ARG EPOCH_VERSION=dev
+ARG VCS_REF=unknown
+ARG SOURCE_URL=https://github.com/Ripan-Roy/epoch
+
+LABEL org.opencontainers.image.title="Epoch CLI" \
+      org.opencontainers.image.description="Epoch generated-contract management CLI" \
+      org.opencontainers.image.url="${SOURCE_URL}" \
+      org.opencontainers.image.source="${SOURCE_URL}" \
+      org.opencontainers.image.documentation="${SOURCE_URL}/blob/main/docs/CLI.md" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.version="${EPOCH_VERSION}" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.vendor="Epoch"
+
+COPY --from=builder /out/epoch /usr/local/bin/epoch
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/epoch"]

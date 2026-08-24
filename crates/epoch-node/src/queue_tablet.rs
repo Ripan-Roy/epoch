@@ -1,4 +1,4 @@
-//! Experimental typed Queue tablet over the fixed-voter consensus runtime.
+//! Experimental typed Queue tablet over the bounded-voter consensus runtime.
 
 use std::{
     collections::BTreeSet,

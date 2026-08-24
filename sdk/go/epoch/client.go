@@ -28,6 +28,15 @@ func NewClient(endpoint string, timeout time.Duration) (*Client, error) {
 	return &Client{transport: transport}, nil
 }
 
+// NewSecureClient constructs an HTTPS client with explicit CA trust and optional mTLS identity.
+func NewSecureClient(endpoint string, timeout time.Duration, tlsConfig TLSConfig) (*Client, error) {
+	transport, err := NewSecureHTTPTransport(endpoint, timeout, tlsConfig)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{transport: transport}, nil
+}
+
 // NewClientWithTransport constructs a client around an injected transport.
 func NewClientWithTransport(transport Transport) (*Client, error) {
 	if transport == nil {

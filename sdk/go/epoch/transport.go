@@ -3,19 +3,31 @@ package epoch
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
 
 const (
-	userAgent        = "epoch-go/0.1.0-alpha.10"
+	userAgent        = "epoch-go/0.2.0-beta.1"
 	maxResponseBytes = 16 << 20
 )
+
+// TLSConfig defines explicit trust and optional client identity for an Epoch endpoint.
+// System roots are intentionally not combined with RootCAPath.
+type TLSConfig struct {
+	RootCAPath      string
+	CertificatePath string
+	PrivateKeyPath  string
+	ServerName      string
+}
 
 // Request is the transport-neutral representation of one Epoch call.
 type Request struct {
@@ -39,6 +51,19 @@ type HTTPTransport struct {
 
 // NewHTTPTransport validates a node URL and constructs a bounded HTTP client.
 func NewHTTPTransport(baseURL string, timeout time.Duration) (*HTTPTransport, error) {
+	return newHTTPTransport(baseURL, timeout, nil)
+}
+
+// NewSecureHTTPTransport constructs an HTTPS-only client with explicit trust and optional mTLS.
+func NewSecureHTTPTransport(baseURL string, timeout time.Duration, config TLSConfig) (*HTTPTransport, error) {
+	tlsConfig, err := loadClientTLS(config)
+	if err != nil {
+		return nil, err
+	}
+	return newHTTPTransport(baseURL, timeout, tlsConfig)
+}
+
+func newHTTPTransport(baseURL string, timeout time.Duration, tlsConfig *tls.Config) (*HTTPTransport, error) {
 	parsed, err := url.Parse(baseURL)
 	if err != nil {
 		return nil, fmt.Errorf("epoch: parse base URL: %w", err)
@@ -49,15 +74,50 @@ func NewHTTPTransport(baseURL string, timeout time.Duration) (*HTTPTransport, er
 	if timeout <= 0 {
 		return nil, fmt.Errorf("epoch: timeout must be greater than zero")
 	}
+	if tlsConfig != nil && parsed.Scheme != "https" {
+		return nil, fmt.Errorf("epoch: a TLS-configured transport requires an https base URL")
+	}
+	httpTransport := http.DefaultTransport.(*http.Transport).Clone()
+	httpTransport.Proxy = nil
+	httpTransport.TLSClientConfig = tlsConfig
 	return &HTTPTransport{
 		baseURL: strings.TrimRight(parsed.String(), "/"),
 		client: &http.Client{
-			Timeout: timeout,
+			Timeout:   timeout,
+			Transport: httpTransport,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
 		},
 	}, nil
+}
+
+func loadClientTLS(config TLSConfig) (*tls.Config, error) {
+	if strings.TrimSpace(config.RootCAPath) == "" {
+		return nil, fmt.Errorf("epoch: TLS root CA path is required")
+	}
+	rootPEM, err := os.ReadFile(config.RootCAPath)
+	if err != nil {
+		return nil, fmt.Errorf("epoch: read TLS root CA: %w", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(rootPEM) {
+		return nil, fmt.Errorf("epoch: TLS root CA contains no certificates")
+	}
+	certificateSet := strings.TrimSpace(config.CertificatePath) != ""
+	keySet := strings.TrimSpace(config.PrivateKeyPath) != ""
+	if certificateSet != keySet {
+		return nil, fmt.Errorf("epoch: TLS certificate and private-key paths must be configured together")
+	}
+	result := &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots, ServerName: strings.TrimSpace(config.ServerName)}
+	if certificateSet {
+		identity, loadErr := tls.LoadX509KeyPair(config.CertificatePath, config.PrivateKeyPath)
+		if loadErr != nil {
+			return nil, fmt.Errorf("epoch: load TLS client identity: %w", loadErr)
+		}
+		result.Certificates = []tls.Certificate{identity}
+	}
+	return result, nil
 }
 
 // Do sends one JSON request and decodes one JSON response.

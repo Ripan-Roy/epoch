@@ -6,6 +6,7 @@
       "id": "development-admin",
       "token_sha256": "dae2068ce258900bd0cc8e0ae8f157c6b0980d562479f65bfb469ea433d7bc45",
       "actions": [
+        "backup.create",
         "catalog.apply",
         "catalog.delete",
         "catalog.read",
@@ -38,7 +39,7 @@
     {
       "id": "epoch-control",
       "token_sha256": "ec11cd10d83454a7791fb28a7dedbcfb5df752d2807b4db121449c8136ddcfd3",
-      "actions": ["catalog.apply", "catalog.delete", "catalog.read", "route.read", "topology.read"],
+      "actions": ["backup.create", "catalog.apply", "catalog.delete", "catalog.read", "route.read", "topology.read"],
       "scope": {
         "organization": "*",
         "project": "*",

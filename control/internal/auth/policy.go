@@ -37,6 +37,7 @@ var (
 type Action string
 
 const (
+	ActionBackupCreate   Action = "backup.create"
 	ActionCatalogApply   Action = "catalog.apply"
 	ActionCatalogDelete  Action = "catalog.delete"
 	ActionCatalogRead    Action = "catalog.read"
@@ -50,6 +51,7 @@ const (
 )
 
 var validActions = map[Action]struct{}{
+	ActionBackupCreate:   {},
 	ActionCatalogApply:   {},
 	ActionCatalogDelete:  {},
 	ActionCatalogRead:    {},

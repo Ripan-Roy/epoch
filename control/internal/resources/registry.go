@@ -79,14 +79,18 @@ const (
 // TabletStatus reports achieved regional routing state without inferring that
 // desired replicas exist merely because the catalog requested them.
 type TabletStatus struct {
-	TabletID           uint64   `json:"tablet_id"`
-	ConsensusGroupID   uint64   `json:"consensus_group_id"`
-	ShardIndex         uint32   `json:"shard_index"`
-	TabletEpoch        uint64   `json:"tablet_epoch"`
-	ResourceGeneration uint64   `json:"resource_generation"`
-	DesiredReplicas    uint32   `json:"desired_replicas"`
-	VoterNodeIDs       []uint64 `json:"voter_node_ids"`
-	LeaderNodeID       uint64   `json:"leader_node_id,omitempty"`
+	TabletID              uint64   `json:"tablet_id"`
+	ConsensusGroupID      uint64   `json:"consensus_group_id"`
+	ShardIndex            uint32   `json:"shard_index"`
+	TabletEpoch           uint64   `json:"tablet_epoch"`
+	ResourceGeneration    uint64   `json:"resource_generation"`
+	DesiredReplicas       uint32   `json:"desired_replicas"`
+	AssignedNodeIDs       []uint64 `json:"assigned_node_ids"`
+	BootstrapVoterNodeIDs []uint64 `json:"bootstrap_voter_node_ids,omitempty"`
+	TargetVoterNodeIDs    []uint64 `json:"target_voter_node_ids,omitempty"`
+	VoterNodeIDs          []uint64 `json:"voter_node_ids"`
+	ReachableVoterNodeIDs []uint64 `json:"reachable_voter_node_ids"`
+	LeaderNodeID          uint64   `json:"leader_node_id,omitempty"`
 }
 
 // RegionalNodeStatus is one policy-protected configured-endpoint topology and
@@ -829,9 +833,25 @@ func cloneStatus(status ResourceStatus) ResourceStatus {
 	} else {
 		status.Tablets = append([]TabletStatus(nil), status.Tablets...)
 		for index := range status.Tablets {
+			status.Tablets[index].AssignedNodeIDs = append(
+				[]uint64(nil),
+				status.Tablets[index].AssignedNodeIDs...,
+			)
+			status.Tablets[index].BootstrapVoterNodeIDs = append(
+				[]uint64(nil),
+				status.Tablets[index].BootstrapVoterNodeIDs...,
+			)
+			status.Tablets[index].TargetVoterNodeIDs = append(
+				[]uint64(nil),
+				status.Tablets[index].TargetVoterNodeIDs...,
+			)
 			status.Tablets[index].VoterNodeIDs = append(
 				[]uint64(nil),
 				status.Tablets[index].VoterNodeIDs...,
+			)
+			status.Tablets[index].ReachableVoterNodeIDs = append(
+				[]uint64(nil),
+				status.Tablets[index].ReachableVoterNodeIDs...,
 			)
 		}
 	}
@@ -869,13 +889,12 @@ func statusEqual(left, right ResourceStatus) bool {
 			leftTablet.ResourceGeneration != rightTablet.ResourceGeneration ||
 			leftTablet.DesiredReplicas != rightTablet.DesiredReplicas ||
 			leftTablet.LeaderNodeID != rightTablet.LeaderNodeID ||
-			len(leftTablet.VoterNodeIDs) != len(rightTablet.VoterNodeIDs) {
+			!slices.Equal(leftTablet.AssignedNodeIDs, rightTablet.AssignedNodeIDs) ||
+			!slices.Equal(leftTablet.BootstrapVoterNodeIDs, rightTablet.BootstrapVoterNodeIDs) ||
+			!slices.Equal(leftTablet.TargetVoterNodeIDs, rightTablet.TargetVoterNodeIDs) ||
+			!slices.Equal(leftTablet.VoterNodeIDs, rightTablet.VoterNodeIDs) ||
+			!slices.Equal(leftTablet.ReachableVoterNodeIDs, rightTablet.ReachableVoterNodeIDs) {
 			return false
-		}
-		for voter := range leftTablet.VoterNodeIDs {
-			if leftTablet.VoterNodeIDs[voter] != rightTablet.VoterNodeIDs[voter] {
-				return false
-			}
 		}
 	}
 	return true
@@ -958,23 +977,105 @@ func validateStatus(status ResourceStatus, desiredGeneration uint64) error {
 		tabletIDs[tablet.TabletID] = struct{}{}
 		groupIDs[tablet.ConsensusGroupID] = struct{}{}
 		shards[tablet.ShardIndex] = struct{}{}
-		voters := make(map[uint64]struct{}, len(tablet.VoterNodeIDs))
-		for _, voter := range tablet.VoterNodeIDs {
-			if voter == 0 {
-				return invalid("voter node IDs must be non-zero")
+		assigned, err := tabletNodeSet(tablet.AssignedNodeIDs, "assigned")
+		if err != nil {
+			return err
+		}
+		if len(tablet.AssignedNodeIDs) > 0 && len(tablet.AssignedNodeIDs) != int(tablet.DesiredReplicas) {
+			return invalid("assigned node IDs must match desired replicas")
+		}
+		bootstrap, err := tabletNodeSet(tablet.BootstrapVoterNodeIDs, "bootstrap voter")
+		if err != nil {
+			return err
+		}
+		if len(bootstrap) > 0 && len(bootstrap) != int(tablet.DesiredReplicas) {
+			return invalid("bootstrap voter node IDs must match desired replicas")
+		}
+		target, err := tabletNodeSet(tablet.TargetVoterNodeIDs, "target voter")
+		if err != nil {
+			return err
+		}
+		if len(target) > 0 {
+			if status.Phase == PhaseReady {
+				return invalid("ready status cannot contain an active voter replacement")
 			}
-			if _, exists := voters[voter]; exists {
-				return invalid("voter node IDs must be unique per tablet")
+			if len(target) != int(tablet.DesiredReplicas) ||
+				!singleTabletVoterReplacement(assigned, target) {
+				return invalid("target voter node IDs must replace exactly one assigned voter")
 			}
-			voters[voter] = struct{}{}
+		}
+		voters, err := tabletNodeSet(tablet.VoterNodeIDs, "voter")
+		if err != nil {
+			return err
+		}
+		if len(voters) > 0 && !sameNodeSet(voters, assigned) &&
+			(len(target) == 0 || !sameNodeSet(voters, target)) {
+			return invalid("observed voters must match the current or target assigned node set")
+		}
+		reachable, err := tabletNodeSet(tablet.ReachableVoterNodeIDs, "reachable voter")
+		if err != nil {
+			return err
+		}
+		for nodeID := range reachable {
+			if _, committed := voters[nodeID]; !committed {
+				return invalid("reachable voters must belong to committed membership")
+			}
 		}
 		if tablet.LeaderNodeID != 0 {
-			if _, exists := voters[tablet.LeaderNodeID]; !exists {
-				return invalid("tablet leader must be an observed voter")
+			if _, exists := reachable[tablet.LeaderNodeID]; !exists {
+				return invalid("tablet leader must be a reachable committed voter")
 			}
 		}
 	}
 	return nil
+}
+
+func tabletNodeSet(values []uint64, label string) (map[uint64]struct{}, error) {
+	if !slices.IsSorted(values) {
+		return nil, invalid(label + " node IDs must be sorted")
+	}
+	result := make(map[uint64]struct{}, len(values))
+	for _, nodeID := range values {
+		if nodeID == 0 {
+			return nil, invalid(label + " node IDs must be non-zero")
+		}
+		if _, duplicate := result[nodeID]; duplicate {
+			return nil, invalid(label + " node IDs must be unique per tablet")
+		}
+		result[nodeID] = struct{}{}
+	}
+	return result, nil
+}
+
+func sameNodeSet(left, right map[uint64]struct{}) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for nodeID := range left {
+		if _, exists := right[nodeID]; !exists {
+			return false
+		}
+	}
+	return true
+}
+
+func singleTabletVoterReplacement(current, target map[uint64]struct{}) bool {
+	if len(current) != len(target) || len(current) == 0 {
+		return false
+	}
+	removed := 0
+	for nodeID := range current {
+		if _, retained := target[nodeID]; !retained {
+			removed++
+		}
+	}
+	added := 0
+	for nodeID := range target {
+		if _, retained := current[nodeID]; !retained {
+			added++
+		}
+	}
+	return removed == 1 && added == 1
 }
 
 func validatePlacementStatus(status PlacementStatus) error {
@@ -1028,8 +1129,8 @@ func validatePlacementStatus(status PlacementStatus) error {
 		}
 		zones[node.Zone] = struct{}{}
 	}
-	if status.AchievedZones != uint32(len(zones)) {
-		return invalid("placement achieved zones must match distinct node zones")
+	if status.AchievedZones > uint32(len(zones)) {
+		return invalid("placement achieved zones cannot exceed inventory failure domains")
 	}
 	return nil
 }

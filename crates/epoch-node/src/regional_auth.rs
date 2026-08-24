@@ -29,8 +29,10 @@ use tracing::{error, info};
 
 const CATALOG_ROOT: &str = "/experimental/v1/regional/catalog";
 const CATALOG_RESOURCE_PREFIX: &str = "/experimental/v1/regional/catalog/resources/";
+const CATALOG_TABLET_PREFIX: &str = "/experimental/v1/regional/catalog/tablets/";
 const RESOURCE_PREFIX: &str = "/experimental/v1/regional/resources/";
 const TOPOLOGY_PATH: &str = "/experimental/v1/regional/topology";
+const BACKUP_PATH: &str = "/v1/admin/backups";
 const NATIVE_RESOURCE_PREFIX: &str = "/v1/organizations/";
 const MAX_REQUEST_ID_BYTES: usize = 128;
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -156,10 +158,16 @@ fn decision_reason(principal: &Principal, action: Action, allowed: bool) -> Deci
 }
 
 fn action_for_request(method: &Method, path: &str) -> Action {
+    if path == BACKUP_PATH {
+        return Action::BackupCreate;
+    }
     if path == TOPOLOGY_PATH {
         return Action::TopologyRead;
     }
-    if path == CATALOG_ROOT || path.starts_with(CATALOG_RESOURCE_PREFIX) {
+    if path == CATALOG_ROOT
+        || path.starts_with(CATALOG_RESOURCE_PREFIX)
+        || path.starts_with(CATALOG_TABLET_PREFIX)
+    {
         return match *method {
             Method::PUT | Method::POST | Method::PATCH => Action::CatalogApply,
             Method::DELETE => Action::CatalogDelete,
@@ -199,7 +207,11 @@ fn action_for_request(method: &Method, path: &str) -> Action {
 }
 
 fn scope_for_path(path: &str) -> Result<ResourceScope, ()> {
-    if path == CATALOG_ROOT || path == TOPOLOGY_PATH {
+    if path == CATALOG_ROOT
+        || path == TOPOLOGY_PATH
+        || path == BACKUP_PATH
+        || path.starts_with(CATALOG_TABLET_PREFIX)
+    {
         return Ok(ResourceScope::new("", "", "", ""));
     }
     if let Some(native) = native_resource_request(path)? {
@@ -365,6 +377,31 @@ mod tests {
     const QUEUE_ROUTE: &str = "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/queues/jobs/shards/0";
     const CACHE_ROUTE: &str = "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/caches/sessions/shards/0";
     const BUS_ROUTE: &str = "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/buses/events/shards/0";
+
+    #[test]
+    fn regional_backup_uses_a_dedicated_cluster_scoped_action() {
+        assert_eq!(
+            action_for_request(&Method::POST, BACKUP_PATH),
+            Action::BackupCreate
+        );
+        assert_eq!(
+            scope_for_path(BACKUP_PATH).unwrap(),
+            ResourceScope::new("", "", "", "")
+        );
+    }
+
+    #[test]
+    fn tablet_membership_plans_are_cluster_scoped_catalog_mutations() {
+        let path = "/experimental/v1/regional/catalog/tablets/41/membership";
+        assert_eq!(
+            action_for_request(&Method::POST, path),
+            Action::CatalogApply
+        );
+        assert_eq!(
+            scope_for_path(path).unwrap(),
+            ResourceScope::new("", "", "", "")
+        );
+    }
 
     #[test]
     fn native_stream_routes_use_data_actions_only_after_the_shard_boundary() {

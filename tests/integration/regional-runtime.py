@@ -34,6 +34,24 @@ TIMEOUT_SECONDS = 30.0
 ADMIN_TOKEN = "epoch-dev-admin-v1"
 CONTROL_TOKEN = "epoch-dev-control-v1"
 AUTH_POLICY_PATH = REPO_ROOT / "spec/auth/bootstrap-policy-v1.example.json"
+RESULT_SCHEMA = "epoch.regional-runtime.evidence/v1"
+RESULT_FAULTS = (
+    "control_sigkill",
+    "stream_leader_sigkill",
+    "queue_leader_sigkill",
+    "advanced_queue_leader_sigkill",
+    "cache_leader_sigkill",
+    "event_bus_leader_sigkill",
+    "all_voter_sigkill_reopen",
+)
+RESULT_INVARIANTS = (
+    "catalog_digest_preserved",
+    "profile_state_converged",
+    "managed_intent_replayed",
+    "leadership_terms_advanced",
+    "idempotent_retries_preserved",
+    "automatic_checkpoints_reopened",
+)
 
 
 @dataclass(frozen=True)
@@ -74,8 +92,12 @@ CAPACITY_REJECTED_RESOURCE = Resource("stream", "too-many-shards")
 ADVANCED_STREAM = next(
     resource for resource in RESOURCES if resource.name == "advanced-orders"
 )
-ADVANCED_QUEUE = next(resource for resource in RESOURCES if resource.name == "advanced-jobs")
-FAILED_QUEUE = next(resource for resource in RESOURCES if resource.name == "failed-jobs")
+ADVANCED_QUEUE = next(
+    resource for resource in RESOURCES if resource.name == "advanced-jobs"
+)
+FAILED_QUEUE = next(
+    resource for resource in RESOURCES if resource.name == "failed-jobs"
+)
 
 
 @dataclass(frozen=True)
@@ -763,7 +785,7 @@ def wait_for_managed_placement(
     cluster: RegionalCluster,
     resource: Resource,
     phase: str,
-    expected_voters: int,
+    expected_reachable_voters: int,
     expected_shards: int = MANAGED_STREAM_SHARDS,
 ) -> dict[str, Any]:
     canonical_name = f"acme/shop/dev/core/{resource.kind}/{resource.name}"
@@ -808,7 +830,7 @@ def wait_for_managed_placement(
         tablets = managed.get("tablets")
         if not isinstance(tablets, list):
             return None
-        if expected_voters == 0:
+        if expected_reachable_voters == 0:
             return managed if len(tablets) == 0 else None
         if len(tablets) != expected_shards or any(
             not isinstance(tablet, dict) for tablet in tablets
@@ -829,15 +851,23 @@ def wait_for_managed_placement(
             voters = tablet.get("voter_node_ids")
             if (
                 not isinstance(voters, list)
-                or len(voters) != expected_voters
+                or len(voters) != 3
                 or any(
                     not isinstance(voter, str) or not voter.isdecimal()
                     for voter in voters
                 )
             ):
                 return None
+            reachable = tablet.get("reachable_voter_node_ids")
+            if (
+                not isinstance(reachable, list)
+                or len(reachable) != expected_reachable_voters
+                or len(set(reachable)) != len(reachable)
+                or any(voter not in voters for voter in reachable)
+            ):
+                return None
             leader = tablet.get("leader_node_id")
-            if not isinstance(leader, str) or leader not in voters:
+            if not isinstance(leader, str) or leader not in reachable:
                 return None
         placement = managed.get("placement")
         if not isinstance(placement, dict):
@@ -2833,7 +2863,9 @@ def prove_python_sdk_advanced_queue_after_failover(
         ),
         "acquired",
     )["deliveries"][0]
-    assert forwarded_delivery.get("message_id") == "advanced-poison-1", forwarded_delivery
+    assert forwarded_delivery.get("message_id") == "advanced-poison-1", (
+        forwarded_delivery
+    )
     queue_result(
         client.acknowledge(
             FAILED_QUEUE.name,
@@ -2846,12 +2878,12 @@ def prove_python_sdk_advanced_queue_after_failover(
         "acknowledged",
     )
     advanced = client.advanced_status(resource.name, 0).get("advanced")
-    assert isinstance(advanced, dict) and advanced.get("pending_dead_letter_forwards") == 0, (
-        advanced
-    )
+    assert (
+        isinstance(advanced, dict) and advanced.get("pending_dead_letter_forwards") == 0
+    ), advanced
 
 
-def run_campaign(cluster: RegionalCluster) -> None:
+def run_campaign(cluster: RegionalCluster) -> dict[str, Any]:
     cluster.start()
     wait_for_nodes(cluster)
     wait_for_topology(cluster, 1)
@@ -3013,13 +3045,62 @@ def run_campaign(cluster: RegionalCluster) -> None:
         )
         wait_for_profile_apply(cluster, resource, expected)
     wait_for_automatic_checkpoints(cluster, 1 + expected_tablets, False)
+    return {
+        "schema": RESULT_SCHEMA,
+        "status": "passed",
+        "profiles": ["cache", "stream", "queue", "event-bus"],
+        "faults": list(RESULT_FAULTS),
+        "invariants": {name: True for name in RESULT_INVARIANTS},
+        "observations": {
+            "catalog_digest": initial_catalog_digest,
+            "resources": expected_resources,
+            "tablets": expected_tablets,
+            "physical_nodes": len(NODES),
+        },
+    }
+
+
+def write_result_evidence(result: dict[str, Any]) -> None:
+    configured = os.environ.get("EPOCH_REGIONAL_RESULT_PATH")
+    if not configured:
+        return
+    destination = Path(configured)
+    if destination.exists():
+        raise AssertionError(f"refusing to overwrite regional evidence: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    encoded = (
+        json.dumps(
+            result,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(encoded)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, destination)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def main() -> int:
     cluster = RegionalCluster()
     failed = False
+    result: dict[str, Any] | None = None
     try:
-        run_campaign(cluster)
+        result = run_campaign(cluster)
     except BaseException:
         failed = True
         cluster.capture_failure()
@@ -3027,6 +3108,8 @@ def main() -> int:
     finally:
         cluster.close()
     if not failed:
+        assert result is not None
+        write_result_evidence(result)
         print(
             "Epoch Go-to-Rust regional catalog/BFF/four-profile/failover/"
             "Stream-batch-session-state-services-Queue-Cache-and-Bus-SDK/"

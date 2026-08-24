@@ -959,6 +959,34 @@ impl TestSourceConnector {
             .expect("source connector task should join")
             .expect("source connector should stop cleanly");
     }
+
+    async fn wait_for_position(&self, expected: &str) {
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            loop {
+                let observed = self
+                    .state
+                    .positions
+                    .lock()
+                    .expect("source positions lock should hold")
+                    .iter()
+                    .any(|position| position == expected);
+                if observed {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            let positions = self
+                .state
+                .positions
+                .lock()
+                .expect("source positions lock should hold")
+                .clone();
+            panic!("source connector never observed position {expected:?}: {positions:?}");
+        });
+    }
 }
 
 async fn poll_source_connector(
@@ -1028,6 +1056,7 @@ async fn prove_source_connector_ingestion(
     )
     .await;
     wait_for_source_checkpoint(client, cluster, indexes).await;
+    source.wait_for_position("cursor-11").await;
     let positions = source
         .state
         .positions

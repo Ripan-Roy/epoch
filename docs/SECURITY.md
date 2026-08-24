@@ -473,6 +473,20 @@ separate SHA-256 values for x86_64 and aarch64, requires an explicit destination
 that does not already exist, verifies the extracted compiler version, and fails
 closed.
 
+The alpha-exit artifact path builds node, control, operator, and CLI images from
+digest-pinned bases with exact version/revision OCI labels and explicit non-root
+users. Pull requests inspect those four images and generate one SPDX JSON SBOM
+per candidate without registry credentials. Only a `v*` tag whose commit equals
+the current `main` may publish Linux amd64/arm64 manifests to GHCR; it never
+publishes `latest`. The tag workflow attaches manifest provenance, attests each
+platform SBOM, signs the immutable manifest digest through GitHub Actions OIDC,
+and verifies both the Sigstore workflow identity and GitHub attestation before
+creating the release. [Release artifacts](RELEASE_ARTIFACTS.md) defines the
+consumer verification procedure and
+[ADR-0041](adr/0041-tag-only-oci-supply-chain.md) records the boundary.
+Protected tag evidence remains required before any candidate image is called
+published.
+
 Protocol parsers, storage formats, cryptography integrations, authorization,
 webhook egress, connector sandboxing, and tenant boundaries receive dedicated
 threat models and security tests before public exposure.
@@ -522,10 +536,33 @@ baseline at the managed and regional public boundaries:
   evidence remain open.
 - HTTP source ingestion reuses the same strict secret-reference, hostname
   allowlist, public-address DNS validation/pinning, redirect/proxy suppression,
-  response-size, and timeout boundary. The worker validates the exact source
-  cursor before proposing data and never exposes secret bytes in replicated
-  connector state or topology. CDC/Kafka/storage adapters and independent
-  connector isolation/abuse certification remain open.
+  response-size, and timeout boundary. Object, PostgreSQL, MySQL, and Kafka
+  adapters resolve typed values from the bounded node-local
+  `connector_credentials` entry; references alone enter replicated state.
+  TLS certificate/hostname verification is the default, explicit plaintext is
+  loopback-development only, and configured database/broker hosts must match
+  the replicated allowlist. Leadership loss, pause, deletion, or route loss
+  drops PostgreSQL/Kafka sessions. Independent abuse certification, cloud IAM
+  and workload identity, secret-manager hot rotation, private egress, and live
+  Azure/GCS security evidence remain open.
+- The supported operator deployment sets `EPOCH_TLS_REQUIRED=true`. Rust public
+  HTTP uses a configured server certificate and client trust root; Rust peer
+  transport and Go-to-Rust transport use mTLS, reject untrusted client chains,
+  verify server DNS names, disable ambient proxies, and reject redirects.
+  Missing, partial, malformed, or untrusted material fails before application
+  traffic is served. Go public HTTP/gRPC uses the corresponding mandatory TLS
+  server boundary. Bearer authorization remains independent of certificate
+  trust.
+- Regional semantic backup requires the separate cluster-scoped
+  `backup.create` action. The managed Job accepts its bearer, mTLS identity,
+  destination, and encryption key only through read-only mounted files. It
+  validates the canonical manifest, encrypts with AES-256-GCM and a fresh
+  nonce, authenticates key ID/digests/size as associated data, publishes
+  without overwrite, and never copies key bytes into the custom resource,
+  artifact header, status, process arguments, or logs. Restore authenticates
+  before creating fresh consensus state. During rotation, bounded
+  `previous.<key-id>` Secret fields let retention authenticate older objects;
+  an absent key or duplicate key material fails before any deletion.
 - Governance metadata is bounded, non-secret desired state. New managed
   resources require canonical owner, cost center, classification, and tags;
   `epoch.io/` tag keys are reserved. The Go BFF filters tenant visibility before
@@ -534,21 +571,20 @@ baseline at the managed and regional public boundaries:
   conditions, so they must not be described as an enforcement boundary.
 
 Health and CORS preflight remain public. The stable standalone local-emulator
-HTTP API also remains unauthenticated and must stay on a trusted interface.
-Consensus peer port 7701 is still plaintext and unauthenticated.
-The bootstrap bearer authenticates Go to Rust; plain HTTP does not authenticate
-the Rust server to Go. The configured endpoint allowlist and consistent voter
-set narrow accidental misconfiguration but are not a substitute for mTLS.
+HTTP API remains unauthenticated and must stay on a trusted interface. Compose
+and an explicitly configured local diagnostic runtime may still use plaintext;
+that mode is not the supported Kubernetes boundary. In the operator deployment,
+public port 7601 and peer port 7701 use TLS/mTLS and secure `https` peer URLs.
 
 This is not the complete security architecture above. There is still no OIDC,
-credential expiry/revocation service, TLS/mTLS identity, signed forwarded
-context, replicated or hot-reloaded regional policy, envelope encryption, KMS
+credential expiry/revocation service, certificate issuance/revocation service,
+certificate-subject-to-role policy, signed forwarded context, replicated or
+hot-reloaded regional policy, WAL/data-volume encryption, external KMS
 integration, immutable audit pipeline/export, tenant scheduler, external secret
-manager/hot reload, private managed webhook egress, connector OS sandbox, quota system, or support
-workflow. Signed public HTTPS delivery has request-local SSRF enforcement but
-not a network-level egress proxy or tenant egress policy. The example policy tokens are public development fixtures, and
-environment-variable injection of the Go-to-Rust token is not a production
-secret-delivery design.
+manager/hot reload, private managed webhook egress, connector OS sandbox, quota
+system, or support workflow. Signed public HTTPS delivery has request-local
+SSRF enforcement but not a network-level egress proxy or tenant egress policy.
+The example policy tokens are public development fixtures.
 
 Unsigned legacy Bus HTTP targets remain durable intent only. The current local WAL
 checksum detects accidental corruption; it is not encryption, tamper-proofing,
@@ -563,22 +599,18 @@ path-bearing, and malformed origins are rejected during startup. The GitHub
 Pages artifact is documentation-only and does not contain the live console
 client.
 
-The opt-in consensus probe uses a distinct listener with no CORS, TLS, or peer
-authentication. Its internal frame and diagnostic routes are development-only.
-The supplied Compose topology publishes them only on host loopback; operators
-must not expose port 7701 or the experimental routes to an untrusted network.
-Outbound peer requests ignore ambient proxy settings and reject redirects so a
-configured authority cannot reroute frames through the host environment or a
-3xx response. This does not authenticate the configured peer. The explicit
-plaintext/unauthenticated weakness is one reason the probe cannot support a
-product quorum claim.
+The opt-in standalone consensus probe remains a development-only diagnostic
+surface with no CORS or public SDK contract. When launched through the managed
+regional mode it shares the mTLS peer listener; when launched explicitly
+without required TLS it must remain on trusted loopback. Outbound peer requests
+ignore ambient proxy settings and reject redirects in both modes.
 
 CORS is only a browser boundary, not authentication. Managed and regional
-requests without an `Origin` still require bearer authentication, while the
-standalone API remains available to native SDKs, CLI tools, and any network
-peer that can reach it. Because every current HTTP listener still lacks TLS and
-the peer/standalone paths remain unauthenticated, none may be exposed to an
-untrusted network or used for untrusted production traffic.
+requests without an `Origin` still require bearer authentication and, in the
+supported deployment, the configured TLS client trust boundary. The standalone
+API remains available to native SDKs, CLI tools, and any network peer that can
+reach it, so plaintext standalone/Compose modes must not be exposed to an
+untrusted network.
 
 No deployment is secure for untrusted or multi-tenant production traffic until
 the applicable rows in [REQUIREMENTS_TRACEABILITY.md](REQUIREMENTS_TRACEABILITY.md)

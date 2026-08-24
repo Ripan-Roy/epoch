@@ -1,4 +1,4 @@
-//! Experimental typed Stream tablet over the fixed-voter consensus runtime.
+//! Experimental typed Stream tablet over the bounded-voter consensus runtime.
 
 use std::{
     collections::BTreeSet,
@@ -2889,6 +2889,7 @@ mod tests {
             checkpoint_index: LogIndex::ZERO,
             retained_log_first_index: LogIndex::new(1),
             voter_count: 3,
+            replication_progress: Vec::new(),
             fail_stopped: false,
         };
         let status = StreamTabletStatus::new(
@@ -2955,6 +2956,7 @@ mod tests {
             checkpoint_index: LogIndex::ZERO,
             retained_log_first_index: LogIndex::new(1),
             voter_count: 3,
+            replication_progress: Vec::new(),
             fail_stopped: false,
         };
 

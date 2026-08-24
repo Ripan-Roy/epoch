@@ -29,6 +29,10 @@ use crate::{
         AttemptDisposition, ConnectorSourceFetch, ManagedTargetDeliveryConfig,
         ManagedTargetDeliveryWorker, enforce_allowlist,
     },
+    source_adapters::{
+        KafkaSource, KafkaSourceAdapter, MySqlSource, MySqlSourceAdapter, ObjectSource,
+        ObjectSourceAdapter, PostgresSource, PostgresSourceAdapter, SourceBatch, SourceRecord,
+    },
     tablet_materializer::{MaterializedTabletRoute, TabletDirectory},
     webhook_delivery::safe_http_target,
 };
@@ -156,6 +160,10 @@ pub struct SourceConnectorDeliveryStatusSnapshot {
 pub struct SourceConnectorDeliveryWorker {
     interval: Duration,
     http: ManagedTargetDeliveryWorker,
+    object: ObjectSourceAdapter,
+    kafka: KafkaSourceAdapter,
+    mysql: MySqlSourceAdapter,
+    postgres: PostgresSourceAdapter,
     commit_wait: Duration,
 }
 
@@ -171,17 +179,30 @@ impl SourceConnectorDeliveryWorker {
                 MAX_SOURCE_CONNECTOR_INTERVAL.as_millis()
             )));
         }
+        let object = ObjectSourceAdapter::new(&http_config);
+        let kafka = KafkaSourceAdapter::new(&http_config);
+        let mysql = MySqlSourceAdapter::new(&http_config);
+        let postgres = PostgresSourceAdapter::new(&http_config);
         let http = ManagedTargetDeliveryWorker::new(http_config, commit_wait)
             .map_err(|error| SourceConnectorDeliveryError::Configuration(error.to_string()))?;
         Ok(Self {
             interval,
             http,
+            object,
+            kafka,
+            mysql,
+            postgres,
             commit_wait,
         })
     }
 
     pub const fn interval(&self) -> Duration {
         self.interval
+    }
+
+    async fn retain_source_sessions(&self, active: &BTreeSet<String>) {
+        self.kafka.retain_active(active).await;
+        self.postgres.retain_active(active).await;
     }
 }
 
@@ -195,12 +216,20 @@ struct HttpSourceBatch {
 }
 
 #[derive(Debug)]
-struct ResolvedSource {
+struct ResolvedHttpSource {
     identity: String,
     url: Url,
     secret_reference: Option<String>,
-    source_position: String,
     timeout: Duration,
+}
+
+#[derive(Debug)]
+enum ResolvedSource {
+    Http(ResolvedHttpSource),
+    Object(ObjectSource),
+    Kafka(KafkaSource),
+    MySql(MySqlSource),
+    Postgres(PostgresSource),
 }
 
 struct SourceBatchContext<'a> {
@@ -220,6 +249,7 @@ pub async fn run_source_connector_delivery_pass(
     let routes = match directory.routes() {
         Ok(routes) => routes,
         Err(error) => {
+            worker.retain_source_sessions(&BTreeSet::new()).await;
             return (
                 SourceConnectorDeliveryPass {
                     errors: 1,
@@ -231,19 +261,30 @@ pub async fn run_source_connector_delivery_pass(
     };
     let mut pass = SourceConnectorDeliveryPass::default();
     let mut last_error = None;
+    let mut active_streams = BTreeSet::new();
     for route in routes {
         pass.tablets_examined = pass.tablets_examined.saturating_add(1);
         let Some(service) = route.bus_service() else {
             continue;
         };
         let errors_before = pass.errors;
-        if let Err(error) = dispatch_route(&route, &service, worker, clock, &mut pass).await {
+        if let Err(error) = dispatch_route(
+            &route,
+            &service,
+            worker,
+            clock,
+            &mut pass,
+            &mut active_streams,
+        )
+        .await
+        {
             if pass.errors == errors_before {
                 pass.errors = pass.errors.saturating_add(1);
             }
             last_error = Some(error.to_string());
         }
     }
+    worker.retain_source_sessions(&active_streams).await;
     (pass, last_error)
 }
 
@@ -253,6 +294,7 @@ async fn dispatch_route(
     worker: &SourceConnectorDeliveryWorker,
     clock: &dyn Clock,
     pass: &mut SourceConnectorDeliveryPass,
+    active_streams: &mut BTreeSet<String>,
 ) -> Result<(), SourceConnectorDeliveryError> {
     let consensus = route.consensus();
     let status = consensus
@@ -283,6 +325,7 @@ async fn dispatch_route(
             pass,
             &integration,
             &name,
+            active_streams,
         )
         .await
         {
@@ -305,36 +348,35 @@ async fn dispatch_connector(
     pass: &mut SourceConnectorDeliveryPass,
     integration: &EventIntegrationState,
     name: &str,
+    active_streams: &mut BTreeSet<String>,
 ) -> Result<(), SourceConnectorDeliveryError> {
     let resource = integration
         .connectors()
         .connector(name)
         .ok_or_else(|| SourceConnectorDeliveryError::State("connector disappeared".into()))?;
-    let Some(source) = resolve_source(name, resource, worker.http.config())? else {
+    let Some(source) = resolve_source(name, resource, worker)? else {
         return Ok(());
     };
-    let response = worker
-        .http
-        .fetch_connector_source(ConnectorSourceFetch {
-            target: &source.url,
-            secret_reference: source.secret_reference.as_deref(),
-            connector_identity: &source.identity,
-            source_position: &source.source_position,
-            timeout: source.timeout,
-            maximum_response_bytes: MAX_SOURCE_RESPONSE_BYTES,
-            now_ms: clock.wall_time_ms(),
-        })
-        .await
-        .map_err(source_attempt_error)?;
-    let Some(response) = response else {
+    let source_position = source_position(resource);
+    let runtime_key = format!("{}:{name}", consensus.group_id().get());
+    if matches!(
+        &source,
+        ResolvedSource::Kafka(_) | ResolvedSource::Postgres(_)
+    ) {
+        active_streams.insert(runtime_key.clone());
+    }
+    let batch = fetch_source_batch(
+        worker,
+        &source,
+        &runtime_key,
+        &source_position,
+        clock.wall_time_ms(),
+    )
+    .await?;
+    let Some(batch) = batch else {
         return Ok(());
     };
-    let batch: HttpSourceBatch = serde_json::from_slice(&response).map_err(|error| {
-        SourceConnectorDeliveryError::State(format!(
-            "connector {name} response is invalid: {error}"
-        ))
-    })?;
-    validate_batch(&batch, &source.source_position)?;
+    validate_batch(&batch, &source_position)?;
     pass.batches_fetched = pass.batches_fetched.saturating_add(1);
 
     let batch_context = SourceBatchContext {
@@ -345,9 +387,17 @@ async fn dispatch_connector(
         connector: name,
         batch_id: &batch.batch_id,
     };
-    let mut results = Vec::with_capacity(batch.events.len());
-    for (index, event) in batch.events.iter().enumerate() {
-        let result = publish_source_event(&batch_context, index, event).await?;
+    let mut results = Vec::with_capacity(batch.records.len());
+    for (index, record) in batch.records.iter().enumerate() {
+        let result = match record {
+            SourceRecord::Event(event) => {
+                publish_source_event(&batch_context, index, event).await?
+            }
+            SourceRecord::Error { record_id, reason } => ConnectorRecordResult::RoutedToError {
+                record_id: record_id.clone(),
+                reason: reason.clone(),
+            },
+        };
         match result {
             ConnectorRecordResult::Applied { .. } => {
                 pass.events_applied = pass.events_applied.saturating_add(1);
@@ -365,12 +415,61 @@ async fn dispatch_connector(
         worker.commit_wait,
         clock,
         name,
-        batch,
+        &batch,
         results,
     )
     .await?;
     pass.checkpoints_committed = pass.checkpoints_committed.saturating_add(1);
+    acknowledge_source(worker, &source, &runtime_key, &batch.source_to).await?;
     Ok(())
+}
+
+async fn fetch_source_batch(
+    worker: &SourceConnectorDeliveryWorker,
+    source: &ResolvedSource,
+    runtime_key: &str,
+    source_position: &str,
+    now_ms: u64,
+) -> Result<Option<SourceBatch>, SourceConnectorDeliveryError> {
+    match source {
+        ResolvedSource::Http(source) => {
+            fetch_http_batch(&worker.http, source, source_position, now_ms).await
+        }
+        ResolvedSource::Object(source) => worker
+            .object
+            .fetch(source, source_position)
+            .await
+            .map_err(SourceConnectorDeliveryError::State),
+        ResolvedSource::Kafka(source) => worker
+            .kafka
+            .fetch(runtime_key, source, source_position)
+            .await
+            .map_err(SourceConnectorDeliveryError::State),
+        ResolvedSource::MySql(source) => worker
+            .mysql
+            .fetch(source, source_position)
+            .await
+            .map_err(SourceConnectorDeliveryError::State),
+        ResolvedSource::Postgres(source) => worker
+            .postgres
+            .fetch(runtime_key, source, source_position)
+            .await
+            .map_err(SourceConnectorDeliveryError::State),
+    }
+}
+
+async fn acknowledge_source(
+    worker: &SourceConnectorDeliveryWorker,
+    source: &ResolvedSource,
+    runtime_key: &str,
+    source_to: &str,
+) -> Result<(), SourceConnectorDeliveryError> {
+    match source {
+        ResolvedSource::Postgres(_) => worker.postgres.acknowledge(runtime_key, source_to).await,
+        ResolvedSource::Kafka(_) => worker.kafka.acknowledge(runtime_key, source_to).await,
+        ResolvedSource::Http(_) | ResolvedSource::Object(_) | ResolvedSource::MySql(_) => Ok(()),
+    }
+    .map_err(SourceConnectorDeliveryError::State)
 }
 
 fn source_direction(direction: ConnectorDirection) -> bool {
@@ -383,10 +482,44 @@ fn source_direction(direction: ConnectorDirection) -> bool {
 fn resolve_source(
     name: &str,
     resource: &ConnectorResource,
-    http_config: &ManagedTargetDeliveryConfig,
+    worker: &SourceConnectorDeliveryWorker,
 ) -> Result<Option<ResolvedSource>, SourceConnectorDeliveryError> {
     if resource.status != ConnectorStatus::Active || !source_direction(resource.spec.direction) {
         return Ok(None);
+    }
+    if matches!(
+        resource.spec.kind,
+        ConnectorKind::S3Compatible
+            | ConnectorKind::AzureBlob
+            | ConnectorKind::AzureDataLake
+            | ConnectorKind::Gcs
+    ) {
+        return worker
+            .object
+            .resolve(name, resource)
+            .map(|source| source.map(ResolvedSource::Object))
+            .map_err(SourceConnectorDeliveryError::Configuration);
+    }
+    if resource.spec.kind == ConnectorKind::PostgresCdc {
+        return worker
+            .postgres
+            .resolve(name, resource)
+            .map(|source| source.map(ResolvedSource::Postgres))
+            .map_err(SourceConnectorDeliveryError::Configuration);
+    }
+    if resource.spec.kind == ConnectorKind::MySqlCdc {
+        return worker
+            .mysql
+            .resolve(name, resource)
+            .map(|source| source.map(ResolvedSource::MySql))
+            .map_err(SourceConnectorDeliveryError::Configuration);
+    }
+    if resource.spec.kind == ConnectorKind::Kafka {
+        return worker
+            .kafka
+            .resolve(name, resource)
+            .map(|source| source.map(ResolvedSource::Kafka))
+            .map_err(SourceConnectorDeliveryError::Configuration);
     }
     if !matches!(
         resource.spec.kind,
@@ -399,11 +532,12 @@ fn resolve_source(
     let raw_url = resource.spec.config.get("source_url").ok_or_else(|| {
         SourceConnectorDeliveryError::Configuration(format!("connector {name} requires source_url"))
     })?;
-    let url = safe_http_target(raw_url, http_config.allow_http_loopback).map_err(|_| {
-        SourceConnectorDeliveryError::Configuration(format!(
-            "connector {name} source_url is unsafe"
-        ))
-    })?;
+    let url =
+        safe_http_target(raw_url, worker.http.config().allow_http_loopback).map_err(|_| {
+            SourceConnectorDeliveryError::Configuration(format!(
+                "connector {name} source_url is unsafe"
+            ))
+        })?;
     enforce_allowlist(&url, &resource.spec.outbound_allowlist, "connector")
         .map_err(source_attempt_error)?;
     let secret_reference = match resource.spec.secret_refs.len() {
@@ -432,7 +566,16 @@ fn resolve_source(
                         ))
                     })
             })?;
-    let source_position = resource.checkpoint.as_ref().map_or_else(
+    Ok(Some(ResolvedSource::Http(ResolvedHttpSource {
+        identity: resource.spec.identity.clone(),
+        url,
+        secret_reference,
+        timeout,
+    })))
+}
+
+fn source_position(resource: &ConnectorResource) -> String {
+    resource.checkpoint.as_ref().map_or_else(
         || {
             resource
                 .spec
@@ -442,18 +585,52 @@ fn resolve_source(
                 .unwrap_or_else(|| "0".into())
         },
         |checkpoint| checkpoint.source_position.clone(),
-    );
-    Ok(Some(ResolvedSource {
-        identity: resource.spec.identity.clone(),
-        url,
-        secret_reference,
-        source_position,
-        timeout,
-    }))
+    )
+}
+
+async fn fetch_http_batch(
+    http: &ManagedTargetDeliveryWorker,
+    source: &ResolvedHttpSource,
+    source_position: &str,
+    now_ms: u64,
+) -> Result<Option<SourceBatch>, SourceConnectorDeliveryError> {
+    let response = http
+        .fetch_connector_source(ConnectorSourceFetch {
+            target: &source.url,
+            secret_reference: source.secret_reference.as_deref(),
+            connector_identity: &source.identity,
+            source_position,
+            timeout: source.timeout,
+            maximum_response_bytes: MAX_SOURCE_RESPONSE_BYTES,
+            now_ms,
+        })
+        .await
+        .map_err(source_attempt_error)?;
+    response
+        .map(|response| {
+            serde_json::from_slice::<HttpSourceBatch>(&response)
+                .map(|batch| SourceBatch {
+                    batch_id: batch.batch_id,
+                    source_from: batch.source_from,
+                    source_to: batch.source_to,
+                    records: batch
+                        .events
+                        .into_iter()
+                        .map(Box::new)
+                        .map(SourceRecord::Event)
+                        .collect(),
+                })
+                .map_err(|error| {
+                    SourceConnectorDeliveryError::State(format!(
+                        "HTTP source response is invalid: {error}"
+                    ))
+                })
+        })
+        .transpose()
 }
 
 fn validate_batch(
-    batch: &HttpSourceBatch,
+    batch: &SourceBatch,
     expected_source_from: &str,
 ) -> Result<(), SourceConnectorDeliveryError> {
     validate_source_text("batch_id", &batch.batch_id)?;
@@ -470,20 +647,24 @@ fn validate_batch(
             "source batch must advance its position".into(),
         ));
     }
-    if batch.events.is_empty() || batch.events.len() > MAX_SOURCE_BATCH_EVENTS {
+    if batch.records.is_empty() || batch.records.len() > MAX_SOURCE_BATCH_EVENTS {
         return Err(SourceConnectorDeliveryError::State(format!(
             "source batch must contain 1-{MAX_SOURCE_BATCH_EVENTS} events"
         )));
     }
     let mut event_ids = BTreeSet::new();
-    for event in &batch.events {
-        event.validate().map_err(|error| {
-            SourceConnectorDeliveryError::State(format!("source event is invalid: {error}"))
-        })?;
-        if !event_ids.insert(event.id.as_str()) {
+    for record in &batch.records {
+        if let SourceRecord::Event(event) = record {
+            event.validate().map_err(|error| {
+                SourceConnectorDeliveryError::State(format!("source event is invalid: {error}"))
+            })?;
+        } else if let SourceRecord::Error { reason, .. } = record {
+            validate_source_text("record_error", reason)?;
+        }
+        if !event_ids.insert(record.record_id()) {
             return Err(SourceConnectorDeliveryError::State(format!(
                 "source batch repeats event id {}",
-                event.id
+                record.record_id()
             )));
         }
     }
@@ -557,7 +738,7 @@ async fn commit_source_batch(
     commit_wait: Duration,
     clock: &dyn Clock,
     connector: &str,
-    batch: HttpSourceBatch,
+    batch: &SourceBatch,
     results: Vec<ConnectorRecordResult>,
 ) -> Result<(), SourceConnectorDeliveryError> {
     let batch_identity = stable_key("source-batch", connector, &batch.batch_id, 0);
@@ -571,9 +752,9 @@ async fn commit_source_batch(
             operation: Box::new(IntegrationOperation::CommitConnectorBatch {
                 name: connector.to_owned(),
                 commit: ConnectorBatchCommit {
-                    batch_id: batch.batch_id,
-                    source_from: batch.source_from,
-                    source_to: batch.source_to,
+                    batch_id: batch.batch_id.clone(),
+                    source_from: batch.source_from.clone(),
+                    source_to: batch.source_to.clone(),
                     target_idempotency_key: batch_identity,
                     records: results,
                     committed_at_ms: 0,
@@ -723,24 +904,32 @@ mod tests {
             allow_http_loopback: true,
             ..ManagedTargetDeliveryConfig::default()
         };
+        let worker = SourceConnectorDeliveryWorker::new(
+            Duration::from_millis(10),
+            config,
+            Duration::from_secs(1),
+        )
+        .unwrap();
         let mut resource = source_resource();
-        let source = resolve_source("orders-source", &resource, &config)
+        let source = resolve_source("orders-source", &resource, &worker)
             .unwrap()
             .unwrap();
-        assert_eq!(source.source_position, "cursor-10");
+        assert!(matches!(source, ResolvedSource::Http(_)));
+        assert_eq!(source_position(&resource), "cursor-10");
         resource.checkpoint = Some(ConnectorCheckpoint {
             source_position: "cursor-42".into(),
             target_idempotency_key: "target-42".into(),
             batch_id: "batch-42".into(),
             committed_at_ms: 42,
         });
-        let source = resolve_source("orders-source", &resource, &config)
+        let source = resolve_source("orders-source", &resource, &worker)
             .unwrap()
             .unwrap();
-        assert_eq!(source.source_position, "cursor-42");
+        assert!(matches!(source, ResolvedSource::Http(_)));
+        assert_eq!(source_position(&resource), "cursor-42");
         resource.spec.direction = ConnectorDirection::Target;
         assert!(
-            resolve_source("orders-source", &resource, &config)
+            resolve_source("orders-source", &resource, &worker)
                 .unwrap()
                 .is_none()
         );
@@ -748,16 +937,19 @@ mod tests {
 
     #[test]
     fn source_batch_rejects_cursor_gaps_and_duplicate_event_ids() {
-        let batch = HttpSourceBatch {
+        let batch = SourceBatch {
             batch_id: "batch-11".into(),
             source_from: "cursor-10".into(),
             source_to: "cursor-11".into(),
-            events: vec![event("event-1")],
+            records: vec![SourceRecord::Event(Box::new(event("event-1")))],
         };
         validate_batch(&batch, "cursor-10").unwrap();
         assert!(validate_batch(&batch, "cursor-9").is_err());
-        let repeated = HttpSourceBatch {
-            events: vec![event("event-1"), event("event-1")],
+        let repeated = SourceBatch {
+            records: vec![
+                SourceRecord::Event(Box::new(event("event-1"))),
+                SourceRecord::Event(Box::new(event("event-1"))),
+            ],
             ..batch
         };
         assert!(validate_batch(&repeated, "cursor-10").is_err());
@@ -816,21 +1008,16 @@ mod tests {
         )
         .unwrap();
         let url = Url::parse(&format!("http://{address}/events")).unwrap();
-        let response = worker
-            .http
-            .fetch_connector_source(ConnectorSourceFetch {
-                target: &url,
-                secret_reference: None,
-                connector_identity: "orders-reader",
-                source_position: "cursor-10",
-                timeout: Duration::from_secs(1),
-                maximum_response_bytes: MAX_SOURCE_RESPONSE_BYTES,
-                now_ms: 1,
-            })
+        let source = ResolvedHttpSource {
+            identity: "orders-reader".into(),
+            url,
+            secret_reference: None,
+            timeout: Duration::from_secs(1),
+        };
+        let batch = fetch_http_batch(&worker.http, &source, "cursor-10", 1)
             .await
             .unwrap()
             .unwrap();
-        let batch: HttpSourceBatch = serde_json::from_slice(&response).unwrap();
         validate_batch(&batch, "cursor-10").unwrap();
         let headers = headers_seen.lock().unwrap().take().unwrap();
         assert_eq!(headers["epoch-connector-identity"], "orders-reader");

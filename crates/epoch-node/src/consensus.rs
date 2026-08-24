@@ -1,4 +1,4 @@
-//! Experimental fixed-three-voter consensus probe runtime.
+//! Experimental bounded-voter consensus probe runtime.
 //!
 //! The default probe deliberately does not replicate Epoch profile data. An
 //! opt-in typed profile applier can consume committed commands on the actor
@@ -24,14 +24,16 @@ use axum::{
     extract::{DefaultBodyLimit, Path as AxumPath, State},
     http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use epoch_consensus::{
     ApplicationSnapshot, CommitReceipt, CommittedProposal, CompletedReadBarrier, ConsensusAdapter,
-    ConsensusCheckpoint, ConsensusError, ConsensusOutput, ConsensusRole, ConsensusStatus,
-    GroupEpoch, GroupId, LogIndex, MAX_PEER_MESSAGE_WIRE_BYTES, MAX_PROPOSAL_PAYLOAD_BYTES, NodeId,
-    PeerMessage, PersistentOpenResult, PersistentRaftAdapter, PersistentRecovery, Proposal,
-    ProposalId, ProposalLookup, ReadBarrierId, ReadBarrierRequest, Term,
+    ConsensusCheckpoint, ConsensusError, ConsensusMembership, ConsensusOutput,
+    ConsensusPeerProgress, ConsensusRestoreSnapshot, ConsensusRole, ConsensusStatus, GroupEpoch,
+    GroupId, LogIndex, MAX_PEER_MESSAGE_WIRE_BYTES, MAX_PROPOSAL_PAYLOAD_BYTES,
+    MAX_PROVISIONED_MEMBERS, NodeId, PeerMessage, PersistentOpenResult, PersistentRaftAdapter,
+    PersistentRecovery, Proposal, ProposalId, ProposalLookup, ReadBarrierId, ReadBarrierRequest,
+    Term,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -42,6 +44,9 @@ use tokio::{
 use url::Url;
 
 pub const INTERNAL_PEER_MESSAGE_PATH: &str = "/internal/v1/consensus/messages";
+pub const INTERNAL_MEMBERSHIP_PATH: &str = "/internal/v1/consensus/membership";
+pub const INTERNAL_MEMBERSHIP_LEARNER_PATH: &str =
+    "/internal/v1/consensus/membership/learners/{node_id}";
 pub const EXPERIMENTAL_STATUS_PATH: &str = "/experimental/v1/consensus/status";
 pub const EXPERIMENTAL_CHECKPOINTS_PATH: &str = "/experimental/v1/consensus/checkpoints";
 pub const EXPERIMENTAL_PROPOSALS_PATH: &str = "/experimental/v1/consensus/proposals";
@@ -134,17 +139,19 @@ pub trait CommittedProposalApplier: fmt::Debug + Send + Sync + 'static {
     }
 }
 
-/// Validated configuration for one fixed-three-voter probe group.
+/// Validated configuration for one three- or five-voter group selected from a
+/// bounded regional member directory.
 #[derive(Debug, Clone)]
 pub struct ConsensusProbeConfig {
     node_id: NodeId,
     group_id: GroupId,
     group_epoch: GroupEpoch,
-    voters: [NodeId; 3],
+    voters: Vec<NodeId>,
     peer_urls: BTreeMap<NodeId, Url>,
     tick_interval: Duration,
     command_queue_capacity: usize,
     outbound_queue_capacity: usize,
+    outbound_client: reqwest::Client,
 }
 
 impl ConsensusProbeConfig {
@@ -178,9 +185,9 @@ impl ConsensusProbeConfig {
                 )));
             }
         }
-        if peer_urls.len() != 3 {
+        if !(3..=MAX_PROVISIONED_MEMBERS).contains(&peer_urls.len()) {
             return Err(ConsensusProbeError::InvalidConfiguration(format!(
-                "the probe requires exactly three peers; observed {}",
+                "the probe requires 3..={MAX_PROVISIONED_MEMBERS} provisioned peers; observed {}",
                 peer_urls.len()
             )));
         }
@@ -189,16 +196,12 @@ impl ConsensusProbeConfig {
                 "local node {node_id} is absent from the peer map"
             )));
         }
-        let voters = peer_urls
-            .keys()
-            .copied()
-            .collect::<Vec<_>>()
-            .try_into()
-            .map_err(|_| {
-                ConsensusProbeError::InvalidConfiguration(
-                    "the probe requires exactly three voters".into(),
-                )
-            })?;
+        let voters = if matches!(peer_urls.len(), 3 | 5) {
+            peer_urls.keys().copied().collect::<Vec<_>>()
+        } else {
+            peer_urls.keys().copied().take(3).collect::<Vec<_>>()
+        };
+        let outbound_client = build_outbound_client()?;
 
         Ok(Self {
             node_id,
@@ -209,6 +212,7 @@ impl ConsensusProbeConfig {
             tick_interval,
             command_queue_capacity: DEFAULT_COMMAND_QUEUE_CAPACITY,
             outbound_queue_capacity: DEFAULT_OUTBOUND_QUEUE_CAPACITY,
+            outbound_client,
         })
     }
 
@@ -240,6 +244,43 @@ impl ConsensusProbeConfig {
         Ok(self)
     }
 
+    /// Selects the three- or five-voter bootstrap set from the provisioned
+    /// peer map. Peers outside this set remain addressable and may later join
+    /// through the learner-first membership protocol.
+    pub fn with_initial_voters(
+        mut self,
+        voters: impl IntoIterator<Item = u64>,
+    ) -> ConsensusProbeResult<Self> {
+        let voters = voters
+            .into_iter()
+            .map(checked_node_id)
+            .collect::<ConsensusProbeResult<BTreeSet<_>>>()?;
+        if !matches!(voters.len(), 3 | 5) {
+            return Err(ConsensusProbeError::InvalidConfiguration(format!(
+                "the initial voter set requires exactly three or five distinct nodes; observed {}",
+                voters.len()
+            )));
+        }
+        if let Some(voter) = voters
+            .iter()
+            .find(|voter| !self.peer_urls.contains_key(voter))
+        {
+            return Err(ConsensusProbeError::InvalidConfiguration(format!(
+                "initial voter {voter} is absent from the provisioned peer map"
+            )));
+        }
+        self.voters = voters.into_iter().collect();
+        Ok(self)
+    }
+
+    /// Replaces the peer HTTP client after the caller has applied its trust
+    /// roots and workload identity to [`outbound_client_builder`].
+    #[must_use]
+    pub fn with_outbound_client(mut self, outbound_client: reqwest::Client) -> Self {
+        self.outbound_client = outbound_client;
+        self
+    }
+
     pub const fn node_id(&self) -> NodeId {
         self.node_id
     }
@@ -252,8 +293,12 @@ impl ConsensusProbeConfig {
         self.group_epoch
     }
 
-    pub const fn voters(&self) -> [NodeId; 3] {
-        self.voters
+    pub fn voters(&self) -> &[NodeId] {
+        &self.voters
+    }
+
+    pub fn members(&self) -> impl ExactSizeIterator<Item = NodeId> + '_ {
+        self.peer_urls.keys().copied()
     }
 
     pub const fn tick_interval(&self) -> Duration {
@@ -261,7 +306,7 @@ impl ConsensusProbeConfig {
     }
 
     pub fn for_group(&self, group_id: u64, group_epoch: u64) -> ConsensusProbeResult<Self> {
-        Self::new(
+        Ok(Self::new(
             self.node_id.get(),
             group_id,
             group_epoch,
@@ -270,11 +315,26 @@ impl ConsensusProbeConfig {
                 .map(|(node_id, url)| (node_id.get(), url.clone())),
             self.tick_interval,
         )?
-        .with_queue_capacities(self.command_queue_capacity, self.outbound_queue_capacity)
+        .with_initial_voters(self.voters.iter().map(|node_id| node_id.get()))?
+        .with_queue_capacities(self.command_queue_capacity, self.outbound_queue_capacity)?
+        .with_outbound_client(self.outbound_client.clone()))
     }
 
     pub fn peer_url(&self, node_id: NodeId) -> Option<&Url> {
         self.peer_urls.get(&node_id)
+    }
+
+    pub(crate) fn outbound_client(&self) -> reqwest::Client {
+        self.outbound_client.clone()
+    }
+
+    pub fn require_https_peer_urls(&self) -> ConsensusProbeResult<()> {
+        if let Some(url) = self.peer_urls.values().find(|url| url.scheme() != "https") {
+            return Err(ConsensusProbeError::InvalidConfiguration(format!(
+                "peer URL {url} must use https when peer TLS is configured"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -458,6 +518,22 @@ enum ActorCommand {
     Status {
         reply: ActorReply<ConsensusStatus>,
     },
+    Membership {
+        reply: ActorReply<ConsensusMembership>,
+    },
+    AddLearner {
+        learner: NodeId,
+        reply: ActorReply<ConsensusMembership>,
+    },
+    ReconfigureVoters {
+        voters: Vec<NodeId>,
+        reply: ActorReply<ConsensusMembership>,
+    },
+    TransferLeadership {
+        target: NodeId,
+        expected_term: Option<Term>,
+        reply: ActorReply<ConsensusStatus>,
+    },
     Campaign {
         reply: ActorReply<ConsensusStatus>,
     },
@@ -489,6 +565,14 @@ enum ActorCommand {
     },
     AppliedProposals {
         reply: ActorReply<Vec<CommittedProposal>>,
+    },
+    ExportSnapshot {
+        minimum_index: LogIndex,
+        reply: ActorReply<ApplicationSnapshot>,
+    },
+    ExportRestoreSnapshot {
+        minimum_index: LogIndex,
+        reply: ActorReply<ConsensusRestoreSnapshot>,
     },
     Checkpoint {
         reply: ActorReply<ConsensusCheckpoint>,
@@ -544,6 +628,57 @@ impl ConsensusProbeHandle {
 
     pub async fn status(&self) -> ConsensusProbeResult<ConsensusStatus> {
         self.request(|reply| ActorCommand::Status { reply }).await
+    }
+
+    pub async fn membership(&self) -> ConsensusProbeResult<ConsensusMembership> {
+        self.request(|reply| ActorCommand::Membership { reply })
+            .await
+    }
+
+    pub async fn add_learner(&self, node_id: u64) -> ConsensusProbeResult<ConsensusMembership> {
+        let learner = checked_node_id(node_id)?;
+        self.request(|reply| ActorCommand::AddLearner { learner, reply })
+            .await
+    }
+
+    pub async fn reconfigure_voters(
+        &self,
+        voters: impl IntoIterator<Item = u64>,
+    ) -> ConsensusProbeResult<ConsensusMembership> {
+        let voters = voters
+            .into_iter()
+            .map(checked_node_id)
+            .collect::<ConsensusProbeResult<Vec<_>>>()?;
+        self.request(|reply| ActorCommand::ReconfigureVoters { voters, reply })
+            .await
+    }
+
+    pub async fn transfer_leadership(
+        &self,
+        target_node_id: u64,
+    ) -> ConsensusProbeResult<ConsensusStatus> {
+        let target = checked_node_id(target_node_id)?;
+        self.request(|reply| ActorCommand::TransferLeadership {
+            target,
+            expected_term: None,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn transfer_leadership_if_term(
+        &self,
+        target_node_id: u64,
+        expected_term: u64,
+    ) -> ConsensusProbeResult<ConsensusStatus> {
+        let target = checked_node_id(target_node_id)?;
+        let expected_term = Term::new(expected_term);
+        self.request(|reply| ActorCommand::TransferLeadership {
+            target,
+            expected_term: Some(expected_term),
+            reply,
+        })
+        .await
     }
 
     pub async fn campaign(&self) -> ConsensusProbeResult<ConsensusStatus> {
@@ -689,6 +824,32 @@ impl ConsensusProbeHandle {
     pub async fn applied_proposals(&self) -> ConsensusProbeResult<Vec<CommittedProposal>> {
         self.request(|reply| ActorCommand::AppliedProposals { reply })
             .await
+    }
+
+    /// Captures a native application snapshot after a caller has completed a
+    /// quorum read barrier and supplies its minimum applied index.
+    pub async fn export_snapshot(
+        &self,
+        minimum_index: LogIndex,
+    ) -> ConsensusProbeResult<ApplicationSnapshot> {
+        self.request(|reply| ActorCommand::ExportSnapshot {
+            minimum_index,
+            reply,
+        })
+        .await
+    }
+
+    /// Captures and durably checkpoints the complete consensus/application
+    /// image used to restore this group into a fresh journal.
+    pub async fn export_restore_snapshot(
+        &self,
+        minimum_index: LogIndex,
+    ) -> ConsensusProbeResult<ConsensusRestoreSnapshot> {
+        self.request(|reply| ActorCommand::ExportRestoreSnapshot {
+            minimum_index,
+            reply,
+        })
+        .await
     }
 
     /// Creates a durable consensus checkpoint at this voter's applied index.
@@ -870,7 +1031,7 @@ impl ConsensusProbeRuntime {
         applier: Option<Arc<dyn CommittedProposalApplier>>,
     ) -> ConsensusProbeResult<Self> {
         let stable_path = stable_path.as_ref().to_path_buf();
-        let client = build_outbound_client()?;
+        let client = config.outbound_client.clone();
         let (outbound, outbound_health, mut outbound_workers) =
             spawn_outbound_workers(&config, &client)?;
         let (commands, command_receiver) = mpsc::channel(config.command_queue_capacity);
@@ -1022,7 +1183,7 @@ impl ConsensusProbeRuntime {
     }
 }
 
-fn build_outbound_client() -> ConsensusProbeResult<reqwest::Client> {
+pub fn outbound_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         // Peer authorities are an explicit consensus configuration boundary.
         // Ambient host proxy settings and HTTP redirects must not route frames
@@ -1031,12 +1192,14 @@ fn build_outbound_client() -> ConsensusProbeResult<reqwest::Client> {
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(OUTBOUND_CONNECT_TIMEOUT)
         .timeout(OUTBOUND_REQUEST_TIMEOUT)
-        .build()
-        .map_err(|error| {
-            ConsensusProbeError::InvalidConfiguration(format!(
-                "HTTP transport client could not be built: {error}"
-            ))
-        })
+}
+
+fn build_outbound_client() -> ConsensusProbeResult<reqwest::Client> {
+    outbound_client_builder().build().map_err(|error| {
+        ConsensusProbeError::InvalidConfiguration(format!(
+            "HTTP transport client could not be built: {error}"
+        ))
+    })
 }
 
 impl Drop for ConsensusProbeRuntime {
@@ -1067,12 +1230,13 @@ fn run_persistent_actor(
     let PersistentOpenResult {
         mut adapter,
         output,
-    } = match PersistentRaftAdapter::open(
+    } = match PersistentRaftAdapter::open_with_members(
         stable_path,
         config.node_id,
         config.group_id,
         config.group_epoch,
-        config.voters,
+        config.voters.clone(),
+        config.peer_urls.keys().copied().collect::<Vec<_>>(),
     ) {
         Ok(opened) => opened,
         Err(error) => {
@@ -1152,6 +1316,10 @@ enum ActorDirective {
     Shutdown,
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the exhaustive actor command dispatcher keeps all reply delivery and fatal-state handling in one auditable boundary"
+)]
 fn handle_actor_command(
     adapter: &mut PersistentRaftAdapter,
     outbound: &OutboundSenders,
@@ -1163,6 +1331,52 @@ fn handle_actor_command(
     match command {
         ActorCommand::Status { reply } => {
             let _ = reply.send(Ok(adapter.status()));
+        }
+        ActorCommand::Membership { reply } => {
+            let _ = reply.send(adapter.membership().map_err(Into::into));
+        }
+        ActorCommand::AddLearner { learner, reply } => {
+            let result = adapter
+                .add_learner(learner)
+                .map_err(Into::into)
+                .and_then(|output| {
+                    publish_output(output, outbound, commits, read_barriers, applier)
+                })
+                .and_then(|_| adapter.membership().map_err(Into::into));
+            deliver_actor_result(adapter, reply, result)?;
+        }
+        ActorCommand::ReconfigureVoters { voters, reply } => {
+            let result = adapter
+                .reconfigure_voters(voters)
+                .map_err(Into::into)
+                .and_then(|output| {
+                    publish_output(output, outbound, commits, read_barriers, applier)
+                })
+                .and_then(|_| adapter.membership().map_err(Into::into));
+            deliver_actor_result(adapter, reply, result)?;
+        }
+        ActorCommand::TransferLeadership {
+            target,
+            expected_term,
+            reply,
+        } => {
+            let result = expected_term
+                .map_or(Ok(()), |expected| {
+                    let current = adapter.status().term;
+                    if current == expected {
+                        Ok(())
+                    } else {
+                        Err(ConsensusProbeError::Consensus(ConsensusError::StaleTerm {
+                            current,
+                            observed: expected,
+                        }))
+                    }
+                })
+                .and_then(|()| adapter.transfer_leadership(target).map_err(Into::into))
+                .and_then(|output| {
+                    publish_output(output, outbound, commits, read_barriers, applier)
+                });
+            deliver_actor_result(adapter, reply, result)?;
         }
         ActorCommand::Campaign { reply } => {
             let result = adapter.campaign().map_err(Into::into).and_then(|output| {
@@ -1225,6 +1439,20 @@ fn handle_actor_command(
         ActorCommand::AppliedProposals { reply } => {
             let _ = reply.send(Ok(adapter.applied_proposals().to_vec()));
         }
+        ActorCommand::ExportSnapshot {
+            minimum_index,
+            reply,
+        } => {
+            let result = export_application_snapshot(adapter, applier, minimum_index);
+            deliver_actor_result(adapter, reply, result)?;
+        }
+        ActorCommand::ExportRestoreSnapshot {
+            minimum_index,
+            reply,
+        } => {
+            let result = export_consensus_restore_snapshot(adapter, applier, minimum_index);
+            deliver_actor_result(adapter, reply, result)?;
+        }
         ActorCommand::Checkpoint { reply } => {
             let result = create_consensus_checkpoint(adapter, applier);
             deliver_actor_result(adapter, reply, result)?;
@@ -1266,6 +1494,41 @@ fn create_consensus_checkpoint(
         .map_err(ConsensusProbeError::ProfileApplication)?;
     adapter
         .checkpoint_with_application(snapshot)
+        .map_err(Into::into)
+}
+
+fn export_application_snapshot(
+    adapter: &PersistentRaftAdapter,
+    applier: Option<&dyn CommittedProposalApplier>,
+    minimum_index: LogIndex,
+) -> ConsensusProbeResult<ApplicationSnapshot> {
+    let applier = applier
+        .filter(|applier| applier.supports_native_snapshots())
+        .ok_or_else(|| {
+            ConsensusProbeError::InvalidConfiguration(
+                "application snapshot export requires a native profile applier".into(),
+            )
+        })?;
+    let checkpoint_index = adapter.status().applied_index;
+    if checkpoint_index < minimum_index {
+        return Err(ConsensusProbeError::InvalidConfiguration(format!(
+            "local applied index {checkpoint_index} is behind backup barrier {minimum_index}"
+        )));
+    }
+    let retained = adapter.checkpoint_retry_proposals()?;
+    applier
+        .capture_snapshot(checkpoint_index, &retained)
+        .map_err(ConsensusProbeError::ProfileApplication)
+}
+
+fn export_consensus_restore_snapshot(
+    adapter: &mut PersistentRaftAdapter,
+    applier: Option<&dyn CommittedProposalApplier>,
+    minimum_index: LogIndex,
+) -> ConsensusProbeResult<ConsensusRestoreSnapshot> {
+    let snapshot = export_application_snapshot(adapter, applier, minimum_index)?;
+    adapter
+        .export_restore_snapshot(snapshot)
         .map_err(Into::into)
 }
 
@@ -1522,6 +1785,12 @@ fn collect_shutdown_error(errors: &mut Vec<String>, stage: &str, result: Consens
 pub fn internal_peer_router(handle: ConsensusProbeHandle) -> Router {
     Router::new()
         .route(INTERNAL_PEER_MESSAGE_PATH, post(receive_peer_message))
+        .route(INTERNAL_MEMBERSHIP_PATH, get(consensus_membership))
+        .route(INTERNAL_MEMBERSHIP_PATH, put(reconfigure_membership))
+        .route(
+            INTERNAL_MEMBERSHIP_LEARNER_PATH,
+            post(add_membership_learner),
+        )
         .layer(DefaultBodyLimit::max(MAX_PEER_MESSAGE_WIRE_BYTES))
         .with_state(handle)
 }
@@ -1559,10 +1828,38 @@ async fn consensus_status(
     State(handle): State<ConsensusProbeHandle>,
 ) -> Result<Json<ConsensusProbeStatus>, ConsensusProbeApiError> {
     let consensus = handle.status().await?;
+    let membership = handle.membership().await?;
     Ok(Json(ConsensusProbeStatus::new(
         &consensus,
+        &membership,
         handle.outbound_transport_status(),
     )))
+}
+
+async fn consensus_membership(
+    State(handle): State<ConsensusProbeHandle>,
+) -> Result<Json<ConsensusProbeMembershipStatus>, ConsensusProbeApiError> {
+    Ok(Json(handle.membership().await?.into()))
+}
+
+async fn add_membership_learner(
+    State(handle): State<ConsensusProbeHandle>,
+    AxumPath(node_id): AxumPath<u64>,
+) -> Result<(StatusCode, Json<ConsensusProbeMembershipStatus>), ConsensusProbeApiError> {
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(handle.add_learner(node_id).await?.into()),
+    ))
+}
+
+async fn reconfigure_membership(
+    State(handle): State<ConsensusProbeHandle>,
+    Json(request): Json<ConsensusProbeReconfigureRequest>,
+) -> Result<(StatusCode, Json<ConsensusProbeMembershipStatus>), ConsensusProbeApiError> {
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(handle.reconfigure_voters(request.voters).await?.into()),
+    ))
 }
 
 async fn create_checkpoint(
@@ -1668,6 +1965,8 @@ pub struct ConsensusProbeStatus {
     pub checkpoint_index: u64,
     pub retained_log_first_index: u64,
     pub voter_count: usize,
+    pub membership: ConsensusProbeMembershipStatus,
+    pub replication_progress: Vec<ConsensusProbeReplicationProgress>,
     pub fail_stopped: bool,
     pub observation_scope: &'static str,
     pub profile_replication: bool,
@@ -1679,6 +1978,7 @@ pub struct ConsensusProbeStatus {
 impl ConsensusProbeStatus {
     fn new(
         status: &ConsensusStatus,
+        membership: &ConsensusMembership,
         outbound_transport: Vec<ConsensusProbePeerTransportStatus>,
     ) -> Self {
         Self {
@@ -1696,6 +1996,12 @@ impl ConsensusProbeStatus {
             checkpoint_index: status.checkpoint_index.get(),
             retained_log_first_index: status.retained_log_first_index.get(),
             voter_count: status.voter_count,
+            membership: membership.into(),
+            replication_progress: status
+                .replication_progress
+                .iter()
+                .map(ConsensusProbeReplicationProgress::from)
+                .collect(),
             fail_stopped: status.fail_stopped,
             observation_scope: "local",
             profile_replication: false,
@@ -1703,6 +2009,59 @@ impl ConsensusProbeStatus {
             peer_authentication: "none",
             outbound_transport,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct ConsensusProbeReplicationProgress {
+    pub node_id: u64,
+    pub matched_index: u64,
+    pub committed_index: u64,
+    pub pending_snapshot_index: u64,
+    pub recent_active: bool,
+}
+
+impl From<&ConsensusPeerProgress> for ConsensusProbeReplicationProgress {
+    fn from(progress: &ConsensusPeerProgress) -> Self {
+        Self {
+            node_id: progress.node_id.get(),
+            matched_index: progress.matched_index.get(),
+            committed_index: progress.committed_index.get(),
+            pending_snapshot_index: progress.pending_snapshot_index.get(),
+            recent_active: progress.recent_active,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ConsensusProbeMembershipStatus {
+    pub allowed_members: Vec<u64>,
+    pub voters: Vec<u64>,
+    pub outgoing_voters: Vec<u64>,
+    pub learners: Vec<u64>,
+    pub staged_learners: Vec<u64>,
+    pub joint: bool,
+    pub auto_leave: bool,
+}
+
+impl From<&ConsensusMembership> for ConsensusProbeMembershipStatus {
+    fn from(membership: &ConsensusMembership) -> Self {
+        let ids = |members: &[NodeId]| members.iter().copied().map(NodeId::get).collect();
+        Self {
+            allowed_members: ids(&membership.allowed_members),
+            voters: ids(&membership.voters),
+            outgoing_voters: ids(&membership.outgoing_voters),
+            learners: ids(&membership.learners),
+            staged_learners: ids(&membership.staged_learners),
+            joint: !membership.outgoing_voters.is_empty(),
+            auto_leave: membership.auto_leave,
+        }
+    }
+}
+
+impl From<ConsensusMembership> for ConsensusProbeMembershipStatus {
+    fn from(membership: ConsensusMembership) -> Self {
+        Self::from(&membership)
     }
 }
 
@@ -1729,10 +2088,9 @@ impl From<ConsensusCheckpoint> for ConsensusProbeCheckpointResponse {
     }
 }
 
-impl From<ConsensusStatus> for ConsensusProbeStatus {
-    fn from(status: ConsensusStatus) -> Self {
-        Self::new(&status, Vec::new())
-    }
+#[derive(Debug, Deserialize)]
+pub struct ConsensusProbeReconfigureRequest {
+    pub voters: Vec<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1840,6 +2198,9 @@ impl IntoResponse for ConsensusProbeApiError {
                 "not_leader",
                 leader_hint.map(NodeId::get),
             ),
+            ConsensusProbeError::Consensus(ConsensusError::LearnerNotCaughtUp { .. }) => {
+                (StatusCode::CONFLICT, "membership_not_ready", None)
+            }
             ConsensusProbeError::Consensus(
                 ConsensusError::GroupMismatch { .. }
                 | ConsensusError::FencedEpoch { .. }
@@ -1931,12 +2292,100 @@ mod tests {
     }
 
     #[test]
-    fn peer_spec_requires_three_unique_ids_and_authority_only_urls() {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one table-style configuration test keeps all member-count and URL invariants together"
+    )]
+    fn peer_spec_requires_bounded_inventory_three_or_five_voters_and_authority_urls() {
         let parsed =
             parse_peer_urls("1=http://node-1:7701, 2=http://node-2:7701,3=https://node-3:7701")
                 .expect("valid peer spec should parse");
         assert_eq!(parsed.len(), 3);
         assert!(ConsensusProbeConfig::new(1, 1, 1, parsed, Duration::from_millis(100)).is_ok());
+
+        let five = ConsensusProbeConfig::new(
+            4,
+            1,
+            1,
+            (1..=5).rev().map(|node_id| {
+                let port = 31_000 + u16::try_from(node_id).unwrap();
+                (node_id, peer_url(port))
+            }),
+            Duration::from_millis(100),
+        )
+        .expect("five voters should be supported");
+        assert_eq!(
+            five.voters()
+                .iter()
+                .map(|node_id| node_id.get())
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+
+        let provisioned = five
+            .clone()
+            .with_initial_voters([1, 2, 3])
+            .expect("a local provisioned member may begin outside the voter set");
+        assert_eq!(
+            provisioned
+                .voters()
+                .iter()
+                .map(|node_id| node_id.get())
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            provisioned.members().map(NodeId::get).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+        assert_eq!(
+            provisioned
+                .for_group(9, 2)
+                .unwrap()
+                .voters()
+                .iter()
+                .map(|node_id| node_id.get())
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert!(five.clone().with_initial_voters([1, 2, 6]).is_err());
+        assert!(five.with_initial_voters([1, 2, 3, 4]).is_err());
+
+        let four_members = ConsensusProbeConfig::new(
+            4,
+            1,
+            1,
+            (1..=4).map(|node_id| {
+                let port = 31_000 + u16::try_from(node_id).unwrap();
+                (node_id, peer_url(port))
+            }),
+            Duration::from_millis(100),
+        );
+        let four_members =
+            four_members.expect("four physical members should select the first three voters");
+        assert_eq!(
+            four_members
+                .voters()
+                .iter()
+                .map(|node_id| node_id.get())
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            four_members.members().map(NodeId::get).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        assert!(
+            ConsensusProbeConfig::new(
+                1,
+                1,
+                1,
+                [(1, peer_url(31_001)), (2, peer_url(31_002))],
+                Duration::from_millis(100),
+            )
+            .is_err(),
+            "fewer than three physical members must fail closed"
+        );
 
         let duplicate_id = [
             (1, peer_url(31_001)),
@@ -1957,6 +2406,27 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn secure_peer_transport_rejects_plaintext_authorities() {
+        let plaintext = config();
+        let error = plaintext.require_https_peer_urls().unwrap_err();
+        assert!(error.to_string().contains("must use https"));
+
+        let secure = ConsensusProbeConfig::new(
+            1,
+            7,
+            3,
+            [
+                (1, Url::parse("https://node-1:7701/").unwrap()),
+                (2, Url::parse("https://node-2:7701/").unwrap()),
+                (3, Url::parse("https://node-3:7701/").unwrap()),
+            ],
+            Duration::from_millis(100),
+        )
+        .unwrap();
+        secure.require_https_peer_urls().unwrap();
     }
 
     #[test]
@@ -2060,6 +2530,11 @@ mod tests {
                 observed_bytes: MAX_SNAPSHOT_DATA_BYTES + 1,
                 max_bytes: MAX_SNAPSHOT_DATA_BYTES,
             }),
+            ConsensusProbeError::Consensus(ConsensusError::LearnerNotCaughtUp {
+                learner: NodeId::new(4).unwrap(),
+                matched_index: LogIndex::new(8),
+                required_index: LogIndex::new(9),
+            }),
         ];
 
         for error in expected {
@@ -2097,6 +2572,31 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains(&MAX_SNAPSHOT_DATA_BYTES.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn learner_catch_up_error_has_a_stable_nonfatal_http_contract() {
+        let response = ConsensusProbeApiError(ConsensusProbeError::Consensus(
+            ConsensusError::LearnerNotCaughtUp {
+                learner: NodeId::new(4).unwrap(),
+                matched_index: LogIndex::new(8),
+                required_index: LogIndex::new(9),
+            },
+        ))
+        .into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("error body should collect")
+            .to_bytes();
+        let document: Value = serde_json::from_slice(&body).expect("error should be JSON");
+        assert_eq!(document["code"], "membership_not_ready");
+        assert_eq!(
+            document["message"],
+            "learner 4 is not caught up: matched index 8, required 9"
         );
     }
 
@@ -2162,6 +2662,9 @@ mod tests {
         assert_eq!(status["production_readiness"], "not_production_ready");
         assert_eq!(status["checkpoint_index"], 0);
         assert_eq!(status["retained_log_first_index"], 1);
+        assert_eq!(status["membership"]["allowed_members"], json!([1, 2, 3]));
+        assert_eq!(status["membership"]["voters"], json!([1, 2, 3]));
+        assert_eq!(status["membership"]["joint"], false);
         let outbound_transport = status["outbound_transport"]
             .as_array()
             .expect("outbound transport status should be an array");
@@ -2247,6 +2750,31 @@ mod tests {
             .await
             .expect("router should respond");
         assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let membership = router
+            .as_ref()
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(INTERNAL_MEMBERSHIP_PATH)
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(membership.status(), StatusCode::OK);
+        let membership: Value = serde_json::from_slice(
+            &membership
+                .into_body()
+                .collect()
+                .await
+                .expect("membership body should collect")
+                .to_bytes(),
+        )
+        .expect("membership should be JSON");
+        assert_eq!(membership["allowed_members"], json!([1, 2, 3]));
+        assert_eq!(membership["voters"], json!([1, 2, 3]));
+        assert_eq!(membership["joint"], false);
         runtime
             .shutdown()
             .await
@@ -2420,6 +2948,7 @@ mod tests {
     struct TestProbeCluster {
         directories: Vec<TempDir>,
         peers: Vec<(u64, Url)>,
+        initial_voters: Vec<u64>,
         runtimes: Vec<ConsensusProbeRuntime>,
         servers: Vec<Option<JoinHandle<()>>>,
     }
@@ -2450,13 +2979,24 @@ mod tests {
             outbound_queue_capacity: usize,
             appliers: Vec<Option<Arc<dyn CommittedProposalApplier>>>,
         ) -> Self {
-            assert_eq!(appliers.len(), 3, "one applier slot is required per voter");
-            let listeners = bind_three_listeners().await;
+            Self::start_with_members(outbound_queue_capacity, vec![1, 2, 3], appliers).await
+        }
+
+        async fn start_with_members(
+            outbound_queue_capacity: usize,
+            initial_voters: Vec<u64>,
+            appliers: Vec<Option<Arc<dyn CommittedProposalApplier>>>,
+        ) -> Self {
+            assert!(
+                matches!(appliers.len(), 3 | 5),
+                "one applier slot is required per provisioned member"
+            );
+            let listeners = bind_listeners(appliers.len()).await;
             let peers = listeners
                 .iter()
                 .enumerate()
                 .map(|(index, listener)| {
-                    let node_id = u64::try_from(index + 1).expect("three node IDs fit in u64");
+                    let node_id = u64::try_from(index + 1).expect("test node IDs fit in u64");
                     let address = listener
                         .local_addr()
                         .expect("listener should have an address");
@@ -2467,13 +3007,13 @@ mod tests {
                     )
                 })
                 .collect::<Vec<_>>();
-            let directories = (0..3)
+            let directories = (0..appliers.len())
                 .map(|_| TempDir::new().expect("temp directory should be created"))
                 .collect::<Vec<_>>();
             let mut runtimes = Vec::new();
             let mut servers = Vec::new();
             for (index, listener) in listeners.into_iter().enumerate() {
-                let node_id = u64::try_from(index + 1).expect("three node IDs fit in u64");
+                let node_id = u64::try_from(index + 1).expect("test node IDs fit in u64");
                 let config = ConsensusProbeConfig::new(
                     node_id,
                     77,
@@ -2482,6 +3022,8 @@ mod tests {
                     TEST_CONSENSUS_TICK_INTERVAL,
                 )
                 .expect("cluster config should be valid")
+                .with_initial_voters(initial_voters.iter().copied())
+                .expect("initial voter set should be valid")
                 .with_queue_capacities(DEFAULT_COMMAND_QUEUE_CAPACITY, outbound_queue_capacity)
                 .expect("cluster queue capacities should be valid");
                 let stable_path = directories[index].path().join("raft.wal");
@@ -2503,6 +3045,7 @@ mod tests {
             Self {
                 directories,
                 peers,
+                initial_voters,
                 runtimes,
                 servers,
             }
@@ -2600,7 +3143,11 @@ mod tests {
                 self.runtimes.is_empty(),
                 "cluster must be stopped before restart"
             );
-            assert_eq!(appliers.len(), 3, "one applier slot is required per voter");
+            assert_eq!(
+                appliers.len(),
+                self.peers.len(),
+                "one applier slot is required per provisioned member"
+            );
             let mut listeners = Vec::new();
             for (_, peer) in &self.peers {
                 let address = peer
@@ -2616,7 +3163,7 @@ mod tests {
                 );
             }
             for (index, listener) in listeners.into_iter().enumerate() {
-                let node_id = u64::try_from(index + 1).expect("three node IDs fit in u64");
+                let node_id = u64::try_from(index + 1).expect("test node IDs fit in u64");
                 let config = ConsensusProbeConfig::new(
                     node_id,
                     77,
@@ -2624,7 +3171,9 @@ mod tests {
                     self.peers.clone(),
                     TEST_CONSENSUS_TICK_INTERVAL,
                 )
-                .expect("cluster config should be valid");
+                .expect("cluster config should be valid")
+                .with_initial_voters(self.initial_voters.iter().copied())
+                .expect("initial voter set should be valid");
                 let stable_path = self.directories[index].path().join("raft.wal");
                 let runtime = if let Some(applier) = appliers[index].clone() {
                     ConsensusProbeRuntime::start_with_profile_applier(config, stable_path, applier)
@@ -2658,9 +3207,9 @@ mod tests {
         }
     }
 
-    async fn bind_three_listeners() -> Vec<tokio::net::TcpListener> {
+    async fn bind_listeners(count: usize) -> Vec<tokio::net::TcpListener> {
         let mut listeners = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..count {
             listeners.push(
                 tokio::net::TcpListener::bind("127.0.0.1:0")
                     .await
@@ -2688,6 +3237,77 @@ mod tests {
         })
         .await
         .expect("one leader should be elected")
+    }
+
+    async fn wait_for_membership(
+        handles: &[ConsensusProbeHandle],
+        expected_voters: &[u64],
+        expected_learners: &[u64],
+    ) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let mut converged = true;
+                for handle in handles {
+                    let membership = handle
+                        .membership()
+                        .await
+                        .expect("membership should be available");
+                    let voters = membership
+                        .voters
+                        .iter()
+                        .copied()
+                        .map(NodeId::get)
+                        .collect::<Vec<_>>();
+                    let learners = membership
+                        .learners
+                        .iter()
+                        .copied()
+                        .map(NodeId::get)
+                        .collect::<Vec<_>>();
+                    converged &= voters == expected_voters
+                        && learners == expected_learners
+                        && membership.outgoing_voters.is_empty()
+                        && membership.staged_learners.is_empty();
+                }
+                if converged {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("membership should converge on every provisioned member");
+    }
+
+    async fn wait_for_learners_caught_up(
+        handles: &[ConsensusProbeHandle],
+        learner_ids: &[u64],
+    ) -> usize {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                for (index, handle) in handles.iter().enumerate() {
+                    let status = handle.status().await.expect("status should be available");
+                    if status.role != ConsensusRole::Leader {
+                        continue;
+                    }
+                    let caught_up = learner_ids.iter().all(|learner_id| {
+                        status.replication_progress.iter().any(|progress| {
+                            progress.node_id.get() == *learner_id
+                                && progress.matched_index >= status.commit_index
+                                && progress.committed_index >= status.commit_index
+                                && progress.pending_snapshot_index == LogIndex::ZERO
+                                && progress.recent_active
+                        })
+                    });
+                    if caught_up {
+                        return index;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("every learner should catch up to the current leader commit")
     }
 
     async fn wait_for_commit(
@@ -2795,6 +3415,7 @@ mod tests {
                 configuration: None,
                 governance: None,
             },
+            tablet_placements: Vec::new(),
         })
     }
 
@@ -2887,6 +3508,172 @@ mod tests {
             status.retained_log_first_index.get(),
             checkpoint_index.saturating_add(1)
         );
+        cluster.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+    async fn five_member_runtime_reconfigures_through_internal_api_and_reopens() {
+        let mut cluster = TestProbeCluster::start_with_members(
+            DEFAULT_OUTBOUND_QUEUE_CAPACITY,
+            vec![1, 2, 3],
+            vec![None, None, None, None, None],
+        )
+        .await;
+        let mut handles = cluster.handles();
+        wait_for_membership(&handles, &[1, 2, 3], &[]).await;
+        let (leader_index, _) = wait_for_leader(&handles).await;
+
+        for learner in [4_u64, 5] {
+            let response = cluster.runtimes[leader_index]
+                .internal_router()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(
+                            INTERNAL_MEMBERSHIP_LEARNER_PATH
+                                .replace("{node_id}", &learner.to_string()),
+                        )
+                        .body(Body::empty())
+                        .expect("learner request should build"),
+                )
+                .await
+                .expect("learner route should respond");
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let expected_learners = if learner == 4 { vec![4] } else { vec![4, 5] };
+            let admitted_members = if learner == 4 {
+                &handles[..4]
+            } else {
+                handles.as_slice()
+            };
+            wait_for_membership(admitted_members, &[1, 2, 3], &expected_learners).await;
+        }
+
+        let leader_index = wait_for_learners_caught_up(&handles, &[4, 5]).await;
+
+        let response = cluster.runtimes[leader_index]
+            .internal_router()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(INTERNAL_MEMBERSHIP_PATH)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({ "voters": [1, 2, 3, 4, 5] }))
+                            .expect("voter request should serialize"),
+                    ))
+                    .expect("voter request should build"),
+            )
+            .await
+            .expect("voter route should respond");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        wait_for_membership(&handles, &[1, 2, 3, 4, 5], &[]).await;
+
+        let proposal_id = 451;
+        let payload = b"committed-after-five-member-joint-consensus".to_vec();
+        let proposed = propose_through_current_leader(&handles, proposal_id, payload.clone()).await;
+        assert!(matches!(
+            proposed,
+            ProposalLookup::Pending { .. } | ProposalLookup::Committed(_)
+        ));
+        let committed = wait_for_commit(&handles, proposal_id).await;
+        assert_eq!(committed.len(), 5);
+
+        handles.clear();
+        cluster.stop().await;
+        cluster
+            .restart_with_appliers(vec![None, None, None, None, None])
+            .await;
+        handles = cluster.handles();
+        wait_for_membership(&handles, &[1, 2, 3, 4, 5], &[]).await;
+        let _ = wait_for_commit(&handles, proposal_id).await;
+
+        let (leader_index, _) = wait_for_leader(&handles).await;
+        let response = cluster.runtimes[leader_index]
+            .internal_router()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(INTERNAL_MEMBERSHIP_PATH)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({ "voters": [1, 2, 3] }))
+                            .expect("voter request should serialize"),
+                    ))
+                    .expect("voter request should build"),
+            )
+            .await
+            .expect("voter route should respond");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        wait_for_membership(&handles, &[1, 2, 3], &[]).await;
+
+        handles.clear();
+        cluster.stop().await;
+        cluster
+            .restart_with_appliers(vec![None, None, None, None, None])
+            .await;
+        handles = cluster.handles();
+        wait_for_membership(&handles, &[1, 2, 3], &[]).await;
+        let _ = wait_for_commit(&handles, proposal_id).await;
+        cluster.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+    async fn learner_catches_up_after_refreshing_a_compacted_membership_snapshot() {
+        let cluster = TestProbeCluster::start_with_members(
+            DEFAULT_OUTBOUND_QUEUE_CAPACITY,
+            vec![1, 2, 3],
+            vec![None, None, None, None, None],
+        )
+        .await;
+        let handles = cluster.handles();
+        let (leader_index, _) = wait_for_leader(&handles).await;
+
+        let proposal_id = 452;
+        let payload = b"committed-before-snapshot-learner-admission".to_vec();
+        let proposed = propose_through_current_leader(&handles, proposal_id, payload.clone()).await;
+        assert!(matches!(
+            proposed,
+            ProposalLookup::Pending { .. } | ProposalLookup::Committed(_)
+        ));
+        wait_for_commit_on(&handles, &[0, 1, 2], proposal_id).await;
+
+        let checkpoint = handles[leader_index]
+            .checkpoint()
+            .await
+            .expect("the leader should compact its committed prefix");
+        assert!(checkpoint.index.get() > 0);
+        assert_eq!(
+            handles[leader_index]
+                .status()
+                .await
+                .expect("leader status should remain available")
+                .retained_log_first_index
+                .get(),
+            checkpoint.index.get().saturating_add(1)
+        );
+
+        handles[leader_index]
+            .add_learner(4)
+            .await
+            .expect("the leader should admit the provisioned learner");
+        wait_for_membership(&handles[..3], &[1, 2, 3], &[4]).await;
+        let refreshed = handles[leader_index]
+            .checkpoint()
+            .await
+            .expect("the leader should refresh the checkpoint membership");
+        assert!(refreshed.index > checkpoint.index);
+        wait_for_membership(&handles[..4], &[1, 2, 3], &[4]).await;
+        let _ = wait_for_learners_caught_up(&handles, &[4]).await;
+        wait_for_commit_on(&handles, &[3], proposal_id).await;
+
+        let learner_lookup = handles[3]
+            .lookup(proposal_id)
+            .await
+            .expect("learner lookup should remain available");
+        let ProposalLookup::Committed(committed) = learner_lookup else {
+            panic!("the learner should install the checkpointed proposal");
+        };
+        assert_eq!(committed.payload, payload);
         cluster.shutdown().await;
     }
 
@@ -3008,7 +3795,7 @@ mod tests {
         let mut cluster =
             TestProbeCluster::start_with_appliers(DEFAULT_OUTBOUND_QUEUE_CAPACITY, appliers).await;
         let handles = cluster.handles();
-        let (leader_index, _) = wait_for_leader(&handles).await;
+        let (leader_index, leader_status) = wait_for_leader(&handles).await;
 
         for (proposal_id, command) in [
             (701, catalog_command("orders-v1", "orders", 2)),
@@ -3039,6 +3826,16 @@ mod tests {
         );
         assert_eq!(before_restart[0].resource_count, 2);
         assert_eq!(before_restart[0].tablet_count, 3);
+        let barrier = handles[leader_index]
+            .read_barrier(leader_status.term.get(), Duration::from_secs(2))
+            .await
+            .expect("Catalog leader should establish a backup barrier");
+        let exported = handles[leader_index]
+            .export_snapshot(barrier.applied_index)
+            .await
+            .expect("Catalog snapshot should export after the barrier");
+        assert_eq!(exported.checkpoint_index(), barrier.applied_index);
+        assert!(!exported.payload().is_empty());
         let checkpoint = handles[leader_index]
             .checkpoint()
             .await
@@ -3342,26 +4139,39 @@ mod tests {
     #[test]
     fn truthful_status_conversion_is_closed_over_all_consensus_roles() {
         let node_id = NodeId::new(1).expect("valid node");
+        let membership = ConsensusMembership {
+            allowed_members: vec![node_id, NodeId::new(2).unwrap(), NodeId::new(3).unwrap()],
+            voters: vec![node_id, NodeId::new(2).unwrap(), NodeId::new(3).unwrap()],
+            outgoing_voters: Vec::new(),
+            learners: Vec::new(),
+            staged_learners: Vec::new(),
+            auto_leave: false,
+        };
         for role in [
             ConsensusRole::Follower,
             ConsensusRole::PreCandidate,
             ConsensusRole::Candidate,
             ConsensusRole::Leader,
         ] {
-            let status = ConsensusProbeStatus::from(ConsensusStatus {
-                node_id,
-                group_id: GroupId::new(7).expect("valid group"),
-                group_epoch: GroupEpoch::new(3).expect("valid epoch"),
-                role,
-                leader_id: None,
-                term: Term::new(4),
-                commit_index: LogIndex::new(5),
-                applied_index: LogIndex::new(5),
-                checkpoint_index: LogIndex::new(3),
-                retained_log_first_index: LogIndex::new(4),
-                voter_count: 3,
-                fail_stopped: false,
-            });
+            let status = ConsensusProbeStatus::new(
+                &ConsensusStatus {
+                    node_id,
+                    group_id: GroupId::new(7).expect("valid group"),
+                    group_epoch: GroupEpoch::new(3).expect("valid epoch"),
+                    role,
+                    leader_id: None,
+                    term: Term::new(4),
+                    commit_index: LogIndex::new(5),
+                    applied_index: LogIndex::new(5),
+                    checkpoint_index: LogIndex::new(3),
+                    retained_log_first_index: LogIndex::new(4),
+                    voter_count: 3,
+                    replication_progress: Vec::new(),
+                    fail_stopped: false,
+                },
+                &membership,
+                Vec::new(),
+            );
             assert!(!status.profile_replication);
             assert_eq!(status.profile_guarantee_ceiling, "local_durable");
             assert_eq!(status.observation_scope, "local");
@@ -3369,6 +4179,7 @@ mod tests {
             assert_eq!(status.production_readiness, "not_production_ready");
             assert_eq!(status.checkpoint_index, 3);
             assert_eq!(status.retained_log_first_index, 4);
+            assert_eq!(status.membership.voters, vec![1, 2, 3]);
         }
     }
 }

@@ -14,7 +14,7 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 #[tokio::test]
-async fn topology_reports_fixed_voters_and_live_group_capacity() {
+async fn topology_reports_bounded_voters_and_live_group_capacity() {
     let topology = NodeTopology::new(
         2,
         "ap-south",
@@ -80,10 +80,14 @@ async fn topology_reports_fixed_voters_and_live_group_capacity() {
 
 #[test]
 fn topology_rejects_ambiguous_or_unbounded_identity() {
+    let five = NodeTopology::new(3, "ap-south", "zone-a", "general", vec![5, 3, 1, 4, 2], 16)
+        .expect("five voters should be supported");
+    assert_eq!(five.consensus_voter_node_ids(), &[1, 2, 3, 4, 5]);
+    assert!(NodeTopology::new(2, "ap-south", "zone-a", "general", vec![1, 2, 3, 4], 16).is_err());
     assert!(NodeTopology::new(0, "ap-south", "zone-a", "general", [1, 2, 3], 16).is_err());
     assert!(NodeTopology::new(2, "ap south", "zone-a", "general", [1, 2, 3], 16).is_err());
     assert!(NodeTopology::new(2, "ap-south", "", "general", [1, 2, 3], 16).is_err());
     assert!(NodeTopology::new(2, "ap-south", "zone-a", "general", [1, 1, 2], 16).is_err());
-    assert!(NodeTopology::new(4, "ap-south", "zone-a", "general", [1, 2, 3], 16).is_err());
+    assert!(NodeTopology::new(4, "ap-south", "zone-a", "general", [1, 2, 3], 16).is_ok());
     assert!(NodeTopology::new(2, "ap-south", "zone-a", "general", [1, 2, 3], 0).is_err());
 }

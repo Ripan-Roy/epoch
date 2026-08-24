@@ -306,7 +306,11 @@ func assertProtoReady(t *testing.T, resource *epochv1.Resource, tablets int) {
 		t.Fatalf("resource is not ready: %+v", resource)
 	}
 	tablet := resource.GetStatus().GetTablets()[0]
-	if len(tablet.GetVoterNodeIds()) != 3 || tablet.GetLeaderNodeId() == 0 {
+	if len(tablet.GetAssignedNodeIds()) != 3 ||
+		len(tablet.GetVoterNodeIds()) != 3 ||
+		len(tablet.GetReachableVoterNodeIds()) != 3 ||
+		len(tablet.GetTargetVoterNodeIds()) != 0 ||
+		tablet.GetLeaderNodeId() == 0 {
 		t.Fatalf("tablet placement = %+v", tablet)
 	}
 	placement := resource.GetStatus().GetPlacement()

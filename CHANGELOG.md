@@ -6,6 +6,62 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+## [0.2.0-beta.1] - 2026-08-24
+
+### Added
+
+- Added a shared leader-owned source-reader architecture for bounded
+  HTTP/CloudEvents, immutable S3-compatible/Azure/GCS objects, PostgreSQL
+  logical replication, MySQL row binlogs, and Kafka consumer groups. Every
+  adapter commits applied/error-routed records before its exact source cursor;
+  PostgreSQL feedback and Kafka group offsets follow the Epoch checkpoint.
+- Added typed, redacted node-local connector credentials, verified TLS/mTLS and
+  allowlist policy, stateful session fencing, immutable-object overwrite
+  detection, transaction-complete CDC positions, and Epoch-authoritative Kafka
+  assignment seeks.
+- Added deterministic adapter suites, a pinned live MinIO/PostgreSQL/MySQL/Kafka
+  Compose conformance matrix and CI job, ADR-0040, a complete source operations
+  guide, three-language SDK lifecycle calls, and visible documentation-site
+  coverage.
+- Added alpha-exit secure transport, workload-identity manifests, versioned
+  regional backup/fresh-cluster restore, encrypted scheduled backups, guarded
+  data-node upgrades, and learner-first joint-consensus voter replacement.
+- Added digest-base-pinned, non-root node/control/operator/CLI images; strict PR
+  inspection and SPDX evidence; exact-main, tag-only amd64/arm64 GHCR
+  publication; per-platform SBOM and manifest provenance attestations; keyless
+  Sigstore signing/verification; ADR-0041; and an end-user artifact verification
+  guide. No mutable `latest` tag is published.
+- Added a resumable four-profile load/fault/soak runner with atomic attempt
+  checkpoints, exact source/image identity, typed fault/invariant receipts,
+  SHA-256 artifact inventory, duration gating, accelerated CI coverage, and an
+  Ed25519-signed canonical evidence manifest with independent tamper
+  verification.
+- Added a clean-build, digest-pinned four-node Kubernetes acceptance campaign
+  covering mTLS install, all-profile traffic, encrypted backup, compacted-log
+  voter replacement, the post-request backup upgrade gate, serialized rollout,
+  fresh-cluster restore, exact source/restored digests, continued writes,
+  SHA-256 evidence, cleanup, CI artifacts, and visible Pages documentation.
+
+### Fixed
+
+- Pinned Epoch's Rustls listener and client-certificate verifier to an explicit
+  crypto provider so object/database connector dependencies cannot make mTLS
+  startup ambiguous.
+- Refreshed membership-bearing native snapshots after learner admission and
+  reported older in-flight snapshots stale, allowing a newly assigned voter to
+  catch up safely when a pre-replacement backup already compacted the log.
+
+### Limitations
+
+- Live Azure/GCS cloud IAM, private connector networking, secret-manager hot
+  rotation, schema-aware decoded CDC records, exhaustive network crash
+  injection, and sustained connector load/soak certification remain beta
+  operating evidence. OCI/SBOM/provenance passes local image inspection but
+  still requires protected/tag publication evidence. One exact-source local
+  Kubernetes lifecycle passes, but protected/exact-main evidence, a genuinely
+  mixed-version rollout, the actual 30-day soak, and the verified prerelease
+  tag remain open.
+
 ## [0.1.0-alpha.10] - 2026-08-23
 
 ### Added

@@ -30,7 +30,7 @@ pub struct NodeTopology {
     region: String,
     zone: String,
     node_class: String,
-    consensus_voter_node_ids: [u64; 3],
+    consensus_voter_node_ids: Vec<u64>,
     max_consensus_groups: usize,
 }
 
@@ -40,13 +40,15 @@ pub struct NodeTopology {
 pub struct NodeTopologyError(String);
 
 impl NodeTopology {
-    /// Builds a bounded topology record for the fixed-voter runtime.
+    /// Builds one physical-node topology record. The reported voter set is the
+    /// bounded regional catalog quorum; a node may remain a catalog learner
+    /// while hosting data tablets selected from the wider physical inventory.
     pub fn new(
         node_id: u64,
         region: impl Into<String>,
         zone: impl Into<String>,
         node_class: impl Into<String>,
-        mut consensus_voter_node_ids: [u64; 3],
+        consensus_voter_node_ids: impl Into<Vec<u64>>,
         max_consensus_groups: usize,
     ) -> Result<Self, NodeTopologyError> {
         if node_id == 0 {
@@ -55,18 +57,15 @@ impl NodeTopology {
         let region = validate_label("region", region.into())?;
         let zone = validate_label("zone", zone.into())?;
         let node_class = validate_label("node class", node_class.into())?;
+        let mut consensus_voter_node_ids = consensus_voter_node_ids.into();
         consensus_voter_node_ids.sort_unstable();
         let voters = consensus_voter_node_ids
-            .into_iter()
+            .iter()
+            .copied()
             .collect::<BTreeSet<_>>();
-        if voters.len() != 3 || voters.contains(&0) {
+        if !matches!(voters.len(), 3 | 5) || voters.contains(&0) {
             return Err(NodeTopologyError(
-                "consensus voters must contain three distinct non-zero node IDs".into(),
-            ));
-        }
-        if !voters.contains(&node_id) {
-            return Err(NodeTopologyError(
-                "local node must belong to the fixed consensus voter set".into(),
+                "consensus voters must contain three or five distinct non-zero node IDs".into(),
             ));
         }
         if max_consensus_groups == 0 {
@@ -100,8 +99,8 @@ impl NodeTopology {
         &self.node_class
     }
 
-    pub const fn consensus_voter_node_ids(&self) -> [u64; 3] {
-        self.consensus_voter_node_ids
+    pub fn consensus_voter_node_ids(&self) -> &[u64] {
+        &self.consensus_voter_node_ids
     }
 
     pub const fn max_consensus_groups(&self) -> usize {

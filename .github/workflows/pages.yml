@@ -25,10 +25,10 @@ jobs:
       VITE_DOCS_ONLY: true
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up pinned Node.js
-        uses: actions/setup-node@v7.0.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .node-version
           package-manager-cache: false
@@ -70,7 +70,7 @@ jobs:
           assert_bundle_contains 'Experimental replicated Queue'
           assert_bundle_contains 'Experimental replicated Event Bus'
           assert_bundle_contains 'rate and retention, outbox leases, managed target execution'
-          assert_bundle_contains 'One catalog materializes four profile-specific groups'
+          assert_bundle_contains 'One Catalog assigns independent three- or five-voter profile groups across N physical nodes'
           assert_bundle_contains 'Resource governance'
           assert_bundle_contains 'New managed resources fail closed without governance.'
           assert_bundle_contains 'cost_center=cc-1042'
@@ -150,9 +150,38 @@ jobs:
           assert_bundle_contains 'integration_state'
           assert_bundle_contains 'adr/0037-event-integration-platform.md'
           assert_bundle_contains 'Deploy and operate Epoch'
+          assert_bundle_contains 'Verify release artifacts'
+          assert_bundle_contains 'Epoch never publishes'
+          assert_bundle_contains 'gh attestation verify'
+          assert_bundle_contains 'RELEASE_ARTIFACTS.md'
+          assert_bundle_contains 'adr/0041-tag-only-oci-supply-chain.md'
+          assert_bundle_contains 'Run resumable fault evidence'
+          assert_bundle_contains 'Ed25519-signed canonical manifest'
+          assert_bundle_contains 'tests/soak/epoch_soak.py'
+          assert_bundle_contains 'SOAK_TESTING.md'
+          assert_bundle_contains 'Regional backup and restore'
+          assert_bundle_contains 'EPBKAE01'
+          assert_bundle_contains 'Tablet leaders do not need to be co-located with the Catalog leader.'
+          assert_bundle_contains 'REGIONAL_BACKUP_RESTORE.md'
+          assert_bundle_contains 'Guarded data-plane upgrades'
+          assert_bundle_contains 'WaitingForBackup → Preflight → Draining → Updating → Verifying'
+          assert_bundle_contains 'platform.epoch.dev/upgrade-owner=epoch'
+          assert_bundle_contains 'GUARDED_UPGRADES.md'
+          assert_bundle_contains 'Learner-first voter replacement'
+          assert_bundle_contains 'target_voter_node_ids'
+          assert_bundle_contains 'catalog_planned_voter_replacement_catches_up_finalizes_and_reopens'
+          assert_bundle_contains 'VOTER_REPLACEMENT.md'
           assert_bundle_contains 'Epoch-Connector-Position'
+          assert_bundle_contains 'S3-compatible/Azure/GCS objects'
+          assert_bundle_contains 'Only complete transactions advance.'
+          assert_bundle_contains 'The replicated Epoch cursor is authoritative.'
+          assert_bundle_contains 'SOURCE_CONNECTORS.md'
+          assert_bundle_contains 'adr/0040-initial-source-adapter-checkpoint-coupling.md'
           assert_bundle_contains 'Kubernetes installation and lifecycle'
           assert_bundle_contains 'adr/0038-product-runtime-closure.md'
+          assert_bundle_contains 'Prove the live managed lifecycle'
+          assert_bundle_contains 'one compacted-log voter replacement'
+          assert_bundle_contains 'KUBERNETES_ALPHA_EXIT.md'
           assert_bundle_contains 'Checkpoint, compact, catch up, and reopen'
           assert_bundle_contains 'retained_log_first_index'
           assert_bundle_contains 'Multi-tablet operations'
@@ -169,7 +198,7 @@ jobs:
 
       - name: Upload Pages artifact
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-        uses: actions/upload-pages-artifact@v5.0.0
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: console/dist
 
@@ -181,27 +210,32 @@ jobs:
       contents: read
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
 
+      - name: Install native Rust build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends cmake libcurl4-openssl-dev
+
       - name: Set up pinned Go
-        uses: actions/setup-go@v7.0.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: 1.26.5
           cache-dependency-path: go.sum
 
       - name: Set up supported Python
-        uses: actions/setup-python@v7.0.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Set up pinned Java
-        uses: actions/setup-java@v5.6.0
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
         with:
           distribution: temurin
-          java-version: '25'
+          java-version: "25"
           cache: maven
           cache-dependency-path: sdk/java/pom.xml
 
@@ -222,8 +256,8 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Configure GitHub Pages
-        uses: actions/configure-pages@v6.0.0
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v5.0.0
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

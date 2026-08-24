@@ -24,6 +24,11 @@ public final class RegionalQueueClient {
     this.regional = RegionalClientCore.forEndpoints(endpoints, token, scope, timeout);
   }
 
+  public RegionalQueueClient(
+      List<URI> endpoints, String token, RegionalScope scope, Duration timeout, TlsConfig tls) {
+    this.regional = RegionalClientCore.forEndpoints(endpoints, token, scope, timeout, tls);
+  }
+
   private RegionalQueueClient(List<Transport> transports, String token, RegionalScope scope) {
     this.regional = RegionalClientCore.forTransports(transports, token, scope);
   }

@@ -1,0 +1,8 @@
+GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'epoch_replication'@'%';
+FLUSH PRIVILEGES;
+
+USE epoch_connectors;
+CREATE TABLE orders (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    description VARCHAR(255) NOT NULL
+);

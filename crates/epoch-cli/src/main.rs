@@ -1,4 +1,4 @@
-use std::process::ExitCode;
+use std::{path::PathBuf, process::ExitCode, time::Duration};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use epoch_core::EventEnvelope;
@@ -10,6 +10,12 @@ use serde_json::{Value, json};
 struct Cli {
     #[arg(long, env = "EPOCH_URL", default_value = "http://127.0.0.1:7601")]
     url: String,
+    #[arg(long, env = "EPOCH_TLS_CA_PATH")]
+    tls_ca_path: Option<PathBuf>,
+    #[arg(long, env = "EPOCH_TLS_CERT_PATH")]
+    tls_cert_path: Option<PathBuf>,
+    #[arg(long, env = "EPOCH_TLS_KEY_PATH")]
+    tls_key_path: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -199,7 +205,7 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::new();
+    let client = build_client(&cli)?;
     let base = cli.url.trim_end_matches('/');
     let value = match cli.command {
         Command::Health => request(&client, Method::GET, &format!("{base}/healthz"), None).await?,
@@ -222,6 +228,45 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", serde_json::to_string_pretty(&value)?);
     }
     Ok(())
+}
+
+fn build_client(cli: &Cli) -> Result<Client, Box<dyn std::error::Error>> {
+    let certificate_set = cli.tls_cert_path.is_some();
+    let key_set = cli.tls_key_path.is_some();
+    if certificate_set != key_set {
+        return Err("TLS certificate and private-key paths must be configured together".into());
+    }
+    if (certificate_set || key_set) && cli.tls_ca_path.is_none() {
+        return Err("a TLS CA path is required with a client identity".into());
+    }
+    let mut builder = Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(30));
+    if let Some(ca_path) = &cli.tls_ca_path {
+        if !cli.url.trim().starts_with("https://") {
+            return Err("a TLS-configured CLI requires an https URL".into());
+        }
+        let ca = std::fs::read(ca_path)?;
+        let roots = reqwest::Certificate::from_pem_bundle(&ca)?;
+        if roots.is_empty() {
+            return Err("TLS CA bundle contains no certificates".into());
+        }
+        builder = builder
+            .https_only(true)
+            .min_tls_version(reqwest::tls::Version::TLS_1_3)
+            .tls_built_in_root_certs(false);
+        for root in roots {
+            builder = builder.add_root_certificate(root);
+        }
+        if let (Some(certificate), Some(private_key)) = (&cli.tls_cert_path, &cli.tls_key_path) {
+            let mut identity = std::fs::read(certificate)?;
+            identity.extend_from_slice(&std::fs::read(private_key)?);
+            builder = builder.identity(reqwest::Identity::from_pem(&identity)?);
+        }
+    }
+    Ok(builder.build()?)
 }
 
 async fn run_cache(
@@ -530,6 +575,12 @@ async fn request(
 
 #[cfg(test)]
 mod tests {
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
+        KeyPair, KeyUsagePurpose,
+    };
+    use tempfile::TempDir;
+
     use super::*;
 
     #[test]
@@ -586,5 +637,90 @@ mod tests {
             panic!("Queue create command was expected");
         };
         assert_eq!(durability.wire_name(), "volatile");
+    }
+
+    #[test]
+    fn tls_client_loads_explicit_trust_and_identity_without_disabling_verification() {
+        let fixtures = TempDir::new().unwrap();
+        let material = generate_test_client_identity();
+        let ca = fixtures.path().join("ca.crt");
+        let certificate = fixtures.path().join("client.crt");
+        let private_key = fixtures.path().join("client.key");
+        std::fs::write(&ca, material.ca_certificate).unwrap();
+        std::fs::write(&certificate, material.client_certificate).unwrap();
+        std::fs::write(&private_key, material.client_key).unwrap();
+        let cli = Cli::try_parse_from([
+            "epoch",
+            "--url",
+            "https://127.0.0.1:7601",
+            "--tls-ca-path",
+            ca.to_str().unwrap(),
+            "--tls-cert-path",
+            certificate.to_str().unwrap(),
+            "--tls-key-path",
+            private_key.to_str().unwrap(),
+            "health",
+        ])
+        .unwrap();
+        build_client(&cli).unwrap();
+    }
+
+    struct TestClientIdentity {
+        ca_certificate: String,
+        client_certificate: String,
+        client_key: String,
+    }
+
+    fn generate_test_client_identity() -> TestClientIdentity {
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::CrlSign,
+        ];
+        let ca = CertifiedIssuer::self_signed(ca_params, KeyPair::generate().unwrap()).unwrap();
+
+        let mut client_params =
+            CertificateParams::new(vec!["epoch-test-client".to_owned()]).unwrap();
+        client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        let client_key = KeyPair::generate().unwrap();
+        let client_certificate = client_params.signed_by(&client_key, &ca).unwrap();
+
+        TestClientIdentity {
+            ca_certificate: ca.pem(),
+            client_certificate: client_certificate.pem(),
+            client_key: client_key.serialize_pem(),
+        }
+    }
+
+    #[test]
+    fn tls_client_rejects_plaintext_and_partial_identity() {
+        let plaintext =
+            Cli::try_parse_from(["epoch", "--tls-ca-path", "ca.pem", "health"]).unwrap();
+        assert!(
+            build_client(&plaintext)
+                .unwrap_err()
+                .to_string()
+                .contains("https")
+        );
+
+        let partial = Cli::try_parse_from([
+            "epoch",
+            "--url",
+            "https://epoch.invalid",
+            "--tls-ca-path",
+            "ca.pem",
+            "--tls-cert-path",
+            "client.pem",
+            "health",
+        ])
+        .unwrap();
+        assert!(
+            build_client(&partial)
+                .unwrap_err()
+                .to_string()
+                .contains("configured together")
+        );
     }
 }

@@ -221,6 +221,18 @@ where
     })
 }
 
+pub(crate) fn deserialize_vec_u64_from_number_or_decimal<'de, D>(
+    deserializer: D,
+) -> Result<Vec<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Vec::<U64Input>::deserialize(deserializer)?
+        .into_iter()
+        .map(|input| deserialize_u64_input(input).map_err(serde::de::Error::custom))
+        .collect()
+}
+
 pub(crate) fn deserialize_i64_from_number_or_decimal<'de, D>(
     deserializer: D,
 ) -> Result<i64, D::Error>

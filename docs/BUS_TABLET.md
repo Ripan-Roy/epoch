@@ -356,8 +356,10 @@ make test-bus-tablet
 
 Still required are replay-attempt lineage, bidirectional streaming push,
 unsigned legacy HTTP execution, an MQTT wire gateway, official schema/MQTT/
-CloudEvents conformance, CDC/Kafka/object-storage source adapters, active
-endpoint health restoration, private managed egress, secret manager/hot reload,
-user-exportable backups/PITR, production identity/TLS and security/scale
-evidence, generated response models, package publication, and multi-shard
-routing.
+CloudEvents conformance, active endpoint health restoration, private managed
+egress, secret manager/hot reload, live Azure/GCS source certification,
+connector load/fault/soak certification, user-exportable backups/PITR,
+production identity/TLS and security/scale evidence, generated response
+models, package publication, and multi-shard routing. Regional-only source
+workers now cover HTTP/CloudEvents, immutable objects, PostgreSQL, MySQL, and
+Kafka; the direct tablet remains transport-free.

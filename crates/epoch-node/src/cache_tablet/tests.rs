@@ -627,40 +627,8 @@ fn request_identity_ignores_only_expected_term_and_server_time() {
 
 #[test]
 fn status_is_browser_safe_and_truthful_about_retained_storage() {
-    let consensus = ConsensusStatus {
-        node_id: NodeId::new(u64::MAX).unwrap(),
-        group_id: GroupId::new(7).unwrap(),
-        group_epoch: GroupEpoch::new(3).unwrap(),
-        role: ConsensusRole::Leader,
-        leader_id: Some(NodeId::new(u64::MAX - 1).unwrap()),
-        term: Term::new(u64::MAX),
-        commit_index: LogIndex::new(u64::MAX),
-        applied_index: LogIndex::new(u64::MAX - 1),
-        checkpoint_index: LogIndex::ZERO,
-        retained_log_first_index: LogIndex::new(1),
-        voter_count: 3,
-        fail_stopped: false,
-    };
-    let snapshot = CacheTabletSnapshot {
-        last_profile_mutation_index: u64::MAX - 2,
-        last_applied_time_ms: u64::MAX - 3,
-        applied_command_count: u64::MAX - 4,
-        cache_revision: u64::MAX - 5,
-        retained_entry_count: u64::MAX - 6,
-        retained_memory_bytes: u64::MAX - 8,
-        retained_cold_bytes: u64::MAX - 9,
-        max_memory_bytes: Some(u64::MAX - 10),
-        max_cold_bytes: Some(u64::MAX - 11),
-        active_lock_count: u64::MAX - 7,
-        eviction: EvictionPolicy::AllKeysLru,
-        requested_durability: DurabilityProfile::ReplicatedMemory,
-        cold_storage_backend: "local_fsync_file_read_path",
-        cold_read_count: 3,
-        cold_read_average_micros: 7,
-        cold_read_max_micros: 11,
-        cache_recovery_state_digest: "11".repeat(32),
-        state_digest: "22".repeat(32),
-    };
+    let consensus = browser_safe_consensus_status();
+    let snapshot = browser_safe_cache_snapshot();
     let status = CacheTabletStatus::new(&scope(), &consensus, snapshot).unwrap();
     let document = serde_json::to_value(status).unwrap();
     for field in [
@@ -728,6 +696,47 @@ fn status_is_browser_safe_and_truthful_about_retained_storage() {
         state_digest: "00".repeat(32),
     };
     assert!(CacheTabletStatus::new(&scope(), &consensus, ahead).is_err());
+}
+
+fn browser_safe_consensus_status() -> ConsensusStatus {
+    ConsensusStatus {
+        node_id: NodeId::new(u64::MAX).unwrap(),
+        group_id: GroupId::new(7).unwrap(),
+        group_epoch: GroupEpoch::new(3).unwrap(),
+        role: ConsensusRole::Leader,
+        leader_id: Some(NodeId::new(u64::MAX - 1).unwrap()),
+        term: Term::new(u64::MAX),
+        commit_index: LogIndex::new(u64::MAX),
+        applied_index: LogIndex::new(u64::MAX - 1),
+        checkpoint_index: LogIndex::ZERO,
+        retained_log_first_index: LogIndex::new(1),
+        voter_count: 3,
+        replication_progress: Vec::new(),
+        fail_stopped: false,
+    }
+}
+
+fn browser_safe_cache_snapshot() -> CacheTabletSnapshot {
+    CacheTabletSnapshot {
+        last_profile_mutation_index: u64::MAX - 2,
+        last_applied_time_ms: u64::MAX - 3,
+        applied_command_count: u64::MAX - 4,
+        cache_revision: u64::MAX - 5,
+        retained_entry_count: u64::MAX - 6,
+        retained_memory_bytes: u64::MAX - 8,
+        retained_cold_bytes: u64::MAX - 9,
+        max_memory_bytes: Some(u64::MAX - 10),
+        max_cold_bytes: Some(u64::MAX - 11),
+        active_lock_count: u64::MAX - 7,
+        eviction: EvictionPolicy::AllKeysLru,
+        requested_durability: DurabilityProfile::ReplicatedMemory,
+        cold_storage_backend: "local_fsync_file_read_path",
+        cold_read_count: 3,
+        cold_read_average_micros: 7,
+        cold_read_max_micros: 11,
+        cache_recovery_state_digest: "11".repeat(32),
+        state_digest: "22".repeat(32),
+    }
 }
 
 #[test]

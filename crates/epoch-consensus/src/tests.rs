@@ -47,6 +47,7 @@ impl ObservedDelivery {
 
 #[derive(Debug)]
 struct TestCluster {
+    voters: Vec<NodeId>,
     nodes: BTreeMap<NodeId, InMemoryRaftAdapter>,
     stopped: BTreeMap<NodeId, MemoryStableState>,
     transport: PeerTransport,
@@ -58,17 +59,33 @@ struct TestCluster {
 
 impl TestCluster {
     fn new(seed: u64) -> Self {
-        let voters = voters();
-        let nodes = voters
-            .into_iter()
+        Self::with_voters(seed, &voters())
+    }
+
+    fn with_voters(seed: u64, voters: &[NodeId]) -> Self {
+        Self::with_members(seed, voters, voters.to_vec())
+    }
+
+    fn with_members(seed: u64, initial_voters: &[NodeId], allowed_members: Vec<NodeId>) -> Self {
+        let nodes = allowed_members
+            .iter()
+            .copied()
             .map(|node_id| {
                 (
                     node_id,
-                    InMemoryRaftAdapter::new(node_id, group_id(), group_epoch(), voters).unwrap(),
+                    InMemoryRaftAdapter::new_with_members(
+                        node_id,
+                        group_id(),
+                        group_epoch(),
+                        initial_voters.to_vec(),
+                        allowed_members.clone(),
+                    )
+                    .unwrap(),
                 )
             })
             .collect();
         let cluster = Self {
+            voters: allowed_members,
             nodes,
             stopped: BTreeMap::new(),
             transport: PeerTransport::new(seed),
@@ -196,6 +213,28 @@ impl TestCluster {
         self.drain();
     }
 
+    fn add_learner(&mut self, leader: NodeId, learner: NodeId) {
+        let output = self
+            .nodes
+            .get_mut(&leader)
+            .unwrap()
+            .add_learner(learner)
+            .unwrap();
+        self.capture(leader, output);
+        self.drain();
+    }
+
+    fn reconfigure_voters(&mut self, leader: NodeId, target: Vec<NodeId>) {
+        let output = self
+            .nodes
+            .get_mut(&leader)
+            .unwrap()
+            .reconfigure_voters(target)
+            .unwrap();
+        self.capture(leader, output);
+        self.drain();
+    }
+
     fn partition(&mut self, left: &[NodeId], right: &[NodeId]) {
         let left = left.iter().copied().map(peer).collect::<Vec<_>>();
         let right = right.iter().copied().map(peer).collect::<Vec<_>>();
@@ -203,8 +242,10 @@ impl TestCluster {
     }
 
     fn isolate(&mut self, node_id: NodeId) {
-        let other_nodes = voters()
-            .into_iter()
+        let other_nodes = self
+            .voters
+            .iter()
+            .copied()
             .filter(|candidate| *candidate != node_id)
             .collect::<Vec<_>>();
         self.partition(&[node_id], &other_nodes);
@@ -368,6 +409,124 @@ fn deterministic_campaign_elects_the_requested_voter() {
     assert_eq!(cluster.leader(), node(1));
     assert_eq!(cluster.nodes[&node(1)].status().term, Term::new(1));
     assert_eq!(cluster.observed_commit_ids(node(1)), Vec::new());
+}
+
+#[test]
+fn five_voters_elect_commit_and_restart_without_changing_quorum_membership() {
+    let voters = (1..=5).map(node).collect::<Vec<_>>();
+    let mut cluster = TestCluster::with_voters(0x5005, &voters);
+
+    cluster.campaign(node(1));
+    assert_eq!(cluster.leader(), node(1));
+    cluster.propose(node(1), 50, b"five-voter-commit");
+
+    for voter in &voters {
+        assert_eq!(
+            cluster.applied_history(*voter),
+            vec![(proposal(50), b"five-voter-commit".to_vec())]
+        );
+    }
+    assert!(
+        cluster
+            .all_digests()
+            .windows(2)
+            .all(|pair| pair[0] == pair[1])
+    );
+
+    let checkpoint = cluster
+        .nodes
+        .get_mut(&node(5))
+        .unwrap()
+        .checkpoint()
+        .unwrap();
+    assert_eq!(checkpoint.proposal_count, 1);
+    cluster.stop(node(5));
+    cluster.restart(node(5));
+    assert_eq!(
+        cluster.applied_history(node(5)),
+        vec![(proposal(50), b"five-voter-commit".to_vec())]
+    );
+}
+
+#[test]
+fn three_voters_expand_through_learners_and_joint_consensus_then_reopen() {
+    let initial = (1..=3).map(node).collect::<Vec<_>>();
+    let allowed = (1..=5).map(node).collect::<Vec<_>>();
+    let mut cluster = TestCluster::with_members(0x3505, &initial, allowed.clone());
+
+    cluster.campaign(node(1));
+    cluster.add_learner(node(1), node(4));
+    cluster.add_learner(node(1), node(5));
+    for member in &allowed {
+        let membership = cluster.nodes[member].membership().unwrap();
+        assert_eq!(membership.voters, vec![node(1), node(2), node(3)]);
+        assert_eq!(membership.learners, vec![node(4), node(5)]);
+    }
+
+    cluster.reconfigure_voters(node(1), allowed.clone());
+    for member in &allowed {
+        let membership = cluster.nodes[member].membership().unwrap();
+        assert_eq!(membership.voters, allowed);
+        assert!(membership.outgoing_voters.is_empty());
+        assert!(membership.learners.is_empty());
+        assert!(!membership.auto_leave);
+    }
+
+    cluster.propose(node(1), 51, b"after-joint-membership");
+    for member in &allowed {
+        assert_eq!(
+            cluster.applied_history(*member),
+            vec![(proposal(51), b"after-joint-membership".to_vec())]
+        );
+    }
+
+    for member in allowed.clone() {
+        cluster.stop(member);
+    }
+    for member in &allowed {
+        cluster.restart(*member);
+        assert_eq!(cluster.nodes[member].membership().unwrap().voters, allowed);
+    }
+}
+
+#[test]
+fn learner_promotion_is_rejected_until_leader_progress_reaches_commit() {
+    let initial = (1..=3).map(node).collect::<Vec<_>>();
+    let allowed = (1..=4).map(node).collect::<Vec<_>>();
+    let target = vec![node(1), node(2), node(4)];
+    let mut cluster = TestCluster::with_members(0x3414, &initial, allowed);
+
+    cluster.campaign(node(1));
+    cluster.isolate(node(4));
+    cluster.add_learner(node(1), node(4));
+    let error = cluster
+        .nodes
+        .get_mut(&node(1))
+        .unwrap()
+        .reconfigure_voters(target.clone())
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ConsensusError::LearnerNotCaughtUp {
+            learner,
+            matched_index,
+            required_index,
+        } if learner == node(4) && matched_index < required_index
+    ));
+    assert_eq!(
+        cluster.nodes[&node(1)].membership().unwrap().voters,
+        initial
+    );
+
+    cluster.heal_all();
+    cluster.tick_repeatedly(node(1), HEARTBEAT_TICK + 2);
+    cluster.reconfigure_voters(node(1), target.clone());
+    for node_id in target {
+        assert_eq!(
+            cluster.nodes[&node_id].membership().unwrap().voters,
+            [node(1), node(2), node(4)]
+        );
+    }
 }
 
 #[test]
@@ -869,9 +1028,9 @@ fn checkpoint_codec_is_canonical_bounded_and_metadata_fenced() {
         "checkpoint format compatibility golden changed"
     );
 
-    let snapshot = checkpoint_snapshot(&image, voters()).unwrap();
+    let snapshot = checkpoint_snapshot(&image, &expected_conf_state(&voters())).unwrap();
     assert_eq!(
-        decode_checkpoint_snapshot(&snapshot, group_id(), group_epoch(), voters()).unwrap(),
+        decode_checkpoint_snapshot(&snapshot, group_id(), group_epoch(), &voters()).unwrap(),
         image
     );
     assert!(matches!(
@@ -879,7 +1038,7 @@ fn checkpoint_codec_is_canonical_bounded_and_metadata_fenced() {
             &snapshot,
             GroupId::new(group_id().get() + 1).unwrap(),
             group_epoch(),
-            voters()
+            &voters()
         ),
         Err(ConsensusError::InvalidMessage(_))
     ));
@@ -888,7 +1047,7 @@ fn checkpoint_codec_is_canonical_bounded_and_metadata_fenced() {
             &snapshot,
             group_id(),
             GroupEpoch::new(group_epoch().get() + 1).unwrap(),
-            voters()
+            &voters()
         ),
         Err(ConsensusError::InvalidMessage(_))
     ));
@@ -896,7 +1055,7 @@ fn checkpoint_codec_is_canonical_bounded_and_metadata_fenced() {
     let mut wrong_term = snapshot.clone();
     wrong_term.mut_metadata().term += 1;
     assert!(matches!(
-        decode_checkpoint_snapshot(&wrong_term, group_id(), group_epoch(), voters()),
+        decode_checkpoint_snapshot(&wrong_term, group_id(), group_epoch(), &voters()),
         Err(ConsensusError::InvalidMessage(_))
     ));
     let mut wrong_voters = snapshot;
@@ -905,7 +1064,7 @@ fn checkpoint_codec_is_canonical_bounded_and_metadata_fenced() {
         .mut_conf_state()
         .set_voters(vec![1, 2, 4]);
     assert!(matches!(
-        decode_checkpoint_snapshot(&wrong_voters, group_id(), group_epoch(), voters()),
+        decode_checkpoint_snapshot(&wrong_voters, group_id(), group_epoch(), &voters()),
         Err(ConsensusError::InvalidMessage(_))
     ));
 }
@@ -1305,7 +1464,10 @@ fn assert_adapter_invariants(adapter: &InMemoryRaftAdapter) {
     assert_eq!(status.node_id, adapter.node_id);
     assert_eq!(status.group_id, adapter.group_id);
     assert_eq!(status.group_epoch, adapter.group_epoch);
-    assert_eq!(status.voter_count, 3);
+    assert_eq!(
+        status.voter_count,
+        adapter.membership().unwrap().voters.len()
+    );
     assert!(!status.fail_stopped);
 
     let mut previous_index = LogIndex::ZERO;

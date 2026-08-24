@@ -32,6 +32,11 @@ public final class RegionalStreamClient {
     this.regional = RegionalClientCore.forEndpoints(endpoints, token, scope, timeout);
   }
 
+  public RegionalStreamClient(
+      List<URI> endpoints, String token, RegionalScope scope, Duration timeout, TlsConfig tls) {
+    this.regional = RegionalClientCore.forEndpoints(endpoints, token, scope, timeout, tls);
+  }
+
   private RegionalStreamClient(List<Transport> transports, String token, RegionalScope scope) {
     this.regional = RegionalClientCore.forTransports(transports, token, scope);
   }

@@ -1,5 +1,12 @@
 use std::{
-    error::Error, future::Future, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration,
+    error::Error,
+    fs::{self, OpenOptions},
+    future::Future,
+    io::Write as _,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
 };
 
 use clap::Parser;
@@ -13,6 +20,7 @@ use epoch_node::{
     cache_tablet::{self, CacheTabletService, DEFAULT_COMMIT_WAIT as CACHE_DEFAULT_COMMIT_WAIT},
     consensus::{
         CommittedProposalApplier, ConsensusProbeConfig, ConsensusProbeError, ConsensusProbeRuntime,
+        outbound_client_builder,
     },
     epoch_target_delivery::EpochTargetDeliveryConfig,
     managed_target_delivery::{
@@ -20,10 +28,14 @@ use epoch_node::{
     },
     queue_tablet::{self, DEFAULT_COMMIT_WAIT as QUEUE_DEFAULT_COMMIT_WAIT, QueueTabletService},
     regional_auth::with_regional_auth,
+    regional_backup_api::RegionalBackupArtifact,
     regional_runtime::{RegionalNodeRuntime, RegionalRuntimeConfig},
     regional_topology::NodeTopology,
     router, spawn_maintenance,
     stream_tablet::{self, DEFAULT_COMMIT_WAIT as STREAM_DEFAULT_COMMIT_WAIT, StreamTabletService},
+    transport_security::{
+        ClientTlsFiles, ServerTlsFiles, TlsListener, configure_client_builder, load_server_config,
+    },
     validate_allowed_origins,
     webhook_delivery::{WebhookDeliveryConfig, WebhookSigningKeys},
     with_public_http_layers,
@@ -47,6 +59,7 @@ const DEFAULT_REGIONAL_CHECKPOINT_MIN_APPLIED_ENTRIES: u64 = 1_024;
 const DEFAULT_REGIONAL_EPOCH_TARGET_DELIVERY_INTERVAL_MS: u64 = 100;
 const DEFAULT_REGIONAL_SOURCE_CONNECTOR_INTERVAL_MS: u64 = 500;
 const SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const REGIONAL_RESTORE_COMPLETE_MARKER: &str = ".epoch-regional-restore-complete";
 
 #[derive(Debug, Parser)]
 #[command(name = "epoch-node", version, about = "Epoch standalone data node")]
@@ -61,6 +74,20 @@ struct Args {
     log: String,
     #[arg(long, env = "EPOCH_DATA_DIR", default_value = ".epoch")]
     data_dir: PathBuf,
+    #[arg(long, env = "EPOCH_TLS_REQUIRED")]
+    tls_required: bool,
+    #[arg(long, env = "EPOCH_HTTP_TLS_CERT_PATH")]
+    http_tls_cert_path: Option<PathBuf>,
+    #[arg(long, env = "EPOCH_HTTP_TLS_KEY_PATH")]
+    http_tls_key_path: Option<PathBuf>,
+    #[arg(long, env = "EPOCH_HTTP_TLS_CLIENT_CA_PATH")]
+    http_tls_client_ca_path: Option<PathBuf>,
+    #[arg(long, env = "EPOCH_PEER_TLS_CA_PATH")]
+    peer_tls_ca_path: Option<PathBuf>,
+    #[arg(long, env = "EPOCH_PEER_TLS_CERT_PATH")]
+    peer_tls_cert_path: Option<PathBuf>,
+    #[arg(long, env = "EPOCH_PEER_TLS_KEY_PATH")]
+    peer_tls_key_path: Option<PathBuf>,
     #[arg(
         long,
         env = "EPOCH_WAL_SEGMENT_BYTES",
@@ -81,6 +108,8 @@ struct Args {
     consensus_probe_enabled: bool,
     #[arg(long, env = "EPOCH_REGIONAL_RUNTIME_ENABLED")]
     regional_runtime_enabled: bool,
+    #[arg(long, env = "EPOCH_REGIONAL_RESTORE_PATH")]
+    regional_restore_path: Option<PathBuf>,
     #[arg(long, env = "EPOCH_AUTH_POLICY_PATH")]
     auth_policy_path: Option<PathBuf>,
     #[arg(
@@ -179,6 +208,8 @@ struct Args {
     consensus_listen: SocketAddr,
     #[arg(long, env = "EPOCH_CONSENSUS_PEERS")]
     consensus_peers: Option<String>,
+    #[arg(long, env = "EPOCH_CONSENSUS_INITIAL_VOTERS", value_delimiter = ',')]
+    consensus_initial_voters: Option<Vec<u64>>,
     #[arg(
         long,
         env = "EPOCH_CONSENSUS_TICK_MS",
@@ -263,6 +294,14 @@ struct RegionalRuntimeLaunch {
     source_connector_interval: Duration,
     topology: NodeTopology,
     webhook_delivery: Option<WebhookDeliveryConfig>,
+    restore_artifact: Option<Arc<RegionalBackupArtifact>>,
+}
+
+#[derive(Debug)]
+struct TransportSecurityLaunch {
+    public_server: Option<Arc<rustls::ServerConfig>>,
+    peer_server: Option<Arc<rustls::ServerConfig>>,
+    peer_client: Option<reqwest::Client>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,11 +324,32 @@ impl TabletProfileLaunch {
 }
 
 #[tokio::main]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the executable composition root keeps startup validation, transport selection, storage recovery, and graceful shutdown visible in one place"
+)]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     validate_allowed_origins(&args.allowed_origins)?;
-    let regional_runtime = regional_runtime_launch(&args)?;
-    let consensus_probe = consensus_probe_launch(&args)?;
+    let mut regional_runtime = regional_runtime_launch(&args)?;
+    let mut consensus_probe = consensus_probe_launch(&args)?;
+    let transport_security = transport_security_launch(
+        &args,
+        regional_runtime.is_some() || consensus_probe.is_some(),
+    )?;
+    if let Some(peer_client) = transport_security.peer_client.clone() {
+        if let Some(launch) = &mut regional_runtime {
+            launch.config = launch
+                .config
+                .clone()
+                .with_outbound_client(peer_client.clone());
+            launch.config.require_https_peer_urls()?;
+        }
+        if let Some(launch) = &mut consensus_probe {
+            launch.config = launch.config.clone().with_outbound_client(peer_client);
+            launch.config.require_https_peer_urls()?;
+        }
+    }
     let filter = EnvFilter::try_new(&args.log).unwrap_or_else(|_| EnvFilter::new("info"));
     if args.json_logs {
         tracing_subscriber::fmt()
@@ -337,10 +397,45 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "Epoch standalone node is listening"
     );
 
-    let serving_result = if let Some(launch) = regional_runtime {
-        serve_regional_mode(launch, listener, app, clock, &args.allowed_origins).await
+    let serving_result = if let Some(public_tls) = transport_security.public_server {
+        let public_listener = TlsListener::new(listener, public_tls);
+        if let Some(launch) = regional_runtime {
+            serve_regional_mode(
+                launch,
+                public_listener,
+                app,
+                clock,
+                &args.allowed_origins,
+                transport_security.peer_server,
+            )
+            .await
+        } else if let Some(launch) = consensus_probe {
+            serve_consensus_mode(
+                launch,
+                public_listener,
+                app,
+                clock,
+                transport_security.peer_server,
+            )
+            .await
+        } else {
+            axum::serve(public_listener, app)
+                .with_graceful_shutdown(shutdown_signal())
+                .await
+                .map_err(boxed_error)
+        }
+    } else if let Some(launch) = regional_runtime {
+        serve_regional_mode(
+            launch,
+            listener,
+            app,
+            clock,
+            &args.allowed_origins,
+            transport_security.peer_server,
+        )
+        .await
     } else if let Some(launch) = consensus_probe {
-        serve_consensus_mode(launch, listener, app, clock).await
+        serve_consensus_mode(launch, listener, app, clock, transport_security.peer_server).await
     } else {
         axum::serve(listener, app)
             .with_graceful_shutdown(shutdown_signal())
@@ -352,21 +447,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
     serving_result
 }
 
-async fn serve_regional_mode(
+async fn serve_regional_mode<P>(
     launch: RegionalRuntimeLaunch,
-    public_listener: TcpListener,
+    public_listener: P,
     public_app: axum::Router,
     clock: Arc<SystemClock>,
     allowed_origins: &[String],
-) -> Result<(), Box<dyn Error>> {
+    peer_tls: Option<Arc<rustls::ServerConfig>>,
+) -> Result<(), Box<dyn Error>>
+where
+    P: axum::serve::Listener<Addr = SocketAddr>,
+{
+    let restore_manifest = launch
+        .restore_artifact
+        .as_ref()
+        .map(|artifact| artifact.manifest_sha256.clone());
     let policy = Arc::new(BootstrapPolicy::load(&launch.auth_policy_path)?);
     let auth_policy_id = policy.id().to_owned();
+    let peer_authentication = if peer_tls.is_some() { "mtls" } else { "none" };
     let peer_listener = TcpListener::bind(launch.listen).await?;
     let node_id = launch.config.node_id();
     let catalog_group_id = launch.config.group_id();
     let catalog_group_epoch = launch.config.group_epoch();
     let tick_interval = launch.config.tick_interval();
-    let mut runtime = RegionalNodeRuntime::start(
+    let mut runtime_config =
         RegionalRuntimeConfig::new(launch.config, &launch.data_dir, launch.max_groups, clock)
             .with_topology(launch.topology.clone())
             .with_read_barrier_timeout(launch.read_barrier_timeout)
@@ -378,9 +482,14 @@ async fn serve_regional_mode(
             .with_epoch_target_delivery(launch.epoch_target_delivery.clone())
             .with_managed_target_delivery(launch.managed_target_delivery.clone())
             .with_source_connector_interval(launch.source_connector_interval)
-            .with_webhook_delivery(launch.webhook_delivery),
-    )
-    .await?;
+            .with_webhook_delivery(launch.webhook_delivery);
+    if let Some(artifact) = launch.restore_artifact.as_ref() {
+        runtime_config = runtime_config.with_restore_artifact(Arc::clone(artifact));
+    }
+    let mut runtime = RegionalNodeRuntime::start(runtime_config).await?;
+    if let Some(manifest_sha256) = restore_manifest.as_deref() {
+        publish_restore_completion(&launch.data_dir, manifest_sha256)?;
+    }
     let regional_public = with_public_http_layers(
         with_regional_auth(runtime.public_router(), policy),
         allowed_origins,
@@ -407,28 +516,58 @@ async fn serve_regional_mode(
         profile_guarantee_ceiling = "experimental_fixed_voter_majority",
         regional_http_authentication = "bootstrap_bearer",
         auth_policy_id,
-        peer_authentication = "none",
+        peer_authentication,
         "experimental regional multi-tablet runtime is listening"
     );
-    let server_result = serve_with_consensus_probe(
-        public_listener,
-        public_app,
-        peer_listener,
-        runtime.peer_router(),
-        runtime.wait_for_failure(),
-    )
-    .await
+    let peer_app = runtime.peer_router();
+    let actor_failure = runtime.wait_for_failure();
+    let server_result = if let Some(peer_tls) = peer_tls {
+        serve_with_consensus_probe(
+            public_listener,
+            public_app,
+            TlsListener::new(peer_listener, peer_tls),
+            peer_app,
+            actor_failure,
+        )
+        .await
+    } else {
+        serve_with_consensus_probe(
+            public_listener,
+            public_app,
+            peer_listener,
+            peer_app,
+            actor_failure,
+        )
+        .await
+    }
     .map_err(boxed_error);
     let runtime_result = runtime.shutdown().await.map_err(boxed_error);
     server_result.and(runtime_result)
 }
 
-async fn serve_consensus_mode(
+fn publish_restore_completion(data_dir: &Path, manifest_sha256: &str) -> std::io::Result<()> {
+    let marker = data_dir.join(REGIONAL_RESTORE_COMPLETE_MARKER);
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&marker)?;
+    file.write_all(manifest_sha256.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    fs::File::open(data_dir)?.sync_all()
+}
+
+async fn serve_consensus_mode<P>(
     launch: ConsensusProbeLaunch,
-    public_listener: TcpListener,
+    public_listener: P,
     public_app: axum::Router,
     clock: Arc<SystemClock>,
-) -> Result<(), Box<dyn Error>> {
+    peer_tls: Option<Arc<rustls::ServerConfig>>,
+) -> Result<(), Box<dyn Error>>
+where
+    P: axum::serve::Listener<Addr = SocketAddr>,
+{
+    let peer_authentication = if peer_tls.is_some() { "mtls" } else { "none" };
     let stable_parent = launch.stable_path.parent().ok_or_else(|| {
         ConsensusProbeError::InvalidConfiguration(format!(
             "consensus stable path has no parent: {}",
@@ -464,17 +603,29 @@ async fn serve_consensus_mode(
         } else {
             "local_durable"
         },
-        peer_authentication = "none",
-        "experimental fixed-voter consensus probe is listening"
+        peer_authentication,
+        "experimental bounded-voter consensus probe is listening"
     );
-    let server_result = serve_with_consensus_probe(
-        public_listener,
-        public_app,
-        consensus_listener,
-        consensus_app,
-        runtime.wait_for_actor_failure(),
-    )
-    .await
+    let actor_failure = runtime.wait_for_actor_failure();
+    let server_result = if let Some(peer_tls) = peer_tls {
+        serve_with_consensus_probe(
+            public_listener,
+            public_app,
+            TlsListener::new(consensus_listener, peer_tls),
+            consensus_app,
+            actor_failure,
+        )
+        .await
+    } else {
+        serve_with_consensus_probe(
+            public_listener,
+            public_app,
+            consensus_listener,
+            consensus_app,
+            actor_failure,
+        )
+        .await
+    }
     .map_err(boxed_error);
     let runtime_result = runtime.shutdown().await.map_err(boxed_error);
     server_result.and(runtime_result)
@@ -577,11 +728,196 @@ fn boxed_error(error: impl Error + 'static) -> Box<dyn Error> {
     Box::new(error)
 }
 
+fn transport_security_launch(
+    args: &Args,
+    peer_runtime_enabled: bool,
+) -> Result<TransportSecurityLaunch, ConsensusProbeError> {
+    let public_material_count = [
+        args.http_tls_cert_path.is_some(),
+        args.http_tls_key_path.is_some(),
+    ]
+    .into_iter()
+    .filter(|configured| *configured)
+    .count();
+    if public_material_count == 1
+        || (args.http_tls_client_ca_path.is_some() && public_material_count == 0)
+    {
+        return Err(invalid_transport_configuration(
+            "EPOCH_HTTP_TLS_CERT_PATH and EPOCH_HTTP_TLS_KEY_PATH must be configured together",
+        ));
+    }
+    if args.tls_required && public_material_count == 0 {
+        return Err(invalid_transport_configuration(
+            "EPOCH_HTTP_TLS_CERT_PATH and EPOCH_HTTP_TLS_KEY_PATH are required when EPOCH_TLS_REQUIRED is true",
+        ));
+    }
+
+    let peer_material_count = [
+        args.peer_tls_ca_path.is_some(),
+        args.peer_tls_cert_path.is_some(),
+        args.peer_tls_key_path.is_some(),
+    ]
+    .into_iter()
+    .filter(|configured| *configured)
+    .count();
+    if !matches!(peer_material_count, 0 | 3) {
+        return Err(invalid_transport_configuration(
+            "EPOCH_PEER_TLS_CA_PATH, EPOCH_PEER_TLS_CERT_PATH, and EPOCH_PEER_TLS_KEY_PATH must be configured together",
+        ));
+    }
+    if args.tls_required && peer_runtime_enabled && peer_material_count == 0 {
+        return Err(invalid_transport_configuration(
+            "peer TLS CA and identity paths are required for a consensus runtime when EPOCH_TLS_REQUIRED is true",
+        ));
+    }
+
+    let public_server = args
+        .http_tls_cert_path
+        .as_ref()
+        .zip(args.http_tls_key_path.as_ref())
+        .map(|(certificate, private_key)| {
+            load_server_config(&ServerTlsFiles {
+                certificate: certificate.clone(),
+                private_key: private_key.clone(),
+                client_ca: args.http_tls_client_ca_path.clone(),
+            })
+            .map_err(|error| invalid_transport_configuration(error.to_string()))
+        })
+        .transpose()?;
+
+    let peer_files = args
+        .peer_tls_ca_path
+        .as_ref()
+        .zip(args.peer_tls_cert_path.as_ref())
+        .zip(args.peer_tls_key_path.as_ref())
+        .map(|((ca, certificate), private_key)| ClientTlsFiles {
+            ca: ca.clone(),
+            certificate: certificate.clone(),
+            private_key: private_key.clone(),
+        });
+    let peer_server = peer_files
+        .as_ref()
+        .map(|files| {
+            load_server_config(&ServerTlsFiles {
+                certificate: files.certificate.clone(),
+                private_key: files.private_key.clone(),
+                client_ca: Some(files.ca.clone()),
+            })
+            .map_err(|error| invalid_transport_configuration(error.to_string()))
+        })
+        .transpose()?;
+    let peer_client = peer_files
+        .as_ref()
+        .map(|files| {
+            configure_client_builder(outbound_client_builder(), files)
+                .map_err(|error| invalid_transport_configuration(error.to_string()))?
+                .build()
+                .map_err(|error| {
+                    invalid_transport_configuration(format!(
+                        "peer TLS client could not be built: {error}"
+                    ))
+                })
+        })
+        .transpose()?;
+
+    Ok(TransportSecurityLaunch {
+        public_server,
+        peer_server,
+        peer_client,
+    })
+}
+
+fn invalid_transport_configuration(reason: impl Into<String>) -> ConsensusProbeError {
+    ConsensusProbeError::InvalidConfiguration(format!(
+        "transport security configuration is invalid: {}",
+        reason.into()
+    ))
+}
+
 fn regional_runtime_launch(
     args: &Args,
 ) -> Result<Option<RegionalRuntimeLaunch>, ConsensusProbeError> {
-    if !args.regional_runtime_enabled {
+    if !validate_regional_runtime_mode(args)? {
         return Ok(None);
+    }
+    let node_id = required_consensus_node_id(args)?;
+    let peer_spec = required_consensus_peers(args)?;
+    let config = consensus_probe_config(args, node_id, peer_spec)?;
+    let auth_policy_path = args.auth_policy_path.clone().ok_or_else(|| {
+        ConsensusProbeError::InvalidConfiguration(
+            "EPOCH_AUTH_POLICY_PATH is required for the regional runtime".into(),
+        )
+    })?;
+    let topology = NodeTopology::new(
+        node_id,
+        args.regional_region.clone(),
+        args.regional_zone.clone(),
+        args.regional_node_class.clone(),
+        config
+            .voters()
+            .iter()
+            .copied()
+            .map(epoch_consensus::NodeId::get)
+            .collect::<Vec<_>>(),
+        args.regional_max_groups,
+    )
+    .map_err(|error| ConsensusProbeError::InvalidConfiguration(error.to_string()))?;
+    let webhook_delivery = args
+        .regional_webhook_signing_keys_path
+        .as_ref()
+        .map(|path| {
+            WebhookSigningKeys::load(path)
+                .map(|signing_keys| WebhookDeliveryConfig {
+                    interval: Duration::from_millis(args.regional_webhook_delivery_interval_ms),
+                    allow_http_loopback: args.regional_webhook_allow_http_loopback,
+                    signing_keys: Arc::new(signing_keys),
+                })
+                .map_err(|error| ConsensusProbeError::InvalidConfiguration(error.to_string()))
+        })
+        .transpose()?;
+    let managed_target_secrets = args
+        .regional_managed_target_secrets_path
+        .as_ref()
+        .map(ManagedSecretStore::load)
+        .transpose()
+        .map_err(|error| ConsensusProbeError::InvalidConfiguration(error.to_string()))?
+        .unwrap_or_default();
+    let restore_artifact = regional_restore_artifact(args)?;
+    Ok(Some(RegionalRuntimeLaunch {
+        config,
+        listen: args.consensus_listen,
+        data_dir: args.data_dir.clone(),
+        auth_policy_path,
+        max_groups: args.regional_max_groups,
+        read_barrier_timeout: Duration::from_millis(args.regional_read_barrier_timeout_ms),
+        maintenance_interval: Duration::from_millis(args.regional_maintenance_interval_ms),
+        checkpoint_interval: Duration::from_millis(args.regional_checkpoint_interval_ms),
+        checkpoint_min_applied_entries: args.regional_checkpoint_min_applied_entries,
+        epoch_target_delivery: EpochTargetDeliveryConfig {
+            interval: Duration::from_millis(args.regional_epoch_target_delivery_interval_ms),
+        },
+        managed_target_delivery: ManagedTargetDeliveryConfig {
+            interval: Duration::from_millis(args.regional_managed_target_delivery_interval_ms),
+            allow_http_loopback: args.regional_managed_target_allow_http_loopback,
+            secrets: Arc::new(managed_target_secrets),
+        },
+        source_connector_interval: Duration::from_millis(
+            args.regional_source_connector_interval_ms,
+        ),
+        topology,
+        webhook_delivery,
+        restore_artifact,
+    }))
+}
+
+fn validate_regional_runtime_mode(args: &Args) -> Result<bool, ConsensusProbeError> {
+    if !args.regional_runtime_enabled {
+        if args.regional_restore_path.is_some() {
+            return Err(ConsensusProbeError::InvalidConfiguration(
+                "EPOCH_REGIONAL_RESTORE_PATH requires EPOCH_REGIONAL_RUNTIME_ENABLED".into(),
+            ));
+        }
+        return Ok(false);
     }
     if args.consensus_probe_enabled {
         return Err(ConsensusProbeError::InvalidConfiguration(
@@ -608,73 +944,20 @@ fn regional_runtime_launch(
             "EPOCH_REGIONAL_MAX_GROUPS must allow the catalog and at least one data group".into(),
         ));
     }
-    let node_id = required_consensus_node_id(args)?;
-    let peer_spec = required_consensus_peers(args)?;
-    let config = ConsensusProbeConfig::from_peer_spec(
-        node_id,
-        args.consensus_group_id,
-        args.consensus_group_epoch,
-        peer_spec,
-        Duration::from_millis(args.consensus_tick_ms),
-    )?;
-    let auth_policy_path = args.auth_policy_path.clone().ok_or_else(|| {
-        ConsensusProbeError::InvalidConfiguration(
-            "EPOCH_AUTH_POLICY_PATH is required for the regional runtime".into(),
-        )
-    })?;
-    let topology = NodeTopology::new(
-        node_id,
-        args.regional_region.clone(),
-        args.regional_zone.clone(),
-        args.regional_node_class.clone(),
-        config.voters().map(epoch_consensus::NodeId::get),
-        args.regional_max_groups,
-    )
-    .map_err(|error| ConsensusProbeError::InvalidConfiguration(error.to_string()))?;
-    let webhook_delivery = args
-        .regional_webhook_signing_keys_path
+    Ok(true)
+}
+
+fn regional_restore_artifact(
+    args: &Args,
+) -> Result<Option<Arc<RegionalBackupArtifact>>, ConsensusProbeError> {
+    args.regional_restore_path
         .as_ref()
         .map(|path| {
-            WebhookSigningKeys::load(path)
-                .map(|signing_keys| WebhookDeliveryConfig {
-                    interval: Duration::from_millis(args.regional_webhook_delivery_interval_ms),
-                    allow_http_loopback: args.regional_webhook_allow_http_loopback,
-                    signing_keys: Arc::new(signing_keys),
-                })
+            RegionalBackupArtifact::read_from_path(path)
+                .map(Arc::new)
                 .map_err(|error| ConsensusProbeError::InvalidConfiguration(error.to_string()))
         })
-        .transpose()?;
-    let managed_target_secrets = args
-        .regional_managed_target_secrets_path
-        .as_ref()
-        .map(ManagedSecretStore::load)
         .transpose()
-        .map_err(|error| ConsensusProbeError::InvalidConfiguration(error.to_string()))?
-        .unwrap_or_default();
-    Ok(Some(RegionalRuntimeLaunch {
-        config,
-        listen: args.consensus_listen,
-        data_dir: args.data_dir.clone(),
-        auth_policy_path,
-        max_groups: args.regional_max_groups,
-        read_barrier_timeout: Duration::from_millis(args.regional_read_barrier_timeout_ms),
-        maintenance_interval: Duration::from_millis(args.regional_maintenance_interval_ms),
-        checkpoint_interval: Duration::from_millis(args.regional_checkpoint_interval_ms),
-        checkpoint_min_applied_entries: args.regional_checkpoint_min_applied_entries,
-        epoch_target_delivery: EpochTargetDeliveryConfig {
-            interval: Duration::from_millis(args.regional_epoch_target_delivery_interval_ms),
-        },
-        managed_target_delivery: ManagedTargetDeliveryConfig {
-            interval: Duration::from_millis(args.regional_managed_target_delivery_interval_ms),
-            allow_http_loopback: args.regional_managed_target_allow_http_loopback,
-            secrets: Arc::new(managed_target_secrets),
-        },
-        source_connector_interval: Duration::from_millis(
-            args.regional_source_connector_interval_ms,
-        ),
-        topology,
-        webhook_delivery,
-    }))
 }
 
 fn consensus_probe_launch(
@@ -705,13 +988,7 @@ fn consensus_probe_launch(
     }
     let node_id = required_consensus_node_id(args)?;
     let peer_spec = required_consensus_peers(args)?;
-    let config = ConsensusProbeConfig::from_peer_spec(
-        node_id,
-        args.consensus_group_id,
-        args.consensus_group_epoch,
-        peer_spec,
-        Duration::from_millis(args.consensus_tick_ms),
-    )?;
+    let config = consensus_probe_config(args, node_id, peer_spec)?;
     let stable_path = args
         .data_dir
         .join("consensus")
@@ -780,15 +1057,35 @@ fn required_consensus_peers(args: &Args) -> Result<&str, ConsensusProbeError> {
     })
 }
 
-async fn serve_with_consensus_probe<E>(
-    public_listener: TcpListener,
+fn consensus_probe_config(
+    args: &Args,
+    node_id: u64,
+    peer_spec: &str,
+) -> Result<ConsensusProbeConfig, ConsensusProbeError> {
+    let config = ConsensusProbeConfig::from_peer_spec(
+        node_id,
+        args.consensus_group_id,
+        args.consensus_group_epoch,
+        peer_spec,
+        Duration::from_millis(args.consensus_tick_ms),
+    )?;
+    match &args.consensus_initial_voters {
+        Some(voters) => config.with_initial_voters(voters.iter().copied()),
+        None => Ok(config),
+    }
+}
+
+async fn serve_with_consensus_probe<E, P, C>(
+    public_listener: P,
     public_app: axum::Router,
-    consensus_listener: TcpListener,
+    consensus_listener: C,
     consensus_app: axum::Router,
     actor_failure: impl Future<Output = E>,
 ) -> std::io::Result<()>
 where
     E: Error + Send + Sync + 'static,
+    P: axum::serve::Listener<Addr = SocketAddr>,
+    C: axum::serve::Listener<Addr = SocketAddr>,
 {
     serve_with_consensus_probe_until(
         public_listener,
@@ -801,16 +1098,18 @@ where
     .await
 }
 
-async fn serve_with_consensus_probe_until<E>(
-    public_listener: TcpListener,
+async fn serve_with_consensus_probe_until<E, P, C>(
+    public_listener: P,
     public_app: axum::Router,
-    consensus_listener: TcpListener,
+    consensus_listener: C,
     consensus_app: axum::Router,
     shutdown: impl Future<Output = ()>,
     actor_failure: impl Future<Output = E>,
 ) -> std::io::Result<()>
 where
     E: Error + Send + Sync + 'static,
+    P: axum::serve::Listener<Addr = SocketAddr>,
+    C: axum::serve::Listener<Addr = SocketAddr>,
 {
     let (drain_tx, public_shutdown) = watch::channel(false);
     let consensus_shutdown = public_shutdown.clone();
@@ -911,6 +1210,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use axum::{Router, extract::State, http::StatusCode, routing::get};
+    use tempfile::TempDir;
     use tokio::sync::{Notify, oneshot};
 
     use super::*;
@@ -925,6 +1225,18 @@ mod tests {
         state.started.fetch_add(1, Ordering::SeqCst);
         state.release.notified().await;
         StatusCode::NO_CONTENT
+    }
+
+    #[test]
+    fn restore_completion_marker_is_durable_and_never_overwritten() {
+        let directory = TempDir::new().unwrap();
+        let digest = "a".repeat(64);
+        publish_restore_completion(directory.path(), &digest).unwrap();
+        assert_eq!(
+            fs::read_to_string(directory.path().join(REGIONAL_RESTORE_COMPLETE_MARKER)).unwrap(),
+            format!("{digest}\n")
+        );
+        assert!(publish_restore_completion(directory.path(), &"b".repeat(64)).is_err());
     }
 
     #[tokio::test]
@@ -1073,6 +1385,36 @@ mod tests {
     }
 
     #[test]
+    fn plaintext_transport_remains_available_for_local_development() {
+        let args = Args::try_parse_from(["epoch-node"]).unwrap();
+        let transport = transport_security_launch(&args, false).unwrap();
+        assert!(transport.public_server.is_none());
+        assert!(transport.peer_server.is_none());
+        assert!(transport.peer_client.is_none());
+    }
+
+    #[test]
+    fn required_tls_fails_closed_without_public_identity() {
+        let args = Args::try_parse_from(["epoch-node", "--tls-required"]).unwrap();
+        let error = transport_security_launch(&args, false).unwrap_err();
+        assert!(error.to_string().contains("HTTP_TLS_CERT_PATH"));
+    }
+
+    #[test]
+    fn partial_peer_identity_is_rejected_before_startup() {
+        let args = Args::try_parse_from([
+            "epoch-node",
+            "--peer-tls-ca-path",
+            "ca.pem",
+            "--peer-tls-cert-path",
+            "client.pem",
+        ])
+        .unwrap();
+        let error = transport_security_launch(&args, true).unwrap_err();
+        assert!(error.to_string().contains("PEER_TLS_KEY_PATH"));
+    }
+
+    #[test]
     fn regional_runtime_uses_catalog_group_shared_peer_listener_and_capacity() {
         let args = Args::try_parse_from([
             "epoch-node",
@@ -1139,6 +1481,7 @@ mod tests {
         assert_eq!(launch.topology.zone(), "ap-south-1b");
         assert_eq!(launch.topology.node_class(), "general-purpose");
         assert_eq!(launch.topology.consensus_voter_node_ids(), [1, 2, 3]);
+        assert!(launch.restore_artifact.is_none());
     }
 
     #[test]
@@ -1176,6 +1519,19 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("EPOCH_CONSENSUS_NODE_ID")
+        );
+
+        let restore_without_runtime = Args::try_parse_from([
+            "epoch-node",
+            "--regional-restore-path",
+            "/tmp/epoch-backup.json",
+        ])
+        .unwrap();
+        assert!(
+            regional_runtime_launch(&restore_without_runtime)
+                .unwrap_err()
+                .to_string()
+                .contains("requires EPOCH_REGIONAL_RUNTIME_ENABLED")
         );
 
         let missing_auth = Args::try_parse_from([
@@ -1290,6 +1646,40 @@ mod tests {
             PathBuf::from("/tmp/epoch-probe-test/consensus/group-7/node-2.wal")
         );
         assert!(launch.tablet_profile.is_none());
+    }
+
+    #[test]
+    fn consensus_probe_separates_bootstrap_voters_from_provisioned_members() {
+        let args = Args::try_parse_from([
+            "epoch-node",
+            "--consensus-probe-enabled",
+            "--consensus-node-id",
+            "4",
+            "--consensus-peers",
+            "1=http://127.0.0.1:7701,2=http://127.0.0.1:7702,3=http://127.0.0.1:7703,4=http://127.0.0.1:7704,5=http://127.0.0.1:7705",
+            "--consensus-initial-voters",
+            "1,2,3",
+        ])
+        .unwrap();
+        let launch = consensus_probe_launch(&args).unwrap().unwrap();
+        assert_eq!(
+            launch
+                .config
+                .voters()
+                .iter()
+                .copied()
+                .map(epoch_consensus::NodeId::get)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            launch
+                .config
+                .members()
+                .map(epoch_consensus::NodeId::get)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
     }
 
     #[test]

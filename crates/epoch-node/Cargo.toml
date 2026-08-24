@@ -7,6 +7,10 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "epoch-storage"
+path = "src/bin/epoch-storage.rs"
+
 [dependencies]
 axum.workspace = true
 base64.workspace = true
@@ -22,15 +26,24 @@ epoch-queue = { path = "../epoch-queue" }
 epoch-storage = { path = "../epoch-storage" }
 epoch-stream = { path = "../epoch-stream" }
 epoch-tablet = { path = "../epoch-tablet" }
+futures-util.workspace = true
 hmac.workspace = true
 http.workspace = true
+object_store.workspace = true
 percent-encoding.workspace = true
+mysql_async.workspace = true
+pgwire-replication.workspace = true
 reqwest.workspace = true
+rdkafka.workspace = true
+ring.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"] }
+tokio-rustls.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
@@ -39,7 +52,9 @@ url.workspace = true
 
 [dev-dependencies]
 http-body-util.workspace = true
+rcgen.workspace = true
 tempfile.workspace = true
+tokio-postgres.workspace = true
 
 [lints]
 workspace = true

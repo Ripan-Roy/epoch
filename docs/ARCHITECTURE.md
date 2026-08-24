@@ -463,10 +463,26 @@ the tablet itself remains I/O-free and a publish still proves durable intent,
 not target completion. See
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
-User-exportable snapshots/backups, PITR, membership changes, general placement
-solving, online transfer/repair/rebalance, authenticated peer transport, follower
-linearizable routing, and cross-tablet read transactions remain disabled. The
-leader-only regional read barrier is experimental. The byte contract is
+The regional runtime now composes user-exportable semantic backups from one
+barriered Catalog image and every tablet leader's barriered canonical
+checkpoint. Restore validates the whole inventory before creating fresh group
+journals and reopens Catalog, Stream, Cache, Queue, and Event Bus through their
+native snapshot implementations. Managed artifacts add AES-256-GCM,
+no-overwrite publication, retention, and an immutable creation-time operator
+restore reference. This is complete snapshot restore, not log-based semantic
+PITR or a cross-tablet transaction.
+
+Catalog-planned single-voter replacement is implemented for explicit three-
+and five-voter tablets. Every transition materializes the incoming physical
+node, adds it as a non-voting learner, waits for leader-observed catch-up,
+commits joint consensus, removes the outgoing voter, and only then finalizes
+Catalog placement. Immutable bootstrap voters remain in the durable group
+identity so every current voter can reopen the committed membership. Automatic
+multi-tablet rebalance, rack-aware repair planning, follower linearizable
+routing, and cross-tablet read transactions remain disabled. The
+supported Kubernetes runtime now requires authenticated TLS/mTLS transport;
+plaintext probe/Compose modes remain development-only. The leader-only
+regional read barrier is experimental. The byte contract is
 documented in [EPRS v1 consensus stable
 journal](../spec/formats/consensus-stable-store-v1.md); the complete scope and
 non-claims are recorded in
@@ -742,6 +758,16 @@ checkpoint before source acknowledgement; actual endpoint egress failures
 commit unhealthy state before failover. See
 [ADR-0037](adr/0037-event-integration-platform.md).
 
+A third leader-owned worker ingests HTTP/CloudEvents, immutable objects,
+PostgreSQL logical replication, MySQL row binlogs, and Kafka records through
+protocol-specific readers that cannot mutate Bus state. Every reader returns
+one bounded batch with an exact source position. The shared worker commits or
+resolves every event and error result before advancing the replicated connector
+checkpoint; only then may it acknowledge PostgreSQL or Kafka upstream.
+Stateful sessions exist only while the local node remains the eligible Bus
+leader. See [Source connectors](SOURCE_CONNECTORS.md) and
+[ADR-0040](adr/0040-initial-source-adapter-checkpoint-coupling.md).
+
 The current core slice evaluates immutable in-memory route plans rather than a
 compiled filter bytecode. It bounds a resource to 100,000 subscriptions, each
 configured route to 64 patterns and 64 filter/transform entries per collection,
@@ -829,15 +855,16 @@ abort/rollback where semantics allow it.
 Standalone mode uses the same API and state machines with one member. A
 three-or-more-node cluster enables quorum profiles.
 
-The current alpha implements the first bounded form of this layer: one
-three-voter catalog group, a capped multi-group supervisor, catalog-driven
-four-profile materialization, experimental HTTP discovery/data dispatch, and
-an authorization-protected node-local topology/capacity endpoint. Go validates
-region/zone/class constraints and limiting group capacity against all fixed
-voters before catalog mutation. It proves fixed-voter topology admission,
-fencing, failover, catch-up, and same-volume reopen; it does not yet implement
-general voter selection, membership changes, repair/rebalance planning, or a
-stable gRPC administration server in Rust.
+The alpha-exit branch implements one three- or five-voter Catalog, a capped
+multi-group supervisor, catalog-driven four-profile materialization,
+experimental HTTP discovery/data dispatch, and an authorization-protected
+node-local topology/capacity endpoint. Go validates region/zone/class
+constraints and limiting group capacity across the complete physical-node
+inventory. Rust owns learner-first single-voter replacement and durable
+joint-consensus reopen; Go reports current, bootstrap, and target membership
+without consuming a customer resource generation. Rack-aware solving,
+automatic fleet rebalance, split/merge repair, and a stable Rust gRPC
+administration server remain open.
 
 ### 11.2 Go managed plane
 
@@ -859,22 +886,46 @@ reads or changes segment files, Raft logs, queue indexes, transaction state, or
 cache memory.
 
 The Kubernetes operator follows the same boundary: custom resources express
-desired state, while the Rust catalog is authoritative for live data-plane
-state. The current controller-runtime implementation accepts a namespaced
-`EpochCluster`, validates the exact three-voter topology and referenced policy/
-credential objects, then reconciles stable StatefulSets, Services, PVCs,
-anti-affinity, hardened security contexts, explicit region/node-class identity,
-and observed conditions. It uses Lease leader election and treats API-server
-defaults as a no-op while repairing operator-owned drift. It does not yet own
-dynamic membership, backup/restore, or guarded upgrades.
+desired state, while the Rust Catalog and consensus groups are authoritative
+for live data-plane state. The controller accepts 3–1,024 physical nodes and a
+three- or five-voter Catalog, validates referenced policy, bearer, role-scoped
+TLS, encryption-key, and RWX backup objects, then reconciles stable
+StatefulSets, Services, PVCs, anti-affinity, hardened security contexts,
+explicit region/node-class identity, and observed conditions. Individual
+tablets carry their own explicit three/five-voter placement and materialize
+only on assigned physical nodes.
+
+The operator also reconciles one non-overlapping semantic-backup CronJob,
+derives status from a bounded successful termination receipt, records later
+failure/recovery, and renders a creation-time restore init container. Rust—not
+Go—creates, validates, encrypts/decrypts, and installs the semantic artifact.
+The controller uses Lease leader election and treats API-server defaults as a
+no-op while repairing owned drift.
+
+A node-image change now becomes a status-persisted guarded plan. The operator
+requires a post-request encrypted backup, queries every physical node through
+an internal mTLS Rust inventory, rejects unstable/joint or lagging groups,
+drains target leadership with epoch/term fencing, and lowers the StatefulSet
+partition for exactly one ordinal. Exact-image readiness and a second
+cluster-wide verification are required before the next ordinal. A failure
+stops the forward plan and, by default, applies the recorded stable image back
+through the same one-node partition boundary. See
+[Guarded data-plane upgrades](GUARDED_UPGRADES.md). One live same-binary
+retagged rollout passes locally; mixed-version compatibility remains open.
+Catalog-planned learner promotion/removal is owned by the Rust regional
+controller; policy-driven multi-tablet rebalance remains open.
 
 The current Go alpha runs a real `RegionalAdminService` gRPC server and a
 periodic reconciler. Its multi-endpoint HTTP authority adapter first collects
 policy-protected topology and live group capacity from every configured Rust
-node. It fails a mutation before catalog apply when the fixed voters cannot
+node. It fails a mutation before catalog apply when the admitted voters cannot
 satisfy the requested regions, zone count, node class, or additional shard
 capacity. It then applies desired generations to Rust, samples each configured
 node's route identity, and records only matching observed voters and leaders.
+An active replacement is reported as `pending` with separate assigned,
+bootstrap, target, committed, and reachable voter sets. Finalization preserves
+the customer resource generation; the next observation adopts the new
+policy-compliant placement and returns to `ready`.
 A partial outage reuses only the generation-fenced admitted topology while
 fresh route evidence becomes degraded; total authority loss clears the current
 sample. A later observation remains generation-fenced so it cannot mark newer
@@ -993,6 +1044,20 @@ audit events.
 Operational work is represented by resumable, observable operations rather than
 long synchronous API calls. Backup and restore include manifest verification and
 regular automated restore tests.
+
+Reliability campaigns follow the same rule. The soak runner checkpoints one
+exact source/runtime identity and attempt ledger atomically, accepts only typed
+four-profile fault receipts, hashes every retained artifact, and publishes an
+Ed25519-signed canonical completion manifest. Interrupted or failed time cannot
+satisfy the 30-day target, and accelerated CI evidence cannot imply an SLO. See
+[Soak testing](SOAK_TESTING.md).
+
+The disposable live Kubernetes campaign separately binds a digest-pinned
+five-machine Kind topology, exact local image IDs, mTLS install, all-profile
+traffic, encrypted backup, compacted-log voter replacement, guarded rollout,
+fresh restore, digest equality, post-restore writes, and a SHA-256 evidence
+manifest into one release gate. See
+[Live Kubernetes alpha-exit campaign](KUBERNETES_ALPHA_EXIT.md).
 
 ## 15. Deployment modes
 
@@ -1125,10 +1190,14 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0028: Automatic Regional Consensus Checkpoints](adr/0028-automatic-regional-consensus-checkpoints.md)
 - [ADR-0029: Session-Fenced Stream Consumption](adr/0029-stream-session-fenced-consumption.md)
 - [ADR-0030: Leader-Owned Signed Webhook Delivery](adr/0030-leader-owned-signed-webhook-delivery.md)
-- [ADR-0037: Replicated Event Integration Platform and Leader-Owned Delivery](adr/0037-event-integration-platform.md)
 - [ADR-0031: Leader-Owned Epoch Queue and Stream Target Delivery](adr/0031-leader-owned-epoch-target-delivery.md)
-- [ADR-0036: Replicated Queue State Services](adr/0036-queue-state-services.md)
 - [ADR-0032: Regional Cache Eviction and Committed Access Batches](adr/0032-regional-cache-eviction-and-access-batches.md)
 - [ADR-0033: Replicated Resource Governance and Authorized Cost Attribution](adr/0033-resource-governance-and-cost-attribution.md)
 - [ADR-0034: Cache State Services and Cold Read Tier](adr/0034-cache-state-services-and-cold-read-tier.md)
 - [ADR-0035: Replicated Stream State Services](adr/0035-stream-state-services.md)
+- [ADR-0036: Replicated Queue State Services](adr/0036-queue-state-services.md)
+- [ADR-0037: Replicated Event Integration Platform and Leader-Owned Delivery](adr/0037-event-integration-platform.md)
+- [ADR-0038: Product Runtime Closure](adr/0038-product-runtime-closure.md)
+- [ADR-0039: Alpha Exit and Beta-Readiness Boundary](adr/0039-alpha-exit-beta-readiness.md)
+- [ADR-0040: Initial Source Adapters and Checkpoint Coupling](adr/0040-initial-source-adapter-checkpoint-coupling.md)
+- [ADR-0041: Tag-only OCI Supply Chain](adr/0041-tag-only-oci-supply-chain.md)

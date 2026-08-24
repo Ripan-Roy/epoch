@@ -42,7 +42,7 @@ from .regional_cache import (
     RegionalCacheValue,
 )
 from .regional_queue import RegionalQueueClient
-from .transport import Transport, UrllibTransport
+from .transport import TLSConfig, Transport, UrllibTransport
 from .webhook import WebhookVerification, verify_webhook_signature
 
 __all__ = [
@@ -80,6 +80,7 @@ __all__ = [
     "StreamSuperstreamMember",
     "Subscription",
     "SubscriptionTarget",
+    "TLSConfig",
     "TransformLimits",
     "Transport",
     "UrllibTransport",

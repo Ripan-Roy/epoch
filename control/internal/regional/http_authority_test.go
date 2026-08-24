@@ -59,6 +59,10 @@ func TestHTTPAuthorityAppliesThroughAvailableNodeAndObservesPlacement(t *testing
 		ExpectedGeneration: 1,
 		ShardCount:         2,
 		ReplicaCount:       3,
+		TabletPlacements: []TabletPlacement{
+			{ShardIndex: 0, VoterNodeIDs: []uint64{1, 2, 3}},
+			{ShardIndex: 1, VoterNodeIDs: []uint64{1, 2, 3}},
+		},
 		Configuration: map[string]any{
 			"shard_count": 2,
 			"max_entries": 64,
@@ -79,6 +83,7 @@ func TestHTTPAuthorityAppliesThroughAvailableNodeAndObservesPlacement(t *testing
 		received["shard_count"] != float64(2) ||
 		received["replica_count"] != float64(3) ||
 		received["configuration"].(map[string]any)["eviction"] != "all_keys_lru" ||
+		len(received["tablet_placements"].([]any)) != 2 ||
 		received["governance"].(map[string]any)["owner"] != "team:payments" ||
 		received["governance"].(map[string]any)["classification"] != "confidential" {
 		t.Fatalf("request body = %#v", received)
@@ -229,9 +234,51 @@ func TestHTTPAuthorityObserveReturnsTruthfulIncompletePlacement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Observe() error = %v", err)
 	}
-	if !slices.Equal(observation.Tablets[0].VoterNodeIDs, []uint64{1, 2}) ||
+	if !slices.Equal(observation.Tablets[0].VoterNodeIDs, []uint64{1, 2, 3}) ||
+		!slices.Equal(observation.Tablets[0].ReachableVoterNodeIDs, []uint64{1, 2}) ||
 		observation.Tablets[0].LeaderNodeID != 1 {
 		t.Fatalf("incomplete placement was overclaimed: %+v", observation.Tablets[0])
+	}
+}
+
+func TestHTTPAuthorityPreservesCatalogMembershipTransitionIdentity(t *testing.T) {
+	key := regionalKey(resources.KindStream, "orders")
+	resource := resourceDocument(1, 3)
+	tablets := resource["tablets"].([]map[string]any)[:1]
+	tablets[0]["bootstrap_voter_node_ids"] = []string{"1", "2", "3"}
+	tablets[0]["target_voter_node_ids"] = []string{"1", "2", "4"}
+	resource["tablets"] = tablets
+	servers := make([]*httptest.Server, 0, 4)
+	for node := 1; node <= 4; node++ {
+		node := node
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			if request.URL.Path == catalogResourcePath(key) {
+				writeAuthorityJSON(writer, http.StatusOK, resource)
+				return
+			}
+			route := routeResponseDocument(node, 1, 1, request.URL.Path)
+			route["voter_node_ids"] = []string{"1", "2", "4"}
+			writeAuthorityJSON(writer, http.StatusOK, route)
+		}))
+		servers = append(servers, server)
+		t.Cleanup(server.Close)
+	}
+	authority, err := NewHTTPAuthority(serverURLs(servers), nil)
+	if err != nil {
+		t.Fatalf("NewHTTPAuthority() error = %v", err)
+	}
+
+	observation, err := authority.Observe(t.Context(), key)
+	if err != nil {
+		t.Fatalf("Observe() error = %v", err)
+	}
+	if len(observation.Tablets) != 1 ||
+		!slices.Equal(observation.Tablets[0].AssignedNodeIDs, []uint64{1, 2, 3}) ||
+		!slices.Equal(observation.Tablets[0].BootstrapVoterNodeIDs, []uint64{1, 2, 3}) ||
+		!slices.Equal(observation.Tablets[0].TargetVoterNodeIDs, []uint64{1, 2, 4}) ||
+		!slices.Equal(observation.Tablets[0].VoterNodeIDs, []uint64{1, 2, 4}) ||
+		!slices.Equal(observation.Tablets[0].ReachableVoterNodeIDs, []uint64{1, 2, 4}) {
+		t.Fatalf("membership transition observation = %+v", observation)
 	}
 }
 
@@ -377,6 +424,10 @@ func appliedDocument(generation uint64, replicas uint16) map[string]any {
 }
 
 func resourceDocument(generation uint64, replicas uint16) map[string]any {
+	voters := make([]string, replicas)
+	for index := range voters {
+		voters[index] = strconv.Itoa(index + 1)
+	}
 	return map[string]any{
 		"generation":    generationString(generation),
 		"replica_count": replicas,
@@ -388,6 +439,7 @@ func resourceDocument(generation uint64, replicas uint16) map[string]any {
 				"tablet_epoch":        "1",
 				"resource_generation": generationString(generation),
 				"replica_count":       replicas,
+				"voter_node_ids":      voters,
 			},
 			{
 				"tablet_id":           "11",
@@ -396,6 +448,7 @@ func resourceDocument(generation uint64, replicas uint16) map[string]any {
 				"tablet_epoch":        "1",
 				"resource_generation": generationString(generation),
 				"replica_count":       replicas,
+				"voter_node_ids":      voters,
 			},
 		},
 	}
@@ -415,6 +468,7 @@ func routeResponseDocument(node, leader int, generation uint64, path string) map
 		"tablet_epoch":        "1",
 		"local_node_id":       generationString(uint64(node)),
 		"leader_node_id":      generationString(uint64(leader)),
+		"voter_node_ids":      []string{"1", "2", "3"},
 		"accepts_writes":      node == leader,
 	}
 }

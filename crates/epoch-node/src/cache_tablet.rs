@@ -1,4 +1,4 @@
-//! Experimental typed Cache tablet over the fixed-voter consensus runtime.
+//! Experimental typed Cache tablet over the bounded-voter consensus runtime.
 //!
 //! This module is deliberately mounted only on the internal experimental
 //! listener. It does not replace the standalone volatile Cache routes and does

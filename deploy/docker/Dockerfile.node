@@ -1,19 +1,40 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 
 ARG RUST_VERSION=1.97.1
 
-FROM rust:${RUST_VERSION}-bookworm AS builder
+FROM rust:${RUST_VERSION}-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS builder
 WORKDIR /workspace
+
+RUN apt-get update && \
+    apt-get install --yes --no-install-recommends cmake && \
+    rm -rf /var/lib/apt/lists/*
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/workspace/target \
-    cargo build --locked --release -p epoch-node && \
-    cp /workspace/target/release/epoch-node /tmp/epoch-node
+    cargo build --locked --release -p epoch-node --bins && \
+    cp /workspace/target/release/epoch-node /tmp/epoch-node && \
+    cp /workspace/target/release/epoch-storage /tmp/epoch-storage && \
+    cp /workspace/target/release/epoch-backup /tmp/epoch-backup && \
+    cp /workspace/target/release/epoch-maintenance /tmp/epoch-maintenance
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS runtime
+
+ARG EPOCH_VERSION=dev
+ARG VCS_REF=unknown
+ARG SOURCE_URL=https://github.com/Ripan-Roy/epoch
+
+LABEL org.opencontainers.image.title="Epoch node" \
+    org.opencontainers.image.description="Epoch regional and standalone Rust data plane" \
+    org.opencontainers.image.url="${SOURCE_URL}" \
+    org.opencontainers.image.source="${SOURCE_URL}" \
+    org.opencontainers.image.documentation="${SOURCE_URL}/blob/main/README.md" \
+    org.opencontainers.image.revision="${VCS_REF}" \
+    org.opencontainers.image.version="${EPOCH_VERSION}" \
+    org.opencontainers.image.licenses="MIT" \
+    org.opencontainers.image.vendor="Epoch"
 
 RUN apt-get update && \
     apt-get install --yes --no-install-recommends ca-certificates curl tini && \
@@ -24,8 +45,14 @@ RUN apt-get update && \
     chown epoch:epoch /var/lib/epoch
 
 COPY --from=builder --chown=root:root /tmp/epoch-node /usr/local/bin/epoch-node
+COPY --from=builder --chown=root:root /tmp/epoch-storage /usr/local/bin/epoch-storage
+COPY --from=builder --chown=root:root /tmp/epoch-backup /usr/local/bin/epoch-backup
+COPY --from=builder --chown=root:root /tmp/epoch-maintenance /usr/local/bin/epoch-maintenance
 
-USER epoch:epoch
+# Kubernetes cannot prove a named image user is non-root when a pod sets
+# runAsNonRoot. Keep the named account in /etc/passwd for diagnostics, but make
+# the runtime identity numeric so the admission invariant is machine-checkable.
+USER 10001:10001
 WORKDIR /var/lib/epoch
 
 ENV EPOCH_DEPLOYMENT_MODE=standalone \

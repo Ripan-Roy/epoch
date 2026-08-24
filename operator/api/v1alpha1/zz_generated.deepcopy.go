@@ -13,6 +13,24 @@ func (in *EpochCluster) DeepCopyInto(out *EpochCluster) {
 	out.TypeMeta = in.TypeMeta
 	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
 	in.Spec.deepCopyInto(&out.Spec)
+	if in.Status.Backup.LastSuccessfulTime != nil {
+		value := in.Status.Backup.LastSuccessfulTime.DeepCopy()
+		out.Status.Backup.LastSuccessfulTime = value
+	}
+	if in.Status.Backup.LastFailureTime != nil {
+		value := in.Status.Backup.LastFailureTime.DeepCopy()
+		out.Status.Backup.LastFailureTime = value
+	}
+	if in.Status.Upgrade.TargetOrdinal != nil {
+		value := *in.Status.Upgrade.TargetOrdinal
+		out.Status.Upgrade.TargetOrdinal = &value
+	}
+	if in.Status.Upgrade.StartedAt != nil {
+		out.Status.Upgrade.StartedAt = in.Status.Upgrade.StartedAt.DeepCopy()
+	}
+	if in.Status.Upgrade.StepStartedAt != nil {
+		out.Status.Upgrade.StepStartedAt = in.Status.Upgrade.StepStartedAt.DeepCopy()
+	}
 	if in.Status.Conditions != nil {
 		out.Status.Conditions = make([]metav1.Condition, len(in.Status.Conditions))
 		copy(out.Status.Conditions, in.Status.Conditions)
@@ -58,6 +76,13 @@ func (in *EpochClusterSpec) deepCopyInto(out *EpochClusterSpec) {
 	if in.StorageClassName != nil {
 		value := *in.StorageClassName
 		out.StorageClassName = &value
+	}
+	if in.Restore != nil {
+		out.Restore = &RestoreSpec{ObjectName: in.Restore.ObjectName, EncryptionSecret: in.Restore.EncryptionSecret}
+	}
+	if in.Upgrade.RollbackOnFailure != nil {
+		value := *in.Upgrade.RollbackOnFailure
+		out.Upgrade.RollbackOnFailure = &value
 	}
 	out.AllowedOrigins = append([]string(nil), in.AllowedOrigins...)
 	in.NodeResources.DeepCopyInto(&out.NodeResources)

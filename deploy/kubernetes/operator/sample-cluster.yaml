@@ -4,14 +4,29 @@ metadata:
   name: epoch
   namespace: epoch-system
 spec:
-  nodeImage: ghcr.io/ripan-roy/epoch-node:v0.1.0-alpha.10
-  controlImage: ghcr.io/ripan-roy/epoch-control:v0.1.0-alpha.10
+  nodeImage: ghcr.io/ripan-roy/epoch-node:v0.2.0-beta.1
+  controlImage: ghcr.io/ripan-roy/epoch-control:v0.2.0-beta.1
   region: ap-south
   nodeClass: general-purpose
   replicas: 3
+  catalogReplicas: 3
   storage: 20Gi
   authPolicyConfigMap: epoch-auth-policy
   credentialSecret: epoch-control-credentials
+  transportSecurity:
+    dataPlaneSecret: epoch-data-plane-tls
+    controlPlaneSecret: epoch-control-plane-tls
+    regionalServerName: epoch-peer.epoch-system.svc
+  backup:
+    schedule: "*/15 * * * *"
+    destinationPVC: epoch-backups
+    encryptionSecret: epoch-backup-key
+    keyID: backup-key-2026-08
+    retentionCount: 7
+  upgrade:
+    backupMaxAgeSeconds: 3600
+    stepDeadlineSeconds: 900
+    rollbackOnFailure: true
   serviceType: ClusterIP
   allowedOrigins:
     - https://console.example.com

@@ -24,6 +24,8 @@ static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
 struct PersistentCluster {
+    initial_voters: Vec<NodeId>,
+    members: Vec<NodeId>,
     nodes: BTreeMap<NodeId, PersistentRaftAdapter>,
     paths: BTreeMap<NodeId, PathBuf>,
     transport: PeerTransport,
@@ -35,12 +37,23 @@ struct PersistentCluster {
 
 impl PersistentCluster {
     fn new(seed: u64) -> Self {
+        Self::with_voters(seed, voters().to_vec())
+    }
+
+    fn with_voters(seed: u64, members: Vec<NodeId>) -> Self {
+        Self::with_members(seed, members.clone(), members)
+    }
+
+    fn with_members(seed: u64, initial_voters: Vec<NodeId>, members: Vec<NodeId>) -> Self {
         let root = test_directory("cluster");
-        let paths = voters()
-            .into_iter()
+        let paths = members
+            .iter()
+            .copied()
             .map(|node_id| (node_id, root.join(format!("node-{}.wal", node_id.get()))))
             .collect::<BTreeMap<_, _>>();
         let mut cluster = Self {
+            initial_voters,
+            members,
             nodes: BTreeMap::new(),
             paths,
             transport: PeerTransport::new(seed),
@@ -107,8 +120,10 @@ impl PersistentCluster {
     }
 
     fn isolate(&mut self, isolated: NodeId) {
-        let others = voters()
-            .into_iter()
+        let others = self
+            .members
+            .iter()
+            .copied()
             .filter(|candidate| *candidate != isolated)
             .map(peer)
             .collect::<Vec<_>>();
@@ -124,13 +139,14 @@ impl PersistentCluster {
     fn reopen_all(&mut self) {
         self.nodes.clear();
         let mut outputs = Vec::new();
-        for node_id in voters() {
-            let opened = PersistentRaftAdapter::open(
+        for node_id in self.members.clone() {
+            let opened = PersistentRaftAdapter::open_with_members(
                 &self.paths[&node_id],
                 node_id,
                 group_id(),
                 group_epoch(),
-                voters(),
+                self.initial_voters.clone(),
+                self.members.clone(),
             )
             .unwrap();
             outputs.push((node_id, opened.output));
@@ -144,12 +160,13 @@ impl PersistentCluster {
 
     fn reopen_one(&mut self, node_id: NodeId) {
         assert!(self.nodes.remove(&node_id).is_some());
-        let opened = PersistentRaftAdapter::open(
+        let opened = PersistentRaftAdapter::open_with_members(
             &self.paths[&node_id],
             node_id,
             group_id(),
             group_epoch(),
-            voters(),
+            self.initial_voters.clone(),
+            self.members.clone(),
         )
         .unwrap();
         let output = opened.output;
@@ -178,6 +195,39 @@ impl PersistentCluster {
                 .send(peer(message.from()), peer(message.to()), wire)
                 .unwrap();
         }
+    }
+
+    fn add_learner(&mut self, leader: NodeId, learner: NodeId) {
+        let output = self
+            .nodes
+            .get_mut(&leader)
+            .unwrap()
+            .add_learner(learner)
+            .unwrap();
+        self.capture(leader, output);
+        self.drain();
+    }
+
+    fn transfer(&mut self, leader: NodeId, target: NodeId) {
+        let output = self
+            .nodes
+            .get_mut(&leader)
+            .unwrap()
+            .transfer_leadership(target)
+            .unwrap();
+        self.capture(leader, output);
+        self.drain();
+    }
+
+    fn reconfigure_voters(&mut self, leader: NodeId, target: Vec<NodeId>) {
+        let output = self
+            .nodes
+            .get_mut(&leader)
+            .unwrap()
+            .reconfigure_voters(target)
+            .unwrap();
+        self.capture(leader, output);
+        self.drain();
     }
 
     fn drain(&mut self) {
@@ -254,6 +304,98 @@ fn committed_history_and_digest_survive_reopening_every_adapter() {
             cluster.nodes[&node_id].lookup_proposal(proposal(1)),
             ProposalLookup::Committed(_)
         ));
+    }
+}
+
+#[test]
+fn joint_membership_entries_survive_checksums_reopen_and_a_second_reconfiguration() {
+    let five = (1..=5).map(node).collect::<Vec<_>>();
+    let three = (1..=3).map(node).collect::<Vec<_>>();
+    let mut cluster = PersistentCluster::with_members(TEST_SEED + 30, three.clone(), five.clone());
+    cluster.campaign(node(1));
+
+    for member in &five {
+        assert_eq!(cluster.nodes[member].membership().unwrap().voters, three);
+    }
+    cluster.add_learner(node(1), node(4));
+    cluster.add_learner(node(1), node(5));
+    cluster.reconfigure_voters(node(1), five.clone());
+    cluster.propose(node(1), 90, b"durable-after-joint-membership");
+    for member in &five {
+        let membership = cluster.nodes[member].membership().unwrap();
+        assert_eq!(membership.voters, five);
+        assert!(membership.outgoing_voters.is_empty());
+    }
+    let checkpoint = cluster
+        .nodes
+        .get_mut(&node(1))
+        .unwrap()
+        .checkpoint()
+        .unwrap();
+    cluster.reopen_all();
+    assert_eq!(
+        cluster.nodes[&node(1)].recovery().checkpoint_index,
+        checkpoint.index
+    );
+    for member in &five {
+        assert_eq!(cluster.nodes[member].membership().unwrap().voters, five);
+        assert_eq!(
+            cluster.applied_history(*member),
+            vec![(proposal(90), b"durable-after-joint-membership".to_vec())]
+        );
+    }
+
+    cluster.campaign(node(1));
+    cluster.reconfigure_voters(node(1), three.clone());
+    cluster.reopen_all();
+
+    for member in &five {
+        assert_eq!(cluster.nodes[member].membership().unwrap().voters, three);
+        assert_eq!(
+            cluster.applied_history(*member),
+            vec![(proposal(90), b"durable-after-joint-membership".to_vec())]
+        );
+    }
+}
+
+#[test]
+fn five_voter_group_replaces_one_voter_from_a_larger_physical_directory() {
+    let members = (1..=6).map(node).collect::<Vec<_>>();
+    let initial = (1..=5).map(node).collect::<Vec<_>>();
+    let target = (2..=6).map(node).collect::<Vec<_>>();
+    let mut cluster =
+        PersistentCluster::with_members(TEST_SEED + 31, initial.clone(), members.clone());
+    cluster.campaign(node(1));
+
+    cluster.add_learner(node(1), node(6));
+    assert_eq!(
+        cluster.nodes[&node(1)].membership().unwrap().learners,
+        [node(6)]
+    );
+    cluster.transfer(node(1), node(2));
+    assert_eq!(cluster.nodes[&node(2)].status().role, ConsensusRole::Leader);
+    cluster.reconfigure_voters(node(2), target.clone());
+    cluster.propose(node(2), 91, b"durable-after-five-voter-replacement");
+
+    for member in &members {
+        let membership = cluster.nodes[member].membership().unwrap();
+        assert_eq!(membership.allowed_members, members);
+        assert_eq!(membership.voters, target);
+        assert!(membership.outgoing_voters.is_empty());
+    }
+
+    cluster.reopen_all();
+    for member in &members {
+        assert_eq!(cluster.nodes[member].membership().unwrap().voters, target);
+        let expected = if target.contains(member) {
+            vec![(
+                proposal(91),
+                b"durable-after-five-voter-replacement".to_vec(),
+            )]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(cluster.applied_history(*member), expected);
     }
 }
 
@@ -388,6 +530,85 @@ fn profile_checkpoint_reopens_from_native_state_with_a_bounded_retry_suffix() {
             .collect::<Vec<_>>(),
         [proposal(2), proposal(3), proposal(4)]
     );
+}
+
+#[test]
+fn semantic_restore_bootstraps_a_fresh_journal_and_rejects_tampering_or_overwrite() {
+    let mut cluster = PersistentCluster::new(TEST_SEED + 21);
+    cluster.campaign(node(1));
+    cluster.propose(node(1), 1, b"before-semantic-restore");
+    cluster.propose(node(1), 2, b"second-command");
+    let index = cluster.nodes[&node(1)].status().applied_index;
+    let payload = br#"{"format_version":1,"state":"portable"}"#.to_vec();
+    let application = ApplicationSnapshot::new(
+        index,
+        *b"CATALOG_STATE_V1",
+        1,
+        Sha256::digest(&payload).into(),
+        payload,
+    )
+    .unwrap();
+    let snapshot = cluster
+        .nodes
+        .get_mut(&node(1))
+        .unwrap()
+        .export_restore_snapshot(application.clone())
+        .unwrap();
+    let expected_digest = cluster.nodes[&node(1)].state_digest();
+    let root = test_directory("semantic-restore");
+    let path = root.join("restored.wal");
+
+    PersistentRaftAdapter::restore_from_snapshot_with_members(
+        &path,
+        node(1),
+        group_id(),
+        group_epoch(),
+        voters(),
+        voters(),
+        &snapshot,
+    )
+    .unwrap();
+    let opened =
+        PersistentRaftAdapter::open(&path, node(1), group_id(), group_epoch(), voters()).unwrap();
+    assert_eq!(
+        opened.adapter.application_snapshot().unwrap(),
+        Some(application)
+    );
+    assert_eq!(opened.adapter.state_digest(), expected_digest);
+    assert_eq!(opened.adapter.membership().unwrap(), snapshot.membership);
+    assert_eq!(opened.adapter.status().applied_index, index);
+    drop(opened);
+
+    assert!(matches!(
+        PersistentRaftAdapter::restore_from_snapshot_with_members(
+            &path,
+            node(1),
+            group_id(),
+            group_epoch(),
+            voters(),
+            voters(),
+            &snapshot,
+        ),
+        Err(ConsensusError::InvalidState(_))
+    ));
+
+    let mut tampered = snapshot;
+    *tampered.checkpoint.last_mut().unwrap() ^= 0xff;
+    let tampered_path = root.join("tampered.wal");
+    assert!(
+        PersistentRaftAdapter::restore_from_snapshot_with_members(
+            &tampered_path,
+            node(1),
+            group_id(),
+            group_epoch(),
+            voters(),
+            voters(),
+            &tampered,
+        )
+        .is_err()
+    );
+    assert!(!tampered_path.exists());
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -715,7 +936,7 @@ fn committed_entry_ahead_of_checkpoint_is_published_once_during_recovery() {
     let root = test_directory("commit-ahead");
     let path = root.join("stable.wal");
     let identity = stable_identity(node(1));
-    let recovered = DiskStableStore::open(&path, identity).unwrap();
+    let recovered = DiskStableStore::open(&path, identity.clone()).unwrap();
     let mut store = recovered.store;
     let seeded_proposal = Proposal::new(
         group_id(),
@@ -740,7 +961,7 @@ fn committed_entry_ahead_of_checkpoint_is_published_once_during_recovery() {
                 commit: 1,
             },
             &[entry],
-            StableCheckpoint::empty(identity).unwrap(),
+            StableCheckpoint::empty(&identity).unwrap(),
         )
         .unwrap();
     drop(store);
@@ -781,11 +1002,13 @@ fn test_directory(label: &str) -> PathBuf {
 }
 
 fn stable_identity(node_id: NodeId) -> StableIdentity {
+    let voters = voters().to_vec();
     StableIdentity {
         node_id,
         group_id: group_id(),
         group_epoch: group_epoch(),
-        voters: voters(),
+        initial_voters: voters.clone(),
+        voters,
     }
 }
 

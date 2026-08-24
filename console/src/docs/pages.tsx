@@ -2,9 +2,14 @@ import type { ReactNode } from "react";
 
 import { CodeBlock, CodeTabs, type CodeSample } from "./CodeBlock";
 import {
+  backupRestoreSpec,
+  backupStatus,
   consensusCheckpoint,
   epochTargetLanguageGuides,
   governanceInventory,
+  guardedUpgradeSpec,
+  guardedUpgradeStatus,
+  kubernetesAlphaExitCampaign,
   kubernetesInstall,
   languageGuides,
   managementCli,
@@ -24,12 +29,16 @@ import {
   regionalQueueResource,
   regionalResource,
   regionalWebhookConfiguration,
+  releaseArtifactVerification,
   repositoryDocsUrl,
   sdkSurface,
   signedWebhookLanguageGuides,
+  soakCampaign,
   sourceConnectorContract,
   type LanguageId,
   type RegionalGuide,
+  voterReplacementPlan,
+  voterReplacementStatus,
 } from "./content";
 
 /* --------------------------------------------------------------------------
@@ -189,6 +198,12 @@ export function OverviewBody() {
             <span>Concept</span>
             <strong>Resource governance</strong>
             <p>Require ownership and classification, filter inventory, and explain cost drivers.</p>
+            <em aria-hidden="true">Read →</em>
+          </a>
+          <a className="reference-card" href="#/docs/backup-restore">
+            <span>Operations</span>
+            <strong>Backup &amp; restore</strong>
+            <p>Capture distributed semantic state, encrypt it, and restore a fresh regional cluster.</p>
             <em aria-hidden="true">Read →</em>
           </a>
           <a className="reference-card" href="#/docs/sdk-reference">
@@ -398,17 +413,20 @@ export function ClusterMilestoneBody() {
     <>
       <Topic id="scope" title="What the regional runtime does today">
         <p>
-          Three Rust nodes now run a dedicated catalog group plus simultaneous Cache, Stream, Queue, and Event
-          Bus tablets behind resource/shard routing. The Go control plane reconciles desired state through
-          Rust, transactionally persists management metadata, and exposes observed placement to the browser;
-          the console never contacts a storage node. The public SDK quickstart remains standalone and{" "}
-          <code>local_durable</code>.
+          A regional deployment accepts 3–1,024 physical Rust nodes. One dedicated Catalog and independent
+          three- or five-voter Cache, Stream, Queue, and Event Bus tablets run behind resource/shard routing;
+          each node materializes only the groups assigned to it. The Go control plane reconciles desired state
+          through Rust, transactionally persists management metadata, and exposes observed placement to the
+          browser; the console never contacts a storage node. The public SDK quickstart remains standalone and
+          <code> local_durable</code>.
         </p>
         <p>
-          The fixed voters now report configured region, zone, class, and live group capacity; Go validates
-          requested regions, minimum zones, class, and incremental capacity before touching the catalog. That
-          is not dynamic membership, rack placement, or online rebalance. The Go metadata database still has
-          one process owner and these regional routes remain experimental.
+          Nodes report configured region, zone, class, and live group capacity; Go validates requested
+          regions, minimum zones, class, distinct three/five-voter placement, and incremental capacity before
+          touching the Catalog. A committed single-voter plan now adds one learner, waits for catch-up, enters
+          joint consensus, finalizes the target, and reopens durably; rack-aware selection and automatic
+          multi-tablet rebalance remain open. The Go metadata database still has one process owner and these
+          regional routes remain experimental.
         </p>
         <p>
           Regional reads default to a safe leader <code>ReadIndex</code>, wait for majority confirmation and
@@ -447,8 +465,9 @@ export function ClusterMilestoneBody() {
           lease. The current regional leaders also propose Stream retention/session, Queue timer, Cache
           value/lock, and Event Bus lease/archive-retention commands at exact replicated deadlines; topology
           reports node-local scheduler and target-worker counters. Managed HTTP/gRPC and regional HTTP require
-          a shared deny-by-default bootstrap bearer policy, but that is not OIDC, TLS/mTLS, credential
-          expiry/revocation, or immutable audit export.
+          a shared deny-by-default bearer policy; the operator deployment also requires public TLS and
+          peer/control mTLS. OIDC, credential expiry/revocation, certificate issuance, and immutable audit
+          export remain open.
         </p>
       </Topic>
 
@@ -557,20 +576,70 @@ export function ClusterMilestoneBody() {
 export function DeploymentBody() {
   return (
     <>
-      <Note title="Alpha installation boundary">
-        The operator installs the current fixed three-voter runtime and one durable control owner. Dynamic
-        membership, automated backups, guarded rolling upgrades, TLS/mTLS, and published OCI images remain
-        beta-hardening gates.
+      <Note title="Alpha-exit installation boundary">
+        The operator installs N physical nodes with three- or five-voter groups, mandatory TLS/mTLS, one
+        durable control owner, scheduled encrypted semantic backups, guarded data-node upgrades, and explicit
+        learner-first voter replacement. A clean local Kubernetes lifecycle passes with the same binary under
+        two tags; mixed-version compatibility, cloud-object destinations, and protected publication remain
+        open gates.
       </Note>
 
       <Topic id="kubernetes" title="Install on Kubernetes">
         <p>
-          The <code>EpochCluster</code> controller requires three distinct Kubernetes nodes, renders stable
-          peer identities, provisions one PVC per voter and the control owner, checks referenced policy and
-          credential objects before creating workloads, and reports observed readiness through status
-          conditions.
+          The <code>EpochCluster</code> controller accepts 3–1,024 physical nodes. It renders stable peer
+          identities, provisions one PVC per node and the control owner, validates policy, credential, TLS,
+          backup key, and RWX destination references before creating workloads, and reports observed readiness
+          through status conditions.
         </p>
         <CodeBlock label="shell" value={kubernetesInstall} />
+      </Topic>
+
+      <Topic id="live-campaign" title="Prove the live managed lifecycle">
+        <p>
+          The release campaign creates a pinned one-control/four-worker Kind cluster and proves mTLS install,
+          all-profile traffic, encrypted backup, one compacted-log voter replacement, backup-gated rollout,
+          fresh-cluster restore, exact state digests, and post-restore writes. It deletes the cluster on every
+          exit path and writes a SHA-256-bound evidence bundle.
+        </p>
+        <CodeBlock label="shell" value={kubernetesAlphaExitCampaign} />
+        <div className="evidence-grid">
+          <EvidenceCard label="Topology" claim="Placement is derived from observed three-of-four voters.">
+            The campaign does not assume that physical nodes 1/2/3 host every tablet; the same planner covers
+            N physical nodes and bounded three- or five-voter groups.
+          </EvidenceCard>
+          <EvidenceCard label="Recovery" claim="Backup, replacement, rollout, and restore pass in one run.">
+            A replacement learner catches up from a refreshed native snapshot after compaction, Catalog
+            finalizes the target, and a separate restored cluster matches every source digest.
+          </EvidenceCard>
+          <EvidenceCard label="Claim ceiling" claim="The rollout is not mixed-version certification.">
+            Both rollout tags resolve to one immutable node image ID. No production SLO, RPO, RTO, throughput,
+            latency, or multi-region claim is inferred.
+          </EvidenceCard>
+        </div>
+      </Topic>
+
+      <Topic id="release-artifacts" title="Verify release artifacts">
+        <p>
+          A release publishes separate node, control, operator, and CLI manifests for Linux amd64 and arm64.
+          Epoch never publishes <code>latest</code>. Resolve an exact tag, verify its immutable manifest
+          digest against the tag-only workflow identity and GitHub attestations, review the platform-specific
+          SPDX SBOM, and deploy by digest.
+        </p>
+        <CodeBlock label="shell" value={releaseArtifactVerification} />
+        <div className="evidence-grid">
+          <EvidenceCard label="Pull request" claim="Candidate artifacts cannot be published.">
+            CI builds and inspects all four non-root images and retains structurally validated SPDX evidence
+            without logging in to a registry.
+          </EvidenceCard>
+          <EvidenceCard label="Release tag" claim="The immutable manifest is bound to exact main source.">
+            Only a synchronized version tag at the current <code>main</code> can publish, attest, keylessly
+            sign, verify, and create the curated prerelease.
+          </EvidenceCard>
+          <EvidenceCard label="Platform evidence" claim="Every architecture has its own package inventory.">
+            Separate amd64 and arm64 SBOM attestations prevent one generic document from standing in for the
+            actual platform selected by the runtime.
+          </EvidenceCard>
+        </div>
       </Topic>
 
       <Topic id="cli" title="Use the management CLI">
@@ -582,22 +651,71 @@ export function DeploymentBody() {
         <CodeBlock label="shell" value={managementCli} />
       </Topic>
 
-      <Topic id="source-connectors" title="Ingest from an HTTP source connector">
+      <Topic id="source-connectors" title="Ingest from source connectors">
         <p>
-          Only the active Event Bus tablet leader polls. Every event receives a deterministic proposal
-          identity, and the connector checkpoint advances only after every record has a committed applied or
-          error-routed result. A crash before checkpoint replays the same identities without a duplicate Bus
-          event.
+          The active Event Bus tablet leader can ingest bounded HTTP/CloudEvents batches, immutable
+          S3-compatible/Azure/GCS objects, PostgreSQL logical replication, MySQL row binlogs, and Kafka
+          records. Every record receives a deterministic proposal identity; the replicated checkpoint advances
+          before PostgreSQL LSN feedback or Kafka group-offset commit.
         </p>
         <CodeBlock label="http" value={sourceConnectorContract} />
+        <div className="evidence-grid">
+          <EvidenceCard label="Storage" claim="Immutable identity fences every object cursor.">
+            Lexically ordered, bounded objects resume from a version/ETag-fenced key. Malformed objects route
+            to durable connector errors.
+          </EvidenceCard>
+          <EvidenceCard label="Relational CDC" claim="Only complete transactions advance.">
+            PostgreSQL waits for Commit LSN and MySQL waits for XID/COMMIT before advancing a bounded
+            transaction checkpoint.
+          </EvidenceCard>
+          <EvidenceCard label="Kafka" claim="The replicated Epoch cursor is authoritative.">
+            Epoch seeks every assignment generation to its replicated per-partition cursor and commits the
+            external consumer-group offsets only after its own checkpoint.
+          </EvidenceCard>
+        </div>
+      </Topic>
+
+      <Topic id="soak" title="Run resumable fault evidence">
+        <p>
+          Each round drives all four profiles through control loss, profile-leader loss, catch-up, and an
+          all-voter reopen. Attempt state is atomic, every retained artifact is SHA-256 bound, and completion
+          is an Ed25519-signed canonical manifest. The accelerated profile validates this machinery; only the
+          long profile counts successful active runtime toward the separate 30-day gate.
+        </p>
+        <CodeBlock label="shell" value={soakCampaign} />
+        <div className="evidence-grid">
+          <EvidenceCard
+            label="Resume"
+            claim="Completed rounds are never silently rerun or combined across builds."
+          >
+            Plan, complete source-tree, image, platform, and runtime identity must match; an unfinished
+            attempt becomes explicit interrupted evidence before the same round retries.
+          </EvidenceCard>
+          <EvidenceCard
+            label="Integrity"
+            claim="Manifest, event log, results, and logs are independently verifiable."
+          >
+            Canonical JSON, safe relative paths, byte counts, SHA-256 receipts, public-key fingerprint, and
+            the Ed25519 signature all fail closed on tampering.
+          </EvidenceCard>
+          <EvidenceCard
+            label="Claim ceiling"
+            claim="Accelerated success is not a latency or availability SLO."
+          >
+            Offline and failed time do not count toward 30 days, and Docker host faults do not stand in for
+            multi-zone, disk, network, or cloud outage certification.
+          </EvidenceCard>
+        </div>
       </Topic>
 
       <Topic id="operations" title="Operational evidence and limits">
         <p>
           Regional topology exposes source poll passes, batches, applied/error-routed records, checkpoints,
-          errors, and the last bounded error. The real three-process test proves cursor propagation,
-          checkpoint convergence, all-voter restart, and exact state reopen. Generic HTTP and CloudEvents
-          sources are implemented; CDC, Kafka, and object-store source adapters still require certification.
+          errors, backup/checkpoint state, and the last bounded error. Real-process tests prove cursor
+          propagation, distributed backup capture, all-profile restore, all-voter restart, and exact state
+          reopen. A pinned live service matrix covers MinIO/S3, PostgreSQL, MySQL, and Kafka. Azure/GCS live
+          emulators, cloud workload identity, load/soak, and crash-at-every-network-boundary certification
+          remain production gates.
         </p>
         <div className="reference-grid">
           <ReferenceCard
@@ -607,6 +725,24 @@ export function DeploymentBody() {
             href={`${repositoryDocsUrl}/KUBERNETES_OPERATOR.md`}
           />
           <ReferenceCard
+            eyebrow="Release evidence"
+            title="Live Kubernetes alpha-exit campaign"
+            description="Pinned topology, exact lifecycle stages, local command, evidence schema, CI artifact, cleanup behavior, and claim boundary."
+            href={`${repositoryDocsUrl}/KUBERNETES_ALPHA_EXIT.md`}
+          />
+          <ReferenceCard
+            eyebrow="Architecture decision"
+            title="Product runtime closure"
+            description="The operator, control owner, CLI, source ingestion, deployment, and release-evidence boundaries delivered by the managed runtime."
+            href={`${repositoryDocsUrl}/adr/0038-product-runtime-closure.md`}
+          />
+          <ReferenceCard
+            eyebrow="Supply chain"
+            title="Release artifacts and verification"
+            description="Exact image names, no-latest policy, immutable digest verification, signatures, provenance, SBOMs, and non-claims."
+            href={`${repositoryDocsUrl}/RELEASE_ARTIFACTS.md`}
+          />
+          <ReferenceCard
             eyebrow="CLI guide"
             title="Management CLI"
             description="Strict manifests, fully qualified names, idempotency, OCC, diagnostics, and transport limits."
@@ -614,15 +750,216 @@ export function DeploymentBody() {
           />
           <ReferenceCard
             eyebrow="Source contract"
-            title="HTTP source connectors"
-            description="Poll protocol, security boundary, cursor invariants, failure ordering, and recovery proof."
+            title="Source connectors"
+            description="HTTP, immutable object, PostgreSQL, MySQL, and Kafka configuration, cursor invariants, failure ordering, and conformance."
             href={`${repositoryDocsUrl}/SOURCE_CONNECTORS.md`}
           />
           <ReferenceCard
+            eyebrow="Recovery guide"
+            title="Regional backup and restore"
+            description="Distributed quorum barriers, canonical manifests, encryption, retention, status, and fresh-cluster restore."
+            href={`${repositoryDocsUrl}/REGIONAL_BACKUP_RESTORE.md`}
+          />
+          <ReferenceCard
+            eyebrow="Reliability evidence"
+            title="Resumable load, fault, and soak campaigns"
+            description="Exact identity, atomic resumption, typed invariants, artifact receipts, Ed25519 signatures, duration gates, and non-claims."
+            href={`${repositoryDocsUrl}/SOAK_TESTING.md`}
+          />
+          <ReferenceCard
             eyebrow="Architecture decision"
-            title="Product runtime closure"
-            description="Operator ownership, CLI contract, source commit ordering, consequences, verification, and beta gates."
-            href={`${repositoryDocsUrl}/adr/0038-product-runtime-closure.md`}
+            title="Source checkpoint coupling"
+            description="Reader isolation, authoritative cursors, post-checkpoint acknowledgements, session fencing, and remaining beta gates."
+            href={`${repositoryDocsUrl}/adr/0040-initial-source-adapter-checkpoint-coupling.md`}
+          />
+          <ReferenceCard
+            eyebrow="Architecture decision"
+            title="Tag-only OCI supply chain"
+            description="Exact-main publication, component boundaries, platform evidence, keyless identity, and deferred package artifacts."
+            href={`${repositoryDocsUrl}/adr/0041-tag-only-oci-supply-chain.md`}
+          />
+        </div>
+      </Topic>
+    </>
+  );
+}
+
+export function GuardedUpgradeBody() {
+  return (
+    <>
+      <Note title="An image change is a plan, not a rollout">
+        The operator holds the StatefulSet partition at the replica count until an encrypted backup completes
+        after the request begins. It then releases exactly one ordinal only after Rust preflight and
+        term-fenced leadership drain succeed.
+      </Note>
+
+      <Topic id="configure" title="Configure the guardrails">
+        <p>
+          The defaults are a one-hour maximum backup age, a 15-minute deadline per active step, and automatic
+          rollback. A retry token explicitly creates a new request identity for the same failed target image.
+        </p>
+        <CodeBlock label="yaml" value={guardedUpgradeSpec} />
+      </Topic>
+
+      <Topic id="forward" title="One-ordinal forward path">
+        <p>
+          Each target passes <code>WaitingForBackup → Preflight → Draining → Updating → Verifying</code>.
+          Preflight validates every group cluster-wide: one leader, one term view, stable three/five-voter
+          membership, all-voter apply and replication progress, no pending snapshot, and no fail-stop. Drain
+          chooses a caught-up active successor and fences transfer by group epoch and leader term. Exact
+          target image plus Ready status and a second invariant receipt are required before the next lower
+          ordinal.
+        </p>
+      </Topic>
+
+      <Topic id="rollback" title="Stop and guarded rollback">
+        <p>
+          Invalid receipts, failed Jobs, invariant degradation, unexpected images, or deadlines stop forward
+          progress. By default, changed ordinals return to the recorded stable image through the same one-node
+          partition boundary, with drain before mutation and verification afterward. If rollback cannot prove
+          safety, the phase is <code>Failed</code> and the partition remains fenced.
+        </p>
+      </Topic>
+
+      <Topic id="observe" title="Observe the durable plan">
+        <CodeBlock label="shell" value={guardedUpgradeStatus} />
+        <p>
+          <code>UpgradeReady</code> is true only in <code>Stable</code>. The state machine persists current
+          and target images, request ID, phase, target ordinal, timestamps, mutation marker, verified-node
+          count, and a bounded failure message, so operator restart resumes the same boundary.
+        </p>
+        <div className="reference-grid">
+          <ReferenceCard
+            eyebrow="Operations"
+            title="Guarded data-plane upgrades"
+            description="State transitions, internal mTLS API, receipt validation, rollback behavior, commands, and release limits."
+            href={`${repositoryDocsUrl}/GUARDED_UPGRADES.md`}
+          />
+          <ReferenceCard
+            eyebrow="Architecture decision"
+            title="Alpha exit and beta readiness"
+            description="The complete security, recovery, replacement, connector, artifact, and evidence gate."
+            href={`${repositoryDocsUrl}/adr/0039-alpha-exit-beta-readiness.md`}
+          />
+        </div>
+      </Topic>
+    </>
+  );
+}
+
+export function VoterReplacementBody() {
+  return (
+    <>
+      <Note title="One voter, one committed plan">
+        Epoch never swaps a voter by editing a StatefulSet or rewriting a journal. Catalog first commits one
+        exact target, then the data-group leader adds only the incoming node as a learner and waits through
+        its current commit index before joint consensus.
+      </Note>
+
+      <Topic id="contract" title="Learner-first safety contract">
+        <p>
+          Three- and five-voter groups are supported inside a 3–1,024-node physical region. A target must be
+          sorted, remain in the immutable member directory, and differ by one removal plus one addition. Stale
+          epochs/generations, conflicting plans, direct placement edits, and multi-voter changes fail before
+          Catalog mutation.
+        </p>
+      </Topic>
+
+      <Topic id="plan" title="Commit the replacement plan">
+        <p>
+          The provisional route requires supported TLS, bearer authentication, and cluster-scoped
+          <code> catalog.apply</code>. Decimal strings preserve every 64-bit identity. Planning and
+          finalization do not consume a customer resource generation.
+        </p>
+        <CodeBlock label="shell" value={voterReplacementPlan} />
+      </Topic>
+
+      <Topic id="observe" title="Observe current, target, and committed voters">
+        <p>
+          While catch-up is active, Go reports <code>pending</code> and separates assigned, bootstrap, target,
+          committed, and reachable voter sets. After stable Raft membership equals the target, Catalog
+          finalization clears the target, the removed runtime stops, and a fully reachable tablet returns to
+          <code> ready</code>.
+        </p>
+        <CodeBlock label="shell" value={voterReplacementStatus} />
+      </Topic>
+
+      <Topic id="recovery" title="Recovery and current limits">
+        <p>
+          The focused four-node proof commits Stream data on voters 1/2/3, replaces node 3 with node 4,
+          verifies the record on node 4, stops node 3, and reopens every journal as voters 1/2/4. Rack-aware
+          solving, automatic fleet evacuation, concurrent reservations, and live Kubernetes fault evidence
+          remain beta gates.
+        </p>
+        <ReferenceCard
+          eyebrow="Operations"
+          title="Learner-first voter replacement"
+          description="Plan API, catch-up and joint-consensus invariants, status fields, recovery proof, and limits."
+          href={`${repositoryDocsUrl}/VOTER_REPLACEMENT.md`}
+        />
+      </Topic>
+    </>
+  );
+}
+
+export function BackupRestoreBody() {
+  return (
+    <>
+      <Note title="Semantic, not a directory copy">
+        One Catalog leader captures its quorum-confirmed image, derives the exact tablet inventory from that
+        checkpoint, and collects every tablet checkpoint from its actual leader. A partial node filesystem is
+        never labeled as a regional backup.
+      </Note>
+
+      <Topic id="capture" title="Distributed capture contract">
+        <p>
+          <code>POST /v1/admin/backups</code> requires mTLS, bearer authentication, and the cluster-scoped
+          <code> backup.create</code> action. The canonical artifact contains Catalog, Stream, Cache, Queue,
+          and Event Bus state; each group carries its membership, epoch, quorum read/applied boundary,
+          application digest, and native consensus restore snapshot. Tablet leaders do not need to be
+          co-located with the Catalog leader.
+        </p>
+      </Topic>
+
+      <Topic id="encryption" title="Encryption, publication, and retention">
+        <p>
+          The managed <code>EPBKAE01</code> envelope uses AES-256-GCM, a fresh nonce, a mounted 32-byte key,
+          authenticated metadata, and atomic no-overwrite publication. The operator runs one non-overlapping
+          CronJob and records the exact object, manifest digest, key ID, retained count, completion time, and
+          latest bounded failure in status.
+        </p>
+        <CodeBlock label="shell" value={backupStatus} />
+      </Topic>
+
+      <Topic id="restore" title="Restore a fresh regional cluster">
+        <p>
+          Keep the key Secret that protects the selected object, provision fresh data PVCs, and set the
+          restore reference before first reconciliation. An init container authenticates and decrypts into
+          ephemeral storage; Rust validates the complete Catalog/tablet inventory before creating journals and
+          writes a durable completion marker only after startup succeeds. The object and key reference become
+          immutable after initialization.
+        </p>
+        <CodeBlock label="yaml" value={backupRestoreSpec} />
+      </Topic>
+
+      <Topic id="limits" title="Current limits">
+        <p>
+          This is a complete semantic snapshot, not cross-tablet transactional time or log-based PITR. The
+          initial managed backend is an encrypted RWX PVC. Cloud-object destinations, external KMS, automated
+          restore drills, and measured RPO/RTO remain alpha-exit work.
+        </p>
+        <div className="reference-grid">
+          <ReferenceCard
+            eyebrow="Operations"
+            title="Regional backup and restore"
+            description="Exact API, encrypted format, Kubernetes prerequisites, restore lifecycle, and non-claims."
+            href={`${repositoryDocsUrl}/REGIONAL_BACKUP_RESTORE.md`}
+          />
+          <ReferenceCard
+            eyebrow="Architecture decision"
+            title="Alpha exit and beta readiness"
+            description="The security, recovery, upgrade, connector, artifact, and evidence gates for beta."
+            href={`${repositoryDocsUrl}/adr/0039-alpha-exit-beta-readiness.md`}
           />
         </div>
       </Topic>
@@ -1579,9 +1916,9 @@ export function ReferenceBody() {
           />
           <ReferenceCard
             eyebrow="Release"
-            title="v0.1.0-alpha.10 release notes"
-            description="Verified milestone highlights, source-only artifacts, compatibility guidance, and explicit alpha limitations."
-            href={`${repositoryDocsUrl}/releases/v0.1.0-alpha.10.md`}
+            title="v0.2.0-beta.1 release notes"
+            description="Alpha-exit behavior, verified OCI artifacts, compatibility guidance, and explicit beta limitations."
+            href={`${repositoryDocsUrl}/releases/v0.2.0-beta.1.md`}
           />
         </div>
       </Topic>

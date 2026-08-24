@@ -26,9 +26,13 @@ const RESERVED_GOVERNANCE_TAG_PREFIX: &str = "epoch.io/";
 pub const CATALOG_COMMAND_FORMAT_VERSION: u16 = 1;
 pub const CATALOG_CONFIG_COMMAND_FORMAT_VERSION: u16 = 2;
 pub const CATALOG_GOVERNANCE_COMMAND_FORMAT_VERSION: u16 = 3;
+pub const CATALOG_PLACEMENT_COMMAND_FORMAT_VERSION: u16 = 4;
+pub const CATALOG_MEMBERSHIP_COMMAND_FORMAT_VERSION: u16 = 5;
 pub const CATALOG_SNAPSHOT_FORMAT_VERSION: u16 = 1;
 pub const CATALOG_CONFIG_SNAPSHOT_FORMAT_VERSION: u16 = 2;
 pub const CATALOG_GOVERNANCE_SNAPSHOT_FORMAT_VERSION: u16 = 3;
+pub const CATALOG_PLACEMENT_SNAPSHOT_FORMAT_VERSION: u16 = 4;
+pub const CATALOG_MEMBERSHIP_SNAPSHOT_FORMAT_VERSION: u16 = 5;
 pub const MAX_CATALOG_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 
 pub type CatalogResult<T> = Result<T, CatalogError>;
@@ -279,6 +283,16 @@ pub struct TabletDescriptor {
     pub resource_generation: u64,
     pub workload_profile: WorkloadProfile,
     pub replica_count: u16,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub voter_node_ids: Vec<u64>,
+    /// Immutable voter set used only when creating a fresh local Raft journal.
+    /// Legacy descriptors omit it and use `voter_node_ids` as the bootstrap.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bootstrap_voter_node_ids: Vec<u64>,
+    /// One learner-first replacement target. While present, materializers host
+    /// the union of current and target voters; only consensus may finalize it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_voter_node_ids: Vec<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,6 +311,18 @@ pub struct ApplyResource {
     pub expected_generation: Option<u64>,
     pub name: ResourceName,
     pub spec: ResourceSpec,
+    /// Concrete, per-shard voter assignments selected from the regional node
+    /// inventory. Legacy callers may omit this field; once a resource has
+    /// explicit assignments, every subsequent apply must carry all shards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tablet_placements: Vec<TabletPlacement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TabletPlacement {
+    pub shard_index: u32,
+    pub voter_node_ids: Vec<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,10 +334,32 @@ pub struct DeleteResource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanTabletMembership {
+    pub request_token: String,
+    pub tablet_id: u64,
+    pub expected_tablet_epoch: u64,
+    pub expected_resource_generation: u64,
+    pub target_voter_node_ids: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FinalizeTabletMembership {
+    pub request_token: String,
+    pub tablet_id: u64,
+    pub expected_tablet_epoch: u64,
+    pub expected_resource_generation: u64,
+    pub target_voter_node_ids: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "request", rename_all = "snake_case")]
 pub enum CatalogCommand {
     Apply(ApplyResource),
     Delete(DeleteResource),
+    PlanMembership(PlanTabletMembership),
+    FinalizeMembership(FinalizeTabletMembership),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -345,6 +393,8 @@ impl CatalogCommand {
             CATALOG_COMMAND_FORMAT_VERSION
                 | CATALOG_CONFIG_COMMAND_FORMAT_VERSION
                 | CATALOG_GOVERNANCE_COMMAND_FORMAT_VERSION
+                | CATALOG_PLACEMENT_COMMAND_FORMAT_VERSION
+                | CATALOG_MEMBERSHIP_COMMAND_FORMAT_VERSION
         ) {
             return Err(CatalogError::UnsupportedCommandVersion(
                 envelope.format_version,
@@ -364,6 +414,12 @@ impl CatalogCommand {
 
     const fn format_version(&self) -> u16 {
         match self {
+            Self::PlanMembership(_) | Self::FinalizeMembership(_) => {
+                CATALOG_MEMBERSHIP_COMMAND_FORMAT_VERSION
+            }
+            Self::Apply(request) if !request.tablet_placements.is_empty() => {
+                CATALOG_PLACEMENT_COMMAND_FORMAT_VERSION
+            }
             Self::Apply(request) if request.spec.governance.is_some() => {
                 CATALOG_GOVERNANCE_COMMAND_FORMAT_VERSION
             }
@@ -374,10 +430,12 @@ impl CatalogCommand {
         }
     }
 
-    fn request_token(&self) -> &str {
+    pub fn request_token(&self) -> &str {
         match self {
             Self::Apply(request) => &request.request_token,
             Self::Delete(request) => &request.request_token,
+            Self::PlanMembership(request) => &request.request_token,
+            Self::FinalizeMembership(request) => &request.request_token,
         }
     }
 }
@@ -527,6 +585,10 @@ impl Catalog {
         let mutation = match &command {
             CatalogCommand::Apply(request) => self.apply_resource(request)?,
             CatalogCommand::Delete(request) => self.delete_resource(request)?,
+            CatalogCommand::PlanMembership(request) => self.plan_tablet_membership(request)?,
+            CatalogCommand::FinalizeMembership(request) => {
+                self.finalize_tablet_membership(request)?
+            }
         };
         self.completed_requests.insert(
             command.request_token().to_owned(),
@@ -643,6 +705,8 @@ impl Catalog {
             CATALOG_SNAPSHOT_FORMAT_VERSION
                 | CATALOG_CONFIG_SNAPSHOT_FORMAT_VERSION
                 | CATALOG_GOVERNANCE_SNAPSHOT_FORMAT_VERSION
+                | CATALOG_PLACEMENT_SNAPSHOT_FORMAT_VERSION
+                | CATALOG_MEMBERSHIP_SNAPSHOT_FORMAT_VERSION
         ) {
             return Err(CatalogError::UnsupportedSnapshotVersion(
                 envelope.format_version,
@@ -664,6 +728,36 @@ impl Catalog {
     }
 
     fn snapshot_format_version(&self) -> u16 {
+        let membership_resource = self.resources.values().any(|resource| {
+            resource.tablets.iter().any(|tablet| {
+                !tablet.bootstrap_voter_node_ids.is_empty()
+                    || !tablet.target_voter_node_ids.is_empty()
+            })
+        });
+        let membership_request = self.completed_requests.values().any(|completed| {
+            matches!(
+                completed.command,
+                CatalogCommand::PlanMembership(_) | CatalogCommand::FinalizeMembership(_)
+            )
+        });
+        if membership_resource || membership_request {
+            return CATALOG_MEMBERSHIP_SNAPSHOT_FORMAT_VERSION;
+        }
+        let placed_resource = self.resources.values().any(|resource| {
+            resource
+                .tablets
+                .iter()
+                .any(|tablet| !tablet.voter_node_ids.is_empty())
+        });
+        let placed_request = self.completed_requests.values().any(|completed| {
+            matches!(
+                &completed.command,
+                CatalogCommand::Apply(request) if !request.tablet_placements.is_empty()
+            )
+        });
+        if placed_resource || placed_request {
+            return CATALOG_PLACEMENT_SNAPSHOT_FORMAT_VERSION;
+        }
         let governed_resource = self
             .resources
             .values()
@@ -739,6 +833,7 @@ impl Catalog {
             });
         }
         request.spec.validate(request.name.kind)?;
+        let placements = validate_tablet_placements(request, current.as_ref())?;
 
         if let Some(resource) = current.as_ref() {
             if resource.spec.configuration != request.spec.configuration {
@@ -750,7 +845,22 @@ impl Catalog {
                     requested: request.spec.shard_count,
                 });
             }
-            if resource.spec == request.spec {
+            if let Some(placements) = placements.as_ref() {
+                for tablet in &resource.tablets {
+                    if placements.get(&tablet.shard_index) != Some(&tablet.voter_node_ids) {
+                        return Err(CatalogError::InvalidSpec(format!(
+                            "tablet {} placement changes require a learner-first membership plan",
+                            tablet.tablet_id
+                        )));
+                    }
+                }
+            }
+            let placement_unchanged = placements.as_ref().is_none_or(|placements| {
+                resource.tablets.iter().all(|tablet| {
+                    placements.get(&tablet.shard_index) == Some(&tablet.voter_node_ids)
+                })
+            });
+            if resource.spec == request.spec && placement_unchanged {
                 return Ok(CatalogMutation::Applied {
                     resource: resource.clone(),
                     created: false,
@@ -769,34 +879,8 @@ impl Catalog {
             },
             |r| r.generation,
         ))?;
-        let mut tablets = current.map_or_else(Vec::new, |resource| resource.tablets);
-        for tablet in &mut tablets {
-            tablet.resource_generation = generation;
-            tablet.replica_count = request.spec.replica_count;
-        }
-        let additional = request
-            .spec
-            .shard_count
-            .checked_sub(u32::try_from(tablets.len()).map_err(|_| CatalogError::IdentityExhausted)?)
-            .ok_or(CatalogError::IdentityExhausted)?;
-        self.ensure_identity_capacity(additional)?;
-        for shard_index in u32::try_from(tablets.len())
-            .map_err(|_| CatalogError::IdentityExhausted)?
-            ..request.spec.shard_count
-        {
-            let consensus_group_id = self.allocate_consensus_group_id()?;
-            let tablet = TabletDescriptor {
-                tablet_id: self.next_tablet_id,
-                consensus_group_id,
-                shard_index,
-                tablet_epoch: 1,
-                resource_generation: generation,
-                workload_profile: request.spec.workload_profile,
-                replica_count: request.spec.replica_count,
-            };
-            self.next_tablet_id += 1;
-            tablets.push(tablet);
-        }
+        let tablets =
+            self.tablets_for_apply(request, current.as_ref(), placements.as_ref(), generation)?;
         let resource = ResourceRecord {
             name: request.name.clone(),
             generation,
@@ -820,6 +904,169 @@ impl Catalog {
             changed: true,
             replayed: false,
         })
+    }
+
+    fn tablets_for_apply(
+        &mut self,
+        request: &ApplyResource,
+        current: Option<&ResourceRecord>,
+        placements: Option<&BTreeMap<u32, Vec<u64>>>,
+        generation: u64,
+    ) -> CatalogResult<Vec<TabletDescriptor>> {
+        let mut tablets = current.map_or_else(Vec::new, |resource| resource.tablets.clone());
+        for tablet in &mut tablets {
+            tablet.resource_generation = generation;
+            tablet.replica_count = request.spec.replica_count;
+            if let Some(placements) = placements {
+                tablet.voter_node_ids = placements
+                    .get(&tablet.shard_index)
+                    .expect("validated placements cover every requested shard")
+                    .clone();
+            }
+        }
+        let additional = request
+            .spec
+            .shard_count
+            .checked_sub(u32::try_from(tablets.len()).map_err(|_| CatalogError::IdentityExhausted)?)
+            .ok_or(CatalogError::IdentityExhausted)?;
+        self.ensure_identity_capacity(additional)?;
+        for shard_index in u32::try_from(tablets.len())
+            .map_err(|_| CatalogError::IdentityExhausted)?
+            ..request.spec.shard_count
+        {
+            let consensus_group_id = self.allocate_consensus_group_id()?;
+            let tablet = TabletDescriptor {
+                tablet_id: self.next_tablet_id,
+                consensus_group_id,
+                shard_index,
+                tablet_epoch: 1,
+                resource_generation: generation,
+                workload_profile: request.spec.workload_profile,
+                replica_count: request.spec.replica_count,
+                voter_node_ids: placements.map_or_else(Vec::new, |placements| {
+                    placements
+                        .get(&shard_index)
+                        .expect("validated placements cover every requested shard")
+                        .clone()
+                }),
+                bootstrap_voter_node_ids: Vec::new(),
+                target_voter_node_ids: Vec::new(),
+            };
+            self.next_tablet_id += 1;
+            tablets.push(tablet);
+        }
+        Ok(tablets)
+    }
+
+    fn plan_tablet_membership(
+        &mut self,
+        request: &PlanTabletMembership,
+    ) -> CatalogResult<CatalogMutation> {
+        let (name, shard_index) = self.tablet_identity(request.tablet_id)?;
+        let current = self
+            .resources
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| CatalogError::NotFound(name.canonical_name()))?;
+        validate_expected_generation(
+            Some(request.expected_resource_generation),
+            current.generation,
+        )?;
+        let tablet = current
+            .tablets
+            .get(usize::try_from(shard_index).map_err(|_| CatalogError::IdentityExhausted)?)
+            .filter(|tablet| tablet.tablet_id == request.tablet_id)
+            .ok_or_else(|| CatalogError::NotFound(format!("tablet {}", request.tablet_id)))?;
+        validate_membership_request_identity(
+            tablet,
+            request.expected_tablet_epoch,
+            &request.target_voter_node_ids,
+        )?;
+        if !tablet.target_voter_node_ids.is_empty() {
+            if tablet.target_voter_node_ids == request.target_voter_node_ids {
+                return Ok(unchanged_resource_mutation(current));
+            }
+            return Err(CatalogError::InvalidSpec(format!(
+                "tablet {} already has a different membership transition",
+                request.tablet_id
+            )));
+        }
+        if tablet.voter_node_ids == request.target_voter_node_ids {
+            return Ok(unchanged_resource_mutation(current));
+        }
+        validate_single_voter_replacement(&tablet.voter_node_ids, &request.target_voter_node_ids)?;
+
+        let mut resource = current;
+        for descriptor in &mut resource.tablets {
+            if descriptor.tablet_id == request.tablet_id {
+                if descriptor.bootstrap_voter_node_ids.is_empty() {
+                    descriptor
+                        .bootstrap_voter_node_ids
+                        .clone_from(&descriptor.voter_node_ids);
+                }
+                descriptor
+                    .target_voter_node_ids
+                    .clone_from(&request.target_voter_node_ids);
+            }
+        }
+        self.resources.insert(name.clone(), resource.clone());
+        Ok(changed_resource_mutation(resource))
+    }
+
+    fn finalize_tablet_membership(
+        &mut self,
+        request: &FinalizeTabletMembership,
+    ) -> CatalogResult<CatalogMutation> {
+        let (name, shard_index) = self.tablet_identity(request.tablet_id)?;
+        let current = self
+            .resources
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| CatalogError::NotFound(name.canonical_name()))?;
+        validate_expected_generation(
+            Some(request.expected_resource_generation),
+            current.generation,
+        )?;
+        let tablet = current
+            .tablets
+            .get(usize::try_from(shard_index).map_err(|_| CatalogError::IdentityExhausted)?)
+            .filter(|tablet| tablet.tablet_id == request.tablet_id)
+            .ok_or_else(|| CatalogError::NotFound(format!("tablet {}", request.tablet_id)))?;
+        validate_membership_request_identity(
+            tablet,
+            request.expected_tablet_epoch,
+            &request.target_voter_node_ids,
+        )?;
+        if tablet.target_voter_node_ids != request.target_voter_node_ids {
+            return Err(CatalogError::InvalidSpec(format!(
+                "tablet {} membership target is not the committed plan",
+                request.tablet_id
+            )));
+        }
+
+        let mut resource = current;
+        for descriptor in &mut resource.tablets {
+            if descriptor.tablet_id == request.tablet_id {
+                descriptor
+                    .voter_node_ids
+                    .clone_from(&request.target_voter_node_ids);
+                descriptor.target_voter_node_ids.clear();
+            }
+        }
+        self.resources.insert(name.clone(), resource.clone());
+        Ok(changed_resource_mutation(resource))
+    }
+
+    fn tablet_identity(&self, tablet_id: u64) -> CatalogResult<(ResourceName, u32)> {
+        if tablet_id == 0 {
+            return Err(CatalogError::InvalidSpec(
+                "tablet ID must be non-zero".into(),
+            ));
+        }
+        self.tablet_index
+            .get(&tablet_id)
+            .cloned()
+            .ok_or_else(|| CatalogError::NotFound(format!("tablet {tablet_id}")))
     }
 
     fn delete_resource(&mut self, request: &DeleteResource) -> CatalogResult<CatalogMutation> {
@@ -891,6 +1138,60 @@ impl Catalog {
             .ok_or(CatalogError::IdentityExhausted)?;
         Ok(allocated)
     }
+}
+
+fn unchanged_resource_mutation(resource: ResourceRecord) -> CatalogMutation {
+    CatalogMutation::Applied {
+        resource,
+        created: false,
+        changed: false,
+        replayed: false,
+    }
+}
+
+fn changed_resource_mutation(resource: ResourceRecord) -> CatalogMutation {
+    CatalogMutation::Applied {
+        resource,
+        created: false,
+        changed: true,
+        replayed: false,
+    }
+}
+
+fn validate_membership_request_identity(
+    tablet: &TabletDescriptor,
+    expected_tablet_epoch: u64,
+    target_voter_node_ids: &[u64],
+) -> CatalogResult<()> {
+    if expected_tablet_epoch == 0 || tablet.tablet_epoch != expected_tablet_epoch {
+        return Err(CatalogError::InvalidSpec(format!(
+            "tablet {} epoch {} does not match expected epoch {expected_tablet_epoch}",
+            tablet.tablet_id, tablet.tablet_epoch
+        )));
+    }
+    validate_voter_assignment(
+        target_voter_node_ids,
+        tablet.replica_count,
+        "membership target",
+    )
+}
+
+fn validate_single_voter_replacement(current: &[u64], target: &[u64]) -> CatalogResult<()> {
+    if current.is_empty() {
+        return Err(CatalogError::InvalidSpec(
+            "learner-first replacement requires an explicit current voter placement".into(),
+        ));
+    }
+    let current = current.iter().copied().collect::<BTreeSet<_>>();
+    let target = target.iter().copied().collect::<BTreeSet<_>>();
+    let removed = current.difference(&target).count();
+    let added = target.difference(&current).count();
+    if removed != 1 || added != 1 {
+        return Err(CatalogError::InvalidSpec(
+            "a membership plan must replace exactly one voter".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_governance_identifier(label: &str, value: &str, maximum: usize) -> CatalogResult<()> {
@@ -1059,6 +1360,41 @@ fn restore_resource_tablets(
                 "catalog snapshot contains an invalid tablet descriptor".into(),
             ));
         }
+        if !tablet.voter_node_ids.is_empty() {
+            validate_voter_assignment(
+                &tablet.voter_node_ids,
+                tablet.replica_count,
+                "catalog snapshot tablet",
+            )?;
+        }
+        if !tablet.bootstrap_voter_node_ids.is_empty() {
+            validate_voter_assignment(
+                &tablet.bootstrap_voter_node_ids,
+                tablet.replica_count,
+                "catalog snapshot tablet bootstrap",
+            )?;
+            if tablet.voter_node_ids.is_empty() {
+                return Err(CatalogError::InvalidSpec(
+                    "catalog snapshot tablet bootstrap requires explicit current voters".into(),
+                ));
+            }
+        }
+        if !tablet.target_voter_node_ids.is_empty() {
+            validate_voter_assignment(
+                &tablet.target_voter_node_ids,
+                tablet.replica_count,
+                "catalog snapshot tablet membership target",
+            )?;
+            if tablet.bootstrap_voter_node_ids.is_empty() {
+                return Err(CatalogError::InvalidSpec(
+                    "catalog snapshot membership target requires bootstrap voters".into(),
+                ));
+            }
+            validate_single_voter_replacement(
+                &tablet.voter_node_ids,
+                &tablet.target_voter_node_ids,
+            )?;
+        }
         if restored
             .tablet_index
             .insert(
@@ -1161,6 +1497,31 @@ fn validate_completed_requests(
             (CatalogCommand::Delete(request), CatalogMutation::Deleted { name, replayed, .. }) => {
                 name == &request.name && !replayed
             }
+            (
+                CatalogCommand::PlanMembership(request),
+                CatalogMutation::Applied {
+                    resource, replayed, ..
+                },
+            ) => {
+                !replayed
+                    && resource.tablets.iter().any(|tablet| {
+                        tablet.tablet_id == request.tablet_id
+                            && tablet.target_voter_node_ids == request.target_voter_node_ids
+                    })
+            }
+            (
+                CatalogCommand::FinalizeMembership(request),
+                CatalogMutation::Applied {
+                    resource, replayed, ..
+                },
+            ) => {
+                !replayed
+                    && resource.tablets.iter().any(|tablet| {
+                        tablet.tablet_id == request.tablet_id
+                            && tablet.voter_node_ids == request.target_voter_node_ids
+                            && tablet.target_voter_node_ids.is_empty()
+                    })
+            }
             _ => false,
         };
         if !consistent {
@@ -1187,6 +1548,72 @@ fn validate_expected_generation(expected: Option<u64>, actual: u64) -> CatalogRe
         && expected != actual
     {
         return Err(CatalogError::GenerationConflict { expected, actual });
+    }
+    Ok(())
+}
+
+fn validate_tablet_placements(
+    request: &ApplyResource,
+    current: Option<&ResourceRecord>,
+) -> CatalogResult<Option<BTreeMap<u32, Vec<u64>>>> {
+    let has_current_placements = current.is_some_and(|resource| {
+        resource
+            .tablets
+            .iter()
+            .any(|tablet| !tablet.voter_node_ids.is_empty())
+    });
+    if request.tablet_placements.is_empty() {
+        if has_current_placements {
+            return Err(CatalogError::InvalidSpec(
+                "an explicitly placed resource apply must include every shard assignment".into(),
+            ));
+        }
+        return Ok(None);
+    }
+    if !matches!(request.spec.replica_count, 3 | 5) {
+        return Err(CatalogError::InvalidSpec(
+            "explicit tablet placement requires exactly three or five replicas".into(),
+        ));
+    }
+    if request.tablet_placements.len()
+        != usize::try_from(request.spec.shard_count).map_err(|_| CatalogError::IdentityExhausted)?
+    {
+        return Err(CatalogError::InvalidSpec(
+            "explicit tablet placement must contain every requested shard exactly once".into(),
+        ));
+    }
+
+    let mut placements = BTreeMap::new();
+    for (expected_shard, placement) in request.tablet_placements.iter().enumerate() {
+        let expected_shard =
+            u32::try_from(expected_shard).map_err(|_| CatalogError::IdentityExhausted)?;
+        if placement.shard_index != expected_shard {
+            return Err(CatalogError::InvalidSpec(
+                "tablet placements must be strictly ordered by contiguous shard index".into(),
+            ));
+        }
+        validate_voter_assignment(
+            &placement.voter_node_ids,
+            request.spec.replica_count,
+            "tablet placement",
+        )?;
+        placements.insert(placement.shard_index, placement.voter_node_ids.clone());
+    }
+    Ok(Some(placements))
+}
+
+fn validate_voter_assignment(
+    voter_node_ids: &[u64],
+    replica_count: u16,
+    label: &str,
+) -> CatalogResult<()> {
+    if voter_node_ids.len() != usize::from(replica_count)
+        || voter_node_ids.contains(&0)
+        || !voter_node_ids.windows(2).all(|pair| pair[0] < pair[1])
+    {
+        return Err(CatalogError::InvalidSpec(format!(
+            "{label} voters must match replica_count and contain sorted, distinct, non-zero node IDs"
+        )));
     }
     Ok(())
 }

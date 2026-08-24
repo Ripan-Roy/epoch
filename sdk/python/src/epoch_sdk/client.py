@@ -6,7 +6,7 @@ from typing import Any
 from urllib.parse import quote
 
 from .models import DurabilityProfile, EventEnvelope, Subscription
-from .transport import Transport, UrllibTransport
+from .transport import TLSConfig, Transport, UrllibTransport
 
 
 class EpochClient:
@@ -21,9 +21,10 @@ class EpochClient:
         base_url: str = "http://127.0.0.1:7601",
         *,
         timeout: float = 10.0,
+        tls: TLSConfig | None = None,
         transport: Transport | None = None,
     ) -> None:
-        self._transport = transport or UrllibTransport(base_url, timeout=timeout)
+        self._transport = transport or UrllibTransport(base_url, timeout=timeout, tls=tls)
 
     def health(self) -> dict[str, Any]:
         return self._transport.request("GET", "/healthz")

@@ -1,4 +1,4 @@
-//! Disk-backed stable-state journal for the fixed-voter consensus adapter.
+//! Disk-backed stable-state journal for the bounded-voter consensus adapter.
 //!
 //! Record zero fixes the immutable group identity. Later records contain either
 //! a complete `HardState` plus application checkpoint and normal-entry batch,
@@ -8,37 +8,57 @@
 //! boundary; this module supplies canonical Epoch-owned framing, logical suffix
 //! replacement, checkpoint installation, and prefix compaction during replay.
 
-use std::{collections::BTreeMap, fmt, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    mem::size_of,
+    path::Path,
+};
 
 use epoch_storage::{CommitLog, FileWal, LogRecord};
+use prost::Message as _;
 use raft::prelude::{ConfState, Entry, EntryType, HardState};
 
 use super::{
     CheckpointImage, CommitReceipt, CommittedProposal, ConsensusError, ConsensusResult,
     EpochRaftStorage, GroupEpoch, GroupId, LogIndex, NodeId, ProposalId, StateDigest, Term,
     checkpoint_snapshot, compute_state_digest, decode_checkpoint_image, decode_command,
-    encode_checkpoint_image, validate_checkpoint_image, validate_command_scope,
-    validate_hard_state, validate_log_order, validate_voters,
+    decode_membership_change, encode_checkpoint_image, expected_conf_state, membership,
+    validate_checkpoint_image, validate_command_scope, validate_hard_state,
+    validate_initial_membership, validate_log_order,
 };
 
 const RECORD_MAGIC: [u8; 4] = *b"EPRS";
 const RECORD_VERSION: u16 = 1;
 const RECORD_HEADER_LEN: usize = 12;
 const IDENTITY_KIND: u16 = 1;
+const IDENTITY_V2_KIND: u16 = 5;
+const IDENTITY_V3_KIND: u16 = 9;
 const TRANSITION_KIND: u16 = 2;
+const TRANSITION_V2_KIND: u16 = 6;
 const CHECKPOINT_KIND: u16 = 3;
 const COMPACTED_CHECKPOINT_KIND: u16 = 4;
+const CHECKPOINT_V2_KIND: u16 = 7;
+const COMPACTED_CHECKPOINT_V2_KIND: u16 = 8;
 const IDENTITY_PAYLOAD_LEN: usize = 48;
+const IDENTITY_V2_FIXED_PAYLOAD_LEN: usize = 28;
+const IDENTITY_V3_FIXED_PAYLOAD_LEN: usize = 32;
 const TRANSITION_FIXED_PAYLOAD_LEN: usize = 84;
 const CHECKPOINT_FIXED_PAYLOAD_LEN: usize = 88;
+const CHECKPOINT_V2_FIXED_PAYLOAD_LEN: usize = 92;
 const ENTRY_FIXED_PAYLOAD_LEN: usize = 20;
+const ENTRY_V2_FIXED_PAYLOAD_LEN: usize = 24;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StableIdentity {
     pub(crate) node_id: NodeId,
     pub(crate) group_id: GroupId,
     pub(crate) group_epoch: GroupEpoch,
-    pub(crate) voters: [NodeId; 3],
+    pub(crate) initial_voters: Vec<NodeId>,
+    /// Immutable provisioned member allowlist. Existing callers use an equal
+    /// initial voter set and allowlist; v3 identities can bootstrap three
+    /// voters inside a five-member replacement pool.
+    pub(crate) voters: Vec<NodeId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,7 +69,7 @@ pub(crate) struct StableCheckpoint {
 }
 
 impl StableCheckpoint {
-    pub(crate) fn empty(identity: StableIdentity) -> ConsensusResult<Self> {
+    pub(crate) fn empty(identity: &StableIdentity) -> ConsensusResult<Self> {
         Ok(Self {
             applied_index: LogIndex::ZERO,
             publishable_index: LogIndex::ZERO,
@@ -87,6 +107,7 @@ pub(crate) struct DiskStableStore {
     hard_state: HardState,
     snapshot: Option<CheckpointImage>,
     entries: Vec<Entry>,
+    conf_state: ConfState,
     checkpoint: StableCheckpoint,
     stable_generation: u64,
     #[cfg(test)]
@@ -106,6 +127,7 @@ struct StableCheckpointTransition {
     generation: u64,
     hard_state: HardState,
     checkpoint: StableCheckpoint,
+    conf_state: ConfState,
     image: CheckpointImage,
     entries: Vec<Entry>,
 }
@@ -121,10 +143,10 @@ enum StableRecord {
 fn initialize_or_validate_identity(
     wal: &mut FileWal,
     records: &[LogRecord],
-    identity: StableIdentity,
+    identity: &StableIdentity,
 ) -> ConsensusResult<()> {
     let Some(first) = records.first() else {
-        let encoded = encode_record(&StableRecord::Identity(identity))?;
+        let encoded = encode_record(&StableRecord::Identity(identity.clone()))?;
         let record = wal.append(0, &encoded, true).map_err(storage_error)?;
         if record.sequence != 0 {
             return Err(ConsensusError::InvalidState(format!(
@@ -140,7 +162,7 @@ fn initialize_or_validate_identity(
         ));
     }
     match decode_record(&first.payload)? {
-        StableRecord::Identity(stored) if stored == identity => Ok(()),
+        StableRecord::Identity(stored) if &stored == identity => Ok(()),
         StableRecord::Identity(stored) => Err(ConsensusError::InvalidState(format!(
             "stable identity mismatch: stored {stored:?}, requested {identity:?}"
         ))),
@@ -153,13 +175,14 @@ fn initialize_or_validate_identity(
 }
 
 fn replay_transitions(
-    identity: StableIdentity,
+    identity: &StableIdentity,
     records: &[LogRecord],
 ) -> ConsensusResult<(CandidateState, u64)> {
     let mut state = CandidateState {
         hard_state: HardState::default(),
         snapshot: None,
         entries: Vec::new(),
+        conf_state: expected_conf_state(&identity.initial_voters),
         checkpoint: StableCheckpoint::empty(identity)?,
     };
     let mut stable_generation = 0_u64;
@@ -219,6 +242,7 @@ fn replay_transitions(
                 identity,
                 state.prior(),
                 transition.hard_state,
+                transition.conf_state,
                 transition.image,
                 &transition.entries,
                 transition.checkpoint,
@@ -234,32 +258,40 @@ impl DiskStableStore {
         path: &Path,
         identity: StableIdentity,
     ) -> ConsensusResult<RecoveredDiskState> {
-        validate_voters(identity.node_id, identity.voters)?;
+        validate_stable_identity(&identity)?;
         let mut wal = FileWal::open(path).map_err(storage_error)?;
         let repaired_partial_tail = wal.recovered_partial_tail();
         let records = wal.records_from(0, usize::MAX);
-        initialize_or_validate_identity(&mut wal, &records, identity)?;
-        let (state, stable_generation) = replay_transitions(identity, &records)?;
+        initialize_or_validate_identity(&mut wal, &records, &identity)?;
+        let (state, stable_generation) = replay_transitions(&identity, &records)?;
         let CandidateState {
             hard_state,
             snapshot,
             entries,
+            conf_state,
             checkpoint,
         } = state;
 
         let applied = derive_applied_history(
-            identity,
+            &identity,
             snapshot.as_ref(),
             &entries,
             checkpoint.applied_index,
         )?;
-        let storage = materialize_storage(identity, &hard_state, snapshot.as_ref(), &entries)?;
+        let storage = materialize_storage(
+            &identity,
+            &conf_state,
+            &hard_state,
+            snapshot.as_ref(),
+            &entries,
+        )?;
         let store = Self {
             wal,
             identity,
             hard_state,
             snapshot,
             entries,
+            conf_state,
             checkpoint,
             stable_generation,
             #[cfg(test)]
@@ -294,7 +326,7 @@ impl DiskStableStore {
         }
 
         let candidate = prepare_transition(
-            self.identity,
+            &self.identity,
             self.prior_state(),
             hard_state.clone(),
             entries,
@@ -327,6 +359,7 @@ impl DiskStableStore {
         self.hard_state = candidate.hard_state;
         self.snapshot = candidate.snapshot;
         self.entries = candidate.entries;
+        self.conf_state = candidate.conf_state;
         self.checkpoint = candidate.checkpoint;
         self.stable_generation = expected_generation;
         Ok(expected_generation)
@@ -336,6 +369,7 @@ impl DiskStableStore {
         &mut self,
         expected_generation: u64,
         hard_state: &HardState,
+        conf_state: &ConfState,
         image: &CheckpointImage,
         entries: &[Entry],
         checkpoint: StableCheckpoint,
@@ -351,9 +385,10 @@ impl DiskStableStore {
             )));
         }
         let candidate = prepare_checkpoint_transition(
-            self.identity,
+            &self.identity,
             self.prior_state(),
             hard_state.clone(),
+            conf_state.clone(),
             image.clone(),
             entries,
             checkpoint,
@@ -362,6 +397,7 @@ impl DiskStableStore {
             generation: expected_generation,
             hard_state: hard_state.clone(),
             checkpoint,
+            conf_state: conf_state.clone(),
             image: image.clone(),
             entries: entries.to_vec(),
         };
@@ -378,6 +414,7 @@ impl DiskStableStore {
         self.hard_state = candidate.hard_state;
         self.snapshot = candidate.snapshot;
         self.entries = candidate.entries;
+        self.conf_state = candidate.conf_state;
         self.checkpoint = candidate.checkpoint;
         self.stable_generation = expected_generation;
         Ok(expected_generation)
@@ -391,7 +428,7 @@ impl DiskStableStore {
         &mut self,
         transition: &StableCheckpointTransition,
     ) -> ConsensusResult<()> {
-        let identity = encode_record(&StableRecord::Identity(self.identity))?;
+        let identity = encode_record(&StableRecord::Identity(self.identity.clone()))?;
         let checkpoint = encode_record(&StableRecord::CompactedCheckpoint(transition.clone()))?;
         self.wal
             .replace_with_records(&[(0, identity.as_slice()), (0, checkpoint.as_slice())])
@@ -403,6 +440,7 @@ impl DiskStableStore {
             hard_state: &self.hard_state,
             snapshot: self.snapshot.as_ref(),
             entries: &self.entries,
+            conf_state: &self.conf_state,
             checkpoint: self.checkpoint,
         }
     }
@@ -422,6 +460,7 @@ struct CandidateState {
     hard_state: HardState,
     snapshot: Option<CheckpointImage>,
     entries: Vec<Entry>,
+    conf_state: ConfState,
     checkpoint: StableCheckpoint,
 }
 
@@ -431,6 +470,7 @@ impl CandidateState {
             hard_state: &self.hard_state,
             snapshot: self.snapshot.as_ref(),
             entries: &self.entries,
+            conf_state: &self.conf_state,
             checkpoint: self.checkpoint,
         }
     }
@@ -441,11 +481,12 @@ struct PriorState<'a> {
     hard_state: &'a HardState,
     snapshot: Option<&'a CheckpointImage>,
     entries: &'a [Entry],
+    conf_state: &'a ConfState,
     checkpoint: StableCheckpoint,
 }
 
 fn prepare_transition(
-    identity: StableIdentity,
+    identity: &StableIdentity,
     previous: PriorState<'_>,
     hard_state: HardState,
     new_entries: &[Entry],
@@ -482,8 +523,16 @@ fn prepare_transition(
         entries.extend_from_slice(new_entries);
     }
 
+    let conf_state = derive_conf_state(
+        previous.conf_state,
+        &entries,
+        previous.checkpoint.applied_index,
+        checkpoint.applied_index,
+        &identity.voters,
+    )?;
     validate_complete_state(
         identity,
+        &conf_state,
         &hard_state,
         previous.snapshot,
         &entries,
@@ -493,14 +542,16 @@ fn prepare_transition(
         hard_state,
         snapshot: previous.snapshot.cloned(),
         entries,
+        conf_state,
         checkpoint,
     })
 }
 
 fn prepare_checkpoint_transition(
-    identity: StableIdentity,
+    identity: &StableIdentity,
     previous: PriorState<'_>,
     hard_state: HardState,
+    conf_state: ConfState,
     image: CheckpointImage,
     entries: &[Entry],
     checkpoint: StableCheckpoint,
@@ -548,21 +599,35 @@ fn prepare_checkpoint_transition(
             "stable checkpoint tail is not contiguous after its index".into(),
         ));
     }
-    validate_complete_state(identity, &hard_state, Some(&image), entries, checkpoint)?;
+    let conf_state = if conf_state.voters.is_empty() {
+        previous.conf_state.clone()
+    } else {
+        membership::validate_conf_state(&conf_state, &identity.voters)?;
+        conf_state
+    };
+    validate_complete_state(
+        identity,
+        &conf_state,
+        &hard_state,
+        Some(&image),
+        entries,
+        checkpoint,
+    )?;
     Ok(CandidateState {
         hard_state,
         snapshot: Some(image),
         entries: entries.to_vec(),
+        conf_state,
         checkpoint,
     })
 }
 
 fn validate_hard_state_transition(
-    identity: StableIdentity,
+    identity: &StableIdentity,
     previous: &HardState,
     next: &HardState,
 ) -> ConsensusResult<()> {
-    validate_hard_state(next, identity.voters)?;
+    validate_hard_state(next, &identity.voters)?;
     if next.term < previous.term {
         return Err(ConsensusError::InvalidState(format!(
             "stable HardState term decreases from {} to {}",
@@ -606,7 +671,7 @@ fn validate_checkpoint_transition(
 fn validate_entry_batch(entries: &[Entry]) -> ConsensusResult<()> {
     let mut previous_index: Option<u64> = None;
     for entry in entries {
-        validate_normal_entry(entry)?;
+        validate_stable_entry(entry)?;
         if let Some(previous) = previous_index {
             let expected = previous.checked_add(1).ok_or_else(|| {
                 ConsensusError::InvalidState("stable entry index overflow".into())
@@ -623,34 +688,71 @@ fn validate_entry_batch(entries: &[Entry]) -> ConsensusResult<()> {
     Ok(())
 }
 
-fn validate_normal_entry(entry: &Entry) -> ConsensusResult<()> {
-    if entry.entry_type != EntryType::EntryNormal as i32 {
-        return Err(ConsensusError::Unsupported(
-            "membership entries are not supported by the fixed-voter stable store".into(),
-        ));
-    }
+fn validate_stable_entry(entry: &Entry) -> ConsensusResult<()> {
     if entry.index == 0 || entry.term == 0 {
         return Err(ConsensusError::InvalidState(
-            "stable normal entries require nonzero index and term".into(),
+            "stable entries require nonzero index and term".into(),
         ));
     }
     if !entry.context.is_empty() || entry.sync_log {
         return Err(ConsensusError::Unsupported(
-            "stable v1 entries require empty context and deprecated sync_log=false".into(),
+            "stable entries require empty context and deprecated sync_log=false".into(),
         ));
+    }
+    match EntryType::from_i32(entry.entry_type) {
+        Some(EntryType::EntryNormal) => {}
+        Some(EntryType::EntryConfChangeV2) => {
+            decode_membership_change(entry.data.as_ref())?;
+        }
+        Some(EntryType::EntryConfChange) | None => {
+            return Err(ConsensusError::Unsupported(
+                "stable entries do not support legacy or unknown membership types".into(),
+            ));
+        }
     }
     Ok(())
 }
 
+fn derive_conf_state(
+    previous: &ConfState,
+    entries: &[Entry],
+    previous_applied: LogIndex,
+    next_applied: LogIndex,
+    allowed_members: &[NodeId],
+) -> ConsensusResult<ConfState> {
+    let mut state = previous.clone();
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.index > previous_applied.get() && entry.index <= next_applied.get())
+    {
+        match EntryType::from_i32(entry.entry_type) {
+            Some(EntryType::EntryNormal) => {}
+            Some(EntryType::EntryConfChangeV2) => {
+                let change = decode_membership_change(entry.data.as_ref())?;
+                state = membership::apply_conf_change(&state, &change, allowed_members)?;
+            }
+            Some(EntryType::EntryConfChange) | None => {
+                return Err(ConsensusError::Unsupported(
+                    "stable membership replay encountered a legacy or unknown entry type".into(),
+                ));
+            }
+        }
+    }
+    membership::validate_conf_state(&state, allowed_members)?;
+    Ok(state)
+}
+
 fn validate_complete_state(
-    identity: StableIdentity,
+    identity: &StableIdentity,
+    conf_state: &ConfState,
     hard_state: &HardState,
     snapshot: Option<&CheckpointImage>,
     entries: &[Entry],
     checkpoint: StableCheckpoint,
 ) -> ConsensusResult<()> {
-    validate_voters(identity.node_id, identity.voters)?;
-    validate_hard_state(hard_state, identity.voters)?;
+    validate_stable_identity(identity)?;
+    membership::validate_conf_state(conf_state, &identity.voters)?;
+    validate_hard_state(hard_state, &identity.voters)?;
     let base_index = snapshot.map_or(0, |image| image.index.get());
     let base_term = snapshot.map_or(0, |image| image.term.get());
     let last_index = entries.last().map_or(base_index, |entry| entry.index);
@@ -702,7 +804,7 @@ fn validate_complete_state(
 }
 
 fn derive_applied_history(
-    identity: StableIdentity,
+    identity: &StableIdentity,
     snapshot: Option<&CheckpointImage>,
     entries: &[Entry],
     applied_index: LogIndex,
@@ -714,7 +816,10 @@ fn derive_applied_history(
         .collect::<BTreeMap<ProposalId, Vec<u8>>>();
 
     for entry in entries {
-        validate_normal_entry(entry)?;
+        validate_stable_entry(entry)?;
+        if entry.entry_type == EntryType::EntryConfChangeV2 as i32 {
+            continue;
+        }
         if entry.data.is_empty() {
             continue;
         }
@@ -746,22 +851,17 @@ fn derive_applied_history(
 }
 
 fn materialize_storage(
-    identity: StableIdentity,
+    identity: &StableIdentity,
+    conf_state: &ConfState,
     hard_state: &HardState,
     snapshot: Option<&CheckpointImage>,
     entries: &[Entry],
 ) -> ConsensusResult<EpochRaftStorage> {
-    let mut storage = EpochRaftStorage::new_with_conf_state(ConfState::from((
-        identity
-            .voters
-            .iter()
-            .map(|voter| voter.get())
-            .collect::<Vec<_>>(),
-        Vec::<u64>::new(),
-    )));
+    membership::validate_conf_state(conf_state, &identity.voters)?;
+    let mut storage = EpochRaftStorage::new_with_conf_state(conf_state.clone());
     if let Some(image) = snapshot {
         storage.install_snapshot(
-            checkpoint_snapshot(image, identity.voters)?,
+            checkpoint_snapshot(image, conf_state)?,
             entries,
             hard_state.clone(),
         )?;
@@ -802,7 +902,7 @@ fn validate_retained_log_order(
                 })?)
                 .and_then(|value| value.checked_add(1))
                 .ok_or_else(|| ConsensusError::InvalidState("stable log index overflow".into()))?;
-        validate_normal_entry(entry)?;
+        validate_stable_entry(entry)?;
         if entry.index != expected {
             return Err(ConsensusError::InvalidState(format!(
                 "persisted compacted log entry {} is out of order; expected {expected}",
@@ -827,15 +927,60 @@ fn validate_retained_log_order(
 
 fn encode_record(record: &StableRecord) -> ConsensusResult<Vec<u8>> {
     let (kind, payload) = match record {
-        StableRecord::Identity(identity) => (IDENTITY_KIND, encode_identity(*identity)),
-        StableRecord::Transition(transition) => (TRANSITION_KIND, encode_transition(transition)?),
-        StableRecord::Checkpoint(transition) => {
-            (CHECKPOINT_KIND, encode_checkpoint_transition(transition)?)
+        StableRecord::Identity(identity) => {
+            let kind = if identity.initial_voters != identity.voters {
+                IDENTITY_V3_KIND
+            } else if identity.voters.len() == 3 {
+                IDENTITY_KIND
+            } else {
+                IDENTITY_V2_KIND
+            };
+            (kind, encode_identity(identity)?)
         }
-        StableRecord::CompactedCheckpoint(transition) => (
-            COMPACTED_CHECKPOINT_KIND,
-            encode_checkpoint_transition(transition)?,
-        ),
+        StableRecord::Transition(transition) => {
+            if transition
+                .entries
+                .iter()
+                .all(|entry| entry.entry_type == EntryType::EntryNormal as i32)
+            {
+                (TRANSITION_KIND, encode_transition(transition)?)
+            } else {
+                (TRANSITION_V2_KIND, encode_transition_v2(transition)?)
+            }
+        }
+        StableRecord::Checkpoint(transition) => {
+            if transition.conf_state.voters.is_empty()
+                && transition
+                    .entries
+                    .iter()
+                    .all(|entry| entry.entry_type == EntryType::EntryNormal as i32)
+            {
+                (CHECKPOINT_KIND, encode_checkpoint_transition(transition)?)
+            } else {
+                (
+                    CHECKPOINT_V2_KIND,
+                    encode_checkpoint_transition_v2(transition)?,
+                )
+            }
+        }
+        StableRecord::CompactedCheckpoint(transition) => {
+            if transition.conf_state.voters.is_empty()
+                && transition
+                    .entries
+                    .iter()
+                    .all(|entry| entry.entry_type == EntryType::EntryNormal as i32)
+            {
+                (
+                    COMPACTED_CHECKPOINT_KIND,
+                    encode_checkpoint_transition(transition)?,
+                )
+            } else {
+                (
+                    COMPACTED_CHECKPOINT_V2_KIND,
+                    encode_checkpoint_transition_v2(transition)?,
+                )
+            }
+        }
     };
     let payload_len = u32::try_from(payload.len()).map_err(|_| {
         ConsensusError::InvalidState("stable record payload exceeds the v1 length field".into())
@@ -880,11 +1025,18 @@ fn decode_record(encoded: &[u8]) -> ConsensusResult<StableRecord> {
     }
     let payload = &encoded[RECORD_HEADER_LEN..];
     let record = match kind {
-        IDENTITY_KIND => StableRecord::Identity(decode_identity(payload)?),
+        IDENTITY_KIND => StableRecord::Identity(decode_identity_v1(payload)?),
+        IDENTITY_V2_KIND => StableRecord::Identity(decode_identity_v2(payload)?),
+        IDENTITY_V3_KIND => StableRecord::Identity(decode_identity_v3(payload)?),
         TRANSITION_KIND => StableRecord::Transition(decode_transition(payload)?),
+        TRANSITION_V2_KIND => StableRecord::Transition(decode_transition_v2(payload)?),
         CHECKPOINT_KIND => StableRecord::Checkpoint(decode_checkpoint_transition(payload)?),
         COMPACTED_CHECKPOINT_KIND => {
             StableRecord::CompactedCheckpoint(decode_checkpoint_transition(payload)?)
+        }
+        CHECKPOINT_V2_KIND => StableRecord::Checkpoint(decode_checkpoint_transition_v2(payload)?),
+        COMPACTED_CHECKPOINT_V2_KIND => {
+            StableRecord::CompactedCheckpoint(decode_checkpoint_transition_v2(payload)?)
         }
         _ => {
             return Err(ConsensusError::Unsupported(format!(
@@ -900,18 +1052,56 @@ fn decode_record(encoded: &[u8]) -> ConsensusResult<StableRecord> {
     Ok(record)
 }
 
-fn encode_identity(identity: StableIdentity) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(IDENTITY_PAYLOAD_LEN);
+fn encode_identity(identity: &StableIdentity) -> ConsensusResult<Vec<u8>> {
+    validate_stable_identity(identity)?;
+    let has_distinct_allowlist = identity.initial_voters != identity.voters;
+    let is_legacy = !has_distinct_allowlist && identity.voters.len() == 3;
+    let capacity = if has_distinct_allowlist {
+        IDENTITY_V3_FIXED_PAYLOAD_LEN
+            .checked_add(
+                identity
+                    .initial_voters
+                    .len()
+                    .saturating_add(identity.voters.len())
+                    .saturating_mul(size_of::<u64>()),
+            )
+            .ok_or_else(|| ConsensusError::InvalidState("stable identity length overflow".into()))?
+    } else if is_legacy {
+        IDENTITY_PAYLOAD_LEN
+    } else {
+        IDENTITY_V2_FIXED_PAYLOAD_LEN
+            .checked_add(identity.voters.len().saturating_mul(size_of::<u64>()))
+            .ok_or_else(|| ConsensusError::InvalidState("stable identity length overflow".into()))?
+    };
+    let mut payload = Vec::with_capacity(capacity);
     payload.extend_from_slice(&identity.node_id.get().to_be_bytes());
     payload.extend_from_slice(&identity.group_id.get().to_be_bytes());
     payload.extend_from_slice(&identity.group_epoch.get().to_be_bytes());
-    for voter in identity.voters {
+    if has_distinct_allowlist {
+        let initial_count = u32::try_from(identity.initial_voters.len()).map_err(|_| {
+            ConsensusError::InvalidState("stable identity initial voter count overflow".into())
+        })?;
+        let allowed_count = u32::try_from(identity.voters.len()).map_err(|_| {
+            ConsensusError::InvalidState("stable identity member count overflow".into())
+        })?;
+        payload.extend_from_slice(&initial_count.to_be_bytes());
+        payload.extend_from_slice(&allowed_count.to_be_bytes());
+        for voter in &identity.initial_voters {
+            payload.extend_from_slice(&voter.get().to_be_bytes());
+        }
+    } else if !is_legacy {
+        let voter_count = u32::try_from(identity.voters.len()).map_err(|_| {
+            ConsensusError::InvalidState("stable identity voter count overflow".into())
+        })?;
+        payload.extend_from_slice(&voter_count.to_be_bytes());
+    }
+    for voter in &identity.voters {
         payload.extend_from_slice(&voter.get().to_be_bytes());
     }
-    payload
+    Ok(payload)
 }
 
-fn decode_identity(payload: &[u8]) -> ConsensusResult<StableIdentity> {
+fn decode_identity_v1(payload: &[u8]) -> ConsensusResult<StableIdentity> {
     if payload.len() != IDENTITY_PAYLOAD_LEN {
         return Err(ConsensusError::InvalidState(format!(
             "stable identity payload is {} bytes; expected {IDENTITY_PAYLOAD_LEN}",
@@ -919,19 +1109,97 @@ fn decode_identity(payload: &[u8]) -> ConsensusResult<StableIdentity> {
         )));
     }
     let mut reader = Reader::new(payload);
-    let identity = StableIdentity {
+    let mut identity = StableIdentity {
         node_id: NodeId::new(reader.read_u64("node ID")?)?,
         group_id: GroupId::new(reader.read_u64("group ID")?)?,
         group_epoch: GroupEpoch::new(reader.read_u64("group epoch")?)?,
-        voters: [
+        initial_voters: vec![
             NodeId::new(reader.read_u64("voter ID")?)?,
             NodeId::new(reader.read_u64("voter ID")?)?,
             NodeId::new(reader.read_u64("voter ID")?)?,
         ],
+        voters: Vec::new(),
     };
+    identity.voters.clone_from(&identity.initial_voters);
     reader.finish("stable identity")?;
-    validate_voters(identity.node_id, identity.voters)?;
+    validate_stable_identity(&identity)?;
     Ok(identity)
+}
+
+fn decode_identity_v2(payload: &[u8]) -> ConsensusResult<StableIdentity> {
+    if payload.len() < IDENTITY_V2_FIXED_PAYLOAD_LEN {
+        return Err(ConsensusError::InvalidState(
+            "stable v2 identity payload is truncated".into(),
+        ));
+    }
+    let mut reader = Reader::new(payload);
+    let node_id = NodeId::new(reader.read_u64("node ID")?)?;
+    let group_id = GroupId::new(reader.read_u64("group ID")?)?;
+    let group_epoch = GroupEpoch::new(reader.read_u64("group epoch")?)?;
+    let voter_count = reader.read_u32("voter count")? as usize;
+    if voter_count > reader.remaining_len() / size_of::<u64>() {
+        return Err(ConsensusError::InvalidState(
+            "stable v2 identity voter count exceeds its remaining bytes".into(),
+        ));
+    }
+    let mut voters = Vec::with_capacity(voter_count);
+    for _ in 0..voter_count {
+        voters.push(NodeId::new(reader.read_u64("voter ID")?)?);
+    }
+    reader.finish("stable v2 identity")?;
+    let identity = StableIdentity {
+        node_id,
+        group_id,
+        group_epoch,
+        initial_voters: voters.clone(),
+        voters,
+    };
+    validate_stable_identity(&identity)?;
+    Ok(identity)
+}
+
+fn decode_identity_v3(payload: &[u8]) -> ConsensusResult<StableIdentity> {
+    if payload.len() < IDENTITY_V3_FIXED_PAYLOAD_LEN {
+        return Err(ConsensusError::InvalidState(
+            "stable v3 identity payload is truncated".into(),
+        ));
+    }
+    let mut reader = Reader::new(payload);
+    let node_id = NodeId::new(reader.read_u64("node ID")?)?;
+    let group_id = GroupId::new(reader.read_u64("group ID")?)?;
+    let group_epoch = GroupEpoch::new(reader.read_u64("group epoch")?)?;
+    let initial_count = reader.read_u32("initial voter count")? as usize;
+    let allowed_count = reader.read_u32("member allowlist count")? as usize;
+    let total_count = initial_count.checked_add(allowed_count).ok_or_else(|| {
+        ConsensusError::InvalidState("stable v3 identity member count overflow".into())
+    })?;
+    if total_count > reader.remaining_len() / size_of::<u64>() {
+        return Err(ConsensusError::InvalidState(
+            "stable v3 identity member counts exceed the remaining bytes".into(),
+        ));
+    }
+    let mut initial_voters = Vec::with_capacity(initial_count);
+    for _ in 0..initial_count {
+        initial_voters.push(NodeId::new(reader.read_u64("initial voter ID")?)?);
+    }
+    let mut voters = Vec::with_capacity(allowed_count);
+    for _ in 0..allowed_count {
+        voters.push(NodeId::new(reader.read_u64("allowed member ID")?)?);
+    }
+    reader.finish("stable v3 identity")?;
+    let identity = StableIdentity {
+        node_id,
+        group_id,
+        group_epoch,
+        initial_voters,
+        voters,
+    };
+    validate_stable_identity(&identity)?;
+    Ok(identity)
+}
+
+fn validate_stable_identity(identity: &StableIdentity) -> ConsensusResult<()> {
+    validate_initial_membership(identity.node_id, &identity.initial_voters, &identity.voters)
 }
 
 fn encode_transition(transition: &StableTransition) -> ConsensusResult<Vec<u8>> {
@@ -1013,6 +1281,92 @@ fn decode_transition(payload: &[u8]) -> ConsensusResult<StableTransition> {
         entries.push(entry);
     }
     reader.finish("stable transition")?;
+    validate_entry_batch(&entries)?;
+    Ok(StableTransition {
+        generation,
+        hard_state,
+        checkpoint,
+        entries,
+    })
+}
+
+fn encode_transition_v2(transition: &StableTransition) -> ConsensusResult<Vec<u8>> {
+    validate_entry_batch(&transition.entries)?;
+    let entry_count = u32::try_from(transition.entries.len()).map_err(|_| {
+        ConsensusError::InvalidState("stable transition has too many entries".into())
+    })?;
+    let mut capacity = TRANSITION_FIXED_PAYLOAD_LEN;
+    for entry in &transition.entries {
+        capacity = capacity
+            .checked_add(ENTRY_V2_FIXED_PAYLOAD_LEN)
+            .and_then(|value| value.checked_add(entry.data.len()))
+            .ok_or_else(|| {
+                ConsensusError::InvalidState("stable v2 transition length overflow".into())
+            })?;
+    }
+    let mut payload = Vec::with_capacity(capacity);
+    payload.extend_from_slice(&transition.generation.to_be_bytes());
+    payload.extend_from_slice(&transition.hard_state.term.to_be_bytes());
+    payload.extend_from_slice(&transition.hard_state.vote.to_be_bytes());
+    payload.extend_from_slice(&transition.hard_state.commit.to_be_bytes());
+    payload.extend_from_slice(&transition.checkpoint.applied_index.get().to_be_bytes());
+    payload.extend_from_slice(&transition.checkpoint.publishable_index.get().to_be_bytes());
+    payload.extend_from_slice(&transition.checkpoint.state_digest);
+    payload.extend_from_slice(&entry_count.to_be_bytes());
+    for entry in &transition.entries {
+        let data_len = u32::try_from(entry.data.len()).map_err(|_| {
+            ConsensusError::InvalidState("stable entry data exceeds its length field".into())
+        })?;
+        payload.extend_from_slice(&entry.index.to_be_bytes());
+        payload.extend_from_slice(&entry.term.to_be_bytes());
+        payload.extend_from_slice(&entry.entry_type.to_be_bytes());
+        payload.extend_from_slice(&data_len.to_be_bytes());
+        payload.extend_from_slice(entry.data.as_ref());
+    }
+    Ok(payload)
+}
+
+fn decode_transition_v2(payload: &[u8]) -> ConsensusResult<StableTransition> {
+    if payload.len() < TRANSITION_FIXED_PAYLOAD_LEN {
+        return Err(ConsensusError::InvalidState(
+            "stable v2 transition is truncated".into(),
+        ));
+    }
+    let mut reader = Reader::new(payload);
+    let generation = reader.read_u64("generation")?;
+    let hard_state = HardState {
+        term: reader.read_u64("HardState term")?,
+        vote: reader.read_u64("HardState vote")?,
+        commit: reader.read_u64("HardState commit")?,
+    };
+    let checkpoint = StableCheckpoint {
+        applied_index: LogIndex::new(reader.read_u64("applied index")?),
+        publishable_index: LogIndex::new(reader.read_u64("publishable index")?),
+        state_digest: reader.read_array("state digest")?,
+    };
+    let entry_count = reader.read_u32("entry count")? as usize;
+    if entry_count > reader.remaining_len() / ENTRY_V2_FIXED_PAYLOAD_LEN {
+        return Err(ConsensusError::InvalidState(
+            "stable v2 transition entry count exceeds its remaining bytes".into(),
+        ));
+    }
+    let mut entries = Vec::with_capacity(entry_count);
+    for _ in 0..entry_count {
+        let index = reader.read_u64("entry index")?;
+        let term = reader.read_u64("entry term")?;
+        let entry_type = reader.read_i32("entry type")?;
+        let data_len = reader.read_u32("entry data length")? as usize;
+        let data = reader.read_slice(data_len, "entry data")?.to_vec();
+        let mut entry = Entry {
+            entry_type,
+            term,
+            index,
+            ..Entry::default()
+        };
+        entry.data = data;
+        entries.push(entry);
+    }
+    reader.finish("stable v2 transition")?;
     validate_entry_batch(&entries)?;
     Ok(StableTransition {
         generation,
@@ -1116,9 +1470,146 @@ fn decode_checkpoint_transition(payload: &[u8]) -> ConsensusResult<StableCheckpo
         generation,
         hard_state,
         checkpoint,
+        conf_state: ConfState::default(),
         image,
         entries,
     })
+}
+
+fn encode_checkpoint_transition_v2(
+    transition: &StableCheckpointTransition,
+) -> ConsensusResult<Vec<u8>> {
+    validate_entry_batch(&transition.entries)?;
+    validate_checkpoint_image(&transition.image)?;
+    validate_checkpoint_conf_state(&transition.conf_state)?;
+    let conf_state = transition.conf_state.encode_to_vec();
+    let conf_state_len = u32::try_from(conf_state.len()).map_err(|_| {
+        ConsensusError::InvalidState("stable membership exceeds its length field".into())
+    })?;
+    let image = encode_checkpoint_image(&transition.image)?;
+    let image_len = u32::try_from(image.len()).map_err(|_| {
+        ConsensusError::InvalidState("stable checkpoint image exceeds its length field".into())
+    })?;
+    let entry_count = u32::try_from(transition.entries.len()).map_err(|_| {
+        ConsensusError::InvalidState("stable checkpoint has too many tail entries".into())
+    })?;
+    let mut capacity = CHECKPOINT_V2_FIXED_PAYLOAD_LEN
+        .checked_add(conf_state.len())
+        .and_then(|value| value.checked_add(image.len()))
+        .ok_or_else(|| ConsensusError::InvalidState("stable checkpoint length overflow".into()))?;
+    for entry in &transition.entries {
+        capacity = capacity
+            .checked_add(ENTRY_V2_FIXED_PAYLOAD_LEN)
+            .and_then(|value| value.checked_add(entry.data.len()))
+            .ok_or_else(|| {
+                ConsensusError::InvalidState("stable checkpoint length overflow".into())
+            })?;
+    }
+
+    let mut payload = Vec::with_capacity(capacity);
+    payload.extend_from_slice(&transition.generation.to_be_bytes());
+    payload.extend_from_slice(&transition.hard_state.term.to_be_bytes());
+    payload.extend_from_slice(&transition.hard_state.vote.to_be_bytes());
+    payload.extend_from_slice(&transition.hard_state.commit.to_be_bytes());
+    payload.extend_from_slice(&transition.checkpoint.applied_index.get().to_be_bytes());
+    payload.extend_from_slice(&transition.checkpoint.publishable_index.get().to_be_bytes());
+    payload.extend_from_slice(&transition.checkpoint.state_digest);
+    payload.extend_from_slice(&conf_state_len.to_be_bytes());
+    payload.extend_from_slice(&image_len.to_be_bytes());
+    payload.extend_from_slice(&entry_count.to_be_bytes());
+    payload.extend_from_slice(&conf_state);
+    payload.extend_from_slice(&image);
+    for entry in &transition.entries {
+        let data_len = u32::try_from(entry.data.len()).map_err(|_| {
+            ConsensusError::InvalidState("stable entry data exceeds its length field".into())
+        })?;
+        payload.extend_from_slice(&entry.index.to_be_bytes());
+        payload.extend_from_slice(&entry.term.to_be_bytes());
+        payload.extend_from_slice(&entry.entry_type.to_be_bytes());
+        payload.extend_from_slice(&data_len.to_be_bytes());
+        payload.extend_from_slice(entry.data.as_ref());
+    }
+    Ok(payload)
+}
+
+fn decode_checkpoint_transition_v2(payload: &[u8]) -> ConsensusResult<StableCheckpointTransition> {
+    if payload.len() < CHECKPOINT_V2_FIXED_PAYLOAD_LEN {
+        return Err(ConsensusError::InvalidState(
+            "stable v2 checkpoint transition is truncated".into(),
+        ));
+    }
+    let mut reader = Reader::new(payload);
+    let generation = reader.read_u64("generation")?;
+    let hard_state = HardState {
+        term: reader.read_u64("HardState term")?,
+        vote: reader.read_u64("HardState vote")?,
+        commit: reader.read_u64("HardState commit")?,
+    };
+    let checkpoint = StableCheckpoint {
+        applied_index: LogIndex::new(reader.read_u64("applied index")?),
+        publishable_index: LogIndex::new(reader.read_u64("publishable index")?),
+        state_digest: reader.read_array("state digest")?,
+    };
+    let conf_state_len = reader.read_u32("membership length")? as usize;
+    let image_len = reader.read_u32("checkpoint image length")? as usize;
+    let entry_count = reader.read_u32("tail entry count")? as usize;
+    let conf_state_bytes = reader.read_slice(conf_state_len, "membership")?;
+    let conf_state = ConfState::decode(conf_state_bytes).map_err(|error| {
+        ConsensusError::InvalidState(format!("stable membership is invalid: {error}"))
+    })?;
+    if conf_state.encode_to_vec() != conf_state_bytes {
+        return Err(ConsensusError::InvalidState(
+            "stable membership is not canonically encoded".into(),
+        ));
+    }
+    validate_checkpoint_conf_state(&conf_state)?;
+    let image = decode_checkpoint_image(reader.read_slice(image_len, "checkpoint image")?)?;
+    if entry_count > reader.remaining_len() / ENTRY_V2_FIXED_PAYLOAD_LEN {
+        return Err(ConsensusError::InvalidState(
+            "stable v2 checkpoint tail count exceeds its remaining bytes".into(),
+        ));
+    }
+    let mut entries = Vec::with_capacity(entry_count);
+    for _ in 0..entry_count {
+        let index = reader.read_u64("entry index")?;
+        let term = reader.read_u64("entry term")?;
+        let entry_type = reader.read_i32("entry type")?;
+        let data_len = reader.read_u32("entry data length")? as usize;
+        let data = reader.read_slice(data_len, "entry data")?.to_vec();
+        let mut entry = Entry {
+            entry_type,
+            term,
+            index,
+            ..Entry::default()
+        };
+        entry.data = data;
+        entries.push(entry);
+    }
+    reader.finish("stable v2 checkpoint transition")?;
+    validate_entry_batch(&entries)?;
+    Ok(StableCheckpointTransition {
+        generation,
+        hard_state,
+        checkpoint,
+        conf_state,
+        image,
+        entries,
+    })
+}
+
+fn validate_checkpoint_conf_state(conf_state: &ConfState) -> ConsensusResult<()> {
+    let allowed_members = conf_state
+        .voters
+        .iter()
+        .chain(&conf_state.learners)
+        .chain(&conf_state.voters_outgoing)
+        .chain(&conf_state.learners_next)
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(NodeId::new)
+        .collect::<ConsensusResult<Vec<_>>>()?;
+    membership::validate_conf_state(conf_state, &allowed_members)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1134,6 +1625,10 @@ impl<'a> Reader<'a> {
 
     fn read_u32(&mut self, field: &str) -> ConsensusResult<u32> {
         Ok(u32::from_be_bytes(self.read_array(field)?))
+    }
+
+    fn read_i32(&mut self, field: &str) -> ConsensusResult<i32> {
+        Ok(i32::from_be_bytes(self.read_array(field)?))
     }
 
     fn read_u64(&mut self, field: &str) -> ConsensusResult<u64> {
@@ -1239,6 +1734,66 @@ mod tests {
         assert!(matches!(
             decode_record(&trailing),
             Err(ConsensusError::InvalidState(_))
+        ));
+    }
+
+    #[test]
+    fn five_voter_identity_uses_bounded_v2_codec_and_reopens() {
+        let identity = five_voter_identity();
+        let encoded = encode_record(&StableRecord::Identity(identity.clone())).unwrap();
+        assert_eq!(&encoded[6..8], &IDENTITY_V2_KIND.to_be_bytes());
+        assert_eq!(encoded.len(), RECORD_HEADER_LEN + 28 + (5 * 8));
+        assert_eq!(
+            decode_record(&encoded).unwrap(),
+            StableRecord::Identity(identity.clone())
+        );
+
+        let directory = TestDirectory::new();
+        let path = directory.wal_path();
+        let recovered = DiskStableStore::open(&path, identity.clone()).unwrap();
+        assert_eq!(
+            recovered.storage.initial_state().unwrap().conf_state.voters,
+            vec![1, 2, 3, 4, 5]
+        );
+        drop(recovered);
+        DiskStableStore::open(&path, identity).unwrap();
+    }
+
+    #[test]
+    fn three_voter_bootstrap_with_five_member_allowlist_uses_v3_and_reopens() {
+        let identity = StableIdentity {
+            node_id: NodeId::new(4).unwrap(),
+            group_id: GroupId::new(7).unwrap(),
+            group_epoch: GroupEpoch::new(9).unwrap(),
+            initial_voters: (1..=3).map(|value| NodeId::new(value).unwrap()).collect(),
+            voters: (1..=5).map(|value| NodeId::new(value).unwrap()).collect(),
+        };
+        let encoded = encode_record(&StableRecord::Identity(identity.clone())).unwrap();
+        assert_eq!(&encoded[6..8], &IDENTITY_V3_KIND.to_be_bytes());
+        assert_eq!(encoded.len(), RECORD_HEADER_LEN + 32 + (8 * 8));
+        assert_eq!(
+            decode_record(&encoded).unwrap(),
+            StableRecord::Identity(identity.clone())
+        );
+
+        let directory = TestDirectory::new();
+        let path = directory.wal_path();
+        let recovered = DiskStableStore::open(&path, identity.clone()).unwrap();
+        assert_eq!(
+            recovered.storage.initial_state().unwrap().conf_state.voters,
+            vec![1, 2, 3]
+        );
+        drop(recovered);
+        DiskStableStore::open(&path, identity).unwrap();
+    }
+
+    #[test]
+    fn identity_codec_rejects_unsupported_even_voter_count() {
+        let mut invalid = five_voter_identity();
+        invalid.voters.pop();
+        assert!(matches!(
+            encode_record(&StableRecord::Identity(invalid)),
+            Err(ConsensusError::InvalidVoterSet(_))
         ));
     }
 
@@ -1375,6 +1930,7 @@ mod tests {
             .persist_checkpoint(
                 2,
                 &hard_state(1, 1, 1),
+                &expected_conf_state(),
                 &image,
                 &[normal_entry(2, 1)],
                 checkpoint_at(1),
@@ -1438,7 +1994,14 @@ mod tests {
 
         assert_eq!(
             store
-                .persist_checkpoint(129, &hard_state(128, 1, 1), &image, &tail, checkpoint_at(1),)
+                .persist_checkpoint(
+                    129,
+                    &hard_state(128, 1, 1),
+                    &expected_conf_state(),
+                    &image,
+                    &tail,
+                    checkpoint_at(1),
+                )
                 .unwrap(),
             129
         );
@@ -1470,6 +2033,7 @@ mod tests {
                 .persist_checkpoint(
                     131,
                     &hard_state(129, 1, 1),
+                    &expected_conf_state(),
                     &image,
                     &second_tail,
                     checkpoint_at(1),
@@ -1497,6 +2061,7 @@ mod tests {
             generation: 1,
             hard_state: hard_state(1, 1, 1),
             checkpoint: checkpoint_at(1),
+            conf_state: ConfState::default(),
             image: empty_image_at(1, 1),
             entries: Vec::new(),
         };
@@ -1525,6 +2090,7 @@ mod tests {
             generation: 1,
             hard_state: hard_state(1, 1, 1),
             checkpoint: checkpoint_at(1),
+            conf_state: ConfState::default(),
             image: image.clone(),
             entries: Vec::new(),
         });
@@ -1548,6 +2114,7 @@ mod tests {
             store.persist_checkpoint(
                 2,
                 &hard_state(1, 1, 1),
+                &expected_conf_state(),
                 &image,
                 &[normal_entry(3, 1)],
                 checkpoint_at(1),
@@ -1572,18 +2139,21 @@ mod tests {
             state_digest: conflicting.state_digest,
         };
         let previous_hard_state = hard_state(1, 1, 1);
+        let previous_conf_state = expected_conf_state();
         let previous_state = PriorState {
             hard_state: &previous_hard_state,
             snapshot: Some(&previous),
             entries: &[],
+            conf_state: &previous_conf_state,
             checkpoint: previous_checkpoint,
         };
 
         assert!(matches!(
             prepare_checkpoint_transition(
-                identity(),
+                &identity(),
                 previous_state,
                 hard_state(1, 1, 1),
+                expected_conf_state(),
                 conflicting,
                 &[],
                 next_checkpoint,
@@ -1687,20 +2257,35 @@ mod tests {
     }
 
     fn identity() -> StableIdentity {
+        let voters = vec![
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            NodeId::new(3).unwrap(),
+        ];
         StableIdentity {
             node_id: NodeId::new(1).unwrap(),
             group_id: GroupId::new(7).unwrap(),
             group_epoch: GroupEpoch::new(9).unwrap(),
-            voters: [
-                NodeId::new(1).unwrap(),
-                NodeId::new(2).unwrap(),
-                NodeId::new(3).unwrap(),
-            ],
+            initial_voters: voters.clone(),
+            voters,
+        }
+    }
+
+    fn five_voter_identity() -> StableIdentity {
+        let voters = (1..=5)
+            .map(|value| NodeId::new(value).unwrap())
+            .collect::<Vec<_>>();
+        StableIdentity {
+            node_id: NodeId::new(1).unwrap(),
+            group_id: GroupId::new(7).unwrap(),
+            group_epoch: GroupEpoch::new(9).unwrap(),
+            initial_voters: voters.clone(),
+            voters,
         }
     }
 
     fn empty_checkpoint() -> StableCheckpoint {
-        StableCheckpoint::empty(identity()).unwrap()
+        StableCheckpoint::empty(&identity()).unwrap()
     }
 
     fn checkpoint_at(index: u64) -> StableCheckpoint {

@@ -360,13 +360,19 @@ Source-connector tests cover direction/status eligibility, exact cursor
 progression, duplicate/oversized/malformed batch rejection, stable record
 proposal identities, real loopback headers/authentication, error routing,
 connector fairness, topology counters, and a real three-process checkpoint and
-all-voter reopen history.
+all-voter reopen history. Deterministic adapter suites cover immutable-object
+ordering/overwrite detection and cursors, PostgreSQL transaction/LSN assembly,
+MySQL transaction/binlog positions, Kafka partition offsets/error routing,
+credential and transport policy, crash-before-upstream-ack reconciliation, and
+session cleanup. The pinned connector-conformance Compose stack then runs
+MinIO/S3, PostgreSQL 17 logical replication, MySQL 8 row binlogs, and Kafka 4
+against those adapters.
 The container gate adds follower rejection,
 majority-before-success, acquire/ack replication, leader loss, catch-up,
 archive/outbox/digest agreement, all-node `SIGKILL`, and same-volume recovery.
-An MQTT wire/protocol corpus, official schema/CloudEvents conformance,
-CDC/Kafka/object-storage source adapters, unsigned legacy target execution, and a broader
-crash-at-every-network-boundary matrix remain open; see
+An MQTT wire/protocol corpus, official schema/CloudEvents conformance, live
+Azure/GCS cloud campaigns, unsigned legacy target execution, sustained adapter
+load/soak, and a broader crash-at-every-network-boundary matrix remain open; see
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 The `epoch-catalog` unit suite begins at the regional multi-tablet boundary. It
@@ -672,6 +678,32 @@ and 90 day campaigns before stronger release claims. Every campaign records
 configuration, build identity, workload, saturation level, injected faults,
 and SLO distribution.
 
+The alpha-exit branch implements the first resumable evidence runner in
+`tests/soak/epoch_soak.py`. Its accelerated CI profile wraps the existing real
+regional campaign once; its `thirty-day` profile accumulates only successful
+active round time across exact-identity resumes. Atomic state, per-attempt
+SHA-256 receipts, a canonical event log, explicit invariant receipts, and an
+Ed25519-signed manifest make interruption and tampering visible. Campaign
+runtime percentiles are not presented as request-latency SLOs. See
+[Resumable load, fault, and soak evidence](SOAK_TESTING.md).
+
+The first local accelerated campaign passed one exact-image round in 48,434 ms
+with all seven named process faults and six required invariant receipts. Its
+manifest explicitly marks itself accelerated-only and denies throughput,
+latency, managed-service SLO, and production-certification claims. Protected CI
+and the elapsed 30-day campaign remain required.
+
+The separate live Kubernetes acceptance runner in
+`tests/integration/kubernetes_alpha_exit.py` creates a pinned one-control-plane,
+four-worker Kind cluster. One clean local run now passes mTLS install, all four
+profiles, encrypted backup, compacted-log learner catch-up and voter
+replacement, the post-request backup upgrade gate, serialized four-node
+rollout, fresh-cluster restore, exact Catalog/profile digest comparison, and
+post-restore writes. `tests/integration/test_kubernetes_alpha_exit.py` protects
+the evidence schema, N-node placement planner, integer normalization, identity,
+and fail-closed command contracts without requiring Docker. See
+[Live Kubernetes alpha-exit campaign](KUBERNETES_ALPHA_EXIT.md).
+
 ### 8. Benchmarks
 
 Performance results state hardware, payload sizes, concurrency, dataset size,
@@ -716,17 +748,55 @@ The implemented security slices currently contribute:
 - managed-target tests for strict/redacted API-key/bearer/OAuth files, token
   response/expiry bounds, function/connector allowlists, shared SSRF controls,
   stable idempotency, endpoint health mutation, and checkpoint ordering; and
+- Rust/Go transport tests for mandatory TLS inputs, trusted and untrusted
+  client chains, hostname verification, secure listener startup, peer recovery,
+  and the no-proxy/no-redirect client boundary; Go, Java, Python, and CLI tests
+  for custom trust roots and optional client identities; and
+- regional backup tests for canonical/bounded manifests, quorum barriers,
+  Catalog-derived inventory, a seven-node layout with disjoint tablet leaders,
+  exact three/five-voter membership, tamper/wrong-key rejection, no-overwrite
+  publication, retention, non-empty-destination rejection, and encrypted
+  all-profile restore/digest equivalence after a full reopen; and
+- fake-Kubernetes operator tests for required TLS/backup Secret and RWX PVC
+  validation, secure N-node rendering, idempotent backup CronJobs, strict
+  termination receipts, failure-to-success status recovery, restore init
+  containers, immutable restore references, post-request backup gating,
+  all-ordinal partition freeze, preflight/drain/update/postflight ordering,
+  exact-image pod readiness, and guarded rollback entry; and
+- Rust maintenance tests for canonical all-node inventory, cluster-wide group
+  coverage, stable three/five-voter membership, complete replication/apply
+  progress, lag/joint-change rejection, deterministic transfer choice, HTTPS
+  authority validation, and group-epoch/term fencing; and
+- Catalog/consensus/regional membership tests for canonical v5 plan/finalize
+  bytes, exact replay, stale/conflicting/multi-voter rejection, learner
+  catch-up gating, joint-consensus persistence, current/target materialization,
+  Go pending/ready status, and a four-node Stream replacement that preserves
+  data, stops the removed host, and reopens on the new voter set; and
 - console tests proving the managed credential stays session-scoped and that
-  empty, whitespace-bearing, or oversized values are rejected.
+  empty, whitespace-bearing, or oversized values are rejected; and
+- OCI candidate checks that build node/control/operator/CLI from pinned bases,
+  reject root users, wrong entrypoints, source/version/revision/license label
+  drift, and credential-shaped defaults; a scratch-fixture regression proves
+  root identity and revision drift fail closed; and local evidence generates a
+  nonempty SPDX JSON inventory for every built image.
 
 This is not yet the cross-protocol production security suite: OIDC, expiry and
-revocation, mTLS/peer identity, policy replication/cache expiry, immutable
-audit export, network-enforced/private egress, secret-manager rotation, quotas,
-encryption/KMS, and abuse/load campaigns remain open.
+revocation, certificate issuance/automated rotation, certificate-role policy,
+policy replication/cache expiry, immutable audit export,
+network-enforced/private egress, secret-manager rotation, quotas, WAL/data
+encryption and external KMS, protected live-Kubernetes evidence, mixed-version
+upgrade/rollback, and abuse/load campaigns remain open.
 
-Dependency and release gates include Cargo advisory/license policy, Go and
-Python vulnerability scanning, JavaScript dependency scanning, secret scanning,
-SBOM generation, artifact signing, and provenance verification.
+Current dependency gates include Cargo advisory/license policy, Go and Python
+vulnerability scanning, JavaScript dependency scanning, and secret scanning.
+The `v0.2.0-beta.1` workflow candidate additionally pins every action by full commit,
+builds and inspects four images without publishing on pull requests, generates
+four SPDX documents, and defines exact-main/tag-only multi-architecture
+publication with manifest provenance, per-platform SBOM attestations, and
+keyless signing. Local image inspection and four standalone Syft inventories
+pass, as does one clean exact-source local Kubernetes lifecycle. Protected
+pull-request/tag execution, exact-main rerun, and clean published-digest pulls
+remain alpha-exit release gates.
 
 ## Test organization
 
@@ -751,7 +821,7 @@ committed and documented.
 | Pipeline | Trigger | Required work |
 | --- | --- | --- |
 | Fast | Every pull request | Format, lint, generation freshness, unit/property tests |
-| Integration | Every pull request once available | Standalone and three-node process tests |
+| Integration | Every pull request | Standalone, three-node process, connector, and live four-node Kubernetes tests |
 | Simulation | Pull request seed sample; larger nightly matrix | Deterministic failure exploration |
 | Compatibility | Nightly and release | Pinned Redis/Kafka/RabbitMQ client matrix |
 | Security | Pull request and scheduled | Rust advisory gate; secrets, fuzz smoke, authorization as implemented |

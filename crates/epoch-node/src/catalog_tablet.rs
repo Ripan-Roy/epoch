@@ -210,6 +210,48 @@ impl CatalogTabletService {
         })
     }
 
+    /// Reads the exact catalog inventory carried by a native application
+    /// checkpoint. Backup coordinators use this image instead of sampling the
+    /// live service after the barrier, so concurrent catalog mutations cannot
+    /// change the set of tablet checkpoints included in the artifact.
+    pub(crate) fn resources_from_application_snapshot(
+        scope: CatalogTabletScope,
+        snapshot: &ApplicationSnapshot,
+    ) -> Result<Vec<ResourceRecord>, String> {
+        if snapshot.format_id() != CATALOG_APPLICATION_SNAPSHOT_FORMAT_ID
+            || snapshot.format_version() != CATALOG_APPLICATION_SNAPSHOT_VERSION
+        {
+            return Err("application snapshot is not a supported Catalog image".into());
+        }
+        let checkpoint: CatalogApplicationCheckpoint =
+            serde_json::from_slice(snapshot.payload()).map_err(|error| error.to_string())?;
+        if serde_json::to_vec(&checkpoint).map_err(|error| error.to_string())? != snapshot.payload()
+        {
+            return Err("Catalog application snapshot is not canonical".into());
+        }
+        if checkpoint.format_version != CATALOG_APPLICATION_SNAPSHOT_VERSION
+            || checkpoint.group_id != scope.group_id
+            || checkpoint.group_epoch != scope.group_epoch
+            || checkpoint.checkpoint_index != snapshot.checkpoint_index().get()
+            || checkpoint.last_applied_index > checkpoint.checkpoint_index
+        {
+            return Err("Catalog application snapshot scope or index is invalid".into());
+        }
+        let catalog_bytes = STANDARD_NO_PAD
+            .decode(&checkpoint.catalog_base64)
+            .map_err(|error| format!("Catalog snapshot base64 is invalid: {error}"))?;
+        let catalog =
+            Catalog::decode_snapshot(&catalog_bytes).map_err(|error| error.to_string())?;
+        if !catalog.is_consensus_group_reserved(scope.group_id)
+            || catalog.state_digest().map_err(|error| error.to_string())? != snapshot.state_digest()
+        {
+            return Err(
+                "Catalog application snapshot state digest or reservation is invalid".into(),
+            );
+        }
+        Ok(catalog.resources().cloned().collect())
+    }
+
     fn fail(&self, error: impl Into<String>) -> String {
         let error = error.into();
         if let Ok(mut failure) = self.failure.write() {
@@ -483,6 +525,7 @@ mod tests {
                 configuration: None,
                 governance: None,
             },
+            tablet_placements: Vec::new(),
         })
     }
 

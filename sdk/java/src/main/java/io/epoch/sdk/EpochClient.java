@@ -28,6 +28,10 @@ public final class EpochClient {
     this(new HttpTransport(baseUri, timeout));
   }
 
+  public EpochClient(URI baseUri, Duration timeout, TlsConfig tls) {
+    this(new HttpTransport(baseUri, timeout, Objects.requireNonNull(tls, "tls")));
+  }
+
   public EpochClient(Transport transport) {
     this.transport = Objects.requireNonNull(transport, "transport");
   }
