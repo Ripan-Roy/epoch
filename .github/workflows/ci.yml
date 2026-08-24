@@ -203,6 +203,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Install native Rust build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends cmake libcurl4-openssl-dev
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: 1.26.5
@@ -229,6 +233,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Install native Rust build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends cmake libcurl4-openssl-dev
       - name: Validate connector service topology
         run: docker compose -f deploy/compose/docker-compose.connectors.yml config --quiet
       - name: Start pinned connector services
