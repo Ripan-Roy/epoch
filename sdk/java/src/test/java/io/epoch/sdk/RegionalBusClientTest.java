@@ -212,6 +212,101 @@ final class RegionalBusClientTest {
     assertEquals(List.of(), transport.requests);
   }
 
+  @Test
+  void typedSchemaLifecycleIsValidatedAndRouted() throws Exception {
+    RecordingTransport transport = new RecordingTransport();
+    RegionalBusClient client =
+        RegionalBusClient.withTransports(
+            List.of(transport), "secret-token", new RegionalScope("acme", "shop", "dev", "core"));
+    EventEnvelope event =
+        EventEnvelope.builder("java-regional-sdk", "order.created", Map.of("id", 2))
+            .id("order-2")
+            .timeMs(2)
+            .build();
+
+    client.registerSchema(
+        "events",
+        0,
+        "schema-1",
+        new SchemaRegistration(
+            "orders",
+            SchemaFormat.PROTOBUF,
+            "syntax = \"proto3\"; message Order { string id = 1; }",
+            SchemaCompatibility.BACKWARD,
+            "Order"));
+    client.upsertSchemaValidationPolicy(
+        "events",
+        0,
+        "policy-1",
+        new SchemaValidationPolicy(
+            "orders", "order.*", "orders@1", SchemaValidationMode.PRODUCER_AND_BROKER));
+    client.validateSchema("events", 0, SchemaValidationStage.PRODUCER, event);
+    client.removeSchemaValidationPolicy("events", 0, "policy-remove-1", "orders");
+
+    List<Request> operations = new ArrayList<>();
+    for (int index = 1; index < transport.requests.size(); index += 2) {
+      operations.add(transport.requests.get(index));
+    }
+    assertEquals(4, operations.size());
+    assertEquals(
+        "protobuf",
+        operations
+            .get(0)
+            .body()
+            .path("operation")
+            .path("operation")
+            .path("registration")
+            .path("format")
+            .asText());
+    assertEquals(
+        "Order",
+        operations
+            .get(0)
+            .body()
+            .path("operation")
+            .path("operation")
+            .path("registration")
+            .path("root_message")
+            .asText());
+    assertEquals(
+        "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core"
+            + "/buses/events/shards/0/schema/validate",
+        operations.get(2).path());
+    assertEquals("producer", operations.get(2).body().path("mode").asText());
+    assertEquals("linearizable", operations.get(2).headers().get("x-epoch-read-consistency"));
+  }
+
+  @Test
+  void invalidSchemaLifecycleFailsBeforeNetwork() {
+    RecordingTransport transport = new RecordingTransport();
+    RegionalBusClient client =
+        RegionalBusClient.withTransports(
+            List.of(transport), "secret-token", new RegionalScope("acme", "shop", "dev", "core"));
+
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            new SchemaRegistration(
+                "bad/name", SchemaFormat.JSON_SCHEMA, "{}", SchemaCompatibility.NONE));
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            new SchemaRegistration(
+                "orders", SchemaFormat.JSON_SCHEMA, "", SchemaCompatibility.NONE));
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            new SchemaRegistration(
+                "orders", SchemaFormat.JSON_SCHEMA, "{}", SchemaCompatibility.NONE, "Order"));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new SchemaValidationPolicy("orders", "", "orders@1", SchemaValidationMode.BROKER));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> client.removeSchemaValidationPolicy("events", 0, "remove", "bad/name"));
+    assertEquals(List.of(), transport.requests);
+  }
+
   private record Request(
       String method,
       String path,

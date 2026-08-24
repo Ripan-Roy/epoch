@@ -31,7 +31,15 @@ from .regional import (
     StreamSuperstreamMember,
     stream_shard_for,
 )
-from .regional_bus import RegionalBusClient
+from .regional_bus import (
+    RegionalBusClient,
+    SchemaCompatibility,
+    SchemaFormat,
+    SchemaRegistration,
+    SchemaValidationMode,
+    SchemaValidationPolicy,
+    SchemaValidationStage,
+)
 from .regional_cache import (
     RegionalCacheClient,
     RegionalCacheExpectation,
@@ -67,6 +75,12 @@ __all__ = [
     "RegionalQueueClient",
     "RegionalScope",
     "RegionalStreamClient",
+    "SchemaCompatibility",
+    "SchemaFormat",
+    "SchemaRegistration",
+    "SchemaValidationMode",
+    "SchemaValidationPolicy",
+    "SchemaValidationStage",
     "StreamBatchFrame",
     "StreamBatchRecord",
     "StreamCaptureFormat",

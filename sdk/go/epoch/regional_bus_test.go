@@ -235,3 +235,130 @@ func TestRegionalBusClientRejectsInvalidBoundsBeforeNetwork(t *testing.T) {
 		t.Fatalf("invalid calls reached network: %#v", leader.requests)
 	}
 }
+
+func TestRegionalBusClientRoutesTypedSchemaLifecycle(t *testing.T) {
+	leader := &regionalFakeTransport{route: Document{
+		"resource_generation": "6", "tablet_epoch": "4", "term": "11", "accepts_writes": true,
+	}}
+	client, err := NewRegionalBusClientWithTransports(
+		[]Transport{leader}, "secret-token",
+		RegionalScope{Organization: "acme", Project: "shop", Environment: "dev", Namespace: "core"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	event := EventEnvelope{ID: "order-2", Source: "go-regional-sdk", Type: "order.created", TimeMS: 2, Payload: map[string]any{"id": 2}}
+
+	if _, err = client.RegisterSchema(ctx, "events", 0, "schema-1", SchemaRegistration{
+		Name:          "orders",
+		Format:        ProtobufSchema,
+		Definition:    "syntax = \"proto3\"; message Order { string id = 1; }",
+		Compatibility: BackwardSchemaCompatibility,
+		RootMessage:   "Order",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.UpsertSchemaValidationPolicy(ctx, "events", 0, "policy-1", SchemaValidationPolicy{
+		Name:             "orders",
+		EventTypePattern: "order.*",
+		SchemaRef:        "orders@1",
+		Mode:             ProducerAndBrokerSchemaValidation,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.ValidateSchema(ctx, "events", 0, ProducerValidationStage, event); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.RemoveSchemaValidationPolicy(ctx, "events", 0, "policy-remove-1", "orders"); err != nil {
+		t.Fatal(err)
+	}
+
+	var operations []Request
+	for index := 1; index < len(leader.requests); index += 2 {
+		operations = append(operations, leader.requests[index])
+	}
+	if len(operations) != 4 {
+		t.Fatalf("expected four schema lifecycle operations, got %d", len(operations))
+	}
+	base := "/v1/organizations/acme/projects/shop/environments/dev/namespaces/core/buses/events/shards/0"
+	if operations[0].Path != base+"/mutations" || operations[1].Path != base+"/mutations" || operations[2].Path != base+"/schema/validate" || operations[3].Path != base+"/mutations" {
+		t.Fatalf("unexpected schema lifecycle paths: %#v", operations)
+	}
+	if operations[2].Headers[regionalReadHeader] != "linearizable" {
+		t.Fatal("explicit schema validation was not linearizable")
+	}
+
+	var registration map[string]any
+	payload, err := json.Marshal(operations[0].Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal(payload, &registration); err != nil {
+		t.Fatal(err)
+	}
+	integration := registration["operation"].(map[string]any)["operation"].(map[string]any)
+	registered := integration["registration"].(map[string]any)
+	if integration["kind"] != "register_schema" || registered["format"] != "protobuf" || registered["root_message"] != "Order" {
+		t.Fatalf("unexpected typed schema registration: %#v", integration)
+	}
+
+	var validation map[string]any
+	payload, err = json.Marshal(operations[2].Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal(payload, &validation); err != nil {
+		t.Fatal(err)
+	}
+	if validation["mode"] != "producer" || validation["envelope"].(map[string]any)["type"] != "order.created" {
+		t.Fatalf("unexpected typed schema validation: %#v", validation)
+	}
+}
+
+func TestRegionalBusClientRejectsInvalidSchemaLifecycleBeforeNetwork(t *testing.T) {
+	leader := &regionalFakeTransport{route: Document{
+		"resource_generation": "6", "tablet_epoch": "4", "term": "11", "accepts_writes": true,
+	}}
+	client, err := NewRegionalBusClientWithTransports(
+		[]Transport{leader}, "secret-token",
+		RegionalScope{Organization: "acme", Project: "shop", Environment: "dev", Namespace: "core"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	event := EventEnvelope{ID: "order-2", Source: "go-regional-sdk", Type: "order.created", TimeMS: 2, Payload: map[string]any{"id": 2}}
+
+	registrations := []SchemaRegistration{
+		{Name: "bad/name", Format: JSONSchema, Definition: "{}", Compatibility: NoSchemaCompatibility},
+		{Name: "orders", Format: "xml", Definition: "<schema />", Compatibility: NoSchemaCompatibility},
+		{Name: "orders", Format: JSONSchema, Definition: "", Compatibility: NoSchemaCompatibility},
+		{Name: "orders", Format: JSONSchema, Definition: "{}", Compatibility: NoSchemaCompatibility, RootMessage: "Order"},
+	}
+	for _, registration := range registrations {
+		if _, err = client.RegisterSchema(ctx, "events", 0, "schema", registration); err == nil {
+			t.Fatalf("invalid schema registration reached the network: %#v", registration)
+		}
+	}
+	policies := []SchemaValidationPolicy{
+		{Name: "bad/name", EventTypePattern: "order.*", SchemaRef: "orders@1", Mode: BrokerSchemaValidation},
+		{Name: "orders", EventTypePattern: "", SchemaRef: "orders@1", Mode: BrokerSchemaValidation},
+		{Name: "orders", EventTypePattern: "order.*", SchemaRef: "", Mode: BrokerSchemaValidation},
+		{Name: "orders", EventTypePattern: "order.*", SchemaRef: "orders@1", Mode: "unknown"},
+	}
+	for _, policy := range policies {
+		if _, err = client.UpsertSchemaValidationPolicy(ctx, "events", 0, "policy", policy); err == nil {
+			t.Fatalf("invalid schema policy reached the network: %#v", policy)
+		}
+	}
+	if _, err = client.RemoveSchemaValidationPolicy(ctx, "events", 0, "remove", "bad/name"); err == nil {
+		t.Fatal("invalid schema policy name should fail")
+	}
+	if _, err = client.ValidateSchema(ctx, "events", 0, "unknown", event); err == nil {
+		t.Fatal("invalid schema validation stage should fail")
+	}
+	if !reflect.DeepEqual(leader.requests, []Request(nil)) {
+		t.Fatalf("invalid schema lifecycle calls reached network: %#v", leader.requests)
+	}
+}

@@ -83,6 +83,7 @@ fn broker_validation_and_bounded_lookup_enrichment_are_applied_before_routing() 
                 format: SchemaFormat::JsonSchema,
                 definition: r#"{"type":"object"}"#.into(),
                 compatibility: SchemaCompatibility::Backward,
+                root_message: None,
                 fields: schema_fields(),
             },
             1,
@@ -206,6 +207,7 @@ fn schema_revisions_validate_payloads_and_enforce_compatibility() {
                 format: SchemaFormat::JsonSchema,
                 definition: r#"{"type":"object"}"#.into(),
                 compatibility: SchemaCompatibility::Backward,
+                root_message: None,
                 fields: schema_fields(),
             },
             10,
@@ -231,6 +233,7 @@ fn schema_revisions_validate_payloads_and_enforce_compatibility() {
         format: SchemaFormat::JsonSchema,
         definition: r#"{"type":"object"}"#.into(),
         compatibility: SchemaCompatibility::Backward,
+        root_message: None,
         fields: vec![SchemaField {
             path: "order.id".into(),
             value_type: SchemaValueType::Integer,
@@ -245,6 +248,7 @@ fn schema_revisions_validate_payloads_and_enforce_compatibility() {
         format: SchemaFormat::JsonSchema,
         definition: r#"{"type":"object"}"#.into(),
         compatibility: SchemaCompatibility::Backward,
+        root_message: None,
         fields: schema_fields()
             .into_iter()
             .chain([SchemaField {
@@ -280,6 +284,7 @@ fn avro_and_protobuf_definitions_are_stored_with_strict_format_validation() {
                     format,
                     definition: definition.into(),
                     compatibility: SchemaCompatibility::None,
+                    root_message: None,
                     fields: Vec::new(),
                 },
                 1,
@@ -295,12 +300,294 @@ fn avro_and_protobuf_definitions_are_stored_with_strict_format_validation() {
                     format: SchemaFormat::Protobuf,
                     definition: "not a descriptor".into(),
                     compatibility: SchemaCompatibility::None,
+                    root_message: None,
                     fields: Vec::new(),
                 },
                 2,
             )
             .is_err()
     );
+}
+
+#[test]
+fn official_schema_definitions_drive_payload_validation_without_field_overlays() {
+    let cases = [
+        (
+            "json-order",
+            SchemaFormat::JsonSchema,
+            r#"{
+                "$schema":"https://json-schema.org/draft/2020-12/schema",
+                "type":"object",
+                "additionalProperties":false,
+                "required":["id","total"],
+                "properties":{
+                    "id":{"type":"string","minLength":1},
+                    "total":{"type":"integer","minimum":0}
+                }
+            }"#,
+        ),
+        (
+            "avro-order",
+            SchemaFormat::Avro,
+            r#"{
+                "type":"record",
+                "name":"Order",
+                "fields":[
+                    {"name":"id","type":"string"},
+                    {"name":"total","type":"long"}
+                ]
+            }"#,
+        ),
+        (
+            "proto-order",
+            SchemaFormat::Protobuf,
+            r#"syntax = "proto2";
+               package epoch.tests;
+               message Order {
+                   required string id = 1;
+                   required int64 total = 2;
+               }"#,
+        ),
+    ];
+
+    for (name, format, definition) in cases {
+        let mut registry = SchemaRegistry::default();
+        registry
+            .register(
+                SchemaRegistration {
+                    name: name.into(),
+                    format,
+                    definition: definition.into(),
+                    compatibility: SchemaCompatibility::Backward,
+                    root_message: None,
+                    fields: Vec::new(),
+                },
+                1,
+            )
+            .unwrap();
+
+        registry
+            .validate_payload(&format!("{name}@1"), &json!({"id":"o-1","total":42}))
+            .unwrap();
+        let missing = registry
+            .validate_payload(&format!("{name}@1"), &json!({"id":"o-1"}))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            missing.contains("total"),
+            "{format:?} did not identify the missing total field: {missing}"
+        );
+        let invalid_value = "do-not-reflect-schema-payload";
+        let error = registry
+            .validate_payload(
+                &format!("{name}@1"),
+                &json!({"id":"o-1","total":invalid_value}),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !error.contains(invalid_value),
+            "{format:?} reflected a rejected payload value: {error}"
+        );
+    }
+}
+
+#[test]
+fn official_schema_compilers_reject_malformed_definitions() {
+    for (name, format, definition) in [
+        (
+            "bad-json",
+            SchemaFormat::JsonSchema,
+            r#"{"type":"definitely-not-a-json-schema-type"}"#,
+        ),
+        (
+            "bad-avro",
+            SchemaFormat::Avro,
+            r#"{"type":"record","name":"Order","fields":[{"name":"id"}]}"#,
+        ),
+        (
+            "bad-proto",
+            SchemaFormat::Protobuf,
+            "syntax = \"proto3\"; message Order { made_up id = 1; }",
+        ),
+    ] {
+        let error = SchemaRegistry::default()
+            .register(
+                SchemaRegistration {
+                    name: name.into(),
+                    format,
+                    definition: definition.into(),
+                    compatibility: SchemaCompatibility::None,
+                    root_message: None,
+                    fields: Vec::new(),
+                },
+                1,
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("schema"),
+            "{format:?} returned an unscoped compiler error: {error}"
+        );
+    }
+}
+
+#[test]
+fn compatibility_is_derived_from_each_official_schema_definition() {
+    let cases = [
+        (
+            "json-order",
+            SchemaFormat::JsonSchema,
+            r#"{"type":"object","required":["id"],"properties":{"id":{"type":"string"}}}"#,
+            r#"{"type":"object","required":["id","region"],"properties":{"id":{"type":"string"},"region":{"type":"string"}}}"#,
+        ),
+        (
+            "avro-order",
+            SchemaFormat::Avro,
+            r#"{"type":"record","name":"Order","fields":[{"name":"id","type":"string"}]}"#,
+            r#"{"type":"record","name":"Order","fields":[{"name":"id","type":"string"},{"name":"region","type":"string"}]}"#,
+        ),
+        (
+            "proto-order",
+            SchemaFormat::Protobuf,
+            r#"syntax = "proto3"; message Order { string id = 1; }"#,
+            r#"syntax = "proto3"; message Order { int64 id = 1; }"#,
+        ),
+    ];
+
+    for (name, format, first, incompatible) in cases {
+        let mut registry = SchemaRegistry::default();
+        registry
+            .register(
+                SchemaRegistration {
+                    name: name.into(),
+                    format,
+                    definition: first.into(),
+                    compatibility: SchemaCompatibility::Backward,
+                    root_message: None,
+                    fields: Vec::new(),
+                },
+                1,
+            )
+            .unwrap();
+        let error = registry
+            .register(
+                SchemaRegistration {
+                    name: name.into(),
+                    format,
+                    definition: incompatible.into(),
+                    compatibility: SchemaCompatibility::Backward,
+                    root_message: None,
+                    fields: Vec::new(),
+                },
+                2,
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("compatibility"),
+            "{format:?} returned an unscoped compatibility error: {error}"
+        );
+    }
+}
+
+#[test]
+fn protobuf_root_message_selects_one_message_from_a_self_contained_definition() {
+    let definition = r#"
+        syntax = "proto3";
+        package epoch.orders;
+        message Metadata { string trace_id = 1; }
+        message Order {
+            string id = 1;
+            Metadata metadata = 2;
+        }
+    "#;
+    let registration = |root_message| SchemaRegistration {
+        name: "proto-order".into(),
+        format: SchemaFormat::Protobuf,
+        definition: definition.into(),
+        compatibility: SchemaCompatibility::Backward,
+        root_message,
+        fields: Vec::new(),
+    };
+
+    assert!(
+        SchemaRegistry::default()
+            .register(registration(None), 1)
+            .unwrap_err()
+            .to_string()
+            .contains("root_message")
+    );
+
+    let mut registry = SchemaRegistry::default();
+    registry
+        .register(registration(Some("epoch.orders.Order".into())), 1)
+        .unwrap();
+    registry
+        .validate_payload(
+            "proto-order@1",
+            &json!({"id":"o-1","metadata":{"traceId":"trace-1"}}),
+        )
+        .unwrap();
+    assert!(
+        registry
+            .validate_payload(
+                "proto-order@1",
+                &json!({"id":"o-1","metadata":{"unknown":true}}),
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn validation_policy_modes_separate_producer_advice_from_broker_enforcement() {
+    let mut state = EventIntegrationState::default();
+    state
+        .schemas_mut()
+        .register(
+            SchemaRegistration {
+                name: "typed-event".into(),
+                format: SchemaFormat::JsonSchema,
+                definition: r#"{
+                    "type":"object",
+                    "required":["id"],
+                    "properties":{"id":{"type":"string"}}
+                }"#
+                .into(),
+                compatibility: SchemaCompatibility::Backward,
+                root_message: None,
+                fields: Vec::new(),
+            },
+            1,
+        )
+        .unwrap();
+    for (name, mode) in [
+        ("disabled", SchemaValidationMode::Disabled),
+        ("producer", SchemaValidationMode::Producer),
+        ("broker", SchemaValidationMode::Broker),
+        ("both", SchemaValidationMode::ProducerAndBroker),
+    ] {
+        state
+            .upsert_validation_policy(SchemaValidationPolicy {
+                name: name.into(),
+                event_type_pattern: format!("{name}.*"),
+                schema_ref: "typed-event@1".into(),
+                mode,
+            })
+            .unwrap();
+    }
+
+    let invalid = |kind: &str| {
+        let mut event = EventEnvelope::new("tests", format!("{kind}.event"), json!({"id": 7}), 1);
+        event.schema_ref = Some("typed-event@1".into());
+        event
+    };
+    assert!(state.validate_for_producer(&invalid("disabled")).is_ok());
+    assert!(state.validate_for_broker(&invalid("disabled")).is_ok());
+    assert!(state.validate_for_producer(&invalid("producer")).is_err());
+    assert!(state.validate_for_broker(&invalid("producer")).is_ok());
+    assert!(state.validate_for_producer(&invalid("broker")).is_ok());
+    assert!(state.validate_for_broker(&invalid("broker")).is_err());
+    assert!(state.validate_for_producer(&invalid("both")).is_err());
+    assert!(state.validate_for_broker(&invalid("both")).is_err());
 }
 
 fn connector(name: &str) -> ConnectorSpec {

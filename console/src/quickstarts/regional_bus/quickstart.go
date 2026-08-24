@@ -21,6 +21,17 @@ func main() {
 	must(err)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+	schema, err := client.RegisterSchema(ctx, "events", 0, "docs-go-bus-schema-v1", epoch.SchemaRegistration{
+		Name: "order", Format: epoch.JSONSchema,
+		Definition:    `{"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"integer"}}}`,
+		Compatibility: epoch.BackwardSchemaCompatibility,
+	})
+	must(err)
+	schemaPolicy, err := client.UpsertSchemaValidationPolicy(ctx, "events", 0, "docs-go-bus-schema-policy-v1", epoch.SchemaValidationPolicy{
+		Name: "orders", EventTypePattern: "order.*", SchemaRef: "order@1",
+		Mode: epoch.ProducerAndBrokerSchemaValidation,
+	})
+	must(err)
 	policy := epoch.DefaultDeliveryPolicy()
 	policy.Retry.Strategy = epoch.FixedDeliveryBackoff
 	subscription := epoch.Subscription{
@@ -41,7 +52,9 @@ func main() {
 	}
 	streamUpserted, err := client.UpsertSubscription(ctx, "events", 0, "docs-go-bus-stream-target-v1", streamSubscription)
 	must(err)
-	event := epoch.EventEnvelope{ID: "docs-order-1", Source: "docs-go", Type: "order.created", TimeMS: uint64(time.Now().UnixMilli()), Payload: map[string]any{"id": 1}}
+	event := epoch.EventEnvelope{ID: "docs-order-1", Source: "docs-go", Type: "order.created", TimeMS: uint64(time.Now().UnixMilli()), SchemaRef: "order@1", Payload: map[string]any{"id": 1}}
+	validated, err := client.ValidateSchema(ctx, "events", 0, epoch.ProducerValidationStage, event)
+	must(err)
 	published, err := client.Publish(ctx, "events", 0, "docs-go-bus-publish-v1", event)
 	must(err)
 	replayed, err := client.Publish(ctx, "events", 0, "docs-go-bus-publish-v1", event)
@@ -65,6 +78,7 @@ func main() {
 	must(err)
 
 	output, err := json.MarshalIndent(map[string]any{
+		"schema": schema, "schema_policy": schemaPolicy, "schema_validation": validated,
 		"upsert": upserted, "queue_target_upsert": queueUpserted, "stream_target_upsert": streamUpserted,
 		"publish": published, "exact_retry": replayed, "target_publish": targetPublished,
 		"queue_delivery": queueDelivery, "stream_delivery": streamDelivery,

@@ -10,6 +10,12 @@ import io.epoch.sdk.EventTransform;
 import io.epoch.sdk.RegionalBusClient;
 import io.epoch.sdk.RegionalBusDeliveryState;
 import io.epoch.sdk.RegionalScope;
+import io.epoch.sdk.SchemaCompatibility;
+import io.epoch.sdk.SchemaFormat;
+import io.epoch.sdk.SchemaRegistration;
+import io.epoch.sdk.SchemaValidationMode;
+import io.epoch.sdk.SchemaValidationPolicy;
+import io.epoch.sdk.SchemaValidationStage;
 import io.epoch.sdk.Subscription;
 import io.epoch.sdk.SubscriptionTarget;
 import java.math.BigInteger;
@@ -38,6 +44,26 @@ public final class RegionalBusQuickstart {
             environment("EPOCH_TOKEN", "epoch-dev-admin-v1"),
             new RegionalScope("acme", "shop", "dev", "core"),
             Duration.ofSeconds(3));
+    JsonNode schema =
+        client.registerSchema(
+            "events",
+            0,
+            "docs-java-bus-schema-v1",
+            new SchemaRegistration(
+                "order",
+                SchemaFormat.JSON_SCHEMA,
+                "{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"integer\"}}}",
+                SchemaCompatibility.BACKWARD));
+    JsonNode schemaPolicy =
+        client.upsertSchemaValidationPolicy(
+            "events",
+            0,
+            "docs-java-bus-schema-policy-v1",
+            new SchemaValidationPolicy(
+                "orders",
+                "order.*",
+                "order@1",
+                SchemaValidationMode.PRODUCER_AND_BROKER));
     DeliveryPolicy policy =
         new DeliveryPolicy(
             BigInteger.valueOf(30_000),
@@ -81,7 +107,10 @@ public final class RegionalBusQuickstart {
     EventEnvelope event =
         EventEnvelope.builder("docs-java", "order.created", Map.of("id", 1))
             .id("docs-order-1")
+            .schemaRef("order@1")
             .build();
+    JsonNode validated =
+        client.validateSchema("events", 0, SchemaValidationStage.PRODUCER, event);
     JsonNode published = client.publish("events", 0, "docs-java-bus-publish-v1", event);
     JsonNode replayed = client.publish("events", 0, "docs-java-bus-publish-v1", event);
     JsonNode acquired =
@@ -108,6 +137,9 @@ public final class RegionalBusQuickstart {
     JsonNode streamDelivery = waitForTarget(client, "stream-orders", "stream");
 
     ObjectNode output = MAPPER.createObjectNode();
+    output.set("schema", schema);
+    output.set("schema_policy", schemaPolicy);
+    output.set("schema_validation", validated);
     output.set("upsert", upserted);
     output.set("queue_target_upsert", queueUpserted);
     output.set("stream_target_upsert", streamUpserted);

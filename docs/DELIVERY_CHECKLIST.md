@@ -1,7 +1,7 @@
 # Epoch Delivery Checklist
 
 **Last reviewed:** 24 August 2026
-**Current release target:** `v0.2.0-beta.3`
+**Current release target:** `v0.2.0-beta.4`
 **Current core target:** Alpha exit: secure transport, recovery, membership, connectors, supply chain, and operating evidence
 
 This is the operational checklist for turning PRD scope into verified,
@@ -422,14 +422,26 @@ complete.
 |---|---|---|---:|---|
 | EI-01 | Freeze state, delivery ordering, security, compatibility, and non-claims | ADR + contracts | ✅ | ADR-0037 is reviewed and published with the replicated ownership, lease/checkpoint ordering, recovery, egress, idempotency, compatibility, and alpha non-claims. |
 | EI-02 | Complete routing, filters, transforms, rate limits, retention, and redrive | Rust Bus/tablet | ✅ | Focused engine/tablet tests and the protected alpha.9 matrix cover filters, transformation/enrichment, integer rate/burst, DLQ retention/redrive, archive retention, and bounded long poll. |
-| EI-03 | Replicate schemas, MQTT state, catalog, endpoints, functions, and connectors | Rust Bus/tablet | ✅ | Strict registries, revisions, policies, MQTT state, endpoint/catalog/function state, connector outcomes/checkpoints/replay, canonical snapshots, and restore validation shipped in alpha.9. |
+| EI-03 | Replicate schemas, MQTT state, catalog, endpoints, functions, and connectors | Rust Bus/tablet | ✅ | Strict registries, compiler-backed schema revisions and policies, MQTT state, endpoint/catalog/function state, connector outcomes/checkpoints/replay, canonical snapshots, and semantic restore validation pass. |
 | EI-04 | Execute managed HTTP and connector targets safely | Rust node | ✅ | Protected tests cover lease-before-I/O, CloudEvents modes, API key/bearer/OAuth, bounded secret files, allowlists, public-only DNS pinning, no redirects/proxies, failover, and checkpoint ordering. |
 | EI-05 | Persist Bus configuration and expose strict regional APIs | Rust catalog/node | ✅ | Catalog, materialization, authenticated/fenced integration operations, recovery, and executor topology evidence shipped together. |
-| EI-06 | Expose the complete regional lifecycle in every SDK | Go + Java + Python | ✅ | Go, Java, and Python expose the complete bounded native integration lifecycle with route/fence/idempotency tests and published examples. |
+| EI-06 | Expose the complete regional lifecycle in every SDK | Go + Java + Python | ✅ | Go, Java, and Python expose the complete bounded native integration lifecycle, including typed schema registration/policy/removal and linearizable explicit validation, with route/fence/idempotency/pre-network validation tests and published examples. |
 | EI-07 | Prove real failover, side effects, convergence, and reopen | Real three-process runtime | ✅ | The process and Compose campaigns prove structured delivery identity, Ack convergence, leader replacement, voter catch-up, all-node reopen, and cross-language quickstarts. |
 | EI-08 | Bound every live and recovery state path | Rust Bus/tablet | ✅ | Clone-staged capacity admission and semantic restore validation cover identities, revisions, references, receipts, checkpoints, URLs, MQTT state, canonical bytes, and digests. |
 | EI-09 | Publish end-to-end documentation and honest feature coverage | Docs + console + Pages | ✅ | PRD, ADR-0037, traceability, SDK/API/runtime/security/testing guides, executable examples, release notes, and main-only Pages are published. |
 | EI-10 | Pass one large feature PR and release alpha.9 | Quality + GitHub | ✅ | PR #86 merged with protected CI/Pages green; annotated tag `v0.1.0-alpha.9` points at exact `main` and the curated GitHub prerelease is published. |
+
+## Current schema compiler and validation delivery
+
+| ID | Checklist item | Boundary | State | Evidence / acceptance |
+|---|---|---|---:|---|
+| SC-01 | Compile the three PRD schema formats | Rust Bus | ✅ | Apache Avro, JSON Schema meta-validation, and proto2/proto3 descriptor compilation reject malformed definitions before registry mutation. |
+| SC-02 | Derive payload validation from definitions | Rust Bus | ✅ | Official-format payload tests pass without the legacy structural-field overlay; JSON errors are masked and every error is bounded. |
+| SC-03 | Enforce adjacent-revision compatibility | Rust Bus | ✅ | Avro reader/writer, conservative JSON object-contract, and Protobuf number/type/cardinality/oneof/required rules pass compatible and incompatible revision tests. |
+| SC-04 | Separate producer advice and broker enforcement | Rust Bus + node | ✅ | A four-mode matrix plus a real three-voter HTTP route proves read-only producer validation and committed broker rejection. |
+| SC-05 | Expose typed lifecycle APIs in every P0 SDK | Go + Java + Python | ✅ | Registration, policy upsert/removal, and explicit validation have typed models, fail-fast validation, exact route/header tests, and compiling end-to-end quickstarts. |
+| SC-06 | Preserve deterministic recovery and security bounds | Rust Bus | ✅ | Legacy snapshots default the additive root-message field; restore recompiles definitions, external references/imports are prohibited, and payload values are not reflected. |
+| SC-07 | Publish end-to-end schema documentation | Docs + Pages | ✅ | The regional Bus guide and visible docs page cover all three languages, formats, compatibility, validation modes, limits, and non-claims. |
 
 ## Current product/runtime closure delivery
 
@@ -549,19 +561,19 @@ complete.
 
 | Order | Release action | Required evidence | State for next release |
 |---:|---|---|---:|
-| 1 | Select a completed, merged milestone boundary | Traceability and changelog agree with `main` | 🟡 |
-| 2 | Choose the next semantic prerelease version | `v0.2.0-beta.3` supersedes the incomplete immutable beta.2 tag and does not already exist | ✅ |
-| 3 | Synchronize Rust, Go, Java, Python, TypeScript, SDK user agents, and lockfiles | `./scripts/check-release-version.sh` passes locally at `0.2.0-beta.3`; protected verification remains | 🟡 |
-| 4 | Write curated, version-controlled release notes | `docs/releases/v0.2.0-beta.3.md` names behavior, artifacts, verification, compatibility, and beta limitations; merge remains | 🟡 |
+| 1 | Select a completed, merged milestone boundary | Compiler-backed schema registry, regional validation, three SDKs, docs, and traceability pass locally; protected merge remains | 🟡 |
+| 2 | Choose the next semantic prerelease version | `v0.2.0-beta.4` is the next feature release and does not already exist | ✅ |
+| 3 | Synchronize Rust, Go, Java, Python, TypeScript, SDK user agents, and lockfiles | `./scripts/check-release-version.sh` passes locally at `0.2.0-beta.4`; protected verification remains | 🟡 |
+| 4 | Write curated, version-controlled release notes | `docs/releases/v0.2.0-beta.4.md` names behavior, artifacts, migration, verification, compatibility, and beta limitations; merge remains | 🟡 |
 | 5 | Pass protected `main` CI and main-only Pages | Both workflow runs green at the same commit | ⬜ |
 | 6 | Verify the live docs show the release and governance/SDK content | Public Pages bundle assertions | ⬜ |
 | 7 | Create an annotated tag at the exact current `main` commit | Local and remote commit IDs match | ⬜ |
 | 8 | Pass tag/version/main provenance workflow | Release-tag workflow green | ⬜ |
-| 9 | Publish the GitHub release from the checked-in notes | GitHub prerelease targets `v0.2.0-beta.3` | ⬜ |
+| 9 | Publish the GitHub release from the checked-in notes | GitHub prerelease targets `v0.2.0-beta.4` | ⬜ |
 | 10 | Verify downloads and package claims | Four OCI manifests and eight platform SBOM assets match the notes; package-manager publication remains deferred | ⬜ |
 | 11 | Start the next `Unreleased` section | Changelog prepared for continued delivery | ✅ |
 
-After `v0.2.0-beta.3` completes this sequence, the table above intentionally
+After `v0.2.0-beta.4` completes this sequence, the table above intentionally
 resets for the next release.
 
 ## Feature delivery template

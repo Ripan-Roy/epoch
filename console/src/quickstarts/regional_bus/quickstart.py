@@ -12,6 +12,8 @@ from epoch_sdk import (
     EventFilter,
     RegionalBusClient,
     RegionalScope,
+    SchemaRegistration,
+    SchemaValidationPolicy,
     Subscription,
     SubscriptionTarget,
 )
@@ -32,15 +34,30 @@ client = RegionalBusClient(
     scope=RegionalScope("acme", "shop", "dev", "core"),
     timeout=3.0,
 )
+schema = client.register_schema(
+    "events",
+    0,
+    "docs-python-bus-schema-v1",
+    SchemaRegistration(
+        "order",
+        "json_schema",
+        '{"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"integer"}}}',
+        "backward",
+    ),
+)
+schema_policy = client.upsert_schema_validation_policy(
+    "events",
+    0,
+    "docs-python-bus-schema-policy-v1",
+    SchemaValidationPolicy("orders", "order.*", "order@1", "producer_and_broker"),
+)
 subscription = Subscription(
     "orders",
     SubscriptionTarget.pull(),
     filter=EventFilter(event_type_patterns=["order.*"]),
     delivery_policy=DeliveryPolicy(retry=DeliveryRetryPolicy(strategy="fixed")),
 )
-upserted = client.upsert_subscription(
-    "events", 0, "docs-python-bus-upsert-v1", subscription
-)
+upserted = client.upsert_subscription("events", 0, "docs-python-bus-upsert-v1", subscription)
 queue_subscription = Subscription(
     "queue-jobs",
     SubscriptionTarget.queue("jobs"),
@@ -65,7 +82,9 @@ event = EventEnvelope(
     event_type="order.created",
     payload={"id": 1},
     time_ms=time.time_ns() // 1_000_000,
+    schema_ref="order@1",
 )
+validated = client.validate_schema("events", 0, "producer", event)
 published = client.publish("events", 0, "docs-python-bus-publish-v1", event)
 replayed = client.publish("events", 0, "docs-python-bus-publish-v1", event)
 acquired = client.acquire_deliveries(
@@ -124,6 +143,9 @@ stream_delivery = wait_for_target("stream-orders", "stream")
 print(
     json.dumps(
         {
+            "schema": schema,
+            "schema_policy": schema_policy,
+            "schema_validation": validated,
             "upsert": upserted,
             "queue_target_upsert": queue_upserted,
             "stream_target_upsert": stream_upserted,

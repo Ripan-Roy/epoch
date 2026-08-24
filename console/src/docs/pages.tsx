@@ -17,7 +17,6 @@ import {
   nodeRestart,
   nodeStart,
   regionalBusLanguageGuides,
-  regionalBusIntegrationOperation,
   regionalBusResource,
   regionalCacheLanguageGuides,
   regionalCacheResource,
@@ -31,6 +30,7 @@ import {
   regionalWebhookConfiguration,
   releaseArtifactVerification,
   repositoryDocsUrl,
+  schemaLifecycleLanguageGuides,
   sdkSurface,
   signedWebhookLanguageGuides,
   soakCampaign,
@@ -1534,12 +1534,30 @@ export function RegionalBusBody() {
           </Topic>
           <Topic id="integrations" title="Commit and inspect integration state">
             <p>
-              <code>apply_integration</code> accepts one strict tagged document for schema, validation policy,
-              enrichment, function, connector/checkpoint/replay, MQTT session/retained/QoS, event catalog, or
-              endpoint-health state. Go uses <code>Document</code>, Java uses <code>JsonNode</code>, and
-              Python uses a <code>dict</code>; each call still requires a new caller-owned idempotency key.
+              Schema registration, policy binding, removal, and explicit validation are typed in all three
+              SDKs. Definitions are compiler-backed Avro, JSON Schema, or self-contained Protobuf. Producer
+              validation is read-only advice; broker validation is enforced atomically by publish.
             </p>
-            <CodeBlock label="Register a JSON schema" value={regionalBusIntegrationOperation} />
+            <CodeTabs
+              label="Register, validate, and publish"
+              samples={regionalSamples(
+                schemaLifecycleLanguageGuides,
+                (guide) => guide.source,
+                (guide) => guide.filename,
+              )}
+              collapsible={false}
+            />
+            <Note title="Deterministic compiler boundary">
+              JSON Schema external references and Protobuf imports are rejected, so validation performs no
+              network or file access. Set <code>root_message</code> for multi-message Protobuf definitions.
+              Advanced JSON Schema compatibility forms fail closed when compatibility cannot be proven.
+            </Note>
+            <p>
+              Other integration families continue through one strict <code>apply_integration</code> tagged
+              document: enrichment, function, connector/checkpoint/replay, MQTT session/retained/QoS, event
+              catalog, and endpoint-health state. Go uses <code>Document</code>, Java uses{" "}
+              <code>JsonNode</code>, and Python uses a <code>dict</code>.
+            </p>
             <p>
               Call <code>IntegrationState</code>, <code>integrationState</code>, or{" "}
               <code>integration_state</code> for a linearizable view. The image is atomically capped at 2 MiB,
@@ -1598,9 +1616,9 @@ export function RegionalBusBody() {
           Regional Event Bus v1 is a repository-local, single-shard beta. Built-in execution covers Epoch
           Queue/Stream, signed HTTP/webhook, API destination, endpoint-pool, function, target/bidirectional
           connector targets, and checkpoint-coupled object, PostgreSQL, MySQL, and Kafka sources. An MQTT wire
-          gateway, official schema/MQTT/CloudEvents conformance, unsigned legacy HTTP execution, streaming
-          push, private managed egress, secret hot reload, cross-shard ordering, fully typed
-          integration/response models, and public package releases remain open.
+          gateway, schema imports/external references, MQTT/CloudEvents protocol conformance, unsigned legacy
+          HTTP execution, streaming push, private managed egress, secret hot reload, cross-shard ordering,
+          fully typed integration/response models, and public package releases remain open.
         </p>
       }
     />
@@ -1916,9 +1934,9 @@ export function ReferenceBody() {
           />
           <ReferenceCard
             eyebrow="Release"
-            title="v0.2.0-beta.3 release notes"
-            description="Alpha-exit behavior, verified OCI artifacts, compatibility guidance, and explicit beta limitations."
-            href={`${repositoryDocsUrl}/releases/v0.2.0-beta.3.md`}
+            title="v0.2.0-beta.4 release notes"
+            description="Compiler-backed schemas, typed SDK validation, compatibility guidance, and explicit beta limitations."
+            href={`${repositoryDocsUrl}/releases/v0.2.0-beta.4.md`}
           />
         </div>
       </Topic>

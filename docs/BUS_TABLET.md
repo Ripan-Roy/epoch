@@ -65,6 +65,7 @@ exist on the separate internal consensus listener:
 | `POST /experimental/v1/tablets/bus/archive/replay` | Inclusive time-range and optional filtered replay from the local applied profile. |
 | `POST /experimental/v1/tablets/bus/deliveries/query` | Bounded local, stale-capable delivery-ledger and immutable attempt-history observation. |
 | `GET /experimental/v1/tablets/bus/integration/state` | Complete local, stale-capable schema/connector/MQTT/catalog/endpoint/function state. |
+| `POST /experimental/v1/tablets/bus/schema/validate` | Explicit local, stale-capable producer/broker schema validation; the regional wrapper supplies a linearizable barrier. |
 
 All 64-bit JSON values are emitted as exact decimal strings. Mutation input
 accepts a JSON number or decimal string for `expected_term` and envelope time
@@ -355,8 +356,8 @@ make test-bus-tablet
 ```
 
 Still required are replay-attempt lineage, bidirectional streaming push,
-unsigned legacy HTTP execution, an MQTT wire gateway, official schema/MQTT/
-CloudEvents conformance, active endpoint health restoration, private managed
+unsigned legacy HTTP execution, an MQTT wire gateway, external JSON Schema
+references, Protobuf imports, MQTT/CloudEvents protocol conformance, active endpoint health restoration, private managed
 egress, secret manager/hot reload, live Azure/GCS source certification,
 connector load/fault/soak certification, user-exportable backups/PITR,
 production identity/TLS and security/scale evidence, generated response

@@ -13,6 +13,60 @@ const (
 	maxRegionalBusLongPoll      = 30 * time.Second
 )
 
+// SchemaFormat selects one compiler-backed schema language.
+type SchemaFormat string
+
+const (
+	AvroSchema     SchemaFormat = "avro"
+	JSONSchema     SchemaFormat = "json_schema"
+	ProtobufSchema SchemaFormat = "protobuf"
+)
+
+// SchemaCompatibility controls adjacent-revision admission.
+type SchemaCompatibility string
+
+const (
+	NoSchemaCompatibility       SchemaCompatibility = "none"
+	BackwardSchemaCompatibility SchemaCompatibility = "backward"
+	ForwardSchemaCompatibility  SchemaCompatibility = "forward"
+	FullSchemaCompatibility     SchemaCompatibility = "full"
+)
+
+// SchemaRegistration is one compiler-validated schema revision request.
+type SchemaRegistration struct {
+	Name          string              `json:"name"`
+	Format        SchemaFormat        `json:"format"`
+	Definition    string              `json:"definition"`
+	Compatibility SchemaCompatibility `json:"compatibility"`
+	RootMessage   string              `json:"root_message,omitempty"`
+}
+
+// SchemaValidationMode selects producer advice, broker enforcement, both, or neither.
+type SchemaValidationMode string
+
+const (
+	DisabledSchemaValidation          SchemaValidationMode = "disabled"
+	ProducerSchemaValidation          SchemaValidationMode = "producer"
+	BrokerSchemaValidation            SchemaValidationMode = "broker"
+	ProducerAndBrokerSchemaValidation SchemaValidationMode = "producer_and_broker"
+)
+
+// SchemaValidationPolicy binds an event-type pattern to one immutable revision.
+type SchemaValidationPolicy struct {
+	Name             string               `json:"name"`
+	EventTypePattern string               `json:"event_type_pattern"`
+	SchemaRef        string               `json:"schema_ref"`
+	Mode             SchemaValidationMode `json:"mode"`
+}
+
+// SchemaValidationStage selects an explicit read-only validation path.
+type SchemaValidationStage string
+
+const (
+	ProducerValidationStage SchemaValidationStage = "producer"
+	BrokerValidationStage   SchemaValidationStage = "broker"
+)
+
 // RegionalBusAcquireOptions identifies one bounded dispatcher lease request.
 type RegionalBusAcquireOptions struct {
 	Subscription    string
@@ -216,6 +270,55 @@ func (client *RegionalBusClient) ApplyIntegration(ctx context.Context, bus strin
 	}{"apply_integration", operation})
 }
 
+// RegisterSchema compiles and commits one immutable schema revision.
+func (client *RegionalBusClient) RegisterSchema(ctx context.Context, bus string, shard uint32, idempotencyKey string, registration SchemaRegistration) (Document, error) {
+	if err := registration.validate(); err != nil {
+		return nil, err
+	}
+	return client.ApplyIntegration(ctx, bus, shard, idempotencyKey, Document{
+		"kind":         "register_schema",
+		"registration": registration,
+	})
+}
+
+// UpsertSchemaValidationPolicy binds one event-type pattern to an immutable schema revision.
+func (client *RegionalBusClient) UpsertSchemaValidationPolicy(ctx context.Context, bus string, shard uint32, idempotencyKey string, policy SchemaValidationPolicy) (Document, error) {
+	if err := policy.validate(); err != nil {
+		return nil, err
+	}
+	return client.ApplyIntegration(ctx, bus, shard, idempotencyKey, Document{
+		"kind":   "upsert_validation_policy",
+		"policy": policy,
+	})
+}
+
+// RemoveSchemaValidationPolicy removes one exact validation binding.
+func (client *RegionalBusClient) RemoveSchemaValidationPolicy(ctx context.Context, bus string, shard uint32, idempotencyKey, name string) (Document, error) {
+	if !validResourceName(name) {
+		return nil, fmt.Errorf("epoch: schema validation policy name is invalid")
+	}
+	return client.ApplyIntegration(ctx, bus, shard, idempotencyKey, Document{
+		"kind": "remove_validation_policy",
+		"name": name,
+	})
+}
+
+// ValidateSchema performs a linearizable, read-only producer or broker validation.
+// Broker-mode validation is also enforced atomically by Publish when configured.
+func (client *RegionalBusClient) ValidateSchema(ctx context.Context, bus string, shard uint32, stage SchemaValidationStage, event EventEnvelope) (Document, error) {
+	if stage != ProducerValidationStage && stage != BrokerValidationStage {
+		return nil, fmt.Errorf("epoch: schema validation stage must be producer or broker")
+	}
+	event, err := event.normalized()
+	if err != nil {
+		return nil, err
+	}
+	return client.read(ctx, bus, shard, "POST", "/schema/validate", struct {
+		Mode     SchemaValidationStage `json:"mode"`
+		Envelope EventEnvelope         `json:"envelope"`
+	}{stage, event})
+}
+
 // Mutation resolves one proposal from the current leader.
 func (client *RegionalBusClient) Mutation(ctx context.Context, bus string, shard uint32, proposalID uint64) (Document, error) {
 	if proposalID == 0 {
@@ -321,6 +424,41 @@ func validateBusReadLimit(value uint16) error {
 
 func (state RegionalBusDeliveryState) valid() bool {
 	return state == PendingDelivery || state == InFlightDelivery || state == AcknowledgedDelivery || state == DeadLetteredDelivery
+}
+
+func (registration SchemaRegistration) validate() error {
+	if !validResourceName(registration.Name) {
+		return fmt.Errorf("epoch: schema name is invalid")
+	}
+	if strings.TrimSpace(registration.Definition) == "" {
+		return fmt.Errorf("epoch: schema definition is required")
+	}
+	if registration.Format != AvroSchema && registration.Format != JSONSchema && registration.Format != ProtobufSchema {
+		return fmt.Errorf("epoch: unsupported schema format %q", registration.Format)
+	}
+	if registration.Compatibility != NoSchemaCompatibility && registration.Compatibility != BackwardSchemaCompatibility && registration.Compatibility != ForwardSchemaCompatibility && registration.Compatibility != FullSchemaCompatibility {
+		return fmt.Errorf("epoch: unsupported schema compatibility %q", registration.Compatibility)
+	}
+	if registration.Format != ProtobufSchema && strings.TrimSpace(registration.RootMessage) != "" {
+		return fmt.Errorf("epoch: root message is valid only for Protobuf schemas")
+	}
+	return nil
+}
+
+func (policy SchemaValidationPolicy) validate() error {
+	if !validResourceName(policy.Name) {
+		return fmt.Errorf("epoch: schema validation policy name is invalid")
+	}
+	if strings.TrimSpace(policy.EventTypePattern) == "" {
+		return fmt.Errorf("epoch: schema validation event type pattern is required")
+	}
+	if strings.TrimSpace(policy.SchemaRef) == "" {
+		return fmt.Errorf("epoch: schema reference is required")
+	}
+	if policy.Mode != DisabledSchemaValidation && policy.Mode != ProducerSchemaValidation && policy.Mode != BrokerSchemaValidation && policy.Mode != ProducerAndBrokerSchemaValidation {
+		return fmt.Errorf("epoch: unsupported schema validation mode %q", policy.Mode)
+	}
+	return nil
 }
 
 func normalizedEventFilter(filter EventFilter) EventFilter {

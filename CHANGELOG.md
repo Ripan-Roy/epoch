@@ -6,6 +6,31 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+## [0.2.0-beta.4] - 2026-08-24
+
+### Added
+
+- Replaced Event Bus field-overlay-only schema checks with compiler-backed Avro,
+  JSON Schema, and self-contained Protobuf definition validation and payload
+  validation.
+- Added format-derived adjacent-revision compatibility, explicit Protobuf root
+  message selection, deterministic snapshot semantic revalidation, and bounded
+  payload-safe rejection details.
+- Added producer-advisory and broker-enforced validation modes through a
+  linearizable regional route, deterministic committed publish rejection, and
+  typed Go, Java, and Python schema lifecycle APIs.
+- Added end-to-end SDK quickstarts, visible documentation-site guides, a real
+  three-voter route/recovery test, and synchronized PRD, API, testing,
+  traceability, and delivery evidence for `BUS-009`, `INT-001`, and `INT-002`.
+
+### Limitations
+
+- JSON Schema external references and Protobuf imports are deliberately
+  unsupported. Advanced JSON Schema compatibility forms fail closed when Epoch
+  cannot conservatively prove compatibility.
+- This release does not add RESP3, Kafka broker, AMQP, or MQTT wire
+  compatibility; those remain the next private-beta feature boundary.
+
 ## [0.2.0-beta.3] - 2026-08-24
 
 ### Fixed

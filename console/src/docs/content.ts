@@ -16,7 +16,7 @@ import regionalBusPythonSource from "../quickstarts/regional_bus/quickstart.py?r
 
 export const repositoryUrl = "https://github.com/Ripan-Roy/epoch";
 export const repositoryDocsUrl = `${repositoryUrl}/blob/main/docs`;
-export const releaseVersion = "0.2.0-beta.3";
+export const releaseVersion = "0.2.0-beta.4";
 
 export type LanguageId = "go" | "java" | "python";
 
@@ -123,7 +123,7 @@ cd /secure/evidence/epoch-kubernetes-alpha-exit
 sha256sum --check manifest.sha256`;
 
 export const releaseArtifactVerification = `# Exact tags are discovery handles; deploy the verified digest.
-export EPOCH_RELEASE_TAG=v0.2.0-beta.3
+export EPOCH_RELEASE_TAG=v0.2.0-beta.4
 export EPOCH_IMAGE=ghcr.io/ripan-roy/epoch-node
 
 docker buildx imagetools inspect "$EPOCH_IMAGE:$EPOCH_RELEASE_TAG"
@@ -185,7 +185,7 @@ epoch-backup decrypt \
   --output /tmp/epoch-regional-backup.json`;
 
 export const guardedUpgradeSpec = `spec:
-  nodeImage: ghcr.io/ripan-roy/epoch-node:v0.2.0-beta.3
+  nodeImage: ghcr.io/ripan-roy/epoch-node:v0.2.0-beta.4
   upgrade:
     backupMaxAgeSeconds: 3600
     stepDeadlineSeconds: 900
@@ -510,18 +510,69 @@ client.upsert_subscription("events", 0, "orders-api-v1", subscription)`,
   },
 };
 
-export const regionalBusIntegrationOperation = `{
-  "kind": "register_schema",
-  "registration": {
-    "name": "order",
-    "format": "json_schema",
-    "definition": "{\\"type\\":\\"object\\"}",
-    "compatibility": "backward",
-    "fields": [
-      {"path":"id","value_type":"string","required":true,"default":null}
-    ]
-  }
-}`;
+export const schemaLifecycleLanguageGuides: Record<LanguageId, RegionalGuide> = {
+  go: {
+    filename: "schema.go",
+    setup: "// Typed registration and policy validation fail before discovery when malformed.",
+    source: `_, err := client.RegisterSchema(ctx, "events", 0, "schema-order-v1", epoch.SchemaRegistration{
+    Name: "order", Format: epoch.JSONSchema,
+    Definition: \`{"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"integer"}}}\`,
+    Compatibility: epoch.BackwardSchemaCompatibility,
+})
+if err != nil { return err }
+_, err = client.UpsertSchemaValidationPolicy(ctx, "events", 0, "schema-policy-orders-v1", epoch.SchemaValidationPolicy{
+    Name: "orders", EventTypePattern: "order.*", SchemaRef: "order@1",
+    Mode: epoch.ProducerAndBrokerSchemaValidation,
+})
+if err != nil { return err }
+event.SchemaRef = "order@1"
+_, err = client.ValidateSchema(ctx, "events", 0, epoch.ProducerValidationStage, event)
+if err != nil { return err }
+_, err = client.Publish(ctx, "events", 0, "publish-order-1", event)`,
+    run: "go test ./sdk/go/epoch -run 'TestRegionalBusClient.*Schema' -count=1",
+  },
+  java: {
+    filename: "SchemaLifecycle.java",
+    setup: "// The same exact revision is used for advice and atomic broker enforcement.",
+    source: `String definition = """
+    {"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"integer"}}}
+    """;
+client.registerSchema("events", 0, "schema-order-v1",
+    new SchemaRegistration("order", SchemaFormat.JSON_SCHEMA, definition,
+        SchemaCompatibility.BACKWARD));
+client.upsertSchemaValidationPolicy("events", 0, "schema-policy-orders-v1",
+    new SchemaValidationPolicy("orders", "order.*", "order@1",
+        SchemaValidationMode.PRODUCER_AND_BROKER));
+EventEnvelope event = EventEnvelope.builder("checkout", "order.created", Map.of("id", 42))
+    .id("order-1").timeMs(1).schemaRef("order@1").build();
+client.validateSchema("events", 0, SchemaValidationStage.PRODUCER, event);
+client.publish("events", 0, "publish-order-1", event);`,
+    run: "cd sdk/java && ./mvnw -q -Dtest=RegionalBusClientTest test",
+  },
+  python: {
+    filename: "schema_lifecycle.py",
+    setup: "# Server errors are bounded and do not reflect payload values.",
+    source: `client.register_schema(
+    "events", 0, "schema-order-v1",
+    SchemaRegistration(
+        "order", "json_schema",
+        '{"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"integer"}}}',
+        "backward",
+    ),
+)
+client.upsert_schema_validation_policy(
+    "events", 0, "schema-policy-orders-v1",
+    SchemaValidationPolicy("orders", "order.*", "order@1", "producer_and_broker"),
+)
+event = EventEnvelope(
+    id="order-1", source="checkout", event_type="order.created", time_ms=1,
+    schema_ref="order@1", payload={"id": 42},
+)
+client.validate_schema("events", 0, "producer", event)
+client.publish("events", 0, "publish-order-1", event)`,
+    run: "cd sdk/python && PYTHONPATH=src python3 -m unittest tests.test_regional_bus -v",
+  },
+};
 
 export const languageGuides: ReadonlyArray<LanguageGuide> = [
   {
@@ -816,10 +867,10 @@ export const sdkSurface = [
   },
   {
     area: "Regional Event Bus",
-    go: "RegionalBusClient · APIDestinationTarget · EndpointPoolTarget · FunctionTarget · ConnectorTarget · SignedWebhookTarget · VerifyWebhookSignature · UpsertSubscription · RemoveSubscription · Publish · AcquireDeliveries · AcknowledgeDelivery · FailDelivery · RejectDelivery · RedriveDelivery · MaintainDeliveries · MaintainArchive · ApplyIntegration · IntegrationState · Mutation · ReplayArchive · QueryDeliveries · Status",
-    java: "RegionalBusClient · SubscriptionTarget.apiDestination/endpointPool/function/connector/signedWebhook · WebhookSignatures.verify · upsertSubscription · removeSubscription · publish · acquireDeliveries · acknowledgeDelivery · failDelivery · rejectDelivery · redriveDelivery · maintainDeliveries · maintainArchive · applyIntegration · integrationState · mutation · replayArchive · queryDeliveries · status",
+    go: "RegionalBusClient · APIDestinationTarget · EndpointPoolTarget · FunctionTarget · ConnectorTarget · SignedWebhookTarget · VerifyWebhookSignature · UpsertSubscription · RemoveSubscription · Publish · AcquireDeliveries · AcknowledgeDelivery · FailDelivery · RejectDelivery · RedriveDelivery · MaintainDeliveries · MaintainArchive · RegisterSchema · UpsertSchemaValidationPolicy · RemoveSchemaValidationPolicy · ValidateSchema · ApplyIntegration · IntegrationState · Mutation · ReplayArchive · QueryDeliveries · Status",
+    java: "RegionalBusClient · SubscriptionTarget.apiDestination/endpointPool/function/connector/signedWebhook · WebhookSignatures.verify · upsertSubscription · removeSubscription · publish · acquireDeliveries · acknowledgeDelivery · failDelivery · rejectDelivery · redriveDelivery · maintainDeliveries · maintainArchive · registerSchema · upsertSchemaValidationPolicy · removeSchemaValidationPolicy · validateSchema · applyIntegration · integrationState · mutation · replayArchive · queryDeliveries · status",
     python:
-      "RegionalBusClient · SubscriptionTarget.api_destination/endpoint_pool/function/connector/signed_webhook · verify_webhook_signature · upsert_subscription · remove_subscription · publish · acquire_deliveries · acknowledge_delivery · fail_delivery · reject_delivery · redrive_delivery · maintain_deliveries · maintain_archive · apply_integration · integration_state · mutation · replay_archive · query_deliveries · status",
+      "RegionalBusClient · SubscriptionTarget.api_destination/endpoint_pool/function/connector/signed_webhook · verify_webhook_signature · upsert_subscription · remove_subscription · publish · acquire_deliveries · acknowledge_delivery · fail_delivery · reject_delivery · redrive_delivery · maintain_deliveries · maintain_archive · register_schema · upsert_schema_validation_policy · remove_schema_validation_policy · validate_schema · apply_integration · integration_state · mutation · replay_archive · query_deliveries · status",
   },
   {
     area: "Queue",

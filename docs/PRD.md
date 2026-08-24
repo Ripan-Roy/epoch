@@ -8,19 +8,20 @@
 **Status:** Implementation-backed private beta candidate; later managed-service milestones remain open
 **Audience:** Founders, product, distributed-systems engineering, infrastructure, security, and design
 
-**Beta implementation note (24 August 2026):** The `v0.2.0-beta.3` candidate
-closes the alpha operational boundary with fail-closed TLS/mTLS, portable
-encrypted regional backup and fresh restore, durable three/five-voter
-membership and learner-first replacement, guarded Kubernetes rollout, bounded
-object/PostgreSQL/MySQL/Kafka source adapters, four signed non-root OCI images,
-a resumable signed fault harness, and one exact-source four-node Kubernetes
-backup/replacement/upgrade/restore proof. Native amd64 and arm64 release jobs
+**Beta implementation note (24 August 2026):** The `v0.2.0-beta.4` candidate
+retains the alpha-exit TLS/mTLS, encrypted recovery, durable three/five-voter
+membership, guarded Kubernetes rollout, bounded source adapters, signed
+multi-architecture OCI distribution, fault harness, and exact-source
+Kubernetes lifecycle. It adds compiler-backed Avro, JSON Schema, and
+self-contained Protobuf registration, format-derived adjacent-revision
+compatibility, producer/broker validation modes, deterministic recovery, and
+typed Go/Java/Python schema lifecycle APIs. Native amd64 and arm64 release jobs
 assemble exact-tag manifests from immutable platform digests without QEMU and
 retain manifest provenance, signatures, and per-platform SBOM attestations.
-This establishes a locally tested native private-beta distribution. It does
-not complete the later compatibility, geo, managed-service, 30-day,
-package-manager, production SLO, or GA rows in this PRD. See ADR-0039 and the
-alpha-exit checklist.
+This is a locally tested native private-beta distribution; it does not complete
+the later Redis/Kafka/AMQP compatibility, geo, managed-service, 30-day,
+package-manager, production SLO, or GA rows in this PRD. See ADR-0039,
+ADR-0037, and the delivery checklist.
 
 **Implementation note (13 August 2026):** The fixed-three-voter regional Rust
 runtime now owns automatic maintenance for the implemented time-driven profile
@@ -127,11 +128,14 @@ outcome/checkpoint before source settlement; public-address validation,
 allowlists, DNS pinning, redirect/proxy suppression, bounded secret files, and
 stable side-effect idempotency keys fail closed. Go, Java, and Python expose
 the regional lifecycle, and recovery revalidates all integration semantics and
-snapshot capacity. This completes the native alpha development contract for
-`BUS-001`–`BUS-015`; it does not claim an MQTT wire gateway, official schema or
-CloudEvents conformance, external secret-manager hot reload, private-network
-egress, exactly-once external side effects, or production scale/security
-evidence. See ADR-0037.
+snapshot capacity. Compiler-backed Avro, JSON Schema, and self-contained
+Protobuf definitions now drive payload validation and adjacent-revision
+compatibility; producer advice and broker enforcement are separate typed SDK
+paths. This completes the native alpha development contract for
+`BUS-001`–`BUS-015`; it does not claim an MQTT wire gateway, external JSON
+Schema references, Protobuf imports, MQTT/CloudEvents protocol conformance,
+external secret-manager hot reload, private-network egress, exactly-once
+external side effects, or production scale/security evidence. See ADR-0037.
 
 **Alpha-exit implementation note (24 August 2026):** The active Bus leader now
 reads bounded HTTP/CloudEvents, immutable-object (S3-compatible, Azure Blob/Data
