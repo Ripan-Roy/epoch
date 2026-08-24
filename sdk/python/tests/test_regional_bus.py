@@ -12,6 +12,8 @@ from epoch_sdk import (
     EventFilter,
     RegionalBusClient,
     RegionalScope,
+    SchemaRegistration,
+    SchemaValidationPolicy,
     Subscription,
     SubscriptionTarget,
     TransformLimits,
@@ -200,6 +202,57 @@ class RegionalBusClientTests(unittest.TestCase):
             TransformLimits(network_access=True)
         with self.assertRaisesRegex(ValueError, r"HTTP\(S\) token URL"):
             DestinationAuth.oauth2("oauth", "file:///token")
+        self.assertEqual(self.transport.requests, [])
+
+    def test_typed_schema_lifecycle_is_validated_and_routed(self) -> None:
+        event = EventEnvelope(
+            id="order-2",
+            source="python-regional-sdk",
+            event_type="order.created",
+            payload={"id": 2},
+            time_ms=2,
+        )
+        self.client.register_schema(
+            "events",
+            0,
+            "schema-1",
+            SchemaRegistration(
+                "orders",
+                "protobuf",
+                'syntax = "proto3"; message Order { string id = 1; }',
+                "backward",
+                "Order",
+            ),
+        )
+        self.client.upsert_schema_validation_policy(
+            "events",
+            0,
+            "policy-1",
+            SchemaValidationPolicy("orders", "order.*", "orders@1", "producer_and_broker"),
+        )
+        self.client.validate_schema("events", 0, "producer", event)
+        self.client.remove_schema_validation_policy("events", 0, "policy-remove-1", "orders")
+
+        operations = self.transport.requests[1::2]
+        self.assertEqual(len(operations), 4)
+        registration = operations[0]["body"]["operation"]["operation"]["registration"]
+        self.assertEqual(registration["format"], "protobuf")
+        self.assertEqual(registration["root_message"], "Order")
+        self.assertTrue(operations[2]["path"].endswith("/schema/validate"))
+        self.assertEqual(operations[2]["body"]["mode"], "producer")
+        self.assertEqual(operations[2]["headers"]["x-epoch-read-consistency"], "linearizable")
+
+    def test_invalid_schema_lifecycle_fails_before_network(self) -> None:
+        with self.assertRaisesRegex(ValueError, "schema name"):
+            SchemaRegistration("bad/name", "json_schema", "{}", "none")
+        with self.assertRaisesRegex(ValueError, "schema definition"):
+            SchemaRegistration("orders", "json_schema", "", "none")
+        with self.assertRaisesRegex(ValueError, "only for Protobuf"):
+            SchemaRegistration("orders", "json_schema", "{}", "none", "Order")
+        with self.assertRaisesRegex(ValueError, "event type pattern"):
+            SchemaValidationPolicy("orders", "", "orders@1", "broker")
+        with self.assertRaisesRegex(ValueError, "policy name"):
+            self.client.remove_schema_validation_policy("events", 0, "remove", "bad/name")
         self.assertEqual(self.transport.requests, [])
 
 

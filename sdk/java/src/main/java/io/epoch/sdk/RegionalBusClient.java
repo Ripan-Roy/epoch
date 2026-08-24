@@ -217,6 +217,47 @@ public final class RegionalBusClient {
     return mutate(bus, shard, idempotencyKey, operation);
   }
 
+  /** Compiles and commits one immutable schema revision. */
+  public JsonNode registerSchema(
+      String bus, int shard, String idempotencyKey, SchemaRegistration registration)
+      throws IOException, InterruptedException {
+    Objects.requireNonNull(registration, "registration");
+    ObjectNode integration = operation("register_schema");
+    integration.set("registration", registration.toJson(RegionalClientCore.MAPPER));
+    return applyIntegration(bus, shard, idempotencyKey, integration);
+  }
+
+  /** Creates or replaces one event-type schema-validation policy. */
+  public JsonNode upsertSchemaValidationPolicy(
+      String bus, int shard, String idempotencyKey, SchemaValidationPolicy policy)
+      throws IOException, InterruptedException {
+    Objects.requireNonNull(policy, "policy");
+    ObjectNode integration = operation("upsert_validation_policy");
+    integration.set("policy", policy.toJson(RegionalClientCore.MAPPER));
+    return applyIntegration(bus, shard, idempotencyKey, integration);
+  }
+
+  /** Removes one exact schema-validation policy. */
+  public JsonNode removeSchemaValidationPolicy(
+      String bus, int shard, String idempotencyKey, String name)
+      throws IOException, InterruptedException {
+    ObjectNode integration = operation("remove_validation_policy");
+    integration.put("name", SchemaRegistration.resourceName(name, "schema validation policy name"));
+    return applyIntegration(bus, shard, idempotencyKey, integration);
+  }
+
+  /** Performs a linearizable read-only producer or broker schema validation. */
+  public JsonNode validateSchema(
+      String bus, int shard, SchemaValidationStage stage, EventEnvelope event)
+      throws IOException, InterruptedException {
+    Objects.requireNonNull(stage, "stage");
+    Objects.requireNonNull(event, "event");
+    ObjectNode body = RegionalClientCore.MAPPER.createObjectNode();
+    body.put("mode", stage.wireValue());
+    body.set("envelope", event.toJson());
+    return read(bus, shard, "POST", "/schema/validate", body);
+  }
+
   /** Resolves one proposal from the current leader. */
   public JsonNode mutation(String bus, int shard, BigInteger proposalId)
       throws IOException, InterruptedException {

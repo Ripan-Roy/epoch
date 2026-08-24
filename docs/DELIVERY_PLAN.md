@@ -449,12 +449,15 @@ idempotency, endpoint failure observation, and connector checkpoint-before-
 source-settlement ordering pass focused and real-target tests.
 
 This completes the native alpha development surface for BUS-001–BUS-015 and
-DX-001/DX-002. An MQTT wire gateway, official schema/MQTT/CloudEvents
-conformance, unsigned legacy HTTP execution, streaming push, automatic source-
-connector polling, active health restoration, private managed egress, secret
-manager/hot reload, fully typed/generated integration response models, package
-publication, backups/PITR, and production placement/security/scale evidence
-remain open. See
+DX-001/DX-002. The private-beta schema increment additionally completes
+INT-001/INT-002 with compiler-backed Avro, JSON Schema, and self-contained
+Protobuf definitions plus typed Go, Java, and Python lifecycle APIs. External
+JSON Schema references and Protobuf imports remain explicit non-claims. An MQTT
+wire gateway, MQTT/CloudEvents protocol conformance, unsigned legacy HTTP
+execution, streaming push, automatic source-connector polling, active health
+restoration, private managed egress, secret manager/hot reload, fully generated
+integration response models, package publication, backups/PITR, and production
+placement/security/scale evidence remain open. See
 [Regional Event Bus SDK](REGIONAL_EVENT_BUS_SDK.md),
 [ADR-0020](adr/0020-regional-event-bus-v1-and-sdk-routing.md), and
 [ADR-0030](adr/0030-leader-owned-signed-webhook-delivery.md),

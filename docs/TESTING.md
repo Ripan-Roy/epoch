@@ -370,10 +370,15 @@ against those adapters.
 The container gate adds follower rejection,
 majority-before-success, acquire/ack replication, leader loss, catch-up,
 archive/outbox/digest agreement, all-node `SIGKILL`, and same-volume recovery.
-An MQTT wire/protocol corpus, official schema/CloudEvents conformance, live
-Azure/GCS cloud campaigns, unsigned legacy target execution, sustained adapter
-load/soak, and a broader crash-at-every-network-boundary matrix remain open; see
-[Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
+Schema tests compile Avro, JSON Schema, and self-contained Protobuf definitions,
+reject malformed inputs, derive adjacent-revision compatibility, select an
+explicit Protobuf root message, separate producer advice from broker
+enforcement, mask payload values, and recover the same registry and policies
+through a real three-voter route. External JSON Schema references and Protobuf
+imports are intentionally rejected. An MQTT wire/protocol corpus, official
+CloudEvents conformance, live Azure/GCS cloud campaigns, unsigned legacy target
+execution, sustained adapter load/soak, and a broader crash-at-every-network-
+boundary matrix remain open; see [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
 The `epoch-catalog` unit suite begins at the regional multi-tablet boundary. It
 proves collision-free identity across resources and shards, stable existing

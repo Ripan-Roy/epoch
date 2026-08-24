@@ -1355,7 +1355,11 @@ ingress/outbox tablet on the internal listener:
   explicitly local and stale-capable view of delivery state and attempt
   history; and
 - `GET /experimental/v1/tablets/bus/integration/state` returns the complete
-  explicitly local and stale-capable integration registry image.
+  explicitly local and stale-capable integration registry image; and
+- `POST /experimental/v1/tablets/bus/schema/validate` compiles no new state and
+  performs explicit producer or broker validation against the local applied
+  registry. The authenticated regional wrapper requires a leader ReadIndex
+  barrier for this route.
 
 The same strict idempotency, server-owned non-regressing time, browser-safe
 64-bit JSON, majority-before-success, recovery-before-readiness, and fail-stop
@@ -1366,6 +1370,11 @@ captured timeout/max-in-flight/retry/rate/dead-letter policy. Acquires are
 fenced by leader term and dispatcher epoch; ack, failure, retry, timeout/archive
 maintenance, retention, redrive, schemas, enrichment, MQTT, catalog,
 endpoints, functions, and connector checkpoints are replicated and recovered.
+Avro, JSON Schema, and self-contained Protobuf definitions are compiler-backed;
+registrations and compatibility failures do not change registry state. JSON
+Schema external references and Protobuf imports are rejected to prohibit
+validation-time file or network I/O. Broker policy rejection is a deterministic
+committed publish outcome, while the explicit producer path is read-only.
 The tablet-local status reports `durable_target_outbox: true`; topology reports
 the signed, Epoch, and managed executors. Regional workers execute signed
 HTTP/webhook, Epoch Queue/Stream, API, endpoint-pool, function, and connector

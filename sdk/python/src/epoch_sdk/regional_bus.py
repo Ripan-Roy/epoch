@@ -2,17 +2,85 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from ._regional import RegionalClient, Route, _non_negative, _positive, _required
 from .models import EventEnvelope, EventFilter, Subscription
 
 DeliveryState = Literal["pending", "in_flight", "acknowledged", "dead_lettered"]
+SchemaFormat = Literal["avro", "json_schema", "protobuf"]
+SchemaCompatibility = Literal["none", "backward", "forward", "full"]
+SchemaValidationMode = Literal["disabled", "producer", "broker", "producer_and_broker"]
+SchemaValidationStage = Literal["producer", "broker"]
 _DELIVERY_STATES = frozenset({"pending", "in_flight", "acknowledged", "dead_lettered"})
+_SCHEMA_FORMATS = frozenset({"avro", "json_schema", "protobuf"})
+_SCHEMA_COMPATIBILITY = frozenset({"none", "backward", "forward", "full"})
+_SCHEMA_VALIDATION_MODES = frozenset({"disabled", "producer", "broker", "producer_and_broker"})
+_SCHEMA_VALIDATION_STAGES = frozenset({"producer", "broker"})
 _MAX_DELIVERY_BATCH = 100
 _MAX_READ_RESULTS = 10_000
 _MAX_LONG_POLL_MS = 30_000
 _LINEARIZABLE = {"x-epoch-read-consistency": "linearizable"}
+
+
+@dataclass(frozen=True)
+class SchemaRegistration:
+    """One compiler-validated, immutable Event Bus schema revision request."""
+
+    name: str
+    format: SchemaFormat
+    definition: str
+    compatibility: SchemaCompatibility
+    root_message: str | None = None
+
+    def __post_init__(self) -> None:
+        _resource_name(self.name, "schema name")
+        if self.format not in _SCHEMA_FORMATS:
+            raise ValueError(f"unsupported schema format: {self.format}")
+        _required(self.definition, "schema definition")
+        if self.compatibility not in _SCHEMA_COMPATIBILITY:
+            raise ValueError(f"unsupported schema compatibility: {self.compatibility}")
+        if self.format != "protobuf" and self.root_message is not None:
+            raise ValueError("root message is valid only for Protobuf schemas")
+        if self.root_message is not None:
+            _required(self.root_message, "root message")
+
+    def to_dict(self) -> dict[str, str]:
+        value = {
+            "name": self.name,
+            "format": self.format,
+            "definition": self.definition,
+            "compatibility": self.compatibility,
+        }
+        if self.root_message is not None:
+            value["root_message"] = self.root_message
+        return value
+
+
+@dataclass(frozen=True)
+class SchemaValidationPolicy:
+    """Bind one event-type pattern to an immutable schema revision."""
+
+    name: str
+    event_type_pattern: str
+    schema_ref: str
+    mode: SchemaValidationMode
+
+    def __post_init__(self) -> None:
+        _resource_name(self.name, "schema validation policy name")
+        _required(self.event_type_pattern, "schema validation event type pattern")
+        _required(self.schema_ref, "schema reference")
+        if self.mode not in _SCHEMA_VALIDATION_MODES:
+            raise ValueError(f"unsupported schema validation mode: {self.mode}")
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "name": self.name,
+            "event_type_pattern": self.event_type_pattern,
+            "schema_ref": self.schema_ref,
+            "mode": self.mode,
+        }
 
 
 class RegionalBusClient(RegionalClient):
@@ -223,6 +291,72 @@ class RegionalBusClient(RegionalClient):
             {"kind": "apply_integration", "operation": dict(operation)},
         )
 
+    def register_schema(
+        self,
+        bus: str,
+        shard: int,
+        idempotency_key: str,
+        registration: SchemaRegistration,
+    ) -> dict[str, Any]:
+        """Compile and commit one immutable schema revision."""
+        if not isinstance(registration, SchemaRegistration):
+            raise TypeError("registration must be SchemaRegistration")
+        return self.apply_integration(
+            bus,
+            shard,
+            idempotency_key,
+            {"kind": "register_schema", "registration": registration.to_dict()},
+        )
+
+    def upsert_schema_validation_policy(
+        self,
+        bus: str,
+        shard: int,
+        idempotency_key: str,
+        policy: SchemaValidationPolicy,
+    ) -> dict[str, Any]:
+        """Create or replace one event-type schema-validation policy."""
+        if not isinstance(policy, SchemaValidationPolicy):
+            raise TypeError("policy must be SchemaValidationPolicy")
+        return self.apply_integration(
+            bus,
+            shard,
+            idempotency_key,
+            {"kind": "upsert_validation_policy", "policy": policy.to_dict()},
+        )
+
+    def remove_schema_validation_policy(
+        self, bus: str, shard: int, idempotency_key: str, name: str
+    ) -> dict[str, Any]:
+        """Remove one exact schema-validation policy."""
+        _resource_name(name, "schema validation policy name")
+        return self.apply_integration(
+            bus,
+            shard,
+            idempotency_key,
+            {"kind": "remove_validation_policy", "name": name},
+        )
+
+    def validate_schema(
+        self,
+        bus: str,
+        shard: int,
+        stage: SchemaValidationStage,
+        event: EventEnvelope,
+    ) -> dict[str, Any]:
+        """Perform a linearizable read-only producer or broker validation."""
+        if stage not in _SCHEMA_VALIDATION_STAGES:
+            raise ValueError("schema validation stage must be producer or broker")
+        if not isinstance(event, EventEnvelope):
+            raise TypeError("event must be EventEnvelope")
+        return self._read(
+            bus,
+            shard,
+            "POST",
+            "/schema/validate",
+            {"mode": stage, "envelope": event.to_dict()},
+        )
+
     def mutation(self, bus: str, shard: int, proposal_id: int) -> dict[str, Any]:
         _positive(proposal_id, "Event Bus proposal ID")
         return self._read(bus, shard, "GET", f"/mutations/{proposal_id}")
@@ -355,4 +489,22 @@ def _read_limit(value: int) -> None:
         raise ValueError("Event Bus read limit must be between 1 and 10000")
 
 
-__all__ = ["DeliveryState", "RegionalBusClient"]
+def _resource_name(value: str, label: str) -> None:
+    _required(value, label)
+    if len(value.encode("utf-8")) > 128 or any(
+        character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
+        for character in value
+    ):
+        raise ValueError(f"{label} must be a 1-128 byte resource name")
+
+
+__all__ = [
+    "DeliveryState",
+    "RegionalBusClient",
+    "SchemaCompatibility",
+    "SchemaFormat",
+    "SchemaRegistration",
+    "SchemaValidationMode",
+    "SchemaValidationPolicy",
+    "SchemaValidationStage",
+]

@@ -50,6 +50,8 @@ pub const EXPERIMENTAL_BUS_TABLET_DELIVERY_QUERY_PATH: &str =
     "/experimental/v1/tablets/bus/deliveries/query";
 pub const EXPERIMENTAL_BUS_TABLET_INTEGRATION_STATE_PATH: &str =
     "/experimental/v1/tablets/bus/integration/state";
+pub const EXPERIMENTAL_BUS_TABLET_SCHEMA_VALIDATE_PATH: &str =
+    "/experimental/v1/tablets/bus/schema/validate";
 
 const TABLET_REQUEST_BODY_BYTES: usize = MAX_BUS_TABLET_COMMAND_BYTES + 16 * 1024;
 const DEFAULT_REPLAY_LIMIT: usize = 100;
@@ -535,6 +537,10 @@ pub fn router(
         .route(
             EXPERIMENTAL_BUS_TABLET_INTEGRATION_STATE_PATH,
             get(integration_state),
+        )
+        .route(
+            EXPERIMENTAL_BUS_TABLET_SCHEMA_VALIDATE_PATH,
+            post(validate_schema),
         )
         .layer(DefaultBodyLimit::max(TABLET_REQUEST_BODY_BYTES))
         .with_state(state)
@@ -1072,6 +1078,68 @@ async fn integration_state(
         read: tablet_read_metadata(read),
         state: state.service.integration_state()?,
     }))
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum BusSchemaValidationMode {
+    Producer,
+    Broker,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BusSchemaValidationRequest {
+    mode: BusSchemaValidationMode,
+    envelope: StrictEventEnvelope,
+}
+
+#[derive(Debug, Serialize)]
+struct BusSchemaValidationResponse {
+    #[serde(flatten)]
+    read: TabletReadMetadata,
+    valid: bool,
+    mode: BusSchemaValidationMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schema_ref: Option<String>,
+}
+
+async fn validate_schema(
+    State(state): State<BusTabletApiState>,
+    read: Option<Extension<TabletReadMetadata>>,
+    request: Result<Json<BusSchemaValidationRequest>, JsonRejection>,
+) -> TabletApiResult<Json<BusSchemaValidationResponse>> {
+    let Json(request) = request.map_err(|rejection| TabletApiError::RequestBody {
+        status: rejection.status(),
+        message: rejection.body_text(),
+    })?;
+    let event = request.envelope.into();
+    let integration = state.service.integration_state()?;
+    let result = match request.mode {
+        BusSchemaValidationMode::Producer => integration.validate_for_producer(&event),
+        BusSchemaValidationMode::Broker => integration.validate_for_broker(&event),
+    };
+    result.map_err(schema_validation_error)?;
+    Ok(Json(BusSchemaValidationResponse {
+        read: tablet_read_metadata(read),
+        valid: true,
+        mode: request.mode,
+        schema_ref: event.schema_ref,
+    }))
+}
+
+fn schema_validation_error(error: EpochError) -> TabletApiError {
+    match error {
+        EpochError::InvalidArgument(message)
+        | EpochError::NotFound(message)
+        | EpochError::Conflict(message) => TabletApiError::InvalidRequest(message),
+        EpochError::AlreadyExists(message)
+        | EpochError::Capacity(message)
+        | EpochError::Unavailable(message)
+        | EpochError::Storage(message)
+        | EpochError::Internal(message) => TabletApiError::Profile(message),
+        EpochError::Fenced => TabletApiError::Profile(error.to_string()),
+    }
 }
 
 async fn tablet_status(
@@ -2360,6 +2428,52 @@ mod tests {
         (status, document)
     }
 
+    async fn install_order_schema_policy(
+        client: &reqwest::Client,
+        node: &RunningBusNode,
+        term: u64,
+    ) {
+        for (key, operation) in [
+            (
+                "schema-order-v1",
+                json!({
+                    "kind": "register_schema",
+                    "registration": {
+                        "name": "order",
+                        "format": "json_schema",
+                        "definition": r#"{"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"integer"}}}"#,
+                        "compatibility": "backward"
+                    }
+                }),
+            ),
+            (
+                "schema-policy-orders-v1",
+                json!({
+                    "kind": "upsert_validation_policy",
+                    "policy": {
+                        "name": "orders",
+                        "event_type_pattern": "order.*",
+                        "schema_ref": "order@1",
+                        "mode": "producer_and_broker"
+                    }
+                }),
+            ),
+        ] {
+            let (status, document) = post_json(
+                client,
+                node,
+                EXPERIMENTAL_BUS_TABLET_MUTATIONS_PATH,
+                &json!({
+                    "idempotency_key": key,
+                    "expected_term": term.to_string(),
+                    "operation": {"kind": "apply_integration", "operation": operation}
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{document}");
+        }
+    }
+
     async fn get_status(client: &reqwest::Client, node: &RunningBusNode) -> Value {
         client
             .get(
@@ -2699,5 +2813,81 @@ mod tests {
         assert_replay_on_every_node(&reopened, &client).await;
         assert_acknowledged_delivery_on_every_node(&reopened, &client).await;
         reopened.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn schema_validation_route_uses_the_replicated_compiler_backed_registry() {
+        let temporary = TempDir::new().unwrap();
+        let paths = tablet_paths(temporary.path());
+        let cluster = RunningBusCluster::start(&paths).await;
+        let client = reqwest::Client::new();
+        let (leader_index, term) = cluster.leader().await;
+        let leader = &cluster.nodes[leader_index];
+
+        install_order_schema_policy(&client, leader, term).await;
+
+        let valid_event = json!({
+            "id": "event-valid",
+            "source": "tests",
+            "type": "order.created",
+            "time_ms": "1",
+            "schema_ref": "order@1",
+            "payload": {"id": 42}
+        });
+        let (status, validation) = post_json(
+            &client,
+            leader,
+            EXPERIMENTAL_BUS_TABLET_SCHEMA_VALIDATE_PATH,
+            &json!({"mode": "producer", "envelope": valid_event}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{validation}");
+        assert_eq!(validation["valid"], true);
+        assert_eq!(validation["mode"], "producer");
+        assert_eq!(validation["schema_ref"], "order@1");
+
+        let invalid_event = json!({
+            "id": "event-invalid",
+            "source": "tests",
+            "type": "order.created",
+            "time_ms": "1",
+            "schema_ref": "order@1",
+            "payload": {"id": "do-not-reflect-this-value"}
+        });
+        let (status, rejected) = post_json(
+            &client,
+            leader,
+            EXPERIMENTAL_BUS_TABLET_SCHEMA_VALIDATE_PATH,
+            &json!({"mode": "producer", "envelope": invalid_event.clone()}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+        assert_eq!(rejected["error"]["code"], "invalid_request");
+        assert!(!rejected.to_string().contains("do-not-reflect-this-value"));
+
+        let (status, rejected_publish) = post_json(
+            &client,
+            leader,
+            EXPERIMENTAL_BUS_TABLET_MUTATIONS_PATH,
+            &json!({
+                "idempotency_key": "publish-invalid-schema",
+                "expected_term": term.to_string(),
+                "operation": {"kind": "publish", "envelope": invalid_event}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{rejected_publish}");
+        assert_eq!(rejected_publish["state"], "committed");
+        assert_eq!(
+            rejected_publish["receipt"]["outcome"]["code"],
+            "invalid_argument"
+        );
+        assert!(
+            !rejected_publish
+                .to_string()
+                .contains("do-not-reflect-this-value")
+        );
+
+        cluster.shutdown().await;
     }
 }

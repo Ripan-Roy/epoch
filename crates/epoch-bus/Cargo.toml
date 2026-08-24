@@ -8,7 +8,11 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+apache-avro.workspace = true
 epoch-core = { path = "../epoch-core" }
+jsonschema.workspace = true
+prost-reflect.workspace = true
+protox-parse.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

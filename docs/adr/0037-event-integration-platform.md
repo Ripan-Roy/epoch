@@ -1,8 +1,8 @@
 # ADR-0037: Replicated Event integration platform and leader-owned delivery
 
-- Status: Accepted for `v0.1.0-alpha.9`
-- Date: 2026-08-23
-- Requirements: `BUS-001` through `BUS-015`
+- Status: Accepted for `v0.1.0-alpha.9`; amended for private-beta schema compilation
+- Date: 2026-08-23; amended 2026-08-24
+- Requirements: `BUS-001` through `BUS-015`, `INT-001`, `INT-002`
 
 ## Decision
 
@@ -57,10 +57,22 @@ configuration errors do not poison endpoint health.
 ## Schemas, transforms, and enrichment
 
 The replicated registry stores bounded Avro, JSON Schema, and Protobuf source
-definitions with monotonic revisions and structural compatibility checks.
-Validation policies bind event-type patterns to exact schema revisions at the
-producer and/or broker boundary. The alpha validator enforces Epoch's declared
-field model; it is not a substitute for every official format compiler.
+definitions with monotonic immutable revisions. Registration compiles each
+definition with the format implementation used for payload validation:
+Apache Avro parsing and reader/writer resolution, JSON Schema meta-validation
+and compiled instance validation, and Protobuf descriptor compilation plus
+canonical JSON decoding. A Protobuf definition containing multiple messages
+must name its root message explicitly.
+
+Adjacent revisions derive compatibility from those compiled definitions. Avro
+uses reader/writer resolution, JSON Schema applies a conservative object-shape
+comparison and fails closed on unsupported composition or references, and
+Protobuf compares field numbers, names, scalar/message types, cardinality,
+oneof membership, and required fields. Validation policies bind event-type
+patterns to exact schema revisions at the producer and/or broker boundary.
+Producer validation is an explicit advisory request; broker validation is a
+deterministic committed publish outcome. All rejection details are bounded and
+must not reflect payload values.
 
 Transforms support bounded projection, rename, constants, templates, headers,
 and replicated lookup enrichment. Enrichment is synchronous and deterministic:
@@ -91,8 +103,8 @@ connectors remains outside this release.
   unchanged.
 - Go, Java, and Python use the same regional route, fence, idempotency, long-
   poll, maintenance, and integration-operation contract.
-- Secret-manager integration, hot reload, private destinations, OAuth variants
-  beyond client credentials, official schema/MQTT/CloudEvents conformance,
-  automatic source polling, health-probe restoration, production performance,
-  exhaustive fault injection, and formal security review remain production or
-  compatibility gates.
+- External JSON Schema references, Protobuf imports, secret-manager integration,
+  hot reload, private destinations, OAuth variants beyond client credentials,
+  MQTT/CloudEvents protocol conformance, automatic source polling, health-probe
+  restoration, production performance, exhaustive fault injection, and formal
+  security review remain production or compatibility gates.

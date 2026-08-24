@@ -1,6 +1,6 @@
 # Regional Event Bus SDK
 
-**Status:** Repository-local, single-shard regional alpha with replicated integrations and leader-owned managed delivery
+**Status:** Repository-local, single-shard private beta with replicated integrations and leader-owned managed delivery
 
 Epoch's Go, Java, and Python Event Bus clients call the same replicated tablet hosted by the Rust regional runtime. The clients discover the current leader, send generation and tablet fences, preserve caller-owned mutation identity across bounded rediscovery, and request linearizable archive, delivery, mutation, and status reads.
 
@@ -40,6 +40,10 @@ The current implementation accepts shard `0`; keeping the shard in the API preve
 | `redrive_delivery` | `redrive_delivery` | Return one retained dead letter to pending with prior attempts preserved |
 | `maintain_deliveries` | `maintain_deliveries` | Explicitly process due retries and expired leases |
 | `maintain_archive` | `maintain_archive` | Explicitly enforce bounded archive count/age retention |
+| `register_schema` | `apply_integration/register_schema` | Compile and commit one immutable Avro, JSON Schema, or Protobuf revision |
+| `upsert_schema_validation_policy` | `apply_integration/upsert_validation_policy` | Bind an event-type pattern and producer/broker mode to an exact revision |
+| `remove_schema_validation_policy` | `apply_integration/remove_validation_policy` | Remove one exact validation binding |
+| `validate_schema` | `schema/validate` | Perform a linearizable, read-only producer or broker validation |
 | `apply_integration` | `apply_integration` | Commit one schema, policy, enrichment, function, connector, MQTT, catalog, or endpoint operation |
 | `mutation` | mutation lookup | Resolve one proposal ID |
 | `replay_archive` | `archive/replay` | Replay 1–10,000 archived events in an inclusive server-received time range |
@@ -307,29 +311,82 @@ SDKs (`Document`, `JsonNode`, or `dict`). Supported `kind` values are:
 | MQTT state | `mqtt_connect`, `mqtt_disconnect`, `mqtt_subscribe`, `mqtt_unsubscribe`, `mqtt_publish`, `mqtt_clear_retained`, `mqtt_expire_sessions` |
 | Discovery/routing | `upsert_catalog_entry`, `remove_catalog_entry`, `observe_endpoint` |
 
-For example, register a schema and bind broker validation:
-
-```json
-{"kind":"register_schema","registration":{"name":"order","format":"json_schema","definition":"{\"type\":\"object\"}","compatibility":"backward","fields":[{"path":"id","value_type":"string","required":true,"default":null}]}}
-```
-
-```json
-{"kind":"upsert_validation_policy","policy":{"name":"orders","event_type_pattern":"order.*","schema_ref":"order@1","mode":"broker"}}
-```
-
-Pass each document with a new caller-owned mutation identity:
+Schema lifecycle operations have typed SDK methods. This JSON Schema requires
+an integer `id`, binds both producer advice and broker enforcement, validates
+before publish, and preserves the exact immutable revision on the envelope:
 
 ```go
-_, err := client.ApplyIntegration(ctx, "events", 0, "schema-order-v1", operation)
+_, err := client.RegisterSchema(ctx, "events", 0, "schema-order-v1", epoch.SchemaRegistration{
+    Name: "order", Format: epoch.JSONSchema,
+    Definition: `{"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"integer"}}}`,
+    Compatibility: epoch.BackwardSchemaCompatibility,
+})
+if err != nil { return err }
+_, err = client.UpsertSchemaValidationPolicy(ctx, "events", 0, "schema-policy-orders-v1", epoch.SchemaValidationPolicy{
+    Name: "orders", EventTypePattern: "order.*", SchemaRef: "order@1",
+    Mode: epoch.ProducerAndBrokerSchemaValidation,
+})
+if err != nil { return err }
+event := epoch.EventEnvelope{ID: "order-1", Source: "checkout", Type: "order.created", TimeMS: 1,
+    SchemaRef: "order@1", Payload: map[string]any{"id": 42}}
+_, err = client.ValidateSchema(ctx, "events", 0, epoch.ProducerValidationStage, event)
+if err != nil { return err }
+_, err = client.Publish(ctx, "events", 0, "publish-order-1", event)
 ```
 
 ```java
-client.applyIntegration("events", 0, "schema-order-v1", operationNode);
+client.registerSchema(
+    "events", 0, "schema-order-v1",
+    new SchemaRegistration(
+        "order", SchemaFormat.JSON_SCHEMA,
+        "{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"integer\"}}}",
+        SchemaCompatibility.BACKWARD));
+client.upsertSchemaValidationPolicy(
+    "events", 0, "schema-policy-orders-v1",
+    new SchemaValidationPolicy(
+        "orders", "order.*", "order@1", SchemaValidationMode.PRODUCER_AND_BROKER));
+EventEnvelope event = EventEnvelope.builder("checkout", "order.created", Map.of("id", 42))
+    .id("order-1").timeMs(1).schemaRef("order@1").build();
+client.validateSchema("events", 0, SchemaValidationStage.PRODUCER, event);
+client.publish("events", 0, "publish-order-1", event);
 ```
 
 ```python
-client.apply_integration("events", 0, "schema-order-v1", operation)
+client.register_schema(
+    "events", 0, "schema-order-v1",
+    SchemaRegistration(
+        "order", "json_schema",
+        '{"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"integer"}}}',
+        "backward",
+    ),
+)
+client.upsert_schema_validation_policy(
+    "events", 0, "schema-policy-orders-v1",
+    SchemaValidationPolicy("orders", "order.*", "order@1", "producer_and_broker"),
+)
+event = EventEnvelope(
+    id="order-1", source="checkout", event_type="order.created", time_ms=1,
+    schema_ref="order@1", payload={"id": 42},
+)
+client.validate_schema("events", 0, "producer", event)
+client.publish("events", 0, "publish-order-1", event)
 ```
+
+Registration compiles before consensus state changes. JSON Schema supports
+official local-reference validation and rejects external references so
+validation never performs network or file I/O. Avro uses the Apache Avro parser
+and reader/writer compatibility rules. Protobuf accepts self-contained proto2
+or proto3 source, rejects imports, and uses canonical Protobuf JSON mapping; set
+`root_message` when a definition contains more than one top-level message.
+
+Compatibility is checked against the latest revision before a new immutable
+revision is admitted. JSON Schema compatibility is conservative and fails
+closed for composition or reference forms it cannot prove; Avro and Protobuf
+use their format contracts. Validation errors are bounded and payload values
+are not reflected. `producer` is explicit SDK advice, `broker` is enforced
+atomically by `publish`, `producer_and_broker` does both, and `disabled` does
+neither. The optional legacy `fields` overlay is read only for snapshot
+compatibility and is not required by new registrations.
 
 Read `integration_state` after a linearizable barrier to inspect the exact
 replicated schemas, policies, enrichments, functions, connectors/checkpoints,
@@ -484,8 +541,9 @@ with the same browser-safe encoding.
 - built-in execution covers Epoch Queue/Stream, signed HTTP/webhook, API
   destinations, endpoint pools, functions, and target/bidirectional connectors;
   unsigned legacy HTTP/webhook intent remains application-dispatched;
-- schema validation uses Epoch's bounded structural field model rather than
-  every official format compiler;
+- schema definitions are compiler-backed; JSON Schema external references and
+  Protobuf imports are deliberately rejected, and advanced JSON Schema
+  compatibility forms fail closed when compatibility cannot be proven;
 - MQTT session/QoS state is implemented, but no MQTT wire gateway or protocol
   conformance is claimed;
 - HTTP/CloudEvents, immutable-object, PostgreSQL, MySQL, and Kafka source
