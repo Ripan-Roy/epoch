@@ -60,7 +60,7 @@ struct Args {
     redis_listen: SocketAddr,
     #[arg(long, env = "EPOCH_COMPAT_REDIS_CACHE", default_value = "sessions")]
     redis_cache: String,
-    #[arg(long, env = "EPOCH_COMPAT_REDIS_PASSWORD")]
+    #[arg(long, env = "EPOCH_COMPAT_REDIS_PASSWORD", hide_env_values = true)]
     redis_password: Option<String>,
 
     #[arg(
@@ -290,12 +290,28 @@ fn run_scan(args: &ScanArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory as _;
 
     #[test]
     fn gateway_credentials_are_required_and_never_have_embedded_defaults() {
         let args = Args::try_parse_from(["epoch-compat"]).unwrap();
         let error = runtime_credentials(&args).unwrap_err();
         assert!(error.to_string().contains("EPOCH_COMPAT_TOKEN"));
+    }
+
+    #[test]
+    fn gateway_secret_environment_values_are_hidden_from_help() {
+        let command = Args::command();
+        for id in ["token", "redis_password", "amqp_password"] {
+            let argument = command
+                .get_arguments()
+                .find(|argument| argument.get_id() == id)
+                .unwrap_or_else(|| panic!("missing secret argument {id}"));
+            assert!(
+                argument.is_hide_env_values_set(),
+                "{id} must redact its environment value from CLI help"
+            );
+        }
     }
 
     #[test]
