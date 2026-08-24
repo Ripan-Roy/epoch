@@ -99,7 +99,7 @@ function assessTopologyEvidence(
     phase: "ready",
     summarySuffix: ` · ${topology.achievedZones} configured zones observed`,
     risks: [
-      "Configured zone labels agree across allowlisted responses; physical rack separation, Rust server identity, membership changes, and dynamic rebalancing remain outside this alpha.",
+      "Configured zone labels agree across allowlisted responses; physical rack separation, automatic topology rebalancing, and production SLOs remain outside this beta.",
     ],
   };
 }

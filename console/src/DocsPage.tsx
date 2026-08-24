@@ -112,7 +112,7 @@ export function DocsPage({ section, heading = null }: DocsPageProps) {
               <div className="docs-sidebar__status">
                 <span className="status-dot" data-tone="good" aria-hidden="true" />
                 <span>
-                  <strong>Foundation alpha</strong>
+                  <strong>Private beta</strong>
                   APIs are provisional
                 </span>
               </div>
