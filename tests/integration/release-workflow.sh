@@ -5,6 +5,7 @@ set -euo pipefail
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 workflow="${repository_root}/.github/workflows/release-tag.yml"
 ci_workflow="${repository_root}/.github/workflows/ci.yml"
+release_images="${repository_root}/scripts/release-images.txt"
 
 fail() {
   printf 'release workflow contract failed: %s\n' "$1" >&2
@@ -50,6 +51,34 @@ require_literal 'pattern: epoch-${{ matrix.component.name }}-digest-*'
 require_literal "./scripts/create-release-manifest.sh"
 require_literal '/tmp/digests'
 require_literal 'DIGEST: ${{ steps.manifest.outputs.amd64 }}'
+
+# The build matrix, finalize matrix, and manifest helper must share the exact
+# official image set. This rejects adding an image to only part of the release
+# pipeline, which would otherwise fail after expensive native builds finish.
+official_components="$(
+  sed 's#^ghcr\.io/ripan-roy/epoch-##' "$release_images" | sort
+)"
+[[ "$(printf '%s\n' "$official_components" | sed '/^$/d' | wc -l | tr -d ' ')" -eq 5 ]] || \
+  fail "official release image set must contain exactly five components"
+[[ "$(printf '%s\n' "$official_components" | sort -u)" == "$official_components" ]] || \
+  fail "official release image set contains duplicates"
+
+matrix_components() {
+  local job="$1"
+  awk -v job="  ${job}:" '
+    $0 == job { in_job = 1; next }
+    in_job && /^  [a-z0-9-]+:/ { exit }
+    in_job && /^          - name: [a-z][a-z0-9-]*$/ {
+      sub(/^          - name: /, "")
+      print
+    }
+  ' "$workflow" | sort
+}
+
+for matrix_job in build-platform-images publish-images; do
+  [[ "$(matrix_components "$matrix_job")" == "$official_components" ]] || \
+    fail "$matrix_job does not match scripts/release-images.txt"
+done
 
 # The faster topology must retain the release trust boundary and evidence:
 # exact-main provenance, one platform SBOM per architecture and component,

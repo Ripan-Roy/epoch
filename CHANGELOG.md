@@ -6,7 +6,25 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+## [0.2.0-beta.6] - 2026-08-26
+
+### Fixed
+
+- Moved the exact five-image release allowlist into a checked-in source shared
+  by manifest assembly and release contract tests.
+- Added a regression that exercises manifest creation for node, control,
+  operator, CLI, and compatibility images and rejects drift between both
+  workflow matrices and the official image set.
+- Preserved the immutable failed beta.5 tag and prepared beta.6 as the corrected
+  Redis/Kafka/RabbitMQ feature release.
+
 ## [0.2.0-beta.5] - 2026-08-24
+
+> Publication aborted after all ten native images built: the compatibility
+> manifest finalizer rejected its image because the helper's official allowlist
+> still named only four components. Four older manifests were finalized, but no
+> curated GitHub prerelease was published. The immutable tag was not moved; use
+> beta.6 instead of beta.5's partial registry artifacts.
 
 ### Added
 

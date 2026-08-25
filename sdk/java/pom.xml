@@ -6,7 +6,7 @@
 
   <groupId>io.epoch</groupId>
   <artifactId>epoch-sdk</artifactId>
-  <version>0.2.0-beta.5</version>
+  <version>0.2.0-beta.6</version>
   <name>Epoch Java SDK</name>
   <description>Guarantee-aware Java client for Epoch.</description>
   <url>https://github.com/Ripan-Roy/epoch</url>

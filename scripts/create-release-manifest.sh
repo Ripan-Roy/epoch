@@ -15,9 +15,14 @@ image="$1"
 tag="$2"
 digest_directory="$3"
 github_output="$4"
+script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+official_images="${script_directory}/release-images.txt"
 
-[[ "$image" =~ ^ghcr\.io/ripan-roy/epoch-(node|control|operator|cli)$ ]] || \
+[[ -f "$official_images" ]] || fail "official release image set is missing"
+if [[ ! "$image" =~ ^ghcr\.io/ripan-roy/epoch-[a-z0-9-]+$ ]] || \
+  ! grep -Fqx -- "$image" "$official_images"; then
   fail "image is outside the official Epoch release set: $image"
+fi
 [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-(alpha|beta)\.[0-9]+$ ]] || \
   fail "tag is not a supported Epoch prerelease: $tag"
 [[ -d "$digest_directory" ]] || fail "digest directory does not exist"

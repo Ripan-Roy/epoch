@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "epoch-sdk"
-version = "0.2.0b5"
+version = "0.2.0b6"
 description = "Official Python client for Epoch"
 readme = "README.md"
 requires-python = ">=3.11"

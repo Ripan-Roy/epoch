@@ -96,19 +96,23 @@ source_amd64="1111111111111111111111111111111111111111111111111111111111111111"
 source_arm64="2222222222222222222222222222222222222222222222222222222222222222"
 touch "${digest_dir}/${source_amd64}" "${digest_dir}/${source_arm64}"
 
-PATH="${fake_bin}:$PATH" \
-  EPOCH_FAKE_DOCKER_LOG="$docker_log" \
-  "${repository_root}/scripts/create-release-manifest.sh" \
-  ghcr.io/ripan-roy/epoch-node \
-  v0.2.0-beta.3 \
-  "$digest_dir" \
-  "$output_file"
+while IFS= read -r official_image; do
+  : >"$output_file"
+  PATH="${fake_bin}:$PATH" \
+    EPOCH_FAKE_DOCKER_LOG="$docker_log" \
+    "${repository_root}/scripts/create-release-manifest.sh" \
+    "$official_image" \
+    v0.2.0-beta.6 \
+    "$digest_dir" \
+    "$output_file"
+
+  grep -Fq "${official_image}@sha256:${source_amd64}" "$docker_log"
+  grep -Fq "${official_image}@sha256:${source_arm64}" "$docker_log"
+done <"${repository_root}/scripts/release-images.txt"
 
 grep -Fqx 'digest=sha256:0000000000000000000000000000000000000000000000000000000000000000' "$output_file"
 grep -Fqx 'amd64=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$output_file"
 grep -Fqx 'arm64=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$output_file"
-grep -Fq "ghcr.io/ripan-roy/epoch-node@sha256:${source_amd64}" "$docker_log"
-grep -Fq "ghcr.io/ripan-roy/epoch-node@sha256:${source_arm64}" "$docker_log"
 
 expect_rejection() {
   local reason="$1"
@@ -122,6 +126,10 @@ expect_rejection() {
 expect_rejection "an invalid tag" \
   "${repository_root}/scripts/create-release-manifest.sh" \
   ghcr.io/ripan-roy/epoch-node latest "$digest_dir" "$output_file"
+
+expect_rejection "an unofficial image" \
+  "${repository_root}/scripts/create-release-manifest.sh" \
+  ghcr.io/ripan-roy/epoch-unknown v0.2.0-beta.6 "$digest_dir" "$output_file"
 
 rm -f "${digest_dir}/${source_arm64}"
 expect_rejection "one platform digest" \
