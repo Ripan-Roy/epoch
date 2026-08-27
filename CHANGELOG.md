@@ -6,7 +6,12 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
-## [0.2.0-beta.6] - 2026-08-26
+## [0.2.0-beta.6] - 2026-08-27
+
+### Changed
+
+- Consolidated 69 compatible Rust, Go, Java, npm, and pinned GitHub Actions
+  dependency updates into the release candidate and verified them together.
 
 ### Fixed
 
@@ -17,6 +22,14 @@ notes explicitly list additional verified artifacts.
   workflow matrices and the official image set.
 - Preserved the immutable failed beta.5 tag and prepared beta.6 as the corrected
   Redis/Kafka/RabbitMQ feature release.
+
+### Security
+
+- Pinned patched transitive versions of `brace-expansion` 5.0.9, `nanoid`
+  3.3.18, and `postcss` 8.5.26, resolving two high and one moderate npm
+  advisory.
+- Added `pnpm audit` to the local aggregate audit and protected console CI so a
+  vulnerable frozen npm graph fails before merge.
 
 ## [0.2.0-beta.5] - 2026-08-24
 

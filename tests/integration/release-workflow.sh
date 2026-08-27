@@ -97,5 +97,7 @@ reject_literal ":latest"
 
 grep -Fq -- "make test-release-manifest test-release-workflow" "$ci_workflow" || \
   fail "CI does not execute the release workflow contracts"
+grep -Fq -- "- run: pnpm run audit" "$ci_workflow" || \
+  fail "CI does not reject npm dependency advisories"
 
 printf 'release workflow contract passed\n'

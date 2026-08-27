@@ -18,8 +18,8 @@ make check
 
 It performs generated-code freshness, formatting, static analysis, Rust
 documentation checks, unit tests for every language area currently present,
-and the Rust dependency advisory gate. The extended deterministic local gate
-is:
+and the Rust and npm dependency advisory gates. The extended deterministic
+local gate is:
 
 ```shell
 make ci
@@ -30,7 +30,7 @@ validates the Compose model. Long-running compatibility, fuzz, simulation,
 chaos, soak, and performance suites remain separate so the fast gate stays
 useful.
 
-### Rust dependency gate
+### Dependency advisory gates
 
 Both pull-request CI and `make audit` install or require `cargo-audit` 0.22.2
 and run:
@@ -45,6 +45,12 @@ All reported Rust advisories and audit warnings fail the gate except
 or an acceptance of the adapter. ADR-0003 remains Proposed until the dependency
 decision and replacement path are reviewed. No additional advisory may be
 ignored without a documented review and a bounded removal condition.
+
+The console CI job and `make audit` also run `pnpm audit` against the frozen
+workspace lockfile. Every npm advisory fails the gate; patched transitive
+versions are pinned through root workspace overrides when an owning direct
+dependency has not yet refreshed its own lock resolution. No npm advisory is
+silenced or accepted without a documented, bounded exception.
 
 The Rust CI job also tests and builds the complete workspace with
 `--all-features`, and builds workspace documentation with

@@ -84,11 +84,12 @@ lint: ## Run static checks for every language and contract.
 	@$(PNPM_ENV) pnpm run typecheck
 	@if find spec/proto -type f -name '*.proto' -print -quit 2>/dev/null | grep -q .; then buf lint; else echo "no Protobuf contracts found; skipping Buf lint"; fi
 
-audit: ## Reject Rust dependency advisories except the documented Raft exception.
+audit: ## Reject Rust and npm dependency advisories except the documented Raft exception.
 	@cargo audit --version 2>/dev/null | grep -Eq '^cargo-audit(-audit)? 0\.22\.2$$' || { echo "missing cargo-audit 0.22.2; see docs/DEVELOPMENT.md" >&2; exit 1; }
 	# The only temporary exception is Raft's unmaintained fxhash dependency;
 	# ADR-0003 stays Proposed until the dependency decision is accepted.
 	cargo audit --deny warnings --ignore RUSTSEC-2025-0057
+	@$(PNPM_ENV) pnpm run audit
 
 test: test-unit ## Run the default local test suite.
 

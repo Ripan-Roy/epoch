@@ -161,7 +161,7 @@ make format           # update source formatting
 make format-check     # verify formatting without writes
 make generate         # regenerate Go Protobuf bindings
 make lint             # Rust, Go, Java, Python, TypeScript, and Protobuf checks
-make audit            # pinned Rust dependency advisory gate
+make audit            # pinned Rust and npm dependency advisory gates
 make test             # local unit tests
 make test-integration # real processes plus exact published SDK quickstarts
 make build            # compile all current components
@@ -173,9 +173,9 @@ make test-kubernetes-live # exact-source disposable four-node managed lifecycle
 ```
 
 `make check` includes `make audit`; it therefore requires the pinned
-`cargo-audit` installation above. The Make targets remain thin wrappers. When
-debugging a failure, rerun the native command printed by Make rather than adding
-behavior that exists only in the wrapper.
+`cargo-audit` installation above and a frozen pnpm installation. The Make
+targets remain thin wrappers. When debugging a failure, rerun the native command
+printed by Make rather than adding behavior that exists only in the wrapper.
 
 The live Kubernetes target is intentionally separate from `make check` because
 it builds three images and creates five Kind containers. Final alpha-exit/beta
