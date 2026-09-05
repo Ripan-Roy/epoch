@@ -6,12 +6,12 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
-## [0.2.0-beta.6] - 2026-08-27
+## [0.2.0-beta.6] - 2026-09-05
 
 ### Changed
 
-- Consolidated 69 compatible Rust, Go, Java, npm, and pinned GitHub Actions
-  dependency updates into the release candidate and verified them together.
+- Consolidated compatible Rust, Go, Java, npm, and pinned GitHub Actions
+  dependency groups into the release candidate for combined verification.
 
 ### Fixed
 
@@ -22,9 +22,14 @@ notes explicitly list additional verified artifacts.
   workflow matrices and the official image set.
 - Preserved the immutable failed beta.5 tag and prepared beta.6 as the corrected
   Redis/Kafka/RabbitMQ feature release.
+- Synchronized the four tablet SIGKILL recovery campaigns with Docker container
+  exit before restarting every named voter; CI regression tests cover delayed
+  exits and reject missing containers, invalid state, and Docker command failures.
 
 ### Security
 
+- Updated gRPC to 1.83.1 and replaced withdrawn Rust `chacha20` 0.10.1 and
+  `mysql_async` 0.37.0 with 0.10.2 and 0.37.1, retaining the strict audit gate.
 - Pinned patched transitive versions of `brace-expansion` 5.0.9, `nanoid`
   3.3.18, and `postcss` 8.5.26, resolving two high and one moderate npm
   advisory.

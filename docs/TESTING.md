@@ -60,6 +60,12 @@ Linux installer before any Rust compilation and verifies the exact
 
 ## Test layers
 
+The Compose tablet crash/replay campaigns use a shared helper which waits for
+every named container to finish exiting after SIGKILL before starting the
+voters. `make test-compose-crash-restart` models delayed exits and rejects
+missing containers, invalid state, exhausted polling, and Docker failures. It
+runs in both the default unit gate and CI without requiring a Docker daemon.
+
 ### 1. Unit and property tests
 
 Unit tests live beside the code they cover. They must be deterministic and must

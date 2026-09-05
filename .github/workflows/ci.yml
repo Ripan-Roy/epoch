@@ -99,6 +99,8 @@ jobs:
           shellcheck scripts/*.sh tests/integration/*.sh
       - name: Verify release workflow contracts
         run: make test-release-manifest test-release-workflow
+      - name: Verify Compose crash and restart synchronization
+        run: make test-compose-crash-restart
       - name: Verify synchronized release metadata
         run: ./scripts/check-release-version.sh
       - name: Check Go formatting
@@ -408,7 +410,7 @@ jobs:
       - name: Prove OCI inspection fails closed
         run: tests/integration/oci-image-inspection.sh
       - name: Generate node SPDX SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           image: epoch/node:ci
           format: spdx-json
@@ -416,7 +418,7 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
       - name: Generate control SPDX SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           image: epoch/control:ci
           format: spdx-json
@@ -424,7 +426,7 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
       - name: Generate operator SPDX SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           image: epoch/operator:ci
           format: spdx-json
@@ -432,7 +434,7 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
       - name: Generate CLI SPDX SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           image: epoch/cli:ci
           format: spdx-json
@@ -440,7 +442,7 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
       - name: Generate compatibility gateway SPDX SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           image: epoch/compat:ci
           format: spdx-json
