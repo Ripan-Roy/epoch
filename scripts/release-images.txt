@@ -1,0 +1,5 @@
+ghcr.io/ripan-roy/epoch-node
+ghcr.io/ripan-roy/epoch-control
+ghcr.io/ripan-roy/epoch-operator
+ghcr.io/ripan-roy/epoch-cli
+ghcr.io/ripan-roy/epoch-compat

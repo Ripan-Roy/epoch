@@ -4,8 +4,8 @@ metadata:
   name: epoch
   namespace: epoch-system
 spec:
-  nodeImage: ghcr.io/ripan-roy/epoch-node:v0.2.0-beta.5
-  controlImage: ghcr.io/ripan-roy/epoch-control:v0.2.0-beta.5
+  nodeImage: ghcr.io/ripan-roy/epoch-node:v0.2.0-beta.6
+  controlImage: ghcr.io/ripan-roy/epoch-control:v0.2.0-beta.6
   region: ap-south
   nodeClass: general-purpose
   replicas: 3

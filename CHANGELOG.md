@@ -6,7 +6,43 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+## [0.2.0-beta.6] - 2026-09-05
+
+### Changed
+
+- Consolidated compatible Rust, Go, Java, npm, and pinned GitHub Actions
+  dependency groups into the release candidate for combined verification.
+
+### Fixed
+
+- Moved the exact five-image release allowlist into a checked-in source shared
+  by manifest assembly and release contract tests.
+- Added a regression that exercises manifest creation for node, control,
+  operator, CLI, and compatibility images and rejects drift between both
+  workflow matrices and the official image set.
+- Preserved the immutable failed beta.5 tag and prepared beta.6 as the corrected
+  Redis/Kafka/RabbitMQ feature release.
+- Synchronized the four tablet SIGKILL recovery campaigns with Docker container
+  exit before restarting every named voter; CI regression tests cover delayed
+  exits and reject missing containers, invalid state, and Docker command failures.
+
+### Security
+
+- Updated gRPC to 1.83.1 and replaced withdrawn Rust `chacha20` 0.10.1 and
+  `mysql_async` 0.37.0 with 0.10.2 and 0.37.1, retaining the strict audit gate.
+- Pinned patched transitive versions of `brace-expansion` 5.0.9, `nanoid`
+  3.3.18, and `postcss` 8.5.26, resolving two high and one moderate npm
+  advisory.
+- Added `pnpm audit` to the local aggregate audit and protected console CI so a
+  vulnerable frozen npm graph fails before merge.
+
 ## [0.2.0-beta.5] - 2026-08-24
+
+> Publication aborted after all ten native images built: the compatibility
+> manifest finalizer rejected its image because the helper's official allowlist
+> still named only four components. Four older manifests were finalized, but no
+> curated GitHub prerelease was published. The immutable tag was not moved; use
+> beta.6 instead of beta.5's partial registry artifacts.
 
 ### Added
 

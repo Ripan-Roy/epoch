@@ -535,8 +535,8 @@ wait_for_applied_count 14
 epoch_pre_kill_digest="$(json_field "$(tablet_status 1)" state_digest)"
 assert_cluster_state "$epoch_pre_kill_digest"
 
-"${epoch_compose[@]}" kill --signal SIGKILL >/dev/null
-"${epoch_compose[@]}" start >/dev/null
+"$epoch_repo_root/scripts/crash-restart-compose-services.sh" \
+  "$epoch_project_name" "$epoch_compose_file" "${epoch_services[@]}"
 wait_for_nodes
 wait_for_applied_count 14
 assert_cluster_state "$epoch_pre_kill_digest"

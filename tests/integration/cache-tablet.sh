@@ -878,8 +878,8 @@ epoch_pre_kill_status="$(tablet_status 1)"
 [[ "$(json_field "$epoch_pre_kill_status" retained_entry_count)" == 4 ]]
 [[ "$(json_field "$epoch_pre_kill_status" active_lock_count)" == 0 ]]
 
-"${epoch_compose[@]}" kill --signal SIGKILL >/dev/null
-"${epoch_compose[@]}" start >/dev/null
+"$epoch_repo_root/scripts/crash-restart-compose-services.sh" \
+  "$epoch_project_name" "$epoch_compose_file" "${epoch_services[@]}"
 wait_for_nodes
 epoch_recovered_digest="$(wait_for_convergence 22 1 2 3)"
 [[ "$epoch_recovered_digest" == "$epoch_pre_kill_digest" ]]

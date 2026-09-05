@@ -412,8 +412,8 @@ wait_for_state 2 1
 assert_archive_count 2
 assert_delivery_counts 1 1
 
-"${epoch_compose[@]}" kill >/dev/null
-"${epoch_compose[@]}" up --no-build --detach >/dev/null
+"$epoch_repo_root/scripts/crash-restart-compose-services.sh" \
+  "$epoch_project_name" "$epoch_compose_file" "${epoch_services[@]}"
 wait_for_nodes
 wait_for_state 2 1
 assert_archive_count 2

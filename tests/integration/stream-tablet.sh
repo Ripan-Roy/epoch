@@ -677,8 +677,8 @@ done
 # Force every process down without graceful application shutdown. EPRS remains
 # the only clustered source of truth; startup must rebuild the tablet before
 # its typed status endpoint becomes ready.
-"${epoch_compose[@]}" kill --signal SIGKILL >/dev/null
-"${epoch_compose[@]}" start >/dev/null
+"$epoch_repo_root/scripts/crash-restart-compose-services.sh" \
+  "$epoch_project_name" "$epoch_compose_file" "${epoch_services[@]}"
 wait_for_nodes
 wait_for_record_count 4 1 2 3
 wait_for_group_offset 1 1 2 3

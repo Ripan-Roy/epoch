@@ -8,7 +8,7 @@
 **Status:** Implementation-backed private beta candidate; later managed-service milestones remain open
 **Audience:** Founders, product, distributed-systems engineering, infrastructure, security, and design
 
-**Beta implementation note (24 August 2026):** The `v0.2.0-beta.5` candidate
+**Beta implementation note (26 August 2026):** The `v0.2.0-beta.6` candidate
 retains the alpha-exit TLS/mTLS, encrypted recovery, durable three/five-voter
 membership, guarded Kubernetes rollout, bounded source adapters, signed
 multi-architecture OCI distribution, fault harness, and exact-source

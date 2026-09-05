@@ -8,7 +8,7 @@ NODE_LTS := $(if $(wildcard /opt/homebrew/opt/node@24/bin/node),/opt/homebrew/op
 PNPM_ENV := PATH="/opt/homebrew/opt/node@24/bin:$$PATH"
 JAVA_MVN := ./sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress
 
-.PHONY: help bootstrap-check generate generate-check release-check format format-check lint audit test test-unit test-retry-command test-release-manifest test-release-workflow test-soak-runner test-kubernetes-runner test-consensus-process test-consensus-probe test-stream-tablet test-queue-tablet test-cache-tablet test-bus-tablet test-regional-runtime test-kubernetes-live test-integration build check ci kubernetes-config compose-config compose-up compose-down compose-probe-config compose-probe-up compose-probe-down compose-regional-config compose-regional-up compose-regional-down clean
+.PHONY: help bootstrap-check generate generate-check release-check format format-check lint audit test test-unit test-retry-command test-compose-crash-restart test-release-manifest test-release-workflow test-soak-runner test-kubernetes-runner test-consensus-process test-consensus-probe test-stream-tablet test-queue-tablet test-cache-tablet test-bus-tablet test-regional-runtime test-kubernetes-live test-integration build check ci kubernetes-config compose-config compose-up compose-down compose-probe-config compose-probe-up compose-probe-down compose-regional-config compose-regional-up compose-regional-down clean
 
 help: ## Show available commands.
 	@awk 'BEGIN {FS = ":.*## "; printf "Epoch development commands:\n\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -84,15 +84,16 @@ lint: ## Run static checks for every language and contract.
 	@$(PNPM_ENV) pnpm run typecheck
 	@if find spec/proto -type f -name '*.proto' -print -quit 2>/dev/null | grep -q .; then buf lint; else echo "no Protobuf contracts found; skipping Buf lint"; fi
 
-audit: ## Reject Rust dependency advisories except the documented Raft exception.
+audit: ## Reject Rust and npm dependency advisories except the documented Raft exception.
 	@cargo audit --version 2>/dev/null | grep -Eq '^cargo-audit(-audit)? 0\.22\.2$$' || { echo "missing cargo-audit 0.22.2; see docs/DEVELOPMENT.md" >&2; exit 1; }
 	# The only temporary exception is Raft's unmaintained fxhash dependency;
 	# ADR-0003 stays Proposed until the dependency decision is accepted.
 	cargo audit --deny warnings --ignore RUSTSEC-2025-0057
+	@$(PNPM_ENV) pnpm run audit
 
 test: test-unit ## Run the default local test suite.
 
-test-unit: test-retry-command test-release-manifest test-release-workflow test-soak-runner test-kubernetes-runner test-regional-runtime-runner ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
+test-unit: test-retry-command test-compose-crash-restart test-release-manifest test-release-workflow test-soak-runner test-kubernetes-runner test-regional-runtime-runner ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
 	@if [ -f Cargo.toml ]; then cargo test --locked --workspace --all-targets --all-features; fi
 	@if find control operator sdk/go -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then go test -race ./...; fi
 	@if [ -d sdk/python ]; then PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests -v; fi
@@ -101,6 +102,9 @@ test-unit: test-retry-command test-release-manifest test-release-workflow test-s
 
 test-retry-command: ## Prove bounded command retries and final-status preservation.
 	@bash tests/integration/retry-command.sh
+
+test-compose-crash-restart: ## Prove SIGKILL recovery waits for every Compose service to stop.
+	@bash tests/integration/compose-crash-restart.sh
 
 test-release-manifest: ## Prove release digest validation and manifest assembly fail closed.
 	@bash tests/integration/release-manifest.sh
