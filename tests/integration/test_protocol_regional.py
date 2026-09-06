@@ -4,11 +4,37 @@ from __future__ import annotations
 
 import copy
 import unittest
+import xml.etree.ElementTree as ET
+from pathlib import Path
 
 import protocol_regional as campaign
 
 
 class ProtocolRegionalContractTest(unittest.TestCase):
+    def test_reported_java_client_versions_match_manifest(self) -> None:
+        manifest = Path(__file__).parents[1] / "compatibility/java/pom.xml"
+        namespace = {"m": "http://maven.apache.org/POM/4.0.0"}
+        dependencies = {
+            (
+                dependency.findtext("m:groupId", namespaces=namespace),
+                dependency.findtext("m:artifactId", namespaces=namespace),
+            ): dependency.findtext("m:version", namespaces=namespace)
+            for dependency in ET.parse(manifest).findall(
+                "m:dependencies/m:dependency", namespace
+            )
+        }
+        for client, coordinate in (
+            ("kafka", ("org.apache.kafka", "kafka-clients")),
+            ("rabbitmq", ("com.rabbitmq", "amqp-client")),
+        ):
+            with self.subTest(client=client):
+                self.assertEqual(
+                    campaign.CLIENTS[client],
+                    dependencies[coordinate],
+                    "Client updates must refresh the evidence metadata and rerun "
+                    "conformance; do not report results for the previous version.",
+                )
+
     def evidence(self) -> dict:
         return {
             "schema": campaign.RESULT_SCHEMA,

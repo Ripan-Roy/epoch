@@ -146,12 +146,34 @@ patch-only because a `0.x` minor change can be API-breaking and the consensus
 dependency graph is deliberately pinned. Security updates use a separate group
 and are never filtered or delayed by the routine-version policy.
 
+The Maven entry covers both `sdk/java` and `tests/compatibility/java` in the
+same group, including the Kafka and RabbitMQ conformance clients. The root npm
+entry covers the pnpm workspace. `make test-dependabot` verifies manifest
+coverage, grouped routine limits, and the unrestricted security-update policy
+locally and in CI, using the workspace's existing YAML parser. These are
+repository policy contracts, not a replacement for GitHub's
+[Dependabot configuration validation](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference).
+
+Protocol-client upgrades must update the regional campaign's reported client
+versions, the fixture's completion banner, and the current compatibility guide
+and docs page, then rerun fixture and real-regional conformance. A Python contract
+checks the campaign's Java client versions against the Maven manifest, preventing
+a bot update from silently relabeling new-client evidence as an older release.
+Historical release notes remain unchanged. Docker image digests and toolchains
+pinned in scripts are still maintained explicitly; this configuration does not
+claim to update every test tool or container automatically.
+
 Major migrations, Cargo `0.x` minor migrations, runtime-floor changes, and
 coupled toolchain upgrades are maintained on explicit branches. They require a
 compatibility note and the same language, integration, container, and
 documentation gates as product code. Dependabot pull requests are not
 auto-merged; a green check on one dependency does not prove that a collection
 of independently generated updates is compatible.
+
+When a maintainer folds bot updates into an active feature PR, preserve the
+manifest/lockfile changes, identify the superseded PRs in its description, and
+verify the combined graph. Close superseded bot PRs only after those updates
+land on `main`. Security fixes should not wait for an unrelated feature release.
 
 ## Common commands
 

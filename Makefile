@@ -60,14 +60,14 @@ release-check: ## Verify synchronized cross-language release metadata.
 
 format: ## Format Rust, Go, Java, Python, and JavaScript/TypeScript sources.
 	@if [ -f Cargo.toml ]; then cargo fmt --all; fi
-	@files="$$(find control operator sdk/go console/src/quickstarts -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then gofmt -w $$files; fi
+	@files="$$(find control operator sdk/go console/src/quickstarts tests/repository -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then gofmt -w $$files; fi
 	@if [ -d sdk/python ]; then ruff format sdk/python tests/soak tests/integration/*.py; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) spotless:apply; fi
 	@$(PNPM_ENV) pnpm run format
 
 format-check: ## Check formatting without changing files.
 	@if [ -f Cargo.toml ]; then cargo fmt --all --check; fi
-	@files="$$(find control operator sdk/go console/src/quickstarts -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then unformatted="$$(gofmt -l $$files)"; test -z "$$unformatted" || { printf '%s\n' "$$unformatted"; exit 1; }; fi
+	@files="$$(find control operator sdk/go console/src/quickstarts tests/repository -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then unformatted="$$(gofmt -l $$files)"; test -z "$$unformatted" || { printf '%s\n' "$$unformatted"; exit 1; }; fi
 	@if [ -d sdk/python ]; then ruff format --check sdk/python tests/soak tests/integration/*.py; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) spotless:check; fi
 	@$(PNPM_ENV) pnpm run format:check
@@ -111,6 +111,10 @@ test-release-manifest: ## Prove release digest validation and manifest assembly 
 
 test-release-workflow: ## Prove native multi-platform release and supply-chain invariants.
 	@bash tests/integration/release-workflow.sh
+
+.PHONY: test-dependabot
+test-dependabot: ## Verify dependency coverage, grouped-update limits, and security policy.
+	@go test ./tests/repository -run TestDependabot -count=1
 
 test-soak-runner: ## Prove soak resumption, duration gating, signatures, and tamper rejection.
 	@python3 -m unittest discover -s tests/soak -p 'test_*.py' -v

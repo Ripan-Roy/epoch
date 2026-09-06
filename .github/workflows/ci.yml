@@ -99,13 +99,15 @@ jobs:
           shellcheck scripts/*.sh tests/integration/*.sh
       - name: Verify release workflow contracts
         run: make test-release-manifest test-release-workflow
+      - name: Verify Dependabot coverage and update policy
+        run: make test-dependabot
       - name: Verify Compose crash and restart synchronization
         run: make test-compose-crash-restart
       - name: Verify synchronized release metadata
         run: ./scripts/check-release-version.sh
       - name: Check Go formatting
         run: |
-          mapfile -t go_files < <(find control operator sdk/go console/src/quickstarts -type f -name '*.go' 2>/dev/null)
+          mapfile -t go_files < <(find control operator sdk/go console/src/quickstarts tests/repository -type f -name '*.go' 2>/dev/null)
           if (( ${#go_files[@]} > 0 )); then
             unformatted="$(gofmt -l "${go_files[@]}")"
             test -z "$unformatted" || { printf '%s\n' "$unformatted"; exit 1; }

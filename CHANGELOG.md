@@ -12,6 +12,8 @@ notes explicitly list additional verified artifacts.
 
 - Consolidated compatible Rust, Go, Java, npm, and pinned GitHub Actions
   dependency groups into the release candidate for combined verification.
+- Extended grouped Maven Dependabot coverage to the Kafka/RabbitMQ conformance
+  clients, with CI contracts for update policy and reported client-version pins.
 
 ### Fixed
 
