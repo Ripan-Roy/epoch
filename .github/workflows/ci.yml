@@ -99,13 +99,15 @@ jobs:
           shellcheck scripts/*.sh tests/integration/*.sh
       - name: Verify release workflow contracts
         run: make test-release-manifest test-release-workflow
+      - name: Verify Dependabot coverage and update policy
+        run: make test-dependabot
       - name: Verify Compose crash and restart synchronization
         run: make test-compose-crash-restart
       - name: Verify synchronized release metadata
         run: ./scripts/check-release-version.sh
       - name: Check Go formatting
         run: |
-          mapfile -t go_files < <(find control operator sdk/go console/src/quickstarts -type f -name '*.go' 2>/dev/null)
+          mapfile -t go_files < <(find control operator sdk/go console/src/quickstarts tests/repository -type f -name '*.go' 2>/dev/null)
           if (( ${#go_files[@]} > 0 )); then
             unformatted="$(gofmt -l "${go_files[@]}")"
             test -z "$unformatted" || { printf '%s\n' "$unformatted"; exit 1; }
@@ -156,6 +158,8 @@ jobs:
         run: >-
           PYTHONPATH=tests/integration python -m unittest
           tests/integration/test_regional_runtime.py -v
+      - name: Run protocol regional campaign contract tests
+        run: make test-protocol-regional-runner
       - name: Build an installable SDK wheel
         run: python -m pip wheel --no-deps --wheel-dir /tmp/epoch-python-wheel sdk/python
 
@@ -378,7 +382,7 @@ jobs:
   container:
     name: Container and Compose
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -517,6 +521,28 @@ jobs:
           EPOCH_PROBE_IMAGE: epoch/node:ci
           EPOCH_BUS_TABLET_USE_EXISTING_IMAGE: "1"
         run: bash tests/integration/bus-tablet.sh
+      - name: Install Java for real regional protocol clients
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+          cache-dependency-path: tests/compatibility/java/pom.xml
+      - name: Prove real protocol clients survive regional and gateway failures
+        env:
+          EPOCH_REGIONAL_IMAGE: epoch/node:ci
+          EPOCH_REGIONAL_USE_EXISTING_IMAGE: "1"
+          EPOCH_COMPAT_IMAGE: epoch/compat:ci
+          EPOCH_COMPAT_ARTIFACT_DIR: ${{ runner.temp }}/epoch-protocol-regional
+        run: make test-protocol-regional
+      - name: Upload real regional protocol evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: protocol-regional-evidence-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/epoch-protocol-regional
+          if-no-files-found: error
+          retention-days: 30
       - name: Prove mounted local durability across container replacement
         run: |
           wait_for_health() {

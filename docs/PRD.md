@@ -747,6 +747,13 @@ Transaction coordinators use producer epochs and fencing. Timeouts and maximum t
 
 Compatibility is a migration surface, not the internal architecture.
 
+Implementation evidence is tracked separately from the full target below in
+[Protocol compatibility](PROTOCOL_COMPATIBILITY.md) and delivery items PC-01
+through PC-10. The beta candidate now includes a combined named-client/regional
+recovery campaign, lossless Kafka CreateTime and ordered duplicate headers,
+and fail-closed native mutation receipts. These do not remove the richer
+protocol, differential/fuzz, or performance requirements in this PRD.
+
 | Surface | Initial target | Compatibility promise | Known boundary |
 |---|---|---|---|
 | Native API | gRPC, HTTP, supported language SDKs | Full Epoch semantics | Preferred for new applications |

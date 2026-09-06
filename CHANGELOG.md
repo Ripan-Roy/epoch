@@ -12,9 +12,24 @@ notes explicitly list additional verified artifacts.
 
 - Consolidated compatible Rust, Go, Java, npm, and pinned GitHub Actions
   dependency groups into the release candidate for combined verification.
+- Extended grouped Maven Dependabot coverage to the Kafka/RabbitMQ conformance
+  clients, with CI contracts for update policy and reported client-version pins.
 
 ### Fixed
 
+- Preserve Kafka producer CreateTime and ordered duplicate/nullable headers
+  through the wire codec and native storage envelope. Legacy header maps remain
+  readable; newly written v2 envelopes require the updated gateway.
+- Inspect Cache/Queue mutation receipts so a committed native rejection never
+  becomes a Redis success or AMQP publisher confirmation.
+- Make Redis `SET ... GET` return the atomically fenced previous value, preserve
+  a non-string on `WRONGTYPE`, and use the native missing-key shard revision for
+  conditional sets.
+- Reject unsupported Kafka idempotent producer identities and preflight bounded
+  record/header framing instead of silently dropping metadata.
+- Add a real-client regional campaign covering gateway replacement, per-profile
+  leader loss, full-voter SIGKILL/reopen, durable checkpoints and acknowledgements,
+  disconnected lease redelivery, and a full Queue refusing publisher confirms.
 - Moved the exact five-image release allowlist into a checked-in source shared
   by manifest assembly and release contract tests.
 - Added a regression that exercises manifest creation for node, control,

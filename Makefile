@@ -60,14 +60,14 @@ release-check: ## Verify synchronized cross-language release metadata.
 
 format: ## Format Rust, Go, Java, Python, and JavaScript/TypeScript sources.
 	@if [ -f Cargo.toml ]; then cargo fmt --all; fi
-	@files="$$(find control operator sdk/go console/src/quickstarts -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then gofmt -w $$files; fi
+	@files="$$(find control operator sdk/go console/src/quickstarts tests/repository -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then gofmt -w $$files; fi
 	@if [ -d sdk/python ]; then ruff format sdk/python tests/soak tests/integration/*.py; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) spotless:apply; fi
 	@$(PNPM_ENV) pnpm run format
 
 format-check: ## Check formatting without changing files.
 	@if [ -f Cargo.toml ]; then cargo fmt --all --check; fi
-	@files="$$(find control operator sdk/go console/src/quickstarts -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then unformatted="$$(gofmt -l $$files)"; test -z "$$unformatted" || { printf '%s\n' "$$unformatted"; exit 1; }; fi
+	@files="$$(find control operator sdk/go console/src/quickstarts tests/repository -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then unformatted="$$(gofmt -l $$files)"; test -z "$$unformatted" || { printf '%s\n' "$$unformatted"; exit 1; }; fi
 	@if [ -d sdk/python ]; then ruff format --check sdk/python tests/soak tests/integration/*.py; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) spotless:check; fi
 	@$(PNPM_ENV) pnpm run format:check
@@ -93,7 +93,7 @@ audit: ## Reject Rust and npm dependency advisories except the documented Raft e
 
 test: test-unit ## Run the default local test suite.
 
-test-unit: test-retry-command test-compose-crash-restart test-release-manifest test-release-workflow test-soak-runner test-kubernetes-runner test-regional-runtime-runner ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
+test-unit: test-retry-command test-compose-crash-restart test-release-manifest test-release-workflow test-soak-runner test-kubernetes-runner test-regional-runtime-runner test-protocol-regional-runner ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
 	@if [ -f Cargo.toml ]; then cargo test --locked --workspace --all-targets --all-features; fi
 	@if find control operator sdk/go -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then go test -race ./...; fi
 	@if [ -d sdk/python ]; then PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests -v; fi
@@ -112,6 +112,10 @@ test-release-manifest: ## Prove release digest validation and manifest assembly 
 test-release-workflow: ## Prove native multi-platform release and supply-chain invariants.
 	@bash tests/integration/release-workflow.sh
 
+.PHONY: test-dependabot
+test-dependabot: ## Verify dependency coverage, grouped-update limits, and security policy.
+	@go test ./tests/repository -run TestDependabot -count=1
+
 test-soak-runner: ## Prove soak resumption, duration gating, signatures, and tamper rejection.
 	@python3 -m unittest discover -s tests/soak -p 'test_*.py' -v
 
@@ -120,6 +124,13 @@ test-kubernetes-runner: ## Prove the disposable Kubernetes campaign's fail-close
 
 test-regional-runtime-runner: ## Prove regional recovery deadlines and diagnostics.
 	@PYTHONPATH=tests/integration python3 -m unittest tests/integration/test_regional_runtime.py -v
+
+.PHONY: test-protocol-regional test-protocol-regional-runner
+test-protocol-regional-runner: ## Reject incomplete real-client recovery evidence.
+	@PYTHONPATH=tests/integration python3 -m unittest tests/integration/test_protocol_regional.py -v
+
+test-protocol-regional: ## Prove Redis/Kafka/AMQP through real regional tablets and fault recovery.
+	@python3 tests/integration/protocol_regional.py
 
 test-consensus-process: ## Prove persistent three-voter behavior across real SIGKILL/reopen cycles.
 	cargo test --locked -p epoch-consensus --test multiprocess persistent_three_node_partition_and_sigkill_reopen -- --ignored --nocapture --test-threads=1

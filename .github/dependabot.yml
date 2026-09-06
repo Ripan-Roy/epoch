@@ -91,7 +91,10 @@ updates:
           - version-update:semver-minor
           - version-update:semver-patch
   - package-ecosystem: maven
-    directory: /sdk/java
+    # Keep SDK and protocol-test clients in the same weekly Maven group.
+    directories:
+      - /sdk/java
+      - /tests/compatibility/java
     open-pull-requests-limit: 1
     schedule:
       interval: weekly
