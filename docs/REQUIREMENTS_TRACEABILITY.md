@@ -70,7 +70,12 @@ real wire listeners; native adapter contracts separately prove bearer identity,
 generation/tablet/term fences, routes, payloads, and responses. Parser/semantic
 tests, all four Kafka compression paths, the DX-007 versioned migration scanner,
 the public matrix, Pages UI, and a fifth signed non-root OCI component are local.
-Combined real-regional conformance, differential and fuzz evidence, richer
+The next candidate adds combined real-regional conformance: production node
+and gateway images preserve binary Cache state, Kafka CreateTime and ordered
+duplicate headers/checkpoints, and AMQP confirms/leases/acks through gateway
+replacement, profile-leader losses, and all-voter SIGKILL/reopen. A full Queue's
+committed rejection is never confirmed. Local fault evidence passes; protected
+execution of this combined gate remains required. Differential and fuzz evidence, richer
 Redis types, Kafka membership/transactions, broader AMQP routing/1.0, MQTT, and
 performance parity remain open; no G6 completion is claimed.
 

@@ -19,10 +19,12 @@ The component boundary is recorded in
 | RabbitMQ | AMQP 0-9-1 | RabbitMQ Java client 5.34.0 | Partial; direct routing and Queue delivery lifecycle |
 
 The versions above are pinned and executed by CI, not a promise that every
-operation in those releases is implemented. The conformance job runs their
-supported paths through the real wire listeners, while semantic adapter tests
-separately prove authenticated, fenced native HTTP translation. A combined
-real regional-cluster certification remains a beta promotion gate.
+operation in those releases is implemented. In addition to fast wire fixtures
+and native adapter contracts, the regional campaign runs these clients through
+the production gateway image and authenticated, replicated Cache/Stream/Queue
+tablets. It checks gateway replacement, each profile's leader loss, and all
+voters reopening their existing volumes after SIGKILL. See
+[ADR-0043](adr/0043-lossless-protocol-recovery-contract.md).
 
 ## Architecture and trust boundary
 
@@ -152,8 +154,15 @@ Current Kafka boundaries:
 - one Produce partition is submitted as one canonical native batch and becomes
   visible atomically; the translated batch must contain 1–1,000 records, fit
   4 MiB uncompressed, and fit the native 360 KiB compressed proposal boundary;
-- record keys, nullable values, timestamps, and headers round-trip through a
+- record keys, nullable values, producer CreateTime timestamps, and ordered
+  duplicate/nullable headers round-trip through a
   namespaced Epoch envelope; protocol-only broker metadata does not.
+
+New native Kafka envelopes use payload `format_version: 2` and an ordered
+header-pair array. Legacy unversioned header maps remain readable, but headers
+already discarded by an older gateway cannot be recovered. Do not downgrade
+the gateway after writing v2 envelopes; a mixed-version gateway rollback window
+is not supported. Header counts are capped at 1,024 per record.
 
 Java manual-consumer example:
 
@@ -188,6 +197,13 @@ do not create or mutate them.
 | Consume | `basic.consume`, `basic.cancel`, `basic.get`, `basic.qos`, automatic or manual ack | Push consumers poll the native Queue; consumer priority/exclusive arguments are unsupported |
 | Settlement | `basic.ack`, `basic.reject`, `basic.nack`; requeue maps to release | Lease renewal is native-API-only; disconnected leases redeliver after visibility expiry |
 
+Native Queue capacity, visibility, and retry policy remain authoritative.
+Requeue consumes another delivery attempt; once the configured retry ceiling
+is exhausted, native dead-letter handling applies. A full Queue is not
+publisher-confirmed. In this revision a native rejection closes the AMQP
+connection; clients must treat unconfirmed publications as unsuccessful or
+unknown rather than infer acceptance from TCP delivery.
+
 RabbitMQ Java client example:
 
 ```java
@@ -218,6 +234,10 @@ try (var connection = factory.newConnection(); var channel = connection.createCh
 - AMQP malformed, unauthenticated, out-of-order, oversized, and unsupported
   frames fail closed. Client automatic recovery may reconnect, but must not
   infer that an unconfirmed publish committed.
+
+A native HTTP success status can carry a durably committed rejection. The
+gateway inspects the receipt and never treats that as an applied Cache or Queue
+mutation; unknown or missing receipt outcomes also fail closed.
 
 The gateway generates a fresh native idempotency identity per translated
 mutation. A connection loss after an uncertain native response is therefore an
@@ -266,6 +286,13 @@ tests. Release promotion additionally requires combined exact-version client
 conformance against a real regional Epoch cluster, an inspected non-root OCI
 image, SBOMs for amd64 and arm64, and the published matrix matching the APIs
 advertised by `ApiVersions` and `COMMAND`.
+
+The repeatable real-cluster command and evidence fields are documented in
+[Testing](TESTING.md#5-protocol-compatibility). Its Kafka history checks cover
+all four codecs, null keys/values, duplicate/null headers, CreateTime, exact
+offsets, and a persisted consumer checkpoint. AMQP checks cover confirms,
+native capacity rejection, nack/requeue, disconnected-lease redelivery, and
+acknowledged messages staying absent after restart.
 
 Performance parity with Redis, Kafka, or RabbitMQ is not claimed by this beta
 slice. Comparative throughput and p99 gates in the PRD remain separate work.

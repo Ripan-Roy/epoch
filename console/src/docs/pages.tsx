@@ -1843,6 +1843,11 @@ export function ProtocolCompatibilityBody() {
           360 KiB compressed proposal boundary.
         </p>
         <p>
+          Producer CreateTime, null keys and values, and ordered duplicate/nullable headers survive native
+          storage and recovery. New records use a v2 header envelope; legacy maps remain readable, but
+          downgrading the gateway after writing v2 records is unsupported.
+        </p>
+        <p>
           Manual partition assignment is the current consumer contract. Group membership/rebalancing,
           idempotent and transactional producers, admin mutations, SASL, ACLs, auto-creation, and timestamp
           offset lookup remain unsupported and are not advertised.
@@ -1857,10 +1862,30 @@ export function ProtocolCompatibilityBody() {
           heartbeats, and content/correlation/reply metadata are implemented.
         </p>
         <p>
+          Native Queue capacity and retry limits remain authoritative. Requeue consumes a delivery attempt. A
+          committed native rejection is never publisher-confirmed, even when its HTTP response is successful.
+        </p>
+        <p>
           AMQP 1.0, fanout/topic/header routing, server-named queues, policy arguments, mandatory returns,
           transactions, and RabbitMQ plugins remain unsupported.
         </p>
         <CodeBlock label="java · RabbitMQ client" value={compatibilityAmqpJava} />
+      </Topic>
+
+      <Topic id="recovery-evidence" title="Real regional recovery checks">
+        <p>
+          The regional campaign runs the pinned clients through production gateway and node images. It
+          replaces the gateway, kills each profile&apos;s leader, and reopens all voter volumes after SIGKILL,
+          checking Cache state, Kafka metadata and checkpoints, AMQP lease redelivery, durable
+          acknowledgements, and capacity refusal. This verifies the documented subset, not full broker parity
+          or production SLOs.
+        </p>
+        <CodeBlock
+          label="shell · prebuilt node and gateway images"
+          value={`EPOCH_REGIONAL_USE_EXISTING_IMAGE=1 \\
+EPOCH_COMPAT_ARTIFACT_DIR=/tmp/epoch-protocol-regional \\
+make test-protocol-regional`}
+        />
       </Topic>
 
       <Topic id="migration-scan" title="Scan before cutover">

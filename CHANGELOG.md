@@ -15,6 +15,16 @@ notes explicitly list additional verified artifacts.
 
 ### Fixed
 
+- Preserve Kafka producer CreateTime and ordered duplicate/nullable headers
+  through the wire codec and native storage envelope. Legacy header maps remain
+  readable; newly written v2 envelopes require the updated gateway.
+- Inspect Cache/Queue mutation receipts so a committed native rejection never
+  becomes a Redis success or AMQP publisher confirmation.
+- Reject unsupported Kafka idempotent producer identities and preflight bounded
+  record/header framing instead of silently dropping metadata.
+- Add a real-client regional campaign covering gateway replacement, per-profile
+  leader loss, full-voter SIGKILL/reopen, durable checkpoints and acknowledgements,
+  disconnected lease redelivery, and a full Queue refusing publisher confirms.
 - Moved the exact five-image release allowlist into a checked-in source shared
   by manifest assembly and release contract tests.
 - Added a regression that exercises manifest creation for node, control,

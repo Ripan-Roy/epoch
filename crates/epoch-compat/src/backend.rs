@@ -353,13 +353,13 @@ impl NativeHttpBackend {
         .await
     }
 
-    async fn mutate<T: DeserializeOwned>(
+    async fn mutate(
         &self,
         collection: &str,
         resource: &str,
         shard: u32,
         operation: Value,
-    ) -> Result<T, BackendError> {
+    ) -> Result<Value, BackendError> {
         let (base, route) = self.discover(collection, resource, shard).await?;
         let url = suffix_url(&base, "/mutations");
         let body = json!({
@@ -367,16 +367,19 @@ impl NativeHttpBackend {
             "expected_term": route.term,
             "operation": operation,
         });
-        self.send_json(
-            Method::POST,
-            url,
-            Some(body),
-            &[
-                ("x-epoch-resource-generation", &route.resource_generation),
-                ("x-epoch-tablet-epoch", &route.tablet_epoch),
-            ],
-        )
-        .await
+        let response = self
+            .send_json(
+                Method::POST,
+                url,
+                Some(body),
+                &[
+                    ("x-epoch-resource-generation", &route.resource_generation),
+                    ("x-epoch-tablet-epoch", &route.tablet_epoch),
+                ],
+            )
+            .await?;
+        require_applied_mutation(&response)?;
+        Ok(response)
     }
 
     async fn send_json<T: DeserializeOwned>(
@@ -849,6 +852,32 @@ impl CompatibilityBackend for NativeHttpBackend {
     }
 }
 
+fn require_applied_mutation(response: &Value) -> Result<(), BackendError> {
+    // A committed rejection is itself durable and may legitimately use HTTP
+    // 201. Transport success is not proof that the profile mutation applied.
+    match response
+        .pointer("/receipt/outcome/status")
+        .and_then(Value::as_str)
+    {
+        Some("applied") => Ok(()),
+        Some("rejected") => match response
+            .pointer("/receipt/outcome/code")
+            .and_then(Value::as_str)
+        {
+            Some("conflict" | "fenced" | "already_exists") => Err(BackendError::Conflict),
+            Some("not_found") => Err(BackendError::NotFound),
+            Some("invalid_argument") => Err(BackendError::Invalid(
+                "native operation was rejected".into(),
+            )),
+            Some("capacity" | "unavailable") => Err(BackendError::Unavailable(
+                "native capacity or availability rejection".into(),
+            )),
+            _ => Err(invalid_response("unknown native rejection code")),
+        },
+        _ => Err(invalid_response("native mutation outcome is missing")),
+    }
+}
+
 fn valid_resource_segment(value: &str) -> bool {
     !value.is_empty()
         && value != "."
@@ -985,15 +1014,11 @@ struct NativeStreamBatchRecord {
 }
 
 fn stream_envelope(record: StreamRecord) -> EventEnvelope {
-    let mut headers = Map::new();
-    for (name, value) in record.headers {
-        headers.insert(
-            name,
-            value.map_or(Value::Null, |value| {
-                Value::String(STANDARD_NO_PAD.encode(value))
-            }),
-        );
-    }
+    let headers = record
+        .headers
+        .into_iter()
+        .map(|(name, value)| (name, value.map(|value| STANDARD_NO_PAD.encode(value))))
+        .collect::<Vec<_>>();
     EventEnvelope {
         id: Uuid::now_v7().to_string(),
         source: "epoch://compat/kafka".into(),
@@ -1009,6 +1034,7 @@ fn stream_envelope(record: StreamRecord) -> EventEnvelope {
         schema_ref: None,
         traceparent: None,
         payload: json!({
+            "format_version":2,
             "value_base64":record.value.map(|value| STANDARD_NO_PAD.encode(value)),
             "headers":headers,
         }),
@@ -1031,14 +1057,37 @@ fn decode_stream_record(value: &Value) -> Result<StreamRecord, BackendError> {
     let key = optional_base64(envelope.get("key"))?;
     let record_value = optional_base64(payload.get("value_base64"))?;
     let mut headers = Vec::new();
-    if let Some(values) = payload.get("headers").and_then(Value::as_object) {
-        for (name, value) in values {
-            headers.push((name.clone(), optional_base64(Some(value))?));
+    match payload.get("format_version") {
+        None => {
+            let values = payload
+                .get("headers")
+                .and_then(Value::as_object)
+                .ok_or_else(|| invalid_response("legacy Kafka headers are missing"))?;
+            for (name, value) in values {
+                headers.push((name.clone(), optional_base64(Some(value))?));
+            }
         }
+        Some(version) if version.as_u64() == Some(2) => {
+            let values = payload
+                .get("headers")
+                .and_then(Value::as_array)
+                .ok_or_else(|| invalid_response("ordered Kafka headers are missing"))?;
+            for pair in values {
+                let pair = pair
+                    .as_array()
+                    .filter(|pair| pair.len() == 2)
+                    .ok_or_else(|| invalid_response("invalid ordered Kafka header"))?;
+                let name = pair[0]
+                    .as_str()
+                    .ok_or_else(|| invalid_response("invalid Kafka header name"))?;
+                headers.push((name.to_owned(), optional_base64(Some(&pair[1]))?));
+            }
+        }
+        Some(_) => return Err(invalid_response("unsupported Kafka envelope version")),
     }
     Ok(StreamRecord {
         offset: decimal_field(value, "offset")?,
-        timestamp_ms: decimal_field(value, "appended_at_ms")?,
+        timestamp_ms: decimal_field(envelope, "time_ms")?,
         key,
         value: record_value,
         headers,
@@ -1128,4 +1177,50 @@ fn decode_queue_delivery(value: &Value) -> Result<QueueDelivery, BackendError> {
             headers,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kafka_envelope_preserves_producer_time_and_ordered_duplicate_headers() {
+        let original = StreamRecord {
+            offset: 0,
+            timestamp_ms: 1_700_000_000_000,
+            key: Some(vec![0, 255]),
+            value: None,
+            headers: vec![
+                ("z".into(), Some(vec![1])),
+                ("a".into(), None),
+                ("z".into(), Some(vec![2])),
+                (String::new(), Some(vec![])),
+            ],
+        };
+        let envelope = stream_envelope(original.clone());
+        let recovered = decode_stream_record(&json!({
+            "offset":"7", "appended_at_ms":"1800000000000", "envelope":envelope,
+        }))
+        .unwrap();
+        assert_eq!(recovered.timestamp_ms, original.timestamp_ms);
+        assert_eq!(recovered.headers, original.headers);
+        assert_eq!(recovered.key, original.key);
+        assert_eq!(recovered.value, original.value);
+        assert_eq!(recovered.offset, 7);
+    }
+
+    #[test]
+    fn kafka_legacy_header_map_remains_readable_without_rewriting_history() {
+        let recovered = decode_stream_record(&json!({
+            "offset":"7", "appended_at_ms":"1800000000000",
+            "envelope":{"time_ms":"1700000000000", "key":null,
+                "payload":{"value_base64":null, "headers":{"trace": "AA", "nullable":null}}},
+        }))
+        .unwrap();
+        assert_eq!(recovered.timestamp_ms, 1_700_000_000_000);
+        assert_eq!(
+            recovered.headers,
+            vec![("nullable".into(), None), ("trace".into(), Some(vec![0])),]
+        );
+    }
 }

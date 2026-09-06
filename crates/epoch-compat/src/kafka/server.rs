@@ -1,5 +1,4 @@
 use std::{
-    cell::Cell,
     io::{Cursor, Read as _},
     sync::Arc,
 };
@@ -25,20 +24,16 @@ use kafka_protocol::{
         produce_response::{PartitionProduceResponse, TopicProduceResponse},
     },
     protocol::{Encodable, StrBytes, decode_request_header_from_buffer},
-    records::{
-        Compression, Record, RecordBatchDecoder, RecordBatchEncoder, RecordEncodeOptions,
-        TimestampType,
-    },
+    records::{BatchDecodeInfo, Compression, RecordBatchDecoder},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
 
-use crate::{
-    CompatibilityBackend, MAX_FRAME_BYTES, MAX_MESSAGE_BYTES,
-    backend::{BackendError, StreamRecord},
-};
+use crate::{CompatibilityBackend, MAX_FRAME_BYTES, MAX_MESSAGE_BYTES, backend::BackendError};
+
+use super::records::{decode_records, encode_records};
 
 const MAX_KAFKA_RECORDS_PER_PRODUCE_PARTITION: usize = 1_000;
 const KAFKA_SNAPPY_MAGIC_HEADER: &[u8; 16] = b"\x82SNAPPY\x00\x00\x00\x00\x01\x00\x00\x00\x01";
@@ -442,54 +437,31 @@ async fn produce_partition<B: CompatibilityBackend>(
     if bytes.len() > MAX_MESSAGE_BYTES {
         return Err(BackendError::Invalid("Kafka batch exceeds limit".into()));
     }
-    validate_kafka_batch_headers(&bytes)?;
-
-    let translated = {
-        let decompressed_bytes = Cell::new(0_usize);
-        let decompressor = |compressed: &mut Bytes, compression: Compression| {
-            let decompressed = decompress_kafka_records_bounded(compressed, compression)?;
-            let total = decompressed_bytes
-                .get()
+    let batches = validate_kafka_batch_headers(&bytes)?;
+    let mut total = 0_usize;
+    let mut translated = Vec::new();
+    for batch in batches {
+        // Metadata decoding already checked each complete magic-2 frame and CRC.
+        bytes.advance(8);
+        let length = usize::try_from(bytes.get_i32())
+            .map_err(|_| BackendError::Invalid("negative Kafka batch length".into()))?;
+        let mut frame = bytes.split_to(length);
+        frame.advance(49);
+        let decoded = (|| -> Result<_> {
+            let decompressed = decompress_kafka_records_bounded(&mut frame, batch.compression)?;
+            total = total
                 .checked_add(decompressed.len())
-                .context("Kafka decompressed batch size overflow")?;
-            if total > MAX_MESSAGE_BYTES {
-                bail!("Kafka decompressed batches exceed {MAX_MESSAGE_BYTES} bytes");
-            }
-            decompressed_bytes.set(total);
-            Ok(decompressed)
-        };
-        let mut translated = Vec::with_capacity(MAX_KAFKA_RECORDS_PER_PRODUCE_PARTITION);
-        while bytes.has_remaining() {
-            let batch =
-                RecordBatchDecoder::decode_with_custom_compression(&mut bytes, Some(&decompressor))
-                    .map_err(|_| {
-                        BackendError::Invalid("malformed or oversized Kafka record batch".into())
-                    })?;
-            for record in batch.records {
-                if record.transactional || record.control {
-                    return Err(BackendError::Invalid(
-                        "Kafka transactional/control batches are unsupported".into(),
-                    ));
-                }
-                translated.push(StreamRecord {
-                    offset: 0,
-                    timestamp_ms: u64::try_from(record.timestamp).unwrap_or(0),
-                    key: record.key.map(|value| value.to_vec()),
-                    value: record.value.map(|value| value.to_vec()),
-                    headers: record
-                        .headers
-                        .into_iter()
-                        .map(|(name, value)| (name.to_string(), value.map(|value| value.to_vec())))
-                        .collect(),
-                });
-            }
-        }
-        translated
-    };
+                .context("Kafka expansion overflow")?;
+            anyhow::ensure!(total <= MAX_MESSAGE_BYTES, "Kafka expansion exceeds limit");
+            decode_records(decompressed, &batch)
+        })()
+        .map_err(|_| BackendError::Invalid("malformed or oversized Kafka record batch".into()))?;
+        translated.extend(decoded);
+    }
     backend.stream_append(stream, partition, translated).await
 }
 
-fn validate_kafka_batch_headers(records: &Bytes) -> Result<(), BackendError> {
+fn validate_kafka_batch_headers(records: &Bytes) -> Result<Vec<BatchDecodeInfo>, BackendError> {
     let mut headers = records.clone();
     let batches = RecordBatchDecoder::decode_batch_info(&mut headers)
         .map_err(|_| BackendError::Invalid("malformed Kafka record batch".into()))?;
@@ -499,10 +471,15 @@ fn validate_kafka_batch_headers(records: &Bytes) -> Result<(), BackendError> {
         ));
     }
     let mut record_count = 0_usize;
-    for batch in batches {
+    for batch in &batches {
         if batch.transactional || batch.control {
             return Err(BackendError::Invalid(
                 "Kafka transactional/control batches are unsupported".into(),
+            ));
+        }
+        if batch.producer_id != -1 || batch.producer_epoch != -1 {
+            return Err(BackendError::Invalid(
+                "Kafka idempotent producer identity is unsupported".into(),
             ));
         }
         let batch_count = usize::try_from(batch.record_count)
@@ -519,7 +496,7 @@ fn validate_kafka_batch_headers(records: &Bytes) -> Result<(), BackendError> {
     if record_count == 0 {
         return Err(BackendError::Invalid("empty Kafka batch".into()));
     }
-    Ok(())
+    Ok(batches)
 }
 
 fn decompress_kafka_records_bounded(
@@ -665,41 +642,9 @@ async fn fetch_partition<B: CompatibilityBackend>(
         .stream_fetch(stream, partition, offset, 1_000)
         .await?;
     let high_watermark = backend.stream_end_offset(stream, partition).await?;
-    let records = records
-        .into_iter()
-        .map(|record| Record {
-            transactional: false,
-            control: false,
-            delete_horizon: false,
-            partition_leader_epoch: 0,
-            producer_id: -1,
-            producer_epoch: -1,
-            timestamp_type: TimestampType::Creation,
-            offset: i64::try_from(record.offset).unwrap_or(i64::MAX),
-            sequence: -1,
-            timestamp: i64::try_from(record.timestamp_ms).unwrap_or(i64::MAX),
-            key: record.key.map(Bytes::from),
-            value: record.value.map(Bytes::from),
-            headers: record
-                .headers
-                .into_iter()
-                .map(|(name, value)| (StrBytes::from_string(name), value.map(Bytes::from)))
-                .collect(),
-        })
-        .collect::<Vec<_>>();
-    let mut encoded = BytesMut::new();
-    if !records.is_empty() {
-        RecordBatchEncoder::encode(
-            &mut encoded,
-            &records,
-            &RecordEncodeOptions {
-                version: 2,
-                compression: Compression::None,
-            },
-        )
+    let encoded = encode_records(&records)
         .map_err(|_| BackendError::Unavailable("Kafka response encoding failed".into()))?;
-    }
-    Ok((high_watermark, encoded.freeze()))
+    Ok((high_watermark, encoded))
 }
 
 async fn list_offsets_response<B: CompatibilityBackend>(
@@ -772,6 +717,7 @@ mod tests {
             offset_fetch_request::OffsetFetchRequestTopic,
         },
         protocol::Decodable,
+        records::{Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType},
     };
 
     fn config() -> KafkaConfig {
@@ -939,6 +885,29 @@ mod tests {
         assert!(
             matches!(error, BackendError::Invalid(message) if message.contains("record count"))
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_unimplemented_idempotent_producer_identity() {
+        let backend = MemoryBackend::with_resources("sessions", "events", 2, "jobs");
+        let mut record = test_record(Bytes::from_static(b"uncommitted"), 0);
+        record.producer_id = 42;
+        record.producer_epoch = 1;
+        let mut batch = BytesMut::new();
+        RecordBatchEncoder::encode(
+            &mut batch,
+            &[record],
+            &RecordEncodeOptions {
+                version: 2,
+                compression: Compression::None,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            produce_partition(&backend, "events", 0, Some(batch.freeze())).await,
+            Err(BackendError::Invalid(_))
+        ));
+        assert_eq!(backend.stream_end_offset("events", 0).await.unwrap(), 0);
     }
 
     fn test_record(value: Bytes, sequence: usize) -> Record {

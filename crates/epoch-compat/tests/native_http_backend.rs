@@ -126,6 +126,13 @@ async fn native_response(
         .into_response();
     }
 
+    if path.contains("/rejected/") && method == Method::POST && path.ends_with("/mutations") {
+        return (StatusCode::CREATED, Json(json!({
+            "outcome_certainty":"committed",
+            "receipt":{"outcome":{"status":"rejected", "code":"conflict", "detail":"private backend detail"}},
+        }))).into_response();
+    }
+
     let document = if method == Method::GET && path.ends_with("/observations") {
         json!({"observation":{
             "revision":"11",
@@ -142,6 +149,7 @@ async fn native_response(
             "offset":"5",
             "appended_at_ms":"1234",
             "envelope":{
+                "time_ms":"1234",
                 "key":STANDARD_NO_PAD.encode(b"key"),
                 "payload":{
                     "value_base64":STANDARD_NO_PAD.encode(b"value"),
@@ -237,6 +245,62 @@ async fn prove_cache_port(backend: &NativeHttpBackend) {
             .unwrap(),
         1
     );
+}
+
+#[tokio::test]
+async fn never_acknowledges_http_success_with_a_committed_native_rejection() {
+    let api = MockNativeApi::start().await;
+    let backend = backend(api.endpoint.clone());
+    let message = QueueMessage {
+        body: b"job".to_vec(),
+        content_type: None,
+        correlation_id: None,
+        reply_to: None,
+        headers: BTreeMap::new(),
+    };
+    assert!(matches!(
+        backend.queue_publish("rejected", message).await,
+        Err(BackendError::Conflict)
+    ));
+    assert!(matches!(
+        backend.queue_ack("rejected", "worker", "lease").await,
+        Err(BackendError::Conflict)
+    ));
+    assert!(matches!(
+        backend
+            .queue_reject("rejected", "worker", "lease", true)
+            .await,
+        Err(BackendError::Conflict)
+    ));
+    assert!(matches!(
+        backend.queue_acquire("rejected", "worker", 1, 30_000).await,
+        Err(BackendError::Conflict)
+    ));
+    assert!(matches!(
+        backend
+            .cache_set(
+                "rejected",
+                "key",
+                CacheValue::Blob(vec![1]),
+                None,
+                false,
+                false
+            )
+            .await,
+        Err(BackendError::Conflict)
+    ));
+    assert!(matches!(
+        backend.cache_expire("rejected", "key", Some(100)).await,
+        Err(BackendError::Conflict)
+    ));
+    assert!(matches!(
+        backend.cache_delete("rejected", &["key".into()]).await,
+        Err(BackendError::Conflict)
+    ));
+    assert!(matches!(
+        backend.cache_increment("rejected", "key", 1).await,
+        Err(BackendError::Conflict)
+    ));
 }
 
 async fn prove_stream_port(backend: &NativeHttpBackend) {

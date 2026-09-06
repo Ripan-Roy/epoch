@@ -670,6 +670,34 @@ translation disclosures.
 Unsupported behavior must fail explicitly. A test that happens to pass outside
 the published subset does not expand the compatibility promise.
 
+`make test-protocol-regional` runs Redis CLI 8.8.2, Kafka Java 4.3.1, and
+RabbitMQ Java 5.34.0 through the production gateway image and three authenticated
+regional nodes. Prepare the two images, then run:
+
+```bash
+docker build -f deploy/docker/Dockerfile.node -t epoch/node:regional .
+docker build -f deploy/docker/Dockerfile.compat -t epoch/compat:regional .
+EPOCH_REGIONAL_USE_EXISTING_IMAGE=1 \
+EPOCH_COMPAT_ARTIFACT_DIR=/tmp/epoch-protocol-regional \
+make test-protocol-regional
+```
+
+Set `EPOCH_REGIONAL_IMAGE` and `EPOCH_COMPAT_IMAGE` to reuse other exact candidate
+tags. Ports, Compose project, gateway container, and volumes are isolated per
+run; cleanup removes only that campaign's containers and disposable test data.
+Java 17+ and Docker are required. CI reuses its five-image build's node/gateway
+candidates, so this gate does not add a second Rust image build.
+
+The `epoch.protocol-regional.evidence/v1` result records exact client versions,
+source revision/dirty state, local image identities, old/new leaders and terms,
+and completed checks. Client logs, gateway logs, and node diagnostics accompany
+it. The campaign validates binary Cache data, counters and TTL; Kafka's four
+codecs, null/duplicate metadata and durable checkpoints; AMQP capacity refusal,
+confirms, requeue, lease redelivery and ack permanence; gateway replacement;
+per-profile leader loss; and all-voter SIGKILL/same-volume reopen with converged
+replicas. It never resubmits an uncertain non-idempotent write to hide failure.
+`make test-protocol-regional-runner` rejects incomplete client/fault evidence.
+
 ### 6. Fuzzing and concurrency exploration
 
 Fuzz all externally controlled parsers and stateful boundaries:
