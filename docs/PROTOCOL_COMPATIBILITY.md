@@ -100,7 +100,7 @@ database numbers.
 |---|---|---|
 | Connection | `HELLO 2/3`, `AUTH`, `PING`, `ECHO`, `QUIT`, `SELECT 0` | Cluster mode and alternate databases are unsupported |
 | Client setup | `CLIENT SETNAME`, `GETNAME`, `ID`, `SETINFO`, `MAINT_NOTIFICATIONS`; bounded `COMMAND` metadata | Tracking and client-side caching are unsupported |
-| Strings | `GET`, `SET`, `MGET`, `MSET`, `DEL`, `EXISTS`, `TYPE` | `SET` supports `NX`, `XX`, `GET`, `EX`, and `PX`; multi-key operations are independently committed |
+| Strings | `GET`, `SET`, `MGET`, `MSET`, `DEL`, `EXISTS`, `TYPE` | `SET` supports `NX`, `XX`, `GET`, `EX`, and `PX`; conditions plus the previous value are evaluated atomically; multi-key operations are independently committed |
 | Counters | `INCR`, `DECR`, `INCRBY`, `DECRBY` | Signed 64-bit integer range |
 | Expiry | `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, `PERSIST` | Absolute-time options and conditional expiry flags are unsupported |
 | Transport | RESP2/RESP3, binary-safe values, pipelining | Keys must be UTF-8; TLS is expected at a private proxy/ingress in this revision |
@@ -124,6 +124,13 @@ client.set(b"session:42", b"binary\x00value", px=30_000, nx=True)
 assert client.get(b"session:42") == b"binary\x00value"
 assert client.incrby("requests", 5) == 5
 ```
+
+`SET ... GET` returns the value at the same linearization point as the set,
+including when `NX` or `XX` prevents the write. A non-string old value returns
+`WRONGTYPE` without modifying it. The regional adapter implements this with a
+version/revision-fenced compare-and-set and at most four contention retries;
+exhaustion returns a retryable error rather than an unrelated previous value.
+Backend read errors are never treated as a missing key.
 
 ## Kafka API matrix
 

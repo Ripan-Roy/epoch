@@ -700,7 +700,7 @@ fn kafka_error(error: &BackendError) -> ResponseError {
         BackendError::Invalid(detail) if detail.contains("exceeds limit") => {
             ResponseError::MessageTooLarge
         }
-        BackendError::Invalid(_) => ResponseError::InvalidRequest,
+        BackendError::WrongType | BackendError::Invalid(_) => ResponseError::InvalidRequest,
         BackendError::Unavailable(_) => ResponseError::BrokerNotAvailable,
     }
 }

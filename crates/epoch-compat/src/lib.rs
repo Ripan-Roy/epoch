@@ -12,8 +12,9 @@ pub mod scanner;
 pub mod test_support;
 
 pub use backend::{
-    BackendError, CacheEntry, CacheValue, CompatibilityBackend, NativeHttpBackend,
-    NativeHttpConfig, QueueDelivery, QueueMessage, StreamRecord,
+    BackendError, CacheEntry, CacheSetCondition, CacheSetOptions, CacheSetOutcome, CacheValue,
+    CompatibilityBackend, NativeHttpBackend, NativeHttpConfig, QueueDelivery, QueueMessage,
+    StreamRecord,
 };
 
 /// Maximum accepted protocol frame size across compatibility listeners.

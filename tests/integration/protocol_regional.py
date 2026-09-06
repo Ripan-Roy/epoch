@@ -30,6 +30,7 @@ REDIS_IMAGE = (
 REQUIRED_CHECKS = (
     "released_client_lifecycle",
     "redis_binary_counter_ttl",
+    "redis_atomic_set_get",
     "kafka_four_codecs_nullable_headers_checkpoint",
     "amqp_confirm_nack_requeue",
     "native_rejection_not_acknowledged",
@@ -77,6 +78,14 @@ def validate_evidence(evidence: dict[str, Any]) -> None:
             and 0 < fault["old_term"] < fault["new_term"]
         ):
             raise ValueError("leader failure did not advance leadership and term")
+
+
+def process_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value
 
 
 class ProtocolCampaign:
@@ -297,6 +306,7 @@ class ProtocolCampaign:
     def verify_redis(self) -> None:
         assert self.redis("GET", "durable-binary") == b"persisted\x00\xffvalue\n"
         assert self.redis("GET", "durable-counter") == b"7\n"
+        assert self.redis("GET", "atomic-set") == b"second\n"
         ttl = int(self.redis("PTTL", "durable-binary"))
         assert 0 < ttl <= 600_000, ttl
 
@@ -316,6 +326,10 @@ class ProtocolCampaign:
         )
         assert self.redis("PEXPIRE", "durable-binary", "600000") == b"1\n"
         assert self.redis("INCRBY", "durable-counter", "7") == b"7\n"
+        assert self.redis("SET", "atomic-set", "first") == b"OK\n"
+        assert self.redis("SET", "atomic-set", "blocked", "NX", "GET") == b"first\n"
+        assert self.redis("GET", "atomic-set") == b"first\n"
+        assert self.redis("SET", "atomic-set", "second", "GET") == b"first\n"
         self.java("seed")
         self.verify()
         faults: list[dict[str, Any]] = []
@@ -447,8 +461,8 @@ def main() -> int:
         return 0
     except Exception as error:
         if isinstance(error, subprocess.CalledProcessError):
-            print((error.stdout or b"").decode(errors="replace"), file=sys.stderr)
-            print((error.stderr or b"").decode(errors="replace"), file=sys.stderr)
+            print(process_output(error.stdout), file=sys.stderr)
+            print(process_output(error.stderr), file=sys.stderr)
         campaign.capture()
         raise
     finally:

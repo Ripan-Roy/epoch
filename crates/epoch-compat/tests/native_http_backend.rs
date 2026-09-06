@@ -17,8 +17,8 @@ use base64::{
     engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
 };
 use epoch_compat::{
-    BackendError, CacheValue, CompatibilityBackend, NativeHttpBackend, NativeHttpConfig,
-    QueueMessage, StreamRecord,
+    BackendError, CacheSetCondition, CacheSetOptions, CacheValue, CompatibilityBackend,
+    NativeHttpBackend, NativeHttpConfig, QueueMessage, StreamRecord,
 };
 use epoch_tablet::{StreamBatchPayload, StreamCompression, decode_stream_batch_payload};
 use serde_json::{Value, json};
@@ -88,7 +88,7 @@ async fn native_response(
     observed.lock().unwrap().push(ObservedRequest {
         method: method.clone(),
         path: path.clone(),
-        query,
+        query: query.clone(),
         authorization: header(&headers, "authorization"),
         generation: header(&headers, "x-epoch-resource-generation"),
         tablet_epoch: header(&headers, "x-epoch-tablet-epoch"),
@@ -127,21 +127,25 @@ async fn native_response(
     }
 
     if path.contains("/rejected/") && method == Method::POST && path.ends_with("/mutations") {
-        return (StatusCode::CREATED, Json(json!({
-            "outcome_certainty":"committed",
-            "receipt":{"outcome":{"status":"rejected", "code":"conflict", "detail":"private backend detail"}},
-        }))).into_response();
+        return committed_conflict("private backend detail");
+    }
+    if path.contains("/contention/") && method == Method::POST && path.ends_with("/mutations") {
+        return committed_conflict("persistent concurrent writer");
+    }
+    if path.contains("/retry/") && method == Method::POST && path.ends_with("/mutations") {
+        let attempts = observed
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.method == Method::POST && request.path == path)
+            .count();
+        if attempts == 1 {
+            return committed_conflict("concurrent writer");
+        }
     }
 
     let document = if method == Method::GET && path.ends_with("/observations") {
-        json!({"observation":{
-            "revision":"11",
-            "item":{
-                "value":{"kind":"blob", "value":[0, 255]},
-                "version":"3",
-                "expires_at_ms":"60000",
-            }
-        }})
+        cache_observation(&path)
     } else if method == Method::POST && path.ends_with("/records/batches") {
         json!({"receipt":{"offset":"5"}})
     } else if method == Method::GET && path.ends_with("/records") {
@@ -169,6 +173,36 @@ async fn native_response(
         json!({})
     };
     Json(document).into_response()
+}
+
+fn committed_conflict(detail: &str) -> Response {
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "outcome_certainty":"committed",
+            "receipt":{"outcome":{"status":"rejected", "code":"conflict", "detail":detail}},
+        })),
+    )
+        .into_response()
+}
+
+fn cache_observation(path: &str) -> Value {
+    let item = if path.contains("/caches/empty/") {
+        Value::Null
+    } else if path.contains("/caches/structured/") {
+        json!({
+            "value":{"kind":"hash", "value":{"field":"value"}},
+            "version":"3",
+            "expires_at_ms":null,
+        })
+    } else {
+        json!({
+            "value":{"kind":"blob", "value":[0, 255]},
+            "version":"3",
+            "expires_at_ms":"60000",
+        })
+    };
+    json!({"observation":{"shard_revision":"11", "item":item}})
 }
 
 fn mutation_response(body: &Value) -> Value {
@@ -248,6 +282,129 @@ async fn prove_cache_port(backend: &NativeHttpBackend) {
 }
 
 #[tokio::test]
+async fn cache_set_uses_observation_fences_and_returns_one_atomic_previous_value() {
+    let api = MockNativeApi::start().await;
+    let backend = backend(api.endpoint.clone());
+
+    let existing = backend
+        .cache_set(
+            "sessions",
+            "profile",
+            CacheValue::Blob(b"replacement".to_vec()),
+            CacheSetOptions {
+                return_previous: true,
+                ..CacheSetOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(existing.applied);
+    assert_eq!(
+        existing.previous.unwrap().value,
+        CacheValue::Blob(vec![0, 255])
+    );
+
+    let missing = backend
+        .cache_set(
+            "empty",
+            "profile",
+            CacheValue::Blob(b"created".to_vec()),
+            CacheSetOptions {
+                condition: CacheSetCondition::Missing,
+                return_previous: true,
+                ..CacheSetOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(missing.applied);
+    assert!(missing.previous.is_none());
+
+    let retried = backend
+        .cache_set(
+            "retry",
+            "profile",
+            CacheValue::Blob(b"replacement".to_vec()),
+            CacheSetOptions {
+                return_previous: true,
+                ..CacheSetOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(retried.applied);
+    assert_eq!(
+        retried.previous.unwrap().value,
+        CacheValue::Blob(vec![0, 255])
+    );
+
+    let observed = api.observed.lock().unwrap();
+    let mutations = observed
+        .iter()
+        .filter(|request| request.method == Method::POST && request.path.ends_with("/mutations"))
+        .collect::<Vec<_>>();
+    assert_eq!(mutations.len(), 4);
+    assert_eq!(
+        mutations[0].body.pointer("/operation/expected"),
+        Some(&json!({"kind":"version", "version":"3"}))
+    );
+    assert_eq!(
+        mutations[1].body.pointer("/operation/expected"),
+        Some(&json!({"kind":"missing", "shard_revision":"11"}))
+    );
+    assert_eq!(
+        mutations
+            .iter()
+            .filter(|request| request.path.contains("/caches/retry/"))
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn cache_set_bounds_contention_and_rejects_wrong_type_before_mutation() {
+    let api = MockNativeApi::start().await;
+    let backend = backend(api.endpoint.clone());
+    assert!(matches!(
+        backend
+            .cache_set(
+                "contention",
+                "profile",
+                CacheValue::Blob(b"replacement".to_vec()),
+                CacheSetOptions::default(),
+            )
+            .await,
+        Err(BackendError::Conflict)
+    ));
+    assert!(matches!(
+        backend
+            .cache_set(
+                "structured",
+                "profile",
+                CacheValue::Blob(b"must-not-write".to_vec()),
+                CacheSetOptions {
+                    return_previous: true,
+                    ..CacheSetOptions::default()
+                },
+            )
+            .await,
+        Err(BackendError::WrongType)
+    ));
+
+    let observed = api.observed.lock().unwrap();
+    let mutations = observed
+        .iter()
+        .filter(|request| request.method == Method::POST && request.path.ends_with("/mutations"))
+        .collect::<Vec<_>>();
+    assert_eq!(mutations.len(), 4);
+    assert!(
+        mutations
+            .iter()
+            .all(|request| request.path.contains("/caches/contention/"))
+    );
+}
+
+#[tokio::test]
 async fn never_acknowledges_http_success_with_a_committed_native_rejection() {
     let api = MockNativeApi::start().await;
     let backend = backend(api.endpoint.clone());
@@ -282,9 +439,7 @@ async fn never_acknowledges_http_success_with_a_committed_native_rejection() {
                 "rejected",
                 "key",
                 CacheValue::Blob(vec![1]),
-                None,
-                false,
-                false
+                CacheSetOptions::default()
             )
             .await,
         Err(BackendError::Conflict)

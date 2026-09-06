@@ -11,7 +11,7 @@ use tokio::{
 
 use crate::{
     CompatibilityBackend, MAX_FRAME_BYTES,
-    backend::{BackendError, CacheValue},
+    backend::{BackendError, CacheSetCondition, CacheSetOptions, CacheValue},
 };
 
 use super::protocol::{RespDecodeError, RespValue, decode_request, encode_response};
@@ -316,14 +316,12 @@ impl<B: CompatibilityBackend> RedisSession<B> {
         if only_if_absent && only_if_present {
             return error("syntax error");
         }
-        let previous = if return_previous {
-            self.backend
-                .cache_get(&self.config.cache, key)
-                .await
-                .ok()
-                .flatten()
+        let condition = if only_if_absent {
+            CacheSetCondition::Missing
+        } else if only_if_present {
+            CacheSetCondition::Present
         } else {
-            None
+            CacheSetCondition::Always
         };
         match self
             .backend
@@ -331,17 +329,19 @@ impl<B: CompatibilityBackend> RedisSession<B> {
                 &self.config.cache,
                 key,
                 CacheValue::Blob(args[1].clone()),
-                ttl_ms,
-                only_if_absent,
-                only_if_present,
+                CacheSetOptions {
+                    ttl_ms,
+                    condition,
+                    return_previous,
+                },
             )
             .await
         {
-            Ok(Some(_)) if return_previous => {
-                previous.map_or(RespValue::Null, |entry| cache_value(entry.value))
-            }
-            Ok(Some(_)) => RespValue::Simple("OK".into()),
-            Ok(None) => RespValue::Null,
+            Ok(outcome) if return_previous => outcome
+                .previous
+                .map_or(RespValue::Null, |entry| cache_value(entry.value)),
+            Ok(outcome) if outcome.applied => RespValue::Simple("OK".into()),
+            Ok(_) => RespValue::Null,
             Err(error) => backend_error(error),
         }
     }
@@ -400,9 +400,7 @@ impl<B: CompatibilityBackend> RedisSession<B> {
                     &self.config.cache,
                     key,
                     CacheValue::Blob(pair[1].clone()),
-                    None,
-                    false,
-                    false,
+                    CacheSetOptions::default(),
                 )
                 .await
             {
@@ -571,7 +569,10 @@ fn cache_value(value: CacheValue) -> RespValue {
 fn backend_error(error_value: BackendError) -> RespValue {
     match error_value {
         BackendError::NotFound => RespValue::Null,
-        BackendError::Conflict => error("operation conflicted"),
+        BackendError::Conflict => RespValue::Error("TRYAGAIN Epoch operation conflicted".into()),
+        BackendError::WrongType => RespValue::Error(
+            "WRONGTYPE Operation against a key holding the wrong kind of value".into(),
+        ),
         BackendError::Invalid(detail) => RespValue::Error(format!("ERR {detail}")),
         BackendError::Unavailable(_) => {
             RespValue::Error("TRYAGAIN Epoch backend is unavailable".into())
@@ -655,6 +656,8 @@ fn constant_time_equal(expected: &[u8], actual: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::test_support::MemoryBackend;
 
@@ -717,6 +720,78 @@ mod tests {
         assert_eq!(
             session.execute(command(&[b"TTL", b"key"])).await,
             RespValue::Integer(-1)
+        );
+    }
+
+    #[tokio::test]
+    async fn set_get_rejects_a_non_string_without_mutating_it() {
+        let mut session = session(None);
+        let original = CacheValue::Hash(BTreeMap::from([("field".into(), "value".into())]));
+        session
+            .backend
+            .cache_set(
+                &session.config.cache,
+                "structured",
+                original.clone(),
+                CacheSetOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            session
+                .execute(command(&[b"SET", b"structured", b"replacement", b"GET"]))
+                .await,
+            RespValue::Error(message) if message.contains("WRONGTYPE")
+        ));
+        assert_eq!(
+            session
+                .backend
+                .cache_get(&session.config.cache, "structured")
+                .await
+                .unwrap()
+                .unwrap()
+                .value,
+            original
+        );
+    }
+
+    #[tokio::test]
+    async fn set_get_returns_the_atomic_previous_value_even_when_condition_fails() {
+        let mut session = session(None);
+        assert_eq!(
+            session.execute(command(&[b"SET", b"key", b"first"])).await,
+            RespValue::Simple("OK".into())
+        );
+        assert_eq!(
+            session
+                .execute(command(&[b"SET", b"key", b"second", b"NX", b"GET"]))
+                .await,
+            RespValue::Bulk(b"first".to_vec())
+        );
+        assert_eq!(
+            session.execute(command(&[b"GET", b"key"])).await,
+            RespValue::Bulk(b"first".to_vec())
+        );
+        assert_eq!(
+            session
+                .execute(command(&[b"SET", b"missing", b"second", b"XX", b"GET"]))
+                .await,
+            RespValue::Null
+        );
+        assert_eq!(
+            session.execute(command(&[b"GET", b"missing"])).await,
+            RespValue::Null
+        );
+        assert_eq!(
+            session
+                .execute(command(&[b"SET", b"key", b"second", b"GET"]))
+                .await,
+            RespValue::Bulk(b"first".to_vec())
+        );
+        assert_eq!(
+            session.execute(command(&[b"GET", b"key"])).await,
+            RespValue::Bulk(b"second".to_vec())
         );
     }
 

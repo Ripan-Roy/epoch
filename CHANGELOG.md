@@ -22,6 +22,9 @@ notes explicitly list additional verified artifacts.
   readable; newly written v2 envelopes require the updated gateway.
 - Inspect Cache/Queue mutation receipts so a committed native rejection never
   becomes a Redis success or AMQP publisher confirmation.
+- Make Redis `SET ... GET` return the atomically fenced previous value, preserve
+  a non-string on `WRONGTYPE`, and use the native missing-key shard revision for
+  conditional sets.
 - Reject unsupported Kafka idempotent producer identities and preflight bounded
   record/header framing instead of silently dropping metadata.
 - Add a real-client regional campaign covering gateway replacement, per-profile

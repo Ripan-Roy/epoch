@@ -691,12 +691,14 @@ candidates, so this gate does not add a second Rust image build.
 The `epoch.protocol-regional.evidence/v1` result records exact client versions,
 source revision/dirty state, local image identities, old/new leaders and terms,
 and completed checks. Client logs, gateway logs, and node diagnostics accompany
-it. The campaign validates binary Cache data, counters and TTL; Kafka's four
-codecs, null/duplicate metadata and durable checkpoints; AMQP capacity refusal,
+it. The campaign validates binary Cache data, counters, TTL, and atomic
+conditional `SET ... GET`; Kafka's four codecs, null/duplicate metadata and durable checkpoints; AMQP capacity refusal,
 confirms, requeue, lease redelivery and ack permanence; gateway replacement;
 per-profile leader loss; and all-voter SIGKILL/same-volume reopen with converged
 replicas. It never resubmits an uncertain non-idempotent write to hide failure.
-`make test-protocol-regional-runner` rejects incomplete client/fault evidence.
+`make test-protocol-regional-runner` rejects incomplete client/fault evidence
+and accepts either text- or byte-mode subprocess diagnostics so the original
+Docker failure remains visible.
 
 ### 6. Fuzzing and concurrency exploration
 

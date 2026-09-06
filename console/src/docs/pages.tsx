@@ -1824,6 +1824,11 @@ export function ProtocolCompatibilityBody() {
           persist, pipelining, and client setup commands used by current SDKs.
         </p>
         <p>
+          <code>SET ... GET</code> returns the previous value from the same fenced mutation. A non-string
+          source returns <code>WRONGTYPE</code> without being replaced; repeated write contention is bounded
+          and returns a retryable error.
+        </p>
+        <p>
           Hashes, lists, sets, sorted sets, Pub/Sub, Streams, blocking calls, cluster mode, modules, Lua, and{" "}
           <code>MULTI</code>/<code>EXEC</code> are not exposed yet. Multi-key writes are independently
           committed.
@@ -1876,9 +1881,9 @@ export function ProtocolCompatibilityBody() {
         <p>
           The regional campaign runs the pinned clients through production gateway and node images. It
           replaces the gateway, kills each profile&apos;s leader, and reopens all voter volumes after SIGKILL,
-          checking Cache state, Kafka metadata and checkpoints, AMQP lease redelivery, durable
-          acknowledgements, and capacity refusal. This verifies the documented subset, not full broker parity
-          or production SLOs.
+          checking Cache state and atomic conditional set/get, Kafka metadata and checkpoints, AMQP lease
+          redelivery, durable acknowledgements, and capacity refusal. This verifies the documented subset, not
+          full broker parity or production SLOs.
         </p>
         <CodeBlock
           label="shell · prebuilt node and gateway images"

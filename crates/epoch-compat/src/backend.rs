@@ -18,6 +18,7 @@ use uuid::Uuid;
 const MAX_HTTP_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_NATIVE_STREAM_BATCH_RECORDS: u16 = 1_000;
 const MAX_NATIVE_STREAM_BATCH_COMPRESSED_BYTES: usize = 360 * 1024;
+const MAX_CACHE_SET_ATTEMPTS: usize = 4;
 
 /// One value stored through the Cache compatibility surface.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -38,6 +39,30 @@ pub struct CacheEntry {
     pub value: CacheValue,
     pub version: u64,
     pub expires_at_ms: Option<u64>,
+}
+
+/// Condition applied atomically with one compatibility Cache set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CacheSetCondition {
+    #[default]
+    Always,
+    Missing,
+    Present,
+}
+
+/// Redis-facing Cache set policy evaluated by the backend at one linearization point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CacheSetOptions {
+    pub ttl_ms: Option<u64>,
+    pub condition: CacheSetCondition,
+    pub return_previous: bool,
+}
+
+/// Result of an atomic compatibility Cache set.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CacheSetOutcome {
+    pub applied: bool,
+    pub previous: Option<CacheEntry>,
 }
 
 /// One record returned through the Stream compatibility surface.
@@ -75,6 +100,8 @@ pub enum BackendError {
     NotFound,
     #[error("operation conflicted with current state")]
     Conflict,
+    #[error("operation is not valid for this value type")]
+    WrongType,
     #[error("operation was rejected: {0}")]
     Invalid(String),
     #[error("backend is unavailable: {0}")]
@@ -91,10 +118,8 @@ pub trait CompatibilityBackend: Send + Sync + 'static {
         cache: &str,
         key: &str,
         value: CacheValue,
-        ttl_ms: Option<u64>,
-        only_if_absent: bool,
-        only_if_present: bool,
-    ) -> Result<Option<CacheEntry>, BackendError>;
+        options: CacheSetOptions,
+    ) -> Result<CacheSetOutcome, BackendError>;
     async fn cache_delete(&self, cache: &str, keys: &[String]) -> Result<u64, BackendError>;
     async fn cache_increment(
         &self,
@@ -210,6 +235,12 @@ struct RegionalRoute {
 #[derive(Debug, Deserialize)]
 struct StreamPartitioning {
     shard_count: u32,
+}
+
+#[derive(Debug)]
+struct NativeCacheObservation {
+    shard_revision: u64,
+    entry: Option<CacheEntry>,
 }
 
 impl NativeHttpBackend {
@@ -353,6 +384,44 @@ impl NativeHttpBackend {
         .await
     }
 
+    async fn observe_cache(
+        &self,
+        cache: &str,
+        key: &str,
+    ) -> Result<NativeCacheObservation, BackendError> {
+        let response: Value = self
+            .read_query(
+                "caches",
+                cache,
+                0,
+                "/observations",
+                &[("key", key.to_owned())],
+            )
+            .await?;
+        let observation = response
+            .get("observation")
+            .ok_or_else(|| invalid_response("Cache observation is missing"))?;
+        let shard_revision = decimal_field(observation, "shard_revision")?;
+        let entry = observation
+            .get("item")
+            .filter(|value| !value.is_null())
+            .map(|item| {
+                Ok(CacheEntry {
+                    value: decode_cache_value(
+                        item.get("value")
+                            .ok_or_else(|| invalid_response("Cache value is missing"))?,
+                    )?,
+                    version: decimal_field(item, "version")?,
+                    expires_at_ms: optional_decimal_field(item, "expires_at_ms")?,
+                })
+            })
+            .transpose()?;
+        Ok(NativeCacheObservation {
+            shard_revision,
+            entry,
+        })
+    }
+
     async fn mutate(
         &self,
         collection: &str,
@@ -435,29 +504,7 @@ impl NativeHttpBackend {
 #[async_trait]
 impl CompatibilityBackend for NativeHttpBackend {
     async fn cache_get(&self, cache: &str, key: &str) -> Result<Option<CacheEntry>, BackendError> {
-        let response: Value = self
-            .read_query(
-                "caches",
-                cache,
-                0,
-                "/observations",
-                &[("key", key.to_owned())],
-            )
-            .await?;
-        let observation = response
-            .get("observation")
-            .ok_or_else(|| invalid_response("Cache observation is missing"))?;
-        let Some(item) = observation.get("item").filter(|value| !value.is_null()) else {
-            return Ok(None);
-        };
-        Ok(Some(CacheEntry {
-            value: decode_cache_value(
-                item.get("value")
-                    .ok_or_else(|| invalid_response("Cache value is missing"))?,
-            )?,
-            version: decimal_field(item, "version")?,
-            expires_at_ms: optional_decimal_field(item, "expires_at_ms")?,
-        }))
+        Ok(self.observe_cache(cache, key).await?.entry)
     }
 
     async fn cache_set(
@@ -465,50 +512,57 @@ impl CompatibilityBackend for NativeHttpBackend {
         cache: &str,
         key: &str,
         value: CacheValue,
-        ttl_ms: Option<u64>,
-        only_if_absent: bool,
-        only_if_present: bool,
-    ) -> Result<Option<CacheEntry>, BackendError> {
-        let observed: Value = self
-            .read_query(
-                "caches",
-                cache,
-                0,
-                "/observations",
-                &[("key", key.to_owned())],
-            )
-            .await?;
-        let observation = observed
-            .get("observation")
-            .ok_or_else(|| invalid_response("Cache observation is missing"))?;
-        let item = observation.get("item").filter(|item| !item.is_null());
-        if (only_if_absent && item.is_some()) || (only_if_present && item.is_none()) {
-            return Ok(None);
-        }
-        let mut operation = Map::new();
-        operation.insert("shard".into(), Value::from(0));
-        operation.insert("key".into(), Value::String(key.to_owned()));
-        operation.insert("value".into(), encode_cache_value(value));
-        if let Some(ttl_ms) = ttl_ms {
-            operation.insert("ttl_ms".into(), Value::String(ttl_ms.to_string()));
-        }
-        if only_if_absent || only_if_present {
-            operation.insert("kind".into(), Value::String("compare_and_set".into()));
-            operation.insert(
-                "expected".into(),
-                if let Some(item) = item {
-                    json!({"kind":"version", "version": decimal_field(item, "version")?.to_string()})
-                } else {
-                    json!({"kind":"missing", "shard_revision": decimal_field(observation, "revision")?.to_string()})
-                },
+        options: CacheSetOptions,
+    ) -> Result<CacheSetOutcome, BackendError> {
+        for attempt in 0..MAX_CACHE_SET_ATTEMPTS {
+            let observation = self.observe_cache(cache, key).await?;
+            if options.return_previous
+                && observation
+                    .entry
+                    .as_ref()
+                    .is_some_and(|entry| !is_redis_string_value(&entry.value))
+            {
+                return Err(BackendError::WrongType);
+            }
+            let condition_matches = match options.condition {
+                CacheSetCondition::Always => true,
+                CacheSetCondition::Missing => observation.entry.is_none(),
+                CacheSetCondition::Present => observation.entry.is_some(),
+            };
+            if !condition_matches {
+                return Ok(CacheSetOutcome {
+                    applied: false,
+                    previous: observation.entry,
+                });
+            }
+            let expected = observation.entry.as_ref().map_or_else(
+                || json!({"kind":"missing", "shard_revision":observation.shard_revision.to_string()}),
+                |entry| json!({"kind":"version", "version":entry.version.to_string()}),
             );
-        } else {
-            operation.insert("kind".into(), Value::String("set".into()));
+            let mut operation = Map::new();
+            operation.insert("kind".into(), Value::String("compare_and_set".into()));
+            operation.insert("shard".into(), Value::from(0));
+            operation.insert("key".into(), Value::String(key.to_owned()));
+            operation.insert("value".into(), encode_cache_value(value.clone()));
+            operation.insert("expected".into(), expected);
+            if let Some(ttl_ms) = options.ttl_ms {
+                operation.insert("ttl_ms".into(), Value::String(ttl_ms.to_string()));
+            }
+            match self
+                .mutate("caches", cache, 0, Value::Object(operation))
+                .await
+            {
+                Ok(_) => {
+                    return Ok(CacheSetOutcome {
+                        applied: true,
+                        previous: observation.entry,
+                    });
+                }
+                Err(BackendError::Conflict) if attempt + 1 < MAX_CACHE_SET_ATTEMPTS => {}
+                Err(error) => return Err(error),
+            }
         }
-        let _: Value = self
-            .mutate("caches", cache, 0, Value::Object(operation))
-            .await?;
-        self.cache_get(cache, key).await
+        Err(BackendError::Conflict)
     }
 
     async fn cache_delete(&self, cache: &str, keys: &[String]) -> Result<u64, BackendError> {
@@ -876,6 +930,13 @@ fn require_applied_mutation(response: &Value) -> Result<(), BackendError> {
         },
         _ => Err(invalid_response("native mutation outcome is missing")),
     }
+}
+
+fn is_redis_string_value(value: &CacheValue) -> bool {
+    matches!(
+        value,
+        CacheValue::String(_) | CacheValue::Blob(_) | CacheValue::Counter(_)
+    )
 }
 
 fn valid_resource_segment(value: &str) -> bool {

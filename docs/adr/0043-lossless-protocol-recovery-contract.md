@@ -12,7 +12,10 @@ their composition preserves client semantics. The combined regional campaign
 exposed three errors: Kafka Fetch substituted native append time for producer
 CreateTime; map-based header representations discarded duplicate keys; and a
 successful native HTTP status carrying a committed rejection could become an
-AMQP publisher confirmation.
+AMQP publisher confirmation. A final release audit exposed another composition
+error: Redis `SET ... GET` fetched its return value separately, could overwrite
+a non-string before returning `WRONGTYPE`, and used the wrong field for a
+missing-key revision fence.
 
 Kafka headers are ordered and permit duplicate keys, as specified by
 [KIP-82](https://cwiki.apache.org/confluence/display/KAFKA/KIP-82+-+Add+Record+Headers).
@@ -42,13 +45,19 @@ so changing only Epoch's persisted envelope cannot correct the wire path.
    HTTP status. Only `receipt.outcome.status = applied` is success. Committed
    rejections map by their typed code to protocol errors; missing/unknown
    outcomes fail closed, and private native error details are not forwarded.
-5. Keep fast fixture and adapter tests, and add named real clients through the
+5. Treat Redis condition evaluation, mutation, and the optional previous value
+   as one atomic compatibility operation. The native adapter reads a
+   linearizable observation, uses its item version or missing-key shard revision
+   in a native compare-and-set, and retries contention at most four times. It
+   returns `WRONGTYPE` before mutation for a non-string `SET ... GET` source and
+   never converts a failed read into absence.
+6. Keep fast fixture and adapter tests, and add named real clients through the
    production gateway image against authenticated, replicated regional nodes.
    Require gateway replacement, each profile's leader loss, full-voter
    SIGKILL/same-volume reopen, Kafka metadata/checkpoint preservation, AMQP
    redelivery and durable acknowledgement, Cache binary/counter/TTL survival,
    and a full native Queue never producing a success confirmation.
-6. CI reuses its already-built node and gateway images and uploads the client,
+7. CI reuses its already-built node and gateway images and uploads the client,
    container, and versioned fault-evidence bundle. It does not publish images
    from a PR or substitute fixture results for real regional results.
 

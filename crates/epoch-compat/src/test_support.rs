@@ -7,8 +7,8 @@ use std::{
 use async_trait::async_trait;
 
 use crate::backend::{
-    BackendError, CacheEntry, CacheValue, CompatibilityBackend, QueueDelivery, QueueMessage,
-    StreamRecord,
+    BackendError, CacheEntry, CacheSetCondition, CacheSetOptions, CacheSetOutcome, CacheValue,
+    CompatibilityBackend, QueueDelivery, QueueMessage, StreamRecord,
 };
 
 #[derive(Debug, Default)]
@@ -74,25 +74,44 @@ impl CompatibilityBackend for MemoryBackend {
         cache: &str,
         key: &str,
         value: CacheValue,
-        ttl_ms: Option<u64>,
-        only_if_absent: bool,
-        only_if_present: bool,
-    ) -> Result<Option<CacheEntry>, BackendError> {
+        options: CacheSetOptions,
+    ) -> Result<CacheSetOutcome, BackendError> {
         let mut state = self.state.lock().unwrap();
         let current = live_entry(&mut state, cache, key);
-        if (only_if_absent && current.is_some()) || (only_if_present && current.is_none()) {
-            return Ok(None);
+        if options.return_previous
+            && current.as_ref().is_some_and(|entry| {
+                !matches!(
+                    entry.value,
+                    CacheValue::String(_) | CacheValue::Blob(_) | CacheValue::Counter(_)
+                )
+            })
+        {
+            return Err(BackendError::WrongType);
+        }
+        let condition_matches = match options.condition {
+            CacheSetCondition::Always => true,
+            CacheSetCondition::Missing => current.is_none(),
+            CacheSetCondition::Present => current.is_some(),
+        };
+        if !condition_matches {
+            return Ok(CacheSetOutcome {
+                applied: false,
+                previous: current,
+            });
         }
         state.version = state.version.saturating_add(1);
         let entry = CacheEntry {
             value,
             version: state.version,
-            expires_at_ms: ttl_ms.map(|ttl| now_ms().saturating_add(ttl)),
+            expires_at_ms: options.ttl_ms.map(|ttl| now_ms().saturating_add(ttl)),
         };
         state
             .caches
-            .insert((cache.to_owned(), key.to_owned()), entry.clone());
-        Ok(Some(entry))
+            .insert((cache.to_owned(), key.to_owned()), entry);
+        Ok(CacheSetOutcome {
+            applied: true,
+            previous: current,
+        })
     }
 
     async fn cache_delete(&self, cache: &str, keys: &[String]) -> Result<u64, BackendError> {

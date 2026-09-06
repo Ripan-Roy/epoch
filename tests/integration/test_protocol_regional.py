@@ -60,6 +60,15 @@ class ProtocolRegionalContractTest(unittest.TestCase):
     def test_accepts_complete_fault_and_client_evidence(self) -> None:
         campaign.validate_evidence(self.evidence())
 
+    def test_process_failure_diagnostics_accept_text_bytes_and_missing_output(
+        self,
+    ) -> None:
+        self.assertEqual(
+            campaign.process_output("compose failed\n"), "compose failed\n"
+        )
+        self.assertEqual(campaign.process_output(b"invalid \xff\n"), "invalid �\n")
+        self.assertEqual(campaign.process_output(None), "")
+
     def test_rejects_missing_fault_or_client_or_check(self) -> None:
         for field in ("faults", "clients", "checks"):
             evidence = self.evidence()

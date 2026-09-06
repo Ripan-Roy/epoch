@@ -71,7 +71,8 @@ generation/tablet/term fences, routes, payloads, and responses. Parser/semantic
 tests, all four Kafka compression paths, the DX-007 versioned migration scanner,
 the public matrix, Pages UI, and a fifth signed non-root OCI component are local.
 The next candidate adds combined real-regional conformance: production node
-and gateway images preserve binary Cache state, Kafka CreateTime and ordered
+and gateway images preserve binary Cache state plus atomic conditional
+set/previous-value results, Kafka CreateTime and ordered
 duplicate headers/checkpoints, and AMQP confirms/leases/acks through gateway
 replacement, profile-leader losses, and all-voter SIGKILL/reopen. A full Queue's
 committed rejection is never confirmed. Local fault evidence passes; protected
