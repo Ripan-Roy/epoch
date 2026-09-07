@@ -96,8 +96,16 @@ func TestDependabotRoutineUpdatesStayBounded(t *testing.T) {
 	days := make(map[string]bool)
 	for _, update := range readDependabot(t).Updates {
 		t.Run(update.Ecosystem, func(t *testing.T) {
-			if update.PullRequests != 1 {
-				t.Errorf("routine PR limit = %d, want 1", update.PullRequests)
+			wantPullRequests := 1
+			if update.Ecosystem == "gomod" {
+				// Kubernetes 0.x minor releases are API migration lines even
+				// though Dependabot classifies them as SemVer minor updates.
+				// Keep one slot available for ordinary Go updates while that
+				// separately grouped migration is being reviewed.
+				wantPullRequests = 2
+			}
+			if update.PullRequests != wantPullRequests {
+				t.Errorf("routine PR limit = %d, want %d", update.PullRequests, wantPullRequests)
 			}
 			if update.Schedule.Interval != "weekly" || update.Schedule.Time != "02:00" || update.Schedule.Timezone != "Asia/Kolkata" {
 				t.Error("routine updates must retain the weekly 02:00 Asia/Kolkata schedule")
@@ -115,8 +123,12 @@ func TestDependabotRoutineUpdatesStayBounded(t *testing.T) {
 				levels = levels[1:]
 				allowed = allowed[1:]
 			}
+			exclusions := []string(nil)
+			if update.Ecosystem == "gomod" {
+				exclusions = []string{"k8s.io/*", "sigs.k8s.io/*"}
+			}
 			group, ok := update.Groups["compatible-updates"]
-			if !ok || group.AppliesTo != "version-updates" || !slices.Equal(group.Patterns, []string{"*"}) || !slices.Equal(group.UpdateTypes, levels) || len(group.ExcludePatterns) != 0 || group.DependencyType != "" {
+			if !ok || group.AppliesTo != "version-updates" || !slices.Equal(group.Patterns, []string{"*"}) || !slices.Equal(group.UpdateTypes, levels) || !slices.Equal(group.ExcludePatterns, exclusions) || group.DependencyType != "" {
 				t.Error("routine updates must share the compatible group at the approved SemVer levels")
 			}
 			if len(update.Allow) != 1 || update.Allow[0].Name != "*" || !slices.Equal(update.Allow[0].UpdateTypes, allowed) {
@@ -124,6 +136,25 @@ func TestDependabotRoutineUpdatesStayBounded(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDependabotIsolatesKubernetesReleaseLineMigrations(t *testing.T) {
+	for _, update := range readDependabot(t).Updates {
+		if update.Ecosystem != "gomod" {
+			continue
+		}
+		patterns := []string{"k8s.io/*", "sigs.k8s.io/*"}
+		group, ok := update.Groups["kubernetes-release-line"]
+		if !ok || group.AppliesTo != "version-updates" || !slices.Equal(group.Patterns, patterns) || !slices.Equal(group.UpdateTypes, []string{"minor", "patch"}) {
+			t.Fatal("Go updates must isolate the coordinated Kubernetes release line")
+		}
+		compatible := update.Groups["compatible-updates"]
+		if !slices.Equal(compatible.ExcludePatterns, patterns) {
+			t.Fatal("ordinary Go updates must exclude Kubernetes release-line packages")
+		}
+		return
+	}
+	t.Fatal("Go Dependabot entry is missing")
 }
 
 func TestDependabotSecurityUpdatesRemainUnfiltered(t *testing.T) {

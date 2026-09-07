@@ -1,13 +1,13 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use amq_protocol::{
     frame::{AMQPContentHeader, AMQPFrame, ProtocolVersion, WriteContext, gen_frame, parse_frame},
     protocol::{AMQPClass, BasicProperties, basic, channel, confirm, connection, exchange, queue},
-    types::{FieldTable, LongString, ShortString},
+    types::{AMQPValue, FieldTable, LongString},
 };
 use anyhow::{Context, Result, bail};
 use tokio::{
@@ -17,7 +17,7 @@ use tokio::{
 };
 
 use crate::{
-    CompatibilityBackend, MAX_FRAME_BYTES, MAX_MESSAGE_BYTES,
+    CompatibilityBackend, MAX_FRAME_BYTES, MAX_MESSAGE_BYTES, MAX_REQUEST_ITEMS,
     backend::{BackendError, QueueDelivery, QueueMessage},
 };
 
@@ -49,6 +49,7 @@ impl fmt::Debug for AmqpConfig {
 pub struct AmqpServer<B> {
     backend: Arc<B>,
     config: AmqpConfig,
+    topology: Arc<Mutex<Topology>>,
 }
 
 impl<B: CompatibilityBackend> AmqpServer<B> {
@@ -58,7 +59,11 @@ impl<B: CompatibilityBackend> AmqpServer<B> {
                 "AMQP credentials and positive connection limit are required".into(),
             ));
         }
-        Ok(Self { backend, config })
+        Ok(Self {
+            backend,
+            config,
+            topology: Arc::new(Mutex::new(Topology::default())),
+        })
     }
 
     pub async fn serve(self, listener: TcpListener) -> Result<(), std::io::Error> {
@@ -71,9 +76,10 @@ impl<B: CompatibilityBackend> AmqpServer<B> {
             };
             let backend = Arc::clone(&self.backend);
             let config = self.config.clone();
+            let topology = Arc::clone(&self.topology);
             tokio::spawn(async move {
                 let _permit = permit;
-                if let Err(error) = serve_connection(stream, backend, config).await {
+                if let Err(error) = serve_connection(stream, backend, config, topology).await {
                     tracing::warn!(protocol = "amqp", %error, "compatibility connection closed");
                 }
             });
@@ -85,6 +91,7 @@ async fn serve_connection<B: CompatibilityBackend>(
     mut stream: TcpStream,
     backend: Arc<B>,
     config: AmqpConfig,
+    topology: Arc<Mutex<Topology>>,
 ) -> Result<()> {
     let mut protocol_header = [0_u8; 8];
     stream.read_exact(&mut protocol_header).await?;
@@ -151,10 +158,14 @@ async fn serve_connection<B: CompatibilityBackend>(
     )
     .await?;
 
-    run_session(stream, backend).await
+    run_session(stream, backend, topology).await
 }
 
-async fn run_session<B: CompatibilityBackend>(stream: TcpStream, backend: Arc<B>) -> Result<()> {
+async fn run_session<B: CompatibilityBackend>(
+    stream: TcpStream,
+    backend: Arc<B>,
+    topology: Arc<Mutex<Topology>>,
+) -> Result<()> {
     let (mut reader, mut writer) = stream.into_split();
     let (frames_tx, mut frames_rx) = mpsc::channel(32);
     let reader_task = tokio::spawn(async move {
@@ -166,7 +177,7 @@ async fn run_session<B: CompatibilityBackend>(stream: TcpStream, backend: Arc<B>
             }
         }
     });
-    let mut session = Session::new(backend);
+    let mut session = Session::with_topology(backend, topology);
     let mut poll = tokio::time::interval(std::time::Duration::from_millis(10));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = async {
@@ -204,10 +215,57 @@ async fn run_session<B: CompatibilityBackend>(stream: TcpStream, backend: Arc<B>
 
 #[derive(Debug)]
 struct PendingPublish {
-    queue: String,
+    queues: Vec<String>,
+    exchange: String,
+    routing_key: String,
+    mandatory: bool,
     properties: Option<BasicProperties>,
     expected_body_size: Option<u64>,
     body: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExchangeKind {
+    Direct,
+    Fanout,
+    Topic,
+}
+
+impl ExchangeKind {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "direct" => Some(Self::Direct),
+            "fanout" => Some(Self::Fanout),
+            "topic" => Some(Self::Topic),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Binding {
+    exchange: String,
+    routing_key: String,
+    queue: String,
+}
+
+#[derive(Debug)]
+struct Topology {
+    exchanges: BTreeMap<String, ExchangeKind>,
+    bindings: BTreeSet<Binding>,
+}
+
+impl Default for Topology {
+    fn default() -> Self {
+        Self {
+            exchanges: BTreeMap::from([
+                ("amq.direct".into(), ExchangeKind::Direct),
+                ("amq.fanout".into(), ExchangeKind::Fanout),
+                ("amq.topic".into(), ExchangeKind::Topic),
+            ]),
+            bindings: BTreeSet::new(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -253,17 +311,20 @@ impl Default for ChannelState {
 struct Session<B> {
     backend: Arc<B>,
     channels: BTreeMap<u16, ChannelState>,
-    exchanges: BTreeSet<String>,
-    bindings: BTreeMap<(String, String), String>,
+    topology: Arc<Mutex<Topology>>,
 }
 
 impl<B: CompatibilityBackend> Session<B> {
+    #[cfg(test)]
     fn new(backend: Arc<B>) -> Self {
+        Self::with_topology(backend, Arc::new(Mutex::new(Topology::default())))
+    }
+
+    fn with_topology(backend: Arc<B>, topology: Arc<Mutex<Topology>>) -> Self {
         Self {
             backend,
             channels: BTreeMap::new(),
-            exchanges: BTreeSet::from([String::new(), "amq.direct".into()]),
-            bindings: BTreeMap::new(),
+            topology,
         }
     }
 
@@ -320,13 +381,31 @@ impl<B: CompatibilityBackend> Session<B> {
             }
             AMQPFrame::Method(id, AMQPClass::Exchange(exchange::AMQPMethod::Declare(declare))) => {
                 self.require_channel(id)?;
-                if declare.kind.as_str() != "direct"
+                let name = declare.exchange.to_string();
+                let Some(kind) = ExchangeKind::parse(declare.kind.as_str()) else {
+                    bail!("unsupported AMQP exchange type");
+                };
+                if name.is_empty()
                     || declare.internal
+                    || declare.auto_delete
+                    || declare.durable
                     || !declare.arguments.inner().is_empty()
                 {
-                    bail!("only argument-free direct AMQP exchanges are supported");
+                    bail!("unsupported AMQP exchange declaration options");
                 }
-                self.exchanges.insert(declare.exchange.to_string());
+                {
+                    let mut topology = self.topology.lock().unwrap();
+                    match topology.exchanges.get(&name) {
+                        Some(existing) if *existing != kind => {
+                            bail!("AMQP exchange redeclaration changed its type");
+                        }
+                        None if declare.passive => bail!("AMQP exchange does not exist"),
+                        None => {
+                            topology.exchanges.insert(name, kind);
+                        }
+                        Some(_) => {}
+                    }
+                }
                 if declare.nowait {
                     return Ok(Vec::new());
                 }
@@ -337,24 +416,78 @@ impl<B: CompatibilityBackend> Session<B> {
                     )),
                 )])
             }
+            AMQPFrame::Method(id, AMQPClass::Exchange(exchange::AMQPMethod::Delete(delete))) => {
+                self.require_channel(id)?;
+                let name = delete.exchange.to_string();
+                if name.starts_with("amq.") || name.is_empty() {
+                    bail!("built-in AMQP exchanges cannot be deleted");
+                }
+                let mut topology = self.topology.lock().unwrap();
+                if !topology.exchanges.contains_key(&name) {
+                    bail!("AMQP exchange does not exist");
+                }
+                if delete.if_unused
+                    && topology
+                        .bindings
+                        .iter()
+                        .any(|binding| binding.exchange == name)
+                {
+                    bail!("AMQP exchange is still in use");
+                }
+                topology.exchanges.remove(&name);
+                topology.bindings.retain(|binding| binding.exchange != name);
+                drop(topology);
+                if delete.nowait {
+                    return Ok(Vec::new());
+                }
+                Ok(vec![method_frame(
+                    id,
+                    AMQPClass::Exchange(exchange::AMQPMethod::DeleteOk(
+                        exchange::DeleteOk::default(),
+                    )),
+                )])
+            }
             AMQPFrame::Method(id, AMQPClass::Queue(queue::AMQPMethod::Bind(bind))) => {
                 self.require_channel(id)?;
-                if !self.exchanges.contains(bind.exchange.as_str())
+                if !bind.arguments.inner().is_empty()
                     || !self.backend.queue_exists(bind.queue.as_str()).await?
-                    || !bind.arguments.inner().is_empty()
                 {
                     bail!("unsupported AMQP queue binding");
                 }
-                self.bindings.insert(
-                    (bind.exchange.to_string(), bind.routing_key.to_string()),
-                    bind.queue.to_string(),
-                );
+                let mut topology = self.topology.lock().unwrap();
+                if !topology.exchanges.contains_key(bind.exchange.as_str()) {
+                    bail!("AMQP exchange does not exist");
+                }
+                topology.bindings.insert(Binding {
+                    exchange: bind.exchange.to_string(),
+                    routing_key: bind.routing_key.to_string(),
+                    queue: bind.queue.to_string(),
+                });
+                drop(topology);
                 if bind.nowait {
                     return Ok(Vec::new());
                 }
                 Ok(vec![method_frame(
                     id,
                     AMQPClass::Queue(queue::AMQPMethod::BindOk(queue::BindOk::default())),
+                )])
+            }
+            AMQPFrame::Method(id, AMQPClass::Queue(queue::AMQPMethod::Unbind(unbind))) => {
+                self.require_channel(id)?;
+                if !unbind.arguments.inner().is_empty() {
+                    bail!("AMQP queue-unbind arguments are unsupported");
+                }
+                let binding = Binding {
+                    exchange: unbind.exchange.to_string(),
+                    routing_key: unbind.routing_key.to_string(),
+                    queue: unbind.queue.to_string(),
+                };
+                if !self.topology.lock().unwrap().bindings.remove(&binding) {
+                    bail!("AMQP queue binding does not exist");
+                }
+                Ok(vec![method_frame(
+                    id,
+                    AMQPClass::Queue(queue::AMQPMethod::UnbindOk(queue::UnbindOk::default())),
                 )])
             }
             AMQPFrame::Method(id, AMQPClass::Basic(basic::AMQPMethod::Qos(qos))) => {
@@ -441,13 +574,16 @@ impl<B: CompatibilityBackend> Session<B> {
                 )])
             }
             AMQPFrame::Method(id, AMQPClass::Basic(basic::AMQPMethod::Publish(publish))) => {
-                let queue = self.resolve_publish_queue(&publish)?;
+                let queues = self.resolve_publish_queues(&publish).await?;
                 let state = self.require_channel_mut(id)?;
                 if state.pending_publish.is_some() {
                     bail!("interleaved AMQP publishes are unsupported");
                 }
                 state.pending_publish = Some(PendingPublish {
-                    queue,
+                    queues,
+                    exchange: publish.exchange.to_string(),
+                    routing_key: publish.routing_key.to_string(),
+                    mandatory: publish.mandatory,
                     properties: None,
                     expected_body_size: None,
                     body: Vec::new(),
@@ -563,20 +699,38 @@ impl<B: CompatibilityBackend> Session<B> {
         Ok(frames)
     }
 
-    fn resolve_publish_queue(&self, publish: &basic::Publish) -> Result<String> {
+    async fn resolve_publish_queues(&self, publish: &basic::Publish) -> Result<Vec<String>> {
         if publish.immediate {
             bail!("AMQP immediate publishing is unsupported");
         }
         if publish.exchange.as_str().is_empty() {
-            return Ok(publish.routing_key.to_string());
+            return if self
+                .backend
+                .queue_exists(publish.routing_key.as_str())
+                .await?
+            {
+                Ok(vec![publish.routing_key.to_string()])
+            } else {
+                Ok(Vec::new())
+            };
         }
-        self.bindings
-            .get(&(
-                publish.exchange.to_string(),
-                publish.routing_key.to_string(),
-            ))
-            .cloned()
-            .context("AMQP direct exchange has no matching binding")
+        let topology = self.topology.lock().unwrap();
+        let kind = topology
+            .exchanges
+            .get(publish.exchange.as_str())
+            .copied()
+            .context("AMQP exchange does not exist")?;
+        Ok(topology
+            .bindings
+            .iter()
+            .filter(|binding| {
+                binding.exchange == publish.exchange.as_str()
+                    && binding_matches(kind, &binding.routing_key, publish.routing_key.as_str())
+            })
+            .map(|binding| binding.queue.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect())
     }
 
     async fn finish_publish(&mut self, id: u16) -> Result<Vec<AMQPFrame>> {
@@ -591,29 +745,60 @@ impl<B: CompatibilityBackend> Session<B> {
             )
         };
         let properties = pending.properties.unwrap_or_default();
+        let expiration = properties.expiration().as_ref().map(ToString::to_string);
+        let ttl_ms = expiration.as_deref().map(parse_expiration).transpose()?;
         let message = QueueMessage {
-            body: pending.body,
+            body: pending.body.clone(),
             content_type: properties.content_type().as_ref().map(ToString::to_string),
             correlation_id: properties
                 .correlation_id()
                 .as_ref()
                 .map(ToString::to_string),
             reply_to: properties.reply_to().as_ref().map(ToString::to_string),
-            headers: BTreeMap::new(),
+            headers: string_headers(&properties)?,
+            exchange: Some(pending.exchange.clone()),
+            routing_key: Some(pending.routing_key.clone()),
+            expiration,
+            ttl_ms,
         };
-        self.backend.queue_publish(&pending.queue, message).await?;
-        if !confirms {
-            return Ok(Vec::new());
+        for queue in &pending.queues {
+            self.backend.queue_publish(queue, message.clone()).await?;
         }
-        let state = self.require_channel_mut(id)?;
-        state.publish_sequence = state.publish_sequence.saturating_add(1);
-        Ok(vec![method_frame(
-            id,
-            AMQPClass::Basic(basic::AMQPMethod::Ack(basic::Ack {
-                delivery_tag: state.publish_sequence,
-                multiple: false,
-            })),
-        )])
+        let mut frames = Vec::new();
+        if pending.queues.is_empty() && pending.mandatory {
+            frames.extend([
+                method_frame(
+                    id,
+                    AMQPClass::Basic(basic::AMQPMethod::Return(basic::Return {
+                        reply_code: 312,
+                        reply_text: "NO_ROUTE".into(),
+                        exchange: pending.exchange.into(),
+                        routing_key: pending.routing_key.into(),
+                    })),
+                ),
+                AMQPFrame::Header(
+                    id,
+                    AMQPContentHeader {
+                        class_id: 60,
+                        body_size: u64::try_from(pending.body.len()).unwrap_or(u64::MAX),
+                        properties,
+                    },
+                ),
+                AMQPFrame::Body(id, pending.body),
+            ]);
+        }
+        if confirms {
+            let state = self.require_channel_mut(id)?;
+            state.publish_sequence = state.publish_sequence.saturating_add(1);
+            frames.push(method_frame(
+                id,
+                AMQPClass::Basic(basic::AMQPMethod::Ack(basic::Ack {
+                    delivery_tag: state.publish_sequence,
+                    multiple: false,
+                })),
+            ));
+        }
+        Ok(frames)
     }
 
     async fn basic_get(&mut self, id: u16, get: basic::Get) -> Result<Vec<AMQPFrame>> {
@@ -633,13 +818,13 @@ impl<B: CompatibilityBackend> Session<B> {
                 .queue_ack(get.queue.as_str(), &consumer, &delivery.lease_token)
                 .await?;
         }
-        self.delivery_frames(id, get.queue.to_string(), consumer, delivery, get.no_ack)
+        self.delivery_frames(id, get.queue.as_str(), consumer, delivery, get.no_ack)
     }
 
     fn delivery_frames(
         &mut self,
         id: u16,
-        queue: String,
+        queue: &str,
         consumer: String,
         delivery: QueueDelivery,
         no_ack: bool,
@@ -651,7 +836,7 @@ impl<B: CompatibilityBackend> Session<B> {
             state.unacked.insert(
                 delivery_tag,
                 DeliveryLease {
-                    queue: queue.clone(),
+                    queue: queue.to_owned(),
                     consumer,
                     lease_token: delivery.lease_token,
                 },
@@ -659,14 +844,20 @@ impl<B: CompatibilityBackend> Session<B> {
         }
         let properties = delivery_properties(&delivery.message);
         let size = u64::try_from(delivery.message.body.len()).unwrap_or(u64::MAX);
+        let exchange = delivery.message.exchange.clone().unwrap_or_default();
+        let routing_key = delivery
+            .message
+            .routing_key
+            .clone()
+            .unwrap_or_else(|| queue.to_owned());
         Ok(vec![
             method_frame(
                 id,
                 AMQPClass::Basic(basic::AMQPMethod::GetOk(basic::GetOk {
                     delivery_tag,
                     redelivered: delivery.redelivered,
-                    exchange: ShortString::default(),
-                    routing_key: queue.into(),
+                    exchange: exchange.into(),
+                    routing_key: routing_key.into(),
                     message_count: 0,
                 })),
             ),
@@ -703,6 +894,12 @@ impl<B: CompatibilityBackend> Session<B> {
         }
         let properties = delivery_properties(&delivery.message);
         let size = u64::try_from(delivery.message.body.len()).unwrap_or(u64::MAX);
+        let exchange = delivery.message.exchange.clone().unwrap_or_default();
+        let routing_key = delivery
+            .message
+            .routing_key
+            .clone()
+            .unwrap_or_else(|| consumer.queue.clone());
         Ok(vec![
             method_frame(
                 id,
@@ -710,8 +907,8 @@ impl<B: CompatibilityBackend> Session<B> {
                     consumer_tag: consumer.tag.clone().into(),
                     delivery_tag,
                     redelivered: delivery.redelivered,
-                    exchange: ShortString::default(),
-                    routing_key: consumer.queue.clone().into(),
+                    exchange: exchange.into(),
+                    routing_key: routing_key.into(),
                 })),
             ),
             AMQPFrame::Header(
@@ -750,6 +947,82 @@ impl<B: CompatibilityBackend> Session<B> {
     }
 }
 
+fn binding_matches(kind: ExchangeKind, binding_key: &str, routing_key: &str) -> bool {
+    match kind {
+        ExchangeKind::Direct => binding_key == routing_key,
+        ExchangeKind::Fanout => true,
+        ExchangeKind::Topic => topic_matches(binding_key, routing_key),
+    }
+}
+
+fn topic_matches(pattern: &str, routing_key: &str) -> bool {
+    let pattern = topic_segments(pattern);
+    let routing_key = topic_segments(routing_key);
+    let mut reachable = vec![vec![false; routing_key.len() + 1]; pattern.len() + 1];
+    reachable[0][0] = true;
+    for pattern_index in 0..pattern.len() {
+        for key_index in 0..=routing_key.len() {
+            if !reachable[pattern_index][key_index] {
+                continue;
+            }
+            match pattern[pattern_index] {
+                "#" => {
+                    reachable[pattern_index + 1][key_index] = true;
+                    if key_index < routing_key.len() {
+                        reachable[pattern_index][key_index + 1] = true;
+                    }
+                }
+                "*" if key_index < routing_key.len() => {
+                    reachable[pattern_index + 1][key_index + 1] = true;
+                }
+                literal if key_index < routing_key.len() && literal == routing_key[key_index] => {
+                    reachable[pattern_index + 1][key_index + 1] = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    reachable[pattern.len()][routing_key.len()]
+}
+
+fn topic_segments(value: &str) -> Vec<&str> {
+    if value.is_empty() {
+        Vec::new()
+    } else {
+        value.split('.').collect()
+    }
+}
+
+fn parse_expiration(value: &str) -> Result<u64> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        bail!("AMQP expiration must be milliseconds encoded as decimal digits");
+    }
+    value.parse().context("AMQP expiration exceeds u64")
+}
+
+fn string_headers(properties: &BasicProperties) -> Result<BTreeMap<String, String>> {
+    let Some(headers) = properties.headers() else {
+        return Ok(BTreeMap::new());
+    };
+    if headers.inner().len() > MAX_REQUEST_ITEMS {
+        bail!("AMQP header count exceeds limit");
+    }
+    headers
+        .inner()
+        .iter()
+        .map(|(name, value)| {
+            let value = match value {
+                AMQPValue::ShortString(value) => value.to_string(),
+                AMQPValue::LongString(value) => std::str::from_utf8(value.as_bytes())
+                    .context("AMQP string header is not UTF-8")?
+                    .to_owned(),
+                _ => bail!("only AMQP string headers are supported"),
+            };
+            Ok((name.to_string(), value))
+        })
+        .collect()
+}
+
 fn delivery_properties(message: &QueueMessage) -> BasicProperties {
     let mut properties = BasicProperties::default();
     if let Some(content_type) = &message.content_type {
@@ -760,6 +1033,19 @@ fn delivery_properties(message: &QueueMessage) -> BasicProperties {
     }
     if let Some(reply_to) = &message.reply_to {
         properties = properties.with_reply_to(reply_to.clone().into());
+    }
+    if let Some(expiration) = &message.expiration {
+        properties = properties.with_expiration(expiration.clone().into());
+    }
+    if !message.headers.is_empty() {
+        let mut headers = FieldTable::default();
+        for (name, value) in &message.headers {
+            headers.insert(
+                name.as_str().into(),
+                AMQPValue::LongString(value.as_str().into()),
+            );
+        }
+        properties = properties.with_headers(headers);
     }
     properties
 }
@@ -898,36 +1184,37 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn rejects_builtin_non_direct_exchanges_instead_of_emulating_the_wrong_semantics() {
-        let mut session = Session::new(Arc::new(MemoryBackend::with_resources(
-            "sessions", "events", 2, "jobs",
-        )));
-        open_channel(&mut session).await;
-        let error = session
-            .handle(method_frame(
-                1,
-                AMQPClass::Queue(queue::AMQPMethod::Bind(queue::Bind {
-                    queue: "jobs".into(),
-                    exchange: "amq.topic".into(),
-                    routing_key: "jobs.*".into(),
-                    nowait: false,
-                    arguments: FieldTable::default(),
-                })),
-            ))
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("unsupported AMQP queue binding"));
+    async fn publish(session: &mut Session<MemoryBackend>, body: &[u8]) -> Vec<AMQPFrame> {
+        publish_to(
+            session,
+            "",
+            "jobs",
+            false,
+            BasicProperties::default()
+                .with_content_type("application/octet-stream".into())
+                .with_correlation_id("correlation-1".into())
+                .with_reply_to("replies".into()),
+            body,
+        )
+        .await
     }
 
-    async fn publish(session: &mut Session<MemoryBackend>, body: &[u8]) -> Vec<AMQPFrame> {
+    async fn publish_to(
+        session: &mut Session<MemoryBackend>,
+        exchange: &str,
+        routing_key: &str,
+        mandatory: bool,
+        properties: BasicProperties,
+        body: &[u8],
+    ) -> Vec<AMQPFrame> {
         assert!(
             session
                 .handle(method(
                     1,
                     basic::AMQPMethod::Publish(basic::Publish {
-                        exchange: ShortString::default(),
-                        routing_key: "jobs".into(),
+                        exchange: exchange.into(),
+                        routing_key: routing_key.into(),
+                        mandatory,
                         ..basic::Publish::default()
                     }),
                 ))
@@ -942,10 +1229,7 @@ mod tests {
                     AMQPContentHeader {
                         class_id: 60,
                         body_size: u64::try_from(body.len()).unwrap(),
-                        properties: BasicProperties::default()
-                            .with_content_type("application/octet-stream".into())
-                            .with_correlation_id("correlation-1".into())
-                            .with_reply_to("replies".into()),
+                        properties,
                     },
                 ))
                 .await
@@ -959,16 +1243,179 @@ mod tests {
     }
 
     async fn get(session: &mut Session<MemoryBackend>) -> Vec<AMQPFrame> {
+        get_from(session, "jobs", false).await
+    }
+
+    async fn get_from(
+        session: &mut Session<MemoryBackend>,
+        queue: &str,
+        no_ack: bool,
+    ) -> Vec<AMQPFrame> {
         session
             .handle(method(
                 1,
                 basic::AMQPMethod::Get(basic::Get {
-                    queue: "jobs".into(),
-                    no_ack: false,
+                    queue: queue.into(),
+                    no_ack,
                 }),
             ))
             .await
             .unwrap()
+    }
+
+    #[test]
+    fn topic_patterns_match_amqp_star_and_hash_semantics() {
+        assert!(topic_matches("orders.*", "orders.created"));
+        assert!(!topic_matches("orders.*", "orders.eu.created"));
+        assert!(topic_matches("orders.#", "orders"));
+        assert!(topic_matches("orders.#", "orders.eu.created"));
+        assert!(topic_matches("#.critical", "orders.eu.critical"));
+        assert!(!topic_matches("#.critical", "orders.eu.created"));
+        assert!(topic_matches("#", ""));
+        assert!(topic_matches("", ""));
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one scenario proves routing, metadata, fanout, shared topology, returns, and confirms together"
+    )]
+    async fn routes_topic_and_fanout_publishes_and_returns_mandatory_misses() {
+        let backend = Arc::new(MemoryBackend::with_resources(
+            "sessions", "events", 2, "jobs",
+        ));
+        backend.add_queue("audit");
+        let topology = Arc::new(Mutex::new(Topology::default()));
+        let mut setup = Session::with_topology(Arc::clone(&backend), Arc::clone(&topology));
+        open_channel(&mut setup).await;
+        for (name, kind) in [("events.topic", "topic"), ("events.all", "fanout")] {
+            let declared = setup
+                .handle(method_frame(
+                    1,
+                    AMQPClass::Exchange(exchange::AMQPMethod::Declare(exchange::Declare {
+                        exchange: name.into(),
+                        kind: kind.into(),
+                        ..exchange::Declare::default()
+                    })),
+                ))
+                .await
+                .unwrap();
+            assert!(matches!(
+                declared.as_slice(),
+                [AMQPFrame::Method(
+                    1,
+                    AMQPClass::Exchange(exchange::AMQPMethod::DeclareOk(_))
+                )]
+            ));
+        }
+        for (exchange, queue, key) in [
+            ("events.topic", "jobs", "orders.*"),
+            ("events.topic", "audit", "orders.#"),
+            ("events.all", "jobs", "ignored.one"),
+            ("events.all", "audit", "ignored.two"),
+        ] {
+            setup
+                .handle(method_frame(
+                    1,
+                    AMQPClass::Queue(queue::AMQPMethod::Bind(queue::Bind {
+                        queue: queue.into(),
+                        exchange: exchange.into(),
+                        routing_key: key.into(),
+                        ..queue::Bind::default()
+                    })),
+                ))
+                .await
+                .unwrap();
+        }
+
+        let mut session = Session::with_topology(backend, topology);
+        open_channel(&mut session).await;
+        session
+            .handle(method_frame(
+                1,
+                AMQPClass::Confirm(confirm::AMQPMethod::Select(confirm::Select::default())),
+            ))
+            .await
+            .unwrap();
+        let mut headers = FieldTable::default();
+        headers.insert(
+            "tenant".into(),
+            AMQPValue::LongString("acme".as_bytes().into()),
+        );
+        let confirmed = publish_to(
+            &mut session,
+            "events.topic",
+            "orders.created",
+            true,
+            BasicProperties::default()
+                .with_headers(headers)
+                .with_expiration("5000".into()),
+            b"created",
+        )
+        .await;
+        assert!(matches!(
+            confirmed.as_slice(),
+            [AMQPFrame::Method(
+                1,
+                AMQPClass::Basic(basic::AMQPMethod::Ack(_))
+            )]
+        ));
+        for queue in ["jobs", "audit"] {
+            let delivery = get_from(&mut session, queue, true).await;
+            assert!(matches!(
+                delivery.as_slice(),
+                [
+                    AMQPFrame::Method(1, AMQPClass::Basic(basic::AMQPMethod::GetOk(get))),
+                    AMQPFrame::Header(1, header),
+                    AMQPFrame::Body(1, body),
+                ] if get.exchange.as_str() == "events.topic"
+                    && get.routing_key.as_str() == "orders.created"
+                    && body == b"created"
+                    && header.properties.expiration().as_ref().map(ToString::to_string)
+                        == Some("5000".into())
+                    && header.properties.headers().as_ref().is_some_and(|headers| {
+                        headers.inner().get("tenant").and_then(AMQPValue::as_long_string)
+                            .is_some_and(|value| value.as_bytes() == b"acme")
+                    })
+            ));
+        }
+
+        let fanout = publish_to(
+            &mut session,
+            "events.all",
+            "anything",
+            false,
+            BasicProperties::default(),
+            b"broadcast",
+        )
+        .await;
+        assert!(matches!(fanout.as_slice(), [AMQPFrame::Method(..)]));
+        for queue in ["jobs", "audit"] {
+            assert!(matches!(
+                get_from(&mut session, queue, true).await.as_slice(),
+                [.., AMQPFrame::Body(1, body)] if body == b"broadcast"
+            ));
+        }
+
+        let returned = publish_to(
+            &mut session,
+            "events.topic",
+            "payments.created",
+            true,
+            BasicProperties::default(),
+            b"unroutable",
+        )
+        .await;
+        assert!(matches!(
+            returned.as_slice(),
+            [
+                AMQPFrame::Method(1, AMQPClass::Basic(basic::AMQPMethod::Return(value))),
+                AMQPFrame::Header(1, _),
+                AMQPFrame::Body(1, body),
+                AMQPFrame::Method(1, AMQPClass::Basic(basic::AMQPMethod::Ack(_))),
+            ] if value.reply_code == 312 && value.reply_text.as_str() == "NO_ROUTE"
+                && body == b"unroutable"
+        ));
     }
 
     #[test]

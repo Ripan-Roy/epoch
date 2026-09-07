@@ -17,8 +17,9 @@ use base64::{
     engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
 };
 use epoch_compat::{
-    BackendError, CacheSetCondition, CacheSetOptions, CacheValue, CompatibilityBackend,
-    NativeHttpBackend, NativeHttpConfig, QueueMessage, StreamRecord,
+    BackendError, CacheCollectionMutation, CacheCollectionResult, CacheSetCondition,
+    CacheSetOptions, CacheValue, CompatibilityBackend, NativeHttpBackend, NativeHttpConfig,
+    QueueMessage, StreamGroupIdentity, StreamRecord,
 };
 use epoch_tablet::{StreamBatchPayload, StreamCompression, decode_stream_batch_payload};
 use serde_json::{Value, json};
@@ -69,6 +70,10 @@ impl Drop for MockNativeApi {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the single mock router keeps each native protocol fixture next to its route predicate"
+)]
 async fn native_response(
     State(observed): State<Arc<Mutex<Vec<ObservedRequest>>>>,
     request: Request<Body>,
@@ -163,6 +168,38 @@ async fn native_response(
         }]})
     } else if method == Method::GET && path.ends_with("/retention") {
         json!({"retention":{"end_offset":"6"}})
+    } else if method == Method::POST && path.ends_with("/groups/billing/sessions") {
+        session_receipt(
+            body.get("member_id")
+                .and_then(Value::as_str)
+                .unwrap_or("epoch.member"),
+            "7",
+            &[0, 2],
+        )
+    } else if method == Method::GET && path.ends_with("/groups/billing/sessions") {
+        json!({"session":{
+            "exists":true,
+            "group":"billing",
+            "shard_count":3,
+            "group_generation":"7",
+            "watermark_ms":"1000",
+            "members":[{
+                "member_id":"epoch.ZXZlbnRz.018f0000000070008000000000000000",
+                "session_timeout_ms":"30000",
+                "deadline_ms":"31000",
+                "assigned_shards":[0,2],
+            }],
+        }})
+    } else if method == Method::PUT && path.ends_with("/heartbeat") {
+        session_receipt(
+            path.split('/').nth_back(1).unwrap_or("epoch.member"),
+            "7",
+            &[0, 2],
+        )
+    } else if method == Method::DELETE && path.contains("/groups/billing/sessions/") {
+        session_receipt(path.rsplit('/').next().unwrap_or("epoch.member"), "8", &[])
+    } else if method == Method::PUT && path.ends_with("/groups/billing/claim") {
+        json!({"receipt":{"outcome":"applied"}})
     } else if method == Method::PUT && path.ends_with("/offsets") {
         json!({"receipt":{"outcome":"applied", "committed_offset":"6"}})
     } else if method == Method::GET && path.ends_with("/lag") {
@@ -173,6 +210,19 @@ async fn native_response(
         json!({})
     };
     Json(document).into_response()
+}
+
+fn session_receipt(member_id: &str, generation: &str, assigned_shards: &[u32]) -> Value {
+    json!({"receipt":{
+        "group_generation":generation,
+        "members":[{
+            "member_id":member_id,
+            "assigned_shards":assigned_shards,
+        }],
+        "assigned_shards":assigned_shards,
+        "outcome":"applied",
+        "rejection":null,
+    }})
 }
 
 fn committed_conflict(detail: &str) -> Response {
@@ -189,6 +239,13 @@ fn committed_conflict(detail: &str) -> Response {
 fn cache_observation(path: &str) -> Value {
     let item = if path.contains("/caches/empty/") {
         Value::Null
+    } else if path.contains("/caches/cold/") {
+        json!({
+            "value":{"kind":"hash", "value":{"field":"value"}},
+            "version":"3",
+            "expires_at_ms":"60000",
+            "storage_class":"cold",
+        })
     } else if path.contains("/caches/structured/") {
         json!({
             "value":{"kind":"hash", "value":{"field":"value"}},
@@ -203,6 +260,194 @@ fn cache_observation(path: &str) -> Value {
         })
     };
     json!({"observation":{"shard_revision":"11", "item":item}})
+}
+
+#[tokio::test]
+async fn collection_mutations_compile_to_one_version_fenced_native_write() {
+    let api = MockNativeApi::start().await;
+    let backend = backend(api.endpoint.clone());
+
+    assert_eq!(
+        backend
+            .cache_collection_mutate(
+                "structured",
+                "profile",
+                CacheCollectionMutation::HashSet {
+                    entries: BTreeMap::from([
+                        ("field".into(), "updated".into()),
+                        ("stage".into(), "beta".into()),
+                    ]),
+                },
+            )
+            .await
+            .unwrap(),
+        CacheCollectionResult::HashSet { added: 1 }
+    );
+    assert_eq!(
+        backend
+            .cache_collection_mutate(
+                "empty",
+                "work",
+                CacheCollectionMutation::ListPush {
+                    values: vec!["first".into(), "second".into()],
+                    front: false,
+                },
+            )
+            .await
+            .unwrap(),
+        CacheCollectionResult::ListPush { length: 2 }
+    );
+    assert_eq!(
+        backend
+            .cache_collection_mutate(
+                "structured",
+                "profile",
+                CacheCollectionMutation::HashDelete {
+                    fields: vec!["field".into()],
+                },
+            )
+            .await
+            .unwrap(),
+        CacheCollectionResult::HashDelete { removed: 1 }
+    );
+    assert_eq!(
+        backend
+            .cache_collection_mutate(
+                "cold",
+                "profile",
+                CacheCollectionMutation::HashSet {
+                    entries: BTreeMap::from([("stage".into(), "beta".into())]),
+                },
+            )
+            .await
+            .unwrap(),
+        CacheCollectionResult::HashSet { added: 1 }
+    );
+
+    let observed = api.observed.lock().unwrap();
+    let mutations = observed
+        .iter()
+        .filter(|request| request.method == Method::POST && request.path.ends_with("/mutations"))
+        .collect::<Vec<_>>();
+    assert_eq!(mutations.len(), 4);
+    assert_eq!(
+        mutations[0].body.pointer("/operation"),
+        Some(&json!({
+            "kind":"transform", "shard":0, "key":"profile",
+            "transform":{
+                "kind":"replace",
+                "value":{"kind":"hash", "value":{"field":"updated", "stage":"beta"}},
+                "storage_class":"memory",
+            },
+            "expected_version":"3",
+        }))
+    );
+    assert_eq!(
+        mutations[1].body.pointer("/operation/expected"),
+        Some(&json!({"kind":"missing", "shard_revision":"11"}))
+    );
+    assert_eq!(
+        mutations[2].body.pointer("/operation"),
+        Some(&json!({
+            "kind":"delete", "shard":0, "key":"profile", "expected_version":"3",
+        }))
+    );
+    assert_eq!(
+        mutations[3]
+            .body
+            .pointer("/operation/transform/storage_class"),
+        Some(&json!("cold"))
+    );
+}
+
+#[tokio::test]
+async fn kafka_group_sessions_and_partition_claims_use_replicated_native_routes() {
+    let api = MockNativeApi::start().await;
+    let backend = backend(api.endpoint.clone());
+    let member = "epoch.ZXZlbnRz.018f0000000070008000000000000000";
+
+    let joined = backend
+        .stream_group_join("events", "billing", member, 30_000)
+        .await
+        .unwrap();
+    assert_eq!(joined.session.generation, 7);
+    assert_eq!(joined.session.assigned_partitions, [0, 2]);
+    assert!(joined.rejection.is_none());
+
+    let observed = backend
+        .stream_group_observe("events", "billing", member)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(observed.assigned_partitions, [0, 2]);
+
+    let heartbeat = backend
+        .stream_group_heartbeat("events", "billing", member, 7)
+        .await
+        .unwrap();
+    assert!(heartbeat.rejection.is_none());
+    backend
+        .stream_group_claim("events", "billing", member, 7, &[0, 2])
+        .await
+        .unwrap();
+    backend
+        .stream_commit_offset(
+            "billing",
+            "events",
+            0,
+            6,
+            Some(&StreamGroupIdentity {
+                member_id: member.into(),
+                generation: 7,
+            }),
+        )
+        .await
+        .unwrap();
+    let left = backend
+        .stream_group_leave("events", "billing", member, 7)
+        .await
+        .unwrap();
+    assert_eq!(left.session.generation, 8);
+
+    let observed = api.observed.lock().unwrap();
+    let session_requests = observed
+        .iter()
+        .filter(|request| request.path.contains("/groups/billing/"))
+        .collect::<Vec<_>>();
+    assert_eq!(session_requests.len(), 7);
+    assert_eq!(session_requests[0].method, Method::POST);
+    assert_eq!(session_requests[0].body["member_id"], member);
+    assert_eq!(session_requests[0].body["session_timeout_ms"], "30000");
+    assert_eq!(session_requests[1].method, Method::GET);
+    assert_eq!(
+        session_requests[1].consistency.as_deref(),
+        Some("linearizable")
+    );
+    assert_eq!(session_requests[2].method, Method::PUT);
+    assert_eq!(session_requests[2].body["group_generation"], "7");
+    assert!(
+        session_requests[3]
+            .path
+            .contains("/shards/0/groups/billing/claim")
+    );
+    assert!(
+        session_requests[4]
+            .path
+            .contains("/shards/2/groups/billing/claim")
+    );
+    for claim in &session_requests[3..=4] {
+        assert_eq!(claim.body["partition"], 0);
+        assert!(
+            claim.body.get("next_offset").is_none(),
+            "native claim schema rejects offset-commit-only fields"
+        );
+    }
+    assert_eq!(session_requests[5].body["member_id"], member);
+    assert_eq!(session_requests[5].body["group_generation"], "7");
+    assert_eq!(session_requests[6].method, Method::DELETE);
+    assert!(session_requests.iter().all(|request| {
+        request.generation.as_deref() == Some("7") && request.tablet_epoch.as_deref() == Some("8")
+    }));
 }
 
 fn mutation_response(body: &Value) -> Value {
@@ -414,6 +659,10 @@ async fn never_acknowledges_http_success_with_a_committed_native_rejection() {
         correlation_id: None,
         reply_to: None,
         headers: BTreeMap::new(),
+        exchange: None,
+        routing_key: None,
+        expiration: None,
+        ttl_ms: None,
     };
     assert!(matches!(
         backend.queue_publish("rejected", message).await,
@@ -481,7 +730,7 @@ async fn prove_stream_port(backend: &NativeHttpBackend) {
     assert_eq!(records[0].value.as_deref(), Some(b"value".as_slice()));
     assert_eq!(backend.stream_end_offset("events", 2).await.unwrap(), 6);
     backend
-        .stream_commit_offset("billing", "events", 2, 6)
+        .stream_commit_offset("billing", "events", 2, 6, None)
         .await
         .unwrap();
     assert_eq!(
@@ -505,6 +754,10 @@ async fn prove_queue_port(backend: &NativeHttpBackend) {
                 correlation_id: Some("correlation-1".into()),
                 reply_to: Some("replies".into()),
                 headers: BTreeMap::from([("tenant".into(), "acme".into())]),
+                exchange: Some("orders".into()),
+                routing_key: Some("jobs.created".into()),
+                expiration: Some("5000".into()),
+                ttl_ms: Some(5_000),
             },
         )
         .await
@@ -568,6 +821,13 @@ fn assert_native_evidence(observed: &[ObservedRequest]) {
         request.body.pointer("/operation/kind") == Some(&Value::String("enqueue".into()))
             && request.body.pointer("/operation/correlation_id")
                 == Some(&Value::String("correlation-1".into()))
+            && request.body.pointer("/operation/envelope/ttl_ms") == Some(&json!(5000))
+            && request.body.pointer("/operation/envelope/payload/exchange")
+                == Some(&json!("orders"))
+            && request
+                .body
+                .pointer("/operation/envelope/payload/routing_key")
+                == Some(&json!("jobs.created"))
     }));
 }
 

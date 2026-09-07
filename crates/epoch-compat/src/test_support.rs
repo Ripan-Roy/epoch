@@ -7,8 +7,10 @@ use std::{
 use async_trait::async_trait;
 
 use crate::backend::{
-    BackendError, CacheEntry, CacheSetCondition, CacheSetOptions, CacheSetOutcome, CacheValue,
-    CompatibilityBackend, QueueDelivery, QueueMessage, StreamRecord,
+    BackendError, CacheCollectionMutation, CacheCollectionResult, CacheEntry, CacheSetCondition,
+    CacheSetOptions, CacheSetOutcome, CacheStorageClass, CacheValue, CompatibilityBackend,
+    QueueDelivery, QueueMessage, StreamGroupIdentity, StreamGroupMember, StreamGroupRejection,
+    StreamGroupSession, StreamGroupSessionResult, StreamRecord, plan_collection_mutation,
 };
 
 #[derive(Debug, Default)]
@@ -23,9 +25,23 @@ struct State {
     streams: BTreeMap<(String, u32), Vec<StreamRecord>>,
     stream_partitions: BTreeMap<String, u32>,
     offsets: BTreeMap<(String, String, u32), u64>,
+    stream_groups: BTreeMap<(String, String), MemoryStreamGroup>,
+    group_claims: BTreeMap<(String, String, u32), (String, u64)>,
     queues: BTreeMap<String, VecDeque<QueueMessage>>,
     leases: BTreeMap<String, (String, QueueMessage)>,
     next_lease: u64,
+}
+
+#[derive(Debug, Default)]
+struct MemoryStreamGroup {
+    generation: u64,
+    members: BTreeMap<String, MemoryGroupMember>,
+}
+
+#[derive(Debug)]
+struct MemoryGroupMember {
+    deadline_ms: u64,
+    session_timeout_ms: u64,
 }
 
 impl MemoryBackend {
@@ -38,6 +54,15 @@ impl MemoryBackend {
         };
         let _ = cache;
         backend
+    }
+
+    pub fn add_queue(&self, queue: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .queues
+            .entry(queue.into())
+            .or_default();
     }
 }
 
@@ -61,6 +86,70 @@ fn live_entry(state: &mut State, cache: &str, key: &str) -> Option<CacheEntry> {
         state.caches.remove(&identity);
     }
     state.caches.get(&identity).cloned()
+}
+
+fn expire_group_members(group: &mut MemoryStreamGroup) {
+    let before = group.members.len();
+    let now = now_ms();
+    group.members.retain(|_, member| member.deadline_ms > now);
+    if group.members.len() != before {
+        group.generation = group.generation.saturating_add(1);
+    }
+}
+
+fn assigned_partitions(
+    group: &MemoryStreamGroup,
+    partition_count: u32,
+    member_id: &str,
+) -> Vec<u32> {
+    let Some(member_index) = group
+        .members
+        .keys()
+        .position(|candidate| candidate == member_id)
+    else {
+        return Vec::new();
+    };
+    let member_count = group.members.len();
+    (0..partition_count)
+        .filter(|partition| {
+            usize::try_from(*partition)
+                .is_ok_and(|partition| partition % member_count == member_index)
+        })
+        .collect()
+}
+
+fn memory_session_result(
+    group: &MemoryStreamGroup,
+    partition_count: u32,
+    member_id: &str,
+    rejection: Option<StreamGroupRejection>,
+) -> StreamGroupSessionResult {
+    StreamGroupSessionResult {
+        session: StreamGroupSession {
+            generation: group.generation,
+            members: group
+                .members
+                .keys()
+                .map(|member_id| StreamGroupMember {
+                    member_id: member_id.clone(),
+                    assigned_partitions: assigned_partitions(group, partition_count, member_id),
+                })
+                .collect(),
+            assigned_partitions: assigned_partitions(group, partition_count, member_id),
+        },
+        rejection,
+    }
+}
+
+fn empty_session_result(rejection: StreamGroupRejection) -> StreamGroupSessionResult {
+    StreamGroupSessionResult {
+        session: StreamGroupSession {
+            generation: 0,
+            members: Vec::new(),
+            assigned_partitions: Vec::new(),
+        },
+        rejection: Some(rejection),
+    }
 }
 
 #[async_trait]
@@ -104,6 +193,7 @@ impl CompatibilityBackend for MemoryBackend {
             value,
             version: state.version,
             expires_at_ms: options.ttl_ms.map(|ttl| now_ms().saturating_add(ttl)),
+            storage_class: CacheStorageClass::Memory,
         };
         state
             .caches
@@ -157,6 +247,7 @@ impl CompatibilityBackend for MemoryBackend {
                 value: CacheValue::Counter(value),
                 version,
                 expires_at_ms: current.and_then(|entry| entry.expires_at_ms),
+                storage_class: CacheStorageClass::Memory,
             },
         );
         Ok(value)
@@ -175,6 +266,42 @@ impl CompatibilityBackend for MemoryBackend {
         };
         entry.expires_at_ms = ttl_ms.map(|ttl| now_ms().saturating_add(ttl));
         Ok(true)
+    }
+
+    async fn cache_collection_mutate(
+        &self,
+        cache: &str,
+        key: &str,
+        mutation: CacheCollectionMutation,
+    ) -> Result<CacheCollectionResult, BackendError> {
+        let mut state = self.state.lock().unwrap();
+        let current = live_entry(&mut state, cache, key);
+        let plan = plan_collection_mutation(current.as_ref().map(|entry| &entry.value), &mutation)?;
+        if !plan.changed {
+            return Ok(plan.result);
+        }
+        state.version = state.version.saturating_add(1);
+        let version = state.version;
+        let identity = (cache.to_owned(), key.to_owned());
+        match plan.value {
+            Some(value) => {
+                state.caches.insert(
+                    identity,
+                    CacheEntry {
+                        value,
+                        version,
+                        expires_at_ms: current.as_ref().and_then(|entry| entry.expires_at_ms),
+                        storage_class: current
+                            .as_ref()
+                            .map_or(CacheStorageClass::Memory, |entry| entry.storage_class),
+                    },
+                );
+            }
+            None => {
+                state.caches.remove(&identity);
+            }
+        }
+        Ok(plan.result)
     }
 
     async fn stream_partition_count(&self, stream: &str) -> Result<u32, BackendError> {
@@ -259,8 +386,20 @@ impl CompatibilityBackend for MemoryBackend {
         stream: &str,
         partition: u32,
         next_offset: u64,
+        identity: Option<&StreamGroupIdentity>,
     ) -> Result<(), BackendError> {
-        self.state.lock().unwrap().offsets.insert(
+        let mut state = self.state.lock().unwrap();
+        if let Some(identity) = identity {
+            let claim = state
+                .group_claims
+                .get(&(stream.to_owned(), group.to_owned(), partition));
+            if !claim.is_some_and(|(member_id, generation)| {
+                member_id == &identity.member_id && *generation == identity.generation
+            }) {
+                return Err(BackendError::Conflict);
+            }
+        }
+        state.offsets.insert(
             (group.to_owned(), stream.to_owned(), partition),
             next_offset,
         );
@@ -280,6 +419,195 @@ impl CompatibilityBackend for MemoryBackend {
             .offsets
             .get(&(group.to_owned(), stream.to_owned(), partition))
             .copied())
+    }
+
+    async fn stream_group_join(
+        &self,
+        stream: &str,
+        group: &str,
+        member_id: &str,
+        session_timeout_ms: u64,
+    ) -> Result<StreamGroupSessionResult, BackendError> {
+        if !(1_000..=300_000).contains(&session_timeout_ms) {
+            return Err(BackendError::Invalid("invalid session timeout".into()));
+        }
+        let mut state = self.state.lock().unwrap();
+        let partition_count = state
+            .stream_partitions
+            .get(stream)
+            .copied()
+            .ok_or(BackendError::NotFound)?;
+        let group_state = state
+            .stream_groups
+            .entry((stream.to_owned(), group.to_owned()))
+            .or_default();
+        expire_group_members(group_state);
+        if !group_state.members.contains_key(member_id) {
+            group_state.generation = group_state.generation.saturating_add(1).max(1);
+        }
+        group_state.members.insert(
+            member_id.to_owned(),
+            MemoryGroupMember {
+                deadline_ms: now_ms().saturating_add(session_timeout_ms),
+                session_timeout_ms,
+            },
+        );
+        Ok(memory_session_result(
+            group_state,
+            partition_count,
+            member_id,
+            None,
+        ))
+    }
+
+    async fn stream_group_observe(
+        &self,
+        stream: &str,
+        group: &str,
+        member_id: &str,
+    ) -> Result<Option<StreamGroupSession>, BackendError> {
+        let mut state = self.state.lock().unwrap();
+        let partition_count = state
+            .stream_partitions
+            .get(stream)
+            .copied()
+            .ok_or(BackendError::NotFound)?;
+        let Some(group_state) = state
+            .stream_groups
+            .get_mut(&(stream.to_owned(), group.to_owned()))
+        else {
+            return Ok(None);
+        };
+        expire_group_members(group_state);
+        Ok(Some(
+            memory_session_result(group_state, partition_count, member_id, None).session,
+        ))
+    }
+
+    async fn stream_group_heartbeat(
+        &self,
+        stream: &str,
+        group: &str,
+        member_id: &str,
+        generation: u64,
+    ) -> Result<StreamGroupSessionResult, BackendError> {
+        let mut state = self.state.lock().unwrap();
+        let partition_count = state
+            .stream_partitions
+            .get(stream)
+            .copied()
+            .ok_or(BackendError::NotFound)?;
+        let Some(group_state) = state
+            .stream_groups
+            .get_mut(&(stream.to_owned(), group.to_owned()))
+        else {
+            return Ok(empty_session_result(StreamGroupRejection::UnknownGroup));
+        };
+        expire_group_members(group_state);
+        let rejection = if !group_state.members.contains_key(member_id) {
+            Some(StreamGroupRejection::UnknownMember)
+        } else if generation != group_state.generation {
+            Some(StreamGroupRejection::StaleGeneration)
+        } else {
+            None
+        };
+        if rejection.is_none() {
+            let timeout = group_state
+                .members
+                .get(member_id)
+                .map_or(1_000, |member| member.session_timeout_ms);
+            group_state.members.insert(
+                member_id.to_owned(),
+                MemoryGroupMember {
+                    deadline_ms: now_ms().saturating_add(timeout),
+                    session_timeout_ms: timeout,
+                },
+            );
+        }
+        Ok(memory_session_result(
+            group_state,
+            partition_count,
+            member_id,
+            rejection,
+        ))
+    }
+
+    async fn stream_group_leave(
+        &self,
+        stream: &str,
+        group: &str,
+        member_id: &str,
+        generation: u64,
+    ) -> Result<StreamGroupSessionResult, BackendError> {
+        let mut state = self.state.lock().unwrap();
+        let partition_count = state
+            .stream_partitions
+            .get(stream)
+            .copied()
+            .ok_or(BackendError::NotFound)?;
+        let Some(group_state) = state
+            .stream_groups
+            .get_mut(&(stream.to_owned(), group.to_owned()))
+        else {
+            return Ok(empty_session_result(StreamGroupRejection::UnknownGroup));
+        };
+        expire_group_members(group_state);
+        let rejection = if !group_state.members.contains_key(member_id) {
+            Some(StreamGroupRejection::UnknownMember)
+        } else if generation != group_state.generation {
+            Some(StreamGroupRejection::StaleGeneration)
+        } else {
+            None
+        };
+        if rejection.is_none() {
+            group_state.members.remove(member_id);
+            group_state.generation = group_state.generation.saturating_add(1);
+        }
+        Ok(memory_session_result(
+            group_state,
+            partition_count,
+            member_id,
+            rejection,
+        ))
+    }
+
+    async fn stream_group_claim(
+        &self,
+        stream: &str,
+        group: &str,
+        member_id: &str,
+        generation: u64,
+        partitions: &[u32],
+    ) -> Result<(), BackendError> {
+        let mut state = self.state.lock().unwrap();
+        let partition_count = state
+            .stream_partitions
+            .get(stream)
+            .copied()
+            .ok_or(BackendError::NotFound)?;
+        let group_key = (stream.to_owned(), group.to_owned());
+        let group_state = state
+            .stream_groups
+            .get_mut(&group_key)
+            .ok_or(BackendError::Conflict)?;
+        expire_group_members(group_state);
+        if generation != group_state.generation || !group_state.members.contains_key(member_id) {
+            return Err(BackendError::Conflict);
+        }
+        let assigned = assigned_partitions(group_state, partition_count, member_id);
+        if partitions
+            .iter()
+            .any(|partition| !assigned.contains(partition))
+        {
+            return Err(BackendError::Conflict);
+        }
+        for partition in partitions {
+            state.group_claims.insert(
+                (stream.to_owned(), group.to_owned(), *partition),
+                (member_id.to_owned(), generation),
+            );
+        }
+        Ok(())
     }
 
     async fn queue_exists(&self, queue: &str) -> Result<bool, BackendError> {

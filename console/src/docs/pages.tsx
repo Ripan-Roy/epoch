@@ -1712,7 +1712,9 @@ client = redis.Redis(
 
 client.set(b"session:42", b"binary\\x00value", px=30_000, nx=True)
 assert client.get(b"session:42") == b"binary\\x00value"
-assert client.incrby("requests", 5) == 5`;
+assert client.incrby("requests", 5) == 5
+assert client.hset("profile:42", mapping={"name": "Ada", "stage": "beta"}) == 2
+assert client.zadd("ranking", {"ada": 1.5, "grace": 0.5}) == 2`;
 
 const compatibilityKafkaJava = `var properties = new java.util.HashMap<String, Object>();
 properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "127.0.0.1:9092");
@@ -1722,9 +1724,7 @@ properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializ
 properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class);
 
 try (var consumer = new KafkaConsumer<byte[], byte[]>(properties)) {
-  var partition = new TopicPartition("events", 0);
-  consumer.assign(java.util.List.of(partition));
-  consumer.seek(partition, 0L);
+  consumer.subscribe(java.util.List.of("events"));
   var records = consumer.poll(java.time.Duration.ofSeconds(1));
   records.forEach(record -> System.out.println(record.offset()));
   consumer.commitSync();
@@ -1738,8 +1738,13 @@ factory.setPassword("local-amqp-password");
 
 try (var connection = factory.newConnection(); var channel = connection.createChannel()) {
   channel.queueDeclare("jobs", true, false, false, java.util.Map.of());
+  channel.exchangeDeclare("epoch.events", "topic", false, false, java.util.Map.of());
+  channel.queueBind("jobs", "epoch.events", "orders.*");
   channel.confirmSelect();
-  channel.basicPublish("", "jobs", null, "work".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+  var properties = new AMQP.BasicProperties.Builder().expiration("30000").build();
+  channel.basicPublish(
+    "epoch.events", "orders.created", true, properties,
+    "work".getBytes(java.nio.charset.StandardCharsets.UTF_8));
   channel.waitForConfirmsOrDie(5_000);
   channel.basicQos(16);
   channel.basicConsume("jobs", false, (tag, delivery) ->
@@ -1766,7 +1771,7 @@ export function ProtocolCompatibilityBody() {
       <Note title="Partial compatibility, stated precisely">
         The gateway does not claim full Redis, Kafka, or RabbitMQ parity. It advertises only implemented Kafka
         APIs, bounds every parser and connection pool, and maps successful writes to native replicated Epoch
-        mutations. CI pins Redis CLI 8.8.2, Kafka Java 4.3.1, and RabbitMQ Java 5.34.0 on their supported
+        mutations. CI pins Redis CLI 8.8.2, Kafka Java 4.3.1, and RabbitMQ Java 5.35.0 on their supported
         paths.
       </Note>
 
@@ -1774,7 +1779,8 @@ export function ProtocolCompatibilityBody() {
         <p>
           First provision <code>sessions</code> as a Cache, <code>events</code> as a Stream, and{" "}
           <code>jobs</code> as a Queue in <code>acme/shop/dev/core</code>. Then start all three listeners from
-          one stateless process.
+          one gateway process. Native data remains durable; the bounded AMQP exchange/binding catalog is
+          process-scoped in this slice.
         </p>
         <CodeBlock label="shell" value={compatibilityGatewayRun} />
         <div className="table-wrap">
@@ -1810,7 +1816,7 @@ export function ProtocolCompatibilityBody() {
                   <code>5672</code>
                 </td>
                 <td>Queue → Queue</td>
-                <td>RabbitMQ Java 5.34.0</td>
+                <td>RabbitMQ Java 5.35.0</td>
               </tr>
             </tbody>
           </table>
@@ -1829,18 +1835,20 @@ export function ProtocolCompatibilityBody() {
           and returns a retryable error.
         </p>
         <p>
-          Hashes, lists, sets, sorted sets, Pub/Sub, Streams, blocking calls, cluster mode, modules, Lua, and{" "}
-          <code>MULTI</code>/<code>EXEC</code> are not exposed yet. Multi-key writes are independently
-          committed.
+          Hashes, lists, sets, and sorted sets use version-fenced native collection replacements that retain
+          TTL and storage class. Their fields and members must be UTF-8 and each collection is bounded to
+          1,024 items. Pub/Sub, Streams, blocking calls, cluster mode, modules, Lua, and <code>MULTI</code>/
+          <code>EXEC</code> are not exposed yet. Multi-key writes are independently committed.
         </p>
         <CodeBlock label="python · redis-py" value={compatibilityRedisPython} />
       </Topic>
 
-      <Topic id="kafka" title="Apache Kafka producer and manual consumer">
+      <Topic id="kafka" title="Apache Kafka producer and classic consumer groups">
         <p>
-          Produce, Fetch, Metadata, ListOffsets, ApiVersions, FindCoordinator, OffsetCommit, and OffsetFetch
-          are implemented. gzip, Snappy, LZ4, and Zstd batches translate into native Stream records while
-          keys, nullable values, timestamps, and headers round-trip.
+          Produce, Fetch, Metadata, ListOffsets, ApiVersions, FindCoordinator, JoinGroup, SyncGroup,
+          Heartbeat, LeaveGroup, OffsetCommit, and OffsetFetch are implemented. gzip, Snappy, LZ4, and Zstd
+          batches translate into native Stream records while keys, nullable values, timestamps, and headers
+          round-trip.
         </p>
         <p>
           Each Produce partition is submitted as one canonical native batch and becomes visible atomically. It
@@ -1853,26 +1861,32 @@ export function ProtocolCompatibilityBody() {
           downgrading the gateway after writing v2 records is unsupported.
         </p>
         <p>
-          Manual partition assignment is the current consumer contract. Group membership/rebalancing,
-          idempotent and transactional producers, admin mutations, SASL, ACLs, auto-creation, and timestamp
-          offset lookup remain unsupported and are not advertised.
+          Manual assignment and classic <code>subscribe()</code> groups are supported for one existing Stream
+          per member with the <code>range</code> protocol. Replicated native sessions assign any configured
+          shard count, SyncGroup claims ownership, and commits are member/generation fenced. Static,
+          multi-topic, regex, cooperative, and new consumer-group protocols remain unsupported, as do
+          idempotent/transactional producers, admin mutations, SASL, ACLs, auto-creation, and timestamp offset
+          lookup.
         </p>
         <CodeBlock label="java · KafkaConsumer" value={compatibilityKafkaJava} />
       </Topic>
 
       <Topic id="amqp" title="RabbitMQ / AMQP 0-9-1">
         <p>
-          Existing Queue declaration, connection-local direct exchanges and bindings, publish, confirms, push
-          consumers, basic.get, prefetch, automatic/manual acknowledgement, nack/reject, cancellation,
-          heartbeats, and content/correlation/reply metadata are implemented.
+          Existing Queue declaration, process-shared direct/fanout/topic exchanges, multi-queue bindings,
+          bind/unbind and exchange deletion, publish, mandatory returns, per-message expiration, confirms,
+          push consumers, basic.get, prefetch, automatic/manual acknowledgement, nack/reject, cancellation,
+          heartbeats, and content/correlation/reply/string-header metadata are implemented.
         </p>
         <p>
           Native Queue capacity and retry limits remain authoritative. Requeue consumes a delivery attempt. A
           committed native rejection is never publisher-confirmed, even when its HTTP response is successful.
         </p>
         <p>
-          AMQP 1.0, fanout/topic/header routing, server-named queues, policy arguments, mandatory returns,
-          transactions, and RabbitMQ plugins remain unsupported.
+          AMQP 1.0, header routing, durable or auto-delete gateway exchange metadata, server-named queues,
+          policy arguments, non-string headers, immediate publishing, transactions, and RabbitMQ plugins
+          remain unsupported. Queue data and delivery state remain native and durable; exchange/binding
+          metadata survives connections but not a gateway-process restart.
         </p>
         <CodeBlock label="java · RabbitMQ client" value={compatibilityAmqpJava} />
       </Topic>
@@ -1881,9 +1895,10 @@ export function ProtocolCompatibilityBody() {
         <p>
           The regional campaign runs the pinned clients through production gateway and node images. It
           replaces the gateway, kills each profile&apos;s leader, and reopens all voter volumes after SIGKILL,
-          checking Cache state and atomic conditional set/get, Kafka metadata and checkpoints, AMQP lease
-          redelivery, durable acknowledgements, and capacity refusal. This verifies the documented subset, not
-          full broker parity or production SLOs.
+          checking Cache state, atomic conditional set/get and structured collections, Kafka metadata,
+          consumer groups and checkpoints, AMQP topic/TTL/mandatory-return behavior, lease redelivery, durable
+          acknowledgements, and capacity refusal. This verifies the documented subset, not full broker parity
+          or production SLOs.
         </p>
         <CodeBlock
           label="shell · prebuilt node and gateway images"

@@ -70,3 +70,7 @@ consumes an attempt. Unknown network outcomes are not retried with fresh
 mutation identities. Differential broker tests, sustained fuzzing, full client
 authentication/TLS, richer protocol features, comparative performance, and
 production operating evidence remain separate requirements.
+
+[ADR-0044](0044-native-backed-protocol-state.md) extends this evidence contract
+to atomic Redis structures, replicated Kafka group generations and claims, and
+AMQP routing, TTL, and mandatory-return behavior.

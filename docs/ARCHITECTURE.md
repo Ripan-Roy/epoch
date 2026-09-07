@@ -817,10 +817,31 @@ it cannot partially commit record-by-record. AMQP confirms follow native Queue
 commit, while Redis multi-key operations explicitly remain independent per key.
 Unknown mutation outcomes are surfaced rather than retried under a new identity.
 
+Structured Redis hash, list, set, and sorted-set values are encoded as one
+bounded Cache item. Each command observes the item linearly, computes a
+replacement, and submits one item-version or missing-key shard-revision fence;
+successful replacements retain native expiry and storage class. Kafka's bounded
+classic `consumer` group subset keeps membership, generation, shard assignment,
+heartbeat deadlines, ownership claims, and committed offsets in replicated
+Stream state. The gateway-issued member token carries only the Stream identity
+needed to recover that state after a gateway restart. Stale generations cannot
+heartbeat, claim a shard, or advance an offset.
+
+AMQP Queue messages and settlements remain native and durable. Exchange and
+binding topology for the supported direct, fanout, and topic subset is shared
+between connections only inside one gateway process; it is intentionally lost
+when that process restarts. Per-message expiration becomes native Queue TTL,
+mandatory unroutable publishes return to the publisher, and only UTF-8 string
+headers cross the current envelope. Durable topology, policy arguments, header
+exchanges, dead-letter configuration, transactions, and AMQP 1.0 remain outside
+the advertised boundary.
+
 Discovery and documentation are allowlists: Kafka `ApiVersions`, Redis
 `COMMAND`, the scanner, and the published exact-client matrix must match the
 implemented dispatch. See [Protocol compatibility](PROTOCOL_COMPATIBILITY.md)
-and [ADR-0042](adr/0042-bounded-protocol-compatibility-gateways.md).
+and [ADR-0042](adr/0042-bounded-protocol-compatibility-gateways.md),
+[ADR-0043](adr/0043-lossless-protocol-recovery-contract.md), and
+[ADR-0044](adr/0044-native-backed-protocol-state.md).
 
 ## 9. Time, leases, and fencing
 
@@ -1223,3 +1244,5 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0040: Initial Source Adapters and Checkpoint Coupling](adr/0040-initial-source-adapter-checkpoint-coupling.md)
 - [ADR-0041: Tag-only OCI Supply Chain](adr/0041-tag-only-oci-supply-chain.md)
 - [ADR-0042: Bounded Protocol-Compatibility Gateways](adr/0042-bounded-protocol-compatibility-gateways.md)
+- [ADR-0043: Lossless Protocol Records and Real Regional Recovery](adr/0043-lossless-protocol-recovery-contract.md)
+- [ADR-0044: Native-Backed Protocol State](adr/0044-native-backed-protocol-state.md)

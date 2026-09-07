@@ -138,13 +138,20 @@ are selected; do not publish it as a stable import path.
 
 ## Dependency update policy
 
-Dependabot staggers the six package ecosystems across the week and opens at
-most one grouped routine version-update pull request per ecosystem after a
-seven-day cooldown. Routine Go, Java, Python, npm, and GitHub Actions updates
-are limited to SemVer minor and patch releases. Routine Cargo updates are
-patch-only because a `0.x` minor change can be API-breaking and the consensus
-dependency graph is deliberately pinned. Security updates use a separate group
-and are never filtered or delayed by the routine-version policy.
+Dependabot staggers the six package ecosystems across the week and normally
+opens at most one grouped routine version-update pull request per ecosystem
+after a seven-day cooldown. Routine Go, Java, Python, npm, and GitHub Actions
+updates are limited to SemVer minor and patch releases. Routine Cargo updates
+are patch-only because a `0.x` minor change can be API-breaking and the
+consensus dependency graph is deliberately pinned. Security updates use a
+separate group and are never filtered or delayed by the routine-version policy.
+
+Go reserves two pull-request slots. Kubernetes packages (`k8s.io/*` and
+`sigs.k8s.io/*`) are grouped into a dedicated release-line change because a
+`0.x` minor bump can remove APIs and requires a coordinated operator migration.
+The ordinary Go group excludes those packages, so a red Kubernetes migration
+cannot block unrelated routine updates. The separate security group remains
+unfiltered.
 
 The Maven entry covers both `sdk/java` and `tests/compatibility/java` in the
 same group, including the Kafka and RabbitMQ conformance clients. The root npm

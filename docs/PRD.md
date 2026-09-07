@@ -170,7 +170,7 @@ PKG-005/DX-001 evidence. See ADR-0039, ADR-0040, and ADR-0041.
 **Protocol-compatibility implementation note (24 August 2026):** A separate
 bounded Rust gateway now exposes the documented RESP2/RESP3, Kafka, and AMQP
 0-9-1 subsets through one authenticated and generation/tablet/term-fenced
-semantic adapter. Redis CLI 8.8.2, Kafka Java 4.3.1, and RabbitMQ Java 5.34.0
+semantic adapter. Redis CLI 8.8.2, Kafka Java 4.3.1, and RabbitMQ Java 5.35.0
 pass exact wire-client flows. Kafka record counts are preflighted, compression
 expansion is capped, and each Produce partition becomes one canonical atomic
 native Stream batch. The versioned migration scanner, public matrix, Pages UI,
@@ -749,10 +749,14 @@ Compatibility is a migration surface, not the internal architecture.
 
 Implementation evidence is tracked separately from the full target below in
 [Protocol compatibility](PROTOCOL_COMPATIBILITY.md) and delivery items PC-01
-through PC-10. The beta candidate now includes a combined named-client/regional
-recovery campaign, lossless Kafka CreateTime and ordered duplicate headers,
-and fail-closed native mutation receipts. These do not remove the richer
-protocol, differential/fuzz, or performance requirements in this PRD.
+through PC-10. The current compatibility candidate adds atomic Redis
+hash/list/set/sorted-set operations, classic Kafka consumer groups backed by
+replicated native sessions and generation-fenced shard claims, and AMQP
+direct/fanout/topic routing with mandatory returns and native Queue TTL. The
+combined named-client/regional recovery campaign also covers lossless Kafka
+CreateTime and ordered duplicate headers plus fail-closed native mutation
+receipts. These bounded slices do not remove the richer protocol,
+differential/fuzz, or performance requirements in this PRD.
 
 | Surface | Initial target | Compatibility promise | Known boundary |
 |---|---|---|---|

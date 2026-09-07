@@ -1,4 +1,10 @@
-use std::{collections::BTreeMap, fmt, io::Write as _, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    io::Write as _,
+    sync::Arc,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use base64::{
@@ -19,6 +25,7 @@ const MAX_HTTP_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_NATIVE_STREAM_BATCH_RECORDS: u16 = 1_000;
 const MAX_NATIVE_STREAM_BATCH_COMPRESSED_BYTES: usize = 360 * 1024;
 const MAX_CACHE_SET_ATTEMPTS: usize = 4;
+const MAX_CACHE_COLLECTION_ITEMS: usize = 1_024;
 
 /// One value stored through the Cache compatibility surface.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -33,12 +40,21 @@ pub enum CacheValue {
     SortedSet(BTreeMap<String, f64>),
 }
 
+/// Native storage class retained by compatibility collection replacements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CacheStorageClass {
+    #[default]
+    Memory,
+    Cold,
+}
+
 /// One observed Cache value and its absolute expiry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CacheEntry {
     pub value: CacheValue,
     pub version: u64,
     pub expires_at_ms: Option<u64>,
+    pub storage_class: CacheStorageClass,
 }
 
 /// Condition applied atomically with one compatibility Cache set.
@@ -65,6 +81,32 @@ pub struct CacheSetOutcome {
     pub previous: Option<CacheEntry>,
 }
 
+/// One Redis collection mutation evaluated atomically by the backend.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CacheCollectionMutation {
+    HashSet { entries: BTreeMap<String, String> },
+    HashDelete { fields: Vec<String> },
+    ListPush { values: Vec<String>, front: bool },
+    ListPop { count: u32, front: bool },
+    SetAdd { members: Vec<String> },
+    SetRemove { members: Vec<String> },
+    SortedSetAdd { entries: BTreeMap<String, f64> },
+    SortedSetRemove { members: Vec<String> },
+}
+
+/// Protocol-relevant result of one atomic collection mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CacheCollectionResult {
+    HashSet { added: u64 },
+    HashDelete { removed: u64 },
+    ListPush { length: u64 },
+    ListPop { values: Vec<String> },
+    SetAdd { added: u64 },
+    SetRemove { removed: u64 },
+    SortedSetAdd { added: u64 },
+    SortedSetRemove { removed: u64 },
+}
+
 /// One record returned through the Stream compatibility surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamRecord {
@@ -75,6 +117,45 @@ pub struct StreamRecord {
     pub headers: Vec<(String, Option<Vec<u8>>)>,
 }
 
+/// One member of a replicated native Stream consumer-group session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamGroupMember {
+    pub member_id: String,
+    pub assigned_partitions: Vec<u32>,
+}
+
+/// State returned after a native Stream consumer-group session mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamGroupSession {
+    pub generation: u64,
+    pub members: Vec<StreamGroupMember>,
+    pub assigned_partitions: Vec<u32>,
+}
+
+/// Durable rejection returned by the native Stream session coordinator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamGroupRejection {
+    UnknownGroup,
+    UnknownMember,
+    StaleGeneration,
+    CapacityReached,
+    Invalid,
+}
+
+/// Result of a replicated Stream consumer-group session mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamGroupSessionResult {
+    pub session: StreamGroupSession,
+    pub rejection: Option<StreamGroupRejection>,
+}
+
+/// Consumer identity used to fence a Stream group offset commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamGroupIdentity {
+    pub member_id: String,
+    pub generation: u64,
+}
+
 /// One message submitted through the Queue compatibility surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueueMessage {
@@ -83,6 +164,10 @@ pub struct QueueMessage {
     pub correlation_id: Option<String>,
     pub reply_to: Option<String>,
     pub headers: BTreeMap<String, String>,
+    pub exchange: Option<String>,
+    pub routing_key: Option<String>,
+    pub expiration: Option<String>,
+    pub ttl_ms: Option<u64>,
 }
 
 /// One leased Queue delivery.
@@ -133,6 +218,12 @@ pub trait CompatibilityBackend: Send + Sync + 'static {
         key: &str,
         ttl_ms: Option<u64>,
     ) -> Result<bool, BackendError>;
+    async fn cache_collection_mutate(
+        &self,
+        cache: &str,
+        key: &str,
+        mutation: CacheCollectionMutation,
+    ) -> Result<CacheCollectionResult, BackendError>;
 
     async fn stream_partition_count(&self, stream: &str) -> Result<u32, BackendError>;
     async fn stream_append(
@@ -155,6 +246,7 @@ pub trait CompatibilityBackend: Send + Sync + 'static {
         stream: &str,
         partition: u32,
         next_offset: u64,
+        identity: Option<&StreamGroupIdentity>,
     ) -> Result<(), BackendError>;
     async fn stream_committed_offset(
         &self,
@@ -162,6 +254,41 @@ pub trait CompatibilityBackend: Send + Sync + 'static {
         stream: &str,
         partition: u32,
     ) -> Result<Option<u64>, BackendError>;
+    async fn stream_group_join(
+        &self,
+        stream: &str,
+        group: &str,
+        member_id: &str,
+        session_timeout_ms: u64,
+    ) -> Result<StreamGroupSessionResult, BackendError>;
+    async fn stream_group_observe(
+        &self,
+        stream: &str,
+        group: &str,
+        member_id: &str,
+    ) -> Result<Option<StreamGroupSession>, BackendError>;
+    async fn stream_group_heartbeat(
+        &self,
+        stream: &str,
+        group: &str,
+        member_id: &str,
+        generation: u64,
+    ) -> Result<StreamGroupSessionResult, BackendError>;
+    async fn stream_group_leave(
+        &self,
+        stream: &str,
+        group: &str,
+        member_id: &str,
+        generation: u64,
+    ) -> Result<StreamGroupSessionResult, BackendError>;
+    async fn stream_group_claim(
+        &self,
+        stream: &str,
+        group: &str,
+        member_id: &str,
+        generation: u64,
+        partitions: &[u32],
+    ) -> Result<(), BackendError>;
 
     async fn queue_exists(&self, queue: &str) -> Result<bool, BackendError>;
     async fn queue_publish(&self, queue: &str, message: QueueMessage) -> Result<(), BackendError>;
@@ -413,6 +540,7 @@ impl NativeHttpBackend {
                     )?,
                     version: decimal_field(item, "version")?,
                     expires_at_ms: optional_decimal_field(item, "expires_at_ms")?,
+                    storage_class: decode_storage_class(item.get("storage_class"))?,
                 })
             })
             .transpose()?;
@@ -449,6 +577,44 @@ impl NativeHttpBackend {
             .await?;
         require_applied_mutation(&response)?;
         Ok(response)
+    }
+
+    async fn stream_session_mutation(
+        &self,
+        stream: &str,
+        group: &str,
+        member_id: &str,
+        method: Method,
+        suffix: String,
+        fields: Value,
+    ) -> Result<StreamGroupSessionResult, BackendError> {
+        if !valid_resource_segment(group) || !valid_resource_segment(member_id) {
+            return Err(BackendError::Invalid(
+                "invalid Kafka group or member ID".into(),
+            ));
+        }
+        let (base, route) = self.discover("streams", stream, 0).await?;
+        let mut body = fields
+            .as_object()
+            .cloned()
+            .ok_or_else(|| BackendError::Invalid("session fields must be an object".into()))?;
+        body.insert(
+            "idempotency_key".into(),
+            Value::String(Uuid::now_v7().to_string()),
+        );
+        body.insert("expected_term".into(), Value::String(route.term.clone()));
+        let response: Value = self
+            .send_json(
+                method,
+                suffix_url(&base, &suffix),
+                Some(Value::Object(body)),
+                &[
+                    ("x-epoch-resource-generation", &route.resource_generation),
+                    ("x-epoch-tablet-epoch", &route.tablet_epoch),
+                ],
+            )
+            .await?;
+        decode_stream_group_session(&response)
     }
 
     async fn send_json<T: DeserializeOwned>(
@@ -626,6 +792,50 @@ impl CompatibilityBackend for NativeHttpBackend {
         Ok(true)
     }
 
+    async fn cache_collection_mutate(
+        &self,
+        cache: &str,
+        key: &str,
+        mutation: CacheCollectionMutation,
+    ) -> Result<CacheCollectionResult, BackendError> {
+        for attempt in 0..MAX_CACHE_SET_ATTEMPTS {
+            let observation = self.observe_cache(cache, key).await?;
+            let plan = plan_collection_mutation(
+                observation.entry.as_ref().map(|entry| &entry.value),
+                &mutation,
+            )?;
+            if !plan.changed {
+                return Ok(plan.result);
+            }
+            let operation = match (&observation.entry, &plan.value) {
+                (None, Some(value)) => json!({
+                    "kind":"compare_and_set", "shard":0, "key":key,
+                    "expected":{"kind":"missing", "shard_revision":observation.shard_revision.to_string()},
+                    "value":encode_cache_value(value.clone()),
+                }),
+                (Some(entry), Some(value)) => json!({
+                    "kind":"transform", "shard":0, "key":key,
+                    "transform":{
+                        "kind":"replace", "value":encode_cache_value(value.clone()),
+                        "storage_class":encode_storage_class(entry.storage_class),
+                    },
+                    "expected_version":entry.version.to_string(),
+                }),
+                (Some(entry), None) => json!({
+                    "kind":"delete", "shard":0, "key":key,
+                    "expected_version":entry.version.to_string(),
+                }),
+                (None, None) => return Ok(plan.result),
+            };
+            match self.mutate("caches", cache, 0, operation).await {
+                Ok(_) => return Ok(plan.result),
+                Err(BackendError::Conflict) if attempt + 1 < MAX_CACHE_SET_ATTEMPTS => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(BackendError::Conflict)
+    }
+
     async fn stream_partition_count(&self, stream: &str) -> Result<u32, BackendError> {
         let (_, route) = self.discover("streams", stream, 0).await?;
         route
@@ -752,12 +962,17 @@ impl CompatibilityBackend for NativeHttpBackend {
         stream: &str,
         partition: u32,
         next_offset: u64,
+        identity: Option<&StreamGroupIdentity>,
     ) -> Result<(), BackendError> {
         if !valid_resource_segment(group) {
             return Err(BackendError::Invalid("invalid Kafka group ID".into()));
         }
         let (base, route) = self.discover("streams", stream, partition).await?;
         let url = suffix_url(&base, &format!("/groups/{group}/offsets"));
+        let (member_id, group_generation) = identity.map_or_else(
+            || ("epoch-kafka-compat", 1),
+            |identity| (identity.member_id.as_str(), identity.generation),
+        );
         let response: Value = self
             .send_json(
                 Method::PUT,
@@ -765,8 +980,8 @@ impl CompatibilityBackend for NativeHttpBackend {
                 Some(json!({
                     "idempotency_key":Uuid::now_v7().to_string(),
                     "expected_term":route.term,
-                    "member_id":"epoch-kafka-compat",
-                    "group_generation":"1",
+                    "member_id":member_id,
+                    "group_generation":group_generation.to_string(),
                     "partition":0,
                     "next_offset":next_offset.to_string(),
                     "mode":"commit",
@@ -813,6 +1028,122 @@ impl CompatibilityBackend for NativeHttpBackend {
             return Ok(None);
         }
         decimal_field(checkpoint, "committed_offset").map(Some)
+    }
+
+    async fn stream_group_join(
+        &self,
+        stream: &str,
+        group: &str,
+        member_id: &str,
+        session_timeout_ms: u64,
+    ) -> Result<StreamGroupSessionResult, BackendError> {
+        self.stream_session_mutation(
+            stream,
+            group,
+            member_id,
+            Method::POST,
+            format!("/groups/{group}/sessions"),
+            json!({
+                "member_id":member_id,
+                "session_timeout_ms":session_timeout_ms.to_string(),
+            }),
+        )
+        .await
+    }
+
+    async fn stream_group_observe(
+        &self,
+        stream: &str,
+        group: &str,
+        member_id: &str,
+    ) -> Result<Option<StreamGroupSession>, BackendError> {
+        if !valid_resource_segment(group) || !valid_resource_segment(member_id) {
+            return Err(BackendError::Invalid(
+                "invalid Kafka group or member ID".into(),
+            ));
+        }
+        let response: Value = self
+            .read("streams", stream, 0, &format!("/groups/{group}/sessions"))
+            .await?;
+        decode_stream_group_observation(&response, member_id)
+    }
+
+    async fn stream_group_heartbeat(
+        &self,
+        stream: &str,
+        group: &str,
+        member_id: &str,
+        generation: u64,
+    ) -> Result<StreamGroupSessionResult, BackendError> {
+        self.stream_session_mutation(
+            stream,
+            group,
+            member_id,
+            Method::PUT,
+            format!("/groups/{group}/sessions/{member_id}/heartbeat"),
+            json!({"group_generation":generation.to_string()}),
+        )
+        .await
+    }
+
+    async fn stream_group_leave(
+        &self,
+        stream: &str,
+        group: &str,
+        member_id: &str,
+        generation: u64,
+    ) -> Result<StreamGroupSessionResult, BackendError> {
+        self.stream_session_mutation(
+            stream,
+            group,
+            member_id,
+            Method::DELETE,
+            format!("/groups/{group}/sessions/{member_id}"),
+            json!({"group_generation":generation.to_string()}),
+        )
+        .await
+    }
+
+    async fn stream_group_claim(
+        &self,
+        stream: &str,
+        group: &str,
+        member_id: &str,
+        generation: u64,
+        partitions: &[u32],
+    ) -> Result<(), BackendError> {
+        if !valid_resource_segment(group) || !valid_resource_segment(member_id) {
+            return Err(BackendError::Invalid(
+                "invalid Kafka group or member ID".into(),
+            ));
+        }
+        for partition in partitions {
+            let (base, route) = self.discover("streams", stream, *partition).await?;
+            let url = suffix_url(&base, &format!("/groups/{group}/claim"));
+            let response: Value = self
+                .send_json(
+                    Method::PUT,
+                    url,
+                    Some(json!({
+                        "idempotency_key":Uuid::now_v7().to_string(),
+                        "expected_term":route.term,
+                        "member_id":member_id,
+                        "group_generation":generation.to_string(),
+                        "partition":0,
+                    })),
+                    &[
+                        ("x-epoch-resource-generation", &route.resource_generation),
+                        ("x-epoch-tablet-epoch", &route.tablet_epoch),
+                    ],
+                )
+                .await?;
+            match response.pointer("/receipt/outcome").and_then(Value::as_str) {
+                Some("applied") => {}
+                Some("rejected") => return Err(BackendError::Conflict),
+                _ => return Err(invalid_response("Stream group claim outcome is missing")),
+            }
+        }
+        Ok(())
     }
 
     async fn queue_exists(&self, queue: &str) -> Result<bool, BackendError> {
@@ -932,6 +1263,248 @@ fn require_applied_mutation(response: &Value) -> Result<(), BackendError> {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct CacheCollectionPlan {
+    pub(crate) value: Option<CacheValue>,
+    pub(crate) result: CacheCollectionResult,
+    pub(crate) changed: bool,
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one exhaustive planner keeps every collection mutation on the same atomic type boundary"
+)]
+pub(crate) fn plan_collection_mutation(
+    current: Option<&CacheValue>,
+    mutation: &CacheCollectionMutation,
+) -> Result<CacheCollectionPlan, BackendError> {
+    match mutation {
+        CacheCollectionMutation::HashSet { entries } => {
+            bounded_collection_items(entries.len())?;
+            let mut hash = collection_value(current, "hash", |value| match value {
+                CacheValue::Hash(hash) => Some(hash.clone()),
+                _ => None,
+            })?
+            .unwrap_or_default();
+            let added = entries
+                .keys()
+                .filter(|field| !hash.contains_key(*field))
+                .count();
+            let changed = entries
+                .iter()
+                .any(|(field, value)| hash.get(field) != Some(value));
+            hash.extend(entries.clone());
+            Ok(CacheCollectionPlan {
+                value: Some(CacheValue::Hash(hash)),
+                result: CacheCollectionResult::HashSet {
+                    added: count_u64(added),
+                },
+                changed,
+            })
+        }
+        CacheCollectionMutation::HashDelete { fields } => {
+            bounded_collection_items(fields.len())?;
+            let Some(mut hash) = collection_value(current, "hash", |value| match value {
+                CacheValue::Hash(hash) => Some(hash.clone()),
+                _ => None,
+            })?
+            else {
+                return Ok(unchanged(CacheCollectionResult::HashDelete { removed: 0 }));
+            };
+            let removed = fields
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .filter(|field| hash.remove(*field).is_some())
+                .count();
+            Ok(CacheCollectionPlan {
+                value: (!hash.is_empty()).then_some(CacheValue::Hash(hash)),
+                result: CacheCollectionResult::HashDelete {
+                    removed: count_u64(removed),
+                },
+                changed: removed != 0,
+            })
+        }
+        CacheCollectionMutation::ListPush { values, front } => {
+            bounded_collection_items(values.len())?;
+            let mut list = collection_value(current, "list", |value| match value {
+                CacheValue::List(list) => Some(list.clone()),
+                _ => None,
+            })?
+            .unwrap_or_default();
+            if *front {
+                let mut pushed = values.iter().rev().cloned().collect::<Vec<_>>();
+                pushed.extend(list);
+                list = pushed;
+            } else {
+                list.extend(values.clone());
+            }
+            let length = count_u64(list.len());
+            Ok(CacheCollectionPlan {
+                value: Some(CacheValue::List(list)),
+                result: CacheCollectionResult::ListPush { length },
+                changed: true,
+            })
+        }
+        CacheCollectionMutation::ListPop { count, front } => {
+            let count = usize::try_from(*count)
+                .ok()
+                .filter(|count| (1..=MAX_CACHE_COLLECTION_ITEMS).contains(count))
+                .ok_or_else(|| BackendError::Invalid("collection count is out of range".into()))?;
+            let Some(mut list) = collection_value(current, "list", |value| match value {
+                CacheValue::List(list) => Some(list.clone()),
+                _ => None,
+            })?
+            else {
+                return Ok(unchanged(CacheCollectionResult::ListPop {
+                    values: Vec::new(),
+                }));
+            };
+            let removed = count.min(list.len());
+            let values = if *front {
+                list.drain(..removed).collect()
+            } else {
+                let mut values = list.split_off(list.len().saturating_sub(removed));
+                values.reverse();
+                values
+            };
+            Ok(CacheCollectionPlan {
+                value: (!list.is_empty()).then_some(CacheValue::List(list)),
+                changed: !values.is_empty(),
+                result: CacheCollectionResult::ListPop { values },
+            })
+        }
+        CacheCollectionMutation::SetAdd { members } => {
+            bounded_collection_items(members.len())?;
+            let mut set = collection_value(current, "set", |value| match value {
+                CacheValue::Set(set) => Some(set.iter().cloned().collect::<BTreeSet<_>>()),
+                _ => None,
+            })?
+            .unwrap_or_default();
+            let added = members
+                .iter()
+                .filter(|member| set.insert((*member).clone()))
+                .count();
+            Ok(CacheCollectionPlan {
+                value: Some(CacheValue::Set(set.into_iter().collect())),
+                result: CacheCollectionResult::SetAdd {
+                    added: count_u64(added),
+                },
+                changed: added != 0,
+            })
+        }
+        CacheCollectionMutation::SetRemove { members } => {
+            bounded_collection_items(members.len())?;
+            let Some(mut set) = collection_value(current, "set", |value| match value {
+                CacheValue::Set(set) => Some(set.iter().cloned().collect::<BTreeSet<_>>()),
+                _ => None,
+            })?
+            else {
+                return Ok(unchanged(CacheCollectionResult::SetRemove { removed: 0 }));
+            };
+            let removed = members
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .filter(|member| set.remove(*member))
+                .count();
+            Ok(CacheCollectionPlan {
+                value: (!set.is_empty()).then(|| CacheValue::Set(set.into_iter().collect())),
+                result: CacheCollectionResult::SetRemove {
+                    removed: count_u64(removed),
+                },
+                changed: removed != 0,
+            })
+        }
+        CacheCollectionMutation::SortedSetAdd { entries } => {
+            bounded_collection_items(entries.len())?;
+            if entries.values().any(|score| !score.is_finite()) {
+                return Err(BackendError::Invalid(
+                    "sorted-set score must be finite".into(),
+                ));
+            }
+            let mut set = collection_value(current, "sorted set", |value| match value {
+                CacheValue::SortedSet(set) => Some(set.clone()),
+                _ => None,
+            })?
+            .unwrap_or_default();
+            let added = entries
+                .keys()
+                .filter(|member| !set.contains_key(*member))
+                .count();
+            let changed = entries
+                .iter()
+                .any(|(member, score)| set.get(member) != Some(score));
+            set.extend(entries.clone());
+            Ok(CacheCollectionPlan {
+                value: Some(CacheValue::SortedSet(set)),
+                result: CacheCollectionResult::SortedSetAdd {
+                    added: count_u64(added),
+                },
+                changed,
+            })
+        }
+        CacheCollectionMutation::SortedSetRemove { members } => {
+            bounded_collection_items(members.len())?;
+            let Some(mut set) = collection_value(current, "sorted set", |value| match value {
+                CacheValue::SortedSet(set) => Some(set.clone()),
+                _ => None,
+            })?
+            else {
+                return Ok(unchanged(CacheCollectionResult::SortedSetRemove {
+                    removed: 0,
+                }));
+            };
+            let removed = members
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .filter(|member| set.remove(*member).is_some())
+                .count();
+            Ok(CacheCollectionPlan {
+                value: (!set.is_empty()).then_some(CacheValue::SortedSet(set)),
+                result: CacheCollectionResult::SortedSetRemove {
+                    removed: count_u64(removed),
+                },
+                changed: removed != 0,
+            })
+        }
+    }
+}
+
+fn collection_value<T>(
+    current: Option<&CacheValue>,
+    _expected: &str,
+    decode: impl FnOnce(&CacheValue) -> Option<T>,
+) -> Result<Option<T>, BackendError> {
+    match current {
+        None => Ok(None),
+        Some(value) => decode(value).map(Some).ok_or(BackendError::WrongType),
+    }
+}
+
+fn bounded_collection_items(count: usize) -> Result<(), BackendError> {
+    if (1..=MAX_CACHE_COLLECTION_ITEMS).contains(&count) {
+        Ok(())
+    } else {
+        Err(BackendError::Invalid(
+            "collection mutation item count is out of range".into(),
+        ))
+    }
+}
+
+const fn unchanged(result: CacheCollectionResult) -> CacheCollectionPlan {
+    CacheCollectionPlan {
+        value: None,
+        result,
+        changed: false,
+    }
+}
+
+fn count_u64(count: usize) -> u64 {
+    u64::try_from(count).unwrap_or(u64::MAX)
+}
+
 fn is_redis_string_value(value: &CacheValue) -> bool {
     matches!(
         value,
@@ -1020,6 +1593,131 @@ fn optional_decimal_field(value: &Value, field: &str) -> Result<Option<u64>, Bac
         Some(value) => decimal_u64(value)
             .map(Some)
             .ok_or_else(|| invalid_response("optional decimal response field is invalid")),
+    }
+}
+
+fn encode_storage_class(storage_class: CacheStorageClass) -> &'static str {
+    match storage_class {
+        CacheStorageClass::Memory => "memory",
+        CacheStorageClass::Cold => "cold",
+    }
+}
+
+fn decode_stream_group_session(response: &Value) -> Result<StreamGroupSessionResult, BackendError> {
+    let receipt = response
+        .get("receipt")
+        .ok_or_else(|| invalid_response("Stream session receipt is missing"))?;
+    let generation = decimal_field(receipt, "group_generation")?;
+    let members = receipt
+        .get("members")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_response("Stream session members are missing"))?
+        .iter()
+        .map(|member| {
+            let member_id = member
+                .get("member_id")
+                .and_then(Value::as_str)
+                .filter(|value| valid_resource_segment(value))
+                .ok_or_else(|| invalid_response("Stream session member ID is invalid"))?;
+            Ok(StreamGroupMember {
+                member_id: member_id.to_owned(),
+                assigned_partitions: decode_partition_list(member, "assigned_shards")?,
+            })
+        })
+        .collect::<Result<Vec<_>, BackendError>>()?;
+    let rejection = match receipt.get("rejection").and_then(Value::as_str) {
+        None => None,
+        Some("unknown_group") => Some(StreamGroupRejection::UnknownGroup),
+        Some("unknown_member") => Some(StreamGroupRejection::UnknownMember),
+        Some("stale_generation") => Some(StreamGroupRejection::StaleGeneration),
+        Some("group_capacity_reached" | "member_capacity_reached") => {
+            Some(StreamGroupRejection::CapacityReached)
+        }
+        Some("shard_count_mismatch" | "deadline_overflow") => Some(StreamGroupRejection::Invalid),
+        Some(_) => return Err(invalid_response("Stream session rejection is unknown")),
+    };
+    let outcome = receipt
+        .get("outcome")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_response("Stream session outcome is missing"))?;
+    if (outcome == "applied") != rejection.is_none() {
+        return Err(invalid_response("Stream session outcome is inconsistent"));
+    }
+    if !matches!(outcome, "applied" | "rejected") {
+        return Err(invalid_response("Stream session outcome is unknown"));
+    }
+    Ok(StreamGroupSessionResult {
+        session: StreamGroupSession {
+            generation,
+            members,
+            assigned_partitions: decode_partition_list(receipt, "assigned_shards")?,
+        },
+        rejection,
+    })
+}
+
+fn decode_stream_group_observation(
+    response: &Value,
+    member_id: &str,
+) -> Result<Option<StreamGroupSession>, BackendError> {
+    let session = response
+        .get("session")
+        .ok_or_else(|| invalid_response("Stream session observation is missing"))?;
+    if !session
+        .get("exists")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+    let members = session
+        .get("members")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_response("Stream session members are missing"))?
+        .iter()
+        .map(|member| {
+            let observed_member_id = member
+                .get("member_id")
+                .and_then(Value::as_str)
+                .filter(|value| valid_resource_segment(value))
+                .ok_or_else(|| invalid_response("Stream session member ID is invalid"))?;
+            Ok(StreamGroupMember {
+                member_id: observed_member_id.to_owned(),
+                assigned_partitions: decode_partition_list(member, "assigned_shards")?,
+            })
+        })
+        .collect::<Result<Vec<_>, BackendError>>()?;
+    let assigned_partitions = members
+        .iter()
+        .find(|member| member.member_id == member_id)
+        .map_or_else(Vec::new, |member| member.assigned_partitions.clone());
+    Ok(Some(StreamGroupSession {
+        generation: decimal_field(session, "group_generation")?,
+        members,
+        assigned_partitions,
+    }))
+}
+
+fn decode_partition_list(value: &Value, field: &str) -> Result<Vec<u32>, BackendError> {
+    value
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_response("Stream session assignment is missing"))?
+        .iter()
+        .map(|partition| {
+            partition
+                .as_u64()
+                .and_then(|partition| u32::try_from(partition).ok())
+                .ok_or_else(|| invalid_response("Stream session partition is invalid"))
+        })
+        .collect()
+}
+
+fn decode_storage_class(value: Option<&Value>) -> Result<CacheStorageClass, BackendError> {
+    match value.and_then(Value::as_str) {
+        None | Some("memory") => Ok(CacheStorageClass::Memory),
+        Some("cold") => Ok(CacheStorageClass::Cold),
+        Some(_) => Err(invalid_response("Cache storage class is invalid")),
     }
 }
 
@@ -1177,7 +1875,11 @@ fn queue_envelope(message: &QueueMessage) -> Value {
         "payload":{
             "body_base64":STANDARD_NO_PAD.encode(&message.body),
             "content_type":message.content_type,
+            "exchange":message.exchange,
+            "routing_key":message.routing_key,
+            "expiration":message.expiration,
         },
+        "ttl_ms":message.ttl_ms,
         "priority":0,
         "extensions":{},
     })
@@ -1236,6 +1938,19 @@ fn decode_queue_delivery(value: &Value) -> Result<QueueDelivery, BackendError> {
                 .and_then(Value::as_str)
                 .map(str::to_owned),
             headers,
+            exchange: payload
+                .get("exchange")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            routing_key: payload
+                .get("routing_key")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            expiration: payload
+                .get("expiration")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            ttl_ms: optional_decimal_field(envelope, "ttl_ms")?,
         },
     })
 }

@@ -1,3 +1,4 @@
+import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.ConnectionFactory;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -30,11 +31,11 @@ public final class ProtocolConformance {
     var amqpPort = Integer.parseInt(arguments[2]);
     require(AppInfoParser.getVersion().equals("4.3.1"), "Kafka client version");
     require(
-        ConnectionFactory.class.getPackage().getImplementationVersion().equals("5.34.0"),
+        ConnectionFactory.class.getPackage().getImplementationVersion().equals("5.35.0"),
         "RabbitMQ client version");
     verifyKafka(host, kafkaPort);
     verifyAmqp(host, amqpPort);
-    System.out.println("Kafka 4.3.1 and RabbitMQ Java 5.34.0 conformance passed");
+    System.out.println("Kafka 4.3.1 and RabbitMQ Java 5.35.0 conformance passed");
   }
 
   private static void verifyKafka(String host, int port) throws Exception {
@@ -91,6 +92,26 @@ public final class ProtocolConformance {
           consumer.committed(Set.of(partition)).get(partition).offset() == 1,
           "Kafka durable offset");
     }
+
+    consumerProperties.put(ConsumerConfig.GROUP_ID_CONFIG, "billing-subscribe");
+    consumerProperties.put(ConsumerConfig.CLIENT_ID_CONFIG, "epoch-conformance-group-consumer");
+    try (var consumer = new KafkaConsumer<byte[], byte[]>(consumerProperties)) {
+      consumer.subscribe(List.of("events"));
+      var deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos();
+      var observed = false;
+      while (!observed && System.nanoTime() < deadline) {
+        for (var record : consumer.poll(Duration.ofMillis(250))) {
+          if (record.partition() == 1
+              && record.offset() == 0
+              && new String(record.value(), StandardCharsets.UTF_8).equals("kafka-value")) {
+            observed = true;
+          }
+        }
+      }
+      require(observed, "Kafka native-backed consumer group subscribe");
+      consumer.commitSync();
+      require(!consumer.assignment().isEmpty(), "Kafka consumer group assignment");
+    }
   }
 
   private static void verifyAmqp(String host, int port) throws Exception {
@@ -136,6 +157,52 @@ public final class ProtocolConformance {
       channel.waitForConfirmsOrDie(5_000);
       require(consumed.await(10, TimeUnit.SECONDS), "AMQP push delivery");
       channel.basicCancel(consumerTag);
+
+      channel.exchangeDeclare("epoch.events.topic", "topic", false, false, Map.of());
+      channel.queueBind("jobs", "epoch.events.topic", "orders.*");
+      var routedProperties =
+          new AMQP.BasicProperties.Builder()
+              .expiration("5000")
+              .headers(Map.of("tenant", "acme"))
+              .build();
+      channel.basicPublish(
+          "epoch.events.topic",
+          "orders.created",
+          true,
+          routedProperties,
+          "rabbit-topic".getBytes(StandardCharsets.UTF_8));
+      channel.waitForConfirmsOrDie(5_000);
+      var routed = channel.basicGet("jobs", true);
+      require(routed != null, "AMQP topic delivery");
+      require(
+          routed.getEnvelope().getExchange().equals("epoch.events.topic")
+              && routed.getEnvelope().getRoutingKey().equals("orders.created"),
+          "AMQP original routing metadata");
+      require(
+          "5000".equals(routed.getProps().getExpiration())
+              && "acme".equals(routed.getProps().getHeaders().get("tenant").toString()),
+          "AMQP expiration and string headers");
+
+      var returned = new CountDownLatch(1);
+      channel.addReturnListener(
+          message -> {
+            if (message.getReplyCode() == 312
+                && message.getExchange().equals("epoch.events.topic")
+                && new String(message.getBody(), StandardCharsets.UTF_8)
+                    .equals("rabbit-unroutable")) {
+              returned.countDown();
+            }
+          });
+      channel.basicPublish(
+          "epoch.events.topic",
+          "payments.created",
+          true,
+          null,
+          "rabbit-unroutable".getBytes(StandardCharsets.UTF_8));
+      channel.waitForConfirmsOrDie(5_000);
+      require(returned.await(5, TimeUnit.SECONDS), "AMQP mandatory basic.return");
+      channel.queueUnbind("jobs", "epoch.events.topic", "orders.*");
+      channel.exchangeDelete("epoch.events.topic");
     }
   }
 

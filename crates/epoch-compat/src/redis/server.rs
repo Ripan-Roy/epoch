@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fmt,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -11,7 +12,10 @@ use tokio::{
 
 use crate::{
     CompatibilityBackend, MAX_FRAME_BYTES,
-    backend::{BackendError, CacheSetCondition, CacheSetOptions, CacheValue},
+    backend::{
+        BackendError, CacheCollectionMutation, CacheCollectionResult, CacheSetCondition,
+        CacheSetOptions, CacheValue,
+    },
 };
 
 use super::protocol::{RespDecodeError, RespValue, decode_request, encode_response};
@@ -136,6 +140,10 @@ impl<B: CompatibilityBackend> RedisSession<B> {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the explicit command table is the fail-closed Redis compatibility boundary"
+    )]
     pub async fn execute(&mut self, arguments: Vec<Vec<u8>>) -> RespValue {
         let Some(command) = arguments
             .first()
@@ -175,6 +183,30 @@ impl<B: CompatibilityBackend> RedisSession<B> {
             "PEXPIRE" => self.expire(&arguments[1..], 1).await,
             "PERSIST" => self.persist(&arguments[1..]).await,
             "TYPE" => self.value_type(&arguments[1..]).await,
+            "HSET" => self.hash_set(&arguments[1..]).await,
+            "HGET" => self.hash_get(&arguments[1..]).await,
+            "HMGET" => self.hash_multi_get(&arguments[1..]).await,
+            "HDEL" => self.hash_delete(&arguments[1..]).await,
+            "HEXISTS" => self.hash_exists(&arguments[1..]).await,
+            "HLEN" => self.hash_length(&arguments[1..]).await,
+            "HGETALL" => self.hash_get_all(&arguments[1..]).await,
+            "LPUSH" => self.list_push(&arguments[1..], true).await,
+            "RPUSH" => self.list_push(&arguments[1..], false).await,
+            "LPOP" => self.list_pop(&arguments[1..], true).await,
+            "RPOP" => self.list_pop(&arguments[1..], false).await,
+            "LLEN" => self.list_length(&arguments[1..]).await,
+            "LRANGE" => self.list_range(&arguments[1..]).await,
+            "LINDEX" => self.list_index(&arguments[1..]).await,
+            "SADD" => self.set_add(&arguments[1..]).await,
+            "SREM" => self.set_remove(&arguments[1..]).await,
+            "SMEMBERS" => self.set_members(&arguments[1..]).await,
+            "SCARD" => self.set_cardinality(&arguments[1..]).await,
+            "SISMEMBER" => self.set_is_member(&arguments[1..]).await,
+            "ZADD" => self.sorted_set_add(&arguments[1..]).await,
+            "ZREM" => self.sorted_set_remove(&arguments[1..]).await,
+            "ZCARD" => self.sorted_set_cardinality(&arguments[1..]).await,
+            "ZSCORE" => self.sorted_set_score(&arguments[1..]).await,
+            "ZRANGE" => self.sorted_set_range(&arguments[1..]).await,
             _ => RespValue::Error(format!(
                 "ERR unknown command '{}'; see Epoch compatibility matrix",
                 command.to_ascii_lowercase()
@@ -522,6 +554,518 @@ impl<B: CompatibilityBackend> RedisSession<B> {
             Err(error) => backend_error(error),
         }
     }
+
+    async fn hash_set(&self, args: &[Vec<u8>]) -> RespValue {
+        if args.len() < 3 || args.len().is_multiple_of(2) {
+            return arity("hset");
+        }
+        let Some(key) = text(&args[0]) else {
+            return error("key must be UTF-8");
+        };
+        let mut entries = BTreeMap::new();
+        for pair in args[1..].chunks_exact(2) {
+            let (Some(field), Some(value)) = (text(&pair[0]), text(&pair[1])) else {
+                return error("hash fields and values must be UTF-8");
+            };
+            entries.insert(field.to_owned(), value.to_owned());
+        }
+        match self
+            .backend
+            .cache_collection_mutate(
+                &self.config.cache,
+                key,
+                CacheCollectionMutation::HashSet { entries },
+            )
+            .await
+        {
+            Ok(CacheCollectionResult::HashSet { added }) => integer(added),
+            Ok(_) => unexpected_collection_result(),
+            Err(error) => backend_error(error),
+        }
+    }
+
+    async fn hash_get(&self, args: &[Vec<u8>]) -> RespValue {
+        if args.len() != 2 {
+            return arity("hget");
+        }
+        let (Some(key), Some(field)) = (text(&args[0]), text(&args[1])) else {
+            return error("key and field must be UTF-8");
+        };
+        match self.hash_value(key).await {
+            Ok(Some(hash)) => hash.get(field).map_or(RespValue::Null, |value| bulk(value)),
+            Ok(None) => RespValue::Null,
+            Err(error) => backend_error(error),
+        }
+    }
+
+    async fn hash_multi_get(&self, args: &[Vec<u8>]) -> RespValue {
+        if args.len() < 2 {
+            return arity("hmget");
+        }
+        let Some(key) = text(&args[0]) else {
+            return error("key must be UTF-8");
+        };
+        let Some(fields) = utf8_values(&args[1..]) else {
+            return error("hash fields must be UTF-8");
+        };
+        match self.hash_value(key).await {
+            Ok(hash) => RespValue::Array(
+                fields
+                    .iter()
+                    .map(|field| {
+                        hash.as_ref()
+                            .and_then(|hash| hash.get(field))
+                            .map_or(RespValue::Null, |value| bulk(value))
+                    })
+                    .collect(),
+            ),
+            Err(error) => backend_error(error),
+        }
+    }
+
+    async fn hash_delete(&self, args: &[Vec<u8>]) -> RespValue {
+        if args.len() < 2 {
+            return arity("hdel");
+        }
+        let Some(key) = text(&args[0]) else {
+            return error("key must be UTF-8");
+        };
+        let Some(fields) = utf8_values(&args[1..]) else {
+            return error("hash fields must be UTF-8");
+        };
+        match self
+            .backend
+            .cache_collection_mutate(
+                &self.config.cache,
+                key,
+                CacheCollectionMutation::HashDelete { fields },
+            )
+            .await
+        {
+            Ok(CacheCollectionResult::HashDelete { removed }) => integer(removed),
+            Ok(_) => unexpected_collection_result(),
+            Err(error) => backend_error(error),
+        }
+    }
+
+    async fn hash_exists(&self, args: &[Vec<u8>]) -> RespValue {
+        if args.len() != 2 {
+            return arity("hexists");
+        }
+        let (Some(key), Some(field)) = (text(&args[0]), text(&args[1])) else {
+            return error("key and field must be UTF-8");
+        };
+        match self.hash_value(key).await {
+            Ok(value) => RespValue::Integer(i64::from(
+                value.is_some_and(|hash| hash.contains_key(field)),
+            )),
+            Err(error) => backend_error(error),
+        }
+    }
+
+    async fn hash_length(&self, args: &[Vec<u8>]) -> RespValue {
+        let Some(key) = exact_key(args) else {
+            return arity("hlen");
+        };
+        match self.hash_value(key).await {
+            Ok(value) => integer(value.map_or(0, |hash| count_u64(hash.len()))),
+            Err(error) => backend_error(error),
+        }
+    }
+
+    async fn hash_get_all(&self, args: &[Vec<u8>]) -> RespValue {
+        let Some(key) = exact_key(args) else {
+            return arity("hgetall");
+        };
+        match self.hash_value(key).await {
+            Ok(Some(hash)) if self.resp3 => RespValue::Map(
+                hash.into_iter()
+                    .map(|(field, value)| (bulk(&field), bulk(&value)))
+                    .collect(),
+            ),
+            Ok(Some(hash)) => RespValue::Array(
+                hash.into_iter()
+                    .flat_map(|(field, value)| [bulk(&field), bulk(&value)])
+                    .collect(),
+            ),
+            Ok(None) => RespValue::Array(Vec::new()),
+            Err(error) => backend_error(error),
+        }
+    }
+
+    async fn list_push(&self, args: &[Vec<u8>], front: bool) -> RespValue {
+        if args.len() < 2 {
+            return arity(if front { "lpush" } else { "rpush" });
+        }
+        let Some(key) = text(&args[0]) else {
+            return error("key must be UTF-8");
+        };
+        let Some(values) = utf8_values(&args[1..]) else {
+            return error("list values must be UTF-8");
+        };
+        match self
+            .backend
+            .cache_collection_mutate(
+                &self.config.cache,
+                key,
+                CacheCollectionMutation::ListPush { values, front },
+            )
+            .await
+        {
+            Ok(CacheCollectionResult::ListPush { length }) => integer(length),
+            Ok(_) => unexpected_collection_result(),
+            Err(error) => backend_error(error),
+        }
+    }
+
+    async fn list_pop(&self, args: &[Vec<u8>], front: bool) -> RespValue {
+        if !(1..=2).contains(&args.len()) {
+            return arity(if front { "lpop" } else { "rpop" });
+        }
+        let Some(key) = text(&args[0]) else {
+            return error("key must be UTF-8");
+        };
+        let with_count = args.len() == 2;
+        let count = if let Some(value) = args.get(1) {
+            let Some(count) = bounded_count(value) else {
+                return error("value is out of range, must be positive");
+            };
+            count
+        } else {
+            1
+        };
+        match self
+            .backend
+            .cache_collection_mutate(
+                &self.config.cache,
+                key,
+                CacheCollectionMutation::ListPop { count, front },
+            )
+            .await
+        {
+            Ok(CacheCollectionResult::ListPop { values }) if values.is_empty() => RespValue::Null,
+            Ok(CacheCollectionResult::ListPop { values }) if with_count => {
+                RespValue::Array(values.into_iter().map(|value| bulk(&value)).collect())
+            }
+            Ok(CacheCollectionResult::ListPop { mut values }) => bulk(&values.remove(0)),
+            Ok(_) => unexpected_collection_result(),
+            Err(error) => backend_error(error),
+        }
+    }
+
+    async fn list_length(&self, args: &[Vec<u8>]) -> RespValue {
+        let Some(key) = exact_key(args) else {
+            return arity("llen");
+        };
+        match self.list_value(key).await {
+            Ok(value) => integer(value.map_or(0, |list| count_u64(list.len()))),
+            Err(error) => backend_error(error),
+        }
+    }
+
+    async fn list_range(&self, args: &[Vec<u8>]) -> RespValue {
+        if args.len() != 3 {
+            return arity("lrange");
+        }
+        let Some(key) = text(&args[0]) else {
+            return error("key must be UTF-8");
+        };
+        let (Some(start), Some(stop)) = (signed_i64(&args[1]), signed_i64(&args[2])) else {
+            return error("value is not an integer or out of range");
+        };
+        match self.list_value(key).await {
+            Ok(Some(list)) => {
+                let Some((start, end)) = redis_range(list.len(), start, stop) else {
+                    return RespValue::Array(Vec::new());
+                };
+                RespValue::Array(list[start..end].iter().map(|value| bulk(value)).collect())
+            }
+            Ok(None) => RespValue::Array(Vec::new()),
+            Err(error) => backend_error(error),
+        }
+    }
+
+    async fn list_index(&self, args: &[Vec<u8>]) -> RespValue {
+        if args.len() != 2 {
+            return arity("lindex");
+        }
+        let Some(key) = text(&args[0]) else {
+            return error("key must be UTF-8");
+        };
+        let Some(index) = signed_i64(&args[1]) else {
+            return error("value is not an integer or out of range");
+        };
+        match self.list_value(key).await {
+            Ok(Some(list)) => redis_index(list.len(), index)
+                .and_then(|index| list.get(index))
+                .map_or(RespValue::Null, |value| bulk(value)),
+            Ok(None) => RespValue::Null,
+            Err(error) => backend_error(error),
+        }
+    }
+
+    async fn set_add(&self, args: &[Vec<u8>]) -> RespValue {
+        self.set_mutation(args, true).await
+    }
+
+    async fn set_remove(&self, args: &[Vec<u8>]) -> RespValue {
+        self.set_mutation(args, false).await
+    }
+
+    async fn set_mutation(&self, args: &[Vec<u8>], add: bool) -> RespValue {
+        if args.len() < 2 {
+            return arity(if add { "sadd" } else { "srem" });
+        }
+        let Some(key) = text(&args[0]) else {
+            return error("key must be UTF-8");
+        };
+        let Some(members) = utf8_values(&args[1..]) else {
+            return error("set members must be UTF-8");
+        };
+        let mutation = if add {
+            CacheCollectionMutation::SetAdd { members }
+        } else {
+            CacheCollectionMutation::SetRemove { members }
+        };
+        match self
+            .backend
+            .cache_collection_mutate(&self.config.cache, key, mutation)
+            .await
+        {
+            Ok(CacheCollectionResult::SetAdd { added }) => integer(added),
+            Ok(CacheCollectionResult::SetRemove { removed }) => integer(removed),
+            Ok(_) => unexpected_collection_result(),
+            Err(error) => backend_error(error),
+        }
+    }
+
+    async fn set_members(&self, args: &[Vec<u8>]) -> RespValue {
+        let Some(key) = exact_key(args) else {
+            return arity("smembers");
+        };
+        match self.set_value(key).await {
+            Ok(value) => {
+                let members = value
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|member| bulk(&member))
+                    .collect();
+                if self.resp3 {
+                    RespValue::Set(members)
+                } else {
+                    RespValue::Array(members)
+                }
+            }
+            Err(error) => backend_error(error),
+        }
+    }
+
+    async fn set_cardinality(&self, args: &[Vec<u8>]) -> RespValue {
+        let Some(key) = exact_key(args) else {
+            return arity("scard");
+        };
+        match self.set_value(key).await {
+            Ok(value) => integer(value.map_or(0, |set| count_u64(set.len()))),
+            Err(error) => backend_error(error),
+        }
+    }
+
+    async fn set_is_member(&self, args: &[Vec<u8>]) -> RespValue {
+        if args.len() != 2 {
+            return arity("sismember");
+        }
+        let (Some(key), Some(member)) = (text(&args[0]), text(&args[1])) else {
+            return error("key and member must be UTF-8");
+        };
+        match self.set_value(key).await {
+            Ok(value) => RespValue::Integer(i64::from(value.is_some_and(|set| {
+                set.binary_search_by(|value| value.as_str().cmp(member))
+                    .is_ok()
+            }))),
+            Err(error) => backend_error(error),
+        }
+    }
+
+    async fn sorted_set_add(&self, args: &[Vec<u8>]) -> RespValue {
+        if args.len() < 3 || args.len().is_multiple_of(2) {
+            return arity("zadd");
+        }
+        let Some(key) = text(&args[0]) else {
+            return error("key must be UTF-8");
+        };
+        let mut entries = BTreeMap::new();
+        for pair in args[1..].chunks_exact(2) {
+            let (Some(score), Some(member)) = (finite_f64(&pair[0]), text(&pair[1])) else {
+                return error("score is not a finite floating point number");
+            };
+            entries.insert(member.to_owned(), score);
+        }
+        match self
+            .backend
+            .cache_collection_mutate(
+                &self.config.cache,
+                key,
+                CacheCollectionMutation::SortedSetAdd { entries },
+            )
+            .await
+        {
+            Ok(CacheCollectionResult::SortedSetAdd { added }) => integer(added),
+            Ok(_) => unexpected_collection_result(),
+            Err(error) => backend_error(error),
+        }
+    }
+
+    async fn sorted_set_remove(&self, args: &[Vec<u8>]) -> RespValue {
+        if args.len() < 2 {
+            return arity("zrem");
+        }
+        let Some(key) = text(&args[0]) else {
+            return error("key must be UTF-8");
+        };
+        let Some(members) = utf8_values(&args[1..]) else {
+            return error("sorted-set members must be UTF-8");
+        };
+        match self
+            .backend
+            .cache_collection_mutate(
+                &self.config.cache,
+                key,
+                CacheCollectionMutation::SortedSetRemove { members },
+            )
+            .await
+        {
+            Ok(CacheCollectionResult::SortedSetRemove { removed }) => integer(removed),
+            Ok(_) => unexpected_collection_result(),
+            Err(error) => backend_error(error),
+        }
+    }
+
+    async fn sorted_set_cardinality(&self, args: &[Vec<u8>]) -> RespValue {
+        let Some(key) = exact_key(args) else {
+            return arity("zcard");
+        };
+        match self.sorted_set_value(key).await {
+            Ok(value) => integer(value.map_or(0, |set| count_u64(set.len()))),
+            Err(error) => backend_error(error),
+        }
+    }
+
+    async fn sorted_set_score(&self, args: &[Vec<u8>]) -> RespValue {
+        if args.len() != 2 {
+            return arity("zscore");
+        }
+        let (Some(key), Some(member)) = (text(&args[0]), text(&args[1])) else {
+            return error("key and member must be UTF-8");
+        };
+        match self.sorted_set_value(key).await {
+            Ok(Some(set)) => set
+                .get(member)
+                .map_or(RespValue::Null, |score| bulk(&score.to_string())),
+            Ok(None) => RespValue::Null,
+            Err(error) => backend_error(error),
+        }
+    }
+
+    async fn sorted_set_range(&self, args: &[Vec<u8>]) -> RespValue {
+        if !(3..=4).contains(&args.len()) {
+            return arity("zrange");
+        }
+        let Some(key) = text(&args[0]) else {
+            return error("key must be UTF-8");
+        };
+        let (Some(start), Some(stop)) = (signed_i64(&args[1]), signed_i64(&args[2])) else {
+            return error("value is not an integer or out of range");
+        };
+        let with_scores = match args.get(3) {
+            None => false,
+            Some(option) if upper(option).as_deref() == Some("WITHSCORES") => true,
+            Some(_) => return error("syntax error"),
+        };
+        match self.sorted_set_value(key).await {
+            Ok(value) => {
+                let mut values = value.unwrap_or_default().into_iter().collect::<Vec<_>>();
+                values.sort_by(|left, right| {
+                    left.1
+                        .total_cmp(&right.1)
+                        .then_with(|| left.0.cmp(&right.0))
+                });
+                let Some((start, end)) = redis_range(values.len(), start, stop) else {
+                    return RespValue::Array(Vec::new());
+                };
+                let values = &values[start..end];
+                if with_scores && self.resp3 {
+                    RespValue::Array(
+                        values
+                            .iter()
+                            .map(|(member, score)| {
+                                RespValue::Array(vec![bulk(member), RespValue::Double(*score)])
+                            })
+                            .collect(),
+                    )
+                } else if with_scores {
+                    RespValue::Array(
+                        values
+                            .iter()
+                            .flat_map(|(member, score)| [bulk(member), bulk(&score.to_string())])
+                            .collect(),
+                    )
+                } else {
+                    RespValue::Array(values.iter().map(|(member, _)| bulk(member)).collect())
+                }
+            }
+            Err(error) => backend_error(error),
+        }
+    }
+
+    async fn hash_value(
+        &self,
+        key: &str,
+    ) -> Result<Option<BTreeMap<String, String>>, BackendError> {
+        match self.backend.cache_get(&self.config.cache, key).await? {
+            None => Ok(None),
+            Some(entry) => match entry.value {
+                CacheValue::Hash(value) => Ok(Some(value)),
+                _ => Err(BackendError::WrongType),
+            },
+        }
+    }
+
+    async fn list_value(&self, key: &str) -> Result<Option<Vec<String>>, BackendError> {
+        match self.backend.cache_get(&self.config.cache, key).await? {
+            None => Ok(None),
+            Some(entry) => match entry.value {
+                CacheValue::List(value) => Ok(Some(value)),
+                _ => Err(BackendError::WrongType),
+            },
+        }
+    }
+
+    async fn set_value(&self, key: &str) -> Result<Option<Vec<String>>, BackendError> {
+        match self.backend.cache_get(&self.config.cache, key).await? {
+            None => Ok(None),
+            Some(entry) => match entry.value {
+                CacheValue::Set(mut value) => {
+                    value.sort();
+                    value.dedup();
+                    Ok(Some(value))
+                }
+                _ => Err(BackendError::WrongType),
+            },
+        }
+    }
+
+    async fn sorted_set_value(
+        &self,
+        key: &str,
+    ) -> Result<Option<BTreeMap<String, f64>>, BackendError> {
+        match self.backend.cache_get(&self.config.cache, key).await? {
+            None => Ok(None),
+            Some(entry) => match entry.value {
+                CacheValue::SortedSet(value) => Ok(Some(value)),
+                _ => Err(BackendError::WrongType),
+            },
+        }
+    }
 }
 
 fn ping(args: &[Vec<u8>]) -> RespValue {
@@ -620,6 +1164,66 @@ fn positive_u64(value: &[u8]) -> Option<u64> {
 
 fn signed_i64(value: &[u8]) -> Option<i64> {
     text(value)?.parse().ok()
+}
+
+fn bounded_count(value: &[u8]) -> Option<u32> {
+    let maximum = u32::try_from(crate::MAX_REQUEST_ITEMS).ok()?;
+    text(value)?
+        .parse()
+        .ok()
+        .filter(|count| (1..=maximum).contains(count))
+}
+
+fn finite_f64(value: &[u8]) -> Option<f64> {
+    text(value)?
+        .parse()
+        .ok()
+        .filter(|value: &f64| value.is_finite())
+}
+
+fn utf8_values(values: &[Vec<u8>]) -> Option<Vec<String>> {
+    values
+        .iter()
+        .map(|value| text(value).map(str::to_owned))
+        .collect()
+}
+
+fn redis_index(length: usize, index: i64) -> Option<usize> {
+    let length = i128::try_from(length).ok()?;
+    let index = i128::from(index);
+    let normalized = if index < 0 { length + index } else { index };
+    (0..length)
+        .contains(&normalized)
+        .then(|| usize::try_from(normalized).ok())
+        .flatten()
+}
+
+fn redis_range(length: usize, start: i64, stop: i64) -> Option<(usize, usize)> {
+    if length == 0 {
+        return None;
+    }
+    let length = i128::try_from(length).ok()?;
+    let normalize = |index: i64| {
+        let index = i128::from(index);
+        if index < 0 { length + index } else { index }
+    };
+    let start = normalize(start).max(0);
+    let stop = normalize(stop).min(length - 1);
+    if start >= length || stop < 0 || start > stop {
+        return None;
+    }
+    Some((
+        usize::try_from(start).ok()?,
+        usize::try_from(stop + 1).ok()?,
+    ))
+}
+
+fn count_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn unexpected_collection_result() -> RespValue {
+    RespValue::Error("ERR Epoch compatibility backend returned an invalid result".into())
 }
 
 fn integer(value: u64) -> RespValue {
@@ -847,6 +1451,189 @@ mod tests {
         assert_eq!(
             session.execute(command(&[b"GET", b"name"])).await,
             RespValue::Bulk(b"epoch".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one table-like protocol test compares all collection families and ordering rules"
+    )]
+    async fn executes_atomic_hash_list_set_and_sorted_set_commands() {
+        let mut session = session(None);
+
+        assert_eq!(
+            session
+                .execute(command(&[
+                    b"HSET", b"profile", b"name", b"epoch", b"stage", b"beta",
+                ]))
+                .await,
+            RespValue::Integer(2)
+        );
+        assert_eq!(
+            session
+                .execute(command(&[b"HSET", b"profile", b"name", b"epoch-db"]))
+                .await,
+            RespValue::Integer(0)
+        );
+        assert_eq!(
+            session
+                .execute(command(&[b"HMGET", b"profile", b"name", b"missing"]))
+                .await,
+            RespValue::Array(vec![RespValue::Bulk(b"epoch-db".to_vec()), RespValue::Null])
+        );
+        assert_eq!(
+            session.execute(command(&[b"HLEN", b"profile"])).await,
+            RespValue::Integer(2)
+        );
+        assert_eq!(
+            session
+                .execute(command(&[b"HDEL", b"profile", b"stage", b"missing"]))
+                .await,
+            RespValue::Integer(1)
+        );
+
+        assert_eq!(
+            session
+                .execute(command(&[b"LPUSH", b"work", b"a", b"b"]))
+                .await,
+            RespValue::Integer(2)
+        );
+        assert_eq!(
+            session
+                .execute(command(&[b"RPUSH", b"work", b"c", b"d"]))
+                .await,
+            RespValue::Integer(4)
+        );
+        assert_eq!(
+            session
+                .execute(command(&[b"LRANGE", b"work", b"0", b"-1"]))
+                .await,
+            RespValue::Array(
+                [b"b", b"a", b"c", b"d"]
+                    .into_iter()
+                    .map(|value| RespValue::Bulk(value.to_vec()))
+                    .collect(),
+            )
+        );
+        assert_eq!(
+            session.execute(command(&[b"LPOP", b"work", b"2"])).await,
+            RespValue::Array(vec![
+                RespValue::Bulk(b"b".to_vec()),
+                RespValue::Bulk(b"a".to_vec()),
+            ])
+        );
+        assert_eq!(
+            session.execute(command(&[b"RPOP", b"work"])).await,
+            RespValue::Bulk(b"d".to_vec())
+        );
+        assert_eq!(
+            session.execute(command(&[b"LPOP", b"work"])).await,
+            RespValue::Bulk(b"c".to_vec())
+        );
+        assert_eq!(
+            session.execute(command(&[b"TYPE", b"work"])).await,
+            RespValue::Simple("none".into())
+        );
+
+        assert_eq!(
+            session
+                .execute(command(&[b"SADD", b"tags", b"z", b"a", b"z"]))
+                .await,
+            RespValue::Integer(2)
+        );
+        assert_eq!(
+            session.execute(command(&[b"SMEMBERS", b"tags"])).await,
+            RespValue::Array(vec![
+                RespValue::Bulk(b"a".to_vec()),
+                RespValue::Bulk(b"z".to_vec()),
+            ])
+        );
+        assert_eq!(
+            session
+                .execute(command(&[b"SREM", b"tags", b"a", b"missing"]))
+                .await,
+            RespValue::Integer(1)
+        );
+        assert_eq!(
+            session.execute(command(&[b"SCARD", b"tags"])).await,
+            RespValue::Integer(1)
+        );
+
+        assert_eq!(
+            session
+                .execute(command(&[
+                    b"ZADD", b"scores", b"2", b"b", b"1", b"a", b"1", b"c",
+                ]))
+                .await,
+            RespValue::Integer(3)
+        );
+        assert_eq!(
+            session
+                .execute(command(&[b"ZRANGE", b"scores", b"0", b"-1", b"WITHSCORES"]))
+                .await,
+            RespValue::Array(
+                [b"a", b"1", b"c", b"1", b"b", b"2"]
+                    .into_iter()
+                    .map(|value| RespValue::Bulk(value.to_vec()))
+                    .collect(),
+            )
+        );
+        assert_eq!(
+            session
+                .execute(command(&[b"ZSCORE", b"scores", b"b"]))
+                .await,
+            RespValue::Bulk(b"2".to_vec())
+        );
+        assert_eq!(
+            session
+                .execute(command(&[b"ZREM", b"scores", b"a", b"missing"]))
+                .await,
+            RespValue::Integer(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn collection_mutations_preserve_ttl_and_fail_wrong_type_without_mutation() {
+        let mut session = session(None);
+        assert_eq!(
+            session
+                .execute(command(&[b"HSET", b"expiring", b"a", b"one"]))
+                .await,
+            RespValue::Integer(1)
+        );
+        assert_eq!(
+            session
+                .execute(command(&[b"PEXPIRE", b"expiring", b"5000"]))
+                .await,
+            RespValue::Integer(1)
+        );
+        assert_eq!(
+            session
+                .execute(command(&[b"HSET", b"expiring", b"b", b"two"]))
+                .await,
+            RespValue::Integer(1)
+        );
+        assert!(matches!(
+            session.execute(command(&[b"PTTL", b"expiring"])).await,
+            RespValue::Integer(1..=5_000)
+        ));
+
+        assert_eq!(
+            session
+                .execute(command(&[b"SET", b"scalar", b"safe"]))
+                .await,
+            RespValue::Simple("OK".into())
+        );
+        assert!(matches!(
+            session
+                .execute(command(&[b"SADD", b"scalar", b"corruption"]))
+                .await,
+            RespValue::Error(message) if message.contains("WRONGTYPE")
+        ));
+        assert_eq!(
+            session.execute(command(&[b"GET", b"scalar"])).await,
+            RespValue::Bulk(b"safe".to_vec())
         );
     }
 }

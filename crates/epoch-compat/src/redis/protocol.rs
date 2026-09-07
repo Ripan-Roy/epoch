@@ -15,6 +15,7 @@ pub enum RespValue {
     Bulk(Vec<u8>),
     Null,
     Array(Vec<RespValue>),
+    Set(Vec<RespValue>),
     Map(Vec<(RespValue, RespValue)>),
     Boolean(bool),
     Double(f64),
@@ -154,6 +155,18 @@ fn encode_into(value: &RespValue, resp3: bool, output: &mut Vec<u8>) {
                 encode_into(value, resp3, output);
             }
         }
+        RespValue::Set(values) if resp3 => {
+            encode_aggregate(b'~', values.len(), output);
+            for value in values {
+                encode_into(value, resp3, output);
+            }
+        }
+        RespValue::Set(values) => {
+            encode_aggregate(b'*', values.len(), output);
+            for value in values {
+                encode_into(value, false, output);
+            }
+        }
         RespValue::Map(entries) if resp3 => {
             encode_aggregate(b'%', entries.len(), output);
             for (key, value) in entries {
@@ -258,5 +271,8 @@ mod tests {
             encode_response(&value, false),
             b"*2\r\n$6\r\nserver\r\n$5\r\nepoch\r\n"
         );
+        let set = RespValue::Set(vec![RespValue::Bulk(b"member".to_vec())]);
+        assert_eq!(encode_response(&set, true), b"~1\r\n$6\r\nmember\r\n");
+        assert_eq!(encode_response(&set, false), b"*1\r\n$6\r\nmember\r\n");
     }
 }

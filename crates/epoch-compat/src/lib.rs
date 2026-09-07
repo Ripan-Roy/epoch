@@ -12,8 +12,10 @@ pub mod scanner;
 pub mod test_support;
 
 pub use backend::{
-    BackendError, CacheEntry, CacheSetCondition, CacheSetOptions, CacheSetOutcome, CacheValue,
-    CompatibilityBackend, NativeHttpBackend, NativeHttpConfig, QueueDelivery, QueueMessage,
+    BackendError, CacheCollectionMutation, CacheCollectionResult, CacheEntry, CacheSetCondition,
+    CacheSetOptions, CacheSetOutcome, CacheStorageClass, CacheValue, CompatibilityBackend,
+    NativeHttpBackend, NativeHttpConfig, QueueDelivery, QueueMessage, StreamGroupIdentity,
+    StreamGroupMember, StreamGroupRejection, StreamGroupSession, StreamGroupSessionResult,
     StreamRecord,
 };
 

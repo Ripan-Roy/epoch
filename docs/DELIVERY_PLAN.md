@@ -544,6 +544,14 @@ Exit gate:
 - Comparative Redis/Kafka/RabbitMQ performance gates pass on matched semantics for the subset being advertised.
 - Two design partners complete cutover and rollback drills with checksums, lag, offsets, sampled reads, and retained reverse replication.
 
+The current compatibility-depth candidate completes a larger locally testable
+slice of this milestone: atomic Redis hash/list/set/sorted-set commands,
+replicated classic Kafka membership/assignment/claims/fenced commits, and
+process-shared AMQP direct/fanout/topic routing with native per-message TTL and
+mandatory returns. It does not complete M3: differential/fuzz/performance
+evidence, design-partner drills, the documented unsupported protocol families,
+and protected-branch execution remain promotion gates.
+
 ## M4 — Public beta managed service, months 15–20
 
 M4 adds the complete Event Bus beta, managed fleet experience, integration runtime, and hosted trust controls.
