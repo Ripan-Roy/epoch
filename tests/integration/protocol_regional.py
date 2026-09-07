@@ -23,7 +23,7 @@ sys.modules[MODULE_SPEC.name] = regional
 MODULE_SPEC.loader.exec_module(regional)
 
 RESULT_SCHEMA = "epoch.protocol-regional.evidence/v1"
-CLIENTS = {"redis": "8.8.2", "kafka": "4.3.1", "rabbitmq": "5.34.0"}
+CLIENTS = {"redis": "8.8.2", "kafka": "4.3.1", "rabbitmq": "5.35.0"}
 REDIS_IMAGE = (
     "redis@sha256:2b42a93631132be6df7a31f843b91ea8a907011e955b03395b7edbb13a20a99d"
 )
@@ -31,8 +31,11 @@ REQUIRED_CHECKS = (
     "released_client_lifecycle",
     "redis_binary_counter_ttl",
     "redis_atomic_set_get",
+    "redis_native_collections",
     "kafka_four_codecs_nullable_headers_checkpoint",
+    "kafka_native_consumer_groups",
     "amqp_confirm_nack_requeue",
+    "amqp_topic_ttl_mandatory_return",
     "native_rejection_not_acknowledged",
     "disconnected_lease_redelivery",
     "acknowledged_messages_stay_absent",
@@ -309,6 +312,16 @@ class ProtocolCampaign:
         assert self.redis("GET", "atomic-set") == b"second\n"
         ttl = int(self.redis("PTTL", "durable-binary"))
         assert 0 < ttl <= 600_000, ttl
+        assert self.redis("HGET", "durable-hash", "stage") == b"beta\n"
+        assert self.redis("HGET", "durable-hash", "verified") == b"true\n"
+        assert (
+            self.redis("LRANGE", "durable-list", "0", "-1") == b"first\nsecond\nthird\n"
+        )
+        assert self.redis("SCARD", "durable-set") == b"2\n"
+        assert self.redis("SISMEMBER", "durable-set", "reader") == b"1\n"
+        assert self.redis("ZSCORE", "durable-ranking", "grace") == b"0.5\n"
+        structured_ttl = int(self.redis("PTTL", "durable-hash"))
+        assert 0 < structured_ttl <= 600_000, structured_ttl
 
     def verify(self, phase: str = "verify") -> None:
         self.verify_redis()
@@ -330,6 +343,15 @@ class ProtocolCampaign:
         assert self.redis("SET", "atomic-set", "blocked", "NX", "GET") == b"first\n"
         assert self.redis("GET", "atomic-set") == b"first\n"
         assert self.redis("SET", "atomic-set", "second", "GET") == b"first\n"
+        assert self.redis("HSET", "durable-hash", "stage", "beta") == b"1\n"
+        assert self.redis("PEXPIRE", "durable-hash", "600000") == b"1\n"
+        assert self.redis("HSET", "durable-hash", "verified", "true") == b"1\n"
+        assert self.redis("RPUSH", "durable-list", "first", "second", "third") == b"3\n"
+        assert self.redis("SADD", "durable-set", "reader", "writer", "reader") == b"2\n"
+        assert (
+            self.redis("ZADD", "durable-ranking", "1.5", "ada", "0.5", "grace")
+            == b"2\n"
+        )
         self.java("seed")
         self.verify()
         faults: list[dict[str, Any]] = []

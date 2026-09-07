@@ -75,6 +75,13 @@ transactions, broader AMQP exchanges/1.0, MQTT, differential testing, fuzzing,
 combined real-cluster certification, and performance evidence remain separate
 promotion gates.
 
+[ADR-0043](0043-lossless-protocol-recovery-contract.md) adds lossless records and
+the combined real-client recovery gate. [ADR-0044](0044-native-backed-protocol-state.md)
+extends the advertised subset with native-backed Redis structures and Kafka
+groups plus explicitly process-scoped AMQP direct/fanout/topic topology. Those
+later decisions replace the initial feature exclusions above without expanding
+the remaining unsupported boundaries.
+
 ## Rejected alternatives
 
 - Embedding protocol parsers in tablets was rejected because malformed network

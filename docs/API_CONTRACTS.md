@@ -1409,8 +1409,12 @@ TLS/mTLS, OIDC authentication metadata, typed `google.rpc.Status` details,
 public native mutation-status lookup, native bidirectional streaming and
 connection-scoped credit, a stable Rust gRPC regional administration
 implementation, long-running operations, metrics on the reserved port,
-protocol gateways, full Go/Java/Python generated SDK parity, and compatibility
-negotiation remain unimplemented. The experimental Stream,
+full Go/Java/Python generated SDK parity, and native compatibility negotiation
+remain unimplemented. A separate Rust compatibility gateway exposes the exact
+RESP2/RESP3, Kafka, and AMQP 0-9-1 subsets in the public compatibility matrix
+through authenticated, fenced regional Cache, Stream, and Queue operations. Its
+classic Kafka group state is replicated by Stream; its AMQP exchange/binding
+topology is process-scoped and is not a durable management API. The experimental Stream,
 Queue, Cache, and Event Bus tablets expose only the mutation/read surfaces
 described above. Typed Go, Java, and Python clients cover both provisional
 standalone routes and the versioned regional Stream, Queue, Cache, and Event Bus

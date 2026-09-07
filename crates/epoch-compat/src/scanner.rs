@@ -183,13 +183,14 @@ fn assess_redis(tokens: &[String]) -> (SupportLevel, &'static str) {
     match feature {
         "hello" | "auth" | "ping" | "echo" | "quit" | "select" | "client" | "command" | "get"
         | "set" | "del" | "exists" | "mget" | "mset" | "incr" | "decr" | "incrby" | "decrby"
-        | "ttl" | "pttl" | "expire" | "pexpire" | "persist" | "type" => {
+        | "ttl" | "pttl" | "expire" | "pexpire" | "persist" | "type" | "hset" | "hget"
+        | "hmget" | "hdel" | "hexists" | "hlen" | "hgetall" | "lpush" | "rpush" | "lpop"
+        | "rpop" | "llen" | "lrange" | "lindex" | "sadd" | "srem" | "smembers" | "scard"
+        | "sismember" | "zadd" | "zrem" | "zcard" | "zscore" | "zrange" => {
             (SupportLevel::Supported, "implemented in the RESP gateway")
         }
-        "hset" | "hget" | "hdel" | "hgetall" | "lpush" | "rpush" | "lpop" | "rpop" | "sadd"
-        | "srem" | "smembers" | "zadd" | "zrem" | "zrange" | "multi" | "exec" | "watch"
-        | "eval" | "evalsha" | "publish" | "subscribe" | "xadd" | "xread" | "xgroup" | "blpop"
-        | "brpop" => (
+        "multi" | "exec" | "watch" | "eval" | "evalsha" | "publish" | "subscribe" | "xadd"
+        | "xread" | "xgroup" | "blpop" | "brpop" => (
             SupportLevel::Unsupported,
             "known Redis feature outside the published beta subset",
         ),
@@ -208,7 +209,9 @@ fn assess_kafka(tokens: &[String]) -> (SupportLevel, &'static str) {
         "listoffsets" | "offsetfetch" => Some(1..=7),
         "metadata" => Some(1..=12),
         "offsetcommit" => Some(2..=9),
-        "findcoordinator" | "apiversions" => Some(0..=4),
+        "findcoordinator" | "apiversions" | "heartbeat" => Some(0..=4),
+        "joingroup" => Some(0..=9),
+        "syncgroup" | "leavegroup" => Some(0..=5),
         _ => None,
     };
     if let Some(range) = supported_range {
@@ -237,9 +240,9 @@ fn assess_kafka(tokens: &[String]) -> (SupportLevel, &'static str) {
         };
     }
     match feature {
-        "joingroup" | "syncgroup" | "heartbeat" | "leavegroup" | "createtopics"
-        | "deletetopics" | "initproducerid" | "addpartitionstotxn" | "addoffsetstotxn"
-        | "endtxn" | "txnoffsetcommit" | "saslauthenticate" | "saslhandshake" => (
+        "createtopics" | "deletetopics" | "initproducerid" | "addpartitionstotxn"
+        | "addoffsetstotxn" | "endtxn" | "txnoffsetcommit" | "saslauthenticate"
+        | "saslhandshake" => (
             SupportLevel::Unsupported,
             "known Kafka API outside the published beta subset",
         ),
@@ -255,7 +258,7 @@ fn assess_amqp(tokens: &[String]) -> (SupportLevel, &'static str) {
     match feature {
         "connection.open" | "connection.close" | "channel.open" | "channel.close" | "basic.qos"
         | "confirm.select" | "basic.get" | "basic.ack" | "basic.reject" | "basic.nack"
-        | "basic.cancel" => (
+        | "basic.cancel" | "exchange.delete" | "queue.unbind" => (
             SupportLevel::Supported,
             "implemented in the AMQP 0-9-1 gateway",
         ),
@@ -266,7 +269,7 @@ fn assess_amqp(tokens: &[String]) -> (SupportLevel, &'static str) {
             )
         }
         "tx.select" | "tx.commit" | "tx.rollback" | "queue.delete" | "queue.purge"
-        | "exchange.delete" | "basic.recover" => (
+        | "basic.recover" => (
             SupportLevel::Unsupported,
             "known AMQP method outside the published beta subset",
         ),
@@ -292,9 +295,9 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(report.supported, 2);
+        assert_eq!(report.supported, 3);
         assert_eq!(report.partial, 1);
-        assert_eq!(report.unsupported, 3);
+        assert_eq!(report.unsupported, 2);
         assert_eq!(report.unknown, 1);
         assert!(report.fails_at(SupportLevel::Unsupported));
     }
@@ -307,7 +310,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.assessments[0].line, 3);
-        assert_eq!(report.assessments[1].level, SupportLevel::Unsupported);
+        assert_eq!(report.assessments[1].level, SupportLevel::Supported);
     }
 
     #[test]

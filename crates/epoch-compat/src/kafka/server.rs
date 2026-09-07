@@ -4,17 +4,21 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use flate2::read::MultiGzDecoder;
 use kafka_protocol::{
     ResponseError,
     messages::{
-        ApiKey, ApiVersionsResponse, FetchResponse, FindCoordinatorResponse, ListOffsetsResponse,
-        MetadataResponse, OffsetCommitResponse, OffsetFetchResponse, ProduceResponse, RequestKind,
-        ResponseHeader, ResponseKind, TopicName,
+        ApiKey, ApiVersionsResponse, FetchResponse, FindCoordinatorResponse, HeartbeatResponse,
+        JoinGroupResponse, LeaveGroupResponse, ListOffsetsResponse, MetadataResponse,
+        OffsetCommitResponse, OffsetFetchResponse, ProduceResponse, RequestKind, ResponseHeader,
+        ResponseKind, SyncGroupResponse, TopicName,
         api_versions_response::ApiVersion,
         fetch_response::{FetchableTopicResponse, PartitionData},
         find_coordinator_response::Coordinator,
+        join_group_response::JoinGroupResponseMember,
+        leave_group_response::MemberResponse,
         list_offsets_response::{ListOffsetsPartitionResponse, ListOffsetsTopicResponse},
         metadata_response::{
             MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic,
@@ -31,7 +35,10 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 
-use crate::{CompatibilityBackend, MAX_FRAME_BYTES, MAX_MESSAGE_BYTES, backend::BackendError};
+use crate::{
+    CompatibilityBackend, MAX_FRAME_BYTES, MAX_MESSAGE_BYTES,
+    backend::{BackendError, StreamGroupIdentity, StreamGroupRejection, StreamGroupSessionResult},
+};
 
 use super::records::{decode_records, encode_records};
 
@@ -47,6 +54,10 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::OffsetCommit, 2, 9),
     (ApiKey::OffsetFetch, 1, 7),
     (ApiKey::FindCoordinator, 0, 4),
+    (ApiKey::JoinGroup, 0, 9),
+    (ApiKey::SyncGroup, 0, 5),
+    (ApiKey::Heartbeat, 0, 4),
+    (ApiKey::LeaveGroup, 0, 5),
     (ApiKey::ApiVersions, 0, 4),
 ];
 
@@ -200,6 +211,22 @@ async fn dispatch<B: CompatibilityBackend>(
             ResponseKind::FindCoordinator(find_coordinator_response(request, config, version)),
             true,
         )),
+        RequestKind::JoinGroup(request) => Ok((
+            ResponseKind::JoinGroup(join_group_response(request, backend, version).await),
+            true,
+        )),
+        RequestKind::SyncGroup(request) => Ok((
+            ResponseKind::SyncGroup(sync_group_response(request, backend, version).await),
+            true,
+        )),
+        RequestKind::Heartbeat(request) => Ok((
+            ResponseKind::Heartbeat(heartbeat_response(request, backend).await),
+            true,
+        )),
+        RequestKind::LeaveGroup(request) => Ok((
+            ResponseKind::LeaveGroup(leave_group_response(request, backend, version).await),
+            true,
+        )),
         RequestKind::OffsetCommit(request) => Ok((
             ResponseKind::OffsetCommit(offset_commit_response(request, backend).await),
             true,
@@ -257,37 +284,513 @@ fn find_coordinator_response(
     response
 }
 
+async fn join_group_response<B: CompatibilityBackend>(
+    request: kafka_protocol::messages::JoinGroupRequest,
+    backend: &B,
+    version: i16,
+) -> JoinGroupResponse {
+    let group = request.group_id.to_string();
+    let requested_member = request.member_id.to_string();
+    if request.group_instance_id.is_some()
+        || request.protocol_type.as_str() != "consumer"
+        || request.protocols.is_empty()
+    {
+        return join_group_failure(ResponseError::InconsistentGroupProtocol, &requested_member);
+    }
+    let Some(protocol) = request
+        .protocols
+        .iter()
+        .find(|protocol| protocol.name.as_str() == "range")
+    else {
+        return join_group_failure(ResponseError::InconsistentGroupProtocol, &requested_member);
+    };
+    let Ok(stream) = decode_consumer_subscription(&protocol.metadata) else {
+        return join_group_failure(ResponseError::InvalidRequest, &requested_member);
+    };
+    let member_id = if requested_member.is_empty() {
+        match kafka_member_id(&stream) {
+            Ok(member_id) => member_id,
+            Err(_) => return join_group_failure(ResponseError::InvalidRequest, ""),
+        }
+    } else {
+        let Ok(encoded_stream) = stream_from_member_id(&requested_member) else {
+            return join_group_failure(ResponseError::UnknownMemberId, &requested_member);
+        };
+        if encoded_stream != stream {
+            return join_group_failure(ResponseError::InconsistentGroupProtocol, &requested_member);
+        }
+        requested_member
+    };
+    if version >= 4 && request.member_id.is_empty() {
+        return join_group_failure(ResponseError::MemberIdRequired, &member_id);
+    }
+    let timeout = u64::try_from(request.session_timeout_ms)
+        .ok()
+        .filter(|timeout| (1_000..=300_000).contains(timeout));
+    let Some(timeout) = timeout else {
+        return join_group_failure(ResponseError::InvalidSessionTimeout, &member_id);
+    };
+    match backend
+        .stream_group_join(&stream, &group, &member_id, timeout)
+        .await
+    {
+        Ok(result) => joined_group_response(&result, &stream, &member_id),
+        Err(error) => join_group_failure(group_backend_error(&error), &member_id),
+    }
+}
+
+fn joined_group_response(
+    result: &StreamGroupSessionResult,
+    stream: &str,
+    member_id: &str,
+) -> JoinGroupResponse {
+    if let Some(rejection) = result.rejection {
+        return join_group_failure(group_rejection_error(rejection), member_id);
+    }
+    let Ok(generation) = i32::try_from(result.session.generation) else {
+        return join_group_failure(ResponseError::UnknownServerError, member_id);
+    };
+    let Some(leader) = result
+        .session
+        .members
+        .iter()
+        .map(|member| member.member_id.as_str())
+        .min()
+    else {
+        return join_group_failure(ResponseError::UnknownServerError, member_id);
+    };
+    let members = if member_id == leader {
+        result
+            .session
+            .members
+            .iter()
+            .map(|member| {
+                JoinGroupResponseMember::default()
+                    .with_member_id(StrBytes::from_string(member.member_id.clone()))
+                    .with_metadata(encode_consumer_subscription(stream))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    JoinGroupResponse::default()
+        .with_error_code(0)
+        .with_generation_id(generation)
+        .with_protocol_type(Some(StrBytes::from_static_str("consumer")))
+        .with_protocol_name(Some(StrBytes::from_static_str("range")))
+        .with_leader(StrBytes::from_string(leader.to_owned()))
+        .with_member_id(StrBytes::from_string(member_id.to_owned()))
+        .with_members(members)
+}
+
+fn join_group_failure(error: ResponseError, member_id: &str) -> JoinGroupResponse {
+    JoinGroupResponse::default()
+        .with_error_code(error.code())
+        .with_generation_id(-1)
+        .with_protocol_type(Some(StrBytes::from_static_str("consumer")))
+        .with_protocol_name(Some(StrBytes::from_static_str("range")))
+        .with_member_id(StrBytes::from_string(member_id.to_owned()))
+}
+
+async fn sync_group_response<B: CompatibilityBackend>(
+    request: kafka_protocol::messages::SyncGroupRequest,
+    backend: &B,
+    version: i16,
+) -> SyncGroupResponse {
+    if request.group_instance_id.is_some()
+        || (version >= 5
+            && (request.protocol_type.as_ref().map(StrBytes::as_str) != Some("consumer")
+                || request.protocol_name.as_ref().map(StrBytes::as_str) != Some("range")))
+    {
+        return sync_group_failure(ResponseError::InconsistentGroupProtocol);
+    }
+    let member_id = request.member_id.to_string();
+    let Ok(stream) = stream_from_member_id(&member_id) else {
+        return sync_group_failure(ResponseError::UnknownMemberId);
+    };
+    let Some(generation) = u64::try_from(request.generation_id)
+        .ok()
+        .filter(|generation| *generation > 0)
+    else {
+        return sync_group_failure(ResponseError::IllegalGeneration);
+    };
+    let group = request.group_id.to_string();
+    let result = match backend
+        .stream_group_heartbeat(&stream, &group, &member_id, generation)
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => return sync_group_failure(group_backend_error(&error)),
+    };
+    if let Some(rejection) = result.rejection {
+        return sync_group_failure(group_rejection_error(rejection));
+    }
+    if let Err(error) = backend
+        .stream_group_claim(
+            &stream,
+            &group,
+            &member_id,
+            generation,
+            &result.session.assigned_partitions,
+        )
+        .await
+    {
+        return sync_group_failure(group_backend_error(&error));
+    }
+    let Ok(assignment) = encode_consumer_assignment(&stream, &result.session.assigned_partitions)
+    else {
+        return sync_group_failure(ResponseError::InvalidRequest);
+    };
+    SyncGroupResponse::default()
+        .with_error_code(0)
+        .with_protocol_type(Some(StrBytes::from_static_str("consumer")))
+        .with_protocol_name(Some(StrBytes::from_static_str("range")))
+        .with_assignment(assignment)
+}
+
+fn sync_group_failure(error: ResponseError) -> SyncGroupResponse {
+    SyncGroupResponse::default()
+        .with_error_code(error.code())
+        .with_protocol_type(Some(StrBytes::from_static_str("consumer")))
+        .with_protocol_name(Some(StrBytes::from_static_str("range")))
+}
+
+async fn heartbeat_response<B: CompatibilityBackend>(
+    request: kafka_protocol::messages::HeartbeatRequest,
+    backend: &B,
+) -> HeartbeatResponse {
+    if request.group_instance_id.is_some() {
+        return HeartbeatResponse::default().with_error_code(ResponseError::InvalidRequest.code());
+    }
+    let member_id = request.member_id.to_string();
+    let Ok(stream) = stream_from_member_id(&member_id) else {
+        return HeartbeatResponse::default().with_error_code(ResponseError::UnknownMemberId.code());
+    };
+    let Some(generation) = u64::try_from(request.generation_id)
+        .ok()
+        .filter(|generation| *generation > 0)
+    else {
+        return HeartbeatResponse::default()
+            .with_error_code(ResponseError::IllegalGeneration.code());
+    };
+    let error = match backend
+        .stream_group_heartbeat(
+            &stream,
+            &request.group_id.to_string(),
+            &member_id,
+            generation,
+        )
+        .await
+    {
+        Ok(result) => result.rejection.map(group_rejection_error),
+        Err(error) => Some(group_backend_error(&error)),
+    };
+    HeartbeatResponse::default().with_error_code(error.as_ref().map_or(0, ResponseError::code))
+}
+
+async fn leave_group_response<B: CompatibilityBackend>(
+    request: kafka_protocol::messages::LeaveGroupRequest,
+    backend: &B,
+    version: i16,
+) -> LeaveGroupResponse {
+    let group = request.group_id.to_string();
+    if version <= 2 {
+        let error = leave_group_member(backend, &group, request.member_id.as_str()).await;
+        return LeaveGroupResponse::default()
+            .with_error_code(error.as_ref().map_or(0, ResponseError::code));
+    }
+    let mut members = Vec::with_capacity(request.members.len());
+    for member in request.members {
+        let error = if member.group_instance_id.is_some() {
+            Some(ResponseError::InvalidRequest)
+        } else {
+            leave_group_member(backend, &group, member.member_id.as_str()).await
+        };
+        members.push(
+            MemberResponse::default()
+                .with_member_id(member.member_id)
+                .with_group_instance_id(member.group_instance_id)
+                .with_error_code(error.as_ref().map_or(0, ResponseError::code)),
+        );
+    }
+    LeaveGroupResponse::default()
+        .with_error_code(0)
+        .with_members(members)
+}
+
+async fn leave_group_member<B: CompatibilityBackend>(
+    backend: &B,
+    group: &str,
+    member_id: &str,
+) -> Option<ResponseError> {
+    let Ok(stream) = stream_from_member_id(member_id) else {
+        return Some(ResponseError::UnknownMemberId);
+    };
+    let session = match backend
+        .stream_group_observe(&stream, group, member_id)
+        .await
+    {
+        Ok(Some(session)) => session,
+        Ok(None) => return Some(ResponseError::UnknownMemberId),
+        Err(error) => return Some(group_backend_error(&error)),
+    };
+    if !session
+        .members
+        .iter()
+        .any(|member| member.member_id == member_id)
+    {
+        return Some(ResponseError::UnknownMemberId);
+    }
+    match backend
+        .stream_group_leave(&stream, group, member_id, session.generation)
+        .await
+    {
+        Ok(result) => result.rejection.map(group_rejection_error),
+        Err(error) => Some(group_backend_error(&error)),
+    }
+}
+
+const KAFKA_MEMBER_PREFIX: &str = "epoch";
+const MAX_CONSUMER_PROTOCOL_ITEMS: usize = 1_024;
+
+fn kafka_member_id(stream: &str) -> Result<String> {
+    let encoded_stream = URL_SAFE_NO_PAD.encode(stream.as_bytes());
+    let member_id = format!(
+        "{KAFKA_MEMBER_PREFIX}.{encoded_stream}.{}",
+        uuid::Uuid::now_v7().simple()
+    );
+    if member_id.len() > 256 {
+        bail!("Kafka member ID exceeds the native limit");
+    }
+    Ok(member_id)
+}
+
+fn stream_from_member_id(member_id: &str) -> Result<String> {
+    let mut parts = member_id.split('.');
+    let prefix = parts.next();
+    let stream = parts.next();
+    let identity = parts.next();
+    if prefix != Some(KAFKA_MEMBER_PREFIX)
+        || stream.is_none()
+        || identity.is_none()
+        || parts.next().is_some()
+        || uuid::Uuid::parse_str(identity.unwrap_or_default()).is_err()
+    {
+        bail!("invalid Epoch Kafka member ID");
+    }
+    let stream = URL_SAFE_NO_PAD
+        .decode(stream.unwrap_or_default())
+        .context("invalid stream encoding")?;
+    let stream = String::from_utf8(stream).context("stream is not UTF-8")?;
+    if stream.is_empty() {
+        bail!("stream is empty");
+    }
+    Ok(stream)
+}
+
+fn decode_consumer_subscription(metadata: &Bytes) -> Result<String> {
+    let mut input = metadata.clone();
+    let version = read_i16(&mut input)?;
+    if !(0..=3).contains(&version) {
+        bail!("unsupported consumer subscription version");
+    }
+    let topic_count = read_count(&mut input)?;
+    if topic_count != 1 {
+        bail!("Epoch Kafka groups require exactly one topic");
+    }
+    let stream = read_string(&mut input)?;
+    skip_nullable_bytes(&mut input)?;
+    if version >= 1 {
+        for _ in 0..read_count(&mut input)? {
+            let _topic = read_string(&mut input)?;
+            for _ in 0..read_count(&mut input)? {
+                let _partition = read_i32(&mut input)?;
+            }
+        }
+    }
+    if version >= 2 {
+        let _generation = read_i32(&mut input)?;
+    }
+    if version >= 3 {
+        let _rack = read_nullable_string(&mut input)?;
+    }
+    if input.has_remaining() {
+        bail!("consumer subscription has trailing bytes");
+    }
+    Ok(stream)
+}
+
+fn encode_consumer_subscription(stream: &str) -> Bytes {
+    let mut output = BytesMut::new();
+    output.put_i16(0);
+    output.put_i32(1);
+    put_string(&mut output, stream);
+    output.put_i32(-1);
+    output.freeze()
+}
+
+fn encode_consumer_assignment(stream: &str, partitions: &[u32]) -> Result<Bytes> {
+    let mut output = BytesMut::new();
+    output.put_i16(0);
+    output.put_i32(1);
+    put_string(&mut output, stream);
+    output.put_i32(i32::try_from(partitions.len()).context("too many assigned partitions")?);
+    for partition in partitions {
+        output.put_i32(i32::try_from(*partition).context("partition exceeds i32")?);
+    }
+    output.put_i32(-1);
+    Ok(output.freeze())
+}
+
+fn put_string(output: &mut BytesMut, value: &str) {
+    output.put_i16(i16::try_from(value.len()).unwrap_or(i16::MAX));
+    output.extend_from_slice(value.as_bytes());
+}
+
+fn read_i16(input: &mut Bytes) -> Result<i16> {
+    if input.remaining() < 2 {
+        bail!("consumer protocol is truncated");
+    }
+    Ok(input.get_i16())
+}
+
+fn read_i32(input: &mut Bytes) -> Result<i32> {
+    if input.remaining() < 4 {
+        bail!("consumer protocol is truncated");
+    }
+    Ok(input.get_i32())
+}
+
+fn read_count(input: &mut Bytes) -> Result<usize> {
+    usize::try_from(read_i32(input)?)
+        .ok()
+        .filter(|count| *count <= MAX_CONSUMER_PROTOCOL_ITEMS)
+        .context("consumer protocol item count is invalid")
+}
+
+fn read_string(input: &mut Bytes) -> Result<String> {
+    let length = usize::try_from(read_i16(input)?)
+        .ok()
+        .filter(|length| *length <= input.remaining())
+        .context("consumer protocol string length is invalid")?;
+    String::from_utf8(input.copy_to_bytes(length).to_vec())
+        .context("consumer protocol is not UTF-8")
+}
+
+fn read_nullable_string(input: &mut Bytes) -> Result<Option<String>> {
+    let length = read_i16(input)?;
+    if length == -1 {
+        return Ok(None);
+    }
+    let length = usize::try_from(length)
+        .ok()
+        .filter(|length| *length <= input.remaining())
+        .context("consumer protocol nullable string length is invalid")?;
+    String::from_utf8(input.copy_to_bytes(length).to_vec())
+        .map(Some)
+        .context("consumer protocol is not UTF-8")
+}
+
+fn skip_nullable_bytes(input: &mut Bytes) -> Result<()> {
+    let length = read_i32(input)?;
+    if length == -1 {
+        return Ok(());
+    }
+    let length = usize::try_from(length)
+        .ok()
+        .filter(|length| *length <= input.remaining())
+        .context("consumer protocol byte length is invalid")?;
+    input.advance(length);
+    Ok(())
+}
+
+const fn group_rejection_error(rejection: StreamGroupRejection) -> ResponseError {
+    match rejection {
+        StreamGroupRejection::UnknownGroup | StreamGroupRejection::UnknownMember => {
+            ResponseError::UnknownMemberId
+        }
+        StreamGroupRejection::StaleGeneration => ResponseError::IllegalGeneration,
+        StreamGroupRejection::CapacityReached => ResponseError::GroupMaxSizeReached,
+        StreamGroupRejection::Invalid => ResponseError::InvalidRequest,
+    }
+}
+
+fn group_backend_error(error: &BackendError) -> ResponseError {
+    match error {
+        BackendError::NotFound => ResponseError::UnknownTopicOrPartition,
+        BackendError::Conflict => ResponseError::RebalanceInProgress,
+        BackendError::Unavailable(_) => ResponseError::CoordinatorNotAvailable,
+        BackendError::WrongType | BackendError::Invalid(_) => ResponseError::InvalidRequest,
+    }
+}
+
 async fn offset_commit_response<B: CompatibilityBackend>(
     request: kafka_protocol::messages::OffsetCommitRequest,
     backend: &B,
 ) -> OffsetCommitResponse {
     let group = request.group_id.to_string();
+    let member_id = request.member_id.to_string();
+    let identity = if request.generation_id_or_member_epoch < 0 && member_id.is_empty() {
+        Ok(None)
+    } else if let Some(generation) = u64::try_from(request.generation_id_or_member_epoch)
+        .ok()
+        .filter(|generation| *generation > 0)
+    {
+        stream_from_member_id(&member_id).map(|stream| {
+            Some((
+                stream,
+                StreamGroupIdentity {
+                    member_id: member_id.clone(),
+                    generation,
+                },
+            ))
+        })
+    } else {
+        Err(anyhow::anyhow!("invalid Kafka group identity"))
+    };
     let mut topics = Vec::with_capacity(request.topics.len());
     for topic in request.topics {
         let mut partitions = Vec::with_capacity(topic.partitions.len());
         for partition in topic.partitions {
-            let result = match (
+            let result: Result<(), ResponseError> = match (
                 u32::try_from(partition.partition_index),
                 u64::try_from(partition.committed_offset),
             ) {
                 (Ok(partition_id), Ok(offset)) => {
-                    backend
-                        .stream_commit_offset(&group, topic.name.as_str(), partition_id, offset)
-                        .await
+                    let commit_identity = match &identity {
+                        Ok(None) => Ok(None),
+                        Ok(Some((stream, identity))) if stream == topic.name.as_str() => {
+                            Ok(Some(identity))
+                        }
+                        Ok(Some(_)) => Err(ResponseError::UnknownMemberId),
+                        Err(_) => Err(ResponseError::IllegalGeneration),
+                    };
+                    match commit_identity {
+                        Ok(identity) => backend
+                            .stream_commit_offset(
+                                &group,
+                                topic.name.as_str(),
+                                partition_id,
+                                offset,
+                                identity,
+                            )
+                            .await
+                            .map_err(|error| {
+                                if identity.is_some() && matches!(error, BackendError::Conflict) {
+                                    ResponseError::IllegalGeneration
+                                } else {
+                                    kafka_error(&error)
+                                }
+                            }),
+                        Err(error) => Err(error),
+                    }
                 }
-                _ => Err(BackendError::Invalid(
-                    "negative Kafka partition or committed offset".into(),
-                )),
+                _ => Err(ResponseError::InvalidRequest),
             };
             partitions.push(
                 OffsetCommitResponsePartition::default()
                     .with_partition_index(partition.partition_index)
-                    .with_error_code(
-                        result
-                            .err()
-                            .as_ref()
-                            .map_or(0, |error| kafka_error(error).code()),
-                    ),
+                    .with_error_code(result.err().as_ref().map_or(0, ResponseError::code)),
             );
         }
         topics.push(
@@ -711,8 +1214,11 @@ mod tests {
     use crate::test_support::MemoryBackend;
     use kafka_protocol::{
         messages::{
-            ApiVersionsRequest, FindCoordinatorRequest, GroupId, OffsetCommitRequest,
-            OffsetFetchRequest, RequestHeader,
+            ApiVersionsRequest, FindCoordinatorRequest, GroupId, HeartbeatRequest,
+            JoinGroupRequest, LeaveGroupRequest, OffsetCommitRequest, OffsetFetchRequest,
+            RequestHeader, SyncGroupRequest,
+            join_group_request::JoinGroupRequestProtocol,
+            leave_group_request::MemberIdentity,
             offset_commit_request::{OffsetCommitRequestPartition, OffsetCommitRequestTopic},
             offset_fetch_request::OffsetFetchRequestTopic,
         },
@@ -994,5 +1500,198 @@ mod tests {
         let fetched = offset_fetch_response(fetch, &backend).await;
         assert_eq!(fetched.topics[0].partitions[0].committed_offset, 73);
         assert_eq!(fetched.topics[0].partitions[1].committed_offset, -1);
+    }
+
+    #[tokio::test]
+    async fn classic_consumer_group_uses_native_generation_fences_and_assigns_every_partition() {
+        let backend = MemoryBackend::with_resources("sessions", "events", 7, "jobs");
+        let initial = join_request("", "events");
+        let identified = join_group_response(initial, &backend, 9).await;
+        assert_eq!(
+            identified.error_code,
+            ResponseError::MemberIdRequired.code()
+        );
+        let first_member = identified.member_id.to_string();
+
+        let first_join =
+            join_group_response(join_request(&first_member, "events"), &backend, 9).await;
+        assert_eq!(first_join.error_code, 0);
+        assert_eq!(first_join.generation_id, 1);
+
+        let second_identity = join_group_response(join_request("", "events"), &backend, 9).await;
+        let second_member = second_identity.member_id.to_string();
+        let second_join =
+            join_group_response(join_request(&second_member, "events"), &backend, 9).await;
+        assert_eq!(second_join.error_code, 0);
+        assert_eq!(second_join.generation_id, 2);
+
+        let first_rejoin =
+            join_group_response(join_request(&first_member, "events"), &backend, 9).await;
+        assert_eq!(first_rejoin.error_code, 0);
+        assert_eq!(first_rejoin.generation_id, 2);
+
+        let first_sync = sync_group_response(sync_request(&first_member, 2), &backend, 5).await;
+        let second_sync = sync_group_response(sync_request(&second_member, 2), &backend, 5).await;
+        assert_eq!(first_sync.error_code, 0);
+        assert_eq!(second_sync.error_code, 0);
+        let (first_stream, first_partitions) = decode_assignment(first_sync.assignment).unwrap();
+        let (second_stream, second_partitions) = decode_assignment(second_sync.assignment).unwrap();
+        assert_eq!(first_stream, "events");
+        assert_eq!(second_stream, "events");
+        assert!(
+            first_partitions
+                .iter()
+                .all(|item| !second_partitions.contains(item))
+        );
+        let first_owned = first_partitions[0];
+        let committed = offset_commit_response(
+            group_offset_commit(&first_member, 2, first_owned, 0),
+            &backend,
+        )
+        .await;
+        assert_eq!(committed.topics[0].partitions[0].error_code, 0);
+        let stale_commit = offset_commit_response(
+            group_offset_commit(&first_member, 1, first_owned, 0),
+            &backend,
+        )
+        .await;
+        assert_eq!(
+            stale_commit.topics[0].partitions[0].error_code,
+            ResponseError::IllegalGeneration.code()
+        );
+        let mut assigned = first_partitions;
+        assigned.extend(second_partitions);
+        assigned.sort_unstable();
+        assert_eq!(assigned, (0..7).collect::<Vec<_>>());
+
+        let stale = heartbeat_response(heartbeat_request(&first_member, 1), &backend).await;
+        assert_eq!(stale.error_code, ResponseError::IllegalGeneration.code());
+        let current = heartbeat_response(heartbeat_request(&first_member, 2), &backend).await;
+        assert_eq!(current.error_code, 0);
+
+        let leave = LeaveGroupRequest::default()
+            .with_group_id(GroupId(StrBytes::from_static_str("billing")))
+            .with_members(vec![
+                MemberIdentity::default()
+                    .with_member_id(StrBytes::from_string(second_member.clone())),
+            ]);
+        let left = leave_group_response(leave, &backend, 5).await;
+        assert_eq!(left.error_code, 0);
+        assert_eq!(left.members[0].error_code, 0);
+        let departed = heartbeat_response(heartbeat_request(&second_member, 3), &backend).await;
+        assert_eq!(departed.error_code, ResponseError::UnknownMemberId.code());
+    }
+
+    #[tokio::test]
+    async fn consumer_groups_reject_multi_topic_and_non_range_subscriptions_without_mutation() {
+        let backend = MemoryBackend::with_resources("sessions", "events", 2, "jobs");
+        let mut multiple = encode_consumer_subscription("events").to_vec();
+        multiple[2..6].copy_from_slice(&2_i32.to_be_bytes());
+        let invalid = JoinGroupRequest::default()
+            .with_group_id(GroupId(StrBytes::from_static_str("billing")))
+            .with_session_timeout_ms(30_000)
+            .with_rebalance_timeout_ms(30_000)
+            .with_protocol_type(StrBytes::from_static_str("consumer"))
+            .with_protocols(vec![
+                JoinGroupRequestProtocol::default()
+                    .with_name(StrBytes::from_static_str("range"))
+                    .with_metadata(Bytes::from(multiple)),
+            ]);
+        assert_eq!(
+            join_group_response(invalid, &backend, 9).await.error_code,
+            ResponseError::InvalidRequest.code()
+        );
+
+        let unsupported = JoinGroupRequest::default()
+            .with_group_id(GroupId(StrBytes::from_static_str("billing")))
+            .with_session_timeout_ms(30_000)
+            .with_rebalance_timeout_ms(30_000)
+            .with_protocol_type(StrBytes::from_static_str("consumer"))
+            .with_protocols(vec![
+                JoinGroupRequestProtocol::default()
+                    .with_name(StrBytes::from_static_str("cooperative-sticky"))
+                    .with_metadata(encode_consumer_subscription("events")),
+            ]);
+        assert_eq!(
+            join_group_response(unsupported, &backend, 9)
+                .await
+                .error_code,
+            ResponseError::InconsistentGroupProtocol.code()
+        );
+        assert!(
+            backend
+                .stream_group_observe("events", "billing", "missing")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    fn join_request(member_id: &str, stream: &str) -> JoinGroupRequest {
+        JoinGroupRequest::default()
+            .with_group_id(GroupId(StrBytes::from_static_str("billing")))
+            .with_session_timeout_ms(30_000)
+            .with_rebalance_timeout_ms(30_000)
+            .with_member_id(StrBytes::from_string(member_id.to_owned()))
+            .with_protocol_type(StrBytes::from_static_str("consumer"))
+            .with_protocols(vec![
+                JoinGroupRequestProtocol::default()
+                    .with_name(StrBytes::from_static_str("range"))
+                    .with_metadata(encode_consumer_subscription(stream)),
+            ])
+    }
+
+    fn sync_request(member_id: &str, generation: i32) -> SyncGroupRequest {
+        SyncGroupRequest::default()
+            .with_group_id(GroupId(StrBytes::from_static_str("billing")))
+            .with_generation_id(generation)
+            .with_member_id(StrBytes::from_string(member_id.to_owned()))
+            .with_protocol_type(Some(StrBytes::from_static_str("consumer")))
+            .with_protocol_name(Some(StrBytes::from_static_str("range")))
+    }
+
+    fn heartbeat_request(member_id: &str, generation: i32) -> HeartbeatRequest {
+        HeartbeatRequest::default()
+            .with_group_id(GroupId(StrBytes::from_static_str("billing")))
+            .with_generation_id(generation)
+            .with_member_id(StrBytes::from_string(member_id.to_owned()))
+    }
+
+    fn group_offset_commit(
+        member_id: &str,
+        generation: i32,
+        partition: u32,
+        offset: i64,
+    ) -> OffsetCommitRequest {
+        OffsetCommitRequest::default()
+            .with_group_id(GroupId(StrBytes::from_static_str("billing")))
+            .with_generation_id_or_member_epoch(generation)
+            .with_member_id(StrBytes::from_string(member_id.to_owned()))
+            .with_topics(vec![
+                OffsetCommitRequestTopic::default()
+                    .with_name(TopicName(StrBytes::from_static_str("events")))
+                    .with_partitions(vec![
+                        OffsetCommitRequestPartition::default()
+                            .with_partition_index(i32::try_from(partition).unwrap())
+                            .with_committed_offset(offset),
+                    ]),
+            ])
+    }
+
+    fn decode_assignment(mut assignment: Bytes) -> Result<(String, Vec<u32>)> {
+        if read_i16(&mut assignment)? != 0 || read_count(&mut assignment)? != 1 {
+            bail!("unexpected assignment envelope");
+        }
+        let stream = read_string(&mut assignment)?;
+        let partitions = (0..read_count(&mut assignment)?)
+            .map(|_| {
+                u32::try_from(read_i32(&mut assignment)?).context("negative assigned partition")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        skip_nullable_bytes(&mut assignment)?;
+        if assignment.has_remaining() {
+            bail!("assignment has trailing bytes");
+        }
+        Ok((stream, partitions))
     }
 }

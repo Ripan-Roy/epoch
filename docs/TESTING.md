@@ -671,7 +671,7 @@ Unsupported behavior must fail explicitly. A test that happens to pass outside
 the published subset does not expand the compatibility promise.
 
 `make test-protocol-regional` runs Redis CLI 8.8.2, Kafka Java 4.3.1, and
-RabbitMQ Java 5.34.0 through the production gateway image and three authenticated
+RabbitMQ Java 5.35.0 through the production gateway image and three authenticated
 regional nodes. Prepare the two images, then run:
 
 ```bash
@@ -691,9 +691,12 @@ candidates, so this gate does not add a second Rust image build.
 The `epoch.protocol-regional.evidence/v1` result records exact client versions,
 source revision/dirty state, local image identities, old/new leaders and terms,
 and completed checks. Client logs, gateway logs, and node diagnostics accompany
-it. The campaign validates binary Cache data, counters, TTL, and atomic
-conditional `SET ... GET`; Kafka's four codecs, null/duplicate metadata and durable checkpoints; AMQP capacity refusal,
-confirms, requeue, lease redelivery and ack permanence; gateway replacement;
+it. The campaign validates binary Cache data, counters, TTL, atomic conditional
+`SET ... GET`, and native-backed hash/list/set/sorted-set operations; Kafka's
+four codecs, null/duplicate metadata, replicated classic consumer groups and
+durable fenced checkpoints; AMQP topic routing, per-message TTL, mandatory
+returns, capacity refusal, confirms, requeue, lease redelivery and ack
+permanence; gateway replacement;
 per-profile leader loss; and all-voter SIGKILL/same-volume reopen with converged
 replicas. It never resubmits an uncertain non-idempotent write to hide failure.
 `make test-protocol-regional-runner` rejects incomplete client/fault evidence

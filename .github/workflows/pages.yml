@@ -185,6 +185,10 @@ jobs:
           assert_bundle_contains 'Checkpoint, compact, catch up, and reopen'
           assert_bundle_contains 'retained_log_first_index'
           assert_bundle_contains 'Multi-tablet operations'
+          assert_bundle_contains 'client.hset'
+          assert_bundle_contains 'consumer.subscribe'
+          assert_bundle_contains 'epoch.events'
+          assert_bundle_contains 'process-shared direct/fanout/topic exchanges'
           release_version="$(cat VERSION)"
           assert_bundle_contains "v${release_version} release notes"
           if grep -Eq '(src|href)="/assets/' console/dist/index.html; then

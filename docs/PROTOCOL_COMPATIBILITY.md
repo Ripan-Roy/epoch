@@ -16,7 +16,7 @@ The component boundary is recorded in
 |---|---|---|---|
 | Redis | RESP2 and RESP3 negotiation | Redis 8.8.2 `redis-cli` | Partial; string/counter/TTL subset |
 | Kafka | Kafka broker protocol | Apache Kafka Java client 4.3.1 | Partial; producer, manual consumer, metadata, offsets |
-| RabbitMQ | AMQP 0-9-1 | RabbitMQ Java client 5.34.0 | Partial; direct routing and Queue delivery lifecycle |
+| RabbitMQ | AMQP 0-9-1 | RabbitMQ Java client 5.35.0 | Partial; direct routing and Queue delivery lifecycle |
 
 The versions above are pinned and executed by CI, not a promise that every
 operation in those releases is implemented. In addition to fast wire fixtures
@@ -104,7 +104,7 @@ database numbers.
 | Counters | `INCR`, `DECR`, `INCRBY`, `DECRBY` | Signed 64-bit integer range |
 | Expiry | `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, `PERSIST` | Absolute-time options and conditional expiry flags are unsupported |
 | Transport | RESP2/RESP3, binary-safe values, pipelining | Keys must be UTF-8; TLS is expected at a private proxy/ingress in this revision |
-| Data structures | Not yet exposed | Hash, list, set, sorted-set, bitmap, Pub/Sub, Streams remain native-API-only |
+| Data structures | Hashes (`HSET`, `HGET`, `HMGET`, `HDEL`, `HEXISTS`, `HLEN`, `HGETALL`), lists (`LPUSH`, `RPUSH`, `LPOP`, `RPOP`, `LLEN`, `LRANGE`, `LINDEX`), sets (`SADD`, `SREM`, `SMEMBERS`, `SCARD`, `SISMEMBER`), and sorted sets (`ZADD`, `ZREM`, `ZCARD`, `ZSCORE`, `ZRANGE [WITHSCORES]`) | Structured fields and members must be UTF-8 and each collection is bounded to 1,024 items; bitmaps, Pub/Sub, and Streams remain native-API-only |
 | Atomic programs | Not yet exposed | `MULTI`/`EXEC`, Lua, functions, watches, and modules are unsupported |
 
 Example with redis-py:
@@ -132,6 +132,12 @@ version/revision-fenced compare-and-set and at most four contention retries;
 exhaustion returns a retryable error rather than an unrelated previous value.
 Backend read errors are never treated as a missing key.
 
+Structured mutations use the same linearizable native observation boundary. A
+missing collection is created with a shard-revision compare-and-set, an existing
+collection is replaced under its value-version fence while retaining TTL and
+storage class, and removal of the final item deletes the key. Wrong-type and
+no-op operations never write. Conflicts are retried at most four times.
+
 ## Kafka API matrix
 
 Each Kafka topic name maps to an existing Epoch Stream with the same name. A
@@ -146,14 +152,23 @@ auto-created by the gateway.
 | Metadata | 1–12 | Existing Stream partitions are advertised on one logical broker |
 | ApiVersions | 0–4 | Advertises only handlers present in this matrix |
 | FindCoordinator | 0–4 | Group coordinator resolves to the compatibility gateway |
-| OffsetCommit | 2–9 | Manual-consumer next offsets become durable Epoch checkpoints |
+| JoinGroup | 0–9 | Classic `consumer` membership joins the replicated native Stream session coordinator |
+| SyncGroup | 0–5 | Native deterministic shard assignments become Kafka consumer assignments and install generation-fenced claims |
+| Heartbeat | 0–4 | Refreshes the replicated session under its current generation |
+| LeaveGroup | 0–5 | Removes members through the replicated session coordinator |
+| OffsetCommit | 2–9 | Manual next offsets or claimed group-member offsets become durable Epoch checkpoints |
 | OffsetFetch | 1–7 | Reads requested durable checkpoints; missing offsets return `-1` |
 
 Current Kafka boundaries:
 
-- manual partition assignment is the supported consumer mode;
-- classic and new group membership, rebalancing, and heartbeats are not yet
-  advertised;
+- manual assignment and classic `subscribe()` groups are supported; a classic
+  member must subscribe to exactly one existing Epoch Stream and offer the
+  `range` assignment protocol;
+- assignments cover any configured Stream shard count and are sourced from the
+  replicated native session coordinator. Sync installs per-shard ownership
+  claims, and group commits are fenced by member ID and generation;
+- static membership, regex/multi-topic subscriptions, cooperative assignment,
+  and Kafka's newer consumer-group protocol are not yet exposed;
 - idempotent/transactional producers, control batches, admin mutations, SASL,
   ACL APIs, topic creation/deletion, and timestamp offset lookup are unsupported;
 - `acks=0` emits no response; other acknowledged writes complete only after the
@@ -171,7 +186,7 @@ already discarded by an older gateway cannot be recovered. Do not downgrade
 the gateway after writing v2 envelopes; a mixed-version gateway rollback window
 is not supported. Header counts are capped at 1,024 per record.
 
-Java manual-consumer example:
+Java classic consumer-group example:
 
 ```java
 var consumer = new KafkaConsumer<byte[], byte[]>(Map.of(
@@ -181,9 +196,7 @@ var consumer = new KafkaConsumer<byte[], byte[]>(Map.of(
     ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class,
     ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false"
 ));
-var partition = new TopicPartition("events", 0);
-consumer.assign(List.of(partition));
-consumer.seek(partition, 0L);
+consumer.subscribe(List.of("events"));
 var records = consumer.poll(Duration.ofSeconds(1));
 consumer.commitSync();
 ```
@@ -198,13 +211,15 @@ do not create or mutate them.
 |---|---|---|
 | Connection | AMQP 0-9-1 header, PLAIN, `/` vhost, tuning, heartbeats | AMQP 1.0 and TLS termination are not implemented here |
 | Channels | Open and close, up to 2,048 per connection | Channel flow and recovery extensions are unsupported |
-| Topology | Existing Queue declaration; connection-local direct exchange and binding | Fanout/topic/headers routing, server-named queues, policies, and arguments are unsupported |
-| Publish | Default/direct exchange, content body, content type, correlation ID, reply-to | Mandatory returns and immediate publishing are unsupported |
+| Topology | Existing Queue declaration; process-shared direct, fanout, and topic exchanges; multi-queue bind/unbind; exchange delete | Topology metadata is gateway-process state, so durable/auto-delete exchanges, header exchanges, server-named queues, policies, and arguments are rejected |
+| Publish | Default/direct/fanout/topic routing, content body, content type, correlation ID, reply-to, UTF-8 string headers, per-message expiration, and mandatory `basic.return` | Non-string headers and immediate publishing are unsupported |
 | Reliability | Publisher confirms after native Queue commit | AMQP transactions are unsupported |
 | Consume | `basic.consume`, `basic.cancel`, `basic.get`, `basic.qos`, automatic or manual ack | Push consumers poll the native Queue; consumer priority/exclusive arguments are unsupported |
 | Settlement | `basic.ack`, `basic.reject`, `basic.nack`; requeue maps to release | Lease renewal is native-API-only; disconnected leases redeliver after visibility expiry |
 
 Native Queue capacity, visibility, and retry policy remain authoritative.
+Per-message AMQP expiration is translated to native Queue `ttl_ms`; original
+exchange, routing key, expiration text, and supported headers survive delivery.
 Requeue consumes another delivery attempt; once the configured retry ceiling
 is exhausted, native dead-letter handling applies. A full Queue is not
 publisher-confirmed. In this revision a native rejection closes the AMQP
@@ -221,8 +236,13 @@ factory.setUsername("epoch");
 factory.setPassword("local-amqp-password");
 try (var connection = factory.newConnection(); var channel = connection.createChannel()) {
   channel.queueDeclare("jobs", true, false, false, Map.of());
+  channel.exchangeDeclare("epoch.events", "topic", false, false, Map.of());
+  channel.queueBind("jobs", "epoch.events", "orders.*");
   channel.confirmSelect();
-  channel.basicPublish("", "jobs", null, "work".getBytes(StandardCharsets.UTF_8));
+  var properties = new AMQP.BasicProperties.Builder().expiration("30000").build();
+  channel.basicPublish(
+      "epoch.events", "orders.created", true, properties,
+      "work".getBytes(StandardCharsets.UTF_8));
   channel.waitForConfirmsOrDie(Duration.ofSeconds(5).toMillis());
   channel.basicQos(16);
   channel.basicConsume("jobs", false, (tag, delivery) -> {

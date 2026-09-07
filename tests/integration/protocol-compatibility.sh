@@ -123,10 +123,25 @@ assert_equal replacement "$(redis_cli GET text-key)" "Redis SET GET stored value
 assert_equal 1 "$(redis_cli INCR counter)" "Redis atomic counter"
 assert_equal $'one\ntwo' "$(redis_cli MSET first one second two >/dev/null && redis_cli MGET first second)" \
   "Redis multi-key round trip"
+assert_equal 2 "$(redis_cli HSET profile name Ada stage beta)" "Redis HSET"
+assert_equal $'Ada\nbeta' "$(redis_cli HMGET profile name stage)" "Redis HMGET"
+assert_equal 3 "$(redis_cli RPUSH work first second third)" "Redis RPUSH"
+assert_equal $'second\nthird' "$(redis_cli LRANGE work 1 -1)" "Redis LRANGE"
+assert_equal 2 "$(redis_cli SADD roles writer reader writer)" "Redis SADD uniqueness"
+assert_equal 1 "$(redis_cli SISMEMBER roles reader)" "Redis SISMEMBER"
+assert_equal 2 "$(redis_cli ZADD leaderboard 1.5 ada 0.5 grace)" "Redis ZADD"
+assert_equal 0.5 "$(redis_cli ZSCORE leaderboard grace)" "Redis ZSCORE"
+assert_equal 1 "$(redis_cli PEXPIRE profile 60000)" "Redis structured TTL"
+assert_equal 1 "$(redis_cli HSET profile verified true)" "Redis structured mutation"
 
 epoch_ttl="$(redis_cli PTTL text-key)"
 if (( epoch_ttl <= 0 || epoch_ttl > 60000 )); then
   printf 'Redis PTTL returned an invalid value: %s\n' "$epoch_ttl" >&2
+  exit 1
+fi
+epoch_structured_ttl="$(redis_cli PTTL profile)"
+if (( epoch_structured_ttl <= 0 || epoch_structured_ttl > 60000 )); then
+  printf 'Redis structured PTTL returned an invalid value: %s\n' "$epoch_structured_ttl" >&2
   exit 1
 fi
 
@@ -171,4 +186,4 @@ javac --release 17 -Xlint:all -Werror \
 java -cp "$epoch_java_classes:$epoch_java_classpath" \
   ProtocolConformance 127.0.0.1 "$epoch_kafka_port" "$epoch_amqp_port"
 
-printf 'Redis CLI 8.8.2, Kafka Java 4.3.1, and RabbitMQ Java 5.34.0 conformance passed.\n'
+printf 'Redis CLI 8.8.2, Kafka Java 4.3.1, and RabbitMQ Java 5.35.0 conformance passed.\n'
