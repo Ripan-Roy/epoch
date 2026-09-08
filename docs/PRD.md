@@ -8,7 +8,7 @@
 **Status:** Implementation-backed private beta candidate; later managed-service milestones remain open
 **Audience:** Founders, product, distributed-systems engineering, infrastructure, security, and design
 
-**Beta implementation note (26 August 2026):** The `v0.2.0-beta.6` candidate
+**Beta implementation note (8 September 2026):** The `v0.2.0-beta.7` candidate
 retains the alpha-exit TLS/mTLS, encrypted recovery, durable three/five-voter
 membership, guarded Kubernetes rollout, bounded source adapters, signed
 multi-architecture OCI distribution, fault harness, and exact-source
@@ -16,14 +16,18 @@ Kubernetes lifecycle. It adds compiler-backed Avro, JSON Schema, and
 self-contained Protobuf registration, format-derived adjacent-revision
 compatibility, producer/broker validation modes, deterministic recovery, and
 typed Go/Java/Python schema lifecycle APIs. It now also adds the bounded
-Redis/Kafka/AMQP compatibility gateway, named exact-client conformance,
-migration scanner, fifth signed non-root OCI image, and public matrix. Native
-amd64 and arm64 release jobs assemble exact-tag manifests from immutable
-platform digests without QEMU and retain manifest provenance, signatures, and
-per-platform SBOM attestations. This is a locally tested private-beta
-distribution; full protocol parity, combined regional/fault certification,
-geo, managed-service, 30-day, package-manager, production SLO, and GA rows
-remain open. See ADR-0039, ADR-0037, ADR-0042, and the delivery checklist.
+Redis/Kafka/AMQP compatibility gateway, deep exact-client conformance, regional
+fault certification, migration scanner, fifth signed non-root OCI image, and
+public matrix. Beta.7 adds bounded Prometheus metrics, structured request
+correlation, W3C trace propagation, optional OTLP/HTTP traces, authenticated
+recent-stage p99 diagnosis, operator wiring, alerts, a Grafana dashboard, and
+an end-to-end observability guide. Native amd64 and arm64 release jobs assemble
+exact-tag manifests from immutable platform digests without QEMU and retain
+manifest provenance, signatures, and per-platform SBOM attestations. This is a
+locally tested private-beta distribution; full protocol parity, exhaustive
+operational telemetry, geo, managed-service, 30-day, package-manager,
+production SLO, and GA rows remain open. See ADR-0039, ADR-0037, ADR-0042,
+ADR-0045, and the delivery checklist.
 
 **Implementation note (13 August 2026):** The fixed-three-voter regional Rust
 runtime now owns automatic maintenance for the implemented time-driven profile
