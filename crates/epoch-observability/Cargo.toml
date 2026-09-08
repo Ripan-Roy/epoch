@@ -1,0 +1,17 @@
+[package]
+name = "epoch-observability"
+description = "Bounded metrics, trace context, and diagnostic contracts for Epoch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+epoch-core = { path = "../epoch-core" }
+serde.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true

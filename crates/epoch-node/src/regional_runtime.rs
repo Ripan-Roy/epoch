@@ -10,6 +10,7 @@ use std::{
 use axum::Router;
 use epoch_consensus::CommittedProposal;
 use epoch_core::Clock;
+use epoch_observability::MetricsRegistry;
 use thiserror::Error;
 use tokio::{
     sync::{Mutex, watch},
@@ -45,7 +46,7 @@ use crate::{
     regional_membership::{PendingTabletMembershipAction, run_tablet_membership_pass},
     regional_router::{
         DEFAULT_REGIONAL_READ_BARRIER_TIMEOUT, MAX_REGIONAL_READ_BARRIER_TIMEOUT,
-        regional_tablet_router_with_read_timeout,
+        regional_tablet_router_with_observability, regional_tablet_router_with_read_timeout,
     },
     regional_topology::{NodeTopology, RegionalTopologyStatuses, regional_topology_router},
     source_connector_delivery::{
@@ -85,6 +86,7 @@ pub struct RegionalRuntimeConfig {
     pub source_connector_interval: Duration,
     pub webhook_delivery: Option<WebhookDeliveryConfig>,
     pub restore_artifact: Option<Arc<RegionalBackupArtifact>>,
+    pub observability: Option<MetricsRegistry>,
 }
 
 impl fmt::Debug for RegionalRuntimeConfig {
@@ -108,6 +110,7 @@ impl fmt::Debug for RegionalRuntimeConfig {
             .field("managed_target_delivery", &self.managed_target_delivery)
             .field("source_connector_interval", &self.source_connector_interval)
             .field("restore_pending", &self.restore_artifact.is_some())
+            .field("observability_enabled", &self.observability.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -150,12 +153,19 @@ impl RegionalRuntimeConfig {
             source_connector_interval: DEFAULT_SOURCE_CONNECTOR_INTERVAL,
             webhook_delivery: None,
             restore_artifact: None,
+            observability: None,
         }
     }
 
     #[must_use]
     pub fn with_topology(mut self, topology: NodeTopology) -> Self {
         self.topology = topology;
+        self
+    }
+
+    #[must_use]
+    pub fn with_observability(mut self, metrics: MetricsRegistry) -> Self {
+        self.observability = Some(metrics);
         self
     }
 
@@ -402,11 +412,23 @@ impl RegionalNodeRuntime {
         let peer_router = shared_internal_peer_router(peer_registry.clone())
             .merge(regional_maintenance_router(peer_registry))
             .merge(regional_backup_peer_router(backup_state.clone()));
+        let tablet_router = config.observability.as_ref().map_or_else(
+            || {
+                regional_tablet_router_with_read_timeout(
+                    directory.clone(),
+                    config.read_barrier_timeout,
+                )
+            },
+            |metrics| {
+                regional_tablet_router_with_observability(
+                    directory.clone(),
+                    config.read_barrier_timeout,
+                    metrics.clone(),
+                )
+            },
+        );
         let public_router = regional_catalog_router(catalog_state.clone())
-            .merge(regional_tablet_router_with_read_timeout(
-                directory.clone(),
-                config.read_barrier_timeout,
-            ))
+            .merge(tablet_router)
             .merge(regional_topology_router(
                 config.topology,
                 directory.clone(),

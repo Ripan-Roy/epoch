@@ -1442,7 +1442,9 @@ fn prepare_cloud_event(
         &delivery.attempt.to_string(),
     )?;
     insert_header(&mut headers, "epoch-subscription", &delivery.subscription)?;
-    if let Some(traceparent) = &delivery.envelope.traceparent {
+    if let Some(traceparent) = &delivery.envelope.traceparent
+        && epoch_core::validate_traceparent(traceparent).is_ok()
+    {
         insert_header(&mut headers, "traceparent", traceparent)?;
     }
     match mode {
@@ -1831,6 +1833,15 @@ mod tests {
             7
         );
         assert_eq!(headers["ce-id"], "event-1");
+        assert_eq!(
+            headers["traceparent"],
+            "00-00000000000000000000000000000001-0000000000000001-01"
+        );
+        let mut legacy_delivery = delivery.clone();
+        legacy_delivery.envelope.traceparent = Some("legacy-opaque-context".into());
+        let (_, legacy_headers) =
+            prepare_cloud_event(&legacy_delivery, CloudEventsMode::Binary).unwrap();
+        assert!(!legacy_headers.contains_key("traceparent"));
         assert_eq!(
             target_idempotency_key("delivery-1"),
             target_idempotency_key("delivery-1")

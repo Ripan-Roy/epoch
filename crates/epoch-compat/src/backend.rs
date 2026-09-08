@@ -14,10 +14,12 @@ use base64::{
 use epoch_core::EventEnvelope;
 use flate2::{Compression as GzipCompression, GzBuilder};
 use futures_util::StreamExt as _;
-use reqwest::{Client, Method, StatusCode};
+use opentelemetry::propagation::Injector;
+use reqwest::{Client, Method, StatusCode, header::HeaderMap};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use url::Url;
 use uuid::Uuid;
 
@@ -26,6 +28,26 @@ const MAX_NATIVE_STREAM_BATCH_RECORDS: u16 = 1_000;
 const MAX_NATIVE_STREAM_BATCH_COMPRESSED_BYTES: usize = 360 * 1024;
 const MAX_CACHE_SET_ATTEMPTS: usize = 4;
 const MAX_CACHE_COLLECTION_ITEMS: usize = 1_024;
+
+struct HeaderInjector<'a>(&'a mut HeaderMap);
+
+impl Injector for HeaderInjector<'_> {
+    fn set(&mut self, key: &str, value: String) {
+        let Ok(name) = reqwest::header::HeaderName::from_bytes(key.as_bytes()) else {
+            return;
+        };
+        let Ok(value) = reqwest::header::HeaderValue::from_str(&value) else {
+            return;
+        };
+        self.0.insert(name, value);
+    }
+}
+
+fn inject_trace_context(headers: &mut HeaderMap, context: &opentelemetry::Context) {
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(context, &mut HeaderInjector(headers));
+    });
+}
 
 /// One value stored through the Cache compatibility surface.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -639,8 +661,14 @@ impl NativeHttpBackend {
         if let Some(body) = body {
             request = request.json(&body);
         }
-        let response = request
-            .send()
+        let mut request = request
+            .build()
+            .map_err(|error| BackendError::Unavailable(error.to_string()))?;
+        let context = tracing::Span::current().context();
+        inject_trace_context(request.headers_mut(), &context);
+        let response = self
+            .client
+            .execute(request)
             .await
             .map_err(|error| BackendError::Unavailable(error.to_string()))?;
         let status = response.status();
@@ -1958,6 +1986,30 @@ fn decode_queue_delivery(value: &Value) -> Result<QueueDelivery, BackendError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opentelemetry::{
+        Context,
+        trace::{SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId, TraceState},
+    };
+    use opentelemetry_sdk::propagation::TraceContextPropagator;
+
+    #[test]
+    fn native_requests_carry_canonical_w3c_trace_context() {
+        opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+        let span = SpanContext::new(
+            TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736").unwrap(),
+            SpanId::from_hex("00f067aa0ba902b7").unwrap(),
+            TraceFlags::SAMPLED,
+            true,
+            TraceState::default(),
+        );
+        let context = Context::new().with_remote_span_context(span);
+        let mut headers = HeaderMap::new();
+        inject_trace_context(&mut headers, &context);
+        assert_eq!(
+            headers.get("traceparent").unwrap(),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        );
+    }
 
     #[test]
     fn kafka_envelope_preserves_producer_time_and_ordered_duplicate_headers() {

@@ -5,6 +5,7 @@ x-epoch-regional: &epoch-regional
   pull_policy: never
   environment: &epoch-regional-environment
     EPOCH_HTTP_LISTEN: 0.0.0.0:7601
+    EPOCH_METRICS_LISTEN: 0.0.0.0:7602
     EPOCH_REGIONAL_RUNTIME_ENABLED: "true"
     EPOCH_AUTH_POLICY_PATH: /etc/epoch/bootstrap-policy.json
     EPOCH_REGIONAL_MAX_GROUPS: "16"
@@ -51,6 +52,7 @@ services:
     ports:
       - "127.0.0.1:${EPOCH_REGIONAL_HTTP_PORT_1:-18661}:7601"
       - "127.0.0.1:${EPOCH_REGIONAL_PEER_PORT_1:-18701}:7701"
+      - "127.0.0.1:${EPOCH_REGIONAL_METRICS_PORT_1:-18672}:7602"
     volumes:
       - epoch-regional-1-data:/var/lib/epoch
       - ../../spec/auth/bootstrap-policy-v1.example.json:/etc/epoch/bootstrap-policy.json:ro
@@ -66,6 +68,7 @@ services:
     ports:
       - "127.0.0.1:${EPOCH_REGIONAL_HTTP_PORT_2:-18662}:7601"
       - "127.0.0.1:${EPOCH_REGIONAL_PEER_PORT_2:-18702}:7701"
+      - "127.0.0.1:${EPOCH_REGIONAL_METRICS_PORT_2:-18673}:7602"
     volumes:
       - epoch-regional-2-data:/var/lib/epoch
       - ../../spec/auth/bootstrap-policy-v1.example.json:/etc/epoch/bootstrap-policy.json:ro
@@ -81,6 +84,7 @@ services:
     ports:
       - "127.0.0.1:${EPOCH_REGIONAL_HTTP_PORT_3:-18663}:7601"
       - "127.0.0.1:${EPOCH_REGIONAL_PEER_PORT_3:-18703}:7701"
+      - "127.0.0.1:${EPOCH_REGIONAL_METRICS_PORT_3:-18674}:7602"
     volumes:
       - epoch-regional-3-data:/var/lib/epoch
       - ../../spec/auth/bootstrap-policy-v1.example.json:/etc/epoch/bootstrap-policy.json:ro

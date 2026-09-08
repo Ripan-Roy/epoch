@@ -1374,7 +1374,7 @@ fn validate_snapshot_document(
                 "Event Bus snapshot archive position is invalid".into(),
             ));
         }
-        event.envelope.validate()?;
+        event.envelope.validate_legacy_persisted()?;
     }
     snapshot.delivery_ledger.validate_snapshot(
         snapshot.config.delivery_outbox,

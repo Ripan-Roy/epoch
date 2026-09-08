@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -43,6 +44,8 @@ DurabilityProfile = Literal[
     "geo_sync",
 ]
 
+_TRACEPARENT = re.compile(r"^00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-[0-9a-f]{2}$")
+
 
 @dataclass(slots=True)
 class EventEnvelope:
@@ -75,6 +78,8 @@ class EventEnvelope:
             raise ValueError("event id is required")
         if not 0 <= self.priority <= 9:
             raise ValueError("priority must be between 0 and 9")
+        if self.traceparent is not None and _TRACEPARENT.fullmatch(self.traceparent) is None:
+            raise ValueError("traceparent must be canonical W3C version 00")
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-compatible native API representation."""

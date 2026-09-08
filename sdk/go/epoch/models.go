@@ -346,6 +346,9 @@ func (event EventEnvelope) normalized() (EventEnvelope, error) {
 	if event.Priority > 9 {
 		return EventEnvelope{}, fmt.Errorf("epoch: event priority must be between 0 and 9")
 	}
+	if event.Traceparent != "" && !validTraceparent(event.Traceparent) {
+		return EventEnvelope{}, fmt.Errorf("epoch: traceparent must be canonical W3C version 00")
+	}
 	if event.Headers == nil {
 		event.Headers = map[string]string{}
 	}
@@ -356,6 +359,26 @@ func (event EventEnvelope) normalized() (EventEnvelope, error) {
 		event.ContentType = "application/json"
 	}
 	return event, nil
+}
+
+func validTraceparent(value string) bool {
+	if len(value) != 55 || value[:3] != "00-" || value[35] != '-' || value[52] != '-' {
+		return false
+	}
+	for sectionIndex, section := range []string{value[3:35], value[36:52], value[53:55]} {
+		nonzero := false
+		for index := range len(section) {
+			character := section[index]
+			if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
+				return false
+			}
+			nonzero = nonzero || character != '0'
+		}
+		if sectionIndex < 2 && !nonzero {
+			return false
+		}
+	}
+	return true
 }
 
 func (target SubscriptionTarget) validate() error {

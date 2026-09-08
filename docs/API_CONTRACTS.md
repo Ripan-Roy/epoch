@@ -1405,10 +1405,10 @@ this document. `epoch-control` serves the current four-method RegionalAdmin
 subset on gRPC port 8081 and the health/registry/browser BFF on HTTP port 8080.
 Rust port 7600 remains reserved for the future native data gRPC service.
 
-TLS/mTLS, OIDC authentication metadata, typed `google.rpc.Status` details,
+OIDC authentication metadata, typed `google.rpc.Status` details,
 public native mutation-status lookup, native bidirectional streaming and
 connection-scoped credit, a stable Rust gRPC regional administration
-implementation, long-running operations, metrics on the reserved port,
+implementation, long-running operations,
 full Go/Java/Python generated SDK parity, and native compatibility negotiation
 remain unimplemented. A separate Rust compatibility gateway exposes the exact
 RESP2/RESP3, Kafka, and AMQP 0-9-1 subsets in the public compatibility matrix
@@ -1420,6 +1420,18 @@ described above. Typed Go, Java, and Python clients cover both provisional
 standalone routes and the versioned regional Stream, Queue, Cache, and Event Bus
 routes. All three use injectable transport boundaries; standalone restart
 quickstarts and regional failover/reopen campaigns execute in CI.
+
+The implemented observability boundary is intentionally separate from the
+product data API. `epoch-node` serves internal `/metrics`, `/healthz`, and
+`/v1/diagnostics/latency` on its configured metrics listener. `epoch-control`
+serves internal `/metrics` and exposes authenticated
+`GET /v1/observability/latency` for exact-tenant diagnostic access. The latter
+accepts organization, project, environment, namespace, and a closed profile;
+it returns measured dominant stage, p99, sample count, source, and a bounded
+recommendation, or `not_found` when no sample exists. It never returns internal
+node URLs. `epoch-compat` serves internal `/metrics`. These endpoints are not a
+substitute for stable generated native telemetry APIs. See
+[Observability](OBSERVABILITY.md).
 
 Node browser calls use exact origins from `EPOCH_ALLOWED_ORIGINS`; Go BFF calls
 use `EPOCH_CONTROL_ALLOWED_ORIGINS`. Requests without an `Origin` header remain

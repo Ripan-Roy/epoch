@@ -1,12 +1,14 @@
 import { mapRegionalInventory } from "../regionalPlacement";
 import { governanceFilterSearchParams } from "../governance";
 import { loadBrowserManagedToken } from "./managedAuth";
+import { latencyDiagnosticPath, parseLatencyDiagnosis } from "./latencyDiagnostics";
 import type {
   CreateResourceInput,
   EngineHealth,
   ManagedRegionalInventory,
   RegionalGovernanceFilter,
   RegionalInventory,
+  LatencyDiagnosis,
   RegionalResource,
   ResourceCreated,
   ResourceSummary,
@@ -146,6 +148,16 @@ export async function listRegionalInventory(
   });
   return { resources, costAttribution };
 }
+
+export async function getLatencyDiagnosis(resource: RegionalResource): Promise<LatencyDiagnosis> {
+  const path = latencyDiagnosticPath(resource);
+  if (path === null) {
+    throw new ManagedApiError("Latency diagnostics are not available for this resource profile", 0);
+  }
+  return parseLatencyDiagnosis(await requestControl<unknown>(path));
+}
+
+export { latencyDiagnosticPath, parseLatencyDiagnosis } from "./latencyDiagnostics";
 
 async function requestControl<T>(path: string): Promise<T> {
   let response: Response;

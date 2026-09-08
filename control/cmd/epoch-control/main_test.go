@@ -8,9 +8,14 @@ import (
 func TestLoadConfigUsesExplicitRegionalEndpointsAndInterval(t *testing.T) {
 	t.Setenv("EPOCH_CONTROL_ADDR", "127.0.0.1:18080")
 	t.Setenv("EPOCH_CONTROL_GRPC_ADDR", "127.0.0.1:18081")
+	t.Setenv("EPOCH_CONTROL_METRICS_ADDR", "127.0.0.1:19090")
 	t.Setenv(
 		"EPOCH_CONTROL_REGIONAL_ENDPOINTS",
 		" http://node-1:7601,https://node-2:7601 ,,",
+	)
+	t.Setenv(
+		"EPOCH_CONTROL_REGIONAL_METRICS_ENDPOINTS",
+		" http://node-1:7602,https://node-2:7602 ,,",
 	)
 	t.Setenv(
 		"EPOCH_CONTROL_ALLOWED_ORIGINS",
@@ -18,6 +23,8 @@ func TestLoadConfigUsesExplicitRegionalEndpointsAndInterval(t *testing.T) {
 	)
 	t.Setenv("EPOCH_CONTROL_STATE_PATH", "/tmp/epoch-control-test/registry.db")
 	t.Setenv("EPOCH_CONTROL_RECONCILE_INTERVAL", "250ms")
+	t.Setenv("EPOCH_CONTROL_OBSERVABILITY_MAX_TENANTS", "12")
+	t.Setenv("EPOCH_OTLP_ENDPOINT", "http://collector:4318")
 	t.Setenv("EPOCH_AUTH_POLICY_PATH", "/etc/epoch/bootstrap-policy.json")
 	t.Setenv("EPOCH_CONTROL_REGIONAL_TOKEN", "control-workload-token")
 	config, err := loadConfig()
@@ -26,13 +33,30 @@ func TestLoadConfigUsesExplicitRegionalEndpointsAndInterval(t *testing.T) {
 	}
 	if config.httpAddress != "127.0.0.1:18080" ||
 		config.grpcAddress != "127.0.0.1:18081" ||
+		config.metricsAddress != "127.0.0.1:19090" ||
 		len(config.regionalEndpoints) != 2 ||
+		len(config.regionalMetricsEndpoints) != 2 ||
 		len(config.allowedOrigins) != 2 ||
 		config.statePath != "/tmp/epoch-control-test/registry.db" ||
 		config.authPolicyPath != "/etc/epoch/bootstrap-policy.json" ||
 		string(config.regionalToken) != "control-workload-token" ||
-		config.reconcileInterval != 250*time.Millisecond {
+		config.reconcileInterval != 250*time.Millisecond ||
+		config.maxMetricTenants != 12 ||
+		config.otlpEndpoint != "http://collector:4318" {
 		t.Fatalf("config = %+v", config)
+	}
+}
+
+func TestLoadConfigRejectsInvalidObservabilityTenantLimit(t *testing.T) {
+	for _, value := range []string{"nope", "0", "4097"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("EPOCH_AUTH_POLICY_PATH", "/etc/epoch/bootstrap-policy.json")
+			t.Setenv("EPOCH_CONTROL_REGIONAL_TOKEN", "control-workload-token")
+			t.Setenv("EPOCH_CONTROL_OBSERVABILITY_MAX_TENANTS", value)
+			if _, err := loadConfig(); err == nil {
+				t.Fatal("loadConfig() succeeded, want error")
+			}
+		})
 	}
 }
 

@@ -1146,6 +1146,16 @@ The product should architect for, but not claim before audit:
 
 All metrics must be scoped by tenant without unbounded-cardinality labels. Logs carry stable event/resource/request identifiers. Traces propagate W3C trace context when the protocol can carry it.
 
+The current production-observability increment implements the cross-process
+baseline: capped tenant fingerprints, closed request/stage/protocol dimensions,
+Prometheus endpoints, structured correlation, W3C propagation, optional
+OTLP/HTTP traces, internal Kubernetes/Compose discovery, tested dashboard and
+alert templates, and measured “Why is it slow?” diagnosis through exact tenant
+authorization. It does not yet claim every profile-specific state metric in the
+table above. See [Observability](OBSERVABILITY.md),
+[ADR-0045](adr/0045-bounded-observability-and-trace-propagation.md), and the
+MGD-012 traceability row.
+
 ### 14.2 Operational experiences
 
 - A single resource health page shows configuration, achieved placement, leader/replicas, durability, lag/backlog, recent changes, incidents, and recommended actions.

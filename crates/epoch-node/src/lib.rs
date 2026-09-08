@@ -9,6 +9,7 @@ pub mod consensus_groups;
 mod delivery_proposal;
 pub mod epoch_target_delivery;
 pub mod managed_target_delivery;
+pub mod observability;
 pub mod queue_tablet;
 pub mod regional_auth;
 pub mod regional_backup;
@@ -45,6 +46,7 @@ use epoch_bus::{ArchivedEvent, BusConfig, EventFilter, Subscription};
 use epoch_cache::{CacheConfig, CacheItem, CacheStorageClass, CacheValue, SetOptions};
 use epoch_core::{EpochError, EpochResult, EventEnvelope};
 use epoch_engine::{BusPublishOutcome, EngineHealth, EpochEngine, ResourceSummary};
+use epoch_observability::MetricsRegistry;
 use epoch_queue::{Delivery, EnqueueReceipt, QueueConfig, QueueCounts};
 use epoch_stream::{AppendReceipt, ConsumerLag, StreamConfig, StreamRecord};
 use serde::{Deserialize, Serialize};
@@ -56,6 +58,7 @@ use tower_http::{
 };
 use url::Url;
 
+use crate::observability::with_http_observability;
 use crate::regional_router::{
     READ_CONSISTENCY_HEADER, READ_INDEX_HEADER, RESOURCE_GENERATION_HEADER, TABLET_EPOCH_HEADER,
 };
@@ -66,8 +69,18 @@ pub struct AppState {
 }
 
 pub fn router(engine: Arc<EpochEngine>, allowed_origins: &[String]) -> EpochResult<Router> {
+    let metrics = MetricsRegistry::new("epoch-node", 1_024)
+        .expect("built-in observability settings must be valid");
+    router_with_observability(engine, allowed_origins, metrics)
+}
+
+pub fn router_with_observability(
+    engine: Arc<EpochEngine>,
+    allowed_origins: &[String],
+    metrics: MetricsRegistry,
+) -> EpochResult<Router> {
     let state = AppState { engine };
-    with_public_http_layers(
+    with_public_http_layers_using(
         Router::new()
             .route("/healthz", get(health))
             .route("/readyz", get(health))
@@ -109,13 +122,27 @@ pub fn router(engine: Arc<EpochEngine>, allowed_origins: &[String]) -> EpochResu
             )
             .with_state(state),
         allowed_origins,
+        metrics,
     )
 }
 
 pub fn with_public_http_layers(router: Router, allowed_origins: &[String]) -> EpochResult<Router> {
-    Ok(router
-        .layer(cors_layer(allowed_origins)?)
-        .layer(TraceLayer::new_for_http()))
+    let metrics = MetricsRegistry::new("epoch-node", 1_024)
+        .expect("built-in observability settings must be valid");
+    with_public_http_layers_using(router, allowed_origins, metrics)
+}
+
+pub fn with_public_http_layers_using(
+    router: Router,
+    allowed_origins: &[String],
+    metrics: MetricsRegistry,
+) -> EpochResult<Router> {
+    Ok(with_http_observability(
+        router
+            .layer(cors_layer(allowed_origins)?)
+            .layer(TraceLayer::new_for_http()),
+        metrics,
+    ))
 }
 
 fn cors_layer(allowed_origins: &[String]) -> EpochResult<CorsLayer> {
@@ -128,6 +155,7 @@ fn cors_layer(allowed_origins: &[String]) -> EpochResult<CorsLayer> {
             AUTHORIZATION,
             CONTENT_TYPE,
             HeaderName::from_static("x-request-id"),
+            HeaderName::from_static("traceparent"),
             HeaderName::from_static(RESOURCE_GENERATION_HEADER),
             HeaderName::from_static(TABLET_EPOCH_HEADER),
             HeaderName::from_static(READ_CONSISTENCY_HEADER),

@@ -1273,7 +1273,7 @@ impl DeliveryLedger {
                     "event bus snapshot delivery record identity is invalid".into(),
                 ));
             }
-            record.envelope.validate()?;
+            record.envelope.validate_legacy_persisted()?;
             for redrive in &record.redrives {
                 if redrive.previous_attempts.is_empty()
                     || redrive.previous_attempts.len()

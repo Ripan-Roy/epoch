@@ -16,9 +16,13 @@ use epoch_compat::{
     redis::{RedisConfig, RedisServer},
     scanner::{Protocol, SupportLevel, scan},
 };
+use epoch_observability::{MetricsRegistry, otlp_traces_endpoint, validate_otlp_http_base};
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_otlp::WithExportConfig as _;
+use opentelemetry_sdk::{Resource, propagation::TraceContextPropagator, trace::SdkTracerProvider};
 use tokio::net::TcpListener;
 use tracing::info;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 use url::Url;
 
 #[derive(Parser)]
@@ -102,6 +106,20 @@ struct Args {
     amqp_heartbeat_seconds: u16,
     #[arg(long, env = "EPOCH_LOG", default_value = "info")]
     log: String,
+    #[arg(long, env = "EPOCH_JSON_LOGS")]
+    json_logs: bool,
+    #[arg(
+        long,
+        env = "EPOCH_COMPAT_METRICS_LISTEN",
+        default_value = "127.0.0.1:9100"
+    )]
+    metrics_listen: SocketAddr,
+    #[arg(
+        long,
+        env = "EPOCH_OTLP_ENDPOINT",
+        value_parser = validate_otlp_endpoint
+    )]
+    otlp_endpoint: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -153,9 +171,9 @@ async fn main() -> Result<()> {
         return run_scan(scan_args);
     }
     let (token, amqp_password) = runtime_credentials(&args)?;
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(&args.log))
-        .init();
+    let tracer_provider = init_tracing(&args)?;
+    let metrics =
+        MetricsRegistry::new("epoch-compat", 1).context("configure compatibility metrics")?;
 
     let backend = Arc::new(NativeHttpBackend::new(NativeHttpConfig {
         endpoints: args.endpoints,
@@ -174,7 +192,8 @@ async fn main() -> Result<()> {
             password: args.redis_password,
             max_connections: args.max_connections,
         },
-    )?;
+    )?
+    .with_observability(metrics.clone());
     let kafka = KafkaServer::new(
         Arc::clone(&backend),
         KafkaConfig {
@@ -183,7 +202,8 @@ async fn main() -> Result<()> {
             node_id: args.kafka_node_id,
             max_connections: args.max_connections,
         },
-    )?;
+    )?
+    .with_observability(metrics.clone());
     let amqp = AmqpServer::new(
         backend,
         AmqpConfig {
@@ -192,7 +212,8 @@ async fn main() -> Result<()> {
             max_connections: args.max_connections,
             heartbeat_seconds: args.amqp_heartbeat_seconds,
         },
-    )?;
+    )?
+    .with_observability(metrics.clone());
 
     let redis_listener = TcpListener::bind(args.redis_listen)
         .await
@@ -203,18 +224,100 @@ async fn main() -> Result<()> {
     let amqp_listener = TcpListener::bind(args.amqp_listen)
         .await
         .with_context(|| format!("failed to bind AMQP listener at {}", args.amqp_listen))?;
+    let metrics_listener = TcpListener::bind(args.metrics_listen)
+        .await
+        .with_context(|| format!("failed to bind metrics listener at {}", args.metrics_listen))?;
 
     info!(listen = %args.redis_listen, cache = %redis_cache, "Redis compatibility listener ready");
     info!(listen = %args.kafka_listen, "Kafka compatibility listener ready");
     info!(listen = %args.amqp_listen, "AMQP 0-9-1 compatibility listener ready");
+    info!(listen = %args.metrics_listen, "compatibility metrics listener ready");
 
     tokio::select! {
         result = redis.serve(redis_listener) => result.context("Redis listener failed")?,
         result = kafka.serve(kafka_listener) => result.context("Kafka listener failed")?,
         result = amqp.serve(amqp_listener) => result.context("AMQP listener failed")?,
+        result = axum::serve(metrics_listener, metrics_router(metrics)) => result.context("metrics listener failed")?,
         signal = tokio::signal::ctrl_c() => signal.context("failed to install shutdown signal")?,
     }
+    if let Some(provider) = tracer_provider {
+        provider
+            .shutdown_with_timeout(Duration::from_secs(5))
+            .context("flush compatibility traces")?;
+    }
     Ok(())
+}
+
+fn metrics_router(metrics: MetricsRegistry) -> axum::Router {
+    axum::Router::new().route(
+        "/metrics",
+        axum::routing::get(move || {
+            let metrics = metrics.clone();
+            async move {
+                (
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "text/plain; version=0.0.4; charset=utf-8",
+                    )],
+                    metrics.render_prometheus(),
+                )
+            }
+        }),
+    )
+}
+
+fn validate_otlp_endpoint(value: &str) -> std::result::Result<String, String> {
+    validate_otlp_http_base(value).map_err(|error| error.to_string())
+}
+
+fn init_tracing(args: &Args) -> Result<Option<SdkTracerProvider>> {
+    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+    let provider = args
+        .otlp_endpoint
+        .as_deref()
+        .map(|endpoint| {
+            let exporter = opentelemetry_otlp::SpanExporter::builder()
+                .with_http()
+                .with_endpoint(otlp_traces_endpoint(endpoint))
+                .with_timeout(Duration::from_secs(5))
+                .build()?;
+            Ok::<_, opentelemetry_otlp::ExporterBuildError>(
+                SdkTracerProvider::builder()
+                    .with_resource(
+                        Resource::builder()
+                            .with_service_name("epoch-compat")
+                            .build(),
+                    )
+                    .with_batch_exporter(exporter)
+                    .build(),
+            )
+        })
+        .transpose()?;
+    let filter = EnvFilter::try_new(&args.log).unwrap_or_else(|_| EnvFilter::new("info"));
+    let tracer = provider
+        .as_ref()
+        .map(|provider| provider.tracer("epoch-compat"));
+    match (args.json_logs, tracer) {
+        (true, Some(tracer)) => tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_opentelemetry::layer().with_tracer(tracer))
+            .with(tracing_subscriber::fmt::layer().json())
+            .try_init()?,
+        (true, None) => tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().json())
+            .try_init()?,
+        (false, Some(tracer)) => tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_opentelemetry::layer().with_tracer(tracer))
+            .with(tracing_subscriber::fmt::layer())
+            .try_init()?,
+        (false, None) => tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .try_init()?,
+    }
+    Ok(provider)
 }
 
 fn runtime_credentials(args: &Args) -> Result<(String, String)> {
@@ -320,5 +423,28 @@ mod tests {
         assert!(matches!(args.command, Some(Command::Scan(_))));
         assert!(args.token.is_none());
         assert!(args.amqp_password.is_none());
+    }
+
+    #[test]
+    fn metrics_are_internal_by_default_and_otlp_validation_is_fail_closed() {
+        let args = Args::try_parse_from(["epoch-compat"]).unwrap();
+        assert_eq!(args.metrics_listen, "127.0.0.1:9100".parse().unwrap());
+        assert!(args.otlp_endpoint.is_none());
+        assert_eq!(
+            validate_otlp_endpoint("http://collector:4318/").unwrap(),
+            "http://collector:4318"
+        );
+        for invalid in [
+            "collector:4318",
+            "file:///tmp/traces",
+            "https://user:secret@collector:4318",
+            "https://collector:4318?token=secret",
+            "https://collector:4318/custom",
+        ] {
+            assert!(
+                validate_otlp_endpoint(invalid).is_err(),
+                "accepted {invalid}"
+            );
+        }
     }
 }

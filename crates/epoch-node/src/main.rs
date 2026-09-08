@@ -26,30 +26,36 @@ use epoch_node::{
     managed_target_delivery::{
         DEFAULT_MANAGED_TARGET_DELIVERY_INTERVAL, ManagedSecretStore, ManagedTargetDeliveryConfig,
     },
+    observability::metrics_router,
     queue_tablet::{self, DEFAULT_COMMIT_WAIT as QUEUE_DEFAULT_COMMIT_WAIT, QueueTabletService},
     regional_auth::with_regional_auth,
     regional_backup_api::RegionalBackupArtifact,
     regional_runtime::{RegionalNodeRuntime, RegionalRuntimeConfig},
     regional_topology::NodeTopology,
-    router, spawn_maintenance,
+    router_with_observability, spawn_maintenance,
     stream_tablet::{self, DEFAULT_COMMIT_WAIT as STREAM_DEFAULT_COMMIT_WAIT, StreamTabletService},
     transport_security::{
         ClientTlsFiles, ServerTlsFiles, TlsListener, configure_client_builder, load_server_config,
     },
     validate_allowed_origins,
     webhook_delivery::{WebhookDeliveryConfig, WebhookSigningKeys},
-    with_public_http_layers,
+    with_public_http_layers_using,
 };
+use epoch_observability::{MetricsRegistry, otlp_traces_endpoint, validate_otlp_http_base};
 use epoch_queue::QueueConfig;
 use epoch_storage::{DEFAULT_WAL_SEGMENT_BYTES, MIN_WAL_SEGMENT_BYTES, StandaloneWal};
 use epoch_tablet::{BusTabletScope, CacheTabletScope, QueueTabletScope, StreamTabletScope};
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_otlp::WithExportConfig as _;
+use opentelemetry_sdk::{Resource, propagation::TraceContextPropagator, trace::SdkTracerProvider};
 use tokio::{net::TcpListener, sync::watch};
 use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
 const DEFAULT_ALLOWED_ORIGINS: &str =
     "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:4173,http://localhost:4173";
 const DEFAULT_CONSENSUS_LISTEN: &str = "127.0.0.1:7701";
+const DEFAULT_METRICS_LISTEN: &str = "127.0.0.1:7602";
 const DEFAULT_CONSENSUS_TICK_MS: u64 = 100;
 const DEFAULT_REGIONAL_MAX_GROUPS: usize = 4_096;
 const DEFAULT_REGIONAL_READ_BARRIER_TIMEOUT_MS: u64 = 2_000;
@@ -70,6 +76,19 @@ const REGIONAL_RESTORE_COMPLETE_MARKER: &str = ".epoch-regional-restore-complete
 struct Args {
     #[arg(long, env = "EPOCH_HTTP_LISTEN", default_value = "127.0.0.1:7601")]
     http_listen: SocketAddr,
+    #[arg(
+        long,
+        env = "EPOCH_METRICS_LISTEN",
+        default_value = DEFAULT_METRICS_LISTEN
+    )]
+    metrics_listen: SocketAddr,
+    #[arg(
+        long,
+        env = "EPOCH_OBSERVABILITY_MAX_TENANTS",
+        default_value_t = 1_024,
+        value_parser = parse_observability_max_tenants
+    )]
+    observability_max_tenants: usize,
     #[arg(long, env = "EPOCH_LOG", default_value = "info")]
     log: String,
     #[arg(long, env = "EPOCH_DATA_DIR", default_value = ".epoch")]
@@ -104,6 +123,12 @@ struct Args {
     allowed_origins: Vec<String>,
     #[arg(long, env = "EPOCH_JSON_LOGS")]
     json_logs: bool,
+    #[arg(
+        long,
+        env = "EPOCH_OTLP_ENDPOINT",
+        value_parser = validate_otlp_endpoint
+    )]
+    otlp_endpoint: Option<String>,
     #[arg(long, env = "EPOCH_CONSENSUS_PROBE_ENABLED")]
     consensus_probe_enabled: bool,
     #[arg(long, env = "EPOCH_REGIONAL_RUNTIME_ENABLED")]
@@ -323,6 +348,67 @@ impl TabletProfileLaunch {
     }
 }
 
+fn parse_observability_max_tenants(value: &str) -> Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|error| format!("invalid tenant-series limit: {error}"))?;
+    if (1..=4_096).contains(&parsed) {
+        Ok(parsed)
+    } else {
+        Err("tenant-series limit must be between 1 and 4096".to_owned())
+    }
+}
+
+fn validate_otlp_endpoint(value: &str) -> Result<String, String> {
+    validate_otlp_http_base(value).map_err(|error| error.to_string())
+}
+
+fn init_tracing(args: &Args) -> Result<Option<SdkTracerProvider>, Box<dyn Error>> {
+    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+    let provider = args
+        .otlp_endpoint
+        .as_deref()
+        .map(|endpoint| {
+            let exporter = opentelemetry_otlp::SpanExporter::builder()
+                .with_http()
+                .with_endpoint(otlp_traces_endpoint(endpoint))
+                .with_timeout(Duration::from_secs(5))
+                .build()?;
+            Ok::<_, opentelemetry_otlp::ExporterBuildError>(
+                SdkTracerProvider::builder()
+                    .with_resource(Resource::builder().with_service_name("epoch-node").build())
+                    .with_batch_exporter(exporter)
+                    .build(),
+            )
+        })
+        .transpose()?;
+    let filter = EnvFilter::try_new(&args.log).unwrap_or_else(|_| EnvFilter::new("info"));
+    let tracer = provider
+        .as_ref()
+        .map(|provider| provider.tracer("epoch-node"));
+    match (args.json_logs, tracer) {
+        (true, Some(tracer)) => tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_opentelemetry::layer().with_tracer(tracer))
+            .with(tracing_subscriber::fmt::layer().json())
+            .try_init()?,
+        (true, None) => tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().json())
+            .try_init()?,
+        (false, Some(tracer)) => tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_opentelemetry::layer().with_tracer(tracer))
+            .with(tracing_subscriber::fmt::layer())
+            .try_init()?,
+        (false, None) => tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .try_init()?,
+    }
+    Ok(provider)
+}
+
 #[tokio::main]
 #[allow(
     clippy::too_many_lines,
@@ -350,15 +436,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             launch.config.require_https_peer_urls()?;
         }
     }
-    let filter = EnvFilter::try_new(&args.log).unwrap_or_else(|_| EnvFilter::new("info"));
-    if args.json_logs {
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .json()
-            .init();
-    } else {
-        tracing_subscriber::fmt().with_env_filter(filter).init();
-    }
+    let tracer_provider = init_tracing(&args)?;
 
     let wal_directory = args.data_dir.join("engine-wal");
     let legacy_wal_path = args.data_dir.join("engine.wal");
@@ -383,9 +461,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
         clock.clone(),
         Box::new(wal),
     )?);
-    let app = router(engine.clone(), &args.allowed_origins)?;
+    let metrics = MetricsRegistry::new("epoch-node", args.observability_max_tenants)?;
+    let app = router_with_observability(engine.clone(), &args.allowed_origins, metrics.clone())?;
     let maintenance = spawn_maintenance(engine.clone());
     let listener = TcpListener::bind(args.http_listen).await?;
+    let metrics_listener = TcpListener::bind(args.metrics_listen).await?;
+    let (metrics_shutdown_tx, metrics_shutdown) = watch::channel(false);
+    let metrics_app = metrics_router(metrics.clone());
+    let metrics_task = tokio::spawn(async move {
+        axum::serve(metrics_listener, metrics_app)
+            .with_graceful_shutdown(wait_for_shutdown(metrics_shutdown))
+            .await
+    });
+    info!(
+        address = %args.metrics_listen,
+        max_tenants = args.observability_max_tenants,
+        "Epoch internal observability endpoint is listening"
+    );
     info!(
         address = %args.http_listen,
         data_dir = %args.data_dir.display(),
@@ -407,6 +499,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 clock,
                 &args.allowed_origins,
                 transport_security.peer_server,
+                metrics.clone(),
             )
             .await
         } else if let Some(launch) = consensus_probe {
@@ -432,6 +525,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             clock,
             &args.allowed_origins,
             transport_security.peer_server,
+            metrics,
         )
         .await
     } else if let Some(launch) = consensus_probe {
@@ -442,9 +536,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .await
             .map_err(boxed_error)
     };
+    let _ = metrics_shutdown_tx.send(true);
+    let metrics_result = stop_metrics_server(metrics_task).await.map_err(boxed_error);
     maintenance.abort();
     let _ = maintenance.await;
+    let tracing_result = tracer_provider.map_or(Ok(()), |provider| {
+        provider.shutdown_with_timeout(Duration::from_secs(5))
+    });
     serving_result
+        .and(metrics_result)
+        .and(tracing_result.map_err(|error| Box::new(error) as Box<dyn Error>))
 }
 
 async fn serve_regional_mode<P>(
@@ -454,6 +555,7 @@ async fn serve_regional_mode<P>(
     clock: Arc<SystemClock>,
     allowed_origins: &[String],
     peer_tls: Option<Arc<rustls::ServerConfig>>,
+    metrics: MetricsRegistry,
 ) -> Result<(), Box<dyn Error>>
 where
     P: axum::serve::Listener<Addr = SocketAddr>,
@@ -473,6 +575,7 @@ where
     let mut runtime_config =
         RegionalRuntimeConfig::new(launch.config, &launch.data_dir, launch.max_groups, clock)
             .with_topology(launch.topology.clone())
+            .with_observability(metrics.clone())
             .with_read_barrier_timeout(launch.read_barrier_timeout)
             .with_maintenance_interval(launch.maintenance_interval)
             .with_checkpoint_policy(
@@ -490,9 +593,10 @@ where
     if let Some(manifest_sha256) = restore_manifest.as_deref() {
         publish_restore_completion(&launch.data_dir, manifest_sha256)?;
     }
-    let regional_public = with_public_http_layers(
+    let regional_public = with_public_http_layers_using(
         with_regional_auth(runtime.public_router(), policy),
         allowed_origins,
+        metrics,
     )?;
     let public_app = public_app.merge(regional_public);
     info!(
@@ -1184,6 +1288,23 @@ async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
     }
 }
 
+async fn stop_metrics_server(
+    metrics_task: tokio::task::JoinHandle<std::io::Result<()>>,
+) -> std::io::Result<()> {
+    tokio::time::timeout(SERVER_SHUTDOWN_TIMEOUT, metrics_task)
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "metrics server did not drain within {} seconds",
+                    SERVER_SHUTDOWN_TIMEOUT.as_secs()
+                ),
+            )
+        })?
+        .map_err(std::io::Error::other)?
+}
+
 async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
@@ -1359,6 +1480,8 @@ mod tests {
                 "http://localhost:4173"
             ]
         );
+        assert_eq!(args.metrics_listen, DEFAULT_METRICS_LISTEN.parse().unwrap());
+        assert_eq!(args.observability_max_tenants, 1_024);
     }
 
     #[test]
@@ -1373,6 +1496,26 @@ mod tests {
             args.allowed_origins,
             ["https://console.example", "http://127.0.0.1:4173"]
         );
+    }
+
+    #[test]
+    fn otlp_endpoint_validation_is_fail_closed() {
+        assert_eq!(
+            validate_otlp_endpoint("http://collector:4318/").unwrap(),
+            "http://collector:4318"
+        );
+        for invalid in [
+            "collector:4318",
+            "file:///tmp/traces",
+            "https://user:secret@collector:4318",
+            "https://collector:4318?token=secret",
+            "https://collector:4318/custom",
+        ] {
+            assert!(
+                validate_otlp_endpoint(invalid).is_err(),
+                "accepted {invalid}"
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 package resources
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -41,7 +42,7 @@ func NewHTTPHandler(registry *Registry) http.Handler {
 // browser origins. An empty set keeps the API available to non-browser clients
 // without granting cross-origin access.
 func NewHTTPHandlerWithOrigins(registry *Registry, allowedOrigins []string) (http.Handler, error) {
-	return newHTTPHandler(registry, allowedOrigins, nil, nil)
+	return newHTTPHandler(registry, allowedOrigins, nil, nil, nil)
 }
 
 // NewAuthenticatedHTTPHandler exposes the managed HTTP API behind a required
@@ -59,7 +60,27 @@ func NewAuthenticatedHTTPHandler(
 	if audit == nil {
 		return nil, fmt.Errorf("control HTTP audit sink is required")
 	}
-	return newHTTPHandler(registry, allowedOrigins, policy, audit)
+	return newHTTPHandler(registry, allowedOrigins, policy, audit, nil)
+}
+
+// NewAuthenticatedHTTPHandlerWithDiagnostics adds the tenant-scoped operational view.
+func NewAuthenticatedHTTPHandlerWithDiagnostics(
+	registry *Registry,
+	allowedOrigins []string,
+	policy *controlauth.Policy,
+	audit controlauth.AuditSink,
+	diagnostics LatencyDiagnosticProvider,
+) (http.Handler, error) {
+	if policy == nil {
+		return nil, fmt.Errorf("control HTTP auth policy is required")
+	}
+	if audit == nil {
+		return nil, fmt.Errorf("control HTTP audit sink is required")
+	}
+	if diagnostics == nil {
+		return nil, fmt.Errorf("latency diagnostic provider is required")
+	}
+	return newHTTPHandler(registry, allowedOrigins, policy, audit, diagnostics)
 }
 
 func newHTTPHandler(
@@ -67,6 +88,7 @@ func newHTTPHandler(
 	allowedOrigins []string,
 	policy *controlauth.Policy,
 	audit controlauth.AuditSink,
+	diagnostics LatencyDiagnosticProvider,
 ) (http.Handler, error) {
 	if registry == nil {
 		panic("resources: nil registry")
@@ -75,12 +97,18 @@ func newHTTPHandler(
 	if err != nil {
 		return nil, err
 	}
-	handler := &httpHandler{registry: registry, policy: policy, audit: audit}
+	handler := &httpHandler{
+		registry:    registry,
+		policy:      policy,
+		audit:       audit,
+		diagnostics: diagnostics,
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handler.health)
 	mux.HandleFunc("/v1/resources", handler.collection)
 	mux.HandleFunc("/v1/resources/", handler.item)
 	mux.HandleFunc("/v1/regional/resources", handler.regionalInventory)
+	mux.HandleFunc("/v1/observability/latency", handler.latencyDiagnostic)
 	var routed http.Handler = mux
 	if policy != nil {
 		routed = withAuthentication(routed, policy, audit)
@@ -89,9 +117,106 @@ func newHTTPHandler(
 }
 
 type httpHandler struct {
-	registry *Registry
-	policy   *controlauth.Policy
-	audit    controlauth.AuditSink
+	registry    *Registry
+	policy      *controlauth.Policy
+	audit       controlauth.AuditSink
+	diagnostics LatencyDiagnosticProvider
+}
+
+// LatencyDiagnosticRequest identifies a tenant and bounded workload profile.
+type LatencyDiagnosticRequest struct {
+	Organization string
+	Project      string
+	Environment  string
+	Namespace    string
+	Profile      string
+}
+
+// LatencyDiagnosis is the actionable data-plane tail-latency attribution.
+type LatencyDiagnosis struct {
+	Cause            string `json:"cause"`
+	Stage            string `json:"stage"`
+	ObservedP99MS    uint64 `json:"observed_p99_ms"`
+	Samples          int    `json:"samples"`
+	Recommendation   string `json:"recommendation"`
+	RegionalEndpoint string `json:"regional_endpoint"`
+}
+
+// ErrLatencyDiagnosisNotFound means all reachable nodes had no recent sample.
+var ErrLatencyDiagnosisNotFound = errors.New("no recent latency samples")
+
+// LatencyDiagnosticProvider queries the internal regional observability plane.
+type LatencyDiagnosticProvider interface {
+	DiagnoseLatency(context.Context, LatencyDiagnosticRequest) (LatencyDiagnosis, error)
+}
+
+func (handler *httpHandler) latencyDiagnostic(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer, http.MethodGet)
+		return
+	}
+	diagnostic, err := latencyDiagnosticFromQuery(request.URL.Query())
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	if !handler.authorize(writer, request, controlauth.ActionResourceRead, controlauth.Scope{
+		Organization: diagnostic.Organization,
+		Project:      diagnostic.Project,
+		Environment:  diagnostic.Environment,
+		Namespace:    diagnostic.Namespace,
+	}) {
+		return
+	}
+	if handler.diagnostics == nil {
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{
+			"code":    "unavailable",
+			"message": "latency diagnostics are not configured",
+		})
+		return
+	}
+	diagnosis, err := handler.diagnostics.DiagnoseLatency(request.Context(), diagnostic)
+	if err != nil {
+		if errors.Is(err, ErrLatencyDiagnosisNotFound) {
+			writeJSON(writer, http.StatusNotFound, map[string]string{
+				"code":    "not_found",
+				"message": "no recent successful latency samples match this tenant and profile",
+			})
+			return
+		}
+		writeJSON(writer, http.StatusBadGateway, map[string]string{
+			"code":    "unavailable",
+			"message": "regional latency diagnostics are temporarily unavailable",
+		})
+		return
+	}
+	writeJSON(writer, http.StatusOK, diagnosis)
+}
+
+func latencyDiagnosticFromQuery(query url.Values) (LatencyDiagnosticRequest, error) {
+	diagnostic := LatencyDiagnosticRequest{
+		Organization: strings.TrimSpace(query.Get("organization")),
+		Project:      strings.TrimSpace(query.Get("project")),
+		Environment:  strings.TrimSpace(query.Get("environment")),
+		Namespace:    strings.TrimSpace(query.Get("namespace")),
+		Profile:      strings.TrimSpace(query.Get("profile")),
+	}
+	for name, value := range map[string]string{
+		"organization": diagnostic.Organization,
+		"project":      diagnostic.Project,
+		"environment":  diagnostic.Environment,
+		"namespace":    diagnostic.Namespace,
+	} {
+		if value == "" || len(value) > 128 || strings.ContainsAny(value, "/\\\r\n") {
+			return LatencyDiagnosticRequest{}, invalid(name + " is invalid")
+		}
+	}
+	switch diagnostic.Profile {
+	case "cache", "stream", "queue", "bus", "connector":
+		return diagnostic, nil
+	default:
+		return LatencyDiagnosticRequest{}, invalid("profile must be cache, stream, queue, bus, or connector")
+	}
 }
 
 func (handler *httpHandler) health(writer http.ResponseWriter, request *http.Request) {
@@ -890,7 +1015,7 @@ func withCORS(next http.Handler, allowedOrigins map[string]struct{}) http.Handle
 			)
 			writer.Header().Set(
 				"Access-Control-Allow-Headers",
-				"Accept, Authorization, Content-Type, Idempotency-Key, If-Match, X-Request-ID",
+				"Accept, Authorization, Content-Type, Idempotency-Key, If-Match, Traceparent, X-Request-ID",
 			)
 		}
 		if request.Method == http.MethodOptions {

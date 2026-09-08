@@ -231,6 +231,34 @@ func TestInvalidEventFailsBeforeTransport(t *testing.T) {
 	}
 }
 
+func TestInvalidTraceparentFailsBeforeTransport(t *testing.T) {
+	transport := &recordingTransport{}
+	client := testClient(t, transport)
+	event := NewEventEnvelope("checkout", "order.created", Document{})
+	event.Traceparent = "00-not-a-trace-parent"
+
+	if _, err := client.Publish(context.Background(), "events", event); err == nil {
+		t.Fatal("Publish accepted an invalid traceparent")
+	}
+	if len(transport.requests) != 0 {
+		t.Fatalf("invalid traceparent reached transport: %#v", transport.requests)
+	}
+}
+
+func TestTraceparentAcceptsAdditionalW3CFlags(t *testing.T) {
+	transport := &recordingTransport{response: Document{"position": "0"}}
+	client := testClient(t, transport)
+	event := NewEventEnvelope("checkout", "order.created", Document{})
+	event.Traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-03"
+
+	if _, err := client.Publish(context.Background(), "events", event); err != nil {
+		t.Fatalf("Publish rejected valid W3C trace flags: %v", err)
+	}
+	if len(transport.requests) != 1 {
+		t.Fatalf("valid traceparent did not reach transport: %#v", transport.requests)
+	}
+}
+
 func TestRemainingNativeRoutes(t *testing.T) {
 	transport := &recordingTransport{}
 	client := testClient(t, transport)

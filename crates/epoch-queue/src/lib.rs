@@ -1461,7 +1461,7 @@ fn restore_snapshot_messages(
 ) -> EpochResult<HashMap<String, QueueMessage>> {
     let mut messages = HashMap::with_capacity(snapshot_messages.len());
     for message in snapshot_messages {
-        message.envelope.validate()?;
+        message.envelope.validate_legacy_persisted()?;
         if message.id != message.envelope.id
             || message.id.trim().is_empty()
             || message.commit_position == 0
@@ -1933,7 +1933,7 @@ mod tests {
         first.headers.insert("z-last".into(), "z".into());
         first.headers.insert("a-first".into(), "a".into());
         first.schema_ref = Some("schema:work:1".into());
-        first.traceparent = Some("00-trace-parent-01".into());
+        first.traceparent = Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into());
         first.payload = json!({"z": [true, null, 1.5], "a": {"value": 7}});
         first.ttl_ms = Some(10_000);
         first.priority = 9;
@@ -1972,6 +1972,23 @@ mod tests {
         );
         restored.enqueue(event("three"), 20).unwrap();
         assert!(restored.get("three").is_some());
+    }
+
+    #[test]
+    fn native_snapshot_recovers_legacy_opaque_traceparent_without_accepting_new_ingress() {
+        let mut queue = checksum_fixture_queue();
+        queue.messages.get_mut("two").unwrap().envelope.traceparent =
+            Some("legacy-opaque-context".into());
+        let snapshot = queue.encode_snapshot().unwrap();
+
+        let restored = Queue::decode_snapshot(&snapshot).unwrap();
+        assert_eq!(
+            restored.messages["two"].envelope.traceparent.as_deref(),
+            Some("legacy-opaque-context")
+        );
+        let mut rejected = event("new-invalid");
+        rejected.traceparent = Some("legacy-opaque-context".into());
+        assert!(queue.enqueue(rejected, 20).is_err());
     }
 
     #[test]
@@ -2594,7 +2611,7 @@ mod tests {
     fn recovery_state_checksum_matches_the_v1_golden_value() {
         assert_eq!(
             checksum_fixture_queue().recovery_state_checksum(),
-            3_359_853_911
+            2_426_431_355
         );
     }
 }

@@ -1187,6 +1187,58 @@ tbody td {
   line-height: 1.5;
 }
 
+.diagnostic-button {
+  min-width: 7rem;
+  white-space: nowrap;
+}
+
+.diagnostic-callout {
+  margin-top: 1rem;
+}
+
+.latency-diagnosis {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) minmax(20rem, 1.5fr) minmax(16rem, 1.2fr);
+  align-items: center;
+  gap: 1rem 1.5rem;
+  margin-top: 1rem;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-lg);
+  padding: 1rem 1.1rem;
+  background: var(--accent-wash);
+}
+
+.latency-diagnosis h3,
+.latency-diagnosis p {
+  margin-bottom: 0;
+}
+
+.latency-diagnosis > div > span,
+.latency-diagnosis > p,
+.latency-diagnosis dt {
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+}
+
+.latency-diagnosis dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin: 0;
+}
+
+.latency-diagnosis dt,
+.latency-diagnosis dd {
+  margin: 0;
+}
+
+.latency-diagnosis dd {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
 .tablet-list {
   color: var(--ink-3);
   font-family: var(--font-mono);
@@ -1243,6 +1295,11 @@ footer {
 @media (max-width: 1000px) {
   .status-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .latency-diagnosis,
+  .latency-diagnosis dl {
+    grid-template-columns: 1fr;
   }
 
   .status-card:nth-child(3) {

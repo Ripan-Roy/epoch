@@ -152,6 +152,10 @@ export function mapRegionalInventory(resource: ManagedRegionalResource): Regiona
 
   return {
     canonicalName: resource.canonical_name,
+    organization: resource.organization,
+    project: resource.project,
+    environment: resource.environment,
+    namespace: resource.namespace,
     kind: resource.kind,
     name: resource.name,
     generation: resource.generation,

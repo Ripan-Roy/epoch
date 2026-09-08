@@ -101,6 +101,8 @@ jobs:
         run: make test-release-manifest test-release-workflow
       - name: Verify Dependabot coverage and update policy
         run: make test-dependabot
+      - name: Verify observability templates and low-cardinality policy
+        run: make test-observability-assets
       - name: Verify Compose crash and restart synchronization
         run: make test-compose-crash-restart
       - name: Verify synchronized release metadata

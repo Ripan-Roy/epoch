@@ -1,11 +1,13 @@
 use std::{
     io::{Cursor, Read as _},
     sync::Arc,
+    time::Instant,
 };
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use epoch_observability::{MetricsRegistry, Outcome, Protocol, ProtocolOperation};
 use flate2::read::MultiGzDecoder;
 use kafka_protocol::{
     ResponseError,
@@ -34,10 +36,12 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
+use tracing::Instrument as _;
 
 use crate::{
     CompatibilityBackend, MAX_FRAME_BYTES, MAX_MESSAGE_BYTES,
     backend::{BackendError, StreamGroupIdentity, StreamGroupRejection, StreamGroupSessionResult},
+    observe_protocol,
 };
 
 use super::records::{decode_records, encode_records};
@@ -73,6 +77,7 @@ pub struct KafkaConfig {
 pub struct KafkaServer<B> {
     backend: Arc<B>,
     config: KafkaConfig,
+    metrics: Option<MetricsRegistry>,
 }
 
 impl<B: CompatibilityBackend> KafkaServer<B> {
@@ -86,7 +91,17 @@ impl<B: CompatibilityBackend> KafkaServer<B> {
                 "Kafka host, port, non-negative node ID, and connection limit are required".into(),
             ));
         }
-        Ok(Self { backend, config })
+        Ok(Self {
+            backend,
+            config,
+            metrics: None,
+        })
+    }
+
+    #[must_use]
+    pub fn with_observability(mut self, metrics: MetricsRegistry) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     pub async fn serve(self, listener: TcpListener) -> Result<(), std::io::Error> {
@@ -99,9 +114,23 @@ impl<B: CompatibilityBackend> KafkaServer<B> {
             };
             let backend = Arc::clone(&self.backend);
             let config = self.config.clone();
+            let metrics = self.metrics.clone();
             tokio::spawn(async move {
                 let _permit = permit;
-                if let Err(error) = serve_connection(stream, backend, config).await {
+                let started = Instant::now();
+                let result = serve_connection(stream, backend, config, metrics.as_ref()).await;
+                observe_protocol(
+                    metrics.as_ref(),
+                    Protocol::Kafka,
+                    ProtocolOperation::Connect,
+                    if result.is_ok() {
+                        Outcome::Success
+                    } else {
+                        Outcome::ServerError
+                    },
+                    started.elapsed(),
+                );
+                if let Err(error) = result {
                     tracing::warn!(protocol = "kafka", %error, "compatibility connection closed");
                 }
             });
@@ -113,6 +142,7 @@ async fn serve_connection<B: CompatibilityBackend>(
     mut stream: TcpStream,
     backend: Arc<B>,
     config: KafkaConfig,
+    metrics: Option<&MetricsRegistry>,
 ) -> Result<()> {
     loop {
         let length = match stream.read_i32().await {
@@ -126,9 +156,44 @@ async fn serve_connection<B: CompatibilityBackend>(
             .context("invalid Kafka frame length")?;
         let mut frame = vec![0_u8; length];
         stream.read_exact(&mut frame).await?;
-        if let Some(response) = handle_frame(Bytes::from(frame), backend.as_ref(), &config).await? {
+        let operation = kafka_operation(&frame);
+        let started = Instant::now();
+        let handled = handle_frame(Bytes::from(frame), backend.as_ref(), &config)
+            .instrument(tracing::info_span!(
+                "epoch.compat.request",
+                protocol = Protocol::Kafka.as_str(),
+                operation = operation.as_str()
+            ))
+            .await;
+        observe_protocol(
+            metrics,
+            Protocol::Kafka,
+            operation,
+            if handled.is_ok() {
+                Outcome::Success
+            } else {
+                Outcome::ClientError
+            },
+            started.elapsed(),
+        );
+        if let Some(response) = handled? {
             stream.write_all(&response).await?;
         }
+    }
+}
+
+fn kafka_operation(frame: &[u8]) -> ProtocolOperation {
+    let Some(api_key) = frame
+        .get(..2)
+        .map(|bytes| i16::from_be_bytes([bytes[0], bytes[1]]))
+    else {
+        return ProtocolOperation::Other;
+    };
+    match api_key {
+        0 => ProtocolOperation::Produce,
+        1 | 2 => ProtocolOperation::Fetch,
+        8..=14 => ProtocolOperation::Group,
+        _ => ProtocolOperation::Other,
     }
 }
 

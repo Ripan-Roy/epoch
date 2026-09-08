@@ -104,6 +104,25 @@ class EpochClientTests(unittest.TestCase):
             EventEnvelope(source="", event_type="created", payload={})
         self.assertEqual(self.transport.requests, [])
 
+    def test_invalid_traceparent_is_rejected_before_transport(self) -> None:
+        with self.assertRaisesRegex(ValueError, "traceparent"):
+            EventEnvelope(
+                source="checkout",
+                event_type="created",
+                payload={},
+                traceparent="00-not-a-trace-parent",
+            )
+        self.assertEqual(self.transport.requests, [])
+
+    def test_traceparent_accepts_additional_w3c_flags(self) -> None:
+        event = EventEnvelope(
+            source="checkout",
+            event_type="created",
+            payload={},
+            traceparent="00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-03",
+        )
+        self.assertEqual(event.traceparent[-2:], "03")
+
     def test_cache_mutation_operations_map_to_native_routes(self) -> None:
         self.client.cache_set(
             "sessions",

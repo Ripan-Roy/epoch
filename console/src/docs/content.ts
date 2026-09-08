@@ -73,6 +73,42 @@ EPOCH_AUTH_POLICY_PATH=spec/auth/bootstrap-policy-v1.example.json \
 EPOCH_CONTROL_REGIONAL_TOKEN=epoch-dev-control-v1 \
 go run ./control/cmd/epoch-control`;
 
+export const observabilityRuntime = `# One collector endpoint works across the three processes
+export EPOCH_OTLP_ENDPOINT=http://127.0.0.1:4318
+export EPOCH_JSON_LOGS=true
+
+# The metrics listeners default to loopback-only addresses
+curl --fail --silent http://127.0.0.1:7602/metrics  # epoch-node
+curl --fail --silent http://127.0.0.1:9090/metrics  # epoch-control
+curl --fail --silent http://127.0.0.1:9100/metrics  # epoch-compat`;
+
+export const observabilityPromql = `# Request rate by workload and outcome
+sum by (profile, outcome) (rate(epoch_http_requests_total[5m]))
+
+# p99 by workload
+histogram_quantile(
+  0.99,
+  sum by (le, profile) (rate(epoch_http_request_duration_seconds_bucket[5m]))
+)
+
+# The stage responsible for recent tail latency
+max by (profile, stage) (epoch_operation_stage_duration_p99_seconds)`;
+
+export const observabilityDiagnostic = `curl --fail-with-body \
+  'https://epoch-control.example/v1/observability/latency?organization=acme&project=shop&environment=prod&namespace=core&profile=stream' \
+  --cacert /secure/epoch-ca.crt \
+  --header "authorization: Bearer $EPOCH_TOKEN"`;
+
+export const observabilityKubernetes = `spec:
+  observability:
+    otlpEndpoint: http://otel-collector.observability.svc:4318
+
+# Internal scrape targets; the public service does not expose metrics
+kubectl -n epoch-system get service epoch-peer epoch-control
+
+# Validate the collector, dashboard, alerts, and cardinality policy
+make test-observability-assets`;
+
 export const kubernetesInstall = `# Build the cluster images and optional containerized CLI
 docker build -f deploy/docker/Dockerfile.node -t registry.example/epoch-node:beta.1 .
 docker build -f deploy/docker/Dockerfile.control -t registry.example/epoch-control:beta.1 .

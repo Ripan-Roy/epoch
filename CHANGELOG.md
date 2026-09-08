@@ -6,6 +6,37 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+### Added
+
+- Added bounded Prometheus metrics, structured request correlation, optional
+  OTLP/HTTP trace export, and internal health surfaces to the Rust node, Go
+  control plane, and Redis/Kafka/AMQP compatibility gateway.
+- Added recent-stage p99 attribution with an authenticated control-plane API,
+  the console **Why slow?** workflow, operator wiring, an OpenTelemetry
+  Collector template, Prometheus alerts, a Grafana dashboard, and an end-to-end
+  observability guide on the documentation site.
+
+### Changed
+
+- Folded the compatible Dependabot updates into this feature boundary,
+  including Kubernetes 0.37.0, current Go OpenAPI and Prometheus modules,
+  `tower-http` 0.7.1, `typescript-eslint` 8.69.0, and Maven Surefire 3.6.0.
+
+### Security and correctness
+
+- Bound tenant metric cardinality, keep metrics on dedicated internal
+  listeners, exclude customer resource names from labels, and reject ambiguous
+  OTLP URLs containing credentials, paths, queries, or fragments.
+- Validate canonical W3C version-00 `traceparent` values consistently in Rust,
+  Go, Java, and Python event envelopes and before managed HTTP delivery while
+  preserving every valid trace-flags bit.
+
+### Limitations
+
+- Exhaustive per-profile state metrics, support bundles, loss-risk diagnosis,
+  consumer/replay operational views, telemetry retention evidence, and
+  production load/fault/SLO proof remain open before observability is complete.
+
 ## [0.2.0-beta.6] - 2026-09-05
 
 ### Changed

@@ -73,6 +73,11 @@ func TestReconcileCreatesRunnableBoundedVoterTopology(t *testing.T) {
 		!containsEnvironment(container.Env, "EPOCH_REGIONAL_NODE_CLASS", "general-purpose") {
 		t.Fatalf("explicit placement identity is absent: %#v", container.Env)
 	}
+	if !containsEnvironment(container.Env, "EPOCH_METRICS_LISTEN", "0.0.0.0:7602") ||
+		!containsEnvironment(container.Env, "EPOCH_OTLP_ENDPOINT", "http://otel-collector.observability.svc:4318") ||
+		!containsContainerPort(container.Ports, "metrics", 7602) {
+		t.Fatalf("data-plane observability configuration is absent: %#v", container)
+	}
 	if container.SecurityContext == nil || container.SecurityContext.ReadOnlyRootFilesystem == nil || !*container.SecurityContext.ReadOnlyRootFilesystem {
 		t.Fatal("data container must use a read-only root filesystem")
 	}
@@ -95,6 +100,12 @@ func TestReconcileCreatesRunnableBoundedVoterTopology(t *testing.T) {
 		!containsEnvironment(controlContainer.Env, "EPOCH_CONTROL_REGIONAL_TLS_SERVER_NAME", "orders-peer.epoch-system.svc") {
 		t.Fatalf("control-plane mTLS configuration is absent: %#v", controlContainer.Env)
 	}
+	if !containsEnvironment(controlContainer.Env, "EPOCH_CONTROL_METRICS_ADDR", "0.0.0.0:9090") ||
+		!containsEnvironment(controlContainer.Env, "EPOCH_CONTROL_REGIONAL_METRICS_ENDPOINTS", "http://orders-node-0.orders-peer:7602,http://orders-node-1.orders-peer:7602,http://orders-node-2.orders-peer:7602") ||
+		!containsEnvironment(controlContainer.Env, "EPOCH_OTLP_ENDPOINT", "http://otel-collector.observability.svc:4318") ||
+		!containsContainerPort(controlContainer.Ports, "metrics", 9090) {
+		t.Fatalf("control-plane observability configuration is absent: %#v", controlContainer)
+	}
 	if controlContainer.ReadinessProbe == nil || controlContainer.ReadinessProbe.TCPSocket == nil || controlContainer.ReadinessProbe.HTTPGet != nil {
 		t.Fatal("control-plane mTLS must not depend on an unauthenticated HTTP probe")
 	}
@@ -102,6 +113,15 @@ func TestReconcileCreatesRunnableBoundedVoterTopology(t *testing.T) {
 		service := &corev1.Service{}
 		if err := client.Get(context.Background(), types.NamespacedName{Namespace: cluster.Namespace, Name: serviceName}, service); err != nil {
 			t.Fatalf("Service %s was not created: %v", serviceName, err)
+		}
+		if serviceName != publicName(cluster) {
+			wantPort := int32(7602)
+			if serviceName == controlName(cluster) {
+				wantPort = 9090
+			}
+			if !containsServicePort(service.Spec.Ports, "metrics", wantPort) || service.Annotations["prometheus.io/scrape"] != "true" || service.Annotations["prometheus.io/path"] != "/metrics" {
+				t.Fatalf("Service %s does not expose internal Prometheus discovery: %#v", serviceName, service)
+			}
 		}
 	}
 	backup := &batchv1.CronJob{}
@@ -314,6 +334,15 @@ func TestValidateSpecSeparatesPhysicalNodesFromBoundedCatalogVoters(t *testing.T
 	cluster.Spec.Storage = apiresource.Quantity{}
 	if err := validateSpec(&cluster.Spec); err == nil {
 		t.Fatal("zero durable storage must be rejected")
+	}
+	cluster = validCluster()
+	cluster.Spec.Observability.OTLPEndpoint = "https://user:secret@example.com/v1/traces"
+	if err := validateSpec(&cluster.Spec); err == nil {
+		t.Fatal("credential-bearing OTLP endpoints must be rejected")
+	}
+	cluster.Spec.Observability.OTLPEndpoint = "https://example.com/custom"
+	if err := validateSpec(&cluster.Spec); err == nil {
+		t.Fatal("OTLP endpoints with an ambiguous custom path must be rejected")
 	}
 }
 
@@ -578,6 +607,7 @@ func validCluster() *epochv1alpha1.EpochCluster {
 			AuthPolicyConfigMap: "epoch-auth-policy",
 			CredentialSecret:    "epoch-control-credentials",
 			ServiceType:         corev1.ServiceTypeClusterIP,
+			Observability:       epochv1alpha1.ObservabilitySpec{OTLPEndpoint: "http://otel-collector.observability.svc:4318"},
 			TransportSecurity: epochv1alpha1.TransportSecuritySpec{
 				DataPlaneSecret:    "epoch-data-plane-tls",
 				ControlPlaneSecret: "epoch-control-plane-tls",
@@ -656,6 +686,24 @@ func containsEnvironment(environment []corev1.EnvVar, name, value string) bool {
 func containsSecretEnvironment(environment []corev1.EnvVar, name, secret, key string) bool {
 	for _, variable := range environment {
 		if variable.Name == name && variable.ValueFrom != nil && variable.ValueFrom.SecretKeyRef != nil && variable.ValueFrom.SecretKeyRef.Name == secret && variable.ValueFrom.SecretKeyRef.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+func containsContainerPort(ports []corev1.ContainerPort, name string, port int32) bool {
+	for _, candidate := range ports {
+		if candidate.Name == name && candidate.ContainerPort == port {
+			return true
+		}
+	}
+	return false
+}
+
+func containsServicePort(ports []corev1.ServicePort, name string, port int32) bool {
+	for _, candidate := range ports {
+		if candidate.Name == name && candidate.Port == port {
 			return true
 		}
 	}

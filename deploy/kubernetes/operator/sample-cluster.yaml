@@ -30,6 +30,8 @@ spec:
   serviceType: ClusterIP
   allowedOrigins:
     - https://console.example.com
+  observability:
+    otlpEndpoint: http://otel-collector.observability.svc:4318
   nodeResources:
     requests:
       cpu: "1"
