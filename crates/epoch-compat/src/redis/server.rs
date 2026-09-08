@@ -1,14 +1,16 @@
+use epoch_observability::{MetricsRegistry, Outcome, Protocol, ProtocolOperation};
 use std::{
     collections::BTreeMap,
     fmt,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
+use tracing::Instrument as _;
 
 use crate::{
     CompatibilityBackend, MAX_FRAME_BYTES,
@@ -16,6 +18,7 @@ use crate::{
         BackendError, CacheCollectionMutation, CacheCollectionResult, CacheSetCondition,
         CacheSetOptions, CacheValue,
     },
+    observe_protocol,
 };
 
 use super::protocol::{RespDecodeError, RespValue, decode_request, encode_response};
@@ -42,6 +45,7 @@ impl fmt::Debug for RedisConfig {
 pub struct RedisServer<B> {
     backend: Arc<B>,
     config: RedisConfig,
+    metrics: Option<MetricsRegistry>,
 }
 
 impl<B: CompatibilityBackend> RedisServer<B> {
@@ -51,7 +55,17 @@ impl<B: CompatibilityBackend> RedisServer<B> {
                 "Redis cache and positive connection limit are required".into(),
             ));
         }
-        Ok(Self { backend, config })
+        Ok(Self {
+            backend,
+            config,
+            metrics: None,
+        })
+    }
+
+    #[must_use]
+    pub fn with_observability(mut self, metrics: MetricsRegistry) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     pub async fn serve(self, listener: TcpListener) -> Result<(), std::io::Error> {
@@ -64,11 +78,25 @@ impl<B: CompatibilityBackend> RedisServer<B> {
             };
             let backend = Arc::clone(&self.backend);
             let config = self.config.clone();
+            let metrics = self.metrics.clone();
             tokio::spawn(async move {
                 let _permit = permit;
-                if let Err(error) =
-                    serve_connection(stream, RedisSession::new(backend, config)).await
-                {
+                let started = Instant::now();
+                let result =
+                    serve_connection(stream, RedisSession::new(backend, config), metrics.as_ref())
+                        .await;
+                observe_protocol(
+                    metrics.as_ref(),
+                    Protocol::Redis,
+                    ProtocolOperation::Connect,
+                    if result.is_ok() {
+                        Outcome::Success
+                    } else {
+                        Outcome::ServerError
+                    },
+                    started.elapsed(),
+                );
+                if let Err(error) = result {
                     tracing::warn!(protocol = "redis", %error, "compatibility connection closed");
                 }
             });
@@ -79,13 +107,30 @@ impl<B: CompatibilityBackend> RedisServer<B> {
 async fn serve_connection<B: CompatibilityBackend>(
     mut stream: TcpStream,
     mut session: RedisSession<B>,
+    metrics: Option<&MetricsRegistry>,
 ) -> Result<(), std::io::Error> {
     let mut buffer = Vec::with_capacity(16 * 1024);
     loop {
         match decode_request(&buffer) {
             Ok((arguments, consumed)) => {
                 buffer.drain(..consumed);
-                let response = session.execute(arguments).await;
+                let operation = redis_operation(&arguments);
+                let started = Instant::now();
+                let response = session
+                    .execute(arguments)
+                    .instrument(tracing::info_span!(
+                        "epoch.compat.request",
+                        protocol = Protocol::Redis.as_str(),
+                        operation = operation.as_str()
+                    ))
+                    .await;
+                observe_protocol(
+                    metrics,
+                    Protocol::Redis,
+                    operation,
+                    redis_outcome(&response),
+                    started.elapsed(),
+                );
                 stream
                     .write_all(&encode_response(&response, session.resp3))
                     .await?;
@@ -114,6 +159,79 @@ async fn serve_connection<B: CompatibilityBackend>(
                 return Ok(());
             }
         }
+    }
+}
+
+fn redis_operation(arguments: &[Vec<u8>]) -> ProtocolOperation {
+    let Some(command) = arguments.first() else {
+        return ProtocolOperation::Other;
+    };
+    if [
+        b"GET".as_slice(),
+        b"MGET",
+        b"EXISTS",
+        b"TTL",
+        b"PTTL",
+        b"TYPE",
+        b"HGET",
+        b"HMGET",
+        b"HEXISTS",
+        b"HLEN",
+        b"HGETALL",
+        b"LLEN",
+        b"LRANGE",
+        b"LINDEX",
+        b"SMEMBERS",
+        b"SCARD",
+        b"SISMEMBER",
+        b"ZCARD",
+        b"ZSCORE",
+        b"ZRANGE",
+    ]
+    .iter()
+    .any(|candidate| command.eq_ignore_ascii_case(candidate))
+    {
+        ProtocolOperation::CacheRead
+    } else if [
+        b"SET".as_slice(),
+        b"DEL",
+        b"MSET",
+        b"INCR",
+        b"DECR",
+        b"INCRBY",
+        b"DECRBY",
+        b"EXPIRE",
+        b"PEXPIRE",
+        b"PERSIST",
+        b"HSET",
+        b"HDEL",
+        b"LPUSH",
+        b"RPUSH",
+        b"LPOP",
+        b"RPOP",
+        b"SADD",
+        b"SREM",
+        b"ZADD",
+        b"ZREM",
+    ]
+    .iter()
+    .any(|candidate| command.eq_ignore_ascii_case(candidate))
+    {
+        ProtocolOperation::CacheWrite
+    } else {
+        ProtocolOperation::Other
+    }
+}
+
+fn redis_outcome(response: &RespValue) -> Outcome {
+    match response {
+        RespValue::Error(message)
+            if message.starts_with("TRYAGAIN") || message.contains("backend unavailable") =>
+        {
+            Outcome::ServerError
+        }
+        RespValue::Error(_) => Outcome::ClientError,
+        _ => Outcome::Success,
     }
 }
 

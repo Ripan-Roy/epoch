@@ -471,7 +471,15 @@ the command carries the exact due time, and deterministic proposal identities
 make overlapping ticks idempotent. The authenticated topology response exposes
 node-local pass/leader/due/submission/pending/error observations. Explicit
 maintenance APIs remain available; dynamic/cross-region ownership, timer load
-SLOs, and production metrics/alerts remain open.
+SLOs remain open. The production-observability candidate now adds bounded
+data/control/compatibility request and stage metrics, structured correlation,
+W3C propagation, OTLP/HTTP trace export, internal deployment discovery, a
+measured authenticated “Why slow?” console path, and tested dashboard, alert,
+and Collector templates. Exhaustive profile-state golden signals, retention,
+support bundles, remaining operational experiences, protected CI, and
+production load/fault evidence remain open. See
+[Observability](OBSERVABILITY.md) and
+[ADR-0045](adr/0045-bounded-observability-and-trace-propagation.md).
 
 The segmented-WAL work package is implemented as the single-node storage
 sub-slice at `$EPOCH_DATA_DIR/engine-wal/segment-*.wal`. The implementation has

@@ -82,6 +82,7 @@ impl NodeProcess {
                 PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .join("../../spec/auth/bootstrap-policy-v1.example.json"),
             )
+            .env("EPOCH_METRICS_LISTEN", "127.0.0.1:0")
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))

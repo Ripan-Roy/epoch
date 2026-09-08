@@ -1,6 +1,9 @@
 //! Resource-aware routing and fencing for materialized regional tablets.
 
-use std::{convert::Infallible, time::Duration};
+use std::{
+    convert::Infallible,
+    time::{Duration, Instant},
+};
 
 use axum::{
     Json, Router,
@@ -13,6 +16,7 @@ use axum::{
 use epoch_catalog::ResourceName;
 use epoch_consensus::{ConsensusError, ConsensusMembership, ConsensusRole, ConsensusStatus};
 use epoch_core::{ResourceKind, WorkloadProfile};
+use epoch_observability::{MetricsRegistry, Outcome, Stage, TenantScope};
 use epoch_stream::STREAM_PARTITIONER;
 use serde::{Deserialize, Serialize};
 use tower::ServiceExt;
@@ -46,6 +50,7 @@ pub const MAX_REGIONAL_READ_BARRIER_TIMEOUT: Duration = Duration::from_mins(1);
 struct RegionalRouterState {
     directory: TabletDirectory,
     read_barrier_timeout: Duration,
+    metrics: Option<MetricsRegistry>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -509,6 +514,22 @@ pub fn regional_tablet_router_with_read_timeout(
     directory: TabletDirectory,
     read_barrier_timeout: Duration,
 ) -> Router {
+    regional_tablet_router_inner(directory, read_barrier_timeout, None)
+}
+
+pub fn regional_tablet_router_with_observability(
+    directory: TabletDirectory,
+    read_barrier_timeout: Duration,
+    metrics: MetricsRegistry,
+) -> Router {
+    regional_tablet_router_inner(directory, read_barrier_timeout, Some(metrics))
+}
+
+fn regional_tablet_router_inner(
+    directory: TabletDirectory,
+    read_barrier_timeout: Duration,
+    metrics: Option<MetricsRegistry>,
+) -> Router {
     assert!(
         !read_barrier_timeout.is_zero()
             && read_barrier_timeout <= MAX_REGIONAL_READ_BARRIER_TIMEOUT,
@@ -528,6 +549,7 @@ pub fn regional_tablet_router_with_read_timeout(
         .with_state(RegionalRouterState {
             directory,
             read_barrier_timeout,
+            metrics,
         })
 }
 
@@ -625,8 +647,25 @@ async fn dispatch_data_request(
     path: &RegionalDataPath,
     mut request: Request<Body>,
 ) -> Result<Response, RegionalRouterError> {
+    let tenant = TenantScope::new(
+        &path.organization,
+        &path.project,
+        &path.environment,
+        &path.namespace,
+    )
+    .ok();
+    let routing_started = Instant::now();
     let (route, _) = resolve_local_route(&state.directory, &path.resource_path())?;
     validate_fences(&route, request.headers())?;
+    let profile = profile_label(route.metadata().descriptor.workload_profile);
+    record_stage(
+        state,
+        tenant.as_ref(),
+        profile,
+        Stage::Routing,
+        routing_started.elapsed(),
+        Outcome::Success,
+    );
     if path.operation.trim_matches('/').is_empty() {
         return Err(RegionalRouterError::invalid(
             "a profile operation path is required",
@@ -638,49 +677,15 @@ async fn dispatch_data_request(
         route.metadata().descriptor.workload_profile,
         &path.operation,
     );
-    let requested_consistency = requested_read_consistency(request.headers(), is_read)?;
-    let read_metadata = if requested_consistency == Some(RequestedReadConsistency::Linearizable) {
-        let consensus = route
-            .consensus()
-            .status()
-            .await
-            .map_err(|error| RegionalRouterError::unavailable(error.to_string()))?;
-        if consensus.fail_stopped {
-            return Err(RegionalRouterError::unavailable(format!(
-                "consensus group {} is fail-stopped",
-                route.metadata().descriptor.consensus_group_id
-            )));
-        }
-        if consensus.role != ConsensusRole::Leader {
-            return Err(RegionalRouterError::not_leader(&route, &consensus));
-        }
-        let completed = route
-            .consensus()
-            .read_barrier(consensus.term.get(), state.read_barrier_timeout)
-            .await
-            .map_err(|error| read_barrier_error(&route, &consensus, &error))?;
-        let metadata = TabletReadMetadata::linearizable(completed);
-        request.extensions_mut().insert(metadata);
-        Some(metadata)
-    } else {
-        if !is_read {
-            let consensus = route
-                .consensus()
-                .status()
-                .await
-                .map_err(|error| RegionalRouterError::unavailable(error.to_string()))?;
-            if consensus.fail_stopped {
-                return Err(RegionalRouterError::unavailable(format!(
-                    "consensus group {} is fail-stopped",
-                    route.metadata().descriptor.consensus_group_id
-                )));
-            }
-            if consensus.role != ConsensusRole::Leader {
-                return Err(RegionalRouterError::not_leader(&route, &consensus));
-            }
-        }
-        None
-    };
+    let read_metadata = prepare_read_metadata(
+        state,
+        &route,
+        request.headers(),
+        is_read,
+        tenant.as_ref(),
+        profile,
+    )
+    .await?;
 
     let inner_uri = profile_uri(
         route.metadata().descriptor.workload_profile,
@@ -699,9 +704,22 @@ async fn dispatch_data_request(
     if let Some(metadata) = read_metadata {
         request.extensions_mut().insert(metadata);
     }
+    let profile_started = Instant::now();
     let result: Result<Response, Infallible> = route.router().oneshot(request).await;
     match result {
         Ok(mut response) => {
+            record_stage(
+                state,
+                tenant.as_ref(),
+                profile,
+                if is_read {
+                    Stage::Storage
+                } else {
+                    Stage::Replication
+                },
+                profile_started.elapsed(),
+                Outcome::from_status(response.status().as_u16()),
+            );
             if let Some(metadata) = read_metadata {
                 response.headers_mut().insert(
                     READ_CONSISTENCY_HEADER,
@@ -721,6 +739,72 @@ async fn dispatch_data_request(
             Ok(response)
         }
         Err(never) => match never {},
+    }
+}
+
+async fn prepare_read_metadata(
+    state: &RegionalRouterState,
+    route: &MaterializedTabletRoute,
+    headers: &HeaderMap,
+    is_read: bool,
+    tenant: Option<&TenantScope>,
+    profile: &'static str,
+) -> Result<Option<TabletReadMetadata>, RegionalRouterError> {
+    let requested_consistency = requested_read_consistency(headers, is_read)?;
+    if requested_consistency == Some(RequestedReadConsistency::Linearizable) {
+        let replication_started = Instant::now();
+        let consensus = require_leader(route).await?;
+        let completed = route
+            .consensus()
+            .read_barrier(consensus.term.get(), state.read_barrier_timeout)
+            .await
+            .map_err(|error| read_barrier_error(route, &consensus, &error))?;
+        record_stage(
+            state,
+            tenant,
+            profile,
+            Stage::Replication,
+            replication_started.elapsed(),
+            Outcome::Success,
+        );
+        return Ok(Some(TabletReadMetadata::linearizable(completed)));
+    }
+    if !is_read {
+        require_leader(route).await?;
+    }
+    Ok(None)
+}
+
+async fn require_leader(
+    route: &MaterializedTabletRoute,
+) -> Result<ConsensusStatus, RegionalRouterError> {
+    let consensus = route
+        .consensus()
+        .status()
+        .await
+        .map_err(|error| RegionalRouterError::unavailable(error.to_string()))?;
+    if consensus.fail_stopped {
+        return Err(RegionalRouterError::unavailable(format!(
+            "consensus group {} is fail-stopped",
+            route.metadata().descriptor.consensus_group_id
+        )));
+    }
+    if consensus.role != ConsensusRole::Leader {
+        return Err(RegionalRouterError::not_leader(route, &consensus));
+    }
+    Ok(consensus)
+}
+
+fn record_stage(
+    registry: &RegionalRouterState,
+    tenant: Option<&TenantScope>,
+    profile: &'static str,
+    latency_stage: Stage,
+    elapsed: Duration,
+    outcome: Outcome,
+) {
+    if let (Some(metrics), Some(tenant)) = (&registry.metrics, tenant) {
+        metrics.record_stage(tenant, profile, latency_stage, elapsed, outcome);
     }
 }
 
@@ -862,12 +946,7 @@ fn profile_uri(
     operation: &str,
     query: Option<&str>,
 ) -> Result<Uri, RegionalRouterError> {
-    let profile = match profile {
-        WorkloadProfile::CacheAndState => "cache",
-        WorkloadProfile::StreamLog => "stream",
-        WorkloadProfile::WorkQueue => "queue",
-        WorkloadProfile::EventBus => "bus",
-    };
+    let profile = profile_label(profile);
     let operation = operation.trim_start_matches('/');
     let path = if let Some(query) = query {
         format!("/experimental/v1/tablets/{profile}/{operation}?{query}")
@@ -876,6 +955,15 @@ fn profile_uri(
     };
     path.parse()
         .map_err(|error| RegionalRouterError::invalid(format!("invalid operation URI: {error}")))
+}
+
+const fn profile_label(profile: WorkloadProfile) -> &'static str {
+    match profile {
+        WorkloadProfile::CacheAndState => "cache",
+        WorkloadProfile::StreamLog => "stream",
+        WorkloadProfile::WorkQueue => "queue",
+        WorkloadProfile::EventBus => "bus",
+    }
 }
 
 fn parse_resource_kind(value: &str) -> Result<ResourceKind, RegionalRouterError> {
@@ -901,6 +989,7 @@ mod tests {
 
     use epoch_catalog::{ResourceRecord, ResourceSpec, TabletDescriptor};
     use epoch_core::ManualClock;
+    use epoch_observability::{LatencyCause, MetricsRegistry, TenantScope};
     use http_body_util::BodyExt;
     use serde_json::Value;
     use tempfile::TempDir;
@@ -1347,6 +1436,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+        materializer.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn routed_profile_work_records_actionable_stage_latency() {
+        let data_directory = TempDir::new().expect("temp directory should be created");
+        let (mut materializer, _router, _resource) = routed_stream(&data_directory).await;
+        let metrics = MetricsRegistry::new("epoch-node", 8).unwrap();
+        let router = regional_tablet_router_with_observability(
+            materializer.directory(),
+            DEFAULT_REGIONAL_READ_BARRIER_TIMEOUT,
+            metrics.clone(),
+        );
+
+        let response = router
+            .oneshot(
+                Request::get(data_path("status"))
+                    .header(RESOURCE_GENERATION_HEADER, "5")
+                    .header(TABLET_EPOCH_HEADER, "3")
+                    .header(READ_CONSISTENCY_HEADER, "local_stale")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let tenant = TenantScope::new("acme", "shop", "dev", "core").unwrap();
+        let diagnosis = metrics.diagnose(&tenant, "stream").unwrap();
+        assert_eq!(diagnosis.cause, LatencyCause::Storage);
+        assert!(metrics.render_prometheus().contains("stage=\"storage\""));
         materializer.shutdown().await.unwrap();
     }
 

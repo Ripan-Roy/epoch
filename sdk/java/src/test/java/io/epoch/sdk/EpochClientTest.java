@@ -77,6 +77,28 @@ final class EpochClientTest {
   }
 
   @Test
+  void rejectsInvalidTraceparentBeforeUsingTheTransport() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            EventEnvelope.builder("checkout", "created", Map.of())
+                .traceparent("00-not-a-trace-parent")
+                .build());
+    assertTrue(transport.requests.isEmpty());
+  }
+
+  @Test
+  void acceptsAdditionalW3cTraceFlags() {
+    EventEnvelope event =
+        EventEnvelope.builder("checkout", "created", Map.of())
+            .traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-03")
+            .build();
+    assertEquals(
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-03",
+        event.toJson().get("traceparent").textValue());
+  }
+
+  @Test
   void mapsCacheAndConsumerGroupOperations() throws Exception {
     client.cacheIncrement("sessions", "visits", 2);
     client.cacheDelete("sessions", "user-42");

@@ -16,6 +16,10 @@ import {
   managedTargetLanguageGuides,
   nodeRestart,
   nodeStart,
+  observabilityDiagnostic,
+  observabilityKubernetes,
+  observabilityPromql,
+  observabilityRuntime,
   regionalBusLanguageGuides,
   regionalBusResource,
   regionalCacheLanguageGuides,
@@ -779,6 +783,100 @@ export function DeploymentBody() {
             href={`${repositoryDocsUrl}/adr/0041-tag-only-oci-supply-chain.md`}
           />
         </div>
+      </Topic>
+    </>
+  );
+}
+
+export function ObservabilityBody() {
+  return (
+    <>
+      <Note title="Measured, bounded, and vendor-neutral">
+        Epoch separates internal metrics from public traffic, fingerprints tenant scope, caps admitted tenant
+        series, and never uses resource names, keys, consumer IDs, or payload fields as metric labels. Missing
+        latency evidence stays unknown; the console does not invent a cause.
+      </Note>
+
+      <Topic id="signals" title="Collect metrics, logs, and traces">
+        <p>
+          The Rust node, Go control plane, and Redis/Kafka/AMQP gateway expose Prometheus metrics, stable
+          request correlation, structured logs, and optional OTLP/HTTP traces. W3C context crosses HTTP, gRPC,
+          regional calls, and translated compatibility operations.
+        </p>
+        <CodeBlock label="shell" value={observabilityRuntime} />
+        <div className="evidence-grid">
+          <EvidenceCard label="Metrics" claim="Customer traffic cannot create unbounded labels.">
+            Closed profile, operation, outcome, stage, and protocol vocabularies sit behind a fixed tenant
+            budget with an explicit overflow counter.
+          </EvidenceCard>
+          <EvidenceCard label="Logs" claim="One request ID joins safe structured events.">
+            Completion logs carry request, event, trace, operation, status, and duration fields without bearer
+            credentials or payloads.
+          </EvidenceCard>
+          <EvidenceCard label="Traces" claim="One canonical W3C context crosses process boundaries.">
+            Invalid parents fail closed. Each service batches OTLP spans and performs a bounded shutdown
+            flush. Legacy opaque values remain recoverable but are never forwarded or accepted on new writes.
+          </EvidenceCard>
+        </div>
+      </Topic>
+
+      <Topic id="queries" title="Query the golden request signals">
+        <p>
+          Start with rate, errors, duration, and saturation/cardinality. This increment measures regional
+          routing, replication, and storage; the closed schema reserves quota, hot-partition, target, and
+          client stages until those measurements exist.
+        </p>
+        <CodeBlock label="PromQL" value={observabilityPromql} />
+      </Topic>
+
+      <Topic id="why-slow" title="Explain why a resource is slow">
+        <p>
+          Choose <strong>Why slow?</strong> beside a regional resource, or call the same authenticated control
+          endpoint. Authorization uses the exact organization, project, environment, and namespace. Results
+          include measured p99, sample count, source node, dominant stage, and a bounded recommendation.
+        </p>
+        <CodeBlock label="shell" value={observabilityDiagnostic} />
+      </Topic>
+
+      <Topic id="deploy" title="Deploy the collector, dashboard, and alerts">
+        <p>
+          The Kubernetes operator exposes only internal node and control metrics Services and accepts a
+          validated OTLP endpoint. Import the checked-in Grafana dashboard, load the Prometheus rules, and use
+          the memory-limited collector template with your backend credentials supplied by its secret manager.
+        </p>
+        <CodeBlock label="yaml + shell" value={observabilityKubernetes} />
+        <div className="reference-grid">
+          <ReferenceCard
+            eyebrow="Operations guide"
+            title="Observability and diagnostics"
+            description="Ports, metric contract, PromQL, W3C propagation, Kubernetes setup, runbooks, and claim boundary."
+            href={`${repositoryDocsUrl}/OBSERVABILITY.md`}
+          />
+          <ReferenceCard
+            eyebrow="Architecture decision"
+            title="Bounded observability"
+            description="Why tenant labels are fingerprinted and capped, and how trace context crosses every implemented boundary."
+            href={`${repositoryDocsUrl}/adr/0045-bounded-observability-and-trace-propagation.md`}
+          />
+        </div>
+      </Topic>
+
+      <Topic id="sdk" title="Propagate context from SDK applications">
+        <p>
+          Go, Java, and Python event envelopes accept an optional canonical <code>traceparent</code>,
+          preserving correlation with durable data. Configure the ecosystem OpenTelemetry HTTP instrumentation
+          to inject the current header for client spans. Do not synthesize trace IDs or reuse a parent for
+          unrelated work.
+        </p>
+      </Topic>
+
+      <Topic id="limits" title="Read the current evidence boundary">
+        <p>
+          This release measures process, request, protocol, reconciliation, and latency-stage signals.
+          Detailed gauges for every PRD profile item—such as fragmentation, every queue age, and connector
+          batch-size distributions—remain profile-instrumentation work. The dashboard is operational evidence,
+          not a production availability or latency SLO claim.
+        </p>
       </Topic>
     </>
   );

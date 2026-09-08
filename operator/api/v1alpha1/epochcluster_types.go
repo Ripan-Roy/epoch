@@ -41,6 +41,12 @@ type UpgradeSpec struct {
 	RetryToken          string `json:"retryToken,omitempty"`
 }
 
+// ObservabilitySpec configures optional vendor-neutral trace export. Metrics
+// remain available on cluster-internal Services regardless of trace export.
+type ObservabilitySpec struct {
+	OTLPEndpoint string `json:"otlpEndpoint,omitempty"`
+}
+
 // EpochClusterSpec declares one regional Epoch deployment.
 type EpochClusterSpec struct {
 	NodeImage    string `json:"nodeImage"`
@@ -66,6 +72,7 @@ type EpochClusterSpec struct {
 	Backup              BackupSpec                  `json:"backup"`
 	Restore             *RestoreSpec                `json:"restore,omitempty"`
 	Upgrade             UpgradeSpec                 `json:"upgrade,omitempty"`
+	Observability       ObservabilitySpec           `json:"observability,omitempty"`
 }
 
 type BackupStatus struct {

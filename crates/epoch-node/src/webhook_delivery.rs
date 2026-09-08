@@ -834,7 +834,9 @@ fn prepare_attempt(
     if let Some(subject) = &input.envelope.subject {
         header_values.insert("ce-subject".into(), subject.clone());
     }
-    if let Some(traceparent) = &input.envelope.traceparent {
+    if let Some(traceparent) = &input.envelope.traceparent
+        && epoch_core::validate_traceparent(traceparent).is_ok()
+    {
         header_values.insert("traceparent".into(), traceparent.clone());
     }
     header_values.insert("content-type".into(), input.envelope.content_type.clone());
@@ -1037,7 +1039,7 @@ mod tests {
             headers: BTreeMap::new(),
             content_type: "application/json".into(),
             schema_ref: None,
-            traceparent: Some("00-trace-parent-01".into()),
+            traceparent: Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into()),
             payload: json!({"order_id":"one"}),
             deliver_at_ms: None,
             ttl_ms: None,
@@ -1114,6 +1116,10 @@ mod tests {
         assert_eq!(attempt.headers["epoch-delivery-attempt"], "2");
         assert_eq!(attempt.headers["epoch-signature-key-id"], "primary");
         assert_eq!(
+            attempt.headers["traceparent"],
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        );
+        assert_eq!(
             attempt.headers["epoch-signature"],
             format!(
                 "v1={}",
@@ -1127,6 +1133,22 @@ mod tests {
             )
         );
         assert_eq!(attempt.timeout, Duration::from_secs(30));
+        let mut legacy_envelope = envelope.clone();
+        legacy_envelope.traceparent = Some("legacy-opaque-context".into());
+        let legacy_attempt = prepare_attempt(
+            WebhookAttemptInput {
+                target: &target,
+                envelope: &legacy_envelope,
+                delivery_id: "epoch.bus.delivery.v1.1.orders",
+                subscription: "orders",
+                attempt: 2,
+                lease_deadline_ms: 1_700_000_030_123,
+            },
+            1_700_000_000_123,
+            &config(),
+        )
+        .unwrap();
+        assert!(!legacy_attempt.headers.contains_key("traceparent"));
         assert!(matches!(
             prepare_attempt(
                 WebhookAttemptInput {

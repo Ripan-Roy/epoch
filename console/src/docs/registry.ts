@@ -9,6 +9,7 @@ import {
   GuardedUpgradeBody,
   GuaranteesBody,
   OverviewBody,
+  ObservabilityBody,
   ProtocolCompatibilityBody,
   QuickstartBody,
   ReferenceBody,
@@ -29,6 +30,7 @@ export type DocsPageId =
   | "guarantees"
   | "cluster-milestone"
   | "deployment"
+  | "observability"
   | "guarded-upgrades"
   | "voter-replacement"
   | "backup-restore"
@@ -177,6 +179,23 @@ export const docsPages: ReadonlyArray<DocsPageMeta> = [
       { id: "limits", label: "Current limits" },
     ],
     Body: BackupRestoreBody,
+  },
+  {
+    id: "observability",
+    group: "Core concepts",
+    label: "Observability",
+    title: "Observability and diagnostics",
+    summary:
+      "Collect bounded Prometheus signals, correlate structured logs, export W3C traces over OTLP, and explain measured tail latency.",
+    headings: [
+      { id: "signals", label: "Metrics, logs & traces" },
+      { id: "queries", label: "PromQL" },
+      { id: "why-slow", label: "Why slow?" },
+      { id: "deploy", label: "Deploy templates" },
+      { id: "sdk", label: "SDK propagation" },
+      { id: "limits", label: "Evidence boundary" },
+    ],
+    Body: ObservabilityBody,
   },
   {
     id: "guarded-upgrades",

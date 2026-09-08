@@ -26,4 +26,6 @@ LABEL org.opencontainers.image.title="Epoch control plane" \
 
 COPY --from=builder /out/epoch-control /usr/local/bin/epoch-control
 USER 65532:65532
+ENV EPOCH_CONTROL_METRICS_ADDR=0.0.0.0:9090
+EXPOSE 8080 8081 9090
 ENTRYPOINT ["/usr/local/bin/epoch-control"]

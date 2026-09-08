@@ -118,18 +118,33 @@ func IsRetryable(err error) bool {
 type Reconciler struct {
 	registry  *resources.Registry
 	authority Authority
+	observer  ReconcileObserver
 	mutations sync.Mutex
+}
+
+// ReconcileObserver records bounded reconciliation outcomes.
+type ReconcileObserver interface {
+	ObserveReconcile(time.Duration, error)
 }
 
 // NewReconciler constructs a regional reconciler.
 func NewReconciler(registry *resources.Registry, authority Authority) *Reconciler {
+	return NewObservedReconciler(registry, authority, nil)
+}
+
+// NewObservedReconciler constructs a reconciler with lifecycle metrics.
+func NewObservedReconciler(
+	registry *resources.Registry,
+	authority Authority,
+	observer ReconcileObserver,
+) *Reconciler {
 	if registry == nil {
 		panic("regional: nil resource registry")
 	}
 	if authority == nil {
 		panic("regional: nil authority")
 	}
-	return &Reconciler{registry: registry, authority: authority}
+	return &Reconciler{registry: registry, authority: authority, observer: observer}
 }
 
 type desiredSpec struct {
@@ -145,7 +160,13 @@ type desiredSpec struct {
 func (reconciler *Reconciler) Reconcile(
 	ctx context.Context,
 	key resources.ResourceKey,
-) (resources.Resource, error) {
+) (result resources.Resource, reconcileErr error) {
+	started := time.Now()
+	if reconciler.observer != nil {
+		defer func() {
+			reconciler.observer.ObserveReconcile(time.Since(started), reconcileErr)
+		}()
+	}
 	reconciler.mutations.Lock()
 	defer reconciler.mutations.Unlock()
 

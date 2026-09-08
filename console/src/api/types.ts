@@ -90,6 +90,10 @@ export interface RegionalTabletPlacement {
 
 export interface RegionalResource {
   canonicalName: string;
+  organization: string;
+  project: string;
+  environment: string;
+  namespace: string;
   kind: RegionalDataKind;
   name: string;
   generation: string;
@@ -102,6 +106,18 @@ export interface RegionalResource {
   placement: RegionalPlacementEvidence | null;
   cacheConfiguration: RegionalCacheConfiguration | null;
   governance: RegionalGovernance | null;
+}
+
+export type LatencyCause =
+  "quota" | "hot_partition" | "replication" | "storage" | "routing" | "target" | "client";
+
+export interface LatencyDiagnosis {
+  cause: LatencyCause;
+  stage: LatencyCause;
+  observedP99MS: number;
+  samples: number;
+  recommendation: string;
+  regionalEndpoint: string;
 }
 
 export interface ManagedRegionalTablet {

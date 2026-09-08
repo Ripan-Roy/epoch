@@ -4,6 +4,7 @@ import {
   apiBaseUrl,
   controlBaseUrl,
   createResource,
+  getLatencyDiagnosis,
   getHealth,
   listRegionalInventory,
   listResources,
@@ -17,6 +18,7 @@ import type {
   CreateResourceInput,
   DurabilityProfile,
   EngineHealth,
+  LatencyDiagnosis,
   RegionalCostAttribution,
   RegionalGovernanceFilter,
   RegionalResource,
@@ -119,6 +121,12 @@ function EpochApp() {
     () => loadBrowserManagedToken() !== null,
   );
   const [managedCredentialError, setManagedCredentialError] = useState<string | null>(null);
+  const [latencyDiagnosis, setLatencyDiagnosis] = useState<{
+    resource: RegionalResource;
+    diagnosis: LatencyDiagnosis;
+  } | null>(null);
+  const [latencyDiagnosticResource, setLatencyDiagnosticResource] = useState<string | null>(null);
+  const [latencyDiagnosticError, setLatencyDiagnosticError] = useState<string | null>(null);
 
   const loadOverview = useCallback(
     async (quiet = false) => {
@@ -228,6 +236,25 @@ function EpochApp() {
     setRegionalResources([]);
     setRegionalCostAttribution([]);
     setRegionalError("A managed-control bearer token is required.");
+    setLatencyDiagnosis(null);
+    setLatencyDiagnosticResource(null);
+    setLatencyDiagnosticError(null);
+  }
+
+  async function handleLatencyDiagnostic(resource: RegionalResource) {
+    setLatencyDiagnosticResource(resource.canonicalName);
+    setLatencyDiagnosis(null);
+    setLatencyDiagnosticError(null);
+    try {
+      const diagnosis = await getLatencyDiagnosis(resource);
+      setLatencyDiagnosis({ resource, diagnosis });
+    } catch (error) {
+      setLatencyDiagnosticError(
+        error instanceof Error ? error.message : "The regional latency diagnosis could not be loaded.",
+      );
+    } finally {
+      setLatencyDiagnosticResource(null);
+    }
   }
 
   function handleGovernanceFilter(event: FormEvent<HTMLFormElement>) {
@@ -502,6 +529,7 @@ function EpochApp() {
                         <th scope="col">State</th>
                         <th scope="col">Observed placement</th>
                         <th scope="col">Remaining risk</th>
+                        <th scope="col">Operations</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -587,11 +615,62 @@ function EpochApp() {
                               ))}
                             </ul>
                           </td>
+                          <td>
+                            <button
+                              className="button button--secondary diagnostic-button"
+                              type="button"
+                              disabled={
+                                !managedCredentialConfigured ||
+                                resource.kind === "table" ||
+                                latencyDiagnosticResource !== null
+                              }
+                              onClick={() => void handleLatencyDiagnostic(resource)}
+                            >
+                              {latencyDiagnosticResource === resource.canonicalName
+                                ? "Inspecting…"
+                                : "Why slow?"}
+                            </button>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
+              ) : null}
+
+              {latencyDiagnosticError ? (
+                <div className="callout callout--warning diagnostic-callout" role="status">
+                  <strong>No measured cause available</strong>
+                  <span>{latencyDiagnosticError}</span>
+                  <span>The console will not infer a cause without recent regional samples.</span>
+                </div>
+              ) : null}
+
+              {latencyDiagnosis ? (
+                <article className="latency-diagnosis" aria-live="polite">
+                  <div>
+                    <p className="eyebrow">Why is it slow?</p>
+                    <h3>{latencyDiagnosis.resource.name}</h3>
+                    <span>
+                      {formatEnum(latencyDiagnosis.diagnosis.cause)} is the dominant measured stage.
+                    </span>
+                  </div>
+                  <dl>
+                    <div>
+                      <dt>Recent p99</dt>
+                      <dd>{latencyDiagnosis.diagnosis.observedP99MS} ms</dd>
+                    </div>
+                    <div>
+                      <dt>Samples</dt>
+                      <dd>{latencyDiagnosis.diagnosis.samples}</dd>
+                    </div>
+                    <div>
+                      <dt>Source</dt>
+                      <dd>{latencyDiagnosis.diagnosis.regionalEndpoint}</dd>
+                    </div>
+                  </dl>
+                  <p>{latencyDiagnosis.diagnosis.recommendation}</p>
+                </article>
               ) : null}
             </section>
 

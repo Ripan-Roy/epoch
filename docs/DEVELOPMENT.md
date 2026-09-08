@@ -199,6 +199,7 @@ make ci               # local deterministic CI gate
 make kubernetes-config # render and strictly type-check the operator Kustomize tree offline
 make test-kubernetes-runner # unit-test live-campaign contracts without Docker
 make test-kubernetes-live # exact-source disposable four-node managed lifecycle
+make test-observability-assets # validate collector, dashboard, alerts, and metric policy
 ```
 
 `make check` includes `make audit`; it therefore requires the pinned
@@ -269,7 +270,7 @@ The initial standalone development contract is:
 | Deployment mode | `standalone` |
 | Native gRPC address | `0.0.0.0:7600` |
 | Native/admin HTTP address | `0.0.0.0:7601` |
-| Metrics address | `0.0.0.0:9464` |
+| Internal metrics/diagnostics | `127.0.0.1:7602` |
 | Data directory in the image | `/var/lib/epoch` |
 | Browser origins | local Vite dev/preview on `127.0.0.1` and `localhost` |
 
@@ -279,6 +280,7 @@ The current managed-control alpha uses:
 | --- | --- |
 | Go HTTP health/registry/browser BFF | `0.0.0.0:8080` |
 | Go RegionalAdmin gRPC | `0.0.0.0:8081` |
+| Go internal metrics | `127.0.0.1:9090` |
 | Rust authority endpoints | `http://127.0.0.1:7601` |
 | Reconcile interval | `1s` |
 | Go metadata database | `data/control/registry.db` |
@@ -286,8 +288,13 @@ The current managed-control alpha uses:
 
 The first node exposes its implemented native and administrative HTTP routes on
 7601. Port 7600 is reserved for the native gRPC service as contracts land.
-Health endpoints are `/healthz` and `/readyz`; metrics are reserved on 9464 and
-will use `/metrics` when the exporter lands.
+Public health endpoints are `/healthz` and `/readyz`. The separate 7602
+listener serves internal `/healthz`, `/metrics`, and measured latency
+diagnostics. Control serves internal `/metrics` on 9090; `epoch-compat` uses
+9100. Compose binds these ports to loopback and the Kubernetes operator exposes
+only internal Services. Configure optional W3C trace export with
+`EPOCH_OTLP_ENDPOINT`; enable Rust JSON output with `EPOCH_JSON_LOGS=true`. See
+[Observability](OBSERVABILITY.md).
 
 Browser access is restricted to a comma-delimited exact-origin allowlist. Set
 `--allowed-origins` or `EPOCH_ALLOWED_ORIGINS` when serving the local console

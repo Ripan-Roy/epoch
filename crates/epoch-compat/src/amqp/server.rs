@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use amq_protocol::{
@@ -10,15 +11,18 @@ use amq_protocol::{
     types::{AMQPValue, FieldTable, LongString},
 };
 use anyhow::{Context, Result, bail};
+use epoch_observability::{MetricsRegistry, Outcome, Protocol, ProtocolOperation};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::mpsc,
 };
+use tracing::Instrument as _;
 
 use crate::{
     CompatibilityBackend, MAX_FRAME_BYTES, MAX_MESSAGE_BYTES, MAX_REQUEST_ITEMS,
     backend::{BackendError, QueueDelivery, QueueMessage},
+    observe_protocol,
 };
 
 const AMQP_PROTOCOL_HEADER: &[u8; 8] = b"AMQP\0\0\x09\x01";
@@ -50,6 +54,7 @@ pub struct AmqpServer<B> {
     backend: Arc<B>,
     config: AmqpConfig,
     topology: Arc<Mutex<Topology>>,
+    metrics: Option<MetricsRegistry>,
 }
 
 impl<B: CompatibilityBackend> AmqpServer<B> {
@@ -63,7 +68,14 @@ impl<B: CompatibilityBackend> AmqpServer<B> {
             backend,
             config,
             topology: Arc::new(Mutex::new(Topology::default())),
+            metrics: None,
         })
+    }
+
+    #[must_use]
+    pub fn with_observability(mut self, metrics: MetricsRegistry) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     pub async fn serve(self, listener: TcpListener) -> Result<(), std::io::Error> {
@@ -77,9 +89,24 @@ impl<B: CompatibilityBackend> AmqpServer<B> {
             let backend = Arc::clone(&self.backend);
             let config = self.config.clone();
             let topology = Arc::clone(&self.topology);
+            let metrics = self.metrics.clone();
             tokio::spawn(async move {
                 let _permit = permit;
-                if let Err(error) = serve_connection(stream, backend, config, topology).await {
+                let started = Instant::now();
+                let result =
+                    serve_connection(stream, backend, config, topology, metrics.as_ref()).await;
+                observe_protocol(
+                    metrics.as_ref(),
+                    Protocol::Amqp091,
+                    ProtocolOperation::Connect,
+                    if result.is_ok() {
+                        Outcome::Success
+                    } else {
+                        Outcome::ServerError
+                    },
+                    started.elapsed(),
+                );
+                if let Err(error) = result {
                     tracing::warn!(protocol = "amqp", %error, "compatibility connection closed");
                 }
             });
@@ -92,6 +119,7 @@ async fn serve_connection<B: CompatibilityBackend>(
     backend: Arc<B>,
     config: AmqpConfig,
     topology: Arc<Mutex<Topology>>,
+    metrics: Option<&MetricsRegistry>,
 ) -> Result<()> {
     let mut protocol_header = [0_u8; 8];
     stream.read_exact(&mut protocol_header).await?;
@@ -158,13 +186,14 @@ async fn serve_connection<B: CompatibilityBackend>(
     )
     .await?;
 
-    run_session(stream, backend, topology).await
+    run_session(stream, backend, topology, metrics).await
 }
 
 async fn run_session<B: CompatibilityBackend>(
     stream: TcpStream,
     backend: Arc<B>,
     topology: Arc<Mutex<Topology>>,
+    metrics: Option<&MetricsRegistry>,
 ) -> Result<()> {
     let (mut reader, mut writer) = stream.into_split();
     let (frames_tx, mut frames_rx) = mpsc::channel(32);
@@ -199,7 +228,24 @@ async fn run_session<B: CompatibilityBackend>(
                         .await?;
                         return Ok(());
                     }
-                    session.handle(frame).await?
+                    let operation = amqp_operation(&frame);
+                    let started = Instant::now();
+                    let handled = session
+                        .handle(frame)
+                        .instrument(tracing::info_span!(
+                            "epoch.compat.request",
+                            protocol = Protocol::Amqp091.as_str(),
+                            operation = operation.as_str()
+                        ))
+                        .await;
+                    observe_protocol(
+                        metrics,
+                        Protocol::Amqp091,
+                        operation,
+                        if handled.is_ok() { Outcome::Success } else { Outcome::ClientError },
+                        started.elapsed(),
+                    );
+                    handled?
                 }
                 _ = poll.tick(), if session.has_consumers() => session.poll_consumers().await?,
             };
@@ -211,6 +257,27 @@ async fn run_session<B: CompatibilityBackend>(
     .await;
     reader_task.abort();
     result
+}
+
+fn amqp_operation(frame: &AMQPFrame) -> ProtocolOperation {
+    match frame {
+        AMQPFrame::Method(_, AMQPClass::Connection(_) | AMQPClass::Channel(_)) => {
+            ProtocolOperation::Connect
+        }
+        AMQPFrame::Method(_, AMQPClass::Queue(_) | AMQPClass::Exchange(_)) => {
+            ProtocolOperation::Declare
+        }
+        AMQPFrame::Method(_, AMQPClass::Basic(method)) => match method {
+            basic::AMQPMethod::Publish(_) => ProtocolOperation::Publish,
+            basic::AMQPMethod::Get(_) | basic::AMQPMethod::Consume(_) => ProtocolOperation::Consume,
+            basic::AMQPMethod::Ack(_)
+            | basic::AMQPMethod::Nack(_)
+            | basic::AMQPMethod::Reject(_) => ProtocolOperation::Settle,
+            _ => ProtocolOperation::Other,
+        },
+        AMQPFrame::Header(_, _) | AMQPFrame::Body(_, _) => ProtocolOperation::Publish,
+        _ => ProtocolOperation::Other,
+    }
 }
 
 #[derive(Debug)]

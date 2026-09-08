@@ -1,0 +1,85 @@
+groups:
+  - name: epoch-runtime
+    interval: 30s
+    rules:
+      - alert: EpochDataPlaneUnavailable
+        expr: min_over_time(up{job="epoch-node"}[2m]) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Epoch data-plane target is unavailable
+          runbook: docs/OBSERVABILITY.md#availability
+      - alert: EpochHTTPErrorBudgetBurn
+        expr: >-
+          sum(rate(epoch_http_requests_total{outcome=~"client_error|server_error"}[5m]))
+          /
+          clamp_min(sum(rate(epoch_http_requests_total[5m])), 0.001)
+          > 0.01
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Epoch HTTP error ratio exceeds one percent
+          runbook: docs/OBSERVABILITY.md#error-rate
+      - alert: EpochHTTPP99LatencyHigh
+        expr: >-
+          histogram_quantile(0.99,
+            sum by (le, profile) (rate(epoch_http_request_duration_seconds_bucket[5m])))
+          > 0.25
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Epoch HTTP p99 exceeds 250 ms
+          runbook: docs/OBSERVABILITY.md#tail-latency
+      - alert: EpochReplicationStageP99High
+        expr: >-
+          max by (profile) (epoch_operation_stage_duration_p99_seconds{stage="replication"})
+          > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Epoch replication is dominating tail latency
+          runbook: docs/OBSERVABILITY.md#tail-latency
+      - alert: EpochMetricCardinalityOverflow
+        expr: increase(epoch_observability_overflow_total[15m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Epoch data-plane tenant metric budget is exhausted
+          runbook: docs/OBSERVABILITY.md#cardinality
+
+  - name: epoch-control-and-compatibility
+    interval: 30s
+    rules:
+      - alert: EpochControlReconciliationFailures
+        expr: increase(epoch_control_reconciliations_total{outcome="error"}[10m]) > 2
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Epoch control reconciliation is repeatedly failing
+          runbook: docs/OBSERVABILITY.md#control-plane
+      - alert: EpochControlMetricCardinalityOverflow
+        expr: increase(epoch_control_observability_overflow_total[15m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Epoch control-plane tenant metric budget is exhausted
+          runbook: docs/OBSERVABILITY.md#cardinality
+      - alert: EpochCompatibilityErrorRateHigh
+        expr: >-
+          sum(rate(epoch_compat_requests_total{outcome=~"client_error|server_error"}[5m]))
+          /
+          clamp_min(sum(rate(epoch_compat_requests_total[5m])), 0.001)
+          > 0.02
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Epoch compatibility gateway error ratio exceeds two percent
+          runbook: docs/OBSERVABILITY.md#compatibility-gateways

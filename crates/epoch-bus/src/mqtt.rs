@@ -358,7 +358,7 @@ impl MqttBrokerState {
         }
         for (topic, retained) in &self.retained {
             validate_topic_name(topic)?;
-            retained.envelope.validate()?;
+            retained.envelope.validate_legacy_persisted()?;
             if retained.topic != *topic || self.packet_sequence == 0 {
                 return Err(EpochError::InvalidArgument(format!(
                     "MQTT retained topic {topic} snapshot is invalid"

@@ -1161,6 +1161,20 @@ Correctness, fencing, recovery, observability, and matched benchmarks are exit
 gates, not deferred cleanup. See [ADR-0006](adr/0006-delivery-sequence.md).
 The milestone-level schedule is maintained in [DELIVERY_PLAN.md](DELIVERY_PLAN.md).
 
+### 17.1 Observability boundary
+
+Each Rust or Go process owns a separate internal metrics listener. Public HTTP
+and gRPC traffic is instrumented at the outer boundary, classified into closed
+dimensions, and recorded only after completion. Tenant scope is represented by
+a deterministic capped fingerprint; customer resource names, keys, consumer
+IDs, and payload fields never become metric labels. W3C trace context crosses
+HTTP, gRPC, regional clients, and the compatibility gateway. OTLP/HTTP export
+is optional and vendor-neutral. The Go control plane is the authenticated
+bridge for node-local operational diagnostics; it re-authorizes the exact
+tenant rather than forwarding an internal endpoint. See
+[Observability](OBSERVABILITY.md) and
+[ADR-0045](adr/0045-bounded-observability-and-trace-propagation.md).
+
 ## 18. Initial safety invariants
 
 - No quorum success is returned before a durable voter majority has appended the
@@ -1246,3 +1260,4 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0042: Bounded Protocol-Compatibility Gateways](adr/0042-bounded-protocol-compatibility-gateways.md)
 - [ADR-0043: Lossless Protocol Records and Real Regional Recovery](adr/0043-lossless-protocol-recovery-contract.md)
 - [ADR-0044: Native-Backed Protocol State](adr/0044-native-backed-protocol-state.md)
+- [ADR-0045: Bounded Observability and Trace Propagation](adr/0045-bounded-observability-and-trace-propagation.md)

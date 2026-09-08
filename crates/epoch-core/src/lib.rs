@@ -194,6 +194,19 @@ impl EventEnvelope {
     }
 
     pub fn validate(&self) -> EpochResult<()> {
+        self.validate_legacy_persisted()?;
+        if let Some(traceparent) = &self.traceparent {
+            validate_traceparent(traceparent)?;
+        }
+        Ok(())
+    }
+
+    /// Validates fields that were enforced before trace-context validation.
+    ///
+    /// This exists only for versioned snapshot recovery. New ingress and
+    /// mutations must call [`Self::validate`] so invalid trace context cannot
+    /// enter durable state.
+    pub fn validate_legacy_persisted(&self) -> EpochResult<()> {
         if self.id.trim().is_empty() {
             return Err(EpochError::InvalidArgument("event id is required".into()));
         }
@@ -211,6 +224,28 @@ impl EventEnvelope {
             ));
         }
         Ok(())
+    }
+}
+
+/// Validates the canonical W3C Trace Context version-00 parent representation.
+pub fn validate_traceparent(value: &str) -> EpochResult<()> {
+    let bytes = value.as_bytes();
+    let lower_hex = |byte: u8| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f');
+    let valid = bytes.len() == 55
+        && &bytes[..3] == b"00-"
+        && bytes[35] == b'-'
+        && bytes[52] == b'-'
+        && bytes[3..35].iter().all(|byte| lower_hex(*byte))
+        && bytes[36..52].iter().all(|byte| lower_hex(*byte))
+        && bytes[53..55].iter().all(|byte| lower_hex(*byte))
+        && bytes[3..35].iter().any(|byte| *byte != b'0')
+        && bytes[36..52].iter().any(|byte| *byte != b'0');
+    if valid {
+        Ok(())
+    } else {
+        Err(EpochError::InvalidArgument(
+            "traceparent must be canonical W3C version 00".into(),
+        ))
     }
 }
 
@@ -486,6 +521,15 @@ mod tests {
             Err(EpochError::InvalidArgument(_))
         ));
         event.source = "checkout".into();
+        event.priority = 0;
+        event.traceparent = Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into());
+        assert!(event.validate().is_ok());
+        event.traceparent = Some("00-not-a-trace-parent".into());
+        assert!(matches!(
+            event.validate(),
+            Err(EpochError::InvalidArgument(_))
+        ));
+        assert!(event.validate_legacy_persisted().is_ok());
         event.priority = 10;
         assert!(matches!(
             event.validate(),

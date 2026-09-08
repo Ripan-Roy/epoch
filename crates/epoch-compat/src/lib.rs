@@ -27,3 +27,20 @@ pub const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Maximum number of logical items in one protocol request.
 pub const MAX_REQUEST_ITEMS: usize = 1_024;
+
+pub(crate) fn observe_protocol(
+    metrics: Option<&epoch_observability::MetricsRegistry>,
+    protocol: epoch_observability::Protocol,
+    operation: epoch_observability::ProtocolOperation,
+    outcome: epoch_observability::Outcome,
+    elapsed: std::time::Duration,
+) {
+    if let Some(metrics) = metrics {
+        metrics.record_protocol(&epoch_observability::ProtocolObservation {
+            protocol,
+            operation,
+            outcome,
+            elapsed,
+        });
+    }
+}

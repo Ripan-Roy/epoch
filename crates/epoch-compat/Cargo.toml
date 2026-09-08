@@ -24,15 +24,20 @@ test-support = []
 amq-protocol.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
+axum.workspace = true
 base64.workspace = true
 bytes.workspace = true
 clap.workspace = true
 crc32c.workspace = true
 epoch-core = { path = "../epoch-core" }
+epoch-observability = { path = "../epoch-observability" }
 flate2.workspace = true
 futures-util.workspace = true
 kafka-protocol.workspace = true
 lz4.workspace = true
+opentelemetry.workspace = true
+opentelemetry-otlp.workspace = true
+opentelemetry_sdk.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -40,6 +45,7 @@ snap.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "sync"] }
 tracing.workspace = true
+tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
 uuid.workspace = true

@@ -52,9 +52,10 @@ ENV EPOCH_COMPAT_ENDPOINTS=http://epoch-node:7601 \
     EPOCH_COMPAT_KAFKA_ADVERTISED_HOST=epoch-compat \
     EPOCH_COMPAT_KAFKA_ADVERTISED_PORT=9092 \
     EPOCH_COMPAT_AMQP_LISTEN=0.0.0.0:5672 \
+    EPOCH_COMPAT_METRICS_LISTEN=0.0.0.0:9100 \
     EPOCH_LOG=info
 
-EXPOSE 6379 9092 5672
+EXPOSE 5672 6379 9092 9100
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD ["/usr/local/bin/epoch-compat", "--version"]

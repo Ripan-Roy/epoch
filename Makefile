@@ -116,6 +116,10 @@ test-release-workflow: ## Prove native multi-platform release and supply-chain i
 test-dependabot: ## Verify dependency coverage, grouped-update limits, and security policy.
 	@go test ./tests/repository -run TestDependabot -count=1
 
+.PHONY: test-observability-assets
+test-observability-assets: ## Verify collector, dashboard, and alert contracts.
+	@go test ./tests/repository -run TestObservability -count=1
+
 test-soak-runner: ## Prove soak resumption, duration gating, signatures, and tamper rejection.
 	@python3 -m unittest discover -s tests/soak -p 'test_*.py' -v
 

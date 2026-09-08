@@ -7,10 +7,13 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /** Common native record accepted by every Epoch workload profile. */
 public final class EventEnvelope {
   private static final ObjectMapper MAPPER = new ObjectMapper();
+  private static final Pattern TRACEPARENT =
+      Pattern.compile("^00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-[0-9a-f]{2}$");
 
   private final String id;
   private final String source;
@@ -53,6 +56,9 @@ public final class EventEnvelope {
     }
     if (ttlMs != null && ttlMs <= 0) {
       throw new IllegalArgumentException("ttlMs must be greater than zero");
+    }
+    if (traceparent != null && !TRACEPARENT.matcher(traceparent).matches()) {
+      throw new IllegalArgumentException("traceparent must be canonical W3C version 00");
     }
   }
 

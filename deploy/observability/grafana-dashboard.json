@@ -1,0 +1,96 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "id": 1,
+      "title": "HTTP request rate by profile",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (profile, outcome) (rate(epoch_http_requests_total[5m]))",
+          "legendFormat": "{{profile}} · {{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "title": "HTTP p99 latency by profile",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, profile) (rate(epoch_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{profile}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
+    },
+    {
+      "id": 3,
+      "title": "Tail-latency attribution",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "max by (profile, stage) (epoch_operation_stage_duration_p99_seconds)",
+          "legendFormat": "{{profile}} · {{stage}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 }
+    },
+    {
+      "id": 4,
+      "title": "Control reconciliation rate",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(epoch_control_reconciliations_total[5m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 }
+    },
+    {
+      "id": 5,
+      "title": "Compatibility operation rate",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (protocol, operation, outcome) (rate(epoch_compat_requests_total[5m]))",
+          "legendFormat": "{{protocol}} · {{operation}} · {{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 }
+    },
+    {
+      "id": 6,
+      "title": "Bounded tenant series",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "epoch_observability_tenants or epoch_control_observability_tenants",
+          "legendFormat": "{{service}}",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "tags": ["epoch", "observability"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "timezone": "browser",
+  "title": "Epoch production overview",
+  "uid": "epoch-production-overview",
+  "version": 1
+}

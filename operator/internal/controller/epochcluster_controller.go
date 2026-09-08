@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -193,6 +194,12 @@ func validateSpec(spec *epochv1alpha1.EpochClusterSpec) error {
 		}
 		if strings.TrimSpace(spec.Restore.EncryptionSecret) == "" {
 			return fmt.Errorf("restore.encryptionSecret is required")
+		}
+	}
+	if endpoint := strings.TrimSpace(spec.Observability.OTLPEndpoint); endpoint != "" {
+		parsed, err := url.ParseRequestURI(endpoint)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.EscapedPath() != "" && parsed.EscapedPath() != "/" || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return fmt.Errorf("observability.otlpEndpoint must be an http(s) base URL without credentials, path, query, or fragment")
 		}
 	}
 	return nil
@@ -625,6 +632,14 @@ func labels(cluster *epochv1alpha1.EpochCluster, component string) map[string]st
 	}
 }
 
+func prometheusAnnotations(port string) map[string]string {
+	return map[string]string{
+		"prometheus.io/scrape": "true",
+		"prometheus.io/path":   "/metrics",
+		"prometheus.io/port":   port,
+	}
+}
+
 func nodeName(cluster *epochv1alpha1.EpochCluster) string    { return cluster.Name + "-node" }
 func peerName(cluster *epochv1alpha1.EpochCluster) string    { return cluster.Name + "-peer" }
 func publicName(cluster *epochv1alpha1.EpochCluster) string  { return cluster.Name }
@@ -715,13 +730,17 @@ func backupCronJob(cluster *epochv1alpha1.EpochCluster) *batchv1.CronJob {
 
 func peerService(cluster *epochv1alpha1.EpochCluster) *corev1.Service {
 	return &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: peerName(cluster), Namespace: cluster.Namespace, Labels: labels(cluster, "data-plane")},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: peerName(cluster), Namespace: cluster.Namespace, Labels: labels(cluster, "data-plane"),
+			Annotations: prometheusAnnotations("7602"),
+		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: "None",
 			Selector:  labels(cluster, "data-plane"),
 			Ports: []corev1.ServicePort{
 				{Name: "https", Port: 7601, TargetPort: intstr.FromString("https")},
 				{Name: "peer-tls", Port: 7701, TargetPort: intstr.FromString("peer-tls")},
+				{Name: "metrics", Port: 7602, TargetPort: intstr.FromString("metrics")},
 			},
 		},
 	}
@@ -744,12 +763,16 @@ func publicService(cluster *epochv1alpha1.EpochCluster) *corev1.Service {
 
 func controlService(cluster *epochv1alpha1.EpochCluster) *corev1.Service {
 	return &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: controlName(cluster), Namespace: cluster.Namespace, Labels: labels(cluster, "control-plane")},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: controlName(cluster), Namespace: cluster.Namespace, Labels: labels(cluster, "control-plane"),
+			Annotations: prometheusAnnotations("9090"),
+		},
 		Spec: corev1.ServiceSpec{
 			Selector: labels(cluster, "control-plane"),
 			Ports: []corev1.ServicePort{
 				{Name: "https", Port: 8080, TargetPort: intstr.FromString("https")},
 				{Name: "grpcs", Port: 8081, TargetPort: intstr.FromString("grpcs")},
+				{Name: "metrics", Port: 9090, TargetPort: intstr.FromString("metrics")},
 			},
 		},
 	}
@@ -799,6 +822,7 @@ func nodeStatefulSet(cluster *epochv1alpha1.EpochCluster) *appsv1.StatefulSet {
 						Args:            []string{`ordinal="${HOSTNAME##*-}"; export EPOCH_CONSENSUS_NODE_ID="$((ordinal + 1))"; exec /usr/local/bin/epoch-node`},
 						Env: []corev1.EnvVar{
 							{Name: "EPOCH_HTTP_LISTEN", Value: "0.0.0.0:7601"},
+							{Name: "EPOCH_METRICS_LISTEN", Value: "0.0.0.0:7602"},
 							{Name: "EPOCH_DATA_DIR", Value: "/var/lib/epoch"},
 							{Name: "EPOCH_REGIONAL_RUNTIME_ENABLED", Value: "true"},
 							{Name: "EPOCH_AUTH_POLICY_PATH", Value: "/etc/epoch/auth/bootstrap-policy.json"},
@@ -816,7 +840,7 @@ func nodeStatefulSet(cluster *epochv1alpha1.EpochCluster) *appsv1.StatefulSet {
 							{Name: "EPOCH_PEER_TLS_CERT_PATH", Value: "/etc/epoch/tls/tls.crt"},
 							{Name: "EPOCH_PEER_TLS_KEY_PATH", Value: "/etc/epoch/tls/tls.key"},
 						},
-						Ports:          []corev1.ContainerPort{{Name: "https", ContainerPort: 7601}, {Name: "peer-tls", ContainerPort: 7701}},
+						Ports:          []corev1.ContainerPort{{Name: "https", ContainerPort: 7601}, {Name: "peer-tls", ContainerPort: 7701}, {Name: "metrics", ContainerPort: 7602}},
 						Resources:      cluster.Spec.NodeResources,
 						ReadinessProbe: tlsSocketProbe("https"),
 						LivenessProbe:  tlsSocketProbe("https"),
@@ -842,6 +866,12 @@ func nodeStatefulSet(cluster *epochv1alpha1.EpochCluster) *appsv1.StatefulSet {
 				},
 			}},
 		},
+	}
+	if endpoint := strings.TrimSpace(cluster.Spec.Observability.OTLPEndpoint); endpoint != "" {
+		statefulSet.Spec.Template.Spec.Containers[0].Env = append(
+			statefulSet.Spec.Template.Spec.Containers[0].Env,
+			corev1.EnvVar{Name: "EPOCH_OTLP_ENDPOINT", Value: endpoint},
+		)
 	}
 	configureRestore(statefulSet, cluster)
 	return statefulSet
@@ -890,6 +920,10 @@ func controlStatefulSet(cluster *epochv1alpha1.EpochCluster) *appsv1.StatefulSet
 	for index := range endpoints {
 		endpoints[index] = fmt.Sprintf("https://%s-%d.%s:7601", nodeName(cluster), index, peerName(cluster))
 	}
+	metricsEndpoints := make([]string, cluster.Spec.Replicas)
+	for index := range metricsEndpoints {
+		metricsEndpoints[index] = fmt.Sprintf("http://%s-%d.%s:7602", nodeName(cluster), index, peerName(cluster))
+	}
 	return &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{Name: controlName(cluster), Namespace: cluster.Namespace, Labels: selector},
 		Spec: appsv1.StatefulSetSpec{
@@ -907,8 +941,10 @@ func controlStatefulSet(cluster *epochv1alpha1.EpochCluster) *appsv1.StatefulSet
 						Env: []corev1.EnvVar{
 							{Name: "EPOCH_CONTROL_ADDR", Value: ":8080"},
 							{Name: "EPOCH_CONTROL_GRPC_ADDR", Value: ":8081"},
+							{Name: "EPOCH_CONTROL_METRICS_ADDR", Value: "0.0.0.0:9090"},
 							{Name: "EPOCH_CONTROL_STATE_PATH", Value: "/var/lib/epoch-control/registry.db"},
 							{Name: "EPOCH_CONTROL_REGIONAL_ENDPOINTS", Value: strings.Join(endpoints, ",")},
+							{Name: "EPOCH_CONTROL_REGIONAL_METRICS_ENDPOINTS", Value: strings.Join(metricsEndpoints, ",")},
 							{Name: "EPOCH_AUTH_POLICY_PATH", Value: "/etc/epoch/auth/bootstrap-policy.json"},
 							{Name: "EPOCH_CONTROL_REGIONAL_TOKEN", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: cluster.Spec.CredentialSecret}, Key: credentialKey}}},
 							{Name: "EPOCH_CONTROL_ALLOWED_ORIGINS", Value: strings.Join(cluster.Spec.AllowedOrigins, ",")},
@@ -920,8 +956,9 @@ func controlStatefulSet(cluster *epochv1alpha1.EpochCluster) *appsv1.StatefulSet
 							{Name: "EPOCH_CONTROL_REGIONAL_TLS_CERT_PATH", Value: "/etc/epoch/tls/tls.crt"},
 							{Name: "EPOCH_CONTROL_REGIONAL_TLS_KEY_PATH", Value: "/etc/epoch/tls/tls.key"},
 							{Name: "EPOCH_CONTROL_REGIONAL_TLS_SERVER_NAME", Value: cluster.Spec.TransportSecurity.RegionalServerName},
+							{Name: "EPOCH_OTLP_ENDPOINT", Value: strings.TrimSpace(cluster.Spec.Observability.OTLPEndpoint)},
 						},
-						Ports:           []corev1.ContainerPort{{Name: "https", ContainerPort: 8080}, {Name: "grpcs", ContainerPort: 8081}},
+						Ports:           []corev1.ContainerPort{{Name: "https", ContainerPort: 8080}, {Name: "grpcs", ContainerPort: 8081}, {Name: "metrics", ContainerPort: 9090}},
 						Resources:       cluster.Spec.ControlResources,
 						ReadinessProbe:  tlsSocketProbe("https"),
 						LivenessProbe:   tlsSocketProbe("https"),

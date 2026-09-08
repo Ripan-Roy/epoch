@@ -715,7 +715,7 @@ fn restore_partition(
                 "Stream snapshot record position is invalid".into(),
             ));
         }
-        record.envelope.validate()?;
+        record.envelope.validate_legacy_persisted()?;
         previous_offset = Some(record.offset);
     }
     Ok(Partition {

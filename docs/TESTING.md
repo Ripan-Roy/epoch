@@ -30,6 +30,20 @@ validates the Compose model. Long-running compatibility, fuzz, simulation,
 chaos, soak, and performance suites remain separate so the fast gate stays
 useful.
 
+Observability assets have a focused offline contract gate:
+
+```shell
+make test-observability-assets
+```
+
+It parses the Collector, Prometheus rules, and Grafana dashboard; requires the
+runtime/control/compatibility signals and runbook links; detects duplicate
+panels/alerts; and rejects customer-controlled dimensions in alert queries.
+Rust and Go unit/integration tests separately cover cardinality overflow,
+route classification, W3C parsing/propagation, metrics rendering, exact tenant
+authorization, bounded regional diagnostic failover, and strict console
+decoding.
+
 ### Dependency advisory gates
 
 Both pull-request CI and `make audit` install or require `cargo-audit` 0.22.2
