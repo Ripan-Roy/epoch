@@ -102,7 +102,7 @@ while IFS= read -r official_image; do
     EPOCH_FAKE_DOCKER_LOG="$docker_log" \
     "${repository_root}/scripts/create-release-manifest.sh" \
     "$official_image" \
-    v0.2.0-beta.7 \
+    v0.2.0-beta.8 \
     "$digest_dir" \
     "$output_file"
 
@@ -129,7 +129,7 @@ expect_rejection "an invalid tag" \
 
 expect_rejection "an unofficial image" \
   "${repository_root}/scripts/create-release-manifest.sh" \
-  ghcr.io/ripan-roy/epoch-unknown v0.2.0-beta.7 "$digest_dir" "$output_file"
+  ghcr.io/ripan-roy/epoch-unknown v0.2.0-beta.8 "$digest_dir" "$output_file"
 
 rm -f "${digest_dir}/${source_arm64}"
 expect_rejection "one platform digest" \

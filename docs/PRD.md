@@ -4,11 +4,11 @@
 
 **Tagline:** One runtime. Every real-time workload.  
 **Document version:** 0.3  
-**Date:** 9 September 2026
+**Date:** 10 September 2026
 **Status:** Implementation-backed private beta candidate; later managed-service milestones remain open
 **Audience:** Founders, product, distributed-systems engineering, infrastructure, security, and design
 
-**Beta implementation note (8 September 2026):** The `v0.2.0-beta.7` candidate
+**Beta implementation note (10 September 2026):** The `v0.2.0-beta.8` candidate
 retains the alpha-exit TLS/mTLS, encrypted recovery, durable three/five-voter
 membership, guarded Kubernetes rollout, bounded source adapters, signed
 multi-architecture OCI distribution, fault harness, and exact-source
@@ -18,7 +18,7 @@ compatibility, producer/broker validation modes, deterministic recovery, and
 typed Go/Java/Python schema lifecycle APIs. It now also adds the bounded
 Redis/Kafka/AMQP compatibility gateway, deep exact-client conformance, regional
 fault certification, migration scanner, fifth signed non-root OCI image, and
-public matrix. Beta.7 adds bounded Prometheus metrics, structured request
+public matrix. Beta.7 added bounded Prometheus metrics, structured request
 correlation, W3C trace propagation, optional OTLP/HTTP traces, authenticated
 recent-stage p99 diagnosis, operator wiring, alerts, a Grafana dashboard, and
 an end-to-end observability guide. Native amd64 and arm64 release jobs assemble
@@ -29,8 +29,8 @@ operational telemetry, geo, managed-service, 30-day, package-manager,
 production SLO, and GA rows remain open. See ADR-0039, ADR-0037, ADR-0042,
 ADR-0045, ADR-0046, and the delivery checklist.
 
-**Protocol implementation note (9 September 2026):** The private-beta
-compatibility candidate makes Redis `MSET`/`MSETNX` one bounded,
+**Protocol implementation note (10 September 2026):** Beta.8 makes Redis
+`MSET`/`MSETNX` one bounded,
 revision-fenced native transaction; adds Kafka static identity reuse with
 instance checks on every implemented group operation; and adds string-only
 AMQP headers exchanges plus provisioned default-exchange DLX forwarding through
@@ -39,9 +39,10 @@ RabbitMQ Java 5.35.0 fixture conformance passes. Simultaneous duplicate static
 owners, cooperative/new Kafka group protocols, Redis scripts/transactions,
 durable AMQP topology, named-DLX routing, and full differential/fuzz/performance
 evidence remain open and are not implied by this slice. Production node and
-gateway images also pass the local evidence-v2 campaign through gateway
+gateway images also pass protected evidence-v2 campaigns through gateway
 replacement, profile-leader loss, all-voter `SIGKILL`/same-volume reopen, and
-replica-digest convergence. See ADR-0046.
+replica-digest convergence. Feature PR #123 and exact-main CI/Pages are green;
+only the beta.8 tag publication sequence remains. See ADR-0046.
 
 **Implementation note (13 August 2026):** The fixed-three-voter regional Rust
 runtime now owns automatic maintenance for the implemented time-driven profile
