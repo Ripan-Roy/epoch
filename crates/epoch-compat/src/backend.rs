@@ -27,6 +27,7 @@ const MAX_HTTP_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_NATIVE_STREAM_BATCH_RECORDS: u16 = 1_000;
 const MAX_NATIVE_STREAM_BATCH_COMPRESSED_BYTES: usize = 360 * 1024;
 const MAX_CACHE_SET_ATTEMPTS: usize = 4;
+pub const MAX_CACHE_MULTI_SET_ENTRIES: usize = 128;
 const MAX_CACHE_COLLECTION_ITEMS: usize = 1_024;
 
 struct HeaderInjector<'a>(&'a mut HeaderMap);
@@ -101,6 +102,13 @@ pub struct CacheSetOptions {
 pub struct CacheSetOutcome {
     pub applied: bool,
     pub previous: Option<CacheEntry>,
+}
+
+/// One distinct binary-safe key/value pair in an atomic Redis multi-set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheMultiSetEntry {
+    pub key: String,
+    pub value: Vec<u8>,
 }
 
 /// One Redis collection mutation evaluated atomically by the backend.
@@ -227,6 +235,17 @@ pub trait CompatibilityBackend: Send + Sync + 'static {
         value: CacheValue,
         options: CacheSetOptions,
     ) -> Result<CacheSetOutcome, BackendError>;
+    /// Atomically writes every entry, or writes none of them.
+    ///
+    /// When `only_if_all_missing` is true, a present key returns `Ok(false)`
+    /// without changing any key. Implementations must reject duplicate keys and
+    /// preserve the all-or-nothing boundary across retries.
+    async fn cache_multi_set(
+        &self,
+        cache: &str,
+        entries: &[CacheMultiSetEntry],
+        only_if_all_missing: bool,
+    ) -> Result<bool, BackendError>;
     async fn cache_delete(&self, cache: &str, keys: &[String]) -> Result<u64, BackendError>;
     async fn cache_increment(
         &self,
@@ -313,6 +332,9 @@ pub trait CompatibilityBackend: Send + Sync + 'static {
     ) -> Result<(), BackendError>;
 
     async fn queue_exists(&self, queue: &str) -> Result<bool, BackendError>;
+    /// Returns the provisioned native Queue dead-letter target, when configured.
+    /// A missing Queue returns [`BackendError::NotFound`].
+    async fn queue_dead_letter_target(&self, queue: &str) -> Result<Option<String>, BackendError>;
     async fn queue_publish(&self, queue: &str, message: QueueMessage) -> Result<(), BackendError>;
     async fn queue_acquire(
         &self,
@@ -379,6 +401,8 @@ struct RegionalRoute {
     accepts_writes: bool,
     #[serde(default)]
     stream_partitioning: Option<StreamPartitioning>,
+    #[serde(default)]
+    queue_dead_letter_target: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -752,6 +776,70 @@ impl CompatibilityBackend for NativeHttpBackend {
                         previous: observation.entry,
                     });
                 }
+                Err(BackendError::Conflict) if attempt + 1 < MAX_CACHE_SET_ATTEMPTS => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(BackendError::Conflict)
+    }
+
+    async fn cache_multi_set(
+        &self,
+        cache: &str,
+        entries: &[CacheMultiSetEntry],
+        only_if_all_missing: bool,
+    ) -> Result<bool, BackendError> {
+        validate_cache_multi_set(entries)?;
+        for attempt in 0..MAX_CACHE_SET_ATTEMPTS {
+            if only_if_all_missing {
+                for entry in entries {
+                    if self.observe_cache(cache, &entry.key).await?.entry.is_some() {
+                        return Ok(false);
+                    }
+                }
+            }
+            // This final revision read closes the optional presence-scan window.
+            // The native transaction rejects if any shard mutation races it.
+            let revision = self
+                .observe_cache(cache, &entries[0].key)
+                .await?
+                .shard_revision;
+            let mutations = entries
+                .iter()
+                .map(|entry| {
+                    if only_if_all_missing {
+                        json!({
+                            "kind":"compare_and_set",
+                            "key":entry.key,
+                            "expected":{"kind":"missing", "shard_revision":revision.to_string()},
+                            "value":{"kind":"blob", "value":entry.value},
+                        })
+                    } else {
+                        json!({
+                            "kind":"set",
+                            "key":entry.key,
+                            "value":{"kind":"blob", "value":entry.value},
+                            "storage_class":"memory",
+                        })
+                    }
+                })
+                .collect::<Vec<_>>();
+            match self
+                .mutate(
+                    "caches",
+                    cache,
+                    0,
+                    json!({
+                        "kind":"transaction",
+                        "shard":0,
+                        "expected_revision":revision.to_string(),
+                        "mutations":mutations,
+                        "lock_guards":[],
+                    }),
+                )
+                .await
+            {
+                Ok(_) => return Ok(true),
                 Err(BackendError::Conflict) if attempt + 1 < MAX_CACHE_SET_ATTEMPTS => {}
                 Err(error) => return Err(error),
             }
@@ -1182,6 +1270,11 @@ impl CompatibilityBackend for NativeHttpBackend {
         }
     }
 
+    async fn queue_dead_letter_target(&self, queue: &str) -> Result<Option<String>, BackendError> {
+        let (_, route) = self.discover("queues", queue, 0).await?;
+        Ok(route.queue_dead_letter_target)
+    }
+
     async fn queue_publish(&self, queue: &str, message: QueueMessage) -> Result<(), BackendError> {
         let operation = json!({
             "kind":"enqueue", "partition":0,
@@ -1289,6 +1382,24 @@ fn require_applied_mutation(response: &Value) -> Result<(), BackendError> {
         },
         _ => Err(invalid_response("native mutation outcome is missing")),
     }
+}
+
+pub(crate) fn validate_cache_multi_set(entries: &[CacheMultiSetEntry]) -> Result<(), BackendError> {
+    if entries.is_empty() || entries.len() > MAX_CACHE_MULTI_SET_ENTRIES {
+        return Err(BackendError::Invalid(format!(
+            "Cache multi-set entries must be between 1 and {MAX_CACHE_MULTI_SET_ENTRIES}"
+        )));
+    }
+    let mut keys = BTreeSet::new();
+    if entries
+        .iter()
+        .any(|entry| entry.key.is_empty() || !keys.insert(entry.key.as_str()))
+    {
+        return Err(BackendError::Invalid(
+            "Cache multi-set keys must be non-empty and distinct".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug)]

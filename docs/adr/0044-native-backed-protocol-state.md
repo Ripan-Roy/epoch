@@ -5,6 +5,7 @@
 - Owners: data plane, protocol compatibility, verification
 - Extends: [ADR-0042](0042-bounded-protocol-compatibility-gateways.md) and
   [ADR-0043](0043-lossless-protocol-recovery-contract.md)
+- Extended by: [ADR-0046](0046-private-beta-protocol-compatibility.md)
 
 ## Context
 

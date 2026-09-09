@@ -258,6 +258,25 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_malformed_corpus_never_panics_or_overconsumes() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        for length in 0..=512 {
+            let mut input = Vec::with_capacity(length);
+            for _ in 0..length {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                input.push(state.to_le_bytes()[0]);
+            }
+            if let Ok((arguments, consumed)) = decode_request(&input) {
+                assert!(!arguments.is_empty());
+                assert!(arguments.len() <= MAX_REQUEST_ITEMS);
+                assert!((1..=input.len()).contains(&consumed));
+            }
+        }
+    }
+
+    #[test]
     fn emits_resp3_maps_and_resp2_flat_arrays() {
         let value = RespValue::Map(vec![(
             RespValue::Bulk(b"server".to_vec()),

@@ -554,9 +554,12 @@ Exit gate:
 
 The current compatibility-depth candidate completes a larger locally testable
 slice of this milestone: atomic Redis hash/list/set/sorted-set commands,
-replicated classic Kafka membership/assignment/claims/fenced commits, and
-process-shared AMQP direct/fanout/topic routing with native per-message TTL and
-mandatory returns. It does not complete M3: differential/fuzz/performance
+all-or-nothing `MSET`/`MSETNX`, replicated classic Kafka
+membership/assignment/claims/fenced commits plus bounded static identity reuse,
+and process-shared AMQP direct/fanout/topic/headers routing with native
+per-message TTL, mandatory returns, and provisioned default-exchange DLX
+forwarding. It does not complete M3: full static/cooperative Kafka ownership,
+durable AMQP topology, named-DLX routing, differential/fuzz/performance
 evidence, design-partner drills, the documented unsupported protocol families,
 and protected-branch execution remain promotion gates.
 

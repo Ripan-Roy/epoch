@@ -1,7 +1,7 @@
 use epoch_core::{DurabilityProfile, EventEnvelope};
 use epoch_queue::{
-    BackoffStrategy, FencedLeaseTokenMetadata, MAX_FENCED_LEASE_TOKEN_BYTES, QueueConfig,
-    QueueState, RetryPolicy,
+    BackoffStrategy, FencedLeaseTokenMetadata, MAX_FENCED_LEASE_TOKEN_BYTES, QueueAdvancedConfig,
+    QueueConfig, QueueState, RetryPolicy,
 };
 use serde_json::{Value, json};
 
@@ -27,6 +27,103 @@ fn config() -> QueueConfig {
         dedupe_window_ms: Some(1_000),
         advanced: None,
     }
+}
+
+fn amqp_event(id: &str) -> EventEnvelope {
+    let mut event = EventEnvelope::new(
+        "epoch://compat/amqp",
+        "org.amqp.message",
+        json!({
+            "body_base64":"cG9pc29u",
+            "exchange":"orders",
+            "routing_key":"jobs.created",
+            "expiration":"5000"
+        }),
+        10,
+    );
+    event.id = id.into();
+    event.ttl_ms = Some(5_000);
+    event
+}
+
+#[test]
+fn amqp_dead_letter_forward_removes_expiry_and_retargets_the_default_exchange() {
+    let mut envelope = QueueTabletEnvelope::from(amqp_event("poison"));
+
+    prepare_amqp_dead_letter_forward(&mut envelope, "jobs", "failed-jobs", "amqp.basic.reject");
+
+    assert_eq!(envelope.ttl_ms, None);
+    assert!(envelope.payload.get("expiration").is_none());
+    assert_eq!(envelope.payload["exchange"], "");
+    assert_eq!(envelope.payload["routing_key"], "failed-jobs");
+    assert_eq!(envelope.headers["x-first-death-exchange"], "orders");
+    assert_eq!(envelope.headers["x-first-death-queue"], "jobs");
+    assert_eq!(envelope.headers["x-first-death-reason"], "rejected");
+}
+
+#[test]
+fn snapshot_restores_a_transformed_amqp_dead_letter_forward() {
+    let tablet = tablet_with_amqp_dead_letter_forward();
+    let expected = tablet.pending_dead_letter_forwards(1);
+    assert_eq!(expected[0].envelope.payload["routing_key"], "failed-jobs");
+    let encoded = tablet.encode_snapshot(&BTreeSet::new()).unwrap();
+    let restored = QueueTablet::decode_snapshot(&scope(), &encoded).unwrap();
+    assert_eq!(restored.pending_dead_letter_forwards(1), expected);
+}
+
+#[test]
+fn snapshot_restores_a_legacy_untransformed_amqp_dead_letter_forward() {
+    let tablet = tablet_with_amqp_dead_letter_forward();
+    let encoded = tablet.encode_snapshot(&BTreeSet::new()).unwrap();
+    let mut legacy: VersionedQueueTabletSnapshot = serde_json::from_slice(&encoded).unwrap();
+    let legacy_envelope = legacy.dead_letter_history[&1].dead_letter.envelope.clone();
+    legacy.dead_letter_forwards.get_mut(&1).unwrap().envelope = legacy_envelope.clone();
+
+    let encoded = serde_json::to_vec(&legacy).unwrap();
+    let restored = QueueTablet::decode_snapshot(&scope(), &encoded).unwrap();
+    assert_eq!(
+        restored.pending_dead_letter_forwards(1)[0].envelope,
+        legacy_envelope
+    );
+}
+
+fn tablet_with_amqp_dead_letter_forward() -> QueueTablet {
+    let mut queue_config = config();
+    queue_config.advanced = Some(QueueAdvancedConfig {
+        dead_letter_target: Some("failed-jobs".into()),
+        ..QueueAdvancedConfig::default()
+    });
+    let mut tablet = QueueTablet::new(scope(), queue_config).unwrap();
+    let enqueue =
+        QueueTabletCommand::enqueue(&scope(), "enqueue", amqp_event("poison"), 10).unwrap();
+    apply_command(&mut tablet, &enqueue, 2, 1);
+    let acquire = command(
+        "acquire",
+        11,
+        QueueTabletOperation::Acquire(QueueAcquireCommand {
+            partition: 0,
+            consumer: "worker".into(),
+            consumer_epoch: 1,
+            max_messages: 1,
+            visibility_timeout_ms: Some(50),
+        }),
+    );
+    let token = acquired_delivery(&apply_command(&mut tablet, &acquire, 2, 2))
+        .lease_token
+        .clone();
+    let reject = command(
+        "reject",
+        12,
+        QueueTabletOperation::Reject(QueueRejectCommand {
+            partition: 0,
+            consumer: "worker".into(),
+            consumer_epoch: 1,
+            lease_token: token,
+            reason: "amqp.basic.reject".into(),
+        }),
+    );
+    apply_command(&mut tablet, &reject, 2, 3);
+    tablet
 }
 
 fn event(id: &str, time_ms: u64) -> EventEnvelope {

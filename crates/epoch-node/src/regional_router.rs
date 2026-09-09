@@ -316,6 +316,8 @@ pub struct RegionalRouteResponse {
     pub retry_hint: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_partitioning: Option<StreamPartitioningResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_dead_letter_target: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -360,6 +362,19 @@ impl RegionalRouteResponse {
                     missing_key_fallback: "event_id",
                     shard_count: route.metadata().shard_count,
                 }),
+            queue_dead_letter_target: (descriptor.workload_profile == WorkloadProfile::WorkQueue)
+                .then(|| {
+                    route
+                        .metadata()
+                        .configuration
+                        .as_ref()
+                        .and_then(|configuration| {
+                            configuration.pointer("/advanced/dead_letter_target")
+                        })
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .flatten(),
         }
     }
 }
@@ -1021,6 +1036,25 @@ mod tests {
         workload_profile: WorkloadProfile,
         shard_count: u32,
     ) -> (RegionalTabletMaterializer, Router, ResourceRecord) {
+        routed_resource_with_configuration(
+            directory,
+            kind,
+            name,
+            workload_profile,
+            shard_count,
+            None,
+        )
+        .await
+    }
+
+    async fn routed_resource_with_configuration(
+        directory: &TempDir,
+        kind: ResourceKind,
+        name: &str,
+        workload_profile: WorkloadProfile,
+        shard_count: u32,
+        configuration: Option<Value>,
+    ) -> (RegionalTabletMaterializer, Router, ResourceRecord) {
         let resource = ResourceRecord {
             name: ResourceName::new("acme", "shop", "dev", "core", kind, name).unwrap(),
             generation: 5,
@@ -1028,7 +1062,7 @@ mod tests {
                 workload_profile,
                 shard_count,
                 replica_count: 3,
-                configuration: None,
+                configuration,
                 governance: None,
             },
             tablets: (0..shard_count)
@@ -1108,6 +1142,37 @@ mod tests {
             ResourceKind::Queue,
             "jobs",
             WorkloadProfile::WorkQueue,
+        )
+        .await
+    }
+
+    async fn routed_queue_with_dead_letter(
+        directory: &TempDir,
+    ) -> (RegionalTabletMaterializer, Router, ResourceRecord) {
+        routed_resource_with_configuration(
+            directory,
+            ResourceKind::Queue,
+            "jobs",
+            WorkloadProfile::WorkQueue,
+            1,
+            Some(serde_json::json!({
+                "durability":"quorum_durable",
+                "visibility_timeout_ms":30_000,
+                "max_messages":100_000,
+                "retry":{
+                    "strategy":"exponential",
+                    "initial_delay_ms":1_000,
+                    "max_delay_ms":60_000,
+                    "jitter_percent":10,
+                    "max_attempts":8,
+                    "max_age_ms":null
+                },
+                "dedupe_window_ms":null,
+                "advanced":{
+                    "overflow":"reject_new",
+                    "dead_letter_target":"failed-jobs"
+                }
+            })),
         )
         .await
     }
@@ -1656,6 +1721,29 @@ mod tests {
             .unwrap();
         assert_eq!(counts.status(), StatusCode::OK);
         assert_eq!(json(counts).await["counts"]["ready"], "0");
+
+        materializer.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_queue_discovery_exposes_its_provisioned_dead_letter_target() {
+        let data_directory = TempDir::new().expect("temp directory should be created");
+        let (mut materializer, router, _resource) =
+            routed_queue_with_dead_letter(&data_directory).await;
+
+        let discovery = router
+            .oneshot(
+                Request::get(native_queue_route_path())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(discovery.status(), StatusCode::OK);
+        assert_eq!(
+            json(discovery).await["queue_dead_letter_target"],
+            "failed-jobs"
+        );
 
         materializer.shutdown().await.unwrap();
     }

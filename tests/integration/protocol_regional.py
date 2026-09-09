@@ -22,7 +22,7 @@ regional = importlib.util.module_from_spec(MODULE_SPEC)
 sys.modules[MODULE_SPEC.name] = regional
 MODULE_SPEC.loader.exec_module(regional)
 
-RESULT_SCHEMA = "epoch.protocol-regional.evidence/v1"
+RESULT_SCHEMA = "epoch.protocol-regional.evidence/v2"
 CLIENTS = {"redis": "8.8.2", "kafka": "4.3.1", "rabbitmq": "5.35.0"}
 REDIS_IMAGE = (
     "redis@sha256:2b42a93631132be6df7a31f843b91ea8a907011e955b03395b7edbb13a20a99d"
@@ -31,11 +31,14 @@ REQUIRED_CHECKS = (
     "released_client_lifecycle",
     "redis_binary_counter_ttl",
     "redis_atomic_set_get",
+    "redis_atomic_multi_set",
     "redis_native_collections",
     "kafka_four_codecs_nullable_headers_checkpoint",
     "kafka_native_consumer_groups",
+    "kafka_static_identity_rejoin",
     "amqp_confirm_nack_requeue",
     "amqp_topic_ttl_mandatory_return",
+    "amqp_headers_and_native_dead_letter",
     "native_rejection_not_acknowledged",
     "disconnected_lease_redelivery",
     "acknowledged_messages_stay_absent",
@@ -48,6 +51,8 @@ RESOURCES = (
     (regional.Resource("queue", "jobs"), 1),
     (regional.Resource("queue", "leases"), 1),
     (regional.Resource("queue", "limited"), 1),
+    (regional.Resource("queue", "audit"), 1),
+    (regional.Resource("queue", "failed-jobs"), 1),
 )
 RESOURCE_COUNT = len(RESOURCES)
 TABLET_COUNT = sum(shards for _, shards in RESOURCES)
@@ -287,6 +292,10 @@ class ProtocolCampaign:
                     },
                     "dedupe_window_ms": 60_000,
                 }
+                if resource.name == "jobs":
+                    body["configuration"]["advanced"] = {
+                        "dead_letter_target": "failed-jobs"
+                    }
 
             def created() -> bool:
                 return any(
@@ -310,6 +319,9 @@ class ProtocolCampaign:
         assert self.redis("GET", "durable-binary") == b"persisted\x00\xffvalue\n"
         assert self.redis("GET", "durable-counter") == b"7\n"
         assert self.redis("GET", "atomic-set") == b"second\n"
+        assert self.redis("MGET", "durable-one", "durable-two") == b"one\ntwo\n"
+        assert self.redis("GET", "durable-three") == b"three\n"
+        assert self.redis("GET", "durable-four") == b"four\n"
         ttl = int(self.redis("PTTL", "durable-binary"))
         assert 0 < ttl <= 600_000, ttl
         assert self.redis("HGET", "durable-hash", "stage") == b"beta\n"
@@ -343,6 +355,17 @@ class ProtocolCampaign:
         assert self.redis("SET", "atomic-set", "blocked", "NX", "GET") == b"first\n"
         assert self.redis("GET", "atomic-set") == b"first\n"
         assert self.redis("SET", "atomic-set", "second", "GET") == b"first\n"
+        assert self.redis("MSET", "durable-one", "one", "durable-two", "two") == b"OK\n"
+        assert (
+            self.redis("MSETNX", "durable-one", "changed", "durable-three", "blocked")
+            == b"0\n"
+        )
+        assert self.redis("GET", "durable-one") == b"one\n"
+        assert self.redis("GET", "durable-three") == b"\n"
+        assert (
+            self.redis("MSETNX", "durable-three", "three", "durable-four", "four")
+            == b"1\n"
+        )
         assert self.redis("HSET", "durable-hash", "stage", "beta") == b"1\n"
         assert self.redis("PEXPIRE", "durable-hash", "600000") == b"1\n"
         assert self.redis("HSET", "durable-hash", "verified", "true") == b"1\n"

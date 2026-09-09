@@ -112,6 +112,28 @@ public final class ProtocolConformance {
       consumer.commitSync();
       require(!consumer.assignment().isEmpty(), "Kafka consumer group assignment");
     }
+
+    var staticConsumerProperties = new HashMap<String, Object>(consumerProperties);
+    staticConsumerProperties.put(ConsumerConfig.GROUP_ID_CONFIG, "billing-static");
+    staticConsumerProperties.put(ConsumerConfig.CLIENT_ID_CONFIG, "epoch-static-consumer");
+    staticConsumerProperties.put(ConsumerConfig.GROUP_INSTANCE_ID_CONFIG, "billing-worker-a");
+    try (var consumer = new KafkaConsumer<byte[], byte[]>(staticConsumerProperties)) {
+      consumer.subscribe(List.of("events"));
+      var deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos();
+      var observed = false;
+      while (!observed && System.nanoTime() < deadline) {
+        for (var record : consumer.poll(Duration.ofMillis(250))) {
+          if (record.partition() == 1
+              && record.offset() == 0
+              && new String(record.value(), StandardCharsets.UTF_8).equals("kafka-value")) {
+            observed = true;
+          }
+        }
+      }
+      require(observed, "Kafka static group member subscription");
+      consumer.commitSync();
+      require(!consumer.assignment().isEmpty(), "Kafka static member assignment");
+    }
   }
 
   private static void verifyAmqp(String host, int port) throws Exception {
@@ -126,7 +148,13 @@ public final class ProtocolConformance {
     factory.setHandshakeTimeout(5_000);
     try (var connection = factory.newConnection("epoch-conformance");
         var channel = connection.createChannel()) {
-      channel.queueDeclare("jobs", true, false, false, Map.of());
+      var deadLetterArguments =
+          Map.<String, Object>of(
+              "x-dead-letter-exchange", "",
+              "x-dead-letter-routing-key", "failed-jobs");
+      channel.queueDeclare("failed-jobs", true, false, false, Map.of());
+      channel.queueDeclare("audit", true, false, false, Map.of());
+      channel.queueDeclare("jobs", true, false, false, deadLetterArguments);
       channel.confirmSelect();
       channel.basicPublish(
           "", "jobs", null, "rabbit-pull".getBytes(StandardCharsets.UTF_8));
@@ -203,6 +231,70 @@ public final class ProtocolConformance {
       require(returned.await(5, TimeUnit.SECONDS), "AMQP mandatory basic.return");
       channel.queueUnbind("jobs", "epoch.events.topic", "orders.*");
       channel.exchangeDelete("epoch.events.topic");
+
+      channel.exchangeDeclare("epoch.events.headers", "headers", false, false, Map.of());
+      var allHeaders =
+          Map.<String, Object>of("x-match", "all", "tenant", "acme", "format", "json");
+      var anyHeaders =
+          Map.<String, Object>of("x-match", "any", "tenant", "acme", "priority", "high");
+      channel.queueBind("jobs", "epoch.events.headers", "", allHeaders);
+      channel.queueBind("audit", "epoch.events.headers", "", anyHeaders);
+      var headerProperties =
+          new AMQP.BasicProperties.Builder()
+              .headers(Map.of("tenant", "acme", "format", "json"))
+              .build();
+      channel.basicPublish(
+          "epoch.events.headers",
+          "ignored",
+          true,
+          headerProperties,
+          "rabbit-headers".getBytes(StandardCharsets.UTF_8));
+      channel.waitForConfirmsOrDie(5_000);
+      for (var queue : List.of("jobs", "audit")) {
+        var headerRouted = channel.basicGet(queue, true);
+        require(
+            headerRouted != null
+                && new String(headerRouted.getBody(), StandardCharsets.UTF_8)
+                    .equals("rabbit-headers"),
+            "AMQP headers x-match routing: " + queue);
+      }
+      channel.queueUnbind("jobs", "epoch.events.headers", "", allHeaders);
+      channel.queueUnbind("audit", "epoch.events.headers", "", anyHeaders);
+      channel.exchangeDelete("epoch.events.headers");
+
+      var expiring = new AMQP.BasicProperties.Builder().expiration("5000").build();
+      channel.basicPublish(
+          "", "jobs", expiring, "rabbit-poison".getBytes(StandardCharsets.UTF_8));
+      channel.waitForConfirmsOrDie(5_000);
+      var poison = channel.basicGet("jobs", false);
+      require(poison != null, "AMQP dead-letter source delivery");
+      channel.basicReject(poison.getEnvelope().getDeliveryTag(), false);
+      channel.queueDeclarePassive("jobs");
+      var deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos();
+      var deadLetter = channel.basicGet("failed-jobs", true);
+      while (deadLetter == null && System.nanoTime() < deadline) {
+        Thread.sleep(100);
+        deadLetter = channel.basicGet("failed-jobs", true);
+      }
+      require(deadLetter != null, "AMQP native dead-letter forwarding");
+      require(
+          new String(deadLetter.getBody(), StandardCharsets.UTF_8).equals("rabbit-poison"),
+          "AMQP dead-letter body");
+      require(
+          deadLetter.getEnvelope().getExchange().isEmpty()
+              && deadLetter.getEnvelope().getRoutingKey().equals("failed-jobs")
+              && deadLetter.getProps().getExpiration() == null,
+          "AMQP dead-letter rerouting and expiration removal");
+      require(
+          "jobs".equals(deadLetter.getProps().getHeaders().get("x-first-death-queue").toString())
+              && "rejected"
+                  .equals(
+                      deadLetter
+                          .getProps()
+                          .getHeaders()
+                          .get("x-first-death-reason")
+                          .toString()),
+          "AMQP first-death metadata");
     }
   }
 

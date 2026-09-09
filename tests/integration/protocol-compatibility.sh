@@ -123,6 +123,12 @@ assert_equal replacement "$(redis_cli GET text-key)" "Redis SET GET stored value
 assert_equal 1 "$(redis_cli INCR counter)" "Redis atomic counter"
 assert_equal $'one\ntwo' "$(redis_cli MSET first one second two >/dev/null && redis_cli MGET first second)" \
   "Redis multi-key round trip"
+assert_equal 0 "$(redis_cli MSETNX first changed third blocked)" \
+  "Redis MSETNX all-or-nothing conflict"
+assert_equal "" "$(redis_cli GET third)" "Redis MSETNX conflict writes nothing"
+assert_equal 1 "$(redis_cli MSETNX third three fourth four)" \
+  "Redis MSETNX all-or-nothing success"
+assert_equal $'three\nfour' "$(redis_cli MGET third fourth)" "Redis MSETNX values"
 assert_equal 2 "$(redis_cli HSET profile name Ada stage beta)" "Redis HSET"
 assert_equal $'Ada\nbeta' "$(redis_cli HMGET profile name stage)" "Redis HMGET"
 assert_equal 3 "$(redis_cli RPUSH work first second third)" "Redis RPUSH"

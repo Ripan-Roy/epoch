@@ -1811,12 +1811,15 @@ client = redis.Redis(
 client.set(b"session:42", b"binary\\x00value", px=30_000, nx=True)
 assert client.get(b"session:42") == b"binary\\x00value"
 assert client.incrby("requests", 5) == 5
+client.mset({"profile:42:name": "Ada", "profile:42:stage": "beta"})
+assert client.msetnx({"new:one": "1", "new:two": "2"}) is True
 assert client.hset("profile:42", mapping={"name": "Ada", "stage": "beta"}) == 2
 assert client.zadd("ranking", {"ada": 1.5, "grace": 0.5}) == 2`;
 
 const compatibilityKafkaJava = `var properties = new java.util.HashMap<String, Object>();
 properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "127.0.0.1:9092");
 properties.put(ConsumerConfig.GROUP_ID_CONFIG, "billing");
+properties.put(ConsumerConfig.GROUP_INSTANCE_ID_CONFIG, "billing-worker-a");
 properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
 properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class);
 properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class);
@@ -1835,7 +1838,10 @@ factory.setUsername("epoch");
 factory.setPassword("local-amqp-password");
 
 try (var connection = factory.newConnection(); var channel = connection.createChannel()) {
-  channel.queueDeclare("jobs", true, false, false, java.util.Map.of());
+  channel.queueDeclare("failed-jobs", true, false, false, java.util.Map.of());
+  channel.queueDeclare("jobs", true, false, false, java.util.Map.of(
+    "x-dead-letter-exchange", "",
+    "x-dead-letter-routing-key", "failed-jobs"));
   channel.exchangeDeclare("epoch.events", "topic", false, false, java.util.Map.of());
   channel.queueBind("jobs", "epoch.events", "orders.*");
   channel.confirmSelect();
@@ -1936,7 +1942,9 @@ export function ProtocolCompatibilityBody() {
           Hashes, lists, sets, and sorted sets use version-fenced native collection replacements that retain
           TTL and storage class. Their fields and members must be UTF-8 and each collection is bounded to
           1,024 items. Pub/Sub, Streams, blocking calls, cluster mode, modules, Lua, and <code>MULTI</code>/
-          <code>EXEC</code> are not exposed yet. Multi-key writes are independently committed.
+          <code>EXEC</code> are not exposed yet. <code>MSET</code> and <code>MSETNX</code> commit up to 128
+          distinct keys through one revision-fenced native transaction; a failed <code>MSETNX</code> writes
+          nothing.
         </p>
         <CodeBlock label="python · redis-py" value={compatibilityRedisPython} />
       </Topic>
@@ -1961,30 +1969,35 @@ export function ProtocolCompatibilityBody() {
         <p>
           Manual assignment and classic <code>subscribe()</code> groups are supported for one existing Stream
           per member with the <code>range</code> protocol. Replicated native sessions assign any configured
-          shard count, SyncGroup claims ownership, and commits are member/generation fenced. Static,
-          multi-topic, regex, cooperative, and new consumer-group protocols remain unsupported, as do
-          idempotent/transactional producers, admin mutations, SASL, ACLs, auto-creation, and timestamp offset
-          lookup.
+          shard count, SyncGroup claims ownership, and commits are member/generation fenced. A bounded
+          <code>group.instance.id</code> reuses the same native identity and is checked by join, sync,
+          heartbeat, commit, and leave. Simultaneous duplicate-owner fencing, multi-topic, regex, cooperative,
+          and new consumer-group protocols remain unsupported, as do idempotent/transactional producers, admin
+          mutations, SASL, ACLs, auto-creation, and timestamp offset lookup.
         </p>
         <CodeBlock label="java · KafkaConsumer" value={compatibilityKafkaJava} />
       </Topic>
 
       <Topic id="amqp" title="RabbitMQ / AMQP 0-9-1">
         <p>
-          Existing Queue declaration, process-shared direct/fanout/topic exchanges, multi-queue bindings,
-          bind/unbind and exchange deletion, publish, mandatory returns, per-message expiration, confirms,
-          push consumers, basic.get, prefetch, automatic/manual acknowledgement, nack/reject, cancellation,
-          heartbeats, and content/correlation/reply/string-header metadata are implemented.
+          Existing Queue declaration, process-shared direct/fanout/topic/headers exchanges, multi-queue
+          bindings, bind/unbind and exchange deletion, publish, mandatory returns, per-message expiration,
+          confirms, push consumers, basic.get, prefetch, automatic/manual acknowledgement, nack/reject,
+          cancellation, heartbeats, and content/correlation/reply/string-header metadata are implemented.
         </p>
         <p>
-          Native Queue capacity and retry limits remain authoritative. Requeue consumes a delivery attempt. A
-          committed native rejection is never publisher-confirmed, even when its HTTP response is successful.
+          Native Queue capacity and retry limits remain authoritative. Headers bindings accept bounded string
+          criteria with <code>x-match=all|any</code>. Requeue consumes a delivery attempt. A committed native
+          rejection is never publisher-confirmed, even when its HTTP response is successful.
         </p>
         <p>
-          AMQP 1.0, header routing, durable or auto-delete gateway exchange metadata, server-named queues,
-          policy arguments, non-string headers, immediate publishing, transactions, and RabbitMQ plugins
-          remain unsupported. Queue data and delivery state remain native and durable; exchange/binding
-          metadata survives connections but not a gateway-process restart.
+          A Queue may declare the default exchange plus the routing key from its provisioned native
+          dead-letter target. Reject/nack without requeue is then forwarded by the replicated Queue outbox;
+          expiration is removed and <code>x-first-death-*</code> string metadata is added. Named DLX routing,
+          <code>x-death</code> arrays, AMQP 1.0, durable or auto-delete gateway exchange metadata,
+          server-named queues, policy arguments, non-string headers, immediate publishing, transactions, and
+          RabbitMQ plugins remain unsupported. Queue data and delivery state remain native and durable;
+          exchange/binding metadata survives connections but not a gateway-process restart.
         </p>
         <CodeBlock label="java · RabbitMQ client" value={compatibilityAmqpJava} />
       </Topic>
@@ -1993,10 +2006,10 @@ export function ProtocolCompatibilityBody() {
         <p>
           The regional campaign runs the pinned clients through production gateway and node images. It
           replaces the gateway, kills each profile&apos;s leader, and reopens all voter volumes after SIGKILL,
-          checking Cache state, atomic conditional set/get and structured collections, Kafka metadata,
-          consumer groups and checkpoints, AMQP topic/TTL/mandatory-return behavior, lease redelivery, durable
-          acknowledgements, and capacity refusal. This verifies the documented subset, not full broker parity
-          or production SLOs.
+          checking Cache state, atomic conditional set/get, atomic multi-set and structured collections, Kafka
+          metadata, consumer groups, static identity reuse and checkpoints, AMQP topic/headers routing,
+          TTL/DLX/mandatory-return behavior, lease redelivery, durable acknowledgements, and capacity refusal.
+          This verifies the documented subset, not full broker parity or production SLOs.
         </p>
         <CodeBlock
           label="shell · prebuilt node and gateway images"

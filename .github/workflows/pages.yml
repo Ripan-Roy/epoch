@@ -188,7 +188,7 @@ jobs:
           assert_bundle_contains 'client.hset'
           assert_bundle_contains 'consumer.subscribe'
           assert_bundle_contains 'epoch.events'
-          assert_bundle_contains 'process-shared direct/fanout/topic exchanges'
+          assert_bundle_contains 'process-shared direct/fanout/topic/headers exchanges'
           release_version="$(cat VERSION)"
           assert_bundle_contains "v${release_version} release notes"
           if grep -Eq '(src|href)="/assets/' console/dist/index.html; then

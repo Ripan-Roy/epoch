@@ -33,6 +33,9 @@ async fn main() -> Result<()> {
     let backend = Arc::new(MemoryBackend::with_resources(
         "sessions", "events", 3, "jobs",
     ));
+    backend.add_queue("audit");
+    backend.add_queue("failed-jobs");
+    backend.configure_queue_dead_letter("jobs", "failed-jobs");
     let redis = RedisServer::new(
         Arc::clone(&backend),
         RedisConfig {
