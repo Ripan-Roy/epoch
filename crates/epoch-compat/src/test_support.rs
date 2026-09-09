@@ -7,10 +7,11 @@ use std::{
 use async_trait::async_trait;
 
 use crate::backend::{
-    BackendError, CacheCollectionMutation, CacheCollectionResult, CacheEntry, CacheSetCondition,
-    CacheSetOptions, CacheSetOutcome, CacheStorageClass, CacheValue, CompatibilityBackend,
-    QueueDelivery, QueueMessage, StreamGroupIdentity, StreamGroupMember, StreamGroupRejection,
-    StreamGroupSession, StreamGroupSessionResult, StreamRecord, plan_collection_mutation,
+    BackendError, CacheCollectionMutation, CacheCollectionResult, CacheEntry, CacheMultiSetEntry,
+    CacheSetCondition, CacheSetOptions, CacheSetOutcome, CacheStorageClass, CacheValue,
+    CompatibilityBackend, QueueDelivery, QueueMessage, StreamGroupIdentity, StreamGroupMember,
+    StreamGroupRejection, StreamGroupSession, StreamGroupSessionResult, StreamRecord,
+    plan_collection_mutation, validate_cache_multi_set,
 };
 
 #[derive(Debug, Default)]
@@ -28,6 +29,7 @@ struct State {
     stream_groups: BTreeMap<(String, String), MemoryStreamGroup>,
     group_claims: BTreeMap<(String, String, u32), (String, u64)>,
     queues: BTreeMap<String, VecDeque<QueueMessage>>,
+    queue_dead_letter_targets: BTreeMap<String, String>,
     leases: BTreeMap<String, (String, QueueMessage)>,
     next_lease: u64,
 }
@@ -63,6 +65,15 @@ impl MemoryBackend {
             .queues
             .entry(queue.into())
             .or_default();
+    }
+
+    pub fn configure_queue_dead_letter(&self, queue: &str, target: &str) {
+        let mut state = self.state.lock().unwrap();
+        assert!(state.queues.contains_key(queue), "source Queue must exist");
+        assert!(state.queues.contains_key(target), "target Queue must exist");
+        state
+            .queue_dead_letter_targets
+            .insert(queue.to_owned(), target.to_owned());
     }
 }
 
@@ -202,6 +213,37 @@ impl CompatibilityBackend for MemoryBackend {
             applied: true,
             previous: current,
         })
+    }
+
+    async fn cache_multi_set(
+        &self,
+        cache: &str,
+        entries: &[CacheMultiSetEntry],
+        only_if_all_missing: bool,
+    ) -> Result<bool, BackendError> {
+        validate_cache_multi_set(entries)?;
+        let mut state = self.state.lock().unwrap();
+        if only_if_all_missing
+            && entries
+                .iter()
+                .any(|entry| live_entry(&mut state, cache, &entry.key).is_some())
+        {
+            return Ok(false);
+        }
+        for entry in entries {
+            state.version = state.version.saturating_add(1);
+            let version = state.version;
+            state.caches.insert(
+                (cache.to_owned(), entry.key.clone()),
+                CacheEntry {
+                    value: CacheValue::Blob(entry.value.clone()),
+                    version,
+                    expires_at_ms: None,
+                    storage_class: CacheStorageClass::Memory,
+                },
+            );
+        }
+        Ok(true)
     }
 
     async fn cache_delete(&self, cache: &str, keys: &[String]) -> Result<u64, BackendError> {
@@ -614,6 +656,14 @@ impl CompatibilityBackend for MemoryBackend {
         Ok(self.state.lock().unwrap().queues.contains_key(queue))
     }
 
+    async fn queue_dead_letter_target(&self, queue: &str) -> Result<Option<String>, BackendError> {
+        let state = self.state.lock().unwrap();
+        if !state.queues.contains_key(queue) {
+            return Err(BackendError::NotFound);
+        }
+        Ok(state.queue_dead_letter_targets.get(queue).cloned())
+    }
+
     async fn queue_publish(&self, queue: &str, message: QueueMessage) -> Result<(), BackendError> {
         self.state
             .lock()
@@ -681,12 +731,35 @@ impl CompatibilityBackend for MemoryBackend {
         requeue: bool,
     ) -> Result<(), BackendError> {
         let mut state = self.state.lock().unwrap();
-        let (queue, message) = state
+        let (queue, mut message) = state
             .leases
             .remove(lease_token)
             .ok_or(BackendError::Conflict)?;
         if requeue {
             state.queues.get_mut(&queue).unwrap().push_front(message);
+        } else if let Some(target) = state.queue_dead_letter_targets.get(&queue).cloned() {
+            let first_exchange = message.exchange.clone().unwrap_or_default();
+            message.expiration = None;
+            message.ttl_ms = None;
+            message.exchange = Some(String::new());
+            message.routing_key = Some(target.clone());
+            message
+                .headers
+                .entry("x-first-death-exchange".into())
+                .or_insert(first_exchange);
+            message
+                .headers
+                .entry("x-first-death-queue".into())
+                .or_insert(queue);
+            message
+                .headers
+                .entry("x-first-death-reason".into())
+                .or_insert_with(|| "rejected".into());
+            state
+                .queues
+                .get_mut(&target)
+                .ok_or(BackendError::NotFound)?
+                .push_back(message);
         }
         Ok(())
     }

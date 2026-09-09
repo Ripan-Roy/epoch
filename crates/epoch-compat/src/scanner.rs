@@ -182,11 +182,11 @@ fn assess_redis(tokens: &[String]) -> (SupportLevel, &'static str) {
     }
     match feature {
         "hello" | "auth" | "ping" | "echo" | "quit" | "select" | "client" | "command" | "get"
-        | "set" | "del" | "exists" | "mget" | "mset" | "incr" | "decr" | "incrby" | "decrby"
-        | "ttl" | "pttl" | "expire" | "pexpire" | "persist" | "type" | "hset" | "hget"
-        | "hmget" | "hdel" | "hexists" | "hlen" | "hgetall" | "lpush" | "rpush" | "lpop"
-        | "rpop" | "llen" | "lrange" | "lindex" | "sadd" | "srem" | "smembers" | "scard"
-        | "sismember" | "zadd" | "zrem" | "zcard" | "zscore" | "zrange" => {
+        | "set" | "del" | "exists" | "mget" | "mset" | "msetnx" | "incr" | "decr" | "incrby"
+        | "decrby" | "ttl" | "pttl" | "expire" | "pexpire" | "persist" | "type" | "hset"
+        | "hget" | "hmget" | "hdel" | "hexists" | "hlen" | "hgetall" | "lpush" | "rpush"
+        | "lpop" | "rpop" | "llen" | "lrange" | "lindex" | "sadd" | "srem" | "smembers"
+        | "scard" | "sismember" | "zadd" | "zrem" | "zcard" | "zscore" | "zrange" => {
             (SupportLevel::Supported, "implemented in the RESP gateway")
         }
         "multi" | "exec" | "watch" | "eval" | "evalsha" | "publish" | "subscribe" | "xadd"
@@ -227,6 +227,25 @@ fn assess_kafka(tokens: &[String]) -> (SupportLevel, &'static str) {
                 "Kafka API version must be a signed 16-bit decimal integer",
             );
         };
+        if feature == "joingroup"
+            && tokens.iter().skip(2).any(|option| {
+                matches!(
+                    option.as_str(),
+                    "cooperative" | "multi-topic" | "regex" | "consumer-protocol"
+                )
+            })
+        {
+            return (
+                SupportLevel::Unsupported,
+                "Kafka cooperative, multi-topic, regex, and newer consumer-group modes are outside the beta subset",
+            );
+        }
+        if feature == "joingroup" && tokens.iter().skip(2).any(|option| option == "static") {
+            return (
+                SupportLevel::Partial,
+                "static identity rejoin is supported without simultaneous duplicate-owner fencing",
+            );
+        }
         return if range.contains(&version) {
             (
                 SupportLevel::Supported,
@@ -337,6 +356,18 @@ mod tests {
         assert_eq!(report.supported, 3);
         assert_eq!(report.unknown, 1);
         assert_eq!(report.unsupported, 4);
+    }
+
+    #[test]
+    fn reports_atomic_multi_set_and_static_group_boundaries() {
+        let report = scan(
+            Cursor::new("redis MSETNX\nkafka JoinGroup 9 static\nkafka JoinGroup 9 cooperative\n"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(report.supported, 1);
+        assert_eq!(report.partial, 1);
+        assert_eq!(report.unsupported, 1);
     }
 
     #[test]

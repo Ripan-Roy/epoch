@@ -356,10 +356,8 @@ async fn join_group_response<B: CompatibilityBackend>(
 ) -> JoinGroupResponse {
     let group = request.group_id.to_string();
     let requested_member = request.member_id.to_string();
-    if request.group_instance_id.is_some()
-        || request.protocol_type.as_str() != "consumer"
-        || request.protocols.is_empty()
-    {
+    let group_instance_id = request.group_instance_id.as_ref().map(StrBytes::as_str);
+    if request.protocol_type.as_str() != "consumer" || request.protocols.is_empty() {
         return join_group_failure(ResponseError::InconsistentGroupProtocol, &requested_member);
     }
     let Some(protocol) = request
@@ -373,16 +371,19 @@ async fn join_group_response<B: CompatibilityBackend>(
         return join_group_failure(ResponseError::InvalidRequest, &requested_member);
     };
     let member_id = if requested_member.is_empty() {
-        match kafka_member_id(&stream) {
+        match kafka_member_id(&stream, group_instance_id) {
             Ok(member_id) => member_id,
             Err(_) => return join_group_failure(ResponseError::InvalidRequest, ""),
         }
     } else {
-        let Ok(encoded_stream) = stream_from_member_id(&requested_member) else {
+        let Ok(identity) = member_identity(&requested_member) else {
             return join_group_failure(ResponseError::UnknownMemberId, &requested_member);
         };
-        if encoded_stream != stream {
+        if identity.stream != stream {
             return join_group_failure(ResponseError::InconsistentGroupProtocol, &requested_member);
+        }
+        if identity.group_instance_id.as_deref() != group_instance_id {
+            return join_group_failure(ResponseError::FencedInstanceId, &requested_member);
         }
         requested_member
     };
@@ -430,8 +431,13 @@ fn joined_group_response(
             .members
             .iter()
             .map(|member| {
+                let group_instance_id = member_identity(&member.member_id)
+                    .ok()
+                    .and_then(|identity| identity.group_instance_id)
+                    .map(StrBytes::from_string);
                 JoinGroupResponseMember::default()
                     .with_member_id(StrBytes::from_string(member.member_id.clone()))
+                    .with_group_instance_id(group_instance_id)
                     .with_metadata(encode_consumer_subscription(stream))
             })
             .collect()
@@ -462,17 +468,22 @@ async fn sync_group_response<B: CompatibilityBackend>(
     backend: &B,
     version: i16,
 ) -> SyncGroupResponse {
-    if request.group_instance_id.is_some()
-        || (version >= 5
-            && (request.protocol_type.as_ref().map(StrBytes::as_str) != Some("consumer")
-                || request.protocol_name.as_ref().map(StrBytes::as_str) != Some("range")))
+    if version >= 5
+        && (request.protocol_type.as_ref().map(StrBytes::as_str) != Some("consumer")
+            || request.protocol_name.as_ref().map(StrBytes::as_str) != Some("range"))
     {
         return sync_group_failure(ResponseError::InconsistentGroupProtocol);
     }
     let member_id = request.member_id.to_string();
-    let Ok(stream) = stream_from_member_id(&member_id) else {
+    let Ok(identity) = member_identity(&member_id) else {
         return sync_group_failure(ResponseError::UnknownMemberId);
     };
+    if identity.group_instance_id.as_deref()
+        != request.group_instance_id.as_ref().map(StrBytes::as_str)
+    {
+        return sync_group_failure(ResponseError::FencedInstanceId);
+    }
+    let stream = identity.stream;
     let Some(generation) = u64::try_from(request.generation_id)
         .ok()
         .filter(|generation| *generation > 0)
@@ -524,13 +535,17 @@ async fn heartbeat_response<B: CompatibilityBackend>(
     request: kafka_protocol::messages::HeartbeatRequest,
     backend: &B,
 ) -> HeartbeatResponse {
-    if request.group_instance_id.is_some() {
-        return HeartbeatResponse::default().with_error_code(ResponseError::InvalidRequest.code());
-    }
     let member_id = request.member_id.to_string();
-    let Ok(stream) = stream_from_member_id(&member_id) else {
+    let Ok(identity) = member_identity(&member_id) else {
         return HeartbeatResponse::default().with_error_code(ResponseError::UnknownMemberId.code());
     };
+    if identity.group_instance_id.as_deref()
+        != request.group_instance_id.as_ref().map(StrBytes::as_str)
+    {
+        return HeartbeatResponse::default()
+            .with_error_code(ResponseError::FencedInstanceId.code());
+    }
+    let stream = identity.stream;
     let Some(generation) = u64::try_from(request.generation_id)
         .ok()
         .filter(|generation| *generation > 0)
@@ -560,17 +575,19 @@ async fn leave_group_response<B: CompatibilityBackend>(
 ) -> LeaveGroupResponse {
     let group = request.group_id.to_string();
     if version <= 2 {
-        let error = leave_group_member(backend, &group, request.member_id.as_str()).await;
+        let error = leave_group_member(backend, &group, request.member_id.as_str(), None).await;
         return LeaveGroupResponse::default()
             .with_error_code(error.as_ref().map_or(0, ResponseError::code));
     }
     let mut members = Vec::with_capacity(request.members.len());
     for member in request.members {
-        let error = if member.group_instance_id.is_some() {
-            Some(ResponseError::InvalidRequest)
-        } else {
-            leave_group_member(backend, &group, member.member_id.as_str()).await
-        };
+        let error = leave_group_member(
+            backend,
+            &group,
+            member.member_id.as_str(),
+            member.group_instance_id.as_ref().map(StrBytes::as_str),
+        )
+        .await;
         members.push(
             MemberResponse::default()
                 .with_member_id(member.member_id)
@@ -587,10 +604,15 @@ async fn leave_group_member<B: CompatibilityBackend>(
     backend: &B,
     group: &str,
     member_id: &str,
+    group_instance_id: Option<&str>,
 ) -> Option<ResponseError> {
-    let Ok(stream) = stream_from_member_id(member_id) else {
+    let Ok(identity) = member_identity(member_id) else {
         return Some(ResponseError::UnknownMemberId);
     };
+    if identity.group_instance_id.as_deref() != group_instance_id {
+        return Some(ResponseError::FencedInstanceId);
+    }
+    let stream = identity.stream;
     let session = match backend
         .stream_group_observe(&stream, group, member_id)
         .await
@@ -616,33 +638,65 @@ async fn leave_group_member<B: CompatibilityBackend>(
 }
 
 const KAFKA_MEMBER_PREFIX: &str = "epoch";
+const KAFKA_STATIC_MEMBER_MARKER: &str = "static";
 const MAX_CONSUMER_PROTOCOL_ITEMS: usize = 1_024;
+const MAX_GROUP_INSTANCE_ID_BYTES: usize = 128;
 
-fn kafka_member_id(stream: &str) -> Result<String> {
+fn kafka_member_id(stream: &str, group_instance_id: Option<&str>) -> Result<String> {
     let encoded_stream = URL_SAFE_NO_PAD.encode(stream.as_bytes());
-    let member_id = format!(
-        "{KAFKA_MEMBER_PREFIX}.{encoded_stream}.{}",
-        uuid::Uuid::now_v7().simple()
-    );
+    let member_id = if let Some(group_instance_id) = group_instance_id {
+        if group_instance_id.is_empty() || group_instance_id.len() > MAX_GROUP_INSTANCE_ID_BYTES {
+            bail!("Kafka group instance ID is invalid");
+        }
+        let encoded_instance = URL_SAFE_NO_PAD.encode(group_instance_id.as_bytes());
+        format!(
+            "{KAFKA_MEMBER_PREFIX}.{encoded_stream}.{KAFKA_STATIC_MEMBER_MARKER}.{encoded_instance}"
+        )
+    } else {
+        format!(
+            "{KAFKA_MEMBER_PREFIX}.{encoded_stream}.{}",
+            uuid::Uuid::now_v7().simple()
+        )
+    };
     if member_id.len() > 256 {
         bail!("Kafka member ID exceeds the native limit");
     }
     Ok(member_id)
 }
 
-fn stream_from_member_id(member_id: &str) -> Result<String> {
+#[derive(Debug, PartialEq, Eq)]
+struct KafkaMemberIdentity {
+    stream: String,
+    group_instance_id: Option<String>,
+}
+
+fn member_identity(member_id: &str) -> Result<KafkaMemberIdentity> {
     let mut parts = member_id.split('.');
     let prefix = parts.next();
     let stream = parts.next();
     let identity = parts.next();
-    if prefix != Some(KAFKA_MEMBER_PREFIX)
-        || stream.is_none()
-        || identity.is_none()
-        || parts.next().is_some()
-        || uuid::Uuid::parse_str(identity.unwrap_or_default()).is_err()
-    {
+    if prefix != Some(KAFKA_MEMBER_PREFIX) || stream.is_none() || identity.is_none() {
         bail!("invalid Epoch Kafka member ID");
     }
+    let group_instance_id = if identity == Some(KAFKA_STATIC_MEMBER_MARKER) {
+        let encoded_instance = parts.next().context("static member instance is missing")?;
+        if parts.next().is_some() {
+            bail!("invalid Epoch Kafka member ID");
+        }
+        let instance = URL_SAFE_NO_PAD
+            .decode(encoded_instance)
+            .context("invalid group instance encoding")?;
+        let instance = String::from_utf8(instance).context("group instance is not UTF-8")?;
+        if instance.is_empty() || instance.len() > MAX_GROUP_INSTANCE_ID_BYTES {
+            bail!("Kafka group instance ID is invalid");
+        }
+        Some(instance)
+    } else {
+        if parts.next().is_some() || uuid::Uuid::parse_str(identity.unwrap_or_default()).is_err() {
+            bail!("invalid Epoch Kafka member ID");
+        }
+        None
+    };
     let stream = URL_SAFE_NO_PAD
         .decode(stream.unwrap_or_default())
         .context("invalid stream encoding")?;
@@ -650,7 +704,10 @@ fn stream_from_member_id(member_id: &str) -> Result<String> {
     if stream.is_empty() {
         bail!("stream is empty");
     }
-    Ok(stream)
+    Ok(KafkaMemberIdentity {
+        stream,
+        group_instance_id,
+    })
 }
 
 fn decode_consumer_subscription(metadata: &Bytes) -> Result<String> {
@@ -795,20 +852,24 @@ async fn offset_commit_response<B: CompatibilityBackend>(
 ) -> OffsetCommitResponse {
     let group = request.group_id.to_string();
     let member_id = request.member_id.to_string();
+    let requested_instance = request.group_instance_id.as_ref().map(StrBytes::as_str);
     let identity = if request.generation_id_or_member_epoch < 0 && member_id.is_empty() {
         Ok(None)
     } else if let Some(generation) = u64::try_from(request.generation_id_or_member_epoch)
         .ok()
         .filter(|generation| *generation > 0)
     {
-        stream_from_member_id(&member_id).map(|stream| {
-            Some((
-                stream,
+        member_identity(&member_id).and_then(|decoded| {
+            if decoded.group_instance_id.as_deref() != requested_instance {
+                bail!("Kafka group instance ID does not match member ID");
+            }
+            Ok(Some((
+                decoded.stream,
                 StreamGroupIdentity {
                     member_id: member_id.clone(),
                     generation,
                 },
-            ))
+            )))
         })
     } else {
         Err(anyhow::anyhow!("invalid Kafka group identity"))
@@ -828,6 +889,9 @@ async fn offset_commit_response<B: CompatibilityBackend>(
                             Ok(Some(identity))
                         }
                         Ok(Some(_)) => Err(ResponseError::UnknownMemberId),
+                        Err(_) if requested_instance.is_some() => {
+                            Err(ResponseError::FencedInstanceId)
+                        }
                         Err(_) => Err(ResponseError::IllegalGeneration),
                     };
                     match commit_identity {
@@ -1645,6 +1709,153 @@ mod tests {
         assert_eq!(left.members[0].error_code, 0);
         let departed = heartbeat_response(heartbeat_request(&second_member, 3), &backend).await;
         assert_eq!(departed.error_code, ResponseError::UnknownMemberId.code());
+    }
+
+    async fn join_static_member(backend: &MemoryBackend) -> (String, StrBytes) {
+        let instance = StrBytes::from_static_str("billing-worker-a");
+        let initial = join_request("", "events").with_group_instance_id(Some(instance.clone()));
+        let identified = join_group_response(initial, backend, 9).await;
+        assert_eq!(
+            identified.error_code,
+            ResponseError::MemberIdRequired.code()
+        );
+        let member = identified.member_id.to_string();
+        let joined = join_group_response(
+            join_request(&member, "events").with_group_instance_id(Some(instance.clone())),
+            backend,
+            9,
+        )
+        .await;
+        assert_eq!(joined.error_code, 0);
+        assert_eq!(joined.generation_id, 1);
+        assert_eq!(
+            joined.members[0].group_instance_id.as_ref(),
+            Some(&instance)
+        );
+        (member, instance)
+    }
+
+    #[tokio::test]
+    async fn static_consumer_members_reuse_their_bounded_identity() {
+        let backend = MemoryBackend::with_resources("sessions", "events", 3, "jobs");
+        for invalid in [String::new(), "x".repeat(MAX_GROUP_INSTANCE_ID_BYTES + 1)] {
+            let response = join_group_response(
+                join_request("", "events")
+                    .with_group_instance_id(Some(StrBytes::from_string(invalid))),
+                &backend,
+                9,
+            )
+            .await;
+            assert_eq!(response.error_code, ResponseError::InvalidRequest.code());
+        }
+        let (member, instance) = join_static_member(&backend).await;
+
+        let rejoined = join_group_response(
+            join_request(&member, "events").with_group_instance_id(Some(instance.clone())),
+            &backend,
+            9,
+        )
+        .await;
+        assert_eq!(rejoined.error_code, 0);
+        assert_eq!(rejoined.generation_id, 1);
+
+        let mismatched = join_group_response(
+            join_request(&member, "events")
+                .with_group_instance_id(Some(StrBytes::from_static_str("billing-worker-b"))),
+            &backend,
+            9,
+        )
+        .await;
+        assert_eq!(
+            mismatched.error_code,
+            ResponseError::FencedInstanceId.code()
+        );
+    }
+
+    #[tokio::test]
+    async fn static_consumer_group_operations_fence_instance_mismatches() {
+        let backend = MemoryBackend::with_resources("sessions", "events", 3, "jobs");
+        let (member, instance) = join_static_member(&backend).await;
+        let sync = sync_group_response(
+            sync_request(&member, 1).with_group_instance_id(Some(instance.clone())),
+            &backend,
+            5,
+        )
+        .await;
+        assert_eq!(sync.error_code, 0);
+        assert_eq!(
+            sync_group_response(sync_request(&member, 1), &backend, 5)
+                .await
+                .error_code,
+            ResponseError::FencedInstanceId.code()
+        );
+        let heartbeat = heartbeat_response(
+            heartbeat_request(&member, 1).with_group_instance_id(Some(instance.clone())),
+            &backend,
+        )
+        .await;
+        assert_eq!(heartbeat.error_code, 0);
+        assert_eq!(
+            heartbeat_response(
+                heartbeat_request(&member, 1)
+                    .with_group_instance_id(Some(StrBytes::from_static_str("billing-worker-b"),)),
+                &backend,
+            )
+            .await
+            .error_code,
+            ResponseError::FencedInstanceId.code()
+        );
+
+        let mut commit = group_offset_commit(&member, 1, 0, 4);
+        commit.group_instance_id = Some(instance.clone());
+        assert_eq!(
+            offset_commit_response(commit, &backend).await.topics[0].partitions[0].error_code,
+            0
+        );
+        let mut mismatched_commit = group_offset_commit(&member, 1, 0, 5);
+        mismatched_commit.group_instance_id = Some(StrBytes::from_static_str("billing-worker-b"));
+        assert_eq!(
+            offset_commit_response(mismatched_commit, &backend)
+                .await
+                .topics[0]
+                .partitions[0]
+                .error_code,
+            ResponseError::FencedInstanceId.code()
+        );
+
+        let fenced_leave = LeaveGroupRequest::default()
+            .with_group_id(GroupId(StrBytes::from_static_str("billing")))
+            .with_members(vec![
+                MemberIdentity::default()
+                    .with_member_id(StrBytes::from_string(member.clone()))
+                    .with_group_instance_id(Some(StrBytes::from_static_str("billing-worker-b"))),
+            ]);
+        let fenced_leave = leave_group_response(fenced_leave, &backend, 5).await;
+        assert_eq!(fenced_leave.error_code, 0);
+        assert_eq!(
+            fenced_leave.members[0].error_code,
+            ResponseError::FencedInstanceId.code()
+        );
+        assert_eq!(
+            heartbeat_response(
+                heartbeat_request(&member, 1).with_group_instance_id(Some(instance.clone())),
+                &backend,
+            )
+            .await
+            .error_code,
+            0
+        );
+
+        let leave = LeaveGroupRequest::default()
+            .with_group_id(GroupId(StrBytes::from_static_str("billing")))
+            .with_members(vec![
+                MemberIdentity::default()
+                    .with_member_id(StrBytes::from_string(member.clone()))
+                    .with_group_instance_id(Some(instance)),
+            ]);
+        let left = leave_group_response(leave, &backend, 5).await;
+        assert_eq!(left.error_code, 0);
+        assert_eq!(left.members[0].error_code, 0);
     }
 
     #[tokio::test]

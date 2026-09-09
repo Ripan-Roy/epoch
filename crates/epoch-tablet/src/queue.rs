@@ -554,9 +554,17 @@ fn validate_queue_snapshot_auxiliary(
                 "Queue tablet snapshot dead-letter forward history is invalid".into(),
             ));
         };
+        let legacy_envelope = &history.dead_letter.envelope;
+        let mut expected_envelope = legacy_envelope.clone();
+        prepare_amqp_dead_letter_forward(
+            &mut expected_envelope,
+            &snapshot.scope.resource,
+            &forward.target,
+            &history.dead_letter.reason,
+        );
         if forward.dead_letter_history_id != *history_id
             || configured_forward_target != Some(forward.target.as_str())
-            || forward.envelope != history.dead_letter.envelope
+            || (forward.envelope != *legacy_envelope && forward.envelope != expected_envelope)
         {
             return Err(TabletError::InvalidCommand(
                 "Queue tablet snapshot dead-letter forward history is invalid".into(),
@@ -652,7 +660,7 @@ impl QueueTabletBusinessState {
                 self.execute_complete_dead_letter_forward(command)?
             }
         };
-        let new_history_ids = self.reconcile_dead_letter_history(committed)?;
+        let new_history_ids = self.reconcile_dead_letter_history(scope, committed)?;
         self.attach_dead_letter_evidence(&mut result, &new_history_ids)?;
         Ok(result)
     }
@@ -1284,6 +1292,7 @@ impl QueueTabletBusinessState {
 
     fn reconcile_dead_letter_history(
         &mut self,
+        scope: &QueueTabletScope,
         committed: CommittedCommand<'_>,
     ) -> Result<Vec<u64>, EpochError> {
         let current = self.queue.dead_letters(usize::MAX);
@@ -1328,12 +1337,19 @@ impl QueueTabletBusinessState {
                 },
             );
             if let Some(target) = &forward_target {
+                let mut envelope = QueueTabletEnvelope::from(dead_letter.envelope.clone());
+                prepare_amqp_dead_letter_forward(
+                    &mut envelope,
+                    &scope.resource,
+                    target,
+                    &dead_letter.reason,
+                );
                 self.dead_letter_forwards.insert(
                     history_id,
                     QueueTabletDeadLetterForward {
                         dead_letter_history_id: history_id,
                         target: target.clone(),
-                        envelope: dead_letter.envelope.into(),
+                        envelope,
                         status: QueueTabletDeadLetterForwardStatus::Pending,
                         destination: None,
                         target_message_id: None,
@@ -1377,6 +1393,50 @@ impl QueueTabletBusinessState {
 struct AuthorizedLease {
     fence: LeaseFence,
     message_id: String,
+}
+
+fn prepare_amqp_dead_letter_forward(
+    envelope: &mut QueueTabletEnvelope,
+    source_queue: &str,
+    target_queue: &str,
+    reason: &str,
+) {
+    if envelope.source != "epoch://compat/amqp" || envelope.event_type != "org.amqp.message" {
+        return;
+    }
+    envelope.ttl_ms = None;
+    let Some(payload) = envelope.payload.as_object_mut() else {
+        return;
+    };
+    let first_exchange = payload
+        .get("exchange")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    payload.remove("expiration");
+    payload.insert("exchange".into(), serde_json::Value::String(String::new()));
+    payload.insert(
+        "routing_key".into(),
+        serde_json::Value::String(target_queue.to_owned()),
+    );
+    envelope
+        .headers
+        .entry("x-first-death-exchange".into())
+        .or_insert(first_exchange);
+    envelope
+        .headers
+        .entry("x-first-death-queue".into())
+        .or_insert_with(|| source_queue.to_owned());
+    envelope
+        .headers
+        .entry("x-first-death-reason".into())
+        .or_insert_with(|| {
+            if reason == "amqp.basic.reject" {
+                "rejected".into()
+            } else {
+                reason.to_owned()
+            }
+        });
 }
 
 fn tablet_delivery(queue: &Queue, delivery: epoch_queue::Delivery) -> QueueTabletDelivery {

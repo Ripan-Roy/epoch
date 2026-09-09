@@ -9,14 +9,16 @@ This document is the public compatibility contract for the beta implementation.
 Anything not listed as supported is unsupported, even if a client can encode it.
 The component boundary is recorded in
 [ADR-0042](adr/0042-bounded-protocol-compatibility-gateways.md).
+The private-beta additions are fixed by
+[ADR-0046](adr/0046-private-beta-protocol-compatibility.md).
 
 ## Status and version targets
 
 | Ecosystem | Wire target | Client conformance target | Status |
 |---|---|---|---|
-| Redis | RESP2 and RESP3 negotiation | Redis 8.8.2 `redis-cli` | Partial; string/counter/TTL subset |
-| Kafka | Kafka broker protocol | Apache Kafka Java client 4.3.1 | Partial; producer, manual consumer, metadata, offsets |
-| RabbitMQ | AMQP 0-9-1 | RabbitMQ Java client 5.35.0 | Partial; direct routing and Queue delivery lifecycle |
+| Redis | RESP2 and RESP3 negotiation | Redis 8.8.2 `redis-cli` | Partial; strings, atomic multi-set, counters, TTL, and bounded structures |
+| Kafka | Kafka broker protocol | Apache Kafka Java client 4.3.1 | Partial; producer, manual/classic consumer, offsets, and bounded static identities |
+| RabbitMQ | AMQP 0-9-1 | RabbitMQ Java client 5.35.0 | Partial; four exchange kinds, Queue delivery lifecycle, and native DLX subset |
 
 The versions above are pinned and executed by CI, not a promise that every
 operation in those releases is implemented. In addition to fast wire fixtures
@@ -100,7 +102,7 @@ database numbers.
 |---|---|---|
 | Connection | `HELLO 2/3`, `AUTH`, `PING`, `ECHO`, `QUIT`, `SELECT 0` | Cluster mode and alternate databases are unsupported |
 | Client setup | `CLIENT SETNAME`, `GETNAME`, `ID`, `SETINFO`, `MAINT_NOTIFICATIONS`; bounded `COMMAND` metadata | Tracking and client-side caching are unsupported |
-| Strings | `GET`, `SET`, `MGET`, `MSET`, `DEL`, `EXISTS`, `TYPE` | `SET` supports `NX`, `XX`, `GET`, `EX`, and `PX`; conditions plus the previous value are evaluated atomically; multi-key operations are independently committed |
+| Strings | `GET`, `SET`, `MGET`, `MSET`, `MSETNX`, `DEL`, `EXISTS`, `TYPE` | `SET` supports `NX`, `XX`, `GET`, `EX`, and `PX`; `MSET`/`MSETNX` commit all keys atomically; `MGET`, `DEL`, and `EXISTS` are bounded multi-key observations/mutations without a cross-command snapshot |
 | Counters | `INCR`, `DECR`, `INCRBY`, `DECRBY` | Signed 64-bit integer range |
 | Expiry | `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, `PERSIST` | Absolute-time options and conditional expiry flags are unsupported |
 | Transport | RESP2/RESP3, binary-safe values, pipelining | Keys must be UTF-8; TLS is expected at a private proxy/ingress in this revision |
@@ -138,6 +140,12 @@ collection is replaced under its value-version fence while retaining TTL and
 storage class, and removal of the final item deletes the key. Wrong-type and
 no-op operations never write. Conflicts are retried at most four times.
 
+`MSET` and `MSETNX` normalize at most 128 distinct UTF-8 keys and submit one
+native Cache transaction. `MSETNX` first observes the complete key set and uses
+missing-value plus shard-revision fences, returning `0` without mutation when
+any key exists. A concurrent revision change retries the whole operation at
+most four times. Repeated keys are accepted and the final command value wins.
+
 ## Kafka API matrix
 
 Each Kafka topic name maps to an existing Epoch Stream with the same name. A
@@ -167,8 +175,12 @@ Current Kafka boundaries:
 - assignments cover any configured Stream shard count and are sourced from the
   replicated native session coordinator. Sync installs per-shard ownership
   claims, and group commits are fenced by member ID and generation;
-- static membership, regex/multi-topic subscriptions, cooperative assignment,
-  and Kafka's newer consumer-group protocol are not yet exposed;
+- a bounded `group.instance.id` is encoded into the native member identity and
+  is checked across join, sync, heartbeat, commit, and leave. The same static
+  identity can rejoin without a generation change. Simultaneous duplicate-live
+  owner fencing is not yet represented by a separate native owner epoch;
+- regex/multi-topic subscriptions, cooperative assignment, and Kafka's newer
+  consumer-group protocol are not yet exposed;
 - idempotent/transactional producers, control batches, admin mutations, SASL,
   ACL APIs, topic creation/deletion, and timestamp offset lookup are unsupported;
 - `acks=0` emits no response; other acknowledged writes complete only after the
@@ -192,6 +204,7 @@ Java classic consumer-group example:
 var consumer = new KafkaConsumer<byte[], byte[]>(Map.of(
     ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "127.0.0.1:9092",
     ConsumerConfig.GROUP_ID_CONFIG, "billing",
+    ConsumerConfig.GROUP_INSTANCE_ID_CONFIG, "billing-worker-a",
     ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class,
     ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class,
     ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false"
@@ -211,17 +224,23 @@ do not create or mutate them.
 |---|---|---|
 | Connection | AMQP 0-9-1 header, PLAIN, `/` vhost, tuning, heartbeats | AMQP 1.0 and TLS termination are not implemented here |
 | Channels | Open and close, up to 2,048 per connection | Channel flow and recovery extensions are unsupported |
-| Topology | Existing Queue declaration; process-shared direct, fanout, and topic exchanges; multi-queue bind/unbind; exchange delete | Topology metadata is gateway-process state, so durable/auto-delete exchanges, header exchanges, server-named queues, policies, and arguments are rejected |
-| Publish | Default/direct/fanout/topic routing, content body, content type, correlation ID, reply-to, UTF-8 string headers, per-message expiration, and mandatory `basic.return` | Non-string headers and immediate publishing are unsupported |
+| Topology | Existing Queue declaration; process-shared direct, fanout, topic, and headers exchanges; multi-queue bind/unbind; exchange delete | Topology metadata is gateway-process state, so durable/auto-delete exchanges, server-named queues, and policies are rejected; headers bindings accept only string criteria and `x-match=all|any` |
+| Publish | Default/direct/fanout/topic/headers routing, content body, content type, correlation ID, reply-to, UTF-8 string headers, per-message expiration, and mandatory `basic.return` | Non-string headers and immediate publishing are unsupported |
 | Reliability | Publisher confirms after native Queue commit | AMQP transactions are unsupported |
 | Consume | `basic.consume`, `basic.cancel`, `basic.get`, `basic.qos`, automatic or manual ack | Push consumers poll the native Queue; consumer priority/exclusive arguments are unsupported |
-| Settlement | `basic.ack`, `basic.reject`, `basic.nack`; requeue maps to release | Lease renewal is native-API-only; disconnected leases redeliver after visibility expiry |
+| Settlement | `basic.ack`, `basic.reject`, `basic.nack`; requeue maps to release; default-exchange DLX arguments may select the provisioned native dead-letter target | Named DLX routing and `x-death` table arrays are unsupported; lease renewal is native-API-only |
 
 Native Queue capacity, visibility, and retry policy remain authoritative.
 Per-message AMQP expiration is translated to native Queue `ttl_ms`; original
 exchange, routing key, expiration text, and supported headers survive delivery.
 Requeue consumes another delivery attempt; once the configured retry ceiling
-is exhausted, native dead-letter handling applies. A full Queue is not
+is exhausted, native dead-letter handling applies. A Queue declaration may use
+`x-dead-letter-exchange=""` and an `x-dead-letter-routing-key` exactly equal to
+its provisioned native `advanced.dead_letter_target`. Reject/nack without
+requeue is committed to the native dead-letter history and forwarded through
+its durable outbox. Forwarding removes the old expiration, uses the destination
+Queue as the new default-exchange routing key, and exposes bounded string
+`x-first-death-*` metadata. A full Queue is not
 publisher-confirmed. In this revision a native rejection closes the AMQP
 connection; clients must treat unconfirmed publications as unsuccessful or
 unknown rather than infer acceptance from TCP delivery.
@@ -235,7 +254,9 @@ factory.setPort(5672);
 factory.setUsername("epoch");
 factory.setPassword("local-amqp-password");
 try (var connection = factory.newConnection(); var channel = connection.createChannel()) {
-  channel.queueDeclare("jobs", true, false, false, Map.of());
+  channel.queueDeclare("jobs", true, false, false, Map.of(
+      "x-dead-letter-exchange", "",
+      "x-dead-letter-routing-key", "failed-jobs"));
   channel.exchangeDeclare("epoch.events", "topic", false, false, Map.of());
   channel.queueBind("jobs", "epoch.events", "orders.*");
   channel.confirmSelect();
@@ -317,9 +338,10 @@ advertised by `ApiVersions` and `COMMAND`.
 The repeatable real-cluster command and evidence fields are documented in
 [Testing](TESTING.md#5-protocol-compatibility). Its Kafka history checks cover
 all four codecs, null keys/values, duplicate/null headers, CreateTime, exact
-offsets, and a persisted consumer checkpoint. AMQP checks cover confirms,
-native capacity rejection, nack/requeue, disconnected-lease redelivery, and
-acknowledged messages staying absent after restart.
+offsets, a persisted consumer checkpoint, and static identity rejoin. AMQP
+checks cover four exchange kinds, confirms, native DLX forwarding, capacity
+rejection, nack/requeue, disconnected-lease redelivery, and acknowledged
+messages staying absent after restart.
 
 Performance parity with Redis, Kafka, or RabbitMQ is not claimed by this beta
 slice. Comparative throughput and p99 gates in the PRD remain separate work.

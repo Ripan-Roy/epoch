@@ -282,7 +282,6 @@ fn amqp_operation(frame: &AMQPFrame) -> ProtocolOperation {
 
 #[derive(Debug)]
 struct PendingPublish {
-    queues: Vec<String>,
     exchange: String,
     routing_key: String,
     mandatory: bool,
@@ -296,6 +295,7 @@ enum ExchangeKind {
     Direct,
     Fanout,
     Topic,
+    Headers,
 }
 
 impl ExchangeKind {
@@ -304,9 +304,22 @@ impl ExchangeKind {
             "direct" => Some(Self::Direct),
             "fanout" => Some(Self::Fanout),
             "topic" => Some(Self::Topic),
+            "headers" => Some(Self::Headers),
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum HeaderMatch {
+    All,
+    Any,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct HeaderBinding {
+    mode: HeaderMatch,
+    values: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -314,6 +327,7 @@ struct Binding {
     exchange: String,
     routing_key: String,
     queue: String,
+    headers: Option<HeaderBinding>,
 }
 
 #[derive(Debug)]
@@ -329,6 +343,7 @@ impl Default for Topology {
                 ("amq.direct".into(), ExchangeKind::Direct),
                 ("amq.fanout".into(), ExchangeKind::Fanout),
                 ("amq.topic".into(), ExchangeKind::Topic),
+                ("amq.headers".into(), ExchangeKind::Headers),
             ]),
             bindings: BTreeSet::new(),
         }
@@ -428,11 +443,21 @@ impl<B: CompatibilityBackend> Session<B> {
             AMQPFrame::Method(id, AMQPClass::Queue(queue::AMQPMethod::Declare(declare))) => {
                 self.require_channel(id)?;
                 let name = declare.queue.as_str();
-                if name.is_empty() || !declare.arguments.inner().is_empty() {
-                    bail!("server-named queues and queue arguments are unsupported");
+                if name.is_empty() {
+                    bail!("server-named queues are unsupported");
                 }
                 if !self.backend.queue_exists(name).await? {
                     bail!("AMQP queue does not map to a provisioned Epoch Queue");
+                }
+                if let Some(requested_target) =
+                    parse_queue_dead_letter_arguments(&declare.arguments)?
+                {
+                    let configured_target = self.backend.queue_dead_letter_target(name).await?;
+                    if configured_target.as_deref() != Some(requested_target.as_str()) {
+                        bail!(
+                            "AMQP dead-letter arguments do not match the provisioned Epoch Queue"
+                        );
+                    }
                 }
                 if declare.nowait {
                     return Ok(Vec::new());
@@ -516,19 +541,21 @@ impl<B: CompatibilityBackend> Session<B> {
             }
             AMQPFrame::Method(id, AMQPClass::Queue(queue::AMQPMethod::Bind(bind))) => {
                 self.require_channel(id)?;
-                if !bind.arguments.inner().is_empty()
-                    || !self.backend.queue_exists(bind.queue.as_str()).await?
-                {
-                    bail!("unsupported AMQP queue binding");
+                if !self.backend.queue_exists(bind.queue.as_str()).await? {
+                    bail!("AMQP queue binding targets an unknown Queue");
                 }
                 let mut topology = self.topology.lock().unwrap();
-                if !topology.exchanges.contains_key(bind.exchange.as_str()) {
-                    bail!("AMQP exchange does not exist");
-                }
+                let kind = topology
+                    .exchanges
+                    .get(bind.exchange.as_str())
+                    .copied()
+                    .context("AMQP exchange does not exist")?;
+                let headers = parse_binding_headers(kind, &bind.arguments)?;
                 topology.bindings.insert(Binding {
                     exchange: bind.exchange.to_string(),
                     routing_key: bind.routing_key.to_string(),
                     queue: bind.queue.to_string(),
+                    headers,
                 });
                 drop(topology);
                 if bind.nowait {
@@ -541,13 +568,19 @@ impl<B: CompatibilityBackend> Session<B> {
             }
             AMQPFrame::Method(id, AMQPClass::Queue(queue::AMQPMethod::Unbind(unbind))) => {
                 self.require_channel(id)?;
-                if !unbind.arguments.inner().is_empty() {
-                    bail!("AMQP queue-unbind arguments are unsupported");
-                }
+                let kind = self
+                    .topology
+                    .lock()
+                    .unwrap()
+                    .exchanges
+                    .get(unbind.exchange.as_str())
+                    .copied()
+                    .context("AMQP exchange does not exist")?;
                 let binding = Binding {
                     exchange: unbind.exchange.to_string(),
                     routing_key: unbind.routing_key.to_string(),
                     queue: unbind.queue.to_string(),
+                    headers: parse_binding_headers(kind, &unbind.arguments)?,
                 };
                 if !self.topology.lock().unwrap().bindings.remove(&binding) {
                     bail!("AMQP queue binding does not exist");
@@ -641,13 +674,12 @@ impl<B: CompatibilityBackend> Session<B> {
                 )])
             }
             AMQPFrame::Method(id, AMQPClass::Basic(basic::AMQPMethod::Publish(publish))) => {
-                let queues = self.resolve_publish_queues(&publish).await?;
+                self.validate_publish(&publish)?;
                 let state = self.require_channel_mut(id)?;
                 if state.pending_publish.is_some() {
                     bail!("interleaved AMQP publishes are unsupported");
                 }
                 state.pending_publish = Some(PendingPublish {
-                    queues,
                     exchange: publish.exchange.to_string(),
                     routing_key: publish.routing_key.to_string(),
                     mandatory: publish.mandatory,
@@ -766,17 +798,32 @@ impl<B: CompatibilityBackend> Session<B> {
         Ok(frames)
     }
 
-    async fn resolve_publish_queues(&self, publish: &basic::Publish) -> Result<Vec<String>> {
+    fn validate_publish(&self, publish: &basic::Publish) -> Result<()> {
         if publish.immediate {
             bail!("AMQP immediate publishing is unsupported");
         }
-        if publish.exchange.as_str().is_empty() {
-            return if self
-                .backend
-                .queue_exists(publish.routing_key.as_str())
-                .await?
-            {
-                Ok(vec![publish.routing_key.to_string()])
+        if !publish.exchange.as_str().is_empty()
+            && !self
+                .topology
+                .lock()
+                .unwrap()
+                .exchanges
+                .contains_key(publish.exchange.as_str())
+        {
+            bail!("AMQP exchange does not exist");
+        }
+        Ok(())
+    }
+
+    async fn resolve_publish_queues(
+        &self,
+        exchange: &str,
+        routing_key: &str,
+        headers: &BTreeMap<String, String>,
+    ) -> Result<Vec<String>> {
+        if exchange.is_empty() {
+            return if self.backend.queue_exists(routing_key).await? {
+                Ok(vec![routing_key.to_owned()])
             } else {
                 Ok(Vec::new())
             };
@@ -784,15 +831,14 @@ impl<B: CompatibilityBackend> Session<B> {
         let topology = self.topology.lock().unwrap();
         let kind = topology
             .exchanges
-            .get(publish.exchange.as_str())
+            .get(exchange)
             .copied()
             .context("AMQP exchange does not exist")?;
         Ok(topology
             .bindings
             .iter()
             .filter(|binding| {
-                binding.exchange == publish.exchange.as_str()
-                    && binding_matches(kind, &binding.routing_key, publish.routing_key.as_str())
+                binding.exchange == exchange && binding_matches(kind, binding, routing_key, headers)
             })
             .map(|binding| binding.queue.clone())
             .collect::<BTreeSet<_>>()
@@ -814,6 +860,10 @@ impl<B: CompatibilityBackend> Session<B> {
         let properties = pending.properties.unwrap_or_default();
         let expiration = properties.expiration().as_ref().map(ToString::to_string);
         let ttl_ms = expiration.as_deref().map(parse_expiration).transpose()?;
+        let headers = string_headers(&properties)?;
+        let queues = self
+            .resolve_publish_queues(&pending.exchange, &pending.routing_key, &headers)
+            .await?;
         let message = QueueMessage {
             body: pending.body.clone(),
             content_type: properties.content_type().as_ref().map(ToString::to_string),
@@ -822,17 +872,17 @@ impl<B: CompatibilityBackend> Session<B> {
                 .as_ref()
                 .map(ToString::to_string),
             reply_to: properties.reply_to().as_ref().map(ToString::to_string),
-            headers: string_headers(&properties)?,
+            headers,
             exchange: Some(pending.exchange.clone()),
             routing_key: Some(pending.routing_key.clone()),
             expiration,
             ttl_ms,
         };
-        for queue in &pending.queues {
+        for queue in &queues {
             self.backend.queue_publish(queue, message.clone()).await?;
         }
         let mut frames = Vec::new();
-        if pending.queues.is_empty() && pending.mandatory {
+        if queues.is_empty() && pending.mandatory {
             frames.extend([
                 method_frame(
                     id,
@@ -1014,11 +1064,77 @@ impl<B: CompatibilityBackend> Session<B> {
     }
 }
 
-fn binding_matches(kind: ExchangeKind, binding_key: &str, routing_key: &str) -> bool {
+fn binding_matches(
+    kind: ExchangeKind,
+    binding: &Binding,
+    routing_key: &str,
+    headers: &BTreeMap<String, String>,
+) -> bool {
     match kind {
-        ExchangeKind::Direct => binding_key == routing_key,
+        ExchangeKind::Direct => binding.routing_key == routing_key,
         ExchangeKind::Fanout => true,
-        ExchangeKind::Topic => topic_matches(binding_key, routing_key),
+        ExchangeKind::Topic => topic_matches(&binding.routing_key, routing_key),
+        ExchangeKind::Headers => {
+            binding
+                .headers
+                .as_ref()
+                .is_some_and(|binding| match binding.mode {
+                    HeaderMatch::All => binding
+                        .values
+                        .iter()
+                        .all(|(name, value)| headers.get(name) == Some(value)),
+                    HeaderMatch::Any => binding
+                        .values
+                        .iter()
+                        .any(|(name, value)| headers.get(name) == Some(value)),
+                })
+        }
+    }
+}
+
+fn parse_binding_headers(
+    kind: ExchangeKind,
+    arguments: &FieldTable,
+) -> Result<Option<HeaderBinding>> {
+    if kind != ExchangeKind::Headers {
+        if !arguments.inner().is_empty() {
+            bail!("binding arguments are supported only for AMQP headers exchanges");
+        }
+        return Ok(None);
+    }
+    if arguments.inner().len() > MAX_REQUEST_ITEMS.saturating_add(1) {
+        bail!("AMQP headers binding count exceeds limit");
+    }
+    let mut mode = None;
+    let mut values = BTreeMap::new();
+    for (name, value) in arguments.inner() {
+        let value = amqp_string(value).context("AMQP header binding values must be strings")?;
+        if name.as_str() == "x-match" {
+            mode = Some(match value.as_str() {
+                "all" => HeaderMatch::All,
+                "any" => HeaderMatch::Any,
+                _ => bail!("AMQP x-match must be all or any"),
+            });
+        } else {
+            values.insert(name.to_string(), value);
+        }
+    }
+    if values.is_empty() {
+        bail!("AMQP headers binding requires at least one header");
+    }
+    Ok(Some(HeaderBinding {
+        mode: mode.context("AMQP headers binding requires x-match")?,
+        values,
+    }))
+}
+
+fn amqp_string(value: &AMQPValue) -> Result<String> {
+    match value {
+        AMQPValue::ShortString(value) => Ok(value.to_string()),
+        AMQPValue::LongString(value) => Ok(std::str::from_utf8(value.as_bytes())
+            .context("AMQP string is not UTF-8")?
+            .to_owned()),
+        _ => bail!("AMQP value is not a string"),
     }
 }
 
@@ -1067,6 +1183,35 @@ fn parse_expiration(value: &str) -> Result<u64> {
     value.parse().context("AMQP expiration exceeds u64")
 }
 
+fn parse_queue_dead_letter_arguments(arguments: &FieldTable) -> Result<Option<String>> {
+    if arguments.inner().is_empty() {
+        return Ok(None);
+    }
+    if arguments.inner().len() != 2 {
+        bail!("AMQP Queue supports only x-dead-letter-exchange plus x-dead-letter-routing-key");
+    }
+    let exchange = arguments
+        .inner()
+        .get("x-dead-letter-exchange")
+        .context("AMQP Queue dead-letter exchange is missing")?;
+    if !amqp_string(exchange)
+        .context("AMQP Queue dead-letter exchange must be a string")?
+        .is_empty()
+    {
+        bail!("AMQP Queue dead-lettering supports only the default exchange");
+    }
+    let target = arguments
+        .inner()
+        .get("x-dead-letter-routing-key")
+        .context("AMQP Queue dead-letter routing key is missing")?;
+    let target =
+        amqp_string(target).context("AMQP Queue dead-letter routing key must be a string")?;
+    if target.is_empty() {
+        bail!("AMQP Queue dead-letter routing key cannot be empty");
+    }
+    Ok(Some(target))
+}
+
 fn string_headers(properties: &BasicProperties) -> Result<BTreeMap<String, String>> {
     let Some(headers) = properties.headers() else {
         return Ok(BTreeMap::new());
@@ -1078,13 +1223,7 @@ fn string_headers(properties: &BasicProperties) -> Result<BTreeMap<String, Strin
         .inner()
         .iter()
         .map(|(name, value)| {
-            let value = match value {
-                AMQPValue::ShortString(value) => value.to_string(),
-                AMQPValue::LongString(value) => std::str::from_utf8(value.as_bytes())
-                    .context("AMQP string header is not UTF-8")?
-                    .to_owned(),
-                _ => bail!("only AMQP string headers are supported"),
-            };
+            let value = amqp_string(value).context("only AMQP string headers are supported")?;
             Ok((name.to_string(), value))
         })
         .collect()
@@ -1342,6 +1481,230 @@ mod tests {
         assert!(topic_matches("", ""));
     }
 
+    #[test]
+    fn headers_bindings_require_bounded_string_criteria_and_valid_match_mode() {
+        let mut valid = FieldTable::default();
+        valid.insert(
+            "x-match".into(),
+            AMQPValue::LongString("all".as_bytes().into()),
+        );
+        valid.insert(
+            "tenant".into(),
+            AMQPValue::LongString("acme".as_bytes().into()),
+        );
+        assert_eq!(
+            parse_binding_headers(ExchangeKind::Headers, &valid).unwrap(),
+            Some(HeaderBinding {
+                mode: HeaderMatch::All,
+                values: BTreeMap::from([("tenant".into(), "acme".into())]),
+            })
+        );
+        assert!(parse_binding_headers(ExchangeKind::Direct, &valid).is_err());
+
+        let mut missing_mode = FieldTable::default();
+        missing_mode.insert(
+            "tenant".into(),
+            AMQPValue::LongString("acme".as_bytes().into()),
+        );
+        assert!(parse_binding_headers(ExchangeKind::Headers, &missing_mode).is_err());
+
+        let mut invalid_mode = missing_mode.clone();
+        invalid_mode.insert(
+            "x-match".into(),
+            AMQPValue::LongString("none".as_bytes().into()),
+        );
+        assert!(parse_binding_headers(ExchangeKind::Headers, &invalid_mode).is_err());
+
+        let mut non_string = FieldTable::default();
+        non_string.insert(
+            "x-match".into(),
+            AMQPValue::LongString("any".as_bytes().into()),
+        );
+        non_string.insert("priority".into(), AMQPValue::LongInt(10));
+        assert!(parse_binding_headers(ExchangeKind::Headers, &non_string).is_err());
+    }
+
+    #[test]
+    fn queue_dead_letter_arguments_are_limited_to_one_default_exchange_target() {
+        assert_eq!(
+            parse_queue_dead_letter_arguments(&FieldTable::default()).unwrap(),
+            None
+        );
+        let mut valid = FieldTable::default();
+        valid.insert(
+            "x-dead-letter-exchange".into(),
+            AMQPValue::LongString(Vec::new().into()),
+        );
+        valid.insert(
+            "x-dead-letter-routing-key".into(),
+            AMQPValue::LongString("failed-jobs".as_bytes().into()),
+        );
+        assert_eq!(
+            parse_queue_dead_letter_arguments(&valid).unwrap(),
+            Some("failed-jobs".into())
+        );
+
+        let mut named_exchange = valid.clone();
+        named_exchange.insert(
+            "x-dead-letter-exchange".into(),
+            AMQPValue::LongString("events.failed".as_bytes().into()),
+        );
+        assert!(parse_queue_dead_letter_arguments(&named_exchange).is_err());
+
+        let mut unknown = valid.clone();
+        unknown.insert(
+            "x-message-ttl".into(),
+            AMQPValue::LongString("1000".as_bytes().into()),
+        );
+        assert!(parse_queue_dead_letter_arguments(&unknown).is_err());
+    }
+
+    async fn bind_headers(
+        session: &mut Session<MemoryBackend>,
+        queue_name: &str,
+        mode: &str,
+        criteria: &[(&str, &str)],
+    ) {
+        let mut arguments = FieldTable::default();
+        arguments.insert(
+            "x-match".into(),
+            AMQPValue::LongString(mode.as_bytes().into()),
+        );
+        for (name, value) in criteria {
+            arguments.insert(
+                (*name).into(),
+                AMQPValue::LongString(value.as_bytes().into()),
+            );
+        }
+        session
+            .handle(method_frame(
+                1,
+                AMQPClass::Queue(queue::AMQPMethod::Bind(queue::Bind {
+                    queue: queue_name.into(),
+                    exchange: "events.headers".into(),
+                    arguments,
+                    ..queue::Bind::default()
+                })),
+            ))
+            .await
+            .unwrap();
+    }
+
+    async fn declare_headers_exchange(session: &mut Session<MemoryBackend>) {
+        session
+            .handle(method_frame(
+                1,
+                AMQPClass::Exchange(exchange::AMQPMethod::Declare(exchange::Declare {
+                    exchange: "events.headers".into(),
+                    kind: "headers".into(),
+                    ..exchange::Declare::default()
+                })),
+            ))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn routes_headers_exchange_with_all_and_any_semantics() {
+        let backend = Arc::new(MemoryBackend::with_resources(
+            "sessions", "events", 2, "jobs",
+        ));
+        backend.add_queue("audit");
+        let mut session = Session::new(backend);
+        open_channel(&mut session).await;
+        declare_headers_exchange(&mut session).await;
+
+        bind_headers(
+            &mut session,
+            "jobs",
+            "all",
+            &[("tenant", "acme"), ("format", "json")],
+        )
+        .await;
+        bind_headers(
+            &mut session,
+            "audit",
+            "any",
+            &[("tenant", "acme"), ("priority", "high")],
+        )
+        .await;
+
+        let mut matching = FieldTable::default();
+        matching.insert(
+            "tenant".into(),
+            AMQPValue::LongString("acme".as_bytes().into()),
+        );
+        matching.insert(
+            "format".into(),
+            AMQPValue::LongString("json".as_bytes().into()),
+        );
+        assert!(
+            publish_to(
+                &mut session,
+                "events.headers",
+                "routing-key-is-ignored",
+                true,
+                BasicProperties::default().with_headers(matching),
+                b"both",
+            )
+            .await
+            .is_empty()
+        );
+        for queue in ["jobs", "audit"] {
+            assert!(matches!(
+                get_from(&mut session, queue, true).await.as_slice(),
+                [.., AMQPFrame::Body(1, body)] if body == b"both"
+            ));
+        }
+
+        let mut any_only = FieldTable::default();
+        any_only.insert(
+            "priority".into(),
+            AMQPValue::LongString("high".as_bytes().into()),
+        );
+        assert!(
+            publish_to(
+                &mut session,
+                "events.headers",
+                "",
+                true,
+                BasicProperties::default().with_headers(any_only),
+                b"audit-only",
+            )
+            .await
+            .is_empty()
+        );
+        assert!(matches!(
+            get_from(&mut session, "jobs", true).await.as_slice(),
+            [AMQPFrame::Method(
+                1,
+                AMQPClass::Basic(basic::AMQPMethod::GetEmpty(_))
+            )]
+        ));
+        assert!(matches!(
+            get_from(&mut session, "audit", true).await.as_slice(),
+            [.., AMQPFrame::Body(1, body)] if body == b"audit-only"
+        ));
+
+        let returned = publish_to(
+            &mut session,
+            "events.headers",
+            "",
+            true,
+            BasicProperties::default(),
+            b"no-match",
+        )
+        .await;
+        assert!(matches!(
+            returned.as_slice(),
+            [
+                AMQPFrame::Method(1, AMQPClass::Basic(basic::AMQPMethod::Return(value))),
+                AMQPFrame::Header(1, _),
+                AMQPFrame::Body(1, body),
+            ] if value.reply_code == 312 && body == b"no-match"
+        ));
+    }
+
     #[tokio::test]
     #[allow(
         clippy::too_many_lines,
@@ -1510,6 +1873,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deterministic_frame_mutation_corpus_never_panics_or_bypasses_size_bounds() {
+        let oversized = u32::try_from(MAX_FRAME_BYTES + 1).unwrap();
+        let mut oversized_header = vec![1, 0, 1];
+        oversized_header.extend_from_slice(&oversized.to_be_bytes());
+        let mut oversized_input = oversized_header.as_slice();
+        assert!(read_frame(&mut oversized_input).await.is_err());
+
+        let mut state = 0xa076_1d64_78bd_642f_u64;
+        for iteration in 0..512_u16 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let declared = u32::from(state.to_le_bytes()[0] % 65);
+            let mut input = vec![state.to_le_bytes()[1], 0, iteration.to_le_bytes()[0]];
+            input.extend_from_slice(&declared.to_be_bytes());
+            let available = usize::from(state.to_le_bytes()[2] % 80);
+            for _ in 0..available {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                input.push(state.to_le_bytes()[0]);
+            }
+            let mut input = input.as_slice();
+            let _ = read_frame(&mut input).await;
+        }
+    }
+
+    #[tokio::test]
     async fn translates_publish_confirm_get_and_ack_with_binary_body() {
         let backend = Arc::new(MemoryBackend::with_resources(
             "sessions", "events", 2, "jobs",
@@ -1608,6 +1999,91 @@ mod tests {
         assert!(matches!(
             get(&mut session).await.as_slice(),
             [.., AMQPFrame::Body(1, body)] if body == b"retry"
+        ));
+    }
+
+    #[tokio::test]
+    async fn reject_without_requeue_uses_the_provisioned_native_dead_letter_target() {
+        let backend = Arc::new(MemoryBackend::with_resources(
+            "sessions", "events", 2, "jobs",
+        ));
+        backend.add_queue("failed-jobs");
+        backend.configure_queue_dead_letter("jobs", "failed-jobs");
+        let mut session = Session::new(backend);
+        open_channel(&mut session).await;
+
+        let mut arguments = FieldTable::default();
+        arguments.insert(
+            "x-dead-letter-exchange".into(),
+            AMQPValue::LongString(Vec::new().into()),
+        );
+        arguments.insert(
+            "x-dead-letter-routing-key".into(),
+            AMQPValue::LongString("failed-jobs".as_bytes().into()),
+        );
+        assert!(
+            session
+                .handle(method_frame(
+                    1,
+                    AMQPClass::Queue(queue::AMQPMethod::Declare(queue::Declare {
+                        queue: "jobs".into(),
+                        arguments: arguments.clone(),
+                        ..queue::Declare::default()
+                    })),
+                ))
+                .await
+                .is_ok()
+        );
+
+        let mut wrong = arguments;
+        wrong.insert(
+            "x-dead-letter-routing-key".into(),
+            AMQPValue::LongString("other".as_bytes().into()),
+        );
+        assert!(
+            session
+                .handle(method_frame(
+                    1,
+                    AMQPClass::Queue(queue::AMQPMethod::Declare(queue::Declare {
+                        queue: "jobs".into(),
+                        arguments: wrong,
+                        ..queue::Declare::default()
+                    })),
+                ))
+                .await
+                .is_err()
+        );
+
+        assert!(publish(&mut session, b"poison").await.is_empty());
+        assert!(matches!(
+            get(&mut session).await.as_slice(),
+            [
+                AMQPFrame::Method(1, AMQPClass::Basic(basic::AMQPMethod::GetOk(_))),
+                ..
+            ]
+        ));
+        session
+            .handle(method(
+                1,
+                basic::AMQPMethod::Reject(basic::Reject {
+                    delivery_tag: 1,
+                    requeue: false,
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(
+            get_from(&mut session, "failed-jobs", true)
+                .await
+                .as_slice(),
+            [.., AMQPFrame::Body(1, body)] if body == b"poison"
+        ));
+        assert!(matches!(
+            get(&mut session).await.as_slice(),
+            [AMQPFrame::Method(
+                1,
+                AMQPClass::Basic(basic::AMQPMethod::GetEmpty(_))
+            )]
         ));
     }
 

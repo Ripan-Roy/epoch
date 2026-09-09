@@ -318,6 +318,7 @@ export const docsPages: ReadonlyArray<DocsPageMeta> = [
       { id: "redis", label: "Redis / RESP" },
       { id: "kafka", label: "Apache Kafka" },
       { id: "amqp", label: "RabbitMQ / AMQP" },
+      { id: "recovery-evidence", label: "Recovery evidence" },
       { id: "migration-scan", label: "Migration scanner" },
       { id: "security", label: "Security & boundaries" },
     ],

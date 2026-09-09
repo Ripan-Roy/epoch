@@ -1413,8 +1413,12 @@ full Go/Java/Python generated SDK parity, and native compatibility negotiation
 remain unimplemented. A separate Rust compatibility gateway exposes the exact
 RESP2/RESP3, Kafka, and AMQP 0-9-1 subsets in the public compatibility matrix
 through authenticated, fenced regional Cache, Stream, and Queue operations. Its
-classic Kafka group state is replicated by Stream; its AMQP exchange/binding
-topology is process-scoped and is not a durable management API. The experimental Stream,
+classic Kafka group state and bounded static identities are replicated by
+Stream. Redis `MSET`/`MSETNX` use one revision-fenced Cache transaction. Its
+AMQP direct/fanout/topic/headers exchange and binding topology is process-scoped
+and is not a durable management API; default-exchange DLX declarations are
+validated against the Queue's native dead-letter target and forwarding remains
+replicated Queue state. The experimental Stream,
 Queue, Cache, and Event Bus tablets expose only the mutation/read surfaces
 described above. Typed Go, Java, and Python clients cover both provisional
 standalone routes and the versioned regional Stream, Queue, Cache, and Event Bus

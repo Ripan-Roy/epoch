@@ -814,8 +814,13 @@ Wire input is bounded before allocation or decompression. Kafka record counts
 are preflighted, all supported compression codecs share a cumulative expansion
 ceiling, and one Produce partition becomes one canonical native Stream batch so
 it cannot partially commit record-by-record. AMQP confirms follow native Queue
-commit, while Redis multi-key operations explicitly remain independent per key.
+commit, while Redis commands use only their explicit native semantic boundary.
 Unknown mutation outcomes are surfaced rather than retried under a new identity.
+
+`MSET` and `MSETNX` are the bounded exception to independent multi-key
+translation: up to 128 distinct keys become one revision-fenced native Cache
+transaction, so success is all-or-nothing. Other multi-key commands do not
+imply a reusable cross-command snapshot or Redis transaction context.
 
 Structured Redis hash, list, set, and sorted-set values are encoded as one
 bounded Cache item. Each command observes the item linearly, computes a
@@ -823,25 +828,33 @@ replacement, and submits one item-version or missing-key shard-revision fence;
 successful replacements retain native expiry and storage class. Kafka's bounded
 classic `consumer` group subset keeps membership, generation, shard assignment,
 heartbeat deadlines, ownership claims, and committed offsets in replicated
-Stream state. The gateway-issued member token carries only the Stream identity
-needed to recover that state after a gateway restart. Stale generations cannot
-heartbeat, claim a shard, or advance an offset.
+Stream state. A gateway-issued member token carries the Stream and, for bounded
+static identities, the `group.instance.id` needed to recover that state after a
+gateway restart. Stale generations cannot heartbeat, claim a shard, or advance
+an offset. A separate live-owner epoch for simultaneous duplicate static
+members is not implemented, so cooperative/full static-member fencing is not
+claimed.
 
 AMQP Queue messages and settlements remain native and durable. Exchange and
-binding topology for the supported direct, fanout, and topic subset is shared
+binding topology for the supported direct, fanout, topic, and string-only
+headers subset is shared
 between connections only inside one gateway process; it is intentionally lost
 when that process restarts. Per-message expiration becomes native Queue TTL,
 mandatory unroutable publishes return to the publisher, and only UTF-8 string
-headers cross the current envelope. Durable topology, policy arguments, header
-exchanges, dead-letter configuration, transactions, and AMQP 1.0 remain outside
-the advertised boundary.
+headers cross the current envelope. A Queue may validate default-exchange DLX
+arguments against its provisioned native dead-letter target; reject/nack then
+uses the replicated Queue dead-letter outbox, removes the old expiration, and
+retargets the forwarded envelope. Durable topology, named-DLX routing, general
+policy arguments, field-table header parity, transactions, and AMQP 1.0 remain
+outside the advertised boundary.
 
 Discovery and documentation are allowlists: Kafka `ApiVersions`, Redis
 `COMMAND`, the scanner, and the published exact-client matrix must match the
 implemented dispatch. See [Protocol compatibility](PROTOCOL_COMPATIBILITY.md)
 and [ADR-0042](adr/0042-bounded-protocol-compatibility-gateways.md),
 [ADR-0043](adr/0043-lossless-protocol-recovery-contract.md), and
-[ADR-0044](adr/0044-native-backed-protocol-state.md).
+[ADR-0044](adr/0044-native-backed-protocol-state.md), and
+[ADR-0046](adr/0046-private-beta-protocol-compatibility.md).
 
 ## 9. Time, leases, and fencing
 
@@ -1261,3 +1274,4 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0043: Lossless Protocol Records and Real Regional Recovery](adr/0043-lossless-protocol-recovery-contract.md)
 - [ADR-0044: Native-Backed Protocol State](adr/0044-native-backed-protocol-state.md)
 - [ADR-0045: Bounded Observability and Trace Propagation](adr/0045-bounded-observability-and-trace-propagation.md)
+- [ADR-0046: Private-Beta Protocol Compatibility Closure](adr/0046-private-beta-protocol-compatibility.md)

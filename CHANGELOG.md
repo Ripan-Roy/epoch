@@ -6,6 +6,35 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+### Added
+
+- Added bounded Kafka `group.instance.id` identity reuse and mismatch fencing
+  across join, sync, heartbeat, offset commit, and leave.
+- Added AMQP headers exchanges with string-only `x-match=all|any` bindings and
+  provisioned default-exchange dead-letter declarations backed by the native
+  Queue outbox.
+
+### Fixed
+
+- Made Redis `MSET` and the new `MSETNX` translation all-or-nothing through one
+  revision-fenced native Cache transaction instead of sequential key writes.
+- Removed original AMQP expiration before native dead-letter forwarding,
+  retargeted the default-exchange routing metadata, and preserved bounded
+  first-death string metadata.
+- Restored Queue snapshots containing transformed AMQP dead-letter forwards by
+  validating the deterministic derived envelope against its original history,
+  while continuing to accept legacy pre-transformation forwards so upgrades do
+  not strand existing state. This prevents a killed voter from entering a
+  restart loop after DLX delivery.
+
+### Verification
+
+- Expanded Redis CLI 8.8.2, Kafka Java 4.3.1, and RabbitMQ Java 5.35.0
+  conformance plus the regional recovery evidence contract to cover the new
+  compatibility paths. The production-image evidence-v2 campaign passes
+  gateway replacement, Cache/Stream/Queue leader loss, all-voter SIGKILL and
+  same-volume reopen, and replica-digest convergence locally.
+
 ## [0.2.0-beta.7] - 2026-09-08
 
 ### Added

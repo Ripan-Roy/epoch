@@ -63,8 +63,9 @@ migration support, and production support limits remain open.
 
 The protocol-compatibility candidate supplies partial G6 evidence. A separate
 bounded Rust process translates a named RESP2/RESP3 string/counter/TTL and
-hash/list/set/sorted-set subset, Kafka producer/manual/classic-group consumer
-APIs, and AMQP 0-9-1 direct/fanout/topic Queue
+hash/list/set/sorted-set subset plus all-or-nothing multi-set, Kafka
+producer/manual/classic-group consumer APIs with bounded static identity reuse,
+and AMQP 0-9-1 direct/fanout/topic/headers Queue
 publish/return/confirm/consume/settlement into the fenced native regional ports.
 Redis CLI 8.8.2, Kafka Java 4.3.1, and RabbitMQ Java 5.35.0 execute the
 real wire listeners; native adapter contracts separately prove bearer identity,
@@ -73,15 +74,18 @@ tests, all four Kafka compression paths, the DX-007 versioned migration scanner,
 the public matrix, Pages UI, and a fifth signed non-root OCI component are local.
 The current candidate passes combined real-regional conformance locally:
 production node and gateway images preserve binary Cache state plus atomic conditional
-set/previous-value and structured collection results, Kafka CreateTime, ordered
-duplicate headers, replicated group sessions/claims and checkpoints, and AMQP
-topic routing, TTL, mandatory returns, confirms/leases/acks through gateway
+set/previous-value, atomic multi-set, and structured collection results, Kafka
+CreateTime, ordered duplicate headers, replicated group sessions/static
+identities/claims/checkpoints, and AMQP topic/headers routing, TTL, provisioned
+DLX forwarding, mandatory returns, confirms/leases/acks through gateway
 replacement, profile-leader losses, and all-voter SIGKILL/reopen. A full Queue's
 committed rejection is never confirmed. Local fault evidence passes; protected
-execution of this combined gate remains required. Differential and fuzz evidence,
-remaining Redis commands, Kafka static/cooperative/new-group protocols and
-transactions, durable AMQP topology/header routing/DLX/1.0, MQTT, and performance
-parity remain open; no G6 completion is claimed.
+execution of this combined gate remains required. Differential and fuzz
+evidence, remaining Redis commands, Kafka simultaneous duplicate-static-owner
+fencing/cooperative/new-group protocols and transactions, durable AMQP
+topology/named-DLX routing/AMQP 1.0, MQTT, and performance parity remain open;
+no G6 completion is claimed. See
+[ADR-0046](adr/0046-private-beta-protocol-compatibility.md).
 
 The bootstrap trust slice supplies partial G5 evidence. Go and Rust parse the
 same bounded fingerprint-only policy and decision corpus; managed HTTP/gRPC and

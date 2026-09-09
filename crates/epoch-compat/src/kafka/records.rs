@@ -253,6 +253,29 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_record_mutation_corpus_never_panics_or_accepts_trailing_data() {
+        let encoded = encode_records(&[record()]).unwrap();
+        let metadata = RecordBatchDecoder::decode_batch_info(&mut encoded.clone())
+            .unwrap()
+            .remove(0);
+        let mut state = 0xd1b5_4a32_d192_ed03_u64;
+        for length in 0..=512 {
+            let mut input = Vec::with_capacity(length);
+            for _ in 0..length {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                input.push(state.to_le_bytes()[0]);
+            }
+            let _ = decode_records(Bytes::from(input), &metadata);
+        }
+
+        let mut valid_with_trailing = encoded.slice(61..).to_vec();
+        valid_with_trailing.extend_from_slice(b"trailing");
+        assert!(decode_records(valid_with_trailing.into(), &metadata).is_err());
+    }
+
+    #[test]
     fn signed_varints_cover_boundaries_and_reject_overflow() {
         for value in [
             i64::MIN,

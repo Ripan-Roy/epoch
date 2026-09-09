@@ -15,8 +15,8 @@ use tracing::Instrument as _;
 use crate::{
     CompatibilityBackend, MAX_FRAME_BYTES,
     backend::{
-        BackendError, CacheCollectionMutation, CacheCollectionResult, CacheSetCondition,
-        CacheSetOptions, CacheValue,
+        BackendError, CacheCollectionMutation, CacheCollectionResult, CacheMultiSetEntry,
+        CacheSetCondition, CacheSetOptions, CacheValue, MAX_CACHE_MULTI_SET_ENTRIES,
     },
     observe_protocol,
 };
@@ -196,6 +196,7 @@ fn redis_operation(arguments: &[Vec<u8>]) -> ProtocolOperation {
         b"SET".as_slice(),
         b"DEL",
         b"MSET",
+        b"MSETNX",
         b"INCR",
         b"DECR",
         b"INCRBY",
@@ -291,6 +292,7 @@ impl<B: CompatibilityBackend> RedisSession<B> {
             "EXISTS" => self.exists(&arguments[1..]).await,
             "MGET" => self.mget(&arguments[1..]).await,
             "MSET" => self.mset(&arguments[1..]).await,
+            "MSETNX" => self.msetnx(&arguments[1..]).await,
             "INCR" => self.increment(&arguments[1..], 1).await,
             "DECR" => self.increment(&arguments[1..], -1).await,
             "INCRBY" => self.increment_by(&arguments[1..], 1).await,
@@ -537,27 +539,32 @@ impl<B: CompatibilityBackend> RedisSession<B> {
     }
 
     async fn mset(&self, args: &[Vec<u8>]) -> RespValue {
-        if args.is_empty() || !args.len().is_multiple_of(2) {
+        let Some(entries) = multi_set_entries(args) else {
             return arity("mset");
+        };
+        match self
+            .backend
+            .cache_multi_set(&self.config.cache, &entries, false)
+            .await
+        {
+            Ok(true) => RespValue::Simple("OK".into()),
+            Ok(false) => RespValue::Error("ERR atomic MSET was not applied".into()),
+            Err(error) => backend_error(error),
         }
-        for pair in args.chunks_exact(2) {
-            let Some(key) = text(&pair[0]) else {
-                return error("key must be UTF-8");
-            };
-            if let Err(error) = self
-                .backend
-                .cache_set(
-                    &self.config.cache,
-                    key,
-                    CacheValue::Blob(pair[1].clone()),
-                    CacheSetOptions::default(),
-                )
-                .await
-            {
-                return backend_error(error);
-            }
+    }
+
+    async fn msetnx(&self, args: &[Vec<u8>]) -> RespValue {
+        let Some(entries) = multi_set_entries(args) else {
+            return arity("msetnx");
+        };
+        match self
+            .backend
+            .cache_multi_set(&self.config.cache, &entries, true)
+            .await
+        {
+            Ok(applied) => RespValue::Integer(i64::from(applied)),
+            Err(error) => backend_error(error),
         }
-        RespValue::Simple("OK".into())
     }
 
     async fn increment(&self, args: &[Vec<u8>], delta: i64) -> RespValue {
@@ -1267,6 +1274,30 @@ fn exact_key(args: &[Vec<u8>]) -> Option<&str> {
     }
 }
 
+fn multi_set_entries(args: &[Vec<u8>]) -> Option<Vec<CacheMultiSetEntry>> {
+    if args.is_empty()
+        || !args.len().is_multiple_of(2)
+        || args.len() / 2 > MAX_CACHE_MULTI_SET_ENTRIES
+    {
+        return None;
+    }
+    let mut entries = BTreeMap::new();
+    for pair in args.chunks_exact(2) {
+        let key = text(&pair[0])?.to_owned();
+        if key.is_empty() {
+            return None;
+        }
+        // Redis accepts repeated keys in one MSET and the final value wins.
+        entries.insert(key, pair[1].clone());
+    }
+    Some(
+        entries
+            .into_iter()
+            .map(|(key, value)| CacheMultiSetEntry { key, value })
+            .collect(),
+    )
+}
+
 fn keys(args: &[Vec<u8>]) -> Option<Vec<String>> {
     if args.is_empty() {
         return None;
@@ -1514,6 +1545,48 @@ mod tests {
         assert_eq!(
             session.execute(command(&[b"GET", b"key"])).await,
             RespValue::Bulk(b"second".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_set_and_multi_set_if_absent_are_one_all_or_nothing_operation() {
+        let mut session = session(None);
+        assert_eq!(
+            session
+                .execute(command(&[b"MSET", b"one", b"1", b"two", b"2"]))
+                .await,
+            RespValue::Simple("OK".into())
+        );
+        assert_eq!(
+            session
+                .execute(command(&[b"MSETNX", b"two", b"changed", b"three", b"3"]))
+                .await,
+            RespValue::Integer(0)
+        );
+        assert_eq!(session.execute(command(&[b"GET", b"two"])).await, bulk("2"));
+        assert_eq!(
+            session.execute(command(&[b"GET", b"three"])).await,
+            RespValue::Null
+        );
+        assert_eq!(
+            session
+                .execute(command(&[b"MSETNX", b"three", b"3", b"four", b"4"]))
+                .await,
+            RespValue::Integer(1)
+        );
+        assert_eq!(
+            session.execute(command(&[b"GET", b"four"])).await,
+            bulk("4")
+        );
+        assert_eq!(
+            session
+                .execute(command(&[b"MSET", b"duplicate", b"1", b"duplicate", b"2"]))
+                .await,
+            RespValue::Simple("OK".into())
+        );
+        assert_eq!(
+            session.execute(command(&[b"GET", b"duplicate"])).await,
+            bulk("2")
         );
     }
 

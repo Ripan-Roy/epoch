@@ -104,6 +104,18 @@ public final class RegionalRecoveryConformance {
     return new KafkaConsumer<>(properties);
   }
 
+  private static KafkaConsumer<byte[], byte[]> staticConsumer(String bootstrap) {
+    var properties = new HashMap<String, Object>();
+    properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrap);
+    properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class);
+    properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class);
+    properties.put(ConsumerConfig.GROUP_ID_CONFIG, "recovery-static");
+    properties.put(ConsumerConfig.GROUP_INSTANCE_ID_CONFIG, "recovery-worker-a");
+    properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
+    properties.put(ConsumerConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, 10_000);
+    return new KafkaConsumer<>(properties);
+  }
+
   private static byte[] key(int index) {
     return index == 1 ? null : ("key-" + index).getBytes(StandardCharsets.UTF_8);
   }
@@ -159,6 +171,14 @@ public final class RegionalRecoveryConformance {
         }
       }
       require(count == CODECS.size(), "complete persisted Kafka history");
+    }
+    try (var consumer = staticConsumer(bootstrap)) {
+      consumer.subscribe(List.of("events"));
+      var deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos();
+      while (consumer.assignment().isEmpty() && System.nanoTime() < deadline) {
+        consumer.poll(Duration.ofMillis(250));
+      }
+      require(!consumer.assignment().isEmpty(), "static member assignment survives recovery");
     }
   }
 

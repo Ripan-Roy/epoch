@@ -17,9 +17,9 @@ use base64::{
     engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
 };
 use epoch_compat::{
-    BackendError, CacheCollectionMutation, CacheCollectionResult, CacheSetCondition,
-    CacheSetOptions, CacheValue, CompatibilityBackend, NativeHttpBackend, NativeHttpConfig,
-    QueueMessage, StreamGroupIdentity, StreamRecord,
+    BackendError, CacheCollectionMutation, CacheCollectionResult, CacheMultiSetEntry,
+    CacheSetCondition, CacheSetOptions, CacheValue, CompatibilityBackend, NativeHttpBackend,
+    NativeHttpConfig, QueueMessage, StreamGroupIdentity, StreamRecord,
 };
 use epoch_tablet::{StreamBatchPayload, StreamCompression, decode_stream_batch_payload};
 use serde_json::{Value, json};
@@ -121,12 +121,14 @@ async fn native_response(
             "missing_key_fallback":"event_id",
             "shard_count":3,
         }));
+        let queue_dead_letter_target = path.contains("/queues/jobs/").then_some("failed-jobs");
         return Json(json!({
             "resource_generation":"7",
             "tablet_epoch":"8",
             "term":"9",
             "accepts_writes":true,
             "stream_partitioning":partitioning,
+            "queue_dead_letter_target":queue_dead_letter_target,
         }))
         .into_response();
     }
@@ -650,6 +652,63 @@ async fn cache_set_bounds_contention_and_rejects_wrong_type_before_mutation() {
 }
 
 #[tokio::test]
+async fn cache_multi_set_compiles_to_one_revision_fenced_native_transaction() {
+    let api = MockNativeApi::start().await;
+    let backend = backend(api.endpoint.clone());
+    let entries = [
+        CacheMultiSetEntry {
+            key: "one".into(),
+            value: vec![0, 1],
+        },
+        CacheMultiSetEntry {
+            key: "two".into(),
+            value: b"second".to_vec(),
+        },
+    ];
+
+    assert!(
+        backend
+            .cache_multi_set("sessions", &entries, false)
+            .await
+            .unwrap()
+    );
+    assert!(
+        backend
+            .cache_multi_set("empty", &entries, true)
+            .await
+            .unwrap()
+    );
+
+    let observed = api.observed.lock().unwrap();
+    let mutations = observed
+        .iter()
+        .filter(|request| request.method == Method::POST && request.path.ends_with("/mutations"))
+        .collect::<Vec<_>>();
+    assert_eq!(mutations.len(), 2);
+    assert_eq!(
+        mutations[0].body.pointer("/operation"),
+        Some(&json!({
+            "kind":"transaction",
+            "shard":0,
+            "expected_revision":"11",
+            "mutations":[
+                {"kind":"set", "key":"one", "value":{"kind":"blob", "value":[0,1]}, "storage_class":"memory"},
+                {"kind":"set", "key":"two", "value":{"kind":"blob", "value":[115,101,99,111,110,100]}, "storage_class":"memory"},
+            ],
+            "lock_guards":[],
+        }))
+    );
+    assert_eq!(
+        mutations[1].body.pointer("/operation/mutations/0/expected"),
+        Some(&json!({"kind":"missing", "shard_revision":"11"}))
+    );
+    assert_eq!(
+        mutations[1].body.pointer("/operation/mutations/1/expected"),
+        Some(&json!({"kind":"missing", "shard_revision":"11"}))
+    );
+}
+
+#[tokio::test]
 async fn never_acknowledges_http_success_with_a_committed_native_rejection() {
     let api = MockNativeApi::start().await;
     let backend = backend(api.endpoint.clone());
@@ -745,6 +804,10 @@ async fn prove_stream_port(backend: &NativeHttpBackend) {
 async fn prove_queue_port(backend: &NativeHttpBackend) {
     assert!(backend.queue_exists("jobs").await.unwrap());
     assert!(!backend.queue_exists("missing").await.unwrap());
+    assert_eq!(
+        backend.queue_dead_letter_target("jobs").await.unwrap(),
+        Some("failed-jobs".into())
+    );
     backend
         .queue_publish(
             "jobs",

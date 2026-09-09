@@ -702,7 +702,7 @@ run; cleanup removes only that campaign's containers and disposable test data.
 Java 17+ and Docker are required. CI reuses its five-image build's node/gateway
 candidates, so this gate does not add a second Rust image build.
 
-The `epoch.protocol-regional.evidence/v1` result records exact client versions,
+The `epoch.protocol-regional.evidence/v2` result records exact client versions,
 source revision/dirty state, local image identities, old/new leaders and terms,
 and completed checks. Client logs, gateway logs, and node diagnostics accompany
 it. The campaign validates binary Cache data, counters, TTL, atomic conditional
@@ -712,7 +712,11 @@ durable fenced checkpoints; AMQP topic routing, per-message TTL, mandatory
 returns, capacity refusal, confirms, requeue, lease redelivery and ack
 permanence; gateway replacement;
 per-profile leader loss; and all-voter SIGKILL/same-volume reopen with converged
-replicas. It never resubmits an uncertain non-idempotent write to hide failure.
+replicas. The v2 campaign additionally proves atomic `MSET`/`MSETNX` outcomes,
+bounded Kafka static identity rejoin, AMQP headers `all`/`any` routing, and
+provisioned native dead-letter forwarding with expiration removal and
+first-death metadata. It never resubmits an uncertain non-idempotent write to
+hide failure.
 `make test-protocol-regional-runner` rejects incomplete client/fault evidence
 and accepts either text- or byte-mode subprocess diagnostics so the original
 Docker failure remains visible.
@@ -729,6 +733,12 @@ Fuzz all externally controlled parsers and stateful boundaries:
 Run Loom-style concurrency tests for small synchronization components. Run Miri
 for any crate granted an unsafe-code exception. Corpus and crash output are
 local artifacts; minimized non-sensitive regressions belong in test fixtures.
+
+The compatibility crate currently runs deterministic mutation corpora for RESP
+requests, Kafka record bodies, and framed AMQP input on every ordinary Rust CI
+execution. These regressions prove bounds and panic freedom for a repeatable
+sample; they do not replace the still-required coverage-guided fuzz campaigns
+and minimized crash-artifact retention.
 
 ### 7. Chaos, recovery, and soak
 

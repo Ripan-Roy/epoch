@@ -12,11 +12,11 @@ pub mod scanner;
 pub mod test_support;
 
 pub use backend::{
-    BackendError, CacheCollectionMutation, CacheCollectionResult, CacheEntry, CacheSetCondition,
-    CacheSetOptions, CacheSetOutcome, CacheStorageClass, CacheValue, CompatibilityBackend,
-    NativeHttpBackend, NativeHttpConfig, QueueDelivery, QueueMessage, StreamGroupIdentity,
-    StreamGroupMember, StreamGroupRejection, StreamGroupSession, StreamGroupSessionResult,
-    StreamRecord,
+    BackendError, CacheCollectionMutation, CacheCollectionResult, CacheEntry, CacheMultiSetEntry,
+    CacheSetCondition, CacheSetOptions, CacheSetOutcome, CacheStorageClass, CacheValue,
+    CompatibilityBackend, NativeHttpBackend, NativeHttpConfig, QueueDelivery, QueueMessage,
+    StreamGroupIdentity, StreamGroupMember, StreamGroupRejection, StreamGroupSession,
+    StreamGroupSessionResult, StreamRecord,
 };
 
 /// Maximum accepted protocol frame size across compatibility listeners.
