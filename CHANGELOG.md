@@ -6,6 +6,8 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+## [0.2.0-beta.8] - 2026-09-10
+
 ### Added
 
 - Added bounded Kafka `group.instance.id` identity reuse and mismatch fencing
