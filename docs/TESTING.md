@@ -489,12 +489,14 @@ gate, and GitHub Actions Rust job select it explicitly.
 
 `test-consensus-probe` builds a single node image, starts three containers with
 independent EPRS volumes and dynamically allocated loopback ports, verifies the
-truthful experimental status contract, commits an opaque proposal, stops the
-leader, observes a higher-term election and majority commit, restarts the old
-leader, and waits for identical local lookup at all voters. The script uses a
-unique Compose project and deletes only its ephemeral containers, network, and
-volumes. On CI failure it retains container logs, state, and port assignments as
-an uploaded artifact.
+truthful experimental status contract, commits and checkpoints an opaque
+proposal, crash-restarts every checkpoint-bearing survivor only after Docker
+observes every exit, and proves checkpoint-plus-tail catch-up for the lagging
+voter. It then stops the leader, observes a higher-term election and majority
+commit, restarts the old leader, and waits for identical local lookup at all
+voters. The script uses a unique Compose project and deletes only its ephemeral
+containers, network, and volumes. On CI failure it retains container logs,
+state, and port assignments as an uploaded artifact.
 
 `test-stream-tablet` selects the mutually exclusive typed mode on the same
 three-voter runtime. It verifies a follower error, success only after majority
