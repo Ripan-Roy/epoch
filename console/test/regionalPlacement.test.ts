@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { assessRegionalPlacement, mapRegionalInventory } from "../src/regionalPlacement.ts";
-import type { RegionalTabletPlacement } from "../src/api/types.ts";
+import type { RegionalPlacementEvidence, RegionalTabletPlacement } from "../src/api/types.ts";
 
 const completeTablet: RegionalTabletPlacement = {
   tabletId: "10",
@@ -11,8 +11,57 @@ const completeTablet: RegionalTabletPlacement = {
   tabletEpoch: "1",
   resourceGeneration: "4",
   desiredReplicas: 3,
+  assignedNodeIds: ["1", "2", "3"],
+  bootstrapVoterNodeIds: [],
+  targetVoterNodeIds: [],
   voterNodeIds: ["1", "2", "3"],
+  reachableVoterNodeIds: ["1", "2", "3"],
   leaderNodeId: "2",
+};
+
+const completeTopology: RegionalPlacementEvidence = {
+  allowedRegions: ["ap-south"],
+  minimumZones: 3,
+  minimumRacks: 3,
+  requiredNodeClass: "general-purpose",
+  excludedNodeIds: [],
+  achievedZones: 3,
+  achievedRacks: 3,
+  nodes: [
+    {
+      nodeId: "1",
+      region: "ap-south",
+      zone: "zone-a",
+      rack: "rack-a",
+      nodeClass: "general-purpose",
+      consensusVoterNodeIds: ["1", "2", "3"],
+      maxConsensusGroups: 16,
+      usedConsensusGroups: 2,
+      availableConsensusGroups: 14,
+    },
+    {
+      nodeId: "2",
+      region: "ap-south",
+      zone: "zone-b",
+      rack: "rack-b",
+      nodeClass: "general-purpose",
+      consensusVoterNodeIds: ["1", "2", "3"],
+      maxConsensusGroups: 16,
+      usedConsensusGroups: 2,
+      availableConsensusGroups: 14,
+    },
+    {
+      nodeId: "3",
+      region: "ap-south",
+      zone: "zone-c",
+      rack: "rack-c",
+      nodeClass: "general-purpose",
+      consensusVoterNodeIds: ["1", "2", "3"],
+      maxConsensusGroups: 16,
+      usedConsensusGroups: 2,
+      availableConsensusGroups: 14,
+    },
+  ],
 };
 
 test("empty placement remains pending without a replica claim", () => {
@@ -45,6 +94,32 @@ test("complete observed voters are ready but topology remains an explicit risk",
   ]);
 });
 
+test("excluded serving voters fail topology evidence closed", () => {
+  const assessment = assessRegionalPlacement([completeTablet], 1, {
+    ...completeTopology,
+    excludedNodeIds: ["2"],
+  });
+
+  assert.equal(assessment.phase, "degraded");
+  assert.match(assessment.summary, /topology evidence inconsistent/);
+});
+
+test("active learner-first targets are visible as degraded placement evidence", () => {
+  const assessment = assessRegionalPlacement(
+    [
+      {
+        ...completeTablet,
+        targetVoterNodeIds: ["1", "2", "4"],
+      },
+    ],
+    1,
+    completeTopology,
+  );
+
+  assert.equal(assessment.phase, "degraded");
+  assert.ok(assessment.risks.some((risk) => risk.includes("learner-first consensus")));
+});
+
 test("missing catalog shards fail closed as degraded", () => {
   const assessment = assessRegionalPlacement([completeTablet], 2);
   assert.equal(assessment.phase, "degraded");
@@ -60,8 +135,9 @@ test("managed inventory maps browser-safe identifiers without contacting data no
     namespace: "orders",
     kind: "stream",
     name: "events",
-    generation: "9007199254740993",
-    observed_generation: "9007199254740993",
+    generation: "9007199254740994",
+    observed_generation: "9007199254740994",
+    catalog_generation: "9007199254740993",
     workload_profile: "stream_log",
     shard_count: 1,
     phase: "ready",
@@ -87,13 +163,17 @@ test("managed inventory maps browser-safe identifiers without contacting data no
     placement: {
       allowed_regions: ["ap-south"],
       minimum_zones: 3,
+      minimum_racks: 3,
       required_node_class: "general-purpose",
+      excluded_node_ids: [],
       achieved_zones: 3,
+      achieved_racks: 3,
       nodes: [
         {
           node_id: "9007199254740997",
           region: "ap-south",
           zone: "ap-south-1a",
+          rack: "rack-a",
           node_class: "general-purpose",
           consensus_voter_node_ids: ["9007199254740997", "9007199254740998", "9007199254740999"],
           max_consensus_groups: 16,
@@ -104,6 +184,7 @@ test("managed inventory maps browser-safe identifiers without contacting data no
           node_id: "9007199254740998",
           region: "ap-south",
           zone: "ap-south-1b",
+          rack: "rack-b",
           node_class: "general-purpose",
           consensus_voter_node_ids: ["9007199254740997", "9007199254740998", "9007199254740999"],
           max_consensus_groups: 16,
@@ -114,6 +195,7 @@ test("managed inventory maps browser-safe identifiers without contacting data no
           node_id: "9007199254740999",
           region: "ap-south",
           zone: "ap-south-1c",
+          rack: "rack-c",
           node_class: "general-purpose",
           consensus_voter_node_ids: ["9007199254740997", "9007199254740998", "9007199254740999"],
           max_consensus_groups: 16,
@@ -124,11 +206,13 @@ test("managed inventory maps browser-safe identifiers without contacting data no
     },
   });
 
-  assert.equal(mapped.generation, "9007199254740993");
+  assert.equal(mapped.generation, "9007199254740994");
+  assert.equal(mapped.observedGeneration, "9007199254740994");
+  assert.equal(mapped.catalogGeneration, "9007199254740993");
   assert.equal(mapped.phase, "ready");
   assert.equal(mapped.tablets[0]?.tabletId, "9007199254740994");
   assert.equal(mapped.tablets[0]?.leaderNodeId, "9007199254740998");
-  assert.match(mapped.summary, /3 configured zones observed/);
+  assert.match(mapped.summary, /3 zones \/ 3 racks observed/);
   assert.equal(mapped.placement?.nodes[1]?.availableConsensusGroups, 14);
   assert.deepEqual(mapped.governance, {
     owner: "team:payments",
@@ -164,6 +248,37 @@ test("managed ready state fails closed when placement evidence is incomplete", (
 
   assert.equal(mapped.phase, "degraded");
   assert.ok(mapped.risks.some((risk) => risk.includes("No serving placement")));
+});
+
+test("legacy managed inventory derives the catalog cursor without losing uint64 precision", () => {
+  const mapped = mapRegionalInventory({
+    canonical_name: "acme/payments/production/orders/stream/events",
+    organization: "acme",
+    project: "payments",
+    environment: "production",
+    namespace: "orders",
+    kind: "stream",
+    name: "events",
+    generation: "9007199254740994",
+    observed_generation: "9007199254740994",
+    workload_profile: "stream_log",
+    shard_count: 1,
+    phase: "pending",
+    tablets: [
+      {
+        tablet_id: "10",
+        consensus_group_id: "20",
+        shard_index: 0,
+        tablet_epoch: "1",
+        resource_generation: "9007199254740993",
+        desired_replicas: 3,
+        voter_node_ids: ["1", "2", "3"],
+        leader_node_id: "1",
+      },
+    ],
+  });
+
+  assert.equal(mapped.catalogGeneration, "9007199254740993");
 });
 
 test("managed cache configuration remains visible after browser mapping", () => {

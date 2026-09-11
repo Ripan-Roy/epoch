@@ -153,13 +153,14 @@ message ResourceName {
   string name = 6;
 }
 
-// PlacementPolicy declares the failure-domain constraints that must be
-// satisfied before regional catalog mutation. The fixed-voter alpha runtime
-// validates these fields but does not yet perform membership changes.
+// PlacementPolicy declares failure-domain and evacuation constraints. Existing
+// tablets converge through serialized learner-first membership transitions.
 message PlacementPolicy {
   repeated string allowed_regions = 1;
   uint32 minimum_zones = 2;
   string required_node_class = 3;
+  uint32 minimum_racks = 4;
+  repeated uint64 excluded_node_ids = 5;
 }
 
 // ResourceGovernance carries bounded, non-secret ownership and attribution
@@ -228,6 +229,7 @@ message RegionalNodeObservation {
   uint32 max_consensus_groups = 6;
   uint32 used_consensus_groups = 7;
   uint32 available_consensus_groups = 8;
+  string rack = 9;
 }
 
 // PlacementStatus separates the requested constraints from achieved topology.
@@ -237,6 +239,9 @@ message PlacementStatus {
   string required_node_class = 3;
   uint32 achieved_zones = 4;
   repeated RegionalNodeObservation nodes = 5;
+  uint32 minimum_racks = 6;
+  repeated uint64 excluded_node_ids = 7;
+  uint32 achieved_racks = 8;
 }
 
 // ResourceStatus reports achieved state separately from desired state.
@@ -249,6 +254,9 @@ message ResourceStatus {
   repeated Condition conditions = 6;
   repeated TabletDescriptor tablets = 7;
   PlacementStatus placement = 8;
+  // catalog_generation is the Rust Catalog cursor. It can trail
+  // observed_generation after a Go-owned policy-only update.
+  uint64 catalog_generation = 9;
 }
 
 // Resource combines desired state, monotonic generation, and observed state.

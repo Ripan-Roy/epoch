@@ -961,14 +961,15 @@ func (x *ResourceName) GetName() string {
 	return ""
 }
 
-// PlacementPolicy declares the failure-domain constraints that must be
-// satisfied before regional catalog mutation. The fixed-voter alpha runtime
-// validates these fields but does not yet perform membership changes.
+// PlacementPolicy declares failure-domain and evacuation constraints. Existing
+// tablets converge through serialized learner-first membership transitions.
 type PlacementPolicy struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	AllowedRegions    []string               `protobuf:"bytes,1,rep,name=allowed_regions,json=allowedRegions,proto3" json:"allowed_regions,omitempty"`
 	MinimumZones      uint32                 `protobuf:"varint,2,opt,name=minimum_zones,json=minimumZones,proto3" json:"minimum_zones,omitempty"`
 	RequiredNodeClass string                 `protobuf:"bytes,3,opt,name=required_node_class,json=requiredNodeClass,proto3" json:"required_node_class,omitempty"`
+	MinimumRacks      uint32                 `protobuf:"varint,4,opt,name=minimum_racks,json=minimumRacks,proto3" json:"minimum_racks,omitempty"`
+	ExcludedNodeIds   []uint64               `protobuf:"varint,5,rep,packed,name=excluded_node_ids,json=excludedNodeIds,proto3" json:"excluded_node_ids,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -1022,6 +1023,20 @@ func (x *PlacementPolicy) GetRequiredNodeClass() string {
 		return x.RequiredNodeClass
 	}
 	return ""
+}
+
+func (x *PlacementPolicy) GetMinimumRacks() uint32 {
+	if x != nil {
+		return x.MinimumRacks
+	}
+	return 0
+}
+
+func (x *PlacementPolicy) GetExcludedNodeIds() []uint64 {
+	if x != nil {
+		return x.ExcludedNodeIds
+	}
+	return nil
 }
 
 // ResourceGovernance carries bounded, non-secret ownership and attribution
@@ -1454,6 +1469,7 @@ type RegionalNodeObservation struct {
 	MaxConsensusGroups       uint32                 `protobuf:"varint,6,opt,name=max_consensus_groups,json=maxConsensusGroups,proto3" json:"max_consensus_groups,omitempty"`
 	UsedConsensusGroups      uint32                 `protobuf:"varint,7,opt,name=used_consensus_groups,json=usedConsensusGroups,proto3" json:"used_consensus_groups,omitempty"`
 	AvailableConsensusGroups uint32                 `protobuf:"varint,8,opt,name=available_consensus_groups,json=availableConsensusGroups,proto3" json:"available_consensus_groups,omitempty"`
+	Rack                     string                 `protobuf:"bytes,9,opt,name=rack,proto3" json:"rack,omitempty"`
 	unknownFields            protoimpl.UnknownFields
 	sizeCache                protoimpl.SizeCache
 }
@@ -1544,6 +1560,13 @@ func (x *RegionalNodeObservation) GetAvailableConsensusGroups() uint32 {
 	return 0
 }
 
+func (x *RegionalNodeObservation) GetRack() string {
+	if x != nil {
+		return x.Rack
+	}
+	return ""
+}
+
 // PlacementStatus separates the requested constraints from achieved topology.
 type PlacementStatus struct {
 	state             protoimpl.MessageState     `protogen:"open.v1"`
@@ -1552,6 +1575,9 @@ type PlacementStatus struct {
 	RequiredNodeClass string                     `protobuf:"bytes,3,opt,name=required_node_class,json=requiredNodeClass,proto3" json:"required_node_class,omitempty"`
 	AchievedZones     uint32                     `protobuf:"varint,4,opt,name=achieved_zones,json=achievedZones,proto3" json:"achieved_zones,omitempty"`
 	Nodes             []*RegionalNodeObservation `protobuf:"bytes,5,rep,name=nodes,proto3" json:"nodes,omitempty"`
+	MinimumRacks      uint32                     `protobuf:"varint,6,opt,name=minimum_racks,json=minimumRacks,proto3" json:"minimum_racks,omitempty"`
+	ExcludedNodeIds   []uint64                   `protobuf:"varint,7,rep,packed,name=excluded_node_ids,json=excludedNodeIds,proto3" json:"excluded_node_ids,omitempty"`
+	AchievedRacks     uint32                     `protobuf:"varint,8,opt,name=achieved_racks,json=achievedRacks,proto3" json:"achieved_racks,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -1621,6 +1647,27 @@ func (x *PlacementStatus) GetNodes() []*RegionalNodeObservation {
 	return nil
 }
 
+func (x *PlacementStatus) GetMinimumRacks() uint32 {
+	if x != nil {
+		return x.MinimumRacks
+	}
+	return 0
+}
+
+func (x *PlacementStatus) GetExcludedNodeIds() []uint64 {
+	if x != nil {
+		return x.ExcludedNodeIds
+	}
+	return nil
+}
+
+func (x *PlacementStatus) GetAchievedRacks() uint32 {
+	if x != nil {
+		return x.AchievedRacks
+	}
+	return 0
+}
+
 // ResourceStatus reports achieved state separately from desired state.
 type ResourceStatus struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
@@ -1632,8 +1679,11 @@ type ResourceStatus struct {
 	Conditions         []*Condition           `protobuf:"bytes,6,rep,name=conditions,proto3" json:"conditions,omitempty"`
 	Tablets            []*TabletDescriptor    `protobuf:"bytes,7,rep,name=tablets,proto3" json:"tablets,omitempty"`
 	Placement          *PlacementStatus       `protobuf:"bytes,8,opt,name=placement,proto3" json:"placement,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// catalog_generation is the Rust Catalog cursor. It can trail
+	// observed_generation after a Go-owned policy-only update.
+	CatalogGeneration uint64 `protobuf:"varint,9,opt,name=catalog_generation,json=catalogGeneration,proto3" json:"catalog_generation,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *ResourceStatus) Reset() {
@@ -1720,6 +1770,13 @@ func (x *ResourceStatus) GetPlacement() *PlacementStatus {
 		return x.Placement
 	}
 	return nil
+}
+
+func (x *ResourceStatus) GetCatalogGeneration() uint64 {
+	if x != nil {
+		return x.CatalogGeneration
+	}
+	return 0
 }
 
 // Resource combines desired state, monotonic generation, and observed state.
@@ -1855,11 +1912,13 @@ const file_epoch_v1_common_proto_rawDesc = "" +
 	"\venvironment\x18\x03 \x01(\tR\venvironment\x12\x1c\n" +
 	"\tnamespace\x18\x04 \x01(\tR\tnamespace\x12*\n" +
 	"\x04kind\x18\x05 \x01(\x0e2\x16.epoch.v1.ResourceKindR\x04kind\x12\x12\n" +
-	"\x04name\x18\x06 \x01(\tR\x04name\"\x8f\x01\n" +
+	"\x04name\x18\x06 \x01(\tR\x04name\"\xe0\x01\n" +
 	"\x0fPlacementPolicy\x12'\n" +
 	"\x0fallowed_regions\x18\x01 \x03(\tR\x0eallowedRegions\x12#\n" +
 	"\rminimum_zones\x18\x02 \x01(\rR\fminimumZones\x12.\n" +
-	"\x13required_node_class\x18\x03 \x01(\tR\x11requiredNodeClass\"\x86\x02\n" +
+	"\x13required_node_class\x18\x03 \x01(\tR\x11requiredNodeClass\x12#\n" +
+	"\rminimum_racks\x18\x04 \x01(\rR\fminimumRacks\x12*\n" +
+	"\x11excluded_node_ids\x18\x05 \x03(\x04R\x0fexcludedNodeIds\"\x86\x02\n" +
 	"\x12ResourceGovernance\x12\x14\n" +
 	"\x05owner\x18\x01 \x01(\tR\x05owner\x12\x1f\n" +
 	"\vcost_center\x18\x02 \x01(\tR\n" +
@@ -1909,7 +1968,7 @@ const file_epoch_v1_common_proto_rawDesc = "" +
 	"\x11assigned_node_ids\x18\v \x03(\x04R\x0fassignedNodeIds\x127\n" +
 	"\x18reachable_voter_node_ids\x18\f \x03(\x04R\x15reachableVoterNodeIds\x127\n" +
 	"\x18bootstrap_voter_node_ids\x18\r \x03(\x04R\x15bootstrapVoterNodeIds\x121\n" +
-	"\x15target_voter_node_ids\x18\x0e \x03(\x04R\x12targetVoterNodeIds\"\xda\x02\n" +
+	"\x15target_voter_node_ids\x18\x0e \x03(\x04R\x12targetVoterNodeIds\"\xee\x02\n" +
 	"\x17RegionalNodeObservation\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\x04R\x06nodeId\x12\x16\n" +
 	"\x06region\x18\x02 \x01(\tR\x06region\x12\x12\n" +
@@ -1919,13 +1978,17 @@ const file_epoch_v1_common_proto_rawDesc = "" +
 	"\x18consensus_voter_node_ids\x18\x05 \x03(\x04R\x15consensusVoterNodeIds\x120\n" +
 	"\x14max_consensus_groups\x18\x06 \x01(\rR\x12maxConsensusGroups\x122\n" +
 	"\x15used_consensus_groups\x18\a \x01(\rR\x13usedConsensusGroups\x12<\n" +
-	"\x1aavailable_consensus_groups\x18\b \x01(\rR\x18availableConsensusGroups\"\xef\x01\n" +
+	"\x1aavailable_consensus_groups\x18\b \x01(\rR\x18availableConsensusGroups\x12\x12\n" +
+	"\x04rack\x18\t \x01(\tR\x04rack\"\xe7\x02\n" +
 	"\x0fPlacementStatus\x12'\n" +
 	"\x0fallowed_regions\x18\x01 \x03(\tR\x0eallowedRegions\x12#\n" +
 	"\rminimum_zones\x18\x02 \x01(\rR\fminimumZones\x12.\n" +
 	"\x13required_node_class\x18\x03 \x01(\tR\x11requiredNodeClass\x12%\n" +
 	"\x0eachieved_zones\x18\x04 \x01(\rR\rachievedZones\x127\n" +
-	"\x05nodes\x18\x05 \x03(\v2!.epoch.v1.RegionalNodeObservationR\x05nodes\"\xcc\x03\n" +
+	"\x05nodes\x18\x05 \x03(\v2!.epoch.v1.RegionalNodeObservationR\x05nodes\x12#\n" +
+	"\rminimum_racks\x18\x06 \x01(\rR\fminimumRacks\x12*\n" +
+	"\x11excluded_node_ids\x18\a \x03(\x04R\x0fexcludedNodeIds\x12%\n" +
+	"\x0eachieved_racks\x18\b \x01(\rR\rachievedRacks\"\xfb\x03\n" +
 	"\x0eResourceStatus\x12-\n" +
 	"\x05phase\x18\x01 \x01(\x0e2\x17.epoch.v1.ResourcePhaseR\x05phase\x12/\n" +
 	"\x13observed_generation\x18\x02 \x01(\x04R\x12observedGeneration\x12A\n" +
@@ -1936,7 +1999,8 @@ const file_epoch_v1_common_proto_rawDesc = "" +
 	"conditions\x18\x06 \x03(\v2\x13.epoch.v1.ConditionR\n" +
 	"conditions\x124\n" +
 	"\atablets\x18\a \x03(\v2\x1a.epoch.v1.TabletDescriptorR\atablets\x127\n" +
-	"\tplacement\x18\b \x01(\v2\x19.epoch.v1.PlacementStatusR\tplacement\"\xae\x02\n" +
+	"\tplacement\x18\b \x01(\v2\x19.epoch.v1.PlacementStatusR\tplacement\x12-\n" +
+	"\x12catalog_generation\x18\t \x01(\x04R\x11catalogGeneration\"\xae\x02\n" +
 	"\bResource\x12*\n" +
 	"\x04name\x18\x01 \x01(\v2\x16.epoch.v1.ResourceNameR\x04name\x12\x1e\n" +
 	"\n" +

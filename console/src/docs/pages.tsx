@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 
 import { CodeBlock, CodeTabs, type CodeSample } from "./CodeBlock";
 import {
+  automaticPlacementRepair,
   backupRestoreSpec,
   backupStatus,
   consensusCheckpoint,
@@ -425,12 +426,13 @@ export function ClusterMilestoneBody() {
           <code> local_durable</code>.
         </p>
         <p>
-          Nodes report configured region, zone, class, and live group capacity; Go validates requested
-          regions, minimum zones, class, distinct three/five-voter placement, and incremental capacity before
-          touching the Catalog. A committed single-voter plan now adds one learner, waits for catch-up, enters
-          joint consensus, finalizes the target, and reopens durably; rack-aware selection and automatic
-          multi-tablet rebalance remain open. The Go metadata database still has one process owner and these
-          regional routes remain experimental.
+          Nodes report configured region, zone, rack, class, and live group capacity; Go validates requested
+          regions, minimum zones/racks, exclusions, class, distinct three/five-voter placement, and
+          incremental capacity before touching the Catalog. From fresh topology it serializes one automatic
+          policy repair, failure-domain repair, or load-improving move per resource. Rust adds the learner,
+          waits for catch-up, enters joint consensus, finalizes the target, and reopens durably. Transactional
+          cross-resource reservation and multi-owner Go control remain open; these regional routes remain
+          experimental.
         </p>
         <p>
           Regional reads default to a safe leader <code>ReadIndex</code>, wait for majority confirmation and
@@ -544,7 +546,7 @@ export function ClusterMilestoneBody() {
           </EvidenceCard>
           <EvidenceCard
             label="Admission + observation"
-            claim="Go checks fixed-voter zones and capacity, then reports actual serving routes."
+            claim="Go checks zone/rack policy and capacity, then reports actual serving routes."
           >
             A limiting node rejects before catalog apply; leader loss becomes degraded two-voter placement.
           </EvidenceCard>
@@ -580,12 +582,12 @@ export function ClusterMilestoneBody() {
 export function DeploymentBody() {
   return (
     <>
-      <Note title="Alpha-exit installation boundary">
+      <Note title="Private-beta installation boundary">
         The operator installs N physical nodes with three- or five-voter groups, mandatory TLS/mTLS, one
         durable control owner, scheduled encrypted semantic backups, guarded data-node upgrades, and explicit
-        learner-first voter replacement. A clean local Kubernetes lifecycle passes with the same binary under
-        two tags; mixed-version compatibility, cloud-object destinations, and protected publication remain
-        open gates.
+        learner-first voter replacement. Go can automatically repair an excluded voter; Kubernetes rack
+        attestation remains open. A clean local lifecycle passes with the same binary under two tags;
+        mixed-version compatibility, cloud-object destinations, and protected candidate evidence remain open.
       </Note>
 
       <Topic id="kubernetes" title="Install on Kubernetes">
@@ -601,9 +603,9 @@ export function DeploymentBody() {
       <Topic id="live-campaign" title="Prove the live managed lifecycle">
         <p>
           The release campaign creates a pinned one-control/four-worker Kind cluster and proves mTLS install,
-          all-profile traffic, encrypted backup, one compacted-log voter replacement, backup-gated rollout,
-          fresh-cluster restore, exact state digests, and post-restore writes. It deletes the cluster on every
-          exit path and writes a SHA-256-bound evidence bundle.
+          all-profile traffic, encrypted backup, one automatic compacted-log voter repair, backup-gated
+          rollout, fresh-cluster restore, exact state digests, and post-restore writes. It deletes the cluster
+          on every exit path and writes a SHA-256-bound evidence bundle.
         </p>
         <CodeBlock label="shell" value={kubernetesAlphaExitCampaign} />
         <div className="evidence-grid">
@@ -611,9 +613,12 @@ export function DeploymentBody() {
             The campaign does not assume that physical nodes 1/2/3 host every tablet; the same planner covers
             N physical nodes and bounded three- or five-voter groups.
           </EvidenceCard>
-          <EvidenceCard label="Recovery" claim="Backup, replacement, rollout, and restore pass in one run.">
-            A replacement learner catches up from a refreshed native snapshot after compaction, Catalog
-            finalizes the target, and a separate restored cluster matches every source digest.
+          <EvidenceCard
+            label="Recovery"
+            claim="Backup, automatic repair, rollout, and restore pass in one run."
+          >
+            An automatically selected learner catches up from a refreshed native snapshot after compaction,
+            Catalog finalizes the target, and a separate restored cluster matches every source digest.
           </EvidenceCard>
           <EvidenceCard label="Claim ceiling" claim="The rollout is not mixed-version certification.">
             Both rollout tags resolve to one immutable node image ID. No production SLO, RPO, RTO, throughput,
@@ -963,11 +968,23 @@ export function VoterReplacementBody() {
         </p>
       </Topic>
 
+      <Topic id="automatic" title="Request automatic placement repair">
+        <p>
+          Add an assigned node to <code>excluded_node_ids</code>, or tighten a zone/rack/class policy. Go
+          applies that desired generation first, then on a later pass selects one deterministic target from a
+          fresh complete inventory. Policy repair precedes failure-domain repair, which precedes optional load
+          rebalance. Repair requires a reachable quorum; pure rebalance requires every current voter. A
+          policy-only update advances Go desired/observed generation while preserving the Rust{" "}
+          <code>catalog_generation</code> shared by every tablet routing fence.
+        </p>
+        <CodeBlock label="shell" value={automaticPlacementRepair} />
+      </Topic>
+
       <Topic id="plan" title="Commit the replacement plan">
         <p>
           The provisional route requires supported TLS, bearer authentication, and cluster-scoped
           <code> catalog.apply</code>. Decimal strings preserve every 64-bit identity. Planning and
-          finalization do not consume a customer resource generation.
+          finalization consume neither the Go desired generation nor Rust Catalog generation.
         </p>
         <CodeBlock label="shell" value={voterReplacementPlan} />
       </Topic>
@@ -977,7 +994,8 @@ export function VoterReplacementBody() {
           While catch-up is active, Go reports <code>pending</code> and separates assigned, bootstrap, target,
           committed, and reachable voter sets. After stable Raft membership equals the target, Catalog
           finalization clears the target, the removed runtime stops, and a fully reachable tablet returns to
-          <code> ready</code>.
+          <code> ready</code>. The console displays desired, control-observed, and Catalog generations
+          separately so a policy-only change cannot masquerade as a new data-plane routing version.
         </p>
         <CodeBlock label="shell" value={voterReplacementStatus} />
       </Topic>
@@ -985,15 +1003,22 @@ export function VoterReplacementBody() {
       <Topic id="recovery" title="Recovery and current limits">
         <p>
           The focused four-node proof commits Stream data on voters 1/2/3, replaces node 3 with node 4,
-          verifies the record on node 4, stops node 3, and reopens every journal as voters 1/2/4. Rack-aware
-          solving, automatic fleet evacuation, concurrent reservations, and live Kubernetes fault evidence
-          remain beta gates.
+          verifies the record on node 4, stops node 3, and reopens every journal as voters 1/2/4. The live
+          Kubernetes campaign requests this through managed exclusion rather than calling the plan route.
+          Transactional multi-resource reservations, split/merge, Kubernetes rack attestation, and protected
+          candidate evidence remain beta gates.
         </p>
         <ReferenceCard
           eyebrow="Operations"
           title="Learner-first voter replacement"
           description="Plan API, catch-up and joint-consensus invariants, status fields, recovery proof, and limits."
           href={`${repositoryDocsUrl}/VOTER_REPLACEMENT.md`}
+        />
+        <ReferenceCard
+          eyebrow="Architecture"
+          title="Automatic topology repair and rebalance"
+          description="Planner ownership, policy priority, reachability gates, serialization, evidence, and explicit non-claims."
+          href={`${repositoryDocsUrl}/adr/0047-automatic-topology-repair-and-rebalance.md`}
         />
       </Topic>
     </>
@@ -2304,9 +2329,9 @@ export function ReferenceBody() {
           />
           <ReferenceCard
             eyebrow="Release"
-            title="v0.2.0-beta.8 release notes"
-            description="Atomic Redis multi-set, bounded Kafka static identities, AMQP headers and native DLX recovery, plus explicit beta limitations."
-            href={`${repositoryDocsUrl}/releases/v0.2.0-beta.8.md`}
+            title="v0.2.0-beta.9 release notes"
+            description="Rack-aware admission, automatic policy repair, serialized load rebalance, recovery evidence, and explicit beta limitations."
+            href={`${repositoryDocsUrl}/releases/v0.2.0-beta.9.md`}
           />
         </div>
       </Topic>

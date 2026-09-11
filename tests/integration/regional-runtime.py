@@ -656,6 +656,7 @@ def managed_resource_request(
                 "placement": {
                     "allowed_regions": ["ap-south"],
                     "minimum_zones": 3,
+                    "minimum_racks": 3,
                     "required_node_class": "general-purpose",
                 },
             },
@@ -832,6 +833,7 @@ def wait_for_managed_placement(
             managed.get("phase") != phase
             or managed.get("generation") != "1"
             or managed.get("observed_generation") != "1"
+            or managed.get("catalog_generation") != "1"
             or managed.get("shard_count") != expected_shards
         ):
             return None
@@ -856,6 +858,8 @@ def wait_for_managed_placement(
                 value = tablet.get(field)
                 if not isinstance(value, str) or not value.isdecimal():
                     return None
+            if tablet.get("resource_generation") != managed.get("catalog_generation"):
+                return None
             voters = tablet.get("voter_node_ids")
             if (
                 not isinstance(voters, list)
@@ -884,10 +888,14 @@ def wait_for_managed_placement(
         if (
             placement.get("minimum_zones") != 3
             or placement.get("achieved_zones") != 3
+            or placement.get("minimum_racks") != 3
+            or placement.get("achieved_racks") != 3
             or not isinstance(nodes, list)
             or len(nodes) != 3
             or {node.get("zone") for node in nodes if isinstance(node, dict)}
             != {"ap-south-1a", "ap-south-1b", "ap-south-1c"}
+            or {node.get("rack") for node in nodes if isinstance(node, dict)}
+            != {"rack-a", "rack-b", "rack-c"}
         ):
             return None
         return managed

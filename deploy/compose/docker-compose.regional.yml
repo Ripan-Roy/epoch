@@ -48,6 +48,7 @@ services:
       EPOCH_CONSENSUS_NODE_ID: "1"
       EPOCH_REGIONAL_REGION: ap-south
       EPOCH_REGIONAL_ZONE: ap-south-1a
+      EPOCH_REGIONAL_RACK: rack-a
       EPOCH_REGIONAL_NODE_CLASS: general-purpose
     ports:
       - "127.0.0.1:${EPOCH_REGIONAL_HTTP_PORT_1:-18661}:7601"
@@ -64,6 +65,7 @@ services:
       EPOCH_CONSENSUS_NODE_ID: "2"
       EPOCH_REGIONAL_REGION: ap-south
       EPOCH_REGIONAL_ZONE: ap-south-1b
+      EPOCH_REGIONAL_RACK: rack-b
       EPOCH_REGIONAL_NODE_CLASS: general-purpose
     ports:
       - "127.0.0.1:${EPOCH_REGIONAL_HTTP_PORT_2:-18662}:7601"
@@ -80,6 +82,7 @@ services:
       EPOCH_CONSENSUS_NODE_ID: "3"
       EPOCH_REGIONAL_REGION: ap-south
       EPOCH_REGIONAL_ZONE: ap-south-1c
+      EPOCH_REGIONAL_RACK: rack-c
       EPOCH_REGIONAL_NODE_CLASS: general-purpose
     ports:
       - "127.0.0.1:${EPOCH_REGIONAL_HTTP_PORT_3:-18663}:7601"

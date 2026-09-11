@@ -1,15 +1,16 @@
 # Regional Multi-Tablet Runtime
 
-**Status:** Topology-validated fixed-three-voter alpha with regional Stream, Queue, Cache, and Event Bus v1
+**Status:** Serialized automatic-placement private-beta candidate with regional Stream, Queue, Cache, and Event Bus v1
 
 **Authority:** Rust catalog and tablet consensus groups
 
 **Hosted bridge:** Go desired-state reconciler and browser BFF
 
 This guide describes only the implementation that exists now. The standalone
-SDK contract remains separate. Versioned regional Stream, Queue, Cache, and Event Bus v1 clients
-now exist for Go, Java, and Python; they do not claim dynamic production
-placement.
+SDK contract remains separate. Versioned regional Stream, Queue, Cache, and
+Event Bus v1 clients exist for Go, Java, and Python. Placement can repair and
+rebalance one learner-first transition at a time; it does not claim
+transactional fleet-wide planning or a production placement SLO.
 
 ## Ownership and data flow
 
@@ -50,8 +51,11 @@ never connects directly to a Rust node.
 
 The regional Compose model publishes nodes on ports 18661–18663 and gives every
 voter an independent named volume. Nodes are labeled `ap-south-1a`,
-`ap-south-1b`, and `ap-south-1c` in region `ap-south`, with class
-`general-purpose`. It mounts the checked-in development policy read-only at
+`ap-south-1b`, and `ap-south-1c` in region `ap-south`, use racks
+`rack-a`, `rack-b`, and `rack-c`, and have class `general-purpose`. Rust accepts
+the same value through `EPOCH_REGIONAL_RACK` or `--regional-rack`; an omitted
+rack is reported as the single compatibility domain `unassigned`. Compose
+mounts the checked-in development policy read-only at
 `/etc/epoch/bootstrap-policy.json`:
 
 ```shell
@@ -128,6 +132,7 @@ curl --fail-with-body \
         "placement": {
           "allowed_regions": ["ap-south"],
           "minimum_zones": 3,
+          "minimum_racks": 3,
           "required_node_class": "general-purpose"
         }
       }
@@ -136,11 +141,13 @@ curl --fail-with-body \
 ```
 
 Before catalog mutation, Go authenticates to every configured Rust node and
-collects `/experimental/v1/regional/topology`. It requires one complete,
-consistent sample for each fixed voter, validates the placement policy, and
-checks every node has enough live group capacity for newly added shards. It
-then applies the desired generation to the Rust catalog leader and samples the
-route on every configured node. Poll the browser-safe projection:
+collects `/experimental/v1/regional/topology`. It requires one fresh, complete,
+consistent sample for every configured physical node, validates the placement
+policy, and checks each selected node has enough live group capacity. It then
+applies the desired generation to the Rust catalog leader and samples the route
+on every configured node. On later reconciliation passes it can select one safe
+automatic policy repair, topology repair, or load rebalance and submit the
+existing fenced membership plan. Poll the browser-safe projection:
 
 ```shell
 curl --fail-with-body \
@@ -153,10 +160,18 @@ belongs to that observed voter set. Desired replicas never count as observed
 voters. During replacement the row is `pending` and exposes
 `assigned_node_ids`, immutable `bootstrap_voter_node_ids`, and
 `target_voter_node_ids` separately from committed and reachable voters.
-Resource generations, observed generations, tablet/group IDs, epochs, voter
-IDs, and leader IDs are decimal JSON strings so JavaScript cannot round them.
-`placement` reports requested constraints, achieved zones, and per-node
-capacity separately from the tablet routes.
+Resource generations, observed generations, Catalog generations, tablet/group
+IDs, epochs, voter IDs, and leader IDs are decimal JSON strings so JavaScript
+cannot round them. `generation` and `observed_generation` track Go desired
+state; `catalog_generation` is the Rust cursor and equals every tablet's
+`resource_generation`. A policy-only evacuation can advance the Go values
+without changing the Catalog/tablet value. The console shows both clocks rather
+than pretending the policy mutation rewrote data-plane routing identity.
+`placement` reports requested constraints, achieved zones and racks, excluded
+node IDs, and per-node capacity separately from the tablet routes. Adding an
+assigned node to `excluded_node_ids` is a declarative evacuation request: the
+desired generation applies first, then a later pass commits one automatic
+learner-first repair while the row remains `pending`.
 
 Inspect one node directly:
 
@@ -170,7 +185,9 @@ curl --fail-with-body \
 materialized tablet. A capacity rejection uses the stable
 `consensus_group_capacity` reason and names the limiting node; Rust catalog
 `Apply` is not called. This counter does not claim CPU, memory, disk, network,
-or workload-specific sizing.
+or workload-specific sizing. Individually sufficient zone and rack inventories
+that cannot form one joint voter set fail with
+`incompatible_failure_domains`, also before Catalog mutation.
 
 The response also contains `maintenance`. `enabled`, the configured
 `interval_ms`, cumulative `passes`, `tablets_examined`, `leader_passes`,
@@ -519,12 +536,15 @@ same-volume reopen. See [Resource Governance](RESOURCE_GOVERNANCE.md).
 
 - A region accepts 3–1,024 configured physical nodes. Each Catalog/profile
   group records an explicit odd voter set of exactly three or five, and nodes
-  materialize only locally assigned groups. Region, zone count, node class,
-  group capacity, and placement membership are validated. One explicit target
-  may replace exactly one voter through Catalog plan, learner catch-up, joint
-  consensus, finalization, removed-node shutdown, and durable reopen. Rack-aware
-  solving, automatic multi-tablet rebalance, and general repair planning remain
-  open.
+  materialize only locally assigned or transition-target groups. Region, zone
+  and rack counts, node class, explicit exclusions, group capacity, and
+  placement membership are validated. Go deterministically plans one
+  policy/topology repair or load-improving move per resource; Rust executes the
+  exact target through Catalog plan, learner catch-up, joint consensus,
+  finalization, removed-node shutdown, and durable reopen. Fresh complete
+  topology is mandatory for motion. Transactional reservation across several
+  resources/controllers, split/merge, whole-fleet evacuation progress,
+  Kubernetes rack attestation, and production chaos/SLO evidence remain open.
 - Regional semantic backup and fresh-cluster restore are implemented: one
   Catalog leader gathers quorum-barriered checkpoints from distributed tablet
   leaders; the operator schedules AES-256-GCM encrypted RWX-PVC artifacts with

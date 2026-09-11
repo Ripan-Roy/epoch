@@ -29,6 +29,7 @@ pub struct NodeTopology {
     node_id: u64,
     region: String,
     zone: String,
+    rack: String,
     node_class: String,
     consensus_voter_node_ids: Vec<u64>,
     max_consensus_groups: usize,
@@ -51,11 +52,35 @@ impl NodeTopology {
         consensus_voter_node_ids: impl Into<Vec<u64>>,
         max_consensus_groups: usize,
     ) -> Result<Self, NodeTopologyError> {
+        Self::new_with_rack(
+            node_id,
+            region,
+            zone,
+            "unassigned",
+            node_class,
+            consensus_voter_node_ids,
+            max_consensus_groups,
+        )
+    }
+
+    /// Builds a topology record with an explicit rack failure domain. The
+    /// legacy constructor assigns every node to the same `unassigned` rack so
+    /// callers cannot accidentally infer separation from zones.
+    pub fn new_with_rack(
+        node_id: u64,
+        region: impl Into<String>,
+        zone: impl Into<String>,
+        rack: impl Into<String>,
+        node_class: impl Into<String>,
+        consensus_voter_node_ids: impl Into<Vec<u64>>,
+        max_consensus_groups: usize,
+    ) -> Result<Self, NodeTopologyError> {
         if node_id == 0 {
             return Err(NodeTopologyError("node ID must be non-zero".into()));
         }
         let region = validate_label("region", region.into())?;
         let zone = validate_label("zone", zone.into())?;
+        let rack = validate_label("rack", rack.into())?;
         let node_class = validate_label("node class", node_class.into())?;
         let mut consensus_voter_node_ids = consensus_voter_node_ids.into();
         consensus_voter_node_ids.sort_unstable();
@@ -77,6 +102,7 @@ impl NodeTopology {
             node_id,
             region,
             zone,
+            rack,
             node_class,
             consensus_voter_node_ids,
             max_consensus_groups,
@@ -93,6 +119,10 @@ impl NodeTopology {
 
     pub fn zone(&self) -> &str {
         &self.zone
+    }
+
+    pub fn rack(&self) -> &str {
+        &self.rack
     }
 
     pub fn node_class(&self) -> &str {
@@ -155,6 +185,7 @@ struct TopologyResponse {
     node_id: String,
     region: String,
     zone: String,
+    rack: String,
     node_class: String,
     consensus_voter_node_ids: Vec<String>,
     capacity: CapacityResponse,
@@ -223,6 +254,7 @@ async fn get_topology(State(state): State<TopologyState>) -> Response {
         node_id: state.topology.node_id.to_string(),
         region: state.topology.region,
         zone: state.topology.zone,
+        rack: state.topology.rack,
         node_class: state.topology.node_class,
         consensus_voter_node_ids: state
             .topology

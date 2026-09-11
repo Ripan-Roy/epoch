@@ -114,6 +114,7 @@ func TestHTTPAuthorityCollectsCompleteAuthenticatedTopologyInventory(t *testing.
 				"node_id":                  strconv.Itoa(node),
 				"region":                   "ap-south",
 				"zone":                     "ap-south-1" + string(rune('a'+node-1)),
+				"rack":                     "rack-" + strconv.Itoa(node),
 				"node_class":               "general-purpose",
 				"consensus_voter_node_ids": []string{"1", "2", "3"},
 				"capacity": map[string]any{
@@ -137,6 +138,7 @@ func TestHTTPAuthorityCollectsCompleteAuthenticatedTopologyInventory(t *testing.
 	}
 	if len(inventory.Nodes) != 3 || inventory.Nodes[1].NodeID != 2 ||
 		inventory.Nodes[1].Zone != "ap-south-1b" ||
+		inventory.Nodes[1].Rack != "rack-2" ||
 		inventory.Nodes[1].AvailableConsensusGroups != 14 {
 		t.Fatalf("inventory = %+v", inventory)
 	}
@@ -195,6 +197,55 @@ func TestHTTPAuthorityClassifiesFollowerResponsesAsRetryable(t *testing.T) {
 	})
 	if err == nil || !IsRetryable(err) {
 		t.Fatalf("Apply() error = %v, want retryable follower response", err)
+	}
+}
+
+func TestHTTPAuthorityPlansMembershipWithGenerationAndEpochFences(t *testing.T) {
+	key := regionalKey(resources.KindStream, "orders")
+	var received map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet {
+			route := routeResponseDocument(1, 1, 7, request.URL.Path)
+			route["voter_node_ids"] = []string{"2", "3", "4"}
+			writeAuthorityJSON(writer, http.StatusOK, route)
+			return
+		}
+		if request.Method != http.MethodPost || request.URL.Path != catalogTabletMembershipPath(10) {
+			t.Fatalf("request = %s %s", request.Method, request.URL.Path)
+		}
+		if err := json.NewDecoder(request.Body).Decode(&received); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		document := appliedDocument(7, 3)
+		tablet := document["mutation"].(map[string]any)["resource"].(map[string]any)["tablets"].([]map[string]any)[0]
+		tablet["bootstrap_voter_node_ids"] = []string{"1", "2", "3"}
+		tablet["target_voter_node_ids"] = []string{"2", "3", "4"}
+		writeAuthorityJSON(writer, http.StatusAccepted, document)
+	}))
+	t.Cleanup(server.Close)
+	authority, err := NewHTTPAuthority([]string{server.URL}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	observation, err := authority.PlanMembership(t.Context(), AuthorityMembershipPlanRequest{
+		RequestToken:               "repair-10",
+		Key:                        key,
+		TabletID:                   10,
+		ExpectedTabletEpoch:        4,
+		ExpectedResourceGeneration: 7,
+		TargetVoterNodeIDs:         []uint64{2, 3, 4},
+	})
+	if err != nil {
+		t.Fatalf("PlanMembership() error = %v", err)
+	}
+	if received["request_token"] != "repair-10" ||
+		received["expected_tablet_epoch"] != "4" ||
+		received["expected_resource_generation"] != "7" ||
+		len(received["target_voter_node_ids"].([]any)) != 3 ||
+		observation.Generation != 7 ||
+		!slices.Equal(observation.Tablets[0].TargetVoterNodeIDs, []uint64{2, 3, 4}) {
+		t.Fatalf("request = %#v, observation = %+v", received, observation)
 	}
 }
 

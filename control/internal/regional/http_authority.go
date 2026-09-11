@@ -131,6 +131,13 @@ type deleteAuthorityBody struct {
 	ExpectedGeneration string `json:"expected_generation"`
 }
 
+type planMembershipAuthorityBody struct {
+	RequestToken               string   `json:"request_token"`
+	ExpectedTabletEpoch        string   `json:"expected_tablet_epoch"`
+	ExpectedResourceGeneration string   `json:"expected_resource_generation"`
+	TargetVoterNodeIDs         []uint64 `json:"target_voter_node_ids"`
+}
+
 type catalogApplyDocument struct {
 	Mutation struct {
 		Kind     string                  `json:"kind"`
@@ -179,6 +186,7 @@ type topologyDocument struct {
 	NodeID                decimalUint64    `json:"node_id"`
 	Region                string           `json:"region"`
 	Zone                  string           `json:"zone"`
+	Rack                  string           `json:"rack"`
 	NodeClass             string           `json:"node_class"`
 	ConsensusVoterNodeIDs []decimalUint64  `json:"consensus_voter_node_ids"`
 	Capacity              capacityDocument `json:"capacity"`
@@ -245,6 +253,7 @@ func (authority *HTTPAuthority) Inventory(ctx context.Context) (NodeInventory, e
 			NodeID:                   uint64(topology.NodeID),
 			Region:                   topology.Region,
 			Zone:                     topology.Zone,
+			Rack:                     topologyRack(topology.Rack),
 			NodeClass:                topology.NodeClass,
 			ConsensusVoterNodeIDs:    voters,
 			MaxConsensusGroups:       topology.Capacity.MaxConsensusGroups,
@@ -256,6 +265,15 @@ func (authority *HTTPAuthority) Inventory(ctx context.Context) (NodeInventory, e
 		return nodes[left].NodeID < nodes[right].NodeID
 	})
 	return NodeInventory{Nodes: nodes}, nil
+}
+
+func topologyRack(rack string) string {
+	if rack != "" {
+		return rack
+	}
+	// Nodes from the pre-rack rollout remain schedulable for the one-rack
+	// default, but never masquerade as distinct rack failure domains.
+	return "unassigned"
 }
 
 // Apply idempotently sends one desired generation to the first available
@@ -318,6 +336,43 @@ func (authority *HTTPAuthority) Observe(
 		return AuthorityObservation{}, err
 	}
 	return authority.observePlacement(ctx, key, resource)
+}
+
+// PlanMembership commits one fenced learner-first target through the catalog
+// leader and returns the same truthful all-endpoint placement observation used
+// by ordinary reconciliation.
+func (authority *HTTPAuthority) PlanMembership(
+	ctx context.Context,
+	request AuthorityMembershipPlanRequest,
+) (AuthorityObservation, error) {
+	encoded, err := json.Marshal(planMembershipAuthorityBody{
+		RequestToken:               request.RequestToken,
+		ExpectedTabletEpoch:        strconv.FormatUint(request.ExpectedTabletEpoch, 10),
+		ExpectedResourceGeneration: strconv.FormatUint(request.ExpectedResourceGeneration, 10),
+		TargetVoterNodeIDs:         append([]uint64(nil), request.TargetVoterNodeIDs...),
+	})
+	if err != nil {
+		return AuthorityObservation{}, invalidAuthorityError(err.Error())
+	}
+	response, err := authority.requestAny(
+		ctx,
+		http.MethodPost,
+		catalogTabletMembershipPath(request.TabletID),
+		encoded,
+	)
+	if err != nil {
+		return AuthorityObservation{}, err
+	}
+	var planned catalogApplyDocument
+	if err := decodeAuthorityJSON(response, &planned); err != nil {
+		return AuthorityObservation{}, err
+	}
+	if planned.Mutation.Kind != "applied" {
+		return AuthorityObservation{}, invalidAuthorityError(
+			"regional catalog membership response did not contain an applied resource",
+		)
+	}
+	return authority.observePlacement(ctx, request.Key, planned.Mutation.Resource)
 }
 
 // Delete persists a catalog tombstone through the first available leader.
@@ -588,6 +643,12 @@ func authorityErrorMessage(encoded []byte, status int) string {
 
 func catalogResourcePath(key resources.ResourceKey) string {
 	return "/experimental/v1/regional/catalog/resources/" + resourceSegments(key)
+}
+
+func catalogTabletMembershipPath(tabletID uint64) string {
+	return "/experimental/v1/regional/catalog/tablets/" +
+		strconv.FormatUint(tabletID, 10) +
+		"/membership"
 }
 
 func resourceRoutePath(key resources.ResourceKey, shard uint32) string {

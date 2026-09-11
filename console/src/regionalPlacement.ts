@@ -44,6 +44,16 @@ export function assessRegionalPlacement(
         `Shard ${tablet.shardIndex} is missing ${missing} voter${missing === 1 ? "" : "s"} (${voterCount}/${tablet.desiredReplicas} observed).`,
       );
     }
+    if (tablet.reachableVoterNodeIds.length < tablet.desiredReplicas) {
+      risks.push(
+        `Shard ${tablet.shardIndex} has ${tablet.reachableVoterNodeIds.length}/${tablet.desiredReplicas} reachable voters.`,
+      );
+    }
+    if (tablet.targetVoterNodeIds.length > 0) {
+      risks.push(
+        `Shard ${tablet.shardIndex} is moving from ${tablet.assignedNodeIds.join(", ")} to ${tablet.targetVoterNodeIds.join(", ")} through learner-first consensus.`,
+      );
+    }
     if (tablet.leaderNodeId === null) {
       risks.push(`Shard ${tablet.shardIndex} has no leader in the observed placement.`);
     }
@@ -82,12 +92,19 @@ function assessTopologyEvidence(
   }
   const nodeIDs = new Set(topology.nodes.map((node) => node.nodeId));
   const zones = new Set(topology.nodes.map((node) => node.zone));
+  const racks = new Set(topology.nodes.map((node) => node.rack));
+  const excluded = new Set(topology.excludedNodeIds);
   const unknownVoter = tablets.some((tablet) => tablet.voterNodeIds.some((voter) => !nodeIDs.has(voter)));
+  const excludedVoter = tablets.some((tablet) => tablet.voterNodeIds.some((voter) => excluded.has(voter)));
   if (
     topology.minimumZones < 1 ||
+    topology.minimumRacks < 1 ||
     topology.achievedZones < topology.minimumZones ||
+    topology.achievedRacks < topology.minimumRacks ||
     zones.size < topology.minimumZones ||
-    unknownVoter
+    racks.size < topology.minimumRacks ||
+    unknownVoter ||
+    excludedVoter
   ) {
     return {
       phase: "degraded",
@@ -97,9 +114,9 @@ function assessTopologyEvidence(
   }
   return {
     phase: "ready",
-    summarySuffix: ` · ${topology.achievedZones} configured zones observed`,
+    summarySuffix: ` · ${topology.achievedZones} zones / ${topology.achievedRacks} racks observed`,
     risks: [
-      "Configured zone labels agree across allowlisted responses; physical rack separation, automatic topology rebalancing, and production SLOs remain outside this beta.",
+      "Configured zone and rack labels agree across allowlisted responses; automatic moves are serialized and physical topology attestation plus production SLOs remain outside this beta.",
     ],
   };
 }
@@ -112,19 +129,27 @@ export function mapRegionalInventory(resource: ManagedRegionalResource): Regiona
     tabletEpoch: tablet.tablet_epoch,
     resourceGeneration: tablet.resource_generation,
     desiredReplicas: tablet.desired_replicas,
+    assignedNodeIds: [...(tablet.assigned_node_ids ?? tablet.voter_node_ids)],
+    bootstrapVoterNodeIds: [...(tablet.bootstrap_voter_node_ids ?? [])],
+    targetVoterNodeIds: [...(tablet.target_voter_node_ids ?? [])],
     voterNodeIds: [...tablet.voter_node_ids],
+    reachableVoterNodeIds: [...(tablet.reachable_voter_node_ids ?? tablet.voter_node_ids)],
     leaderNodeId: tablet.leader_node_id,
   }));
   const topology: RegionalPlacementEvidence | null = resource.placement
     ? {
         allowedRegions: [...resource.placement.allowed_regions],
         minimumZones: resource.placement.minimum_zones,
+        minimumRacks: resource.placement.minimum_racks ?? 1,
         requiredNodeClass: resource.placement.required_node_class ?? null,
+        excludedNodeIds: [...(resource.placement.excluded_node_ids ?? [])],
         achievedZones: resource.placement.achieved_zones,
+        achievedRacks: resource.placement.achieved_racks ?? 1,
         nodes: resource.placement.nodes.map((node) => ({
           nodeId: node.node_id,
           region: node.region,
           zone: node.zone,
+          rack: node.rack ?? "unassigned",
           nodeClass: node.node_class,
           consensusVoterNodeIds: [...node.consensus_voter_node_ids],
           maxConsensusGroups: node.max_consensus_groups,
@@ -160,6 +185,8 @@ export function mapRegionalInventory(resource: ManagedRegionalResource): Regiona
     name: resource.name,
     generation: resource.generation,
     observedGeneration: resource.observed_generation,
+    catalogGeneration:
+      resource.catalog_generation ?? resource.tablets[0]?.resource_generation ?? resource.observed_generation,
     workloadProfile: resource.workload_profile,
     tablets,
     phase,

@@ -346,9 +346,9 @@ func desiredFromProto(
 			key.Kind,
 		)
 	}
-	if spec.GetReplicas() != 3 {
+	if spec.GetReplicas() != 3 && spec.GetReplicas() != 5 {
 		return resources.ResourceKey{}, resources.DesiredResource{}, fmt.Errorf(
-			"the current regional runtime requires replicas 3",
+			"the regional runtime requires replicas 3 or 5",
 		)
 	}
 	if spec.GetGovernance() == nil {
@@ -542,6 +542,7 @@ func statusToProto(observed resources.ResourceStatus) *epochv1.ResourceStatus {
 	return &epochv1.ResourceStatus{
 		Phase:              protoPhase(observed.Phase),
 		ObservedGeneration: observed.ObservedGeneration,
+		CatalogGeneration:  observed.EffectiveCatalogGeneration(),
 		DeploymentMode:     epochv1.DeploymentMode_DEPLOYMENT_MODE_MANAGED,
 		Conditions: []*epochv1.Condition{{
 			Type:               "Reconciled",
@@ -565,6 +566,7 @@ func placementToProto(observed *resources.PlacementStatus) *epochv1.PlacementSta
 			NodeId:                   node.NodeID,
 			Region:                   node.Region,
 			Zone:                     node.Zone,
+			Rack:                     node.Rack,
 			NodeClass:                node.NodeClass,
 			ConsensusVoterNodeIds:    append([]uint64(nil), node.ConsensusVoterNodeIDs...),
 			MaxConsensusGroups:       node.MaxConsensusGroups,
@@ -575,8 +577,11 @@ func placementToProto(observed *resources.PlacementStatus) *epochv1.PlacementSta
 	return &epochv1.PlacementStatus{
 		AllowedRegions:    append([]string(nil), observed.AllowedRegions...),
 		MinimumZones:      observed.MinimumZones,
+		MinimumRacks:      observed.MinimumRacks,
 		RequiredNodeClass: observed.RequiredNodeClass,
+		ExcludedNodeIds:   append([]uint64(nil), observed.ExcludedNodeIDs...),
 		AchievedZones:     observed.AchievedZones,
+		AchievedRacks:     observed.AchievedRacks,
 		Nodes:             nodes,
 	}
 }

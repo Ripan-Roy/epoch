@@ -99,6 +99,7 @@ type RegionalNodeStatus struct {
 	NodeID                   uint64   `json:"node_id"`
 	Region                   string   `json:"region"`
 	Zone                     string   `json:"zone"`
+	Rack                     string   `json:"rack"`
 	NodeClass                string   `json:"node_class"`
 	ConsensusVoterNodeIDs    []uint64 `json:"consensus_voter_node_ids"`
 	MaxConsensusGroups       uint32   `json:"max_consensus_groups"`
@@ -110,20 +111,36 @@ type RegionalNodeStatus struct {
 type PlacementStatus struct {
 	AllowedRegions    []string             `json:"allowed_regions,omitempty"`
 	MinimumZones      uint32               `json:"minimum_zones"`
+	MinimumRacks      uint32               `json:"minimum_racks"`
 	RequiredNodeClass string               `json:"required_node_class,omitempty"`
+	ExcludedNodeIDs   []uint64             `json:"excluded_node_ids,omitempty"`
 	AchievedZones     uint32               `json:"achieved_zones"`
+	AchievedRacks     uint32               `json:"achieved_racks"`
 	Nodes             []RegionalNodeStatus `json:"nodes"`
 }
 
 // ResourceStatus is intentionally small in the initial slice and never
 // implies that an unconnected data plane has achieved the requested state.
 type ResourceStatus struct {
-	Phase              ResourcePhase    `json:"phase"`
-	ObservedGeneration uint64           `json:"observed_generation"`
+	Phase              ResourcePhase `json:"phase"`
+	ObservedGeneration uint64        `json:"observed_generation"`
+	// CatalogGeneration is the Rust resource cursor. It may trail the Go
+	// observed generation after a management-only policy change.
+	CatalogGeneration  uint64           `json:"catalog_generation,omitempty"`
 	ObservedShardCount uint32           `json:"observed_shard_count,omitempty"`
 	Message            string           `json:"message,omitempty"`
 	Tablets            []TabletStatus   `json:"tablets,omitempty"`
 	Placement          *PlacementStatus `json:"placement,omitempty"`
+}
+
+// EffectiveCatalogGeneration preserves status written before the Catalog
+// cursor became explicit. The old schema required it to equal the observed Go
+// generation, so that value is the only safe rolling-upgrade fallback.
+func (status ResourceStatus) EffectiveCatalogGeneration() uint64 {
+	if status.CatalogGeneration != 0 || status.ObservedGeneration == 0 {
+		return status.CatalogGeneration
+	}
+	return status.ObservedGeneration
 }
 
 // Resource is the registry's immutable response value.
@@ -858,6 +875,7 @@ func cloneStatus(status ResourceStatus) ResourceStatus {
 	if status.Placement != nil {
 		placement := *status.Placement
 		placement.AllowedRegions = append([]string(nil), placement.AllowedRegions...)
+		placement.ExcludedNodeIDs = append([]uint64(nil), placement.ExcludedNodeIDs...)
 		placement.Nodes = append([]RegionalNodeStatus(nil), placement.Nodes...)
 		for index := range placement.Nodes {
 			placement.Nodes[index].ConsensusVoterNodeIDs = append(
@@ -873,6 +891,7 @@ func cloneStatus(status ResourceStatus) ResourceStatus {
 func statusEqual(left, right ResourceStatus) bool {
 	if left.Phase != right.Phase ||
 		left.ObservedGeneration != right.ObservedGeneration ||
+		left.CatalogGeneration != right.CatalogGeneration ||
 		left.ObservedShardCount != right.ObservedShardCount ||
 		left.Message != right.Message ||
 		!placementStatusEqual(left.Placement, right.Placement) ||
@@ -905,9 +924,12 @@ func placementStatusEqual(left, right *PlacementStatus) bool {
 		return left == nil && right == nil
 	}
 	if left.MinimumZones != right.MinimumZones ||
+		left.MinimumRacks != right.MinimumRacks ||
 		left.RequiredNodeClass != right.RequiredNodeClass ||
 		left.AchievedZones != right.AchievedZones ||
+		left.AchievedRacks != right.AchievedRacks ||
 		len(left.AllowedRegions) != len(right.AllowedRegions) ||
+		!slices.Equal(left.ExcludedNodeIDs, right.ExcludedNodeIDs) ||
 		len(left.Nodes) != len(right.Nodes) {
 		return false
 	}
@@ -922,6 +944,7 @@ func placementStatusEqual(left, right *PlacementStatus) bool {
 		if leftNode.NodeID != rightNode.NodeID ||
 			leftNode.Region != rightNode.Region ||
 			leftNode.Zone != rightNode.Zone ||
+			leftNode.Rack != rightNode.Rack ||
 			leftNode.NodeClass != rightNode.NodeClass ||
 			leftNode.MaxConsensusGroups != rightNode.MaxConsensusGroups ||
 			leftNode.UsedConsensusGroups != rightNode.UsedConsensusGroups ||
@@ -945,12 +968,16 @@ func validateStatus(status ResourceStatus, desiredGeneration uint64) error {
 	if status.Phase == PhaseReady && status.ObservedGeneration != desiredGeneration {
 		return invalid("ready status must observe the current desired generation")
 	}
+	catalogGeneration := status.EffectiveCatalogGeneration()
+	if catalogGeneration > status.ObservedGeneration {
+		return invalid("catalog generation cannot exceed the observed control generation")
+	}
 	if status.ObservedShardCount != 0 &&
 		status.ObservedShardCount < uint32(len(status.Tablets)) {
 		return invalid("observed shard count cannot be smaller than the reported tablet set")
 	}
 	if status.Placement != nil {
-		if err := validatePlacementStatus(*status.Placement); err != nil {
+		if err := validatePlacementStatus(status.Phase, *status.Placement); err != nil {
 			return err
 		}
 	}
@@ -962,8 +989,8 @@ func validateStatus(status ResourceStatus, desiredGeneration uint64) error {
 			tablet.TabletEpoch == 0 || tablet.DesiredReplicas == 0 {
 			return invalid("tablet identity, epoch, group, and desired replicas must be non-zero")
 		}
-		if tablet.ResourceGeneration != status.ObservedGeneration {
-			return invalid("tablet resource generation must match the observed generation")
+		if tablet.ResourceGeneration != catalogGeneration {
+			return invalid("tablet resource generation must match the catalog generation")
 		}
 		if _, exists := tabletIDs[tablet.TabletID]; exists {
 			return invalid("tablet IDs must be unique")
@@ -1027,6 +1054,79 @@ func validateStatus(status ResourceStatus, desiredGeneration uint64) error {
 			}
 		}
 	}
+	if status.Placement != nil {
+		if err := validateTabletPlacementEvidence(status.Phase, status.Tablets, *status.Placement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateTabletPlacementEvidence(
+	phase ResourcePhase,
+	tablets []TabletStatus,
+	placement PlacementStatus,
+) error {
+	legacyRackEvidence := placement.MinimumRacks == 0 && placement.AchievedRacks == 0
+	if legacyRackEvidence {
+		return nil
+	}
+	nodes := make(map[uint64]RegionalNodeStatus, len(placement.Nodes))
+	for _, node := range placement.Nodes {
+		nodes[node.NodeID] = node
+	}
+	allowedRegions := make(map[string]struct{}, len(placement.AllowedRegions))
+	for _, region := range placement.AllowedRegions {
+		allowedRegions[region] = struct{}{}
+	}
+	excluded := make(map[uint64]struct{}, len(placement.ExcludedNodeIDs))
+	for _, nodeID := range placement.ExcludedNodeIDs {
+		excluded[nodeID] = struct{}{}
+	}
+	minimumZones := uint32(0)
+	minimumRacks := uint32(0)
+	firstTablet := true
+	for _, tablet := range tablets {
+		assigned := tablet.AssignedNodeIDs
+		if len(tablet.TargetVoterNodeIDs) > 0 {
+			assigned = tablet.TargetVoterNodeIDs
+		}
+		zones := make(map[string]struct{}, len(assigned))
+		racks := make(map[string]struct{}, len(assigned))
+		for _, nodeID := range assigned {
+			node, observed := nodes[nodeID]
+			if !observed {
+				if phase == PhaseReady {
+					return invalid("ready tablet placement references a node absent from topology evidence")
+				}
+				continue
+			}
+			zones[node.Zone] = struct{}{}
+			racks[node.Rack] = struct{}{}
+			_, regionAllowed := allowedRegions[node.Region]
+			if len(allowedRegions) == 0 {
+				regionAllowed = true
+			}
+			_, nodeExcluded := excluded[nodeID]
+			if phase == PhaseReady &&
+				(!regionAllowed || nodeExcluded ||
+					(placement.RequiredNodeClass != "" && node.NodeClass != placement.RequiredNodeClass)) {
+				return invalid("ready tablet placement contains a policy-ineligible node")
+			}
+		}
+		zoneCount := uint32(len(zones))
+		rackCount := uint32(len(racks))
+		if firstTablet || zoneCount < minimumZones {
+			minimumZones = zoneCount
+		}
+		if firstTablet || rackCount < minimumRacks {
+			minimumRacks = rackCount
+		}
+		firstTablet = false
+	}
+	if placement.AchievedZones != minimumZones || placement.AchievedRacks != minimumRacks {
+		return invalid("placement achieved domains do not match tablet assignments")
+	}
 	return nil
 }
 
@@ -1078,11 +1178,23 @@ func singleTabletVoterReplacement(current, target map[uint64]struct{}) bool {
 	return removed == 1 && added == 1
 }
 
-func validatePlacementStatus(status PlacementStatus) error {
-	if status.MinimumZones == 0 ||
-		status.AchievedZones < status.MinimumZones ||
-		len(status.Nodes) == 0 {
-		return invalid("placement status must contain satisfied zone and node evidence")
+func validatePlacementStatus(phase ResourcePhase, status PlacementStatus) error {
+	legacyRackEvidence := status.MinimumRacks == 0 && status.AchievedRacks == 0
+	minimumRacks := status.MinimumRacks
+	achievedRacks := status.AchievedRacks
+	if legacyRackEvidence {
+		// Status persisted before rack-aware placement had no rack fields. Keep
+		// it readable during rolling upgrades without treating it as evidence
+		// for more than the backward-compatible one-rack default.
+		minimumRacks = 1
+		achievedRacks = 1
+	}
+	if status.MinimumZones == 0 || len(status.Nodes) == 0 {
+		return invalid("placement status must contain requested domain and node evidence")
+	}
+	if phase == PhaseReady &&
+		(status.AchievedZones < status.MinimumZones || achievedRacks < minimumRacks) {
+		return invalid("ready placement status must satisfy requested failure domains")
 	}
 	if status.RequiredNodeClass != "" && !validPlacementLabel(status.RequiredNodeClass) {
 		return invalid("placement status contains an invalid required node class")
@@ -1097,8 +1209,22 @@ func validatePlacementStatus(status PlacementStatus) error {
 		}
 		regions[region] = struct{}{}
 	}
+	if !slices.IsSorted(status.ExcludedNodeIDs) {
+		return invalid("placement status excluded node IDs must be sorted")
+	}
+	excluded := make(map[uint64]struct{}, len(status.ExcludedNodeIDs))
+	for _, nodeID := range status.ExcludedNodeIDs {
+		if nodeID == 0 {
+			return invalid("placement status excluded node IDs must be non-zero")
+		}
+		if _, duplicate := excluded[nodeID]; duplicate {
+			return invalid("placement status excluded node IDs must be unique")
+		}
+		excluded[nodeID] = struct{}{}
+	}
 	nodes := make(map[uint64]struct{}, len(status.Nodes))
 	zones := make(map[string]struct{}, len(status.Nodes))
+	racks := make(map[string]struct{}, len(status.Nodes))
 	for _, node := range status.Nodes {
 		if node.NodeID == 0 {
 			return invalid("placement node IDs must be non-zero")
@@ -1109,6 +1235,7 @@ func validatePlacementStatus(status PlacementStatus) error {
 		nodes[node.NodeID] = struct{}{}
 		if !validPlacementLabel(node.Region) ||
 			!validPlacementLabel(node.Zone) ||
+			(!legacyRackEvidence && !validPlacementLabel(node.Rack)) ||
 			!validPlacementLabel(node.NodeClass) {
 			return invalid("placement node contains an invalid topology label")
 		}
@@ -1128,9 +1255,14 @@ func validatePlacementStatus(status PlacementStatus) error {
 			voters[voter] = struct{}{}
 		}
 		zones[node.Zone] = struct{}{}
+		if legacyRackEvidence {
+			racks[node.Zone] = struct{}{}
+		} else {
+			racks[node.Rack] = struct{}{}
+		}
 	}
-	if status.AchievedZones > uint32(len(zones)) {
-		return invalid("placement achieved zones cannot exceed inventory failure domains")
+	if status.AchievedZones > uint32(len(zones)) || status.AchievedRacks > uint32(len(racks)) {
+		return invalid("placement achieved domains cannot exceed inventory failure domains")
 	}
 	return nil
 }

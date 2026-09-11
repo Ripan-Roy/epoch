@@ -489,12 +489,14 @@ gate, and GitHub Actions Rust job select it explicitly.
 
 `test-consensus-probe` builds a single node image, starts three containers with
 independent EPRS volumes and dynamically allocated loopback ports, verifies the
-truthful experimental status contract, commits an opaque proposal, stops the
-leader, observes a higher-term election and majority commit, restarts the old
-leader, and waits for identical local lookup at all voters. The script uses a
-unique Compose project and deletes only its ephemeral containers, network, and
-volumes. On CI failure it retains container logs, state, and port assignments as
-an uploaded artifact.
+truthful experimental status contract, commits and checkpoints an opaque
+proposal, crash-restarts every checkpoint-bearing survivor only after Docker
+observes every exit, and proves checkpoint-plus-tail catch-up for the lagging
+voter. It then stops the leader, observes a higher-term election and majority
+commit, restarts the old leader, and waits for identical local lookup at all
+voters. The script uses a unique Compose project and deletes only its ephemeral
+containers, network, and volumes. On CI failure it retains container logs,
+state, and port assignments as an uploaded artifact.
 
 `test-stream-tablet` selects the mutually exclusive typed mode on the same
 three-voter runtime. It verifies a follower error, success only after majority
@@ -552,7 +554,9 @@ zones, identical peer-derived voter sets, and live group counts from the
 authorization-protected Rust topology endpoints. It also requests more shards than the
 limiting node can host, waits for the stable capacity reason, and proves the
 catalog resource was never created. Every direct regional
-catalog/route/data/topology request also authenticates.
+catalog/route/data/topology request also authenticates. The Compose topology
+adds three explicit racks; managed status must prove both requested domain
+counts and exact voter membership.
 The managed resource includes canonical governance. The campaign queries it by
 owner, cost center, classification, and two exact tags, checks post-filter cost
 attribution, compares the Go BFF value with every Rust catalog voter, and repeats
@@ -770,12 +774,16 @@ and the elapsed 30-day campaign remain required.
 The separate live Kubernetes acceptance runner in
 `tests/integration/kubernetes_alpha_exit.py` creates a pinned one-control-plane,
 four-worker Kind cluster. One clean local run now passes mTLS install, all four
-profiles, encrypted backup, compacted-log learner catch-up and voter
-replacement, the post-request backup upgrade gate, serialized four-node
+profiles, encrypted backup, a managed-policy node exclusion, automatic Go
+repair planning, compacted-log learner catch-up and voter replacement, the
+post-request backup upgrade gate, serialized four-node
 rollout, fresh-cluster restore, exact Catalog/profile digest comparison, and
-post-restore writes. `tests/integration/test_kubernetes_alpha_exit.py` protects
-the evidence schema, N-node placement planner, integer normalization, identity,
-and fail-closed command contracts without requiring Docker. See
+post-restore writes. The repair assertion requires the Go desired/observed
+generation to advance exactly once while the Rust Catalog/tablet generation
+stays coherent and unchanged. `tests/integration/test_kubernetes_alpha_exit.py`
+protects the evidence schema, divergent generation cursors, N-node placement
+planner, integer normalization, identity, and fail-closed command contracts
+without requiring Docker. See
 [Live Kubernetes alpha-exit campaign](KUBERNETES_ALPHA_EXIT.md).
 
 ### 8. Benchmarks
@@ -844,8 +852,13 @@ The implemented security slices currently contribute:
 - Catalog/consensus/regional membership tests for canonical v5 plan/finalize
   bytes, exact replay, stale/conflicting/multi-voter rejection, learner
   catch-up gating, joint-consensus persistence, current/target materialization,
-  Go pending/ready status, and a four-node Stream replacement that preserves
-  data, stops the removed host, and reopens on the new voter set; and
+  Go pending/ready status, deterministic region/zone/rack/class/exclusion
+  admission, N-node three/five-voter selection, serialized automatic
+  policy/topology repair and load rebalance, distinct Go/Catalog generation
+  cursors across policy-only no-op apply and delete, and a four-node Stream
+  replacement that preserves data, stops the removed host, and reopens on the
+  new voter set;
+  and
 - console tests proving the managed credential stays session-scoped and that
   empty, whitespace-bearing, or oversized values are rejected; and
 - OCI candidate checks that build node/control/operator/CLI/compatibility from pinned bases,

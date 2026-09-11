@@ -33,7 +33,7 @@ import { profileDefinitions } from "./profileDefinitions";
 
 const refreshIntervalMs = 15_000;
 const docsOnly = import.meta.env.VITE_DOCS_ONLY === "true";
-const releaseVersion = "0.2.0-beta.8";
+const releaseVersion = "0.2.0-beta.9";
 
 const durabilityRank: Record<DurabilityProfile, number> = {
   volatile: 0,
@@ -564,7 +564,8 @@ function EpochApp() {
                           <td>
                             {resource.generation}
                             <span className="resource-generation-detail">
-                              observed {resource.observedGeneration}
+                              control observed {resource.observedGeneration} · catalog{" "}
+                              {resource.catalogGeneration}
                             </span>
                           </td>
                           <td>
@@ -595,15 +596,20 @@ function EpochApp() {
                             <ul className="tablet-list">
                               {resource.tablets.map((tablet) => (
                                 <li key={tablet.tabletId}>
-                                  Shard {tablet.shardIndex} · voters{" "}
+                                  Shard {tablet.shardIndex} · committed voters{" "}
                                   {tablet.voterNodeIds.length > 0 ? tablet.voterNodeIds.join(", ") : "none"} ·
-                                  leader {tablet.leaderNodeId ?? "none"}
+                                  reachable {tablet.reachableVoterNodeIds.join(", ") || "none"} · leader{" "}
+                                  {tablet.leaderNodeId ?? "none"}
+                                  {tablet.targetVoterNodeIds.length > 0
+                                    ? ` · target ${tablet.targetVoterNodeIds.join(", ")}`
+                                    : ""}
                                 </li>
                               ))}
                               {resource.placement?.nodes.map((node) => (
                                 <li key={`node-${node.nodeId}`}>
-                                  Node {node.nodeId} · {node.region}/{node.zone} · {node.nodeClass} · capacity{" "}
-                                  {node.availableConsensusGroups}/{node.maxConsensusGroups} groups available
+                                  Node {node.nodeId} · {node.region}/{node.zone}/{node.rack} ·{" "}
+                                  {node.nodeClass} · capacity {node.availableConsensusGroups}/
+                                  {node.maxConsensusGroups} groups available
                                 </li>
                               ))}
                             </ul>

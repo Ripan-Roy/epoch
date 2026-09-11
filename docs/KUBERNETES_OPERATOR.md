@@ -25,13 +25,21 @@ scheduled application-layer encrypted semantic backups.
   is idempotent, treats API-server defaults as no-ops, and repairs drift in
   operator-owned objects.
 
-Rust now executes an explicitly planned single-voter replacement through
-learner catch-up and joint consensus while the operator keeps every physical
-ordinal provisioned. Rack-aware placement, automatic multi-tablet rebalance,
-and general repair remain beta gates. One local live Kubernetes campaign passes
-backup-before-replacement, refreshed snapshot catch-up after compaction, joint
-consensus, guarded rollout, fresh restore, exact digests, and continued writes.
-Protected evidence and a genuinely mixed-version campaign remain beta gates.
+Go now turns an explicit managed-resource node exclusion into a deterministic
+single-voter repair plan. Rust executes that plan through learner catch-up and
+joint consensus while the operator keeps every physical ordinal provisioned.
+The Go desired/observed generation advances for the policy update, while the
+Rust `catalog_generation` and tablet `resource_generation` remain the routing
+and membership fence. Both are exposed explicitly so retries never infer one
+clock from the other.
+The generic regional contract supports rack-aware admission/repair and
+serialized load rebalance, but this Kubernetes revision does not yet attest
+cloud zone/rack labels: it reports the scheduled node name as zone and the
+single `unassigned` rack. One local live campaign proves automatic exclusion
+repair, backup-before-repair, refreshed snapshot catch-up after compaction,
+joint consensus, guarded rollout, fresh restore, exact digests, and continued
+writes. Protected evidence and a genuinely mixed-version campaign remain beta
+gates.
 
 ## Required trust material
 
@@ -207,7 +215,7 @@ and postflight verification. Only then does it release the next lower ordinal.
 
 ```yaml
 spec:
-  nodeImage: registry.example/epoch-node:v0.2.0-beta.8
+  nodeImage: registry.example/epoch-node:v0.2.0-beta.9
   upgrade:
     backupMaxAgeSeconds: 3600
     stepDeadlineSeconds: 900
@@ -249,9 +257,11 @@ clients, and retains machine-verifiable lifecycle evidence in CI.
 - The guarded upgrade state machine is locally tested, but a real
   mixed-version live-Kubernetes upgrade/rollback and capability-compatibility
   window remain beta gates.
-- Learner-first single-voter replacement, joint consensus, old-voter removal,
-  and compacted-log snapshot catch-up pass locally. General automatic rebalance,
-  rack-aware repair policy, and multi-failure repair remain open.
+- Learner-first single-voter replacement, automatic exclusion repair, joint
+  consensus, old-voter removal, and compacted-log snapshot catch-up pass
+  locally. Kubernetes node-label-derived region/zone/rack attestation,
+  transactional multi-resource reservation, and multi-failure repair remain
+  open.
 - Certificate issuance/renewal is external. Epoch fails closed on missing or
   malformed files, but the live certificate-rotation campaign remains open.
 - StatefulSet PVCs are deliberately retained after cluster deletion. Delete

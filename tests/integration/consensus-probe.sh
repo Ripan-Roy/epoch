@@ -357,11 +357,15 @@ wait_for_commit 102 "${epoch_checkpoint_survivors[@]}"
 assert_identical_commit 102 '[99,104,101,99,107,112,111,105,110,116,45,116,97,105,108]' \
   "${epoch_checkpoint_survivors[@]}"
 
-# Restart every checkpoint-bearing survivor while the lagging voter remains
-# offline. This clears pre-compaction outbound frames, so the recovered leader
-# can catch the lagging voter up only through the durable checkpoint plus tail.
-"${epoch_compose[@]}" stop "${epoch_checkpoint_survivor_services[@]}" >/dev/null
-"${epoch_compose[@]}" start "${epoch_checkpoint_survivor_services[@]}" >/dev/null
+# Crash-restart every checkpoint-bearing survivor while the lagging voter
+# remains offline. Waiting for Docker to observe every exit before starting the
+# services avoids a Compose race where a slow-stopping container is skipped and
+# left down. The restart also clears pre-compaction outbound frames, so the
+# recovered leader can catch the lagging voter up only through the durable
+# checkpoint plus tail.
+"$epoch_repo_root/scripts/crash-restart-compose-services.sh" \
+  "$epoch_project_name" "$epoch_compose_file" \
+  "${epoch_checkpoint_survivor_services[@]}"
 read -r epoch_leader epoch_term < <(wait_for_leader "$epoch_lagging")
 wait_for_commit 101 "${epoch_checkpoint_survivors[@]}"
 wait_for_commit 102 "${epoch_checkpoint_survivors[@]}"

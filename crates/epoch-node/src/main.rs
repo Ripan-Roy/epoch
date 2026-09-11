@@ -211,6 +211,8 @@ struct Args {
     regional_region: String,
     #[arg(long, env = "EPOCH_REGIONAL_ZONE", default_value = "local")]
     regional_zone: String,
+    #[arg(long, env = "EPOCH_REGIONAL_RACK", default_value = "unassigned")]
+    regional_rack: String,
     #[arg(
         long,
         env = "EPOCH_REGIONAL_NODE_CLASS",
@@ -952,10 +954,11 @@ fn regional_runtime_launch(
             "EPOCH_AUTH_POLICY_PATH is required for the regional runtime".into(),
         )
     })?;
-    let topology = NodeTopology::new(
+    let topology = NodeTopology::new_with_rack(
         node_id,
         args.regional_region.clone(),
         args.regional_zone.clone(),
+        args.regional_rack.clone(),
         args.regional_node_class.clone(),
         config
             .voters()
@@ -1592,6 +1595,8 @@ mod tests {
             "ap-south",
             "--regional-zone",
             "ap-south-1b",
+            "--regional-rack",
+            "rack-7",
             "--regional-node-class",
             "general-purpose",
             "--auth-policy-path",
@@ -1622,6 +1627,7 @@ mod tests {
         assert_eq!(launch.topology.node_id(), 2);
         assert_eq!(launch.topology.region(), "ap-south");
         assert_eq!(launch.topology.zone(), "ap-south-1b");
+        assert_eq!(launch.topology.rack(), "rack-7");
         assert_eq!(launch.topology.node_class(), "general-purpose");
         assert_eq!(launch.topology.consensus_voter_node_ids(), [1, 2, 3]);
         assert!(launch.restore_artifact.is_none());

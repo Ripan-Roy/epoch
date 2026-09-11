@@ -215,12 +215,13 @@ export const docsPages: ReadonlyArray<DocsPageMeta> = [
   {
     id: "voter-replacement",
     group: "Core concepts",
-    label: "Voter replacement",
-    title: "Learner-first voter replacement",
+    label: "Placement repair",
+    title: "Automatic placement repair and voter replacement",
     summary:
-      "Commit one exact target, catch up the incoming learner, enter joint consensus, finalize Catalog, stop the removed host, and reopen the new voter set.",
+      "Select one policy-safe target from fresh topology, catch up the incoming learner, enter joint consensus, finalize Catalog, and reopen the new voter set.",
     headings: [
       { id: "contract", label: "Safety contract" },
+      { id: "automatic", label: "Automatic repair" },
       { id: "plan", label: "Commit a plan" },
       { id: "observe", label: "Observe transition" },
       { id: "recovery", label: "Recovery & limits" },

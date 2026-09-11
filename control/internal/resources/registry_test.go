@@ -422,6 +422,7 @@ func TestUpdateStatusRejectsImpossibleObservations(t *testing.T) {
 	tests := []ResourceStatus{
 		{Phase: "unknown", ObservedGeneration: 1},
 		{Phase: PhaseReady, ObservedGeneration: 2},
+		{Phase: PhasePending, ObservedGeneration: 1, CatalogGeneration: 2},
 		{
 			Phase:              PhaseReady,
 			ObservedGeneration: 1,
@@ -452,6 +453,83 @@ func TestUpdateStatusRejectsImpossibleObservations(t *testing.T) {
 		} else {
 			assertCode(t, err, CodeInvalidArgument)
 		}
+	}
+}
+
+func TestStatusSeparatesControlAndCatalogGenerations(t *testing.T) {
+	status := ResourceStatus{
+		Phase:              PhaseReady,
+		ObservedGeneration: 2,
+		CatalogGeneration:  1,
+		ObservedShardCount: 1,
+		Tablets: []TabletStatus{{
+			TabletID: 1, ConsensusGroupID: 2, TabletEpoch: 1,
+			ResourceGeneration: 1, DesiredReplicas: 3,
+			AssignedNodeIDs: []uint64{1, 2, 3}, VoterNodeIDs: []uint64{1, 2, 3},
+			ReachableVoterNodeIDs: []uint64{1, 2, 3}, LeaderNodeID: 1,
+		}},
+	}
+	if err := validateStatus(status, 2); err != nil {
+		t.Fatalf("policy-only generation status rejected: %v", err)
+	}
+	if status.EffectiveCatalogGeneration() != 1 {
+		t.Fatalf("effective Catalog generation = %d", status.EffectiveCatalogGeneration())
+	}
+
+	legacy := cloneStatus(status)
+	legacy.ObservedGeneration = 1
+	legacy.CatalogGeneration = 0
+	if err := validateStatus(legacy, 1); err != nil {
+		t.Fatalf("legacy coupled generation status rejected: %v", err)
+	}
+	if legacy.EffectiveCatalogGeneration() != 1 {
+		t.Fatalf("legacy effective Catalog generation = %d", legacy.EffectiveCatalogGeneration())
+	}
+}
+
+func TestReadyPlacementEvidenceMatchesRackAndExclusionPolicy(t *testing.T) {
+	status := ResourceStatus{
+		Phase:              PhaseReady,
+		ObservedGeneration: 1,
+		ObservedShardCount: 1,
+		Tablets: []TabletStatus{{
+			TabletID: 1, ConsensusGroupID: 2, ShardIndex: 0, TabletEpoch: 1,
+			ResourceGeneration: 1, DesiredReplicas: 3,
+			AssignedNodeIDs: []uint64{1, 2, 3}, VoterNodeIDs: []uint64{1, 2, 3},
+			ReachableVoterNodeIDs: []uint64{1, 2, 3}, LeaderNodeID: 1,
+		}},
+		Placement: &PlacementStatus{
+			AllowedRegions: []string{"ap-south"}, MinimumZones: 3, MinimumRacks: 3,
+			RequiredNodeClass: "general", AchievedZones: 3, AchievedRacks: 3,
+			Nodes: []RegionalNodeStatus{
+				placementNodeStatus(1, "zone-a", "rack-a"),
+				placementNodeStatus(2, "zone-b", "rack-b"),
+				placementNodeStatus(3, "zone-c", "rack-c"),
+			},
+		},
+	}
+	if err := validateStatus(status, 1); err != nil {
+		t.Fatalf("valid status rejected: %v", err)
+	}
+
+	excluded := cloneStatus(status)
+	excluded.Placement.ExcludedNodeIDs = []uint64{1}
+	if err := validateStatus(excluded, 1); err == nil {
+		t.Fatal("ready status containing an excluded voter succeeded")
+	}
+
+	inaccurate := cloneStatus(status)
+	inaccurate.Placement.AchievedRacks = 2
+	if err := validateStatus(inaccurate, 1); err == nil {
+		t.Fatal("inaccurate achieved rack count succeeded")
+	}
+}
+
+func placementNodeStatus(nodeID uint64, zone, rack string) RegionalNodeStatus {
+	return RegionalNodeStatus{
+		NodeID: nodeID, Region: "ap-south", Zone: zone, Rack: rack, NodeClass: "general",
+		ConsensusVoterNodeIDs: []uint64{1, 2, 3}, MaxConsensusGroups: 16,
+		UsedConsensusGroups: 2, AvailableConsensusGroups: 14,
 	}
 }
 

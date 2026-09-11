@@ -17,11 +17,27 @@ type fakeAuthority struct {
 	mu             sync.Mutex
 	applyCalls     []AuthorityApplyRequest
 	observeCalls   []resources.ResourceKey
+	planCalls      []AuthorityMembershipPlanRequest
 	inventoryCalls int
 	inventory      func() (NodeInventory, error)
 	apply          func(AuthorityApplyRequest) (AuthorityObservation, error)
 	observe        func(resources.ResourceKey) (AuthorityObservation, error)
+	plan           func(AuthorityMembershipPlanRequest) (AuthorityObservation, error)
 	delete         func(AuthorityDeleteRequest) (AuthorityDeleteObservation, error)
+}
+
+func (authority *fakeAuthority) PlanMembership(
+	_ context.Context,
+	request AuthorityMembershipPlanRequest,
+) (AuthorityObservation, error) {
+	authority.mu.Lock()
+	authority.planCalls = append(authority.planCalls, request)
+	plan := authority.plan
+	authority.mu.Unlock()
+	if plan == nil {
+		panic("unexpected PlanMembership call")
+	}
+	return plan(request)
 }
 
 func (authority *fakeAuthority) Inventory(
@@ -176,6 +192,336 @@ func TestReconcilerAdoptsACompletedPolicyCompliantVoterReplacement(t *testing.T)
 	}
 	if len(authority.applyCalls) != 1 {
 		t.Fatalf("replacement triggered %d catalog applies, want one initial apply", len(authority.applyCalls))
+	}
+}
+
+func TestReconcilerAutomaticallyPlansOneSafeMembershipRepair(t *testing.T) {
+	registry := resources.NewRegistry()
+	resource := applyDesired(t, registry, "create-auto-repair-orders", regionalKey(resources.KindStream, "auto-repair-orders"), 1, 3)
+	initial := servingObservation(resource.Generation, 1, 3)
+	var currentObservation = initial
+	authority := &fakeAuthority{
+		inventory: func() (NodeInventory, error) { return regionalInventory(4, 8), nil },
+		apply: func(request AuthorityApplyRequest) (AuthorityObservation, error) {
+			if request.ExpectedGeneration == 0 {
+				currentObservation = servingObservation(1, 1, 3)
+			}
+			// Placement policy is Go-owned metadata. The real Rust authority
+			// returns its unchanged Catalog generation when only that policy
+			// changes, while still validating the complete desired payload.
+			return currentObservation, nil
+		},
+		observe: func(resources.ResourceKey) (AuthorityObservation, error) {
+			return currentObservation, nil
+		},
+		plan: func(request AuthorityMembershipPlanRequest) (AuthorityObservation, error) {
+			if request.TabletID != 10 || request.ExpectedTabletEpoch != 1 ||
+				!slices.Equal(request.TargetVoterNodeIDs, []uint64{2, 3, 4}) ||
+				request.RequestToken == "" {
+				t.Fatalf("PlanMembership request = %+v", request)
+			}
+			planned := currentObservation
+			planned.Tablets = append([]resources.TabletStatus(nil), currentObservation.Tablets...)
+			planned.Tablets[0].BootstrapVoterNodeIDs = []uint64{1, 2, 3}
+			planned.Tablets[0].TargetVoterNodeIDs = []uint64{2, 3, 4}
+			currentObservation = planned
+			return planned, nil
+		},
+	}
+	reconciler := NewReconciler(registry, authority)
+
+	if _, err := reconciler.Reconcile(t.Context(), resource.ResourceKey); err != nil {
+		t.Fatalf("initial Reconcile() error = %v", err)
+	}
+	updated := applyDesiredWithPlacement(
+		t,
+		registry,
+		"exclude-auto-repair-node",
+		resource.ResourceKey,
+		1,
+		3,
+		PlacementPolicy{MinimumZones: 3, MinimumRacks: 3, ExcludedNodeIDs: []uint64{1}},
+	)
+	if _, err := reconciler.Reconcile(t.Context(), resource.ResourceKey); err != nil {
+		t.Fatalf("policy Reconcile() error = %v", err)
+	}
+	pending, err := reconciler.Reconcile(t.Context(), resource.ResourceKey)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if pending.Status.Phase != resources.PhasePending || len(authority.planCalls) != 1 ||
+		pending.Status.ObservedGeneration != updated.Generation ||
+		pending.Status.CatalogGeneration != 1 ||
+		!slices.Equal(pending.Status.Tablets[0].TargetVoterNodeIDs, []uint64{2, 3, 4}) ||
+		!strings.Contains(pending.Status.Message, "automatic policy repair") {
+		t.Fatalf("pending = %+v, plan calls = %+v", pending.Status, authority.planCalls)
+	}
+	if len(authority.applyCalls) != 2 ||
+		authority.applyCalls[0].ExpectedGeneration != 0 ||
+		authority.applyCalls[1].ExpectedGeneration != 1 ||
+		authority.applyCalls[0].RequestToken == authority.applyCalls[1].RequestToken {
+		t.Fatalf("Catalog apply cursors or tokens = %+v", authority.applyCalls)
+	}
+}
+
+func TestReconcilerDeletesAndRecreatesAcrossSeparatedGenerationClocks(t *testing.T) {
+	registry := resources.NewRegistry()
+	resource := applyDesired(
+		t,
+		registry,
+		"create-policy-delete",
+		regionalKey(resources.KindStream, "policy-delete"),
+		1,
+		3,
+	)
+	catalogGeneration := uint64(0)
+	catalogLive := false
+	authority := &fakeAuthority{
+		apply: func(request AuthorityApplyRequest) (AuthorityObservation, error) {
+			switch {
+			case request.ExpectedGeneration == 0 && !catalogLive:
+				catalogGeneration++
+				catalogLive = true
+			case request.ExpectedGeneration == catalogGeneration && catalogLive:
+				// The policy-only desired update is a real Rust Catalog no-op.
+			default:
+				t.Fatalf(
+					"Apply expected Catalog generation = %d with live=%t generation=%d",
+					request.ExpectedGeneration,
+					catalogLive,
+					catalogGeneration,
+				)
+			}
+			return servingObservation(catalogGeneration, 1, 3), nil
+		},
+		delete: func(request AuthorityDeleteRequest) (AuthorityDeleteObservation, error) {
+			if !catalogLive || request.ExpectedGeneration != catalogGeneration {
+				t.Fatalf(
+					"Delete expected Catalog generation = %d with live=%t generation=%d",
+					request.ExpectedGeneration,
+					catalogLive,
+					catalogGeneration,
+				)
+			}
+			catalogGeneration++
+			catalogLive = false
+			return AuthorityDeleteObservation{Generation: catalogGeneration, Deleted: true}, nil
+		},
+	}
+	reconciler := NewReconciler(registry, authority)
+	if _, err := reconciler.Reconcile(t.Context(), resource.ResourceKey); err != nil {
+		t.Fatalf("initial Reconcile() error = %v", err)
+	}
+	updated := applyDesiredWithPlacement(
+		t,
+		registry,
+		"policy-only-delete",
+		resource.ResourceKey,
+		1,
+		3,
+		PlacementPolicy{MinimumZones: 1, MinimumRacks: 1},
+	)
+	ready, err := reconciler.Reconcile(t.Context(), resource.ResourceKey)
+	if err != nil {
+		t.Fatalf("policy-only Reconcile() error = %v", err)
+	}
+	if ready.Status.ObservedGeneration != 2 || ready.Status.CatalogGeneration != 1 {
+		t.Fatalf("separated status = %+v", ready.Status)
+	}
+
+	expected := updated.Generation
+	deleted, err := reconciler.Delete(t.Context(), resources.DeleteRequest{
+		RequestToken:       "delete-after-policy-only-generation",
+		ExpectedGeneration: &expected,
+		Key:                resource.ResourceKey,
+	})
+	if err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if !deleted.Deleted || deleted.Generation != 3 {
+		t.Fatalf("Delete() = %+v", deleted)
+	}
+
+	recreated := applyDesired(
+		t,
+		registry,
+		"recreate-after-separated-delete",
+		resource.ResourceKey,
+		1,
+		3,
+	)
+	if recreated.Generation != 4 {
+		t.Fatalf("recreated Go generation = %d, want 4", recreated.Generation)
+	}
+	reopened, err := reconciler.Reconcile(t.Context(), resource.ResourceKey)
+	if err != nil {
+		t.Fatalf("recreated Reconcile() error = %v", err)
+	}
+	if reopened.Status.ObservedGeneration != 4 || reopened.Status.CatalogGeneration != 3 ||
+		reopened.Status.Tablets[0].ResourceGeneration != 3 {
+		t.Fatalf("recreated separated status = %+v", reopened.Status)
+	}
+}
+
+func TestReconcilerRejectsZeroCatalogGenerationForObservedResource(t *testing.T) {
+	registry := resources.NewRegistry()
+	resource := applyDesired(
+		t,
+		registry,
+		"create-zero-catalog-generation",
+		regionalKey(resources.KindStream, "zero-catalog-generation"),
+		1,
+		3,
+	)
+	authority := &fakeAuthority{
+		apply: func(AuthorityApplyRequest) (AuthorityObservation, error) {
+			return servingObservation(0, 1, 3), nil
+		},
+	}
+	reconciler := NewReconciler(registry, authority)
+	if _, err := reconciler.Reconcile(t.Context(), resource.ResourceKey); err == nil || IsRetryable(err) {
+		t.Fatalf("Reconcile() error = %v, want definitive invalid authority response", err)
+	}
+}
+
+func TestReconcilerDoesNotOverlapMembershipTransitionsForOneResource(t *testing.T) {
+	registry := resources.NewRegistry()
+	resource := applyDesired(t, registry, "create-serial-repair", regionalKey(resources.KindStream, "serial-repair"), 1, 3)
+	initial := servingObservation(resource.Generation, 1, 3)
+	planned := initial
+	planned.Tablets = append([]resources.TabletStatus(nil), initial.Tablets...)
+	planned.Tablets[0].BootstrapVoterNodeIDs = []uint64{1, 2, 3}
+	planned.Tablets[0].TargetVoterNodeIDs = []uint64{1, 2, 4}
+	inventoryCalls := 0
+	currentObservation := initial
+	authority := &fakeAuthority{
+		inventory: func() (NodeInventory, error) {
+			inventoryCalls++
+			if inventoryCalls == 1 {
+				return regionalInventory(5, 8), nil
+			}
+			inventory := regionalInventory(5, 8)
+			for index := range 3 {
+				inventory.Nodes[index].MaxConsensusGroups = 8
+				inventory.Nodes[index].UsedConsensusGroups = 7
+				inventory.Nodes[index].AvailableConsensusGroups = 1
+			}
+			return inventory, nil
+		},
+		apply: func(AuthorityApplyRequest) (AuthorityObservation, error) { return initial, nil },
+		observe: func(resources.ResourceKey) (AuthorityObservation, error) {
+			return currentObservation, nil
+		},
+		plan: func(AuthorityMembershipPlanRequest) (AuthorityObservation, error) {
+			currentObservation = planned
+			return planned, nil
+		},
+	}
+	reconciler := NewReconciler(registry, authority)
+
+	if _, err := reconciler.Reconcile(t.Context(), resource.ResourceKey); err != nil {
+		t.Fatalf("initial Reconcile() error = %v", err)
+	}
+	if _, err := reconciler.Reconcile(t.Context(), resource.ResourceKey); err != nil {
+		t.Fatalf("planning Reconcile() error = %v", err)
+	}
+	if _, err := reconciler.Reconcile(t.Context(), resource.ResourceKey); err != nil {
+		t.Fatalf("active-transition Reconcile() error = %v", err)
+	}
+	if len(authority.planCalls) != 1 {
+		t.Fatalf("plan calls = %d, want exactly the initial serialized transition", len(authority.planCalls))
+	}
+}
+
+func TestReconcilerDoesNotRebalanceADegradedTablet(t *testing.T) {
+	registry := resources.NewRegistry()
+	resource := applyDesired(t, registry, "create-degraded-rebalance", regionalKey(resources.KindStream, "degraded-rebalance"), 1, 3)
+	initial := servingObservation(resource.Generation, 1, 3)
+	inventoryCalls := 0
+	authority := &fakeAuthority{
+		inventory: func() (NodeInventory, error) {
+			inventoryCalls++
+			inventory := regionalInventory(4, 8)
+			if inventoryCalls > 1 {
+				for index := range 3 {
+					inventory.Nodes[index].MaxConsensusGroups = 8
+					inventory.Nodes[index].UsedConsensusGroups = 7
+					inventory.Nodes[index].AvailableConsensusGroups = 1
+				}
+			}
+			return inventory, nil
+		},
+		apply: func(AuthorityApplyRequest) (AuthorityObservation, error) { return initial, nil },
+		observe: func(resources.ResourceKey) (AuthorityObservation, error) {
+			degraded := initial
+			degraded.Tablets = append([]resources.TabletStatus(nil), initial.Tablets...)
+			degraded.Tablets[0].ReachableVoterNodeIDs = []uint64{1, 2}
+			return degraded, nil
+		},
+	}
+	reconciler := NewReconciler(registry, authority)
+	if _, err := reconciler.Reconcile(t.Context(), resource.ResourceKey); err != nil {
+		t.Fatal(err)
+	}
+	degraded, err := reconciler.Reconcile(t.Context(), resource.ResourceKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if degraded.Status.Phase != resources.PhaseDegraded || len(authority.planCalls) != 0 {
+		t.Fatalf("status = %+v, plan calls = %+v", degraded.Status, authority.planCalls)
+	}
+}
+
+func TestReconcilerReportsUnsafePolicyRepairAsDegraded(t *testing.T) {
+	registry := resources.NewRegistry()
+	resource := applyDesired(t, registry, "create-unsafe-repair", regionalKey(resources.KindStream, "unsafe-repair"), 1, 3)
+	observation := servingObservation(resource.Generation, 1, 3)
+	authority := &fakeAuthority{
+		inventory: func() (NodeInventory, error) { return regionalInventory(4, 8), nil },
+		apply:     func(AuthorityApplyRequest) (AuthorityObservation, error) { return observation, nil },
+		observe:   func(resources.ResourceKey) (AuthorityObservation, error) { return observation, nil },
+	}
+	reconciler := NewReconciler(registry, authority)
+	if _, err := reconciler.Reconcile(t.Context(), resource.ResourceKey); err != nil {
+		t.Fatal(err)
+	}
+	updated := applyDesiredWithPlacement(
+		t,
+		registry,
+		"exclude-unsafe-repair-node",
+		resource.ResourceKey,
+		1,
+		3,
+		PlacementPolicy{MinimumZones: 3, MinimumRacks: 3, ExcludedNodeIDs: []uint64{1}},
+	)
+	observation.Generation = updated.Generation
+	observation.Tablets = append([]resources.TabletStatus(nil), observation.Tablets...)
+	observation.Tablets[0].ResourceGeneration = updated.Generation
+	observation.Tablets[0].ReachableVoterNodeIDs = []uint64{1}
+
+	if _, err := reconciler.Reconcile(t.Context(), resource.ResourceKey); err != nil {
+		t.Fatal(err)
+	}
+	degraded, err := reconciler.Reconcile(t.Context(), resource.ResourceKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if degraded.Status.Phase != resources.PhaseDegraded || len(authority.planCalls) != 0 ||
+		!strings.Contains(degraded.Status.Message, "serving placement is incomplete") {
+		t.Fatalf("status = %+v, plan calls = %+v", degraded.Status, authority.planCalls)
+	}
+}
+
+func TestInventoryFromLegacyStatusDoesNotInferRacksFromZones(t *testing.T) {
+	inventory := inventoryFromStatus(&resources.PlacementStatus{
+		Nodes: []resources.RegionalNodeStatus{
+			{NodeID: 1, Zone: "zone-a"},
+			{NodeID: 2, Zone: "zone-b"},
+		},
+	})
+	if len(inventory.Nodes) != 2 || inventory.Nodes[0].Rack != "unassigned" ||
+		inventory.Nodes[1].Rack != "unassigned" {
+		t.Fatalf("inventory = %+v", inventory)
 	}
 }
 
@@ -387,6 +733,7 @@ func TestReconcilerDoesNotPresentStalePlacementDuringAuthorityDisconnect(t *test
 	}
 	if pending.Status.Phase != resources.PhasePending ||
 		pending.Status.ObservedGeneration != resource.Generation ||
+		pending.Status.CatalogGeneration != ready.Status.CatalogGeneration ||
 		len(pending.Status.Tablets) != 0 {
 		t.Fatalf("disconnected status presents stale placement: %+v", pending.Status)
 	}
@@ -547,6 +894,32 @@ func applyDesiredWithExpected(
 	applied, err := registry.Apply(request)
 	if err != nil {
 		t.Fatalf("Apply() error = %v", err)
+	}
+	return applied.Resource
+}
+
+func applyDesiredWithPlacement(
+	t *testing.T,
+	registry *resources.Registry,
+	token string,
+	key resources.ResourceKey,
+	shards uint32,
+	replicas uint16,
+	placement PlacementPolicy,
+) resources.Resource {
+	t.Helper()
+	spec, err := json.Marshal(map[string]any{
+		"shard_count": shards, "replica_count": replicas, "placement": placement,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied, err := registry.Apply(resources.ApplyRequest{
+		RequestToken: token,
+		Resource:     resources.DesiredResource{ResourceKey: key, Spec: spec, Governance: testGovernance()},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 	return applied.Resource
 }

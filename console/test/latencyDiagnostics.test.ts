@@ -14,6 +14,7 @@ const resource: RegionalResource = {
   name: "orders",
   generation: "2",
   observedGeneration: "2",
+  catalogGeneration: "1",
   workloadProfile: "stream_log",
   tablets: [],
   phase: "ready",
