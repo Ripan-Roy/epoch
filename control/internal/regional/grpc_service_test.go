@@ -3,6 +3,7 @@ package regional
 import (
 	"context"
 	"net"
+	"slices"
 	"sync/atomic"
 	"testing"
 
@@ -281,6 +282,7 @@ func applyProtoRequest(
 			Placement: &epochv1.PlacementPolicy{
 				AllowedRegions:    []string{"ap-south"},
 				MinimumZones:      3,
+				MinimumRacks:      3,
 				RequiredNodeClass: "general-purpose",
 			},
 			Governance: &epochv1.ResourceGovernance{
@@ -302,6 +304,7 @@ func assertProtoReady(t *testing.T, resource *epochv1.Resource, tablets int) {
 	if resource.GetGeneration() != 1 ||
 		resource.GetStatus().GetPhase() != epochv1.ResourcePhase_RESOURCE_PHASE_READY ||
 		resource.GetStatus().GetObservedGeneration() != 1 ||
+		resource.GetStatus().GetCatalogGeneration() != 1 ||
 		len(resource.GetStatus().GetTablets()) != tablets {
 		t.Fatalf("resource is not ready: %+v", resource)
 	}
@@ -315,9 +318,42 @@ func assertProtoReady(t *testing.T, resource *epochv1.Resource, tablets int) {
 	}
 	placement := resource.GetStatus().GetPlacement()
 	if placement.GetMinimumZones() != 3 ||
+		placement.GetMinimumRacks() != 3 ||
 		placement.GetAchievedZones() != 3 ||
+		placement.GetAchievedRacks() != 3 ||
 		len(placement.GetNodes()) != 3 {
 		t.Fatalf("achieved topology = %+v", placement)
+	}
+}
+
+func TestStatusProtoKeepsControlAndCatalogGenerationsSeparate(t *testing.T) {
+	status := statusToProto(resources.ResourceStatus{
+		Phase:              resources.PhaseReady,
+		ObservedGeneration: 8,
+		CatalogGeneration:  7,
+	})
+	if status.GetObservedGeneration() != 8 || status.GetCatalogGeneration() != 7 {
+		t.Fatalf("status generations = %+v", status)
+	}
+}
+
+func TestRegionalAdminContractAcceptsFiveVoterPlacement(t *testing.T) {
+	request := applyProtoRequest(t, regionalKey(resources.KindStream, "five-voter"), "five-voter")
+	request.Spec.Replicas = 5
+	request.Spec.Placement.MinimumZones = 5
+	request.Spec.Placement.MinimumRacks = 5
+	request.Spec.Placement.ExcludedNodeIds = []uint64{9}
+	_, desired, err := desiredFromProto(request)
+	if err != nil {
+		t.Fatalf("desiredFromProto() error = %v", err)
+	}
+	spec, err := decodeDesiredSpec(desired.Spec)
+	if err != nil {
+		t.Fatalf("decodeDesiredSpec() error = %v", err)
+	}
+	if spec.ReplicaCount != 5 || spec.Placement.MinimumZones != 5 || spec.Placement.MinimumRacks != 5 ||
+		!slices.Equal(spec.Placement.ExcludedNodeIDs, []uint64{9}) {
+		t.Fatalf("decoded spec = %+v", spec)
 	}
 }
 

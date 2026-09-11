@@ -1,8 +1,8 @@
 # Epoch Delivery Checklist
 
-**Last reviewed:** 10 September 2026
-**Current published release:** `v0.2.0-beta.7`
-**Current release target:** `v0.2.0-beta.8`
+**Last reviewed:** 11 September 2026
+**Current published release:** `v0.2.0-beta.8`
+**Current release target:** `v0.2.0-beta.9`
 **Current core target:** Beta hardening through bounded protocol compatibility and production recovery evidence
 
 This is the operational checklist for turning PRD scope into verified,
@@ -32,14 +32,14 @@ protected-branch evidence agree.
 | G0 | Semantic contracts | 🟡 | Versioned envelope, errors, durability, ordering, delivery, time, fencing, and transaction limits | [Semantics](SEMANTICS.md), [API contracts](API_CONTRACTS.md); same-tablet Stream transaction limits are frozen, while cross-profile/cross-shard contracts remain open |
 | G1 | Repository and deterministic foundation | 🟡 | Reproducible toolchains, generated contracts, deterministic clock/fault harness, cross-language build | [Development](DEVELOPMENT.md), [Testing](TESTING.md), CI; broader fuzz/formal harness remains open |
 | G2 | Storage and recovery | 🟡 | Checksummed formats, crash recovery, corruption policy, snapshots, compaction, retention, tiering | Segmented WAL, compatible EPSN v1/v2 checkpoints, native images for all five profiles, checkpoint-plus-tail reopen, fixed-voter catch-up, physical EPRS reclamation, Stream retention, automatic voter checkpoints, Cache backup/PITR and cold reads pass protected `main`. The Stream candidate adds sparse compaction snapshots and checksum-verified embedded historical objects; protected evidence, product-wide external tiering, managed restore campaigns, and production repair remain open |
-| G3 | Consensus, catalog, and placement | 🟡 | Quorum safety, persistent catalog, multi-group supervision, membership, placement, repair, read barriers | Dedicated catalog consensus, shared multi-group supervision, deterministic multi-shard materialization, authenticated region/zone/class validation, limiting group-capacity admission, fenced routing, safe leader ReadIndex barriers, and per-shard same-volume recovery pass protected `main`. Durable three/five-voter membership, refreshed post-compaction learner catch-up, joint single-voter replacement, control-plane transition status, four-node reopen, and the live Kubernetes lifecycle also pass exact-main CI `34401493735`; rack placement, general automatic rebalance/repair, follower reads, and broader model evidence remain open. |
+| G3 | Consensus, catalog, and placement | 🟡 | Quorum safety, persistent catalog, multi-group supervision, membership, placement, repair, read barriers | Dedicated catalog consensus, shared multi-group supervision, deterministic multi-shard materialization, authenticated region/zone/class admission, capacity rejection, fenced routing, safe leader ReadIndex barriers, durable three/five-voter membership, learner catch-up, joint replacement, and four-node reopen pass protected beta.8. The beta.9 candidate adds explicit racks/exclusions and serialized automatic policy/topology repair and load rebalance from fresh N-node inventory. Transactional multi-plan reservation, split/merge, follower reads, protected candidate evidence, and broader model/chaos evidence remain open. |
 | G4 | Native profile cores | 🟡 | Cache, Stream, Queue, and Bus P0 semantics with truthful public routing and fault evidence | All four typed tablet cores run simultaneously behind resource/shard routing and authenticated three-language clients. Cache, Stream, Queue, and the native Event Bus development surface shipped through alpha.9; production protocol/scale evidence remains open. |
 | G5 | Trust and observability | 🟡 | Identity, authorization, TLS/mTLS, encryption, audit, telemetry, quotas, explain | Shared Go/Rust authorization and audit plus beta.7 internal Prometheus endpoints, bounded tenant series, structured correlation, W3C propagation, OTLP traces, measured “Why slow?” diagnosis, and dashboard/alert/collector templates pass protected `main`. OIDC, expiry/revocation, rotation automation, replicated policy, immutable audit export, exhaustive profile state gauges, support bundles, production telemetry/SLO evidence, and quotas remain open. |
 | G6 | Compatibility gateways | 🟡 | Named protocol/client matrix, differential tests, fuzzing, malformed frames, migration evidence | PR #123 and exact-main CI `34401493735` pass focused, Redis CLI 8.8.2, Kafka Java 4.3.1, RabbitMQ Java 5.35.0, and production-image regional-v2 tests for atomic `MSET`/`MSETNX`, bounded Kafka static identity rejoin, AMQP headers routing, provisioned native DLX forwarding, leader loss, and all-voter reopen. Differential/fuzz certification, remaining Redis commands, full static/cooperative/new-group Kafka protocols and transactions, durable AMQP topology/named-DLX/1.0, MQTT, and comparative performance remain open. |
 | G7 | Data services and integrations | 🟡 | Schemas, pipes, connectors, target execution, checkpoints, transaction boundaries | Replicated schemas/validation, transforms/enrichment, MQTT state, catalogs/endpoints, connector checkpoints/replay, leader-owned signed/Epoch/API/function/managed-target execution, HTTP/CloudEvents polling, and bounded immutable-object/PostgreSQL/MySQL/Kafka readers are implemented. Their pinned MinIO/database/broker conformance passes exact-main CI `34401493735`; private egress, live Azure/GCS identity, load/soak, and broader crash certification remain open. |
-| G8 | Managed operations | 🟡 | Durable Go reconciliation, operator, autoscaling, backup, metering, billing, private networking | The leader-elected operator reconciles 3–1,024 physical nodes, independent three/five-voter placements, a durable control owner, stable storage/network identity, encrypted backup/restore, guarded upgrade, and learner-first replacement. The exact-source four-node lifecycle passes exact-main CI `34401493735`; cloud CSI evidence, autoscaling, metering/billing, and private networking remain open. |
+| G8 | Managed operations | 🟡 | Durable Go reconciliation, operator, autoscaling, backup, metering, billing, private networking | The leader-elected operator reconciles 3–1,024 physical nodes, independent three/five-voter placements, a durable control owner, stable storage/network identity, encrypted backup/restore, guarded upgrade, and learner-first replacement. The beta.9 candidate adds Go-owned automatic exclusion/domain repair and serialized load rebalance while Rust retains Catalog/Raft authority. Protected candidate evidence, Kubernetes topology attestation, cloud CSI, autoscaling, metering/billing, and private networking remain open. |
 | G9 | Geo | ⬜ | Replication, RPO/RTO, promotion, failback, residency, split-brain drills | Not implemented |
-| G10 | Release readiness | 🟡 | Synchronized versions, CI, Pages, notes, verified tag provenance, artifacts, security and compatibility statements | `v0.2.0-beta.7` remains the published signed release. PR #123 is merged at `ac28b7d`; exact-main CI `34401493735` and Pages `34401493856` passed, making its protocol feature set eligible for the staged beta.8 version/notes PR. Beta.8 tag publication and independent artifact verification remain; raw signed binaries, package-manager artifacts, clean-cluster digest-pull evidence, and GA operating evidence stay open. |
+| G10 | Release readiness | 🟡 | Synchronized versions, CI, Pages, notes, verified tag provenance, artifacts, security and compatibility statements | `v0.2.0-beta.8` is published from exact `main` commit `d475cd4`; CI `34407029051`, Pages `34407029068`, and tag verification `34408680723` passed. Beta.9 automatic-placement code, complete local gates, real Compose/Kind evidence, release notes, and docs-only Pages assertions pass; protected PR/main evidence, tag, and artifacts remain in progress. Raw signed binaries, package-manager artifacts, clean-cluster digest-pull evidence, and GA operating evidence stay open. |
 
 ## Milestone readiness
 
@@ -116,6 +116,20 @@ complete.
 | PL-07 | Explain evidence and non-claims | TypeScript console | ✅ | Console verifies zone evidence and per-node capacity while naming rack placement, membership changes, and rebalance as absent |
 | PL-08 | Prove the vertical path in containers | Integration | ✅ | Campaign checks three topology endpoints, accepts a three-zone resource, rejects 15 shards before catalog apply, then repeats failover/recovery |
 | PL-09 | Pass protected pull-request evidence | GitHub | ✅ | PR #41 was squash-merged as `038b8c09`; exact-main CI `30477768038` and Pages `30477767094` passed |
+
+## Current private-beta delivery: automatic topology repair and rebalance
+
+| ID | Checklist item | Boundary | State | Evidence / acceptance |
+|---|---|---|---:|---|
+| AP-01 | Admit explicit rack and exclusion policy | Protobuf + Go | 🟡 | `minimum_racks`, `excluded_node_ids`, node `rack`, and achieved racks are bounded, normalized, generated, and tested locally for three/five-voter resources. |
+| AP-02 | Select the next deterministic safe move | Go placement | 🟡 | Exhaustive legal single-voter candidates prioritize policy repair, topology repair, then normalized load improvement with stable tie-breaking across N-node inventory tests. |
+| AP-03 | Refuse motion from stale or unsafe evidence | Go reconciliation | 🟡 | Automatic planning requires a fresh complete inventory, no active resource transition, matching assigned/committed voters, a reachable leader, repair quorum, and full reachability for optional rebalance. |
+| AP-04 | Commit through the existing Rust authority | Go → Rust | 🟡 | The deterministic token binds resource/generation/tablet/epoch/target; Rust revalidates the one-voter delta and retains sole ownership of learner catch-up, joint consensus, finalization, and reopen. |
+| AP-05 | Converge without conflating management and Catalog generations | Go reconciliation | 🟡 | Desired changes apply first; an explicit durable Catalog cursor permits a policy-only Go generation to reconcile through a Rust no-op without token rebinding. Later passes plan at most one resource transition and wait for Catalog finalization before another; delete uses the Catalog cursor. Focused regression tests pass locally. |
+| AP-06 | Publish exact transition and topology evidence | API + console | 🟡 | Protobuf, browser-safe JSON, and the console distinguish Go desired/observed from Rust Catalog/tablet generation alongside assigned/bootstrap/target/committed/reachable voters, zones/racks, exclusions, capacity, pending repair, and truthful non-claims. |
+| AP-07 | Prove real automatic repair and recovery | Compose + Kubernetes | 🟡 | The rebuilt regional Compose campaign passes three-rack admission/failover/reopen. A clean four-worker Kind run applies a managed exclusion, proves Go generation 2 / Catalog generation 1 coherence, commits and finalizes the automatic target, catches up the learner after compaction, stops the removed host, performs guarded rollout, restores fresh, matches digests, and cleans up. Protected evidence remains. |
+| AP-08 | Publish architecture and operating guidance | Docs + Pages | 🟡 | ADR-0047, PRD, architecture, API, runtime, voter-replacement, Kubernetes, testing, traceability, checklist, and public docs pass the exact docs-only bundle locally, including the Catalog-generation marker. Main-only publication remains. |
+| AP-09 | Pass full local, protected, and release gates | Quality + GitHub | 🟡 | `make check`, all-language build, rebuilt regional runtime, clean automatic-repair Kubernetes lifecycle, evidence-manifest verification, release synchronization, and exact docs-only assertions pass locally. Beta.9 PR/main CI and Pages, exact-main tag verification, and release publication remain. |
 
 ## Current read delivery: quorum-confirmed regional reads
 
@@ -494,7 +508,7 @@ complete.
 | MR-02 | Preserve committed membership across journal reopen | Rust consensus | 🟡 | Durable three/five-voter `ConfState`, learner and joint entries, catch-up promotion guard, stable-store reopen, and focused consensus histories pass locally. |
 | MR-03 | Materialize the transition target safely | Rust node | 🟡 | Current-or-target hosting starts the incoming runtime from immutable bootstrap identity without restarting retained voters; finalization stops only the removed host. |
 | MR-04 | Reconcile one action from committed state | Rust node | 🟡 | The leader-only worker reconstructs add-learner, catch-up, reconfigure, and Catalog-finalize actions; restart cannot skip a gate. |
-| MR-05 | Keep customer generations and management state coherent | Go + Rust | 🟡 | Membership maintenance preserves the customer resource generation; Go adopts policy-compliant finalized placement and reports active transitions as pending. |
+| MR-05 | Keep management and Catalog generations coherent | Go + Rust | 🟡 | Membership maintenance preserves both explicit clocks; Go adopts policy-compliant finalized placement, reports active transitions as pending, and keeps every tablet generation equal to the durable Rust Catalog cursor even after a Go-only policy update. |
 | MR-06 | Expose authorized transition evidence | API + Protobuf + BFF | 🟡 | Cluster-scoped `catalog.apply`, decimal-safe plan IDs, current/bootstrap/target/committed/reachable voter fields, and generated Go contracts pass local auth and race tests. |
 | MR-07 | Prove data continuity and full reopen | Real four-node runtime | 🟡 | A Stream moves from voters 1/2/3 to 1/2/4, retains committed data on node 4, stops node 3, shuts down every runtime, and reopens the same new voter set locally. |
 | MR-08 | Publish complete operating documentation | Docs + Pages | 🟡 | Architecture, API, runtime, operator, traceability, delivery, and the dedicated replacement runbook are synchronized locally; docs-only bundle and live Pages remain. |
@@ -545,12 +559,12 @@ complete.
 
 | ID | Checklist item | Boundary | State | Evidence / acceptance |
 |---|---|---|---:|---|
-| KAE-01 | Create a pinned disposable N-node environment | Python + Kind | 🟡 | One control-plane and four worker nodes run Kubernetes `v1.34.0` from a digest-pinned Kind image. The campaign validates exact image IDs, mTLS inputs, storage topology, node identities, and cleanup on success, failure, or interrupt. |
-| KAE-02 | Prove every managed profile through the real operator | Kubernetes + Go + Rust | 🟡 | A four-physical-node cluster with three Catalog voters reaches ready, then Stream, Cache, Queue, and Event Bus each commit and converge real traffic through authenticated control and data paths. |
-| KAE-03 | Prove encrypted backup and compacted-log voter replacement | Rust + operator | 🟡 | An AES-256-GCM semantic backup completes before one observed three-of-four Stream placement replaces a voter. The incoming learner receives a refreshed native snapshot after compaction, catches up, enters the target voter set, and preserves the Stream digest. |
-| KAE-04 | Prove the guarded rollout state machine | Go operator + maintenance CLI | 🟡 | An image request remains frozen until a post-request backup succeeds; all four ordinals then produce preflight, leadership-drain, exact-image readiness, and postflight receipts one at a time. Both tags intentionally resolve to one image ID, so mixed-version compatibility is not claimed. |
-| KAE-05 | Prove fresh-cluster restore and continued writes | Kubernetes + Rust | 🟡 | A separate `EpochCluster` restores the final encrypted object, matches exact Catalog and all-profile state digests, and commits another traffic sequence after restore. No RPO/RTO or production SLO is inferred. |
-| KAE-06 | Retain fail-closed machine-verifiable evidence | Python + CI | 🟡 | Atomic `evidence.json`, SHA-256 manifest, scoped source/deployment identity, image IDs, Kubernetes version, step receipts, result digests, and failure diagnostics are locally validated. CI uploads the same bundle for 30 days. |
+| KAE-01 | Create a pinned disposable N-node environment | Python + Kind | 🟡 | A clean candidate run created one control-plane and four workers on Kubernetes `v1.34.0` from the digest-pinned Kind image, validated exact images/trust/storage/identities, and deleted all five containers on success. Protected rerun remains. |
+| KAE-02 | Prove every managed profile through the real operator | Kubernetes + Go + Rust | 🟡 | The clean candidate run brought a four-physical-node cluster with three Catalog voters ready, then committed and converged Stream, Cache, Queue, and Event Bus traffic through authenticated control and data paths. Protected rerun remains. |
+| KAE-03 | Prove encrypted backup and compacted-log voter replacement | Rust + operator | 🟡 | The clean candidate run completed AES-256-GCM backup, advanced Go desired/observed generation while retaining the Catalog/tablet cursor, finalized one managed-policy three-of-four repair, refreshed the learner snapshot after compaction, stopped the removed host, and preserved the Stream digest. Protected rerun remains. |
+| KAE-04 | Prove the guarded rollout state machine | Go operator + maintenance CLI | 🟡 | The clean candidate run held an image request until a post-request backup succeeded; all four ordinals then produced preflight, leadership-drain, exact-image readiness, and postflight receipts one at a time. Both tags intentionally resolve to one image ID, so mixed-version compatibility is not claimed. |
+| KAE-05 | Prove fresh-cluster restore and continued writes | Kubernetes + Rust | 🟡 | The clean candidate run restored a separate `EpochCluster`, matched exact Catalog and all-profile state digests, and committed another traffic sequence. No RPO/RTO or production SLO is inferred. |
+| KAE-06 | Retain fail-closed machine-verifiable evidence | Python + CI | 🟡 | The clean candidate run atomically wrote `evidence.json` plus its SHA-256 manifest with source/deployment identity, image IDs, Kubernetes version, generation cursors, step receipts, and result digests. Protected artifact retention remains. |
 | KAE-07 | Close the protected beta gate | GitHub + release | ⬜ | The frozen candidate must pass the new protected `Live Kubernetes alpha-exit lifecycle` job, exact-main CI/Pages, and the published-digest rerun before beta release publication. |
 
 ## Current security delivery: bootstrap trust baseline
@@ -589,20 +603,20 @@ complete.
 
 | Order | Release action | Required evidence | State for next release |
 |---:|---|---|---:|
-| 1 | Select a completed, merged milestone boundary | PR #123 merged atomic Redis multi-set, bounded Kafka static identity, AMQP headers/native DLX recovery, tests, docs, and traceability; exact-main CI/Pages are green | ✅ |
-| 2 | Choose the next semantic prerelease version | `v0.2.0-beta.8` follows published beta.7 and does not already exist | ✅ |
-| 3 | Synchronize Rust, Go, Java, Python, TypeScript, SDK user agents, and lockfiles | `./scripts/check-release-version.sh` passes locally at `0.2.0-beta.8`; protected verification remains | 🟡 |
-| 4 | Write curated, version-controlled release notes | `docs/releases/v0.2.0-beta.8.md` names behavior, artifacts, upgrade guidance, verification, compatibility boundaries, and beta limitations; merge remains | 🟡 |
+| 1 | Select a completed, merged milestone boundary | The automatic placement candidate includes rack/exclusion policy, exact N-node admission, serialized repair/rebalance, separate Go/Catalog clocks, managed status/console, passing local real-runtime campaigns, docs, and traceability; protected gates and merge remain | 🟡 |
+| 2 | Choose the next semantic prerelease version | `v0.2.0-beta.9` follows published beta.8 and does not already exist | ✅ |
+| 3 | Synchronize Rust, Go, Java, Python, TypeScript, SDK user agents, and lockfiles | `./scripts/check-release-version.sh` passes locally at `0.2.0-beta.9`; protected verification remains | ✅ |
+| 4 | Write curated, version-controlled release notes | `docs/releases/v0.2.0-beta.9.md` names behavior, artifacts, upgrade guidance, verification, automatic-repair boundaries, and beta limitations | ✅ |
 | 5 | Pass protected `main` CI and main-only Pages | Both workflow runs green at the release commit | ⬜ |
-| 6 | Verify the live docs show beta.8 notes and the new protocol/recovery guidance | Public Pages bundle assertions | ⬜ |
+| 6 | Verify the live docs show beta.9 notes and the automatic placement/repair guidance | Public Pages bundle assertions | ⬜ |
 | 7 | Create an annotated tag at the exact current `main` commit | Local and remote commit IDs match | ⬜ |
 | 8 | Pass tag/version/main provenance workflow | Release-tag workflow green | ⬜ |
-| 9 | Publish the GitHub release from the checked-in notes | GitHub prerelease targets `v0.2.0-beta.8` | ⬜ |
+| 9 | Publish the GitHub release from the checked-in notes | GitHub prerelease targets `v0.2.0-beta.9` | ⬜ |
 | 10 | Verify downloads and package claims | Five OCI manifests and ten platform SBOM assets match the notes; package-manager publication remains deferred | ⬜ |
 | 11 | Start the next `Unreleased` section | Changelog prepared for continued delivery | ✅ |
 
-This table tracks the `v0.2.0-beta.8` sequence. The completed beta.7 evidence
-remains recorded in G10 and the OCI delivery rows above.
+This table tracks the `v0.2.0-beta.9` sequence. The completed beta.8 evidence
+remains recorded in G10 and the versioned release notes.
 
 ## Feature delivery template
 

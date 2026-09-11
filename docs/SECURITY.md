@@ -528,7 +528,7 @@ baseline at the managed and regional public boundaries:
   generation/tablet fence before forwarding. Public mutation DTOs reject the
   internal binding, and topology counters contain neither payloads nor
   credentials. This is same-runtime routing, not a substitute for authenticated
-  peer transport or per-target authorization: the current fixed voter set and
+  peer transport or per-target authorization: the current explicit voter set and
   bootstrap trust boundary must remain private.
 - Event Bus managed delivery acquires a replicated leader/lease fence before
   egress, reuses public-only DNS validation/pinning with redirects/proxies

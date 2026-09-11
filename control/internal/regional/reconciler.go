@@ -52,11 +52,23 @@ type AuthorityDeleteObservation struct {
 	Deleted    bool
 }
 
+// AuthorityMembershipPlanRequest commits one generation- and epoch-fenced
+// learner-first target for an existing tablet.
+type AuthorityMembershipPlanRequest struct {
+	RequestToken               string
+	Key                        resources.ResourceKey
+	TabletID                   uint64
+	ExpectedTabletEpoch        uint64
+	ExpectedResourceGeneration uint64
+	TargetVoterNodeIDs         []uint64
+}
+
 // Authority is the narrow boundary owned by regional Rust control.
 type Authority interface {
 	Inventory(context.Context) (NodeInventory, error)
 	Apply(context.Context, AuthorityApplyRequest) (AuthorityObservation, error)
 	Observe(context.Context, resources.ResourceKey) (AuthorityObservation, error)
+	PlanMembership(context.Context, AuthorityMembershipPlanRequest) (AuthorityObservation, error)
 	Delete(context.Context, AuthorityDeleteRequest) (AuthorityDeleteObservation, error)
 }
 
@@ -180,16 +192,25 @@ func (reconciler *Reconciler) Reconcile(
 	}
 	var observation AuthorityObservation
 	var placement PlacementDecision
-	if resource.Status.ObservedGeneration < resource.Generation {
+	var inventory NodeInventory
+	var freshInventory bool
+	applyingDesiredGeneration := resource.Status.ObservedGeneration < resource.Generation
+	expectedCatalogGeneration := resource.Status.EffectiveCatalogGeneration()
+	if applyingDesiredGeneration {
 		existingPlacements := placementsFromStatus(resource.Status.Tablets)
-		placement, err = reconciler.admit(ctx, resource, spec, existingPlacements)
+		placement, inventory, freshInventory, err = reconciler.admit(
+			ctx,
+			resource,
+			spec,
+			existingPlacements,
+		)
 		if err != nil {
 			return reconciler.fail(resource, IsRetryable(err), err)
 		}
 		observation, err = reconciler.authority.Apply(ctx, AuthorityApplyRequest{
 			RequestToken:       applyToken(resource),
 			Key:                resource.ResourceKey,
-			ExpectedGeneration: resource.Status.ObservedGeneration,
+			ExpectedGeneration: expectedCatalogGeneration,
 			ShardCount:         spec.ShardCount,
 			ReplicaCount:       spec.ReplicaCount,
 			TabletPlacements:   cloneTabletPlacements(placement.TabletPlacements),
@@ -199,7 +220,7 @@ func (reconciler *Reconciler) Reconcile(
 	} else {
 		observation, err = reconciler.authority.Observe(ctx, resource.ResourceKey)
 		if err == nil {
-			placement, err = reconciler.admit(
+			placement, inventory, freshInventory, err = reconciler.admit(
 				ctx,
 				resource,
 				spec,
@@ -210,11 +231,53 @@ func (reconciler *Reconciler) Reconcile(
 	if err != nil {
 		return reconciler.fail(resource, IsRetryable(err), err)
 	}
-	if err := validateObservation(resource, spec, placement, observation); err != nil {
+	if err := validateObservation(
+		resource,
+		spec,
+		placement,
+		observation,
+		expectedCatalogGeneration,
+		applyingDesiredGeneration,
+	); err != nil {
 		return reconciler.fail(resource, false, err)
 	}
+	transitionReason := PlacementTransitionReason("")
+	if !applyingDesiredGeneration && freshInventory && !hasActiveMembershipTransition(observation) {
+		transition, planErr := PlanNextPlacementTransition(
+			spec.Placement,
+			uint32(spec.ReplicaCount),
+			placementsFromObservation(observation),
+			inventory,
+		)
+		if planErr != nil {
+			return reconciler.fail(resource, IsRetryable(planErr), planErr)
+		}
+		if transition != nil {
+			tablet, found := observedTabletForShard(observation.Tablets, transition.ShardIndex)
+			if found && membershipTransitionSafe(tablet, transition.Reason) {
+				observation, placement, planErr = reconciler.commitPlacementTransition(
+					ctx,
+					resource,
+					spec,
+					placement,
+					observation,
+					*transition,
+				)
+				if planErr != nil {
+					return reconciler.fail(resource, IsRetryable(planErr), planErr)
+				}
+				transitionReason = transition.Reason
+			}
+		}
+	}
 
-	status := statusFromObservation(resource.Generation, spec, placement, observation)
+	status := statusFromObservation(
+		resource.Generation,
+		spec,
+		placement,
+		observation,
+		transitionReason,
+	)
 	updated, err := reconciler.registry.UpdateStatus(
 		resource.ResourceKey,
 		resource.Generation,
@@ -246,33 +309,36 @@ func (reconciler *Reconciler) admit(
 	resource resources.Resource,
 	spec desiredSpec,
 	existing []TabletPlacement,
-) (PlacementDecision, error) {
+) (PlacementDecision, NodeInventory, bool, error) {
 	inventory, inventoryErr := reconciler.authority.Inventory(ctx)
 	if inventoryErr == nil {
-		return AdmitPlacement(
+		decision, err := AdmitPlacement(
 			spec.Placement,
 			uint32(spec.ReplicaCount),
 			spec.ShardCount,
 			existing,
 			inventory,
 		)
+		return decision, inventory, true, err
 	}
 	// A catalog mutation always requires a fresh, complete capacity sample.
 	if resource.Status.ObservedGeneration < resource.Generation ||
 		!IsRetryable(inventoryErr) ||
 		resource.Status.Placement == nil {
-		return PlacementDecision{}, inventoryErr
+		return PlacementDecision{}, NodeInventory{}, false, inventoryErr
 	}
 	// During a transient node outage, the last generation-fenced admission
 	// remains evidence of intended fixed-voter topology. Route sampling below
 	// still determines current serving voters and degrades honestly.
-	return AdmitPlacement(
+	fallback := inventoryFromStatus(resource.Status.Placement)
+	decision, err := AdmitPlacement(
 		spec.Placement,
 		uint32(spec.ReplicaCount),
 		spec.ShardCount,
 		existing,
-		inventoryFromStatus(resource.Status.Placement),
+		fallback,
 	)
+	return decision, fallback, false, err
 }
 
 func inventoryFromStatus(status *resources.PlacementStatus) NodeInventory {
@@ -282,6 +348,7 @@ func inventoryFromStatus(status *resources.PlacementStatus) NodeInventory {
 			NodeID:                   node.NodeID,
 			Region:                   node.Region,
 			Zone:                     node.Zone,
+			Rack:                     legacyRack(node.Rack),
 			NodeClass:                node.NodeClass,
 			ConsensusVoterNodeIDs:    append([]uint64(nil), node.ConsensusVoterNodeIDs...),
 			MaxConsensusGroups:       node.MaxConsensusGroups,
@@ -290,6 +357,153 @@ func inventoryFromStatus(status *resources.PlacementStatus) NodeInventory {
 		})
 	}
 	return NodeInventory{Nodes: nodes}
+}
+
+func legacyRack(rack string) string {
+	if rack != "" {
+		return rack
+	}
+	return "unassigned"
+}
+
+func hasActiveMembershipTransition(observation AuthorityObservation) bool {
+	for _, tablet := range observation.Tablets {
+		if len(tablet.TargetVoterNodeIDs) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (reconciler *Reconciler) commitPlacementTransition(
+	ctx context.Context,
+	resource resources.Resource,
+	spec desiredSpec,
+	placement PlacementDecision,
+	observation AuthorityObservation,
+	transition PlacementTransition,
+) (AuthorityObservation, PlacementDecision, error) {
+	tablet, ok := observedTabletForShard(observation.Tablets, transition.ShardIndex)
+	if !ok || !slices.Equal(tablet.AssignedNodeIDs, transition.CurrentVoterNodeIDs) {
+		return AuthorityObservation{}, PlacementDecision{}, invalidAuthorityError(
+			"automatic membership plan no longer matches the observed tablet assignment",
+		)
+	}
+	planned, err := reconciler.authority.PlanMembership(ctx, AuthorityMembershipPlanRequest{
+		RequestToken:               membershipPlanToken(resource, tablet, transition),
+		Key:                        resource.ResourceKey,
+		TabletID:                   tablet.TabletID,
+		ExpectedTabletEpoch:        tablet.TabletEpoch,
+		ExpectedResourceGeneration: tablet.ResourceGeneration,
+		TargetVoterNodeIDs:         append([]uint64(nil), transition.TargetVoterNodeIDs...),
+	})
+	if err != nil {
+		return AuthorityObservation{}, PlacementDecision{}, err
+	}
+	placement = placementAfterTransition(placement, transition)
+	if err := validateObservation(
+		resource,
+		spec,
+		placement,
+		planned,
+		observation.Generation,
+		false,
+	); err != nil {
+		return AuthorityObservation{}, PlacementDecision{}, err
+	}
+	return planned, placement, nil
+}
+
+func observedTabletForShard(
+	tablets []resources.TabletStatus,
+	shard uint32,
+) (resources.TabletStatus, bool) {
+	for _, tablet := range tablets {
+		if tablet.ShardIndex == shard {
+			return tablet, true
+		}
+	}
+	return resources.TabletStatus{}, false
+}
+
+func membershipTransitionSafe(
+	tablet resources.TabletStatus,
+	reason PlacementTransitionReason,
+) bool {
+	if tablet.LeaderNodeID == 0 ||
+		!slices.Equal(tablet.AssignedNodeIDs, tablet.VoterNodeIDs) ||
+		!slices.Contains(tablet.ReachableVoterNodeIDs, tablet.LeaderNodeID) {
+		return false
+	}
+	requiredReachable := len(tablet.VoterNodeIDs)
+	if reason != TransitionRebalance {
+		requiredReachable = len(tablet.VoterNodeIDs)/2 + 1
+	}
+	return len(tablet.ReachableVoterNodeIDs) >= requiredReachable
+}
+
+func membershipPlanToken(
+	resource resources.Resource,
+	tablet resources.TabletStatus,
+	transition PlacementTransition,
+) string {
+	encoded, err := json.Marshal(struct {
+		Operation          string                `json:"operation"`
+		Key                resources.ResourceKey `json:"key"`
+		Generation         uint64                `json:"generation"`
+		TabletID           uint64                `json:"tablet_id"`
+		TabletEpoch        uint64                `json:"tablet_epoch"`
+		TargetVoterNodeIDs []uint64              `json:"target_voter_node_ids"`
+	}{
+		Operation:          "plan-membership",
+		Key:                resource.ResourceKey,
+		Generation:         resource.Generation,
+		TabletID:           tablet.TabletID,
+		TabletEpoch:        tablet.TabletEpoch,
+		TargetVoterNodeIDs: transition.TargetVoterNodeIDs,
+	})
+	if err != nil {
+		panic("validated membership transition must encode")
+	}
+	digest := sha256.Sum256(encoded)
+	return "epoch-control.plan-membership.v1." + hex.EncodeToString(digest[:])
+}
+
+func placementAfterTransition(
+	decision PlacementDecision,
+	transition PlacementTransition,
+) PlacementDecision {
+	decision.TabletPlacements = cloneTabletPlacements(decision.TabletPlacements)
+	for index := range decision.TabletPlacements {
+		if decision.TabletPlacements[index].ShardIndex == transition.ShardIndex {
+			decision.TabletPlacements[index].VoterNodeIDs = append(
+				[]uint64(nil),
+				transition.TargetVoterNodeIDs...,
+			)
+			break
+		}
+	}
+	decision.AdditionalGroupsByNode = cloneGroupReservations(decision.AdditionalGroupsByNode)
+	for _, nodeID := range transition.TargetVoterNodeIDs {
+		if !slices.Contains(transition.CurrentVoterNodeIDs, nodeID) {
+			decision.AdditionalGroupsByNode[nodeID]++
+		}
+	}
+	nodes := make(map[uint64]RegionalNode, len(decision.Nodes))
+	for _, node := range decision.Nodes {
+		nodes[node.NodeID] = node
+	}
+	decision.AchievedZones = minimumPlacementZones(decision.TabletPlacements, nodes)
+	decision.AchievedRacks = minimumPlacementRacks(decision.TabletPlacements, nodes)
+	return decision
+}
+
+func cloneGroupReservations(reservations map[uint64]uint32) map[uint64]uint32 {
+	cloned := make(map[uint64]uint32, len(reservations)+1)
+	for nodeID, groups := range reservations {
+		cloned[nodeID] = groups
+	}
+	return cloned
 }
 
 func placementsFromStatus(tablets []resources.TabletStatus) []TabletPlacement {
@@ -347,9 +561,10 @@ func (reconciler *Reconciler) Delete(
 		}
 	}
 	if resource.Status.ObservedGeneration > 0 {
-		if resource.Generation == math.MaxUint64 {
+		expectedCatalogGeneration := resource.Status.EffectiveCatalogGeneration()
+		if resource.Generation == math.MaxUint64 || expectedCatalogGeneration == math.MaxUint64 {
 			return resources.DeleteResult{}, &reconcileError{
-				message:   "resource generation is exhausted",
+				message:   "resource or Catalog generation is exhausted",
 				retryable: false,
 				cause:     conflictError("resource generation exhausted"),
 			}
@@ -357,7 +572,7 @@ func (reconciler *Reconciler) Delete(
 		observation, err := reconciler.authority.Delete(ctx, AuthorityDeleteRequest{
 			RequestToken:       deleteToken(resource),
 			Key:                resource.ResourceKey,
-			ExpectedGeneration: resource.Status.ObservedGeneration,
+			ExpectedGeneration: expectedCatalogGeneration,
 		})
 		if err != nil {
 			return resources.DeleteResult{}, &reconcileError{
@@ -366,7 +581,7 @@ func (reconciler *Reconciler) Delete(
 				cause:     err,
 			}
 		}
-		if !observation.Deleted || observation.Generation != resource.Generation+1 {
+		if !observation.Deleted || observation.Generation != expectedCatalogGeneration+1 {
 			return resources.DeleteResult{}, &reconcileError{
 				message:   "regional delete returned an inconsistent tombstone generation",
 				retryable: false,
@@ -488,11 +703,30 @@ func validateObservation(
 	spec desiredSpec,
 	placement PlacementDecision,
 	observation AuthorityObservation,
+	expectedCatalogGeneration uint64,
+	applyingDesiredGeneration bool,
 ) error {
-	if observation.Generation != resource.Generation {
+	if observation.Generation == 0 {
+		return invalidAuthorityError(
+			"regional authority returned zero Catalog generation for an observed resource",
+		)
+	}
+	validGeneration := observation.Generation == expectedCatalogGeneration
+	if applyingDesiredGeneration && expectedCatalogGeneration == 0 {
+		// Rust compares an apply for an absent resource with generation zero,
+		// while retaining its tombstone counter internally. A recreate can
+		// therefore return any positive historical successor no greater than
+		// the Go desired generation. The authenticated Catalog response becomes
+		// the explicit cursor for every later operation.
+		validGeneration = observation.Generation <= resource.Generation
+	} else if applyingDesiredGeneration && expectedCatalogGeneration < math.MaxUint64 {
+		validGeneration = validGeneration || observation.Generation == expectedCatalogGeneration+1
+	}
+	if !validGeneration {
 		return conflictError(fmt.Sprintf(
-			"regional generation %d does not match desired generation %d",
+			"regional Catalog generation %d did not continue from %d for desired generation %d",
 			observation.Generation,
+			expectedCatalogGeneration,
 			resource.Generation,
 		))
 	}
@@ -580,9 +814,11 @@ func statusFromObservation(
 	spec desiredSpec,
 	placement PlacementDecision,
 	observation AuthorityObservation,
+	transitionReason PlacementTransitionReason,
 ) resources.ResourceStatus {
 	tablets := append([]resources.TabletStatus(nil), observation.Tablets...)
-	ready := true
+	policySatisfied := placementSatisfiesPolicy(placement)
+	servingComplete := true
 	transitioning := false
 	for index := range tablets {
 		expected, ok := placementForShard(placement.TabletPlacements, tablets[index].ShardIndex)
@@ -601,7 +837,7 @@ func statusFromObservation(
 			tablets[index].ReachableVoterNodeIDs...,
 		)
 		transitioning = transitioning || len(tablets[index].TargetVoterNodeIDs) > 0
-		ready = ready &&
+		servingComplete = servingComplete &&
 			ok &&
 			len(tablets[index].TargetVoterNodeIDs) == 0 &&
 			slices.Equal(tablets[index].AssignedNodeIDs, expected.VoterNodeIDs) &&
@@ -613,19 +849,55 @@ func statusFromObservation(
 	message := "regional catalog generation and serving placement converged"
 	if transitioning {
 		phase = resources.PhasePending
-		message = "regional catalog generation converged; learner-first voter replacement is in progress"
-	} else if !ready {
+		message = transitionStatusMessage(transitionReason)
+	} else if !servingComplete {
 		phase = resources.PhaseDegraded
 		message = "regional catalog applied; serving placement is incomplete"
+	} else if !policySatisfied {
+		phase = resources.PhasePending
+		message = "regional catalog generation converged; automatic placement repair is pending"
 	}
 	return resources.ResourceStatus{
 		Phase:              phase,
 		ObservedGeneration: generation,
+		CatalogGeneration:  observation.Generation,
 		ObservedShardCount: spec.ShardCount,
 		Message:            message,
 		Tablets:            tablets,
 		Placement:          placementStatus(placement),
 	}
+}
+
+func transitionStatusMessage(reason PlacementTransitionReason) string {
+	switch reason {
+	case TransitionPolicyRepair:
+		return "regional catalog generation converged; automatic policy repair is in progress"
+	case TransitionTopologyRepair:
+		return "regional catalog generation converged; automatic topology repair is in progress"
+	case TransitionRebalance:
+		return "regional catalog generation converged; automatic placement rebalance is in progress"
+	default:
+		return "regional catalog generation converged; learner-first voter replacement is in progress"
+	}
+}
+
+func placementSatisfiesPolicy(decision PlacementDecision) bool {
+	if decision.AchievedZones < decision.Policy.MinimumZones ||
+		decision.AchievedRacks < decision.Policy.MinimumRacks {
+		return false
+	}
+	eligible := make(map[uint64]struct{}, len(decision.EligibleNodeIDs))
+	for _, nodeID := range decision.EligibleNodeIDs {
+		eligible[nodeID] = struct{}{}
+	}
+	for _, placement := range decision.TabletPlacements {
+		for _, nodeID := range placement.VoterNodeIDs {
+			if _, ok := eligible[nodeID]; !ok {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func placementStatus(decision PlacementDecision) *resources.PlacementStatus {
@@ -638,6 +910,7 @@ func placementStatus(decision PlacementDecision) *resources.PlacementStatus {
 			NodeID:                   node.NodeID,
 			Region:                   node.Region,
 			Zone:                     node.Zone,
+			Rack:                     node.Rack,
 			NodeClass:                node.NodeClass,
 			ConsensusVoterNodeIDs:    append([]uint64(nil), node.ConsensusVoterNodeIDs...),
 			MaxConsensusGroups:       node.MaxConsensusGroups,
@@ -648,8 +921,11 @@ func placementStatus(decision PlacementDecision) *resources.PlacementStatus {
 	return &resources.PlacementStatus{
 		AllowedRegions:    append([]string(nil), decision.Policy.AllowedRegions...),
 		MinimumZones:      decision.Policy.MinimumZones,
+		MinimumRacks:      decision.Policy.MinimumRacks,
 		RequiredNodeClass: decision.Policy.RequiredNodeClass,
+		ExcludedNodeIDs:   append([]uint64(nil), decision.Policy.ExcludedNodeIDs...),
 		AchievedZones:     decision.AchievedZones,
+		AchievedRacks:     decision.AchievedRacks,
 		Nodes:             nodes,
 	}
 }

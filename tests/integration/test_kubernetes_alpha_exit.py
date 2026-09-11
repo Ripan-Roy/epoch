@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
@@ -148,6 +149,45 @@ class KubernetesAlphaExitContractTest(unittest.TestCase):
     def test_single_voter_replacement_requires_spare_physical_capacity(self) -> None:
         with self.assertRaisesRegex(campaign.CampaignError, "non-voting physical node"):
             campaign.plan_single_voter_replacement(["1", "2", "3"], ["1", "2", "3"])
+
+    def test_first_observed_tablet_waits_through_incomplete_inventory(self) -> None:
+        self.assertIsNone(campaign.first_observed_tablet({}))
+        self.assertIsNone(campaign.first_observed_tablet({"tablets": []}))
+        self.assertIsNone(campaign.first_observed_tablet({"tablets": "invalid"}))
+        self.assertIsNone(campaign.first_observed_tablet({"tablets": [None]}))
+
+        tablet = {"tablet_id": "tablet-1", "voter_node_ids": ["1", "2", "3"]}
+        self.assertIs(campaign.first_observed_tablet({"tablets": [tablet]}), tablet)
+
+    def test_control_and_catalog_generation_cursors_may_diverge_coherently(
+        self,
+    ) -> None:
+        resource = {
+            "generation": "2",
+            "observed_generation": "2",
+            "catalog_generation": "1",
+            "tablets": [{"resource_generation": "1"}],
+        }
+        self.assertTrue(
+            campaign.generation_cursors_match(
+                resource, expected_control="2", expected_catalog="1"
+            )
+        )
+        self.assertFalse(
+            campaign.generation_cursors_match(
+                {**resource, "tablets": [{"resource_generation": "2"}]}
+            )
+        )
+        self.assertFalse(
+            campaign.generation_cursors_match({**resource, "catalog_generation": "3"})
+        )
+
+    def test_live_repair_is_requested_through_managed_policy(self) -> None:
+        source = inspect.getsource(campaign.Campaign.replace_stream_voter)
+
+        self.assertIn('placement["excluded_node_ids"]', source)
+        self.assertIn("automatic policy repair", source)
+        self.assertNotIn("/membership", source)
 
     def test_wait_until_rejects_an_unmet_contract(self) -> None:
         with self.assertRaisesRegex(campaign.CampaignError, "timed out waiting"):

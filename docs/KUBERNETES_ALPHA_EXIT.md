@@ -18,9 +18,12 @@ clients:
    profile traffic;
 4. capture an AES-256-GCM encrypted semantic backup and verify the operator's
    durable backup receipt;
-5. replace one of three tablet voters with the spare physical node through
-   learner admission, refreshed snapshot catch-up after log compaction, joint
-   consensus, Catalog finalization, and removed-host shutdown;
+5. exclude one currently assigned Stream voter through the managed resource
+   policy and wait for Go to commit the automatic spare-node target, followed by
+   Rust learner admission, refreshed snapshot catch-up after log compaction,
+   joint consensus, Catalog finalization, and removed-host shutdown. The Go
+   desired/observed generation advances once while the explicit Rust
+   `catalog_generation` and tablet routing generation remain unchanged;
 6. reject an image rollout until a post-request backup exists, then perform one
    preflight/drain/restart/postflight ordinal at a time;
 7. capture the final source state, restore it into a separate fresh
@@ -64,7 +67,9 @@ The runner writes `evidence.json` last through an atomic rename and creates a
 - Git revision, scoped source-input hash, dirty/drift state, immutable local
   image IDs, Kind node digest, and observed Kubernetes version;
 - every accepted lifecycle step and its relevant API/Kubernetes receipt;
-- pre/post replacement voters and the resulting profile state digest;
+- pre/post repair voters, the automatic-plan observation, the advanced Go
+  generation, unchanged Catalog/tablet generation, and the resulting profile
+  state digest;
 - upgrade Jobs, ordinals, images, and operator status;
 - source/restored Catalog and profile digests plus post-restore traffic state;
 - diagnostic resources and pod logs when the campaign fails.

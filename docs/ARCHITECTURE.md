@@ -396,16 +396,18 @@ dispatcher-owned. See
 [ADR-0020](adr/0020-regional-event-bus-v1-and-sdk-routing.md) and
 [ADR-0037](adr/0037-event-integration-platform.md).
 
-The current placement remains fixed at three configured voters, but it is now
-topology-aware at admission. Every Rust node reports its authenticated
-region/zone/class, exact fixed voter set, and live consensus-group capacity.
-Go requires a complete consistent inventory before catalog mutation, validates
-allowed regions, minimum zones, and node class, and charges only newly added
-shards. This is real constraint validation and capacity rejection, not dynamic
-membership, voter selection, online rebalance, rack placement, or a production
-placement API. See [ADR-0009](adr/0009-regional-tablet-catalog.md),
-[ADR-0012](adr/0012-topology-aware-admission.md), and
-[ADR-0013](adr/0013-quorum-read-barriers.md).
+Each tablet has an explicit three- or five-voter placement selected from 3–1,024
+physical nodes. Every Rust node reports its authenticated region/zone/rack/class,
+Catalog voter set, and live consensus-group capacity. Go requires a fresh,
+complete, consistent inventory before mutation, admits new shards against all
+constraints, and deterministically plans one learner-first policy repair,
+failure-domain repair, or load-improving rebalance at a time. Rust remains the
+sole Catalog/Raft membership authority. This is serialized automatic placement,
+not transactional fleet-wide reservation or a production placement SLO. See
+[ADR-0009](adr/0009-regional-tablet-catalog.md),
+[ADR-0012](adr/0012-topology-aware-admission.md),
+[ADR-0013](adr/0013-quorum-read-barriers.md), and
+[ADR-0047](adr/0047-automatic-topology-repair-and-rebalance.md).
 
 `crates/epoch-tablet` also contains the canonical single-partition Queue tablet
 state machine. `epoch-node` attaches it as the only selected profile for one
@@ -473,13 +475,16 @@ restore reference. This is complete snapshot restore, not log-based semantic
 PITR or a cross-tablet transaction.
 
 Catalog-planned single-voter replacement is implemented for explicit three-
-and five-voter tablets. Every transition materializes the incoming physical
-node, adds it as a non-voting learner, waits for leader-observed catch-up,
-commits joint consensus, removes the outgoing voter, and only then finalizes
-Catalog placement. Immutable bootstrap voters remain in the durable group
-identity so every current voter can reopen the committed membership. Automatic
-multi-tablet rebalance, rack-aware repair planning, follower linearizable
-routing, and cross-tablet read transactions remain disabled. The
+and five-voter tablets. Go now selects the next target automatically from fresh
+region/zone/rack/class, exclusion, and capacity evidence; it prioritizes policy
+repair, then failure-domain repair, then load improvement. Every transition
+materializes the incoming physical node, adds it as a non-voting learner, waits
+for leader-observed catch-up, commits joint consensus, removes the outgoing
+voter, and only then finalizes Catalog placement. Immutable bootstrap voters
+remain in the durable group identity so every current voter can reopen the
+committed membership. Planning is serialized per resource; transactional
+multi-resource reservation, split/merge, follower linearizable routing, and
+cross-tablet read transactions remain disabled. The
 supported Kubernetes runtime now requires authenticated TLS/mTLS transport;
 plaintext probe/Compose modes remain development-only. The leader-only
 regional read barrier is experimental. The byte contract is
@@ -910,16 +915,18 @@ abort/rollback where semantics allow it.
 Standalone mode uses the same API and state machines with one member. A
 three-or-more-node cluster enables quorum profiles.
 
-The alpha-exit branch implements one three- or five-voter Catalog, a capped
+The private-beta runtime implements one three- or five-voter Catalog, a capped
 multi-group supervisor, catalog-driven four-profile materialization,
 experimental HTTP discovery/data dispatch, and an authorization-protected
-node-local topology/capacity endpoint. Go validates region/zone/class
-constraints and limiting group capacity across the complete physical-node
-inventory. Rust owns learner-first single-voter replacement and durable
-joint-consensus reopen; Go reports current, bootstrap, and target membership
-without consuming a customer resource generation. Rack-aware solving,
-automatic fleet rebalance, split/merge repair, and a stable Rust gRPC
-administration server remain open.
+node-local topology/capacity endpoint. Go validates region/zone/rack/class,
+explicit exclusions, and limiting group capacity across the complete
+physical-node inventory. It deterministically selects and commits one safe
+automatic repair/rebalance target per resource, then waits for Rust-owned
+learner-first replacement and durable joint-consensus finalization before
+selecting another. Customer resource generations remain unchanged by these
+operational moves. Transactional multi-plan reservation, controller-wide
+hysteresis, split/merge repair, Kubernetes failure-domain attestation, and a
+stable Rust gRPC administration server remain open.
 
 ### 11.2 Go managed plane
 
@@ -935,10 +942,23 @@ The Go plane owns:
 
 Go persists management-only state in a transactional database. It submits
 versioned desired specs to the Rust regional administration API with an
-idempotency token and expected generation. Rust validates and commits the
-regional state, then returns `observed_generation` and conditions. Go never
-reads or changes segment files, Raft logs, queue indexes, transaction state, or
-cache memory.
+idempotency token and the last observed Rust Catalog generation. Rust validates
+and commits—or truthfully no-ops—the regional state, then returns its Catalog
+generation and conditions. Go never reads or changes segment files, Raft logs,
+queue indexes, transaction state, or cache memory.
+
+Go's desired `generation`/`observed_generation` and Rust's
+`catalog_generation` are separate monotonic cursors. Go-owned placement policy
+can change without altering the Rust resource specification or current tablet
+placement, so a successful policy-only reconciliation advances the Go clock
+while retaining the Catalog clock. Tablet `resource_generation`, SDK routing,
+membership plans, and Rust delete requests use the Catalog cursor. This avoids
+reusing one Rust proposal identity with a different payload after a legitimate
+Catalog no-op. Additive status decoding maps pre-separation records to the old
+invariant in which both clocks were equal. Creation still expects no live Rust
+resource (`0`); on recreation, Rust advances its retained tombstone and the
+authenticated response establishes the new explicit Catalog cursor even when
+the Go generation is higher.
 
 The Kubernetes operator follows the same boundary: custom resources express
 desired state, while the Rust Catalog and consensus groups are authoritative
@@ -968,7 +988,9 @@ through the same one-node partition boundary. See
 [Guarded data-plane upgrades](GUARDED_UPGRADES.md). One live same-binary
 retagged rollout passes locally; mixed-version compatibility remains open.
 Catalog-planned learner promotion/removal is owned by the Rust regional
-controller; policy-driven multi-tablet rebalance remains open.
+controller. Go selects at most one policy repair, topology repair, or load
+rebalance for a resource at a time; transactional fleet-wide reservation and
+rebalance hysteresis remain open.
 
 The current Go alpha runs a real `RegionalAdminService` gRPC server and a
 periodic reconciler. Its multi-endpoint HTTP authority adapter first collects
@@ -979,8 +1001,8 @@ capacity. It then applies desired generations to Rust, samples each configured
 node's route identity, and records only matching observed voters and leaders.
 An active replacement is reported as `pending` with separate assigned,
 bootstrap, target, committed, and reachable voter sets. Finalization preserves
-the customer resource generation; the next observation adopts the new
-policy-compliant placement and returns to `ready`.
+both the current Go desired generation and Rust Catalog generation; the next
+observation adopts the new policy-compliant placement and returns to `ready`.
 A partial outage reuses only the generation-fenced admitted topology while
 fresh route evidence becomes degraded; total authority loss clears the current
 sample. A later observation remains generation-fenced so it cannot mark newer

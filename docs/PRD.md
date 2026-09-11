@@ -8,7 +8,25 @@
 **Status:** Implementation-backed private beta candidate; later managed-service milestones remain open
 **Audience:** Founders, product, distributed-systems engineering, infrastructure, security, and design
 
-**Beta implementation note (10 September 2026):** The `v0.2.0-beta.8` candidate
+**Automatic placement implementation note (11 September 2026):** The beta.9
+candidate extends the N-node three/five-voter placement contract with explicit
+rack labels, minimum-rack policy, node exclusions, and deterministic serialized
+repair/rebalance. Go requires fresh complete topology, prioritizes policy repair
+over failure-domain repair over load improvement, checks quorum or full
+reachability according to risk, and commits one existing learner-first Catalog
+plan per resource. Rust remains the sole durable Catalog/Raft authority and
+performs catch-up, joint consensus, finalization, shutdown, and reopen. The
+browser contract exposes current/target/committed/reachable voters and exact
+zone/rack evidence. Go desired/observed generation is distinct from the Rust
+Catalog generation: a placement-policy-only update advances the former while
+`catalog_generation` and every tablet routing fence remain unchanged. This
+prevents a no-op Catalog apply from being retried under the same token with a
+different placement. Multi-resource transactional reservation, split/merge,
+Kubernetes rack attestation, multi-instance control ownership, and production
+chaos/SLO evidence remain open. See
+[ADR-0047](adr/0047-automatic-topology-repair-and-rebalance.md).
+
+**Beta implementation note (10 September 2026):** The `v0.2.0-beta.8` release
 retains the alpha-exit TLS/mTLS, encrypted recovery, durable three/five-voter
 membership, guarded Kubernetes rollout, bounded source adapters, signed
 multi-architecture OCI distribution, fault harness, and exact-source
@@ -41,8 +59,8 @@ durable AMQP topology, named-DLX routing, and full differential/fuzz/performance
 evidence remain open and are not implied by this slice. Production node and
 gateway images also pass protected evidence-v2 campaigns through gateway
 replacement, profile-leader loss, all-voter `SIGKILL`/same-volume reopen, and
-replica-digest convergence. Feature PR #123 and exact-main CI/Pages are green;
-only the beta.8 tag publication sequence remains. See ADR-0046.
+replica-digest convergence. Feature PR #123, exact-main CI/Pages, tag
+verification, and the published beta.8 prerelease are green. See ADR-0046.
 
 **Implementation note (13 August 2026):** The fixed-three-voter regional Rust
 runtime now owns automatic maintenance for the implemented time-driven profile

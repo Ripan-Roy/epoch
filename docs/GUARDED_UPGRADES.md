@@ -127,6 +127,6 @@ implemented claims:
 - a real mixed-version Kubernetes upgrade and rollback;
 - version/capability negotiation across adjacent released binaries;
 - load/SLO stop signals beyond the consensus invariants;
-- policy-driven automatic multi-tablet rebalance (explicit learner-first
-  single-voter replacement is implemented separately); and
+- transactional fleet-wide reservation and upgrade-aware suppression around
+  the implemented serialized automatic repair/rebalance path; and
 - exact-main CI, published OCI provenance, and release notes.

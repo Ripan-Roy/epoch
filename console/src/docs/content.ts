@@ -16,7 +16,7 @@ import regionalBusPythonSource from "../quickstarts/regional_bus/quickstart.py?r
 
 export const repositoryUrl = "https://github.com/Ripan-Roy/epoch";
 export const repositoryDocsUrl = `${repositoryUrl}/blob/main/docs`;
-export const releaseVersion = "0.2.0-beta.8";
+export const releaseVersion = "0.2.0-beta.9";
 
 export type LanguageId = "go" | "java" | "python";
 
@@ -159,7 +159,7 @@ cd /secure/evidence/epoch-kubernetes-alpha-exit
 sha256sum --check manifest.sha256`;
 
 export const releaseArtifactVerification = `# Exact tags are discovery handles; deploy the verified digest.
-export EPOCH_RELEASE_TAG=v0.2.0-beta.8
+export EPOCH_RELEASE_TAG=v0.2.0-beta.9
 export EPOCH_IMAGE=ghcr.io/ripan-roy/epoch-node
 
 docker buildx imagetools inspect "$EPOCH_IMAGE:$EPOCH_RELEASE_TAG"
@@ -221,7 +221,7 @@ epoch-backup decrypt \
   --output /tmp/epoch-regional-backup.json`;
 
 export const guardedUpgradeSpec = `spec:
-  nodeImage: ghcr.io/ripan-roy/epoch-node:v0.2.0-beta.8
+  nodeImage: ghcr.io/ripan-roy/epoch-node:v0.2.0-beta.9
   upgrade:
     backupMaxAgeSeconds: 3600
     stepDeadlineSeconds: 900
@@ -255,6 +255,30 @@ curl --fail-with-body --request POST \
     "expected_tablet_epoch": "1",
     "expected_resource_generation": "7",
     "target_voter_node_ids": ["1", "2", "4"]
+  }'`;
+
+export const automaticPlacementRepair = `# Evacuate one physical node through desired policy.
+# The Go desired generation increments once. A policy-only apply retains the
+# Rust catalog_generation/tablet resource_generation, and the later
+# learner-first membership transition increments neither clock.
+curl --fail-with-body --request PUT \
+  https://epoch-control.example/v1/resources \
+  --cacert /secure/epoch-ca.crt \
+  --header "authorization: Bearer $EPOCH_TOKEN" \
+  --header 'content-type: application/json' \
+  --data '{
+    "request_token":"evacuate-orders-node-3-v1",
+    "expected_generation":7,
+    "resource":{
+      "organization":"acme","project":"shop","environment":"prod",
+      "namespace":"core","kind":"stream","name":"orders",
+      "governance":{"owner":"team:platform","cost_center":"cc-1042",
+        "classification":"confidential","tags":{"service":"orders"}},
+      "spec":{"shard_count":3,"replica_count":3,"placement":{
+        "allowed_regions":["ap-south"],"minimum_zones":3,"minimum_racks":3,
+        "required_node_class":"general-purpose","excluded_node_ids":[3]
+      }}
+    }
   }'`;
 
 export const voterReplacementStatus = `# During catch-up this reports pending with current and target voters.
@@ -319,7 +343,7 @@ curl --fail-with-body --request PUT http://127.0.0.1:8080/v1/resources \
       "kind":"stream","name":"orders",
       "governance":{"owner":"team:platform","cost_center":"cc-1042","classification":"confidential","tags":{"service":"orders","profile":"stream"}},
       "spec":{"shard_count":3,"replica_count":3,"placement":{
-        "allowed_regions":["ap-south"],"minimum_zones":3,
+        "allowed_regions":["ap-south"],"minimum_zones":3,"minimum_racks":3,
         "required_node_class":"general-purpose"
       }}
     }

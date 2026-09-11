@@ -8,7 +8,7 @@ operator, and proves the complete managed lifecycle:
 
 * mTLS-protected operator install and four-profile traffic;
 * encrypted semantic backup;
-* one joint-consensus voter replacement from physical node 3 to node 4;
+* one policy-driven automatic joint-consensus voter repair;
 * backup-gated, one-node-at-a-time guarded image rollout; and
 * fresh-cluster restore with exact Catalog and profile digest comparison.
 
@@ -314,6 +314,47 @@ def plan_single_voter_replacement(
     added = candidates[0]
     target = sorted([voter for voter in voters if voter != removed] + [added], key=int)
     return removed, added, target
+
+
+def first_observed_tablet(resource: object) -> dict[str, Any] | None:
+    if not isinstance(resource, dict):
+        return None
+    tablets = resource.get("tablets")
+    if not isinstance(tablets, list) or not tablets:
+        return None
+    tablet = tablets[0]
+    return tablet if isinstance(tablet, dict) else None
+
+
+def generation_cursors_match(
+    resource: object,
+    *,
+    expected_control: str | None = None,
+    expected_catalog: str | None = None,
+) -> bool:
+    if not isinstance(resource, dict):
+        return False
+    desired = resource.get("generation")
+    observed = resource.get("observed_generation")
+    catalog = resource.get("catalog_generation")
+    values = (desired, observed, catalog)
+    if not all(isinstance(value, str) and value.isdecimal() for value in values):
+        return False
+    if not 0 < int(catalog) <= int(observed) <= int(desired):
+        return False
+    if expected_control is not None and (
+        desired != expected_control or observed != expected_control
+    ):
+        return False
+    if expected_catalog is not None and catalog != expected_catalog:
+        return False
+    tablets = resource.get("tablets")
+    if not isinstance(tablets, list):
+        return False
+    return all(
+        isinstance(tablet, dict) and tablet.get("resource_generation") == catalog
+        for tablet in tablets
+    )
 
 
 class Campaign:
@@ -1272,10 +1313,20 @@ class Campaign:
                     return resource
             return None
 
+        def stream_inventory_with_tablet() -> dict[str, Any] | None:
+            resource = stream_inventory()
+            return resource if first_observed_tablet(resource) is not None else None
+
         before = wait_until(
-            "Stream inventory before voter replacement", stream_inventory
+            "Stream inventory before voter replacement", stream_inventory_with_tablet
         )
-        tablet = before["tablets"][0]
+        tablet = first_observed_tablet(before)
+        require(tablet is not None, f"Stream inventory omitted its tablet: {before}")
+        require(
+            generation_cursors_match(before),
+            f"Stream inventory has incoherent generation cursors: {before}",
+        )
+        initial_catalog_generation = before["catalog_generation"]
         initial_voters = tablet.get("voter_node_ids")
         require(
             isinstance(initial_voters, list)
@@ -1287,39 +1338,87 @@ class Campaign:
         removed_voter, added_voter, target_voters = plan_single_voter_replacement(
             initial_voters, ["1", "2", "3", "4"]
         )
-        body = {
-            "request_token": (
-                f"kubernetes-replace-stream-{removed_voter}-with-{added_voter}-v1"
-            ),
-            "expected_tablet_epoch": tablet["tablet_epoch"],
-            "expected_resource_generation": tablet["resource_generation"],
-            "target_voter_node_ids": target_voters,
-        }
-        accepted: HTTPResponse | None = None
-        for ordinal in range(3):
-            response = self.data_request(
-                SOURCE_CLUSTER,
-                ordinal,
-                "POST",
-                "/experimental/v1/regional/catalog/tablets/"
-                f"{tablet['tablet_id']}/membership",
-                body=body,
+        body = managed_resource_request("stream", "orders")
+        body["request_token"] = (
+            f"kubernetes-evacuate-stream-{removed_voter}-to-{added_voter}-v1"
+        )
+        body["expected_generation"] = int(before["generation"])
+        placement = body["resource"]["spec"]["placement"]
+        require(isinstance(placement, dict), f"invalid placement request: {body}")
+        placement["excluded_node_ids"] = [int(removed_voter)]
+        response = self.control_request(
+            SOURCE_CLUSTER,
+            "PUT",
+            "/v1/resources",
+            body=body,
+        )
+        require(
+            response.status == 200,
+            f"managed evacuation returned {response.status}: {response.document}",
+        )
+        updated_control_generation = str(int(before["generation"]) + 1)
+        last_inventory: dict[str, Any] = {}
+
+        def automatically_planned() -> dict[str, Any] | None:
+            nonlocal last_inventory
+            resource = stream_inventory()
+            if resource is None:
+                return None
+            last_inventory = resource
+            current = first_observed_tablet(resource)
+            if current is None:
+                return None
+            if not generation_cursors_match(
+                resource,
+                expected_control=updated_control_generation,
+                expected_catalog=initial_catalog_generation,
+            ):
+                return None
+            active = (
+                resource.get("phase") == "pending"
+                and current.get("target_voter_node_ids") == target_voters
+                and "automatic policy repair" in str(resource.get("message", ""))
             )
-            if response.status == 202:
-                accepted = response
-                break
-            require(
-                response.status == 409,
-                f"membership plan returned {response.status}: {response.document}",
+            finalized = (
+                resource.get("phase") == "ready"
+                and current.get("voter_node_ids") == target_voters
+                and current.get("target_voter_node_ids", []) == []
             )
-        require(accepted is not None, "no Catalog leader accepted the membership plan")
+            if not active and not finalized:
+                return None
+            return {
+                **resource,
+                "automatic_plan_message": (
+                    resource.get("message")
+                    if active
+                    else "automatic repair finalized before the pending observation"
+                ),
+            }
+
+        try:
+            planned = wait_until(
+                "Go control plane to commit an automatic voter repair",
+                automatically_planned,
+                timeout=180,
+            )
+        except CampaignError as error:
+            raise CampaignError(
+                f"{error}; last managed Stream inventory: "
+                f"{json.dumps(last_inventory, sort_keys=True)}"
+            ) from error
 
         def replaced() -> dict[str, Any] | None:
             resource = stream_inventory()
             if resource is None or resource.get("phase") != "ready":
                 return None
-            current = resource.get("tablets", [None])[0]
-            if not isinstance(current, dict):
+            current = first_observed_tablet(resource)
+            if current is None:
+                return None
+            if not generation_cursors_match(
+                resource,
+                expected_control=updated_control_generation,
+                expected_catalog=initial_catalog_generation,
+            ):
                 return None
             if (
                 current.get("voter_node_ids") == target_voters
@@ -1338,15 +1437,22 @@ class Campaign:
             stream["voter_node_ids"] == target_voters,
             f"Stream state did not move to replacement node {added_voter}: {stream}",
         )
+        after_tablet = first_observed_tablet(after)
+        require(
+            after_tablet is not None, f"repaired Stream omitted its tablet: {after}"
+        )
         evidence = {
             "tablet_id": tablet["tablet_id"],
             "removed_voter": removed_voter,
             "added_voter": added_voter,
             "before_voters": initial_voters,
-            "after_voters": after["tablets"][0]["voter_node_ids"],
+            "managed_generation": after["generation"],
+            "catalog_generation": after["catalog_generation"],
+            "automatic_plan_message": planned["automatic_plan_message"],
+            "after_voters": after_tablet["voter_node_ids"],
             "state_digest": stream["state_digest"],
         }
-        self.record_step("stream-single-voter-replacement", **evidence)
+        self.record_step("stream-automatic-voter-repair", **evidence)
         return evidence
 
     def patch_upgrade_and_wait_for_backup_gate(self) -> None:
@@ -1584,7 +1690,7 @@ class Campaign:
                     "install",
                     "traffic",
                     "encrypted_backup",
-                    "single_voter_replacement",
+                    "automatic_policy_voter_repair",
                     "guarded_same_binary_tag_rollout",
                     "fresh_restore",
                     "digest_comparison",
@@ -1658,7 +1764,7 @@ class Campaign:
                 "invariants": {
                     "all_profiles_committed": True,
                     "encrypted_backup_reflected_in_status": True,
-                    "single_voter_replacement_finalized": True,
+                    "automatic_policy_voter_repair_finalized": True,
                     "fresh_backup_gated_upgrade": True,
                     "one_node_at_a_time_maintenance_jobs": True,
                     "catalog_digest_restored": True,

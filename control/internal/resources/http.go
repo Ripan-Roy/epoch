@@ -359,6 +359,7 @@ type regionalResourceView struct {
 	Name               string                          `json:"name"`
 	Generation         string                          `json:"generation"`
 	ObservedGeneration string                          `json:"observed_generation"`
+	CatalogGeneration  string                          `json:"catalog_generation"`
 	WorkloadProfile    string                          `json:"workload_profile"`
 	ShardCount         uint32                          `json:"shard_count"`
 	Phase              ResourcePhase                   `json:"phase"`
@@ -411,8 +412,11 @@ type regionalTabletView struct {
 type regionalPlacementView struct {
 	AllowedRegions    []string           `json:"allowed_regions"`
 	MinimumZones      uint32             `json:"minimum_zones"`
+	MinimumRacks      uint32             `json:"minimum_racks"`
 	RequiredNodeClass string             `json:"required_node_class,omitempty"`
+	ExcludedNodeIDs   []string           `json:"excluded_node_ids,omitempty"`
 	AchievedZones     uint32             `json:"achieved_zones"`
+	AchievedRacks     uint32             `json:"achieved_racks"`
 	Nodes             []regionalNodeView `json:"nodes"`
 }
 
@@ -420,6 +424,7 @@ type regionalNodeView struct {
 	NodeID                   string   `json:"node_id"`
 	Region                   string   `json:"region"`
 	Zone                     string   `json:"zone"`
+	Rack                     string   `json:"rack"`
 	NodeClass                string   `json:"node_class"`
 	ConsensusVoterNodeIDs    []string `json:"consensus_voter_node_ids"`
 	MaxConsensusGroups       uint32   `json:"max_consensus_groups"`
@@ -533,6 +538,7 @@ func regionalResourceForBrowser(resource Resource) regionalResourceView {
 		Name:               resource.Name,
 		Generation:         strconv.FormatUint(resource.Generation, 10),
 		ObservedGeneration: strconv.FormatUint(resource.Status.ObservedGeneration, 10),
+		CatalogGeneration:  strconv.FormatUint(resource.Status.EffectiveCatalogGeneration(), 10),
 		WorkloadProfile:    browserWorkloadProfile(resource.Kind),
 		ShardCount:         browserShardCount(resource.Spec),
 		Phase:              resource.Status.Phase,
@@ -630,6 +636,7 @@ func regionalPlacementForBrowser(status *PlacementStatus) *regionalPlacementView
 			NodeID:                   strconv.FormatUint(node.NodeID, 10),
 			Region:                   node.Region,
 			Zone:                     node.Zone,
+			Rack:                     node.Rack,
 			NodeClass:                node.NodeClass,
 			ConsensusVoterNodeIDs:    voters,
 			MaxConsensusGroups:       node.MaxConsensusGroups,
@@ -637,11 +644,18 @@ func regionalPlacementForBrowser(status *PlacementStatus) *regionalPlacementView
 			AvailableConsensusGroups: node.AvailableConsensusGroups,
 		})
 	}
+	excluded := make([]string, 0, len(status.ExcludedNodeIDs))
+	for _, nodeID := range status.ExcludedNodeIDs {
+		excluded = append(excluded, strconv.FormatUint(nodeID, 10))
+	}
 	return &regionalPlacementView{
 		AllowedRegions:    append([]string(nil), status.AllowedRegions...),
 		MinimumZones:      status.MinimumZones,
+		MinimumRacks:      status.MinimumRacks,
 		RequiredNodeClass: status.RequiredNodeClass,
+		ExcludedNodeIDs:   excluded,
 		AchievedZones:     status.AchievedZones,
+		AchievedRacks:     status.AchievedRacks,
 		Nodes:             nodes,
 	}
 }

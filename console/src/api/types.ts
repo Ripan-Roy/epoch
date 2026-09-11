@@ -84,7 +84,11 @@ export interface RegionalTabletPlacement {
   tabletEpoch: string;
   resourceGeneration: string;
   desiredReplicas: number;
+  assignedNodeIds: string[];
+  bootstrapVoterNodeIds: string[];
+  targetVoterNodeIds: string[];
   voterNodeIds: string[];
+  reachableVoterNodeIds: string[];
   leaderNodeId: string | null;
 }
 
@@ -98,6 +102,7 @@ export interface RegionalResource {
   name: string;
   generation: string;
   observedGeneration: string;
+  catalogGeneration: string;
   workloadProfile: string;
   tablets: RegionalTabletPlacement[];
   phase: RegionalResourcePhase;
@@ -127,7 +132,11 @@ export interface ManagedRegionalTablet {
   tablet_epoch: string;
   resource_generation: string;
   desired_replicas: number;
+  assigned_node_ids?: string[];
+  bootstrap_voter_node_ids?: string[];
+  target_voter_node_ids?: string[];
   voter_node_ids: string[];
+  reachable_voter_node_ids?: string[];
   leader_node_id: string | null;
 }
 
@@ -135,6 +144,7 @@ export interface ManagedRegionalNode {
   node_id: string;
   region: string;
   zone: string;
+  rack?: string;
   node_class: string;
   consensus_voter_node_ids: string[];
   max_consensus_groups: number;
@@ -145,8 +155,11 @@ export interface ManagedRegionalNode {
 export interface ManagedRegionalPlacement {
   allowed_regions: string[];
   minimum_zones: number;
+  minimum_racks?: number;
   required_node_class?: string;
+  excluded_node_ids?: string[];
   achieved_zones: number;
+  achieved_racks?: number;
   nodes: ManagedRegionalNode[];
 }
 
@@ -154,6 +167,7 @@ export interface RegionalPlacementNode {
   nodeId: string;
   region: string;
   zone: string;
+  rack: string;
   nodeClass: string;
   consensusVoterNodeIds: string[];
   maxConsensusGroups: number;
@@ -164,8 +178,11 @@ export interface RegionalPlacementNode {
 export interface RegionalPlacementEvidence {
   allowedRegions: string[];
   minimumZones: number;
+  minimumRacks: number;
   requiredNodeClass: string | null;
+  excludedNodeIds: string[];
   achievedZones: number;
+  achievedRacks: number;
   nodes: RegionalPlacementNode[];
 }
 
@@ -179,6 +196,8 @@ export interface ManagedRegionalResource {
   name: string;
   generation: string;
   observed_generation: string;
+  /** Rust Catalog cursor. Older rolling-upgrade servers omit this field. */
+  catalog_generation?: string;
   workload_profile: string;
   shard_count: number;
   phase: RegionalResourcePhase;

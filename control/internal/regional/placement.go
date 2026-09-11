@@ -1,9 +1,12 @@
 package regional
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -18,7 +21,61 @@ const (
 type PlacementPolicy struct {
 	AllowedRegions    []string `json:"allowed_regions,omitempty"`
 	MinimumZones      uint32   `json:"minimum_zones,omitempty"`
+	MinimumRacks      uint32   `json:"minimum_racks,omitempty"`
 	RequiredNodeClass string   `json:"required_node_class,omitempty"`
+	ExcludedNodeIDs   []uint64 `json:"excluded_node_ids,omitempty"`
+}
+
+// UnmarshalJSON accepts ordinary JSON numbers from the provisional HTTP API
+// and canonical decimal strings emitted by protobuf JSON for uint64 fields.
+// Every other placement field keeps strict unknown-field rejection.
+func (policy *PlacementPolicy) UnmarshalJSON(encoded []byte) error {
+	type placementPolicyDocument struct {
+		AllowedRegions    []string          `json:"allowed_regions"`
+		MinimumZones      uint32            `json:"minimum_zones"`
+		MinimumRacks      uint32            `json:"minimum_racks"`
+		RequiredNodeClass string            `json:"required_node_class"`
+		ExcludedNodeIDs   []json.RawMessage `json:"excluded_node_ids"`
+	}
+	var document placementPolicyDocument
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&document); err != nil {
+		return err
+	}
+	excluded := make([]uint64, 0, len(document.ExcludedNodeIDs))
+	for _, raw := range document.ExcludedNodeIDs {
+		nodeID, err := decodePlacementNodeID(raw)
+		if err != nil {
+			return fmt.Errorf("excluded_node_ids: %w", err)
+		}
+		excluded = append(excluded, nodeID)
+	}
+	*policy = PlacementPolicy{
+		AllowedRegions:    document.AllowedRegions,
+		MinimumZones:      document.MinimumZones,
+		MinimumRacks:      document.MinimumRacks,
+		RequiredNodeClass: document.RequiredNodeClass,
+		ExcludedNodeIDs:   excluded,
+	}
+	return nil
+}
+
+func decodePlacementNodeID(raw json.RawMessage) (uint64, error) {
+	if len(raw) == 0 {
+		return 0, fmt.Errorf("node ID is required")
+	}
+	encoded := string(raw)
+	if raw[0] == '"' {
+		if err := json.Unmarshal(raw, &encoded); err != nil {
+			return 0, fmt.Errorf("node ID must be an unsigned decimal integer")
+		}
+	}
+	value, err := strconv.ParseUint(encoded, 10, 64)
+	if err != nil || strconv.FormatUint(value, 10) != encoded {
+		return 0, fmt.Errorf("node ID must be a canonical unsigned decimal integer")
+	}
+	return value, nil
 }
 
 // RegionalNode is one policy-protected physical-node topology and capacity
@@ -28,6 +85,7 @@ type RegionalNode struct {
 	NodeID                   uint64   `json:"node_id"`
 	Region                   string   `json:"region"`
 	Zone                     string   `json:"zone"`
+	Rack                     string   `json:"rack"`
 	NodeClass                string   `json:"node_class"`
 	ConsensusVoterNodeIDs    []uint64 `json:"consensus_voter_node_ids"`
 	MaxConsensusGroups       uint32   `json:"max_consensus_groups"`
@@ -53,6 +111,7 @@ type PlacementDecision struct {
 	TabletPlacements       []TabletPlacement
 	EligibleNodeIDs        []uint64
 	AchievedZones          uint32
+	AchievedRacks          uint32
 	AdditionalGroupsByNode map[uint64]uint32
 	Nodes                  []RegionalNode
 	Policy                 PlacementPolicy
@@ -66,8 +125,31 @@ const (
 	AdmissionInconsistentInventory  AdmissionCode = "inconsistent_regional_inventory"
 	AdmissionFixedVotersIneligible  AdmissionCode = "eligible_nodes_insufficient"
 	AdmissionInsufficientZones      AdmissionCode = "insufficient_zones"
+	AdmissionInsufficientRacks      AdmissionCode = "insufficient_racks"
+	AdmissionIncompatibleDomains    AdmissionCode = "incompatible_failure_domains"
 	AdmissionConsensusGroupCapacity AdmissionCode = "consensus_group_capacity"
 )
+
+// PlacementTransitionReason identifies why a learner-first membership move
+// is required. Policy and topology repair always take precedence over load
+// balancing.
+type PlacementTransitionReason string
+
+const (
+	TransitionPolicyRepair   PlacementTransitionReason = "policy_repair"
+	TransitionTopologyRepair PlacementTransitionReason = "topology_repair"
+	TransitionRebalance      PlacementTransitionReason = "rebalance"
+)
+
+// PlacementTransition is one safe single-voter target. Reconciliation commits
+// at most one transition per resource and waits for it to finalize before
+// planning another.
+type PlacementTransition struct {
+	ShardIndex          uint32
+	CurrentVoterNodeIDs []uint64
+	TargetVoterNodeIDs  []uint64
+	Reason              PlacementTransitionReason
+}
 
 // AdmissionError names the limiting node and capacity where applicable.
 type AdmissionError struct {
@@ -108,22 +190,7 @@ func AdmitPlacement(
 		return PlacementDecision{}, err
 	}
 
-	allowedRegions := make(map[string]struct{}, len(policy.AllowedRegions))
-	for _, region := range policy.AllowedRegions {
-		allowedRegions[region] = struct{}{}
-	}
-	eligible := make([]RegionalNode, 0, len(nodes))
-	for _, node := range nodes {
-		if len(allowedRegions) > 0 {
-			if _, allowed := allowedRegions[node.Region]; !allowed {
-				continue
-			}
-		}
-		if policy.RequiredNodeClass != "" && node.NodeClass != policy.RequiredNodeClass {
-			continue
-		}
-		eligible = append(eligible, node)
-	}
+	eligible := eligibleNodes(policy, nodes)
 	if len(eligible) < int(replicas) {
 		return PlacementDecision{}, admissionError(
 			AdmissionFixedVotersIneligible,
@@ -144,9 +211,27 @@ func AdmitPlacement(
 			),
 		)
 	}
+	racks := make(map[string]struct{}, len(eligible))
+	for _, node := range eligible {
+		racks[node.Rack] = struct{}{}
+	}
+	if uint32(len(racks)) < policy.MinimumRacks {
+		return PlacementDecision{}, admissionError(
+			AdmissionInsufficientRacks,
+			fmt.Sprintf(
+				"eligible nodes span %d racks; %d are required",
+				len(racks),
+				policy.MinimumRacks,
+			),
+		)
+	}
 
 	eligibleByID := make(map[uint64]RegionalNode, len(eligible))
+	nodesByID := make(map[uint64]RegionalNode, len(nodes))
 	eligibleIDs := make([]uint64, 0, len(eligible))
+	for _, node := range nodes {
+		nodesByID[node.NodeID] = node
+	}
 	for _, node := range eligible {
 		eligibleByID[node.NodeID] = node
 		eligibleIDs = append(eligibleIDs, node.NodeID)
@@ -155,8 +240,6 @@ func AdmitPlacement(
 		existing,
 		desiredShards,
 		replicas,
-		policy.MinimumZones,
-		eligibleByID,
 	)
 	if err != nil {
 		return PlacementDecision{}, err
@@ -167,6 +250,7 @@ func AdmitPlacement(
 			shard,
 			replicas,
 			policy.MinimumZones,
+			policy.MinimumRacks,
 			eligible,
 			additionalByNode,
 		)
@@ -181,7 +265,8 @@ func AdmitPlacement(
 	return PlacementDecision{
 		TabletPlacements:       cloneTabletPlacements(placements),
 		EligibleNodeIDs:        eligibleIDs,
-		AchievedZones:          minimumPlacementZones(placements, eligibleByID),
+		AchievedZones:          minimumPlacementZones(placements, nodesByID),
+		AchievedRacks:          minimumPlacementRacks(placements, nodesByID),
 		AdditionalGroupsByNode: additionalByNode,
 		Nodes:                  cloneRegionalNodes(nodes),
 		Policy:                 policy,
@@ -220,6 +305,7 @@ func validateInventory(inventory NodeInventory, replicas uint32) ([]RegionalNode
 		}
 		if !validTopologyLabel(node.Region) ||
 			!validTopologyLabel(node.Zone) ||
+			!validTopologyLabel(node.Rack) ||
 			!validTopologyLabel(node.NodeClass) {
 			return nil, admissionError(
 				AdmissionInconsistentInventory,
@@ -286,8 +372,6 @@ func validateExistingPlacements(
 	existing []TabletPlacement,
 	desiredShards uint32,
 	replicas uint32,
-	minimumZones uint32,
-	eligible map[uint64]RegionalNode,
 ) ([]TabletPlacement, error) {
 	placements := cloneTabletPlacements(existing)
 	for index, placement := range placements {
@@ -305,23 +389,9 @@ func validateExistingPlacements(
 				fmt.Sprintf("existing shard %d has an invalid voter assignment", placement.ShardIndex),
 			)
 		}
-		zones := make(map[string]struct{}, len(placement.VoterNodeIDs))
-		for _, nodeID := range placement.VoterNodeIDs {
-			node, ok := eligible[nodeID]
-			if !ok {
-				return nil, admissionError(
-					AdmissionFixedVotersIneligible,
-					fmt.Sprintf("existing shard %d voter %d is no longer eligible", placement.ShardIndex, nodeID),
-				)
-			}
-			zones[node.Zone] = struct{}{}
-		}
-		if uint32(len(zones)) < minimumZones {
-			return nil, admissionError(
-				AdmissionInsufficientZones,
-				fmt.Sprintf("existing shard %d spans %d zones; %d are required", placement.ShardIndex, len(zones), minimumZones),
-			)
-		}
+		// A data-tablet voter can disappear from the current physical-node
+		// inventory. Preserve the committed assignment so the repair planner
+		// can replace it; catalog voter completeness is validated separately.
 	}
 	return placements, nil
 }
@@ -330,14 +400,15 @@ func selectTabletVoters(
 	shard uint32,
 	replicas uint32,
 	minimumZones uint32,
+	minimumRacks uint32,
 	nodes []RegionalNode,
 	additional map[uint64]uint32,
 ) (TabletPlacement, error) {
 	selected := make(map[uint64]struct{}, replicas)
 	selectedZones := make(map[string]struct{}, replicas)
+	selectedRacks := make(map[string]struct{}, replicas)
 	voters := make([]uint64, 0, replicas)
 	for uint32(len(voters)) < replicas {
-		requireNewZone := uint32(len(selectedZones)) < minimumZones
 		candidates := make([]RegionalNode, 0, len(nodes))
 		for _, node := range nodes {
 			if _, alreadySelected := selected[node.NodeID]; alreadySelected {
@@ -346,15 +417,11 @@ func selectTabletVoters(
 			if additional[node.NodeID] >= node.AvailableConsensusGroups {
 				continue
 			}
-			if requireNewZone {
-				if _, zoneUsed := selectedZones[node.Zone]; zoneUsed {
-					continue
-				}
-			}
 			candidates = append(candidates, node)
 		}
-		if len(candidates) == 0 {
-			limiting := limitingCapacityNode(nodes, selected, selectedZones, requireNewZone, additional)
+		needed := int(replicas) - len(voters)
+		if len(candidates) < needed {
+			limiting := limitingCapacityNode(nodes, selected, additional)
 			return TabletPlacement{}, &AdmissionError{
 				Code:           AdmissionConsensusGroupCapacity,
 				Message:        fmt.Sprintf("no eligible node has capacity for shard %d voter %d", shard, len(voters)+1),
@@ -364,11 +431,45 @@ func selectTabletVoters(
 			}
 		}
 		sort.Slice(candidates, func(left, right int) bool {
+			leftDomains := newDomainCount(candidates[left], selectedZones, selectedRacks)
+			rightDomains := newDomainCount(candidates[right], selectedZones, selectedRacks)
+			if leftDomains != rightDomains {
+				return leftDomains > rightDomains
+			}
 			return placementNodeLess(candidates[left], candidates[right], additional)
 		})
-		chosen := candidates[0]
+		remaining := needed - 1
+		chosenIndex := -1
+		for index, candidate := range candidates {
+			if domainsRemainSatisfiable(
+				candidate,
+				nodes,
+				selected,
+				selectedZones,
+				selectedRacks,
+				remaining,
+				minimumZones,
+				minimumRacks,
+				additional,
+			) {
+				chosenIndex = index
+				break
+			}
+		}
+		if chosenIndex < 0 {
+			return TabletPlacement{}, admissionError(
+				AdmissionIncompatibleDomains,
+				fmt.Sprintf(
+					"no %d-voter assignment can jointly satisfy minimum zones and racks for shard %d",
+					replicas,
+					shard,
+				),
+			)
+		}
+		chosen := candidates[chosenIndex]
 		selected[chosen.NodeID] = struct{}{}
 		selectedZones[chosen.Zone] = struct{}{}
+		selectedRacks[chosen.Rack] = struct{}{}
 		voters = append(voters, chosen.NodeID)
 	}
 	slices.Sort(voters)
@@ -394,19 +495,20 @@ func placementNodeLess(left, right RegionalNode, additional map[uint64]uint32) b
 func limitingCapacityNode(
 	nodes []RegionalNode,
 	selected map[uint64]struct{},
-	selectedZones map[string]struct{},
-	requireNewZone bool,
 	additional map[uint64]uint32,
 ) RegionalNode {
-	var limiting RegionalNode
 	for _, node := range nodes {
 		if _, alreadySelected := selected[node.NodeID]; alreadySelected {
 			continue
 		}
-		if requireNewZone {
-			if _, zoneUsed := selectedZones[node.Zone]; zoneUsed {
-				continue
-			}
+		if additional[node.NodeID] >= node.AvailableConsensusGroups {
+			return node
+		}
+	}
+	var limiting RegionalNode
+	for _, node := range nodes {
+		if _, alreadySelected := selected[node.NodeID]; alreadySelected {
+			continue
 		}
 		if limiting.NodeID == 0 || placementNodeLess(node, limiting, additional) {
 			limiting = node
@@ -415,14 +517,213 @@ func limitingCapacityNode(
 	return limiting
 }
 
+func domainsRemainSatisfiable(
+	candidate RegionalNode,
+	nodes []RegionalNode,
+	selected map[uint64]struct{},
+	selectedZones map[string]struct{},
+	selectedRacks map[string]struct{},
+	remaining int,
+	minimumZones uint32,
+	minimumRacks uint32,
+	additional map[uint64]uint32,
+) bool {
+	zones := cloneStringSet(selectedZones)
+	racks := cloneStringSet(selectedRacks)
+	zones[candidate.Zone] = struct{}{}
+	racks[candidate.Rack] = struct{}{}
+	chosen := make(map[uint64]struct{}, len(selected)+1)
+	for nodeID := range selected {
+		chosen[nodeID] = struct{}{}
+	}
+	chosen[candidate.NodeID] = struct{}{}
+	return canCompletePlacementDomains(
+		nodes,
+		chosen,
+		zones,
+		racks,
+		remaining,
+		minimumZones,
+		minimumRacks,
+		additional,
+		0,
+	)
+}
+
+// canCompletePlacementDomains performs an exact bounded look-ahead. Replica
+// sets contain only three or five nodes, so this prevents the greedy selector
+// from accepting a locally attractive zone/rack pair that cannot be completed
+// even though a different first choice would satisfy both domains.
+func canCompletePlacementDomains(
+	nodes []RegionalNode,
+	selected map[uint64]struct{},
+	selectedZones map[string]struct{},
+	selectedRacks map[string]struct{},
+	remaining int,
+	minimumZones uint32,
+	minimumRacks uint32,
+	additional map[uint64]uint32,
+	start int,
+) bool {
+	if remaining == 0 {
+		return uint32(len(selectedZones)) >= minimumZones &&
+			uint32(len(selectedRacks)) >= minimumRacks
+	}
+	if !domainCompletionBoundsHold(
+		nodes,
+		selected,
+		selectedZones,
+		selectedRacks,
+		remaining,
+		minimumZones,
+		minimumRacks,
+		additional,
+		start,
+	) {
+		return false
+	}
+	if uint32(len(selectedZones)) >= minimumZones &&
+		uint32(len(selectedRacks)) >= minimumRacks {
+		return true
+	}
+	for index := start; index < len(nodes); index++ {
+		node := nodes[index]
+		if _, exists := selected[node.NodeID]; exists ||
+			additional[node.NodeID] >= node.AvailableConsensusGroups {
+			continue
+		}
+		_, hadZone := selectedZones[node.Zone]
+		_, hadRack := selectedRacks[node.Rack]
+		selected[node.NodeID] = struct{}{}
+		selectedZones[node.Zone] = struct{}{}
+		selectedRacks[node.Rack] = struct{}{}
+		complete := canCompletePlacementDomains(
+			nodes,
+			selected,
+			selectedZones,
+			selectedRacks,
+			remaining-1,
+			minimumZones,
+			minimumRacks,
+			additional,
+			index+1,
+		)
+		delete(selected, node.NodeID)
+		if !hadZone {
+			delete(selectedZones, node.Zone)
+		}
+		if !hadRack {
+			delete(selectedRacks, node.Rack)
+		}
+		if complete {
+			return true
+		}
+	}
+	return false
+}
+
+func domainCompletionBoundsHold(
+	nodes []RegionalNode,
+	selected map[uint64]struct{},
+	selectedZones map[string]struct{},
+	selectedRacks map[string]struct{},
+	remaining int,
+	minimumZones uint32,
+	minimumRacks uint32,
+	additional map[uint64]uint32,
+	start int,
+) bool {
+	available := 0
+	availableZones := cloneStringSet(selectedZones)
+	availableRacks := cloneStringSet(selectedRacks)
+	domainGains := make([]int, 0, len(nodes)-start)
+	for _, node := range nodes[start:] {
+		if _, exists := selected[node.NodeID]; exists ||
+			additional[node.NodeID] >= node.AvailableConsensusGroups {
+			continue
+		}
+		available++
+		gain := 0
+		if _, exists := selectedZones[node.Zone]; !exists {
+			gain++
+		}
+		if _, exists := selectedRacks[node.Rack]; !exists {
+			gain++
+		}
+		domainGains = append(domainGains, gain)
+		availableZones[node.Zone] = struct{}{}
+		availableRacks[node.Rack] = struct{}{}
+	}
+	if available < remaining ||
+		!canReachDomainMinimum(len(selectedZones), len(availableZones), remaining, minimumZones) ||
+		!canReachDomainMinimum(len(selectedRacks), len(availableRacks), remaining, minimumRacks) {
+		return false
+	}
+	zoneDeficit := max(0, int(minimumZones)-len(selectedZones))
+	rackDeficit := max(0, int(minimumRacks)-len(selectedRacks))
+	sort.Sort(sort.Reverse(sort.IntSlice(domainGains)))
+	maximumGain := 0
+	for index := 0; index < remaining && index < len(domainGains); index++ {
+		maximumGain += domainGains[index]
+	}
+	return maximumGain >= zoneDeficit+rackDeficit
+}
+
+func canReachDomainMinimum(current, available, remaining int, minimum uint32) bool {
+	maximum := min(available, current+remaining)
+	return uint32(maximum) >= minimum
+}
+
+func newDomainCount(
+	node RegionalNode,
+	zones map[string]struct{},
+	racks map[string]struct{},
+) int {
+	count := 0
+	if _, exists := zones[node.Zone]; !exists {
+		count++
+	}
+	if _, exists := racks[node.Rack]; !exists {
+		count++
+	}
+	return count
+}
+
+func cloneStringSet(values map[string]struct{}) map[string]struct{} {
+	cloned := make(map[string]struct{}, len(values)+1)
+	for value := range values {
+		cloned[value] = struct{}{}
+	}
+	return cloned
+}
+
 func minimumPlacementZones(placements []TabletPlacement, nodes map[uint64]RegionalNode) uint32 {
 	minimum := uint32(0)
 	for _, placement := range placements {
 		zones := make(map[string]struct{}, len(placement.VoterNodeIDs))
 		for _, nodeID := range placement.VoterNodeIDs {
-			zones[nodes[nodeID].Zone] = struct{}{}
+			if node, exists := nodes[nodeID]; exists {
+				zones[node.Zone] = struct{}{}
+			}
 		}
 		count := uint32(len(zones))
+		if minimum == 0 || count < minimum {
+			minimum = count
+		}
+	}
+	return minimum
+}
+
+func minimumPlacementRacks(placements []TabletPlacement, nodes map[uint64]RegionalNode) uint32 {
+	minimum := uint32(0)
+	for _, placement := range placements {
+		racks := make(map[string]struct{}, len(placement.VoterNodeIDs))
+		for _, nodeID := range placement.VoterNodeIDs {
+			if node, exists := nodes[nodeID]; exists {
+				racks[node.Rack] = struct{}{}
+			}
+		}
+		count := uint32(len(racks))
 		if minimum == 0 || count < minimum {
 			minimum = count
 		}
@@ -445,10 +746,19 @@ func normalizePlacementPolicy(
 	if policy.MinimumZones == 0 {
 		policy.MinimumZones = 1
 	}
+	if policy.MinimumRacks == 0 {
+		policy.MinimumRacks = 1
+	}
 	if policy.MinimumZones > replicas {
 		return PlacementPolicy{}, admissionError(
 			AdmissionInvalidRequest,
 			"minimum zones cannot exceed the requested replica count",
+		)
+	}
+	if policy.MinimumRacks > replicas {
+		return PlacementPolicy{}, admissionError(
+			AdmissionInvalidRequest,
+			"minimum racks cannot exceed the requested replica count",
 		)
 	}
 	if policy.RequiredNodeClass != "" && !validTopologyLabel(policy.RequiredNodeClass) {
@@ -484,7 +794,49 @@ func normalizePlacementPolicy(
 	}
 	slices.Sort(normalizedRegions)
 	policy.AllowedRegions = normalizedRegions
+	if len(policy.ExcludedNodeIDs) > maxRegionalNodes {
+		return PlacementPolicy{}, admissionError(
+			AdmissionInvalidRequest,
+			fmt.Sprintf("excluded node IDs cannot contain more than %d entries", maxRegionalNodes),
+		)
+	}
+	policy.ExcludedNodeIDs = append([]uint64(nil), policy.ExcludedNodeIDs...)
+	slices.Sort(policy.ExcludedNodeIDs)
+	if len(policy.ExcludedNodeIDs) > 0 &&
+		(policy.ExcludedNodeIDs[0] == 0 || hasAdjacentDuplicate(policy.ExcludedNodeIDs)) {
+		return PlacementPolicy{}, admissionError(
+			AdmissionInvalidRequest,
+			"excluded node IDs must be distinct and non-zero",
+		)
+	}
 	return policy, nil
+}
+
+func eligibleNodes(policy PlacementPolicy, nodes []RegionalNode) []RegionalNode {
+	allowedRegions := make(map[string]struct{}, len(policy.AllowedRegions))
+	for _, region := range policy.AllowedRegions {
+		allowedRegions[region] = struct{}{}
+	}
+	excluded := make(map[uint64]struct{}, len(policy.ExcludedNodeIDs))
+	for _, nodeID := range policy.ExcludedNodeIDs {
+		excluded[nodeID] = struct{}{}
+	}
+	eligible := make([]RegionalNode, 0, len(nodes))
+	for _, node := range nodes {
+		if _, omitted := excluded[node.NodeID]; omitted {
+			continue
+		}
+		if len(allowedRegions) > 0 {
+			if _, allowed := allowedRegions[node.Region]; !allowed {
+				continue
+			}
+		}
+		if policy.RequiredNodeClass != "" && node.NodeClass != policy.RequiredNodeClass {
+			continue
+		}
+		eligible = append(eligible, node)
+	}
+	return eligible
 }
 
 func validTopologyLabel(value string) bool {

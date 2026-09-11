@@ -456,9 +456,10 @@ make compose-regional-down
 
 The Compose model enables `EPOCH_REGIONAL_RUNTIME_ENABLED`, reserves consensus
 group 1 for the catalog, shares one peer listener per node, caps the process at
-16 groups, configures three `ap-south` zones, and mounts one independent volume
-per voter. `EPOCH_REGIONAL_REGION`, `EPOCH_REGIONAL_ZONE`, and
-`EPOCH_REGIONAL_NODE_CLASS` configure bounded node-local placement identity.
+16 groups, configures three `ap-south` zones and racks, and mounts one
+independent volume per voter. `EPOCH_REGIONAL_REGION`, `EPOCH_REGIONAL_ZONE`,
+`EPOCH_REGIONAL_RACK`, and `EPOCH_REGIONAL_NODE_CLASS` configure bounded
+node-local placement identity.
 The default Go process
 connects to only `127.0.0.1:7601`; the example overrides it with all three
 published Compose node URLs. The console points only at the Go HTTP address;
@@ -525,8 +526,9 @@ It binds loopback ports and launches three local `epoch-node` children, so the
 test needs permission to create local listeners. The same test provisions
 Queue and three-shard Stream destinations, publishes a keyed Bus event, waits
 for both target commits and source acknowledgements, then proves one target
-record remains after all-voter reopen. Dynamic
-membership, general voter selection, rack placement, production peer
+record remains after all-voter reopen. Explicit three/five-voter membership,
+rack-aware selection, and serialized automatic repair/rebalance are now
+implemented separately. Transactional multi-resource planning, production peer
 identity/TLS, user-exportable backups/PITR, follower read routing, and
 transactional assignment-plus-offset handoff, background session maintenance,
 and cooperative revoke remain subsequent slices. Internal native voter
@@ -537,7 +539,9 @@ and automatic local scheduling is documented in
 [ADR-0009](adr/0009-regional-tablet-catalog.md) and
 [ADR-0010](adr/0010-durable-managed-metadata.md), the bootstrap security
 boundary in [ADR-0011](adr/0011-bootstrap-authz-audit-baseline.md), and
-topology admission in [ADR-0012](adr/0012-topology-aware-admission.md).
+topology admission in [ADR-0012](adr/0012-topology-aware-admission.md), and
+automatic placement planning in
+[ADR-0047](adr/0047-automatic-topology-repair-and-rebalance.md).
 Regional route/SDK behavior is frozen in
 [ADR-0017](adr/0017-regional-stream-v1-and-sdk-routing.md) and
 [ADR-0018](adr/0018-regional-queue-v1-and-sdk-routing.md), and

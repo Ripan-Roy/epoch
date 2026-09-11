@@ -5,10 +5,11 @@ changing the tablet, consensus-group, tablet-epoch, or customer resource
 generation. The physical regional inventory may contain 3–1,024 nodes; only
 the explicit voter set for one tablet changes.
 
-This is an operational repair primitive, not an automatic balancing solver.
 Rust owns the Catalog plan, Raft transition, durable membership, and tablet
-materialization. Go validates and reports the resulting policy-compliant
-placement without rewriting Raft storage.
+materialization. Go may either expose the manual administrative primitive or
+automatically select its next exact target from fresh topology. The automatic
+planner enforces region, zone, rack, class, exclusion, reachability, and
+capacity policy without rewriting Raft storage.
 
 ## Safety contract
 
@@ -32,9 +33,36 @@ state. Process restart therefore cannot skip learner catch-up or revert to the
 bootstrap voter list. An in-memory pending map suppresses duplicate in-flight
 requests but is not correctness state.
 
+## Automatic planning
+
+On a reconciliation pass after the current customer generation is already
+observed, Go may commit one target automatically. It requires fresh complete
+topology from every configured physical node and no active transition for the
+resource. Candidate priority is:
+
+1. replace an excluded, missing, wrong-region, or wrong-class voter;
+2. improve a minimum-zone or minimum-rack deficit; then
+3. improve normalized regional group utilization without weakening policy.
+
+Policy/topology repairs require an observed leader and a reachable current
+quorum. Optional load rebalance requires every current voter to be reachable.
+The chosen incoming node must advertise capacity. Go waits for Catalog
+finalization before it plans the resource's next move, so a multi-shard
+resource converges through a series of independently durable single-voter
+transitions.
+
+The management and data-plane clocks are explicit. `generation` and
+`observed_generation` identify the accepted and reconciled Go desired state;
+`catalog_generation` identifies the Rust Catalog resource version and equals
+the tablet `resource_generation`. Adding an exclusion may advance only the Go
+clock because placement policy is Go-owned. The subsequent membership plan is
+fenced by the unchanged Catalog/tablet generation and does not advance either
+clock.
+
 ## Plan API
 
-The provisional regional administration route is:
+The same provisional regional administration route remains available to the Go
+reconciler and authorized operators:
 
 ```text
 POST /experimental/v1/regional/catalog/tablets/{tablet_id}/membership
@@ -54,8 +82,8 @@ JavaScript clients.
 ```
 
 The target must be strictly sorted, contain exactly three or five nodes as
-declared by the tablet, remain inside the immutable physical-node directory,
-and differ from the current set by exactly one removal and one addition. The
+declared by the tablet, remain inside the physical-node directory, and differ
+from the current set by exactly one removal and one addition. The
 request token is replay-safe and cannot be rebound. Stale generation/epoch,
 conflicting active plans, multi-voter replacement, zero/duplicate IDs, and
 direct placement mutation are rejected before Catalog state changes.
@@ -67,10 +95,10 @@ The accepted response is `202 Accepted`. Its resource contains:
 - `target_voter_node_ids`: the active transition target, or an empty array
   after finalization.
 
-Planning and finalization do not increment the customer resource generation.
-That generation fences application-spec changes and SDK routing; operational
-membership is separately fenced by the exact generation, tablet epoch,
-committed plan, and durable Raft configuration.
+Planning and finalization do not increment either generation clock. Go desired
+generation fences management updates. Rust Catalog/tablet generation fences
+SDK routing and the operational membership request together with tablet epoch,
+the committed plan, and durable Raft configuration.
 
 ## Observe the transition
 
@@ -83,6 +111,9 @@ curl --fail-with-body \
 ```
 
 An active replacement reports resource phase `pending` and separates:
+
+- `generation` / `observed_generation`: accepted and reconciled Go intent;
+- `catalog_generation`: Rust Catalog cursor shared by the tablets;
 
 - `assigned_node_ids`: current Catalog placement;
 - `bootstrap_voter_node_ids`: immutable initial voters;
@@ -113,14 +144,24 @@ cargo test -p epoch-node --lib \
 go test -race ./control/internal/regional ./control/internal/resources
 ```
 
+The regional Compose campaign additionally proves explicit three-rack
+admission and browser-safe achieved-rack evidence. The live Kubernetes runner
+updates a managed Stream with one current voter in `excluded_node_ids`, waits
+for the Go reconciler to commit the automatic target, then proves the same
+learner-first data-continuity/reopen path without directly calling this plan
+API.
+
 ## Current limits
 
 - A plan replaces exactly one voter; it never changes three voters directly.
 - Only explicit three- and five-voter groups are supported.
-- Rack-aware selection, automatic multi-tablet balancing, concurrent
-  reservation across several plans, split/merge repair, and evacuation of an
-  entire physical node remain open.
+- Rack-aware selection and one-resource-at-a-time automatic policy/topology
+  repair and load balancing are implemented. Transactional reservation across
+  several resources or controller instances, whole-fleet evacuation progress,
+  explicit hysteresis, split/merge repair, and multi-failure repair remain
+  open.
 - One exact-source local Kubernetes campaign passes backup compaction, refreshed
-  learner snapshot catch-up, replacement, rollout, restore, and digest equality.
-  Protected CI and broader container/network/disk fault injection remain
-  required before the alpha-exit checklist row is complete.
+  learner snapshot catch-up, automatic policy repair, rollout, restore, and
+  digest equality. Kubernetes does not yet attest rack labels from cloud/node
+  topology. Protected CI and broader container/network/disk fault injection
+  remain required before the beta checklist row is complete.

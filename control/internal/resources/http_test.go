@@ -254,6 +254,7 @@ func TestHTTPRegionalInventoryIsBrowserSafeAndExcludesLocalResources(t *testing.
 	}
 	assertJSONString(t, resource, "generation", "1")
 	assertJSONString(t, resource, "observed_generation", "1")
+	assertJSONString(t, resource, "catalog_generation", "1")
 	if resource["canonical_name"] != "acme/payments/production/orders/stream/events" ||
 		resource["phase"] != "ready" ||
 		resource["shard_count"] != float64(1) ||
@@ -293,6 +294,25 @@ func TestHTTPRegionalInventoryIsBrowserSafeAndExcludesLocalResources(t *testing.
 	node, ok := nodes[0].(map[string]any)
 	if !ok || node["node_id"] != "1" || node["zone"] != "ap-south-1a" {
 		t.Fatalf("regional placement node = %#v", nodes[0])
+	}
+}
+
+func TestRegionalBrowserKeepsControlAndCatalogGenerationsSeparate(t *testing.T) {
+	view := regionalResourceForBrowser(Resource{
+		Generation: 9007199254740994,
+		Status: ResourceStatus{
+			ObservedGeneration: 9007199254740994,
+			CatalogGeneration:  9007199254740993,
+			Tablets: []TabletStatus{{
+				ResourceGeneration: 9007199254740993,
+			}},
+		},
+	})
+	if view.Generation != "9007199254740994" ||
+		view.ObservedGeneration != "9007199254740994" ||
+		view.CatalogGeneration != "9007199254740993" ||
+		view.Tablets[0].ResourceGeneration != "9007199254740993" {
+		t.Fatalf("browser generations = %+v", view)
 	}
 }
 

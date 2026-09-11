@@ -129,7 +129,7 @@ Administrative resources use:
 ```text
 metadata: id, name, parent, labels, tags, generation, create/update/delete times
 spec:     desired typed profile, guarantees, limits, placement, policy references
-status:   observed_generation, conditions, achieved placement, endpoints, operation
+status:   observed_generation, catalog_generation, conditions, achieved placement, endpoints, operation
 ```
 
 `spec` is declarative. `status` is service-owned and cannot be supplied by a
@@ -150,10 +150,13 @@ achieved. Callers must use the phase and conditions, and data requests must
 carry the resource generation and tablet epoch returned by routing. The
 experimental regional runtime now allocates, commits, materializes, discovers,
 and generation/epoch-fences these identities across several independent
-three- or five-voter groups. Membership maintenance does not consume a customer
-resource generation: an active target makes control status `pending`, while
-group epoch, exact resource generation, and the committed Catalog plan fence
-every step.
+three- or five-voter groups. `generation` and `observed_generation` are the Go
+desired-state clock. `catalog_generation` is the Rust Catalog cursor and equals
+every returned tablet's `resource_generation`. A placement-policy-only change
+can therefore report desired/observed generation 8 with Catalog/tablet
+generation 7. Membership maintenance consumes neither clock: an active target
+makes control status `pending`, while group epoch, exact Catalog resource
+generation, and the committed Catalog plan fence every step.
 Its `/experimental/v1/regional/*` routes remain an alpha verification surface,
 not the versioned application contract. The separate fully qualified regional
 Stream v1 route is the first authenticated native adapter over those same
@@ -280,11 +283,12 @@ compaction error when that version is no longer available.
 The current generated `epoch.v1.RegionalAdminService` is a bounded Go-hosted
 bridge with `ApplyResource`, `GetResource`, `ListResources`, and
 `DeleteResource`. Apply validates a fully qualified data-bearing resource,
-profile/kind agreement, nonzero shard count, and the currently fixed replica
-count of three. `ResourceSpec.placement` can require allowed regions, a minimum
-zone count, and a node class. Before Rust catalog mutation, Go authenticates to
-every configured node, verifies an identical fixed-voter inventory, and checks
-incremental group capacity. Unsatisfied constraints fail before catalog apply.
+profile/kind agreement, nonzero shard count, and an explicit replica count of
+three or five. `ResourceSpec.placement` can require allowed regions, minimum
+zone and rack counts, a node class, and excluded physical node IDs. Before Rust
+catalog mutation, Go authenticates to every configured node, verifies a complete
+consistent inventory, and checks incremental group capacity. Unsatisfied
+constraints fail before catalog apply.
 It stores desired state, immediately reconciles through the Rust authority, and
 returns pending desired state when the region is unavailable. Definitive
 conflicts fail; exact apply and delete retries return their original result
@@ -321,6 +325,19 @@ its conditions satisfy the requested placement and guarantee. APIs and the
 console must distinguish `accepted`, `reconciling`, `ready`, `degraded`, and
 `failed`.
 
+The managed and Catalog clocks are intentionally separate. Go increments
+`generation` for every accepted desired-state change, including policy that is
+not stored in the Rust data-plane resource. After successfully reconciling that
+intent it sets `observed_generation` to the same value. It sends the prior
+`catalog_generation` as Rust optimistic concurrency for a live resource and
+accepts either an exact no-op cursor or the next cursor. Creation sends zero;
+recreation may return a higher positive cursor because Rust retains its deleted
+generation internally. The observed Catalog cursor then fences every tablet
+route and later delete. It must be nonzero for an observed resource,
+never exceed `observed_generation`, and equal every tablet
+`resource_generation`. Legacy persisted status without the additive field uses
+its observed generation as the compatible Catalog cursor.
+
 Go does not expose or synthesize data-path receipts and never reads Epoch data
 files.
 
@@ -331,13 +348,15 @@ GET /v1/regional/resources
 ```
 
 It returns only fully qualified managed resources. Each row contains canonical
-name, kind/profile, desired and observed generation, reconciliation phase and
-message, desired shard count, and the achieved tablet placement. Resource
-generation, observed generation, tablet/group/epoch/resource-generation IDs,
-voter node IDs, and optional leader node ID are JSON decimal strings so a
-browser cannot lose 64-bit precision. Desired replicas and observed voters are
-separate fields; an authority outage returns `pending` with no current tablet
-placement rather than retaining a stale leader claim.
+name, kind/profile, desired, observed, and Catalog generation, reconciliation
+phase and message, desired shard count, and the achieved tablet placement.
+Resource generation, observed generation, Catalog generation,
+tablet/group/epoch/resource-generation IDs, voter node IDs, and optional leader
+node ID are JSON decimal strings so a browser cannot lose 64-bit precision.
+Desired replicas and observed voters are separate fields; an authority outage
+returns `pending` with no current tablet placement rather than retaining a
+stale leader claim, while retaining the last durable Catalog cursor for safe
+retry.
 
 Cache rows additionally expose the safe desired `cache_configuration` fields:
 entry capacity, nullable default TTL, and eviction policy. The BFF does not
@@ -361,12 +380,14 @@ filters resources before aggregation. Counts are allocation drivers, not
 metering, rates, currency, or billing. See
 [Resource Governance](RESOURCE_GOVERNANCE.md).
 
-The optional `placement` object contains the requested region/zone/class
-constraints, achieved zone count, and policy-protected configured-endpoint
-topology plus maximum/used/available consensus-group counts. Node and voter IDs
-remain decimal strings. These fields prove the placement admission decision
-and expose one learner-first voter transition; they do not claim rack
-separation, automatic multi-tablet rebalancing, or a general repair solver.
+The optional `placement` object contains requested region/zone/rack/class and
+node-exclusion constraints, achieved zone/rack counts, and policy-protected
+configured-endpoint topology plus maximum/used/available consensus-group
+counts. Node and voter IDs remain decimal strings. Each tablet separately
+reports assigned, immutable bootstrap, active target, committed, and reachable
+voters. These fields expose serialized automatic policy repair,
+failure-domain repair, and load rebalance; they do not claim transactional
+reservation across resources or several controller instances.
 
 The Rust node-local alpha inventory used by Go is:
 
@@ -379,7 +400,9 @@ computes live used groups as catalog group 1 plus materialized tablets. Go
 requires a complete consistent response from every configured endpoint before
 any mutation. Capacity failures use `consensus_group_capacity` and retain the
 limiting node, required groups, and available groups in the internal admission
-error; the current public status exposes the stable reason in its message.
+error. Joint zone/rack layouts with no valid voter combination use
+`incompatible_failure_domains`; the current public status exposes either stable
+reason in its message.
 
 The same response includes node-local regional maintenance observations:
 
@@ -677,7 +700,10 @@ Epoch commits the plan first; the regional controller then adds the incoming
 node as a learner, verifies it through the leader commit index, commits joint
 consensus, and finalizes Catalog state. Concurrent, stale, multi-voter, and
 direct placement changes fail closed. See
-[Learner-first voter replacement](VOTER_REPLACEMENT.md).
+[Learner-first voter replacement](VOTER_REPLACEMENT.md). The Go reconciler calls
+this route automatically only after fresh inventory proves the target satisfies
+policy, capacity, and reachability gates. Applying a new desired generation and
+planning the operational move occur in separate reconciliation passes.
 
 The versioned regional Stream application route is:
 

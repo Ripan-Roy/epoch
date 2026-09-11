@@ -15,10 +15,11 @@ use tower::ServiceExt;
 
 #[tokio::test]
 async fn topology_reports_bounded_voters_and_live_group_capacity() {
-    let topology = NodeTopology::new(
+    let topology = NodeTopology::new_with_rack(
         2,
         "ap-south",
         "ap-south-1b",
+        "rack-7",
         "general-purpose",
         [1, 2, 3],
         16,
@@ -50,6 +51,7 @@ async fn topology_reports_bounded_voters_and_live_group_capacity() {
     assert_eq!(body["node_id"], "2");
     assert_eq!(body["region"], "ap-south");
     assert_eq!(body["zone"], "ap-south-1b");
+    assert_eq!(body["rack"], "rack-7");
     assert_eq!(body["node_class"], "general-purpose");
     assert_eq!(
         body["consensus_voter_node_ids"],
@@ -87,6 +89,9 @@ fn topology_rejects_ambiguous_or_unbounded_identity() {
     assert!(NodeTopology::new(0, "ap-south", "zone-a", "general", [1, 2, 3], 16).is_err());
     assert!(NodeTopology::new(2, "ap south", "zone-a", "general", [1, 2, 3], 16).is_err());
     assert!(NodeTopology::new(2, "ap-south", "", "general", [1, 2, 3], 16).is_err());
+    assert!(
+        NodeTopology::new_with_rack(2, "ap-south", "zone-a", "", "general", [1, 2, 3], 16).is_err()
+    );
     assert!(NodeTopology::new(2, "ap-south", "zone-a", "general", [1, 1, 2], 16).is_err());
     assert!(NodeTopology::new(4, "ap-south", "zone-a", "general", [1, 2, 3], 16).is_ok());
     assert!(NodeTopology::new(2, "ap-south", "zone-a", "general", [1, 2, 3], 0).is_err());

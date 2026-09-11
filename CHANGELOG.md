@@ -6,6 +6,42 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+## [0.2.0-beta.9] - 2026-09-11
+
+### Added
+
+- Added explicit rack topology, minimum-rack placement policy, node exclusions,
+  and browser-safe requested/achieved rack evidence.
+- Added deterministic automatic policy repair, topology repair, and normalized
+  load rebalance through the existing learner-first Catalog/Raft transition.
+- Added exact bounded zone/rack completion checks for three/five-voter placement
+  across 3–1,024 physical nodes, including correlated-domain regressions.
+- Refreshed the grouped Dependabot console tooling updates for
+  `eslint-plugin-react-refresh` 0.5.6 and `globals` 17.12.0.
+
+### Safety and recovery
+
+- Require fresh complete topology for every automatic move, reachable quorum
+  for mandatory repair, and full current-voter reachability for optional
+  rebalance.
+- Serialize one transition per resource, fence its plan token by resource
+  generation/tablet epoch/target, and preserve customer generations across the
+  operational membership change.
+- Separate Go desired/observed generations from the Rust Catalog cursor so a
+  policy-only Catalog no-op cannot be retried with a different placement under
+  the same proposal identity. Browser/protobuf status exposes both clocks,
+  tablet routing and delete use the Catalog cursor, and legacy status plus
+  delete/recreate histories remain compatible.
+- Changed the live Kubernetes voter campaign to request managed-policy
+  exclusion and wait for automatic planning before proving learner snapshot
+  catch-up, joint consensus, data continuity, shutdown, and reopen.
+
+### Limitations
+
+- Transactional cross-resource reservations, multi-instance control ownership,
+  split/merge, configurable hysteresis, Kubernetes rack attestation, and
+  production chaos/SLO evidence remain open.
+
 ## [0.2.0-beta.8] - 2026-09-10
 
 ### Added
