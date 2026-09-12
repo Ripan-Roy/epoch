@@ -36,6 +36,7 @@ const (
 	defaultRegionalMetricsEndpoints = "http://127.0.0.1:7602"
 	defaultAllowedOrigins           = "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:4173,http://localhost:4173"
 	defaultStatePath                = "data/control/registry.db"
+	defaultAuditPath                = "data/control/audit.ndjson"
 	defaultReconcileInterval        = time.Second
 	shutdownTimeout                 = 10 * time.Second
 )
@@ -49,6 +50,7 @@ type controlConfig struct {
 	allowedOrigins           []string
 	statePath                string
 	authPolicyPath           string
+	auditPath                string
 	regionalToken            secret
 	reconcileInterval        time.Duration
 	maxMetricTenants         int
@@ -104,7 +106,17 @@ func run(ctx context.Context, logger *slog.Logger) (runError error) {
 	if err != nil {
 		return fmt.Errorf("load bootstrap auth policy: %w", err)
 	}
-	audit := controlauth.NewSlogAuditSink(logger)
+	auditJournal, err := controlauth.OpenDurableAuditJournal(config.auditPath)
+	if err != nil {
+		return fmt.Errorf("open durable audit journal: %w", err)
+	}
+	defer func() {
+		runError = errors.Join(runError, auditJournal.Close())
+	}()
+	audit := controlauth.NewTeeAuditSink(
+		auditJournal,
+		controlauth.NewSlogAuditSink(logger),
+	)
 	serverTLS, err := securetransport.LoadServerTLS(config.serverTLS)
 	if err != nil {
 		return fmt.Errorf("configure control listener TLS: %w", err)
@@ -324,6 +336,7 @@ func loadConfig() (controlConfig, error) {
 		),
 		statePath:         envOrDefault("EPOCH_CONTROL_STATE_PATH", defaultStatePath),
 		authPolicyPath:    strings.TrimSpace(os.Getenv("EPOCH_AUTH_POLICY_PATH")),
+		auditPath:         envOrDefault("EPOCH_CONTROL_AUDIT_PATH", defaultAuditPath),
 		regionalToken:     secret(os.Getenv("EPOCH_CONTROL_REGIONAL_TOKEN")),
 		reconcileInterval: defaultReconcileInterval,
 		maxMetricTenants:  1024,

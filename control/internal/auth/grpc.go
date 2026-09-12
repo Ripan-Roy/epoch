@@ -47,7 +47,7 @@ func NewUnaryServerInterceptor(
 		}
 		principal, err := policy.AuthenticateBearer(authorization)
 		if err != nil {
-			audit.Record(ctx, DecisionEvent{
+			if auditErr := audit.Record(ctx, DecisionEvent{
 				Timestamp:   time.Now().UTC(),
 				RequestID:   requestID,
 				PrincipalID: "anonymous",
@@ -56,7 +56,9 @@ func NewUnaryServerInterceptor(
 				Decision:    DecisionDeny,
 				Reason:      authenticationReason(err),
 				Scope:       Scope{},
-			})
+			}); auditErr != nil {
+				return nil, status.Error(codes.Unavailable, "audit journal is unavailable")
+			}
 			return nil, status.Error(
 				codes.Unauthenticated,
 				"valid bearer authentication is required",
@@ -78,6 +80,12 @@ func authenticationReason(err error) DecisionReason {
 		return ReasonMissingCredential
 	case AuthenticationMalformed:
 		return ReasonMalformedCredential
+	case AuthenticationExpired:
+		return ReasonExpiredCredential
+	case AuthenticationNotYetValid:
+		return ReasonNotYetValidCredential
+	case AuthenticationRevoked:
+		return ReasonRevokedCredential
 	default:
 		return ReasonInvalidCredential
 	}

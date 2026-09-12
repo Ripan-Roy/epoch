@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://epoch.dev/spec/auth/audit-journal-v1.schema.json",
+  "title": "Epoch audit journal record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format_version",
+    "sequence",
+    "previous_sha256",
+    "event",
+    "record_sha256"
+  ],
+  "properties": {
+    "format_version": { "const": 1 },
+    "sequence": { "type": "string", "pattern": "^[1-9][0-9]{0,19}$" },
+    "previous_sha256": { "$ref": "#/$defs/sha256" },
+    "event": { "$ref": "#/$defs/event" },
+    "record_sha256": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["organization", "project", "environment", "namespace"],
+      "properties": {
+        "organization": { "$ref": "#/$defs/scopeValue" },
+        "project": { "$ref": "#/$defs/scopeValue" },
+        "environment": { "$ref": "#/$defs/scopeValue" },
+        "namespace": { "$ref": "#/$defs/scopeValue" }
+      }
+    },
+    "scopeValue": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^(|\\*|[A-Za-z0-9][A-Za-z0-9._-]*)$"
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_time_unix_ms",
+        "request_id",
+        "principal_id",
+        "policy_id",
+        "action",
+        "decision",
+        "reason",
+        "scope"
+      ],
+      "properties": {
+        "event_time_unix_ms": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,18}$"
+        },
+        "request_id": { "type": "string", "pattern": "^[!-~]{1,128}$" },
+        "principal_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$"
+        },
+        "policy_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "authentication_method": {
+          "enum": ["bootstrap_token", "oidc_eddsa"]
+        },
+        "action": {
+          "enum": [
+            "audit.read",
+            "backup.create",
+            "catalog.apply",
+            "catalog.delete",
+            "catalog.read",
+            "data.read",
+            "data.write",
+            "resource.apply",
+            "resource.delete",
+            "resource.read",
+            "route.read",
+            "topology.read"
+          ]
+        },
+        "decision": { "enum": ["allow", "deny"] },
+        "reason": {
+          "enum": [
+            "policy_grant",
+            "action_not_granted",
+            "scope_mismatch",
+            "missing_credential",
+            "malformed_credential",
+            "invalid_credential",
+            "expired_credential",
+            "not_yet_valid_credential",
+            "revoked_credential"
+          ]
+        },
+        "scope": { "$ref": "#/$defs/scope" }
+      }
+    }
+  }
+}

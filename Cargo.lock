@@ -883,17 +883,22 @@ dependencies = [
 
 [[package]]
 name = "epoch-auth"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
+ "base64 0.23.1",
+ "jsonschema",
+ "ring",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tempfile",
  "thiserror 2.0.20",
+ "url",
 ]
 
 [[package]]
 name = "epoch-bus"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
  "apache-avro",
  "epoch-core",
@@ -908,7 +913,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-cache"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
  "epoch-core",
  "serde",
@@ -918,7 +923,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-catalog"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
  "epoch-core",
  "serde",
@@ -929,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-cli"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
  "clap",
  "epoch-core",
@@ -942,7 +947,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-compat"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
  "amq-protocol",
  "anyhow",
@@ -979,7 +984,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-consensus"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
  "epoch-storage",
  "epoch-testkit",
@@ -994,7 +999,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-core"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
  "serde",
  "serde_json",
@@ -1004,7 +1009,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-engine"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
  "epoch-bus",
  "epoch-cache",
@@ -1019,7 +1024,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-node"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -1071,7 +1076,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-observability"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
  "epoch-core",
  "serde",
@@ -1081,7 +1086,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-queue"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
  "crc32fast",
  "epoch-core",
@@ -1091,7 +1096,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-storage"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
  "crc32fast",
  "epoch-core",
@@ -1104,7 +1109,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-stream"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
  "epoch-core",
  "serde",
@@ -1114,7 +1119,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-tablet"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
  "base64 0.23.1",
  "epoch-bus",
@@ -1134,7 +1139,7 @@ dependencies = [
 
 [[package]]
 name = "epoch-testkit"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 
 [[package]]
 name = "equivalent"

@@ -35,15 +35,15 @@ into this train. A large PR can remain in development longer, but it does not
 merge until its whole row is locally working and its acceptance evidence is
 reviewable.
 
-Releases 1–5 of this train are shipped through `v0.1.0-alpha.9`: governance,
-complete non-deferred Cache, complete Stream, complete Queue, and the native
-Event/integration development platform. Release 6 is the current
-`v0.1.0-alpha.10` product/runtime closure: automatic HTTP source ingestion, a
-real Go Kubernetes operator and manifests, a generated-contract management
-CLI, deployment documentation, and container/CI evidence. The next and only
-priority after that merge is beta hardening: secure transport and workload
-identity, coordinated recovery and guarded upgrades, compatibility evidence,
-and load/soak/fault qualification.
+Releases 1–5 shipped through `v0.1.0-alpha.9`: governance, complete
+non-deferred Cache, complete Stream, complete Queue, and the native
+Event/integration development platform. Product/runtime closure and subsequent
+beta hardening now ship through `v0.2.0-beta.9`: source ingestion, the Go
+operator and CLI, secure transport, recovery and guarded upgrades, OCI supply
+chain, bounded observability, Redis/Kafka/RabbitMQ compatibility, and automatic
+topology repair/rebalance. The current `v0.2.0-beta.10` release boundary is
+strict OIDC workload identity plus durable, tenant-filtered authorization
+audit across Go, Rust, deployment, restart evidence, and public docs.
 
 The published release train extends the authenticated regional
 multi-tablet M1/M2 boundary. Protected `main` evidence covers the consensus-backed catalog, durable
@@ -82,10 +82,10 @@ logical superstreams. `v0.1.0-alpha.8` closed QUEUE-007–015 with bounded
 admission/overflow, idle expiry, FIFO session locks, priority aging, dispatch
 protection, deferred/request-reply state, and crash-safe Queue DLQ forwarding.
 `v0.1.0-alpha.9` then closed the bounded Event/integration development surface.
-Stable
-streaming protocols, replicated multi-instance hosted metadata, production
-identity, follower routing, dynamic membership/voter selection,
-repair/rebalance, and the broader M2 security/performance gates remain open.
+Stable streaming protocols, replicated multi-instance hosted metadata,
+complete production IAM and externally immutable audit, follower routing,
+transactional fleet-wide placement, geo recovery, and the broader security,
+performance, and operating-SLO gates remain open.
 
 ## Dependency-driven architecture sequence
 

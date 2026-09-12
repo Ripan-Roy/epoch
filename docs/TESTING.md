@@ -44,6 +44,22 @@ route classification, W3C parsing/propagation, metrics rendering, exact tenant
 authorization, bounded regional diagnostic failover, and strict console
 decoding.
 
+Identity and durable-audit changes have a focused cross-language gate:
+
+```shell
+cargo test -p epoch-auth
+cargo test -p epoch-node --test regional_auth
+go test ./control/internal/auth ./control/internal/resources
+python3 -m unittest tests/integration/test_regional_runtime.py -v
+```
+
+The tests compile every published auth JSON Schema and validate its example,
+pin one Go/Rust journal record and digest, sign OIDC tokens dynamically, cover
+issuer/audience/key/lifetime/role/scope/revocation rejection, and exercise the
+Go and Rust HTTP boundaries. Journal suites cover owner-only files, reopen,
+pagination, tenant filtering, partial writes, same-length tampering, sticky
+failure, fail-closed requests, and credential exclusion.
+
 ### Dependency advisory gates
 
 Both pull-request CI and `make audit` install or require `cargo-audit` 0.22.2
@@ -600,8 +616,12 @@ on every voter: 27 local voter/group copies. Each old voter catches up before
 the campaign verifies durable applied/checkpoint/retained-first boundaries,
 kills every node, verifies Go clears stale placement while authority is
 unavailable, and reopens the same volumes before comparing those boundaries,
-catalog/profile digests, and the increased applied-command index. CI captures control logs,
-container logs, port assignments, and scoped state evidence on failure.
+catalog/profile digests, and the increased applied-command index. The beta.10
+campaign also recomputes every canonical Go and Rust audit-record digest,
+checks chain continuity and credential exclusion, and compares complete journal
+prefixes across the Go control `SIGKILL` and all-node same-volume reopen. CI
+captures control logs, container logs, port assignments, and scoped state
+evidence on failure.
 
 `tests/integration/docs-quickstarts.sh` separately executes the exact Go, Java,
 and Python source imported into the documentation page. Each language gets a

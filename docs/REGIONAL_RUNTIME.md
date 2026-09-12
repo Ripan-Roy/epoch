@@ -69,6 +69,7 @@ Start the Go bridge against all three Rust endpoints:
 EPOCH_CONTROL_REGIONAL_ENDPOINTS=http://127.0.0.1:18661,http://127.0.0.1:18662,http://127.0.0.1:18663 \
 EPOCH_CONTROL_ALLOWED_ORIGINS=http://127.0.0.1:5173 \
 EPOCH_CONTROL_STATE_PATH=.epoch/control/registry.db \
+EPOCH_CONTROL_AUDIT_PATH=.epoch/control/audit.ndjson \
 EPOCH_AUTH_POLICY_PATH=spec/auth/bootstrap-policy-v1.example.json \
 EPOCH_CONTROL_REGIONAL_TOKEN=epoch-dev-control-v1 \
 go run ./control/cmd/epoch-control
@@ -78,6 +79,13 @@ The process owns that database exclusively. `GET /healthz` reports
 `"registry":"bbolt_v1"` and `"registry_durable":true`. Corruption, an unknown
 schema version, or another process already holding the file makes startup fail
 closed.
+
+Every regional node writes its authorization history to
+`/var/lib/epoch/audit.ndjson` in its independent Compose volume. The Go process
+writes the path above. Use `spec/auth/identity-policy-v2.example.json` after
+replacing its public test issuer/key to accept short-lived EdDSA OIDC tokens.
+The console's existing bearer field can carry such a token; it does not perform
+an interactive OIDC exchange.
 
 Start the console in another terminal:
 

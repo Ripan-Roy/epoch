@@ -47,6 +47,7 @@
           "uniqueItems": true,
           "items": {
             "enum": [
+              "audit.read",
               "backup.create",
               "catalog.apply",
               "catalog.delete",

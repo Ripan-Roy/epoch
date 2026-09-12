@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { CodeBlock, CodeTabs, type CodeSample } from "./CodeBlock";
 import {
   automaticPlacementRepair,
+  auditExport,
   backupRestoreSpec,
   backupStatus,
   consensusCheckpoint,
@@ -10,6 +11,9 @@ import {
   governanceInventory,
   guardedUpgradeSpec,
   guardedUpgradeStatus,
+  identityPolicy,
+  identityRequest,
+  identityRuntime,
   kubernetesAlphaExitCampaign,
   kubernetesInstall,
   languageGuides,
@@ -472,8 +476,9 @@ export function ClusterMilestoneBody() {
           value/lock, and Event Bus lease/archive-retention commands at exact replicated deadlines; topology
           reports node-local scheduler and target-worker counters. Managed HTTP/gRPC and regional HTTP require
           a shared deny-by-default bearer policy; the operator deployment also requires public TLS and
-          peer/control mTLS. OIDC, credential expiry/revocation, certificate issuance, and immutable audit
-          export remain open.
+          peer/control mTLS. The v2 policy additionally accepts short-lived EdDSA OIDC tokens and writes
+          fail-closed, tamper-evident authorization journals. Remote JWKS discovery, certificate issuance, and
+          externally immutable audit retention remain open.
         </p>
       </Topic>
 
@@ -786,6 +791,118 @@ export function DeploymentBody() {
             title="Tag-only OCI supply chain"
             description="Exact-main publication, component boundaries, platform evidence, keyless identity, and deferred package artifacts."
             href={`${repositoryDocsUrl}/adr/0041-tag-only-oci-supply-chain.md`}
+          />
+        </div>
+      </Topic>
+    </>
+  );
+}
+
+/* --------------------------------------------------------------------------
+   Identity and audit
+   -------------------------------------------------------------------------- */
+
+export function IdentityAuditBody() {
+  return (
+    <>
+      <Note title="Production boundary">
+        Epoch verifies pinned Ed25519 OIDC access tokens without a network call and durably records every
+        authentication failure and authorization decision before an allowed operation continues. The current
+        journal is tamper-evident local storage, not a centralized or externally immutable archive.
+      </Note>
+
+      <Topic id="contract" title="One identity contract in Go and Rust">
+        <p>
+          Policy v2 keeps optional fingerprinted break-glass principals and adds exact issuer, audience, key,
+          lifetime, role, and four-part tenant-scope checks. Unknown algorithms, keys, roles, duplicate JSON
+          names, ambiguous timestamps, and revoked token IDs fail closed. Actions are derived only from the
+          policy role map; access tokens cannot introduce their own permissions.
+        </p>
+        <div className="evidence-grid">
+          <EvidenceCard label="Algorithm" claim="Only pinned EdDSA keys are accepted.">
+            Each compact JWT must select a configured OKP/Ed25519 key by an exact <code>kid</code>. Canonical
+            base64url and an exact signature are mandatory.
+          </EvidenceCard>
+          <EvidenceCard label="Lifetime" claim="Long-lived and replay-revoked tokens are rejected.">
+            The issuer policy bounds clock skew and maximum lifetime. A SHA-256 fingerprint of a token's
+            <code>jti</code> can be placed in the bounded emergency revocation list.
+          </EvidenceCard>
+          <EvidenceCard label="Scope" claim="Every request is authorized at all four tenant levels.">
+            Organization, project, environment, and namespace claims are exact identifiers. Collection reads
+            remove records outside the caller's allowed scope.
+          </EvidenceCard>
+        </div>
+      </Topic>
+
+      <Topic id="configure" title="Configure policy and durable paths">
+        <p>
+          Copy trusted public keys from the issuer into a private policy file and mount the same policy into
+          the control and data planes. Overlap old and new keys during rotation. Persist the two journal paths
+          on their respective PVCs; the operator and regional Compose deployment already render these paths.
+        </p>
+        <CodeBlock label="identity-policy-v2.json" value={identityPolicy} />
+        <CodeBlock label="shell" value={identityRuntime} />
+      </Topic>
+
+      <Topic id="call" title="Call an authenticated boundary">
+        <p>
+          HTTP uses one <code>Authorization: Bearer</code> value. RegionalAdmin gRPC uses the same value in
+          lowercase <code>authorization</code> metadata. A printable request ID of at most 128 bytes joins the
+          response, structured diagnostics, and durable authorization record without storing the credential.
+        </p>
+        <CodeBlock label="shell" value={identityRequest} />
+      </Topic>
+
+      <Topic id="audit" title="Export tenant-filtered authorization history">
+        <p>
+          Callers need the distinct <code>audit.read</code> action. Export access is audited before the chain
+          is read, every record is integrity-checked, and the result is filtered to the caller's tenant scope.
+          Pages contain 1–1,000 records; use the returned decimal-string <code>next_sequence</code> as the
+          next cursor. Go and each Rust node own separate ordered histories—there is no implied global order.
+        </p>
+        <CodeBlock label="shell" value={auditExport} />
+      </Topic>
+
+      <Topic id="failure" title="Failure and recovery semantics">
+        <div className="evidence-grid">
+          <EvidenceCard label="Durability" claim="Allowed work waits for the audit fsync.">
+            Each canonical NDJSON record links the previous SHA-256 digest. The next protected allow path
+            returns unavailable if a required append cannot be persisted.
+          </EvidenceCard>
+          <EvidenceCard label="Integrity" claim="Detected corruption makes the journal sticky-failed.">
+            Startup and every export verify the complete chain. Preserve the damaged owner-only file for
+            investigation; restore service with an independently retained valid journal or a new reviewed
+            deployment according to incident policy.
+          </EvidenceCard>
+          <EvidenceCard label="Current limit" claim="Local evidence is not WORM compliance.">
+            Remote acknowledged delivery, retention enforcement, signed merged exports, policy-change history,
+            hot policy reload, RS256/ES256, and discovery/JWKS refresh remain production work.
+          </EvidenceCard>
+        </div>
+        <div className="reference-grid">
+          <ReferenceCard
+            eyebrow="Contract"
+            title="Identity and audit specification"
+            description="Policy formats, OIDC validation, rotation, durable record hashing, export behavior, and exact beta non-claims."
+            href="https://github.com/Ripan-Roy/epoch/blob/main/spec/auth/README.md"
+          />
+          <ReferenceCard
+            eyebrow="Architecture decision"
+            title="OIDC and durable authorization audit"
+            description="Threat boundary, fail-closed ordering, storage ownership, consequences, and rejected alternatives."
+            href={`${repositoryDocsUrl}/adr/0048-oidc-and-durable-authorization-audit.md`}
+          />
+          <ReferenceCard
+            eyebrow="API"
+            title="Identity route and error contracts"
+            description="Action mapping, HTTP and gRPC outcomes, audit paths, strict cursors, and per-process ordering."
+            href={`${repositoryDocsUrl}/API_CONTRACTS.md#68-identity-authentication-and-authorization`}
+          />
+          <ReferenceCard
+            eyebrow="Security"
+            title="Security model"
+            description="Implemented controls, target production matrix, evidence, residual risk, and disclosure process."
+            href={`${repositoryDocsUrl}/SECURITY.md`}
           />
         </div>
       </Topic>
@@ -2329,9 +2446,9 @@ export function ReferenceBody() {
           />
           <ReferenceCard
             eyebrow="Release"
-            title="v0.2.0-beta.9 release notes"
-            description="Rack-aware admission, automatic policy repair, serialized load rebalance, recovery evidence, and explicit beta limitations."
-            href={`${repositoryDocsUrl}/releases/v0.2.0-beta.9.md`}
+            title="v0.2.0-beta.10 release notes"
+            description="OIDC workload identity, durable authorization audit, restart evidence, deployment guidance, and explicit beta limitations."
+            href={`${repositoryDocsUrl}/releases/v0.2.0-beta.10.md`}
           />
         </div>
       </Topic>

@@ -95,12 +95,14 @@ mechanisms, not the preferred native identity. Stored credentials are salted,
 slow-hashed where password verification requires it, scoped, rotatable, and
 never retrievable after creation.
 
-The current alpha implements only the bootstrap case. A strict version-one
-policy stores SHA-256 token fingerprints, explicit actions, and
-organization/project/environment/namespace scopes. Go managed HTTP/gRPC and
-Rust regional HTTP callers present a bearer credential; both implementations
-evaluate the same decision corpus. This is a migration baseline, not the OIDC,
-short-lived credential, or workload-certificate target described below.
+The current beta retains the strict version-one bootstrap policy and adds a
+version-two offline OIDC verifier shared by Go and Rust. V2 pins exact HTTPS
+issuers, audiences, OKP/Ed25519 keys, role-to-action maps, token lifetime/skew,
+four tenant-scope claims, and bounded SHA-256 `jti` revocations. JWT base64url,
+JSON fields, signatures, time claims, roles, subject, and scope fail closed.
+Public and internal mTLS is mandatory in the operator deployment. Interactive
+authorization-code/PKCE exchange, remote JWKS refresh, hot/replicated policy,
+and certificate subject-to-role authorization remain target work.
 
 The regional Stream, Queue, Cache, and Event Bus v1 routes parse organization, project, environment, and
 namespace from the fully qualified URL before authorization. Shard discovery
@@ -305,6 +307,18 @@ silently proceed without its required audit record.
 Audit data never contains payloads, bearer tokens, private keys, webhook
 signing secrets, full connector credentials, or unrestricted user headers.
 
+The current beta implements a narrower durable authorization history. Every
+authentication failure and every authorization allow/deny at Go managed and
+Rust regional boundaries is written as canonical NDJSON to an owner-only file
+and fsynced before an allowed operation proceeds. Records are SHA-256 linked;
+startup and export verify the complete chain, live corruption becomes a sticky
+failure, and protected operations return unavailable when durable recording
+cannot continue. `audit.read` protects bounded tenant-filtered pages from the
+Go and per-node Rust journals. The files live on their respective workload
+PVCs. They are tamper-evident local histories, not external WORM storage; the
+full matrix above, retention, remote delivery acknowledgement, policy-change
+events, and cross-node reconciliation remain open.
+
 ## 9. Webhook and managed-target SSRF/replay controls
 
 The regional alpha now has a dedicated leader-owned worker for signed
@@ -496,13 +510,14 @@ threat models and security tests before public exposure.
 
 ## 15. What is implemented now
 
-The current alpha implements a bounded authentication/authorization/audit
-baseline at the managed and regional public boundaries:
+The current beta implements a bounded identity/authorization/durable-audit
+slice at the managed and regional public boundaries:
 
-- `spec/auth/bootstrap-policy-v1.schema.json` defines a strict, bounded policy
-  containing only token fingerprints, principal IDs, explicit actions, and
-  exact-or-`*` tenant scopes. Go and Rust reject unknown or ambiguous policy
-  input and pass the same checked-in decision corpus.
+- `spec/auth/bootstrap-policy-v1.schema.json` retains strict token-fingerprint
+  identities. `spec/auth/identity-policy-v2.schema.json` adds pinned
+  Ed25519/EdDSA OIDC tokens with issuer/audience/time/role/scope enforcement and
+  emergency `jti` revocation. Go and Rust reject unknown policy and JWT-header
+  fields, duplicate signed claim names, and the same boundary cases.
 - `epoch-control` requires `EPOCH_AUTH_POLICY_PATH`. Its `/v1` HTTP endpoints
   and RegionalAdmin gRPC methods require strict bearer authentication, enforce
   action and parsed-resource scope before mutation or lookup, and filter list
@@ -512,11 +527,14 @@ baseline at the managed and regional public boundaries:
   Regional `epoch-node` processes independently authenticate and authorize
   catalog apply/delete/read, route read, topology read, and typed data
   read/write actions. Topology responses contain no bearer or tenant payload.
-- Authentication failures and authorization decisions produce bounded
-  structured events with request/principal/policy/action/decision/reason/scope
-  fields and no credential or payload field. The console keeps an interactively
-  entered token only in browser session storage; no token is compiled into
-  Pages.
+- Authentication failures and authorization decisions produce bounded events
+  with request/principal/policy/authentication/action/decision/reason/scope
+  fields and no credential or payload field. Each process appends and fsyncs a
+  hash-linked owner-only journal, verifies it on startup/export, exposes only
+  authorized tenant-filtered pages, and fails protected allows if audit storage
+  is unavailable. `spec/auth/audit-journal-v1.example.ndjson` is verified by Go
+  and Rust. The console keeps an interactively entered token only in browser
+  session storage; no token is compiled into Pages.
 - The experimental Stream batch boundary validates canonical base64 and JSON,
   exact compressed/expanded sizes and record count, unique sequences, a
   360 KiB frame ceiling, a 4 MiB output ceiling, and an 8 MiB Zstd window before

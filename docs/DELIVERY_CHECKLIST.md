@@ -1,9 +1,9 @@
 # Epoch Delivery Checklist
 
-**Last reviewed:** 11 September 2026
-**Current published release:** `v0.2.0-beta.8`
-**Current release target:** `v0.2.0-beta.9`
-**Current core target:** Beta hardening through bounded protocol compatibility and production recovery evidence
+**Last reviewed:** 12 September 2026
+**Current published release:** `v0.2.0-beta.9`
+**Current release target:** `v0.2.0-beta.10`
+**Current core target:** OIDC workload identity and durable authorization audit
 
 This is the operational checklist for turning PRD scope into verified,
 releasable increments. [PRD.md](PRD.md) owns product scope,
@@ -32,14 +32,14 @@ protected-branch evidence agree.
 | G0 | Semantic contracts | 🟡 | Versioned envelope, errors, durability, ordering, delivery, time, fencing, and transaction limits | [Semantics](SEMANTICS.md), [API contracts](API_CONTRACTS.md); same-tablet Stream transaction limits are frozen, while cross-profile/cross-shard contracts remain open |
 | G1 | Repository and deterministic foundation | 🟡 | Reproducible toolchains, generated contracts, deterministic clock/fault harness, cross-language build | [Development](DEVELOPMENT.md), [Testing](TESTING.md), CI; broader fuzz/formal harness remains open |
 | G2 | Storage and recovery | 🟡 | Checksummed formats, crash recovery, corruption policy, snapshots, compaction, retention, tiering | Segmented WAL, compatible EPSN v1/v2 checkpoints, native images for all five profiles, checkpoint-plus-tail reopen, fixed-voter catch-up, physical EPRS reclamation, Stream retention, automatic voter checkpoints, Cache backup/PITR and cold reads pass protected `main`. The Stream candidate adds sparse compaction snapshots and checksum-verified embedded historical objects; protected evidence, product-wide external tiering, managed restore campaigns, and production repair remain open |
-| G3 | Consensus, catalog, and placement | 🟡 | Quorum safety, persistent catalog, multi-group supervision, membership, placement, repair, read barriers | Dedicated catalog consensus, shared multi-group supervision, deterministic multi-shard materialization, authenticated region/zone/class admission, capacity rejection, fenced routing, safe leader ReadIndex barriers, durable three/five-voter membership, learner catch-up, joint replacement, and four-node reopen pass protected beta.8. The beta.9 candidate adds explicit racks/exclusions and serialized automatic policy/topology repair and load rebalance from fresh N-node inventory. Transactional multi-plan reservation, split/merge, follower reads, protected candidate evidence, and broader model/chaos evidence remain open. |
+| G3 | Consensus, catalog, and placement | 🟡 | Quorum safety, persistent catalog, multi-group supervision, membership, placement, repair, read barriers | Dedicated Catalog consensus, shared multi-group supervision, safe leader ReadIndex barriers, durable three/five-voter membership, learner catch-up, joint replacement, rack/exclusion-aware N-node placement, and serialized automatic policy/topology repair plus load rebalance pass protected beta.9. Transactional multi-plan reservation, split/merge, follower reads, and broader model/chaos evidence remain open. |
 | G4 | Native profile cores | 🟡 | Cache, Stream, Queue, and Bus P0 semantics with truthful public routing and fault evidence | All four typed tablet cores run simultaneously behind resource/shard routing and authenticated three-language clients. Cache, Stream, Queue, and the native Event Bus development surface shipped through alpha.9; production protocol/scale evidence remains open. |
-| G5 | Trust and observability | 🟡 | Identity, authorization, TLS/mTLS, encryption, audit, telemetry, quotas, explain | Shared Go/Rust authorization and audit plus beta.7 internal Prometheus endpoints, bounded tenant series, structured correlation, W3C propagation, OTLP traces, measured “Why slow?” diagnosis, and dashboard/alert/collector templates pass protected `main`. OIDC, expiry/revocation, rotation automation, replicated policy, immutable audit export, exhaustive profile state gauges, support bundles, production telemetry/SLO evidence, and quotas remain open. |
+| G5 | Trust and observability | 🟡 | Identity, authorization, TLS/mTLS, encryption, audit, telemetry, quotas, explain | The protected baseline includes shared fingerprint authorization, TLS/mTLS, bounded telemetry, W3C propagation, OTLP, and measured diagnostics. The beta.10 candidate adds strict Go/Rust EdDSA OIDC parity, bounded lifetime and emergency revocation, owner-only fsynced hash-chained journals, tenant-filtered export, sticky fail-closed integrity behavior, persistent deployment paths, and public operating docs. Discovery/JWKS refresh, certificate issuance/revocation, replicated policy, external WORM retention, complete sensitive-event coverage, quotas, support bundles, and production security/SLO evidence remain open. |
 | G6 | Compatibility gateways | 🟡 | Named protocol/client matrix, differential tests, fuzzing, malformed frames, migration evidence | PR #123 and exact-main CI `34401493735` pass focused, Redis CLI 8.8.2, Kafka Java 4.3.1, RabbitMQ Java 5.35.0, and production-image regional-v2 tests for atomic `MSET`/`MSETNX`, bounded Kafka static identity rejoin, AMQP headers routing, provisioned native DLX forwarding, leader loss, and all-voter reopen. Differential/fuzz certification, remaining Redis commands, full static/cooperative/new-group Kafka protocols and transactions, durable AMQP topology/named-DLX/1.0, MQTT, and comparative performance remain open. |
 | G7 | Data services and integrations | 🟡 | Schemas, pipes, connectors, target execution, checkpoints, transaction boundaries | Replicated schemas/validation, transforms/enrichment, MQTT state, catalogs/endpoints, connector checkpoints/replay, leader-owned signed/Epoch/API/function/managed-target execution, HTTP/CloudEvents polling, and bounded immutable-object/PostgreSQL/MySQL/Kafka readers are implemented. Their pinned MinIO/database/broker conformance passes exact-main CI `34401493735`; private egress, live Azure/GCS identity, load/soak, and broader crash certification remain open. |
-| G8 | Managed operations | 🟡 | Durable Go reconciliation, operator, autoscaling, backup, metering, billing, private networking | The leader-elected operator reconciles 3–1,024 physical nodes, independent three/five-voter placements, a durable control owner, stable storage/network identity, encrypted backup/restore, guarded upgrade, and learner-first replacement. The beta.9 candidate adds Go-owned automatic exclusion/domain repair and serialized load rebalance while Rust retains Catalog/Raft authority. Protected candidate evidence, Kubernetes topology attestation, cloud CSI, autoscaling, metering/billing, and private networking remain open. |
+| G8 | Managed operations | 🟡 | Durable Go reconciliation, operator, autoscaling, backup, metering, billing, private networking | The leader-elected operator reconciles 3–1,024 physical nodes, independent three/five-voter placements, a durable control owner, stable storage/network identity, encrypted backup/restore, guarded upgrade, learner-first replacement, and beta.9 automatic exclusion/domain repair plus load rebalance. The beta.10 candidate persists Rust node and Go control audit journals on their existing PVCs. Kubernetes topology attestation, cloud CSI, autoscaling, metering/billing, and private networking remain open. |
 | G9 | Geo | ⬜ | Replication, RPO/RTO, promotion, failback, residency, split-brain drills | Not implemented |
-| G10 | Release readiness | 🟡 | Synchronized versions, CI, Pages, notes, verified tag provenance, artifacts, security and compatibility statements | `v0.2.0-beta.8` is published from exact `main` commit `d475cd4`; CI `34407029051`, Pages `34407029068`, and tag verification `34408680723` passed. Beta.9 automatic-placement code, complete local gates, real Compose/Kind evidence, release notes, and docs-only Pages assertions pass; protected PR/main evidence, tag, and artifacts remain in progress. Raw signed binaries, package-manager artifacts, clean-cluster digest-pull evidence, and GA operating evidence stay open. |
+| G10 | Release readiness | 🟡 | Synchronized versions, CI, Pages, notes, verified tag provenance, artifacts, security and compatibility statements | `v0.2.0-beta.9` is published from exact `main` commit `538ea7a`; CI `34615713914`, Pages `34615714056`, and tag verification `34618651846` passed. Beta.10 identity/audit code, synchronized versions, release notes, complete `make check`/`make build`, deployment config validation, docs-bundle assertions, and the rebuilt regional Docker restart campaign pass locally; protected PR/main evidence, tag, and artifacts remain. Raw signed binaries, package-manager artifacts, clean-cluster digest-pull evidence, and GA operating evidence stay open. |
 
 ## Milestone readiness
 
@@ -567,7 +567,7 @@ complete.
 | KAE-06 | Retain fail-closed machine-verifiable evidence | Python + CI | 🟡 | The clean candidate run atomically wrote `evidence.json` plus its SHA-256 manifest with source/deployment identity, image IDs, Kubernetes version, generation cursors, step receipts, and result digests. Protected artifact retention remains. |
 | KAE-07 | Close the protected beta gate | GitHub + release | ⬜ | The frozen candidate must pass the new protected `Live Kubernetes alpha-exit lifecycle` job, exact-main CI/Pages, and the published-digest rerun before beta release publication. |
 
-## Current security delivery: bootstrap trust baseline
+## Current security delivery: identity and durable authorization audit
 
 | ID | Checklist item | Boundary | State | Evidence / acceptance |
 |---|---|---|---:|---|
@@ -579,8 +579,15 @@ complete.
 | AUTH-06 | Emit bounded credential-free decisions | Go + Rust audit | ✅ | Structured request/principal/policy/action/decision/reason/scope events validate bounds and expose no token/payload field |
 | AUTH-07 | Keep browser credentials out of static artifacts | TypeScript console | ✅ | Interactive password field stores only in `sessionStorage`; token validation, clear, test, typecheck, lint, and build pass protected `main` CI |
 | AUTH-08 | Exercise authenticated recovery topologies | Process + Compose | ✅ | Rust real-process recovery and Go-to-Rust container campaign use mounted policy plus separate admin/control credentials |
-| AUTH-09 | Record limits without overstating G5 | Documentation | ✅ | ADR-0011 and security/API/runtime/development/testing/traceability docs keep OIDC, mTLS/TLS, encryption, replicated policy, immutable export, and quotas explicit |
+| AUTH-09 | Record baseline limits without overstating G5 | Documentation | ✅ | ADR-0011 records the fingerprint-era boundary; ADR-0048 supersedes its OIDC/audit non-claims without claiming complete IAM or external immutability |
 | AUTH-10 | Pass protected pull-request evidence | GitHub | ✅ | PR #40 was squash-merged and exact main SHA `3898e90` passed required CI and Pages deployment |
+| AUTH-11 | Version and validate OIDC policy v2 | Go + Rust contract | 🟡 | Strict schemas/examples, unambiguous JSON, optional v1 break-glass principals, bounded roles/issuers/keys/revocations, and runtime/schema agreement pass local contract tests; protected evidence remains |
+| AUTH-12 | Verify short-lived OIDC identities identically | Go + Rust ingress | 🟡 | Exact EdDSA/OKP key ID, signature, issuer, audience, integer `iat`/`nbf`/`exp`, maximum lifetime/skew, subject, token ID, role union, four-part scope, and revoked-ID rejection pass both language suites and HTTP boundary tests locally |
+| AUTH-13 | Persist authorization decisions before allowed work | Go + Rust audit | 🟡 | Owner-only canonical NDJSON, decimal sequence, SHA-256 chain, fsync-before-allow, full startup/export verification, cross-language golden bytes, partial-tail/tamper rejection, and sticky failure pass local tests |
+| AUTH-14 | Export bounded tenant-filtered history | Go + Rust HTTP | 🟡 | Separate `/v1/audit/events` and `/v1/admin/audit/events` routes require `audit.read`, audit their own access, validate canonical cursor/limit queries, filter by scope, and never serialize bearer or `jti`; protected evidence remains |
+| AUTH-15 | Reopen journals in deployed runtimes | Compose + Kubernetes | 🟡 | Compose and operator mount node/control journals on their respective data volumes; the regional campaign recomputes every digest and compares the pre/post-control and all-node-restart prefixes. The updated full campaign passes locally; protected CI remains |
+| AUTH-16 | Publish end-to-end operating guidance | Docs + Pages | 🟡 | Policy, rotation, startup, call, export, failure/recovery, and non-claim guidance is linked from a dedicated docs page; format/lint/type/build and marker checks pass locally, while main-only publication remains |
+| AUTH-17 | Complete production IAM and immutable audit | Security + operations | ⬜ | Add discovery/JWKS refresh and broader algorithms, certificate issuance/revocation and mTLS role mapping, hot replicated policy/ACLs, compatibility-protocol identity mapping, full differential/event matrices, external acknowledged WORM retention, signed merged exports, and policy-change history |
 
 ## Pull request checklist
 
@@ -603,19 +610,19 @@ complete.
 
 | Order | Release action | Required evidence | State for next release |
 |---:|---|---|---:|
-| 1 | Select a completed, merged milestone boundary | The automatic placement candidate includes rack/exclusion policy, exact N-node admission, serialized repair/rebalance, separate Go/Catalog clocks, managed status/console, passing local real-runtime campaigns, docs, and traceability; protected gates and merge remain | 🟡 |
-| 2 | Choose the next semantic prerelease version | `v0.2.0-beta.9` follows published beta.8 and does not already exist | ✅ |
-| 3 | Synchronize Rust, Go, Java, Python, TypeScript, SDK user agents, and lockfiles | `./scripts/check-release-version.sh` passes locally at `0.2.0-beta.9`; protected verification remains | ✅ |
-| 4 | Write curated, version-controlled release notes | `docs/releases/v0.2.0-beta.9.md` names behavior, artifacts, upgrade guidance, verification, automatic-repair boundaries, and beta limitations | ✅ |
+| 1 | Select a completed, merged milestone boundary | The beta.10 candidate is one OIDC and durable-authorization-audit vertical slice across Go, Rust, deployment, real restart evidence, contracts, and public docs; all local gates pass, while merge and protected evidence remain | 🟡 |
+| 2 | Choose the next semantic prerelease version | `v0.2.0-beta.10` follows published beta.9 and does not already exist | ✅ |
+| 3 | Synchronize Rust, Go, Java, Python, TypeScript, SDK user agents, and lockfiles | `./scripts/check-release-version.sh` passes locally at `0.2.0-beta.10`; protected verification remains | ✅ |
+| 4 | Write curated, version-controlled release notes | `docs/releases/v0.2.0-beta.10.md` covers behavior, artifacts, upgrade guidance, verification, and explicit IAM/audit limitations | ✅ |
 | 5 | Pass protected `main` CI and main-only Pages | Both workflow runs green at the release commit | ⬜ |
-| 6 | Verify the live docs show beta.9 notes and the automatic placement/repair guidance | Public Pages bundle assertions | ⬜ |
+| 6 | Verify the live docs show beta.10 notes and the identity/audit operating guide | Public Pages bundle assertions | ⬜ |
 | 7 | Create an annotated tag at the exact current `main` commit | Local and remote commit IDs match | ⬜ |
 | 8 | Pass tag/version/main provenance workflow | Release-tag workflow green | ⬜ |
-| 9 | Publish the GitHub release from the checked-in notes | GitHub prerelease targets `v0.2.0-beta.9` | ⬜ |
+| 9 | Publish the GitHub release from the checked-in notes | GitHub prerelease targets `v0.2.0-beta.10` | ⬜ |
 | 10 | Verify downloads and package claims | Five OCI manifests and ten platform SBOM assets match the notes; package-manager publication remains deferred | ⬜ |
 | 11 | Start the next `Unreleased` section | Changelog prepared for continued delivery | ✅ |
 
-This table tracks the `v0.2.0-beta.9` sequence. The completed beta.8 evidence
+This table tracks the `v0.2.0-beta.10` sequence. The completed beta.9 evidence
 remains recorded in G10 and the versioned release notes.
 
 ## Feature delivery template

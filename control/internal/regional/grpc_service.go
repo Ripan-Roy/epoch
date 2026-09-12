@@ -249,7 +249,9 @@ func (server *RegionalAdminServer) authorize(
 		return status.Error(codes.Unauthenticated, "authentication required")
 	}
 	allowed := principal.Allows(action, scope)
-	server.recordAuthorization(ctx, principal, action, scope, allowed)
+	if err := server.recordAuthorization(ctx, principal, action, scope, allowed); err != nil {
+		return status.Error(codes.Unavailable, "audit journal is unavailable")
+	}
 	if !allowed {
 		return status.Error(
 			codes.PermissionDenied,
@@ -274,7 +276,9 @@ func (server *RegionalAdminServer) authorizeCollection(
 		)
 	}
 	allowed := principal.HasAction(action)
-	server.recordAuthorization(ctx, principal, action, principal.Scope(), allowed)
+	if err := server.recordAuthorization(ctx, principal, action, principal.Scope(), allowed); err != nil {
+		return controlauth.Principal{}, status.Error(codes.Unavailable, "audit journal is unavailable")
+	}
 	if !allowed {
 		return controlauth.Principal{}, status.Error(
 			codes.PermissionDenied,
@@ -290,7 +294,7 @@ func (server *RegionalAdminServer) recordAuthorization(
 	action controlauth.Action,
 	scope controlauth.Scope,
 	allowed bool,
-) {
+) error {
 	decision := controlauth.DecisionDeny
 	reason := controlauth.ReasonActionNotGranted
 	if allowed {
@@ -303,15 +307,16 @@ func (server *RegionalAdminServer) recordAuthorization(
 	if !ok {
 		requestID = "internal-request"
 	}
-	server.audit.Record(ctx, controlauth.DecisionEvent{
-		Timestamp:   time.Now().UTC(),
-		RequestID:   requestID,
-		PrincipalID: principal.ID(),
-		PolicyID:    principal.PolicyID(),
-		Action:      action,
-		Decision:    decision,
-		Reason:      reason,
-		Scope:       scope,
+	return server.audit.Record(ctx, controlauth.DecisionEvent{
+		Timestamp:            time.Now().UTC(),
+		RequestID:            requestID,
+		PrincipalID:          principal.ID(),
+		PolicyID:             principal.PolicyID(),
+		AuthenticationMethod: principal.AuthenticationMethod(),
+		Action:               action,
+		Decision:             decision,
+		Reason:               reason,
+		Scope:                scope,
 	})
 }
 

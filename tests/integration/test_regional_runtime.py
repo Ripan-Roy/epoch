@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -19,6 +20,36 @@ MODULE_SPEC.loader.exec_module(regional_runtime)
 
 
 class RegionalRuntimeContractTest(unittest.TestCase):
+    def test_audit_page_verifier_checks_the_canonical_hash_chain(self) -> None:
+        fixture = MODULE_PATH.parents[2] / "spec/auth/audit-journal-v1.example.ndjson"
+        record = json.loads(fixture.read_text(encoding="utf-8"))
+        records, sequence, digest, at_end = regional_runtime.verify_audit_page(
+            {
+                "records": [record],
+                "next_sequence": "1",
+                "end_of_journal": True,
+            },
+            0,
+            "0" * 64,
+        )
+        self.assertEqual([record], records)
+        self.assertEqual(1, sequence)
+        self.assertEqual(record["record_sha256"], digest)
+        self.assertTrue(at_end)
+
+        tampered = json.loads(json.dumps(record))
+        tampered["event"]["request_id"] = "tampered-request"
+        with self.assertRaises(AssertionError):
+            regional_runtime.verify_audit_page(
+                {
+                    "records": [tampered],
+                    "next_sequence": "1",
+                    "end_of_journal": True,
+                },
+                0,
+                "0" * 64,
+            )
+
     def test_wait_until_honors_a_scoped_timeout(self) -> None:
         with (
             mock.patch.object(

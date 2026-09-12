@@ -8,6 +8,7 @@ import {
   DeploymentBody,
   GuardedUpgradeBody,
   GuaranteesBody,
+  IdentityAuditBody,
   OverviewBody,
   ObservabilityBody,
   ProtocolCompatibilityBody,
@@ -30,6 +31,7 @@ export type DocsPageId =
   | "guarantees"
   | "cluster-milestone"
   | "deployment"
+  | "identity-audit"
   | "observability"
   | "guarded-upgrades"
   | "voter-replacement"
@@ -164,6 +166,22 @@ export const docsPages: ReadonlyArray<DocsPageMeta> = [
       { id: "operations", label: "Evidence and limits" },
     ],
     Body: DeploymentBody,
+  },
+  {
+    id: "identity-audit",
+    group: "Core concepts",
+    label: "Identity & audit",
+    title: "Identity and authorization audit",
+    summary:
+      "Verify short-lived, tenant-scoped OIDC access tokens consistently in Go and Rust, then durably export every authorization decision.",
+    headings: [
+      { id: "contract", label: "Identity contract" },
+      { id: "configure", label: "Configure policy" },
+      { id: "call", label: "Call Epoch" },
+      { id: "audit", label: "Export audit history" },
+      { id: "failure", label: "Failure & recovery" },
+    ],
+    Body: IdentityAuditBody,
   },
   {
     id: "backup-restore",

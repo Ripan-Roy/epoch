@@ -16,7 +16,7 @@ import regionalBusPythonSource from "../quickstarts/regional_bus/quickstart.py?r
 
 export const repositoryUrl = "https://github.com/Ripan-Roy/epoch";
 export const repositoryDocsUrl = `${repositoryUrl}/blob/main/docs`;
-export const releaseVersion = "0.2.0-beta.9";
+export const releaseVersion = "0.2.0-beta.10";
 
 export type LanguageId = "go" | "java" | "python";
 
@@ -69,9 +69,77 @@ curl --fail-with-body --request POST \
 export const regionalControl = `# Terminal B · keep the managed bridge running
 EPOCH_CONTROL_REGIONAL_ENDPOINTS=http://127.0.0.1:18661,http://127.0.0.1:18662,http://127.0.0.1:18663 \
 EPOCH_CONTROL_STATE_PATH=.epoch/control/registry.db \
+EPOCH_CONTROL_AUDIT_PATH=.epoch/control/audit.ndjson \
 EPOCH_AUTH_POLICY_PATH=spec/auth/bootstrap-policy-v1.example.json \
 EPOCH_CONTROL_REGIONAL_TOKEN=epoch-dev-control-v1 \
 go run ./control/cmd/epoch-control`;
+
+export const identityPolicy = `{
+  "format_version": 2,
+  "policy_id": "epoch-production-v2",
+  "oidc": {
+    "role_claim": "epoch_roles",
+    "scope_claims": {
+      "organization": "epoch_organization",
+      "project": "epoch_project",
+      "environment": "epoch_environment",
+      "namespace": "epoch_namespace"
+    },
+    "roles": [
+      {"id": "reader", "actions": ["resource.read", "route.read", "data.read"]},
+      {"id": "auditor", "actions": ["audit.read"]}
+    ],
+    "issuers": [{
+      "issuer": "https://identity.example",
+      "audiences": ["epoch-api"],
+      "clock_skew_seconds": 30,
+      "maximum_token_lifetime_seconds": 3600,
+      "keys": [{
+        "kid": "production-ed25519-1",
+        "kty": "OKP",
+        "crv": "Ed25519",
+        "x": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+      }]
+    }]
+  }
+}`;
+
+export const identityRuntime = `# Use one private policy at both trust boundaries.
+export EPOCH_AUTH_POLICY_PATH=/secure/epoch/identity-policy-v2.json
+
+# Rust: defaults to <data-dir>/audit.ndjson when EPOCH_AUDIT_PATH is omitted.
+EPOCH_AUDIT_PATH=/var/lib/epoch/audit.ndjson \
+epoch-node --regional-config /secure/epoch/regional.json \
+  --data-dir /var/lib/epoch
+
+# Go: use the control PVC, not an ephemeral filesystem.
+EPOCH_CONTROL_AUDIT_PATH=/var/lib/epoch-control/audit.ndjson \
+EPOCH_CONTROL_STATE_PATH=/var/lib/epoch-control/registry.db \
+EPOCH_CONTROL_REGIONAL_TOKEN="$EPOCH_CONTROL_REGIONAL_TOKEN" \
+epoch-control`;
+
+export const identityRequest = `# The same OIDC access token works at the HTTP and gRPC boundaries.
+curl --fail-with-body \
+  'https://epoch-control.example/v1/resources?organization=acme&project=shop&environment=prod&namespace=core' \
+  --cacert /secure/epoch-ca.crt \
+  --header "authorization: Bearer $EPOCH_ACCESS_TOKEN" \
+  --header "x-request-id: inventory-2026-09-12-01"`;
+
+export const auditExport = `# Control-plane authorization history
+curl --fail-with-body --get \
+  https://epoch-control.example/v1/audit/events \
+  --cacert /secure/epoch-ca.crt \
+  --header "authorization: Bearer $EPOCH_ACCESS_TOKEN" \
+  --data-urlencode 'after_sequence=0' \
+  --data-urlencode 'limit=100'
+
+# One regional node's authorization history
+curl --fail-with-body --get \
+  https://epoch-node.example/v1/admin/audit/events \
+  --cacert /secure/epoch-ca.crt \
+  --header "authorization: Bearer $EPOCH_ACCESS_TOKEN" \
+  --data-urlencode 'after_sequence=0' \
+  --data-urlencode 'limit=100'`;
 
 export const observabilityRuntime = `# One collector endpoint works across the three processes
 export EPOCH_OTLP_ENDPOINT=http://127.0.0.1:4318
@@ -159,7 +227,7 @@ cd /secure/evidence/epoch-kubernetes-alpha-exit
 sha256sum --check manifest.sha256`;
 
 export const releaseArtifactVerification = `# Exact tags are discovery handles; deploy the verified digest.
-export EPOCH_RELEASE_TAG=v0.2.0-beta.9
+export EPOCH_RELEASE_TAG=v0.2.0-beta.10
 export EPOCH_IMAGE=ghcr.io/ripan-roy/epoch-node
 
 docker buildx imagetools inspect "$EPOCH_IMAGE:$EPOCH_RELEASE_TAG"
@@ -221,7 +289,7 @@ epoch-backup decrypt \
   --output /tmp/epoch-regional-backup.json`;
 
 export const guardedUpgradeSpec = `spec:
-  nodeImage: ghcr.io/ripan-roy/epoch-node:v0.2.0-beta.9
+  nodeImage: ghcr.io/ripan-roy/epoch-node:v0.2.0-beta.10
   upgrade:
     backupMaxAgeSeconds: 3600
     stepDeadlineSeconds: 900

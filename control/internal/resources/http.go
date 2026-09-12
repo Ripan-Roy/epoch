@@ -103,12 +103,16 @@ func newHTTPHandler(
 		audit:       audit,
 		diagnostics: diagnostics,
 	}
+	if reader, ok := audit.(controlauth.AuditReader); ok {
+		handler.auditReader = reader
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handler.health)
 	mux.HandleFunc("/v1/resources", handler.collection)
 	mux.HandleFunc("/v1/resources/", handler.item)
 	mux.HandleFunc("/v1/regional/resources", handler.regionalInventory)
 	mux.HandleFunc("/v1/observability/latency", handler.latencyDiagnostic)
+	mux.HandleFunc("/v1/audit/events", handler.auditEvents)
 	var routed http.Handler = mux
 	if policy != nil {
 		routed = withAuthentication(routed, policy, audit)
@@ -120,7 +124,110 @@ type httpHandler struct {
 	registry    *Registry
 	policy      *controlauth.Policy
 	audit       controlauth.AuditSink
+	auditReader controlauth.AuditReader
 	diagnostics LatencyDiagnosticProvider
+}
+
+func (handler *httpHandler) auditEvents(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer, http.MethodGet)
+		return
+	}
+	if handler.policy == nil {
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{
+			"code": "unavailable", "message": "audit export requires authentication",
+		})
+		return
+	}
+	principal, ok := controlauth.PrincipalFromContext(request.Context())
+	if !ok {
+		writeAuthError(writer, http.StatusUnauthorized, "unauthenticated", "authentication required")
+		return
+	}
+	allowed := principal.HasAction(controlauth.ActionAuditRead)
+	reason := controlauth.ReasonPolicyGrant
+	if !allowed {
+		reason = controlauth.ReasonActionNotGranted
+	}
+	if err := handler.recordDecision(
+		request,
+		principal,
+		controlauth.ActionAuditRead,
+		principal.Scope(),
+		allowed,
+		reason,
+	); err != nil {
+		writeAuthError(writer, http.StatusServiceUnavailable, "audit_unavailable", "audit journal is unavailable")
+		return
+	}
+	if !allowed {
+		writeAuthError(writer, http.StatusForbidden, "permission_denied", "principal is not authorized to read audit events")
+		return
+	}
+	if handler.auditReader == nil {
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{
+			"code": "unavailable", "message": "durable audit export is not configured",
+		})
+		return
+	}
+	afterSequence, pageSize, err := auditPageRequest(request.URL.Query())
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	page, err := handler.auditReader.ReadAuditPage(
+		request.Context(),
+		afterSequence,
+		pageSize,
+		principal,
+	)
+	if err != nil {
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{
+			"code": "audit_unavailable", "message": "audit journal could not be verified",
+		})
+		return
+	}
+	writeJSON(writer, http.StatusOK, page)
+}
+
+func auditPageRequest(query url.Values) (uint64, int, error) {
+	for name, values := range query {
+		if (name != "after_sequence" && name != "limit") || len(values) != 1 {
+			return 0, 0, invalid("audit query must contain each supported parameter at most once")
+		}
+	}
+	afterValues, hasAfter := query["after_sequence"]
+	after := query.Get("after_sequence")
+	if after != strings.TrimSpace(after) {
+		return 0, 0, invalid("after_sequence must be a canonical decimal uint64")
+	}
+	afterSequence := uint64(0)
+	if hasAfter {
+		if len(afterValues) != 1 || after == "" {
+			return 0, 0, invalid("after_sequence must be a canonical decimal uint64")
+		}
+		parsed, err := strconv.ParseUint(after, 10, 64)
+		if err != nil || strconv.FormatUint(parsed, 10) != after {
+			return 0, 0, invalid("after_sequence must be a canonical decimal uint64")
+		}
+		afterSequence = parsed
+	}
+	pageSize := 100
+	if limitValues, hasLimit := query["limit"]; hasLimit {
+		raw := query.Get("limit")
+		if len(limitValues) != 1 || raw == "" {
+			return 0, 0, invalid("limit must be between 1 and 1000")
+		}
+		if raw != strings.TrimSpace(raw) {
+			return 0, 0, invalid("limit must be between 1 and 1000")
+		}
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 1_000 || strconv.Itoa(parsed) != raw {
+			return 0, 0, invalid("limit must be between 1 and 1000")
+		}
+		pageSize = parsed
+	}
+	return afterSequence, pageSize, nil
 }
 
 // LatencyDiagnosticRequest identifies a tenant and bounded workload profile.
@@ -820,7 +927,10 @@ func (handler *httpHandler) authorize(
 			reason = controlauth.ReasonActionNotGranted
 		}
 	}
-	handler.recordDecision(request, principal, action, scope, allowed, reason)
+	if err := handler.recordDecision(request, principal, action, scope, allowed, reason); err != nil {
+		writeAuthError(writer, http.StatusServiceUnavailable, "audit_unavailable", "audit journal is unavailable")
+		return false
+	}
 	if !allowed {
 		writeAuthError(
 			writer,
@@ -850,7 +960,10 @@ func (handler *httpHandler) authorizeCollection(
 	if !allowed {
 		reason = controlauth.ReasonActionNotGranted
 	}
-	handler.recordDecision(request, principal, action, principal.Scope(), allowed, reason)
+	if err := handler.recordDecision(request, principal, action, principal.Scope(), allowed, reason); err != nil {
+		writeAuthError(writer, http.StatusServiceUnavailable, "audit_unavailable", "audit journal is unavailable")
+		return controlauth.Principal{}, false
+	}
 	if !allowed {
 		writeAuthError(
 			writer,
@@ -869,20 +982,21 @@ func (handler *httpHandler) recordDecision(
 	scope controlauth.Scope,
 	allowed bool,
 	reason controlauth.DecisionReason,
-) {
+) error {
 	decision := controlauth.DecisionDeny
 	if allowed {
 		decision = controlauth.DecisionAllow
 	}
-	handler.audit.Record(request.Context(), controlauth.DecisionEvent{
-		Timestamp:   time.Now().UTC(),
-		RequestID:   request.Header.Get("X-Request-ID"),
-		PrincipalID: principal.ID(),
-		PolicyID:    principal.PolicyID(),
-		Action:      action,
-		Decision:    decision,
-		Reason:      reason,
-		Scope:       scope,
+	return handler.audit.Record(request.Context(), controlauth.DecisionEvent{
+		Timestamp:            time.Now().UTC(),
+		RequestID:            request.Header.Get("X-Request-ID"),
+		PrincipalID:          principal.ID(),
+		PolicyID:             principal.PolicyID(),
+		AuthenticationMethod: principal.AuthenticationMethod(),
+		Action:               action,
+		Decision:             decision,
+		Reason:               reason,
+		Scope:                scope,
 	})
 }
 
@@ -1065,9 +1179,15 @@ func withAuthentication(
 					reason = controlauth.ReasonMalformedCredential
 				case controlauth.AuthenticationInvalid:
 					reason = controlauth.ReasonInvalidCredential
+				case controlauth.AuthenticationExpired:
+					reason = controlauth.ReasonExpiredCredential
+				case controlauth.AuthenticationNotYetValid:
+					reason = controlauth.ReasonNotYetValidCredential
+				case controlauth.AuthenticationRevoked:
+					reason = controlauth.ReasonRevokedCredential
 				}
 			}
-			audit.Record(request.Context(), controlauth.DecisionEvent{
+			if auditErr := audit.Record(request.Context(), controlauth.DecisionEvent{
 				Timestamp:   time.Now().UTC(),
 				RequestID:   requestID,
 				PrincipalID: "anonymous",
@@ -1076,7 +1196,10 @@ func withAuthentication(
 				Decision:    controlauth.DecisionDeny,
 				Reason:      reason,
 				Scope:       controlauth.Scope{},
-			})
+			}); auditErr != nil {
+				writeAuthError(writer, http.StatusServiceUnavailable, "audit_unavailable", "audit journal is unavailable")
+				return
+			}
 			writeAuthError(
 				writer,
 				http.StatusUnauthorized,
@@ -1093,6 +1216,9 @@ func withAuthentication(
 }
 
 func requestedResourceAction(request *http.Request) controlauth.Action {
+	if request.URL.Path == "/v1/audit/events" {
+		return controlauth.ActionAuditRead
+	}
 	switch request.Method {
 	case http.MethodPut, http.MethodPost, http.MethodPatch:
 		return controlauth.ActionResourceApply

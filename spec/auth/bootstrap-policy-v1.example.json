@@ -6,6 +6,7 @@
       "id": "development-admin",
       "token_sha256": "dae2068ce258900bd0cc8e0ae8f157c6b0980d562479f65bfb469ea433d7bc45",
       "actions": [
+        "audit.read",
         "backup.create",
         "catalog.apply",
         "catalog.delete",
