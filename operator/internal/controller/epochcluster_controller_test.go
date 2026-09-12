@@ -346,6 +346,19 @@ func TestValidateSpecSeparatesPhysicalNodesFromBoundedCatalogVoters(t *testing.T
 	}
 }
 
+func TestStatefulWorkloadsPersistAuditJournalsOnTheirDataVolumes(t *testing.T) {
+	t.Parallel()
+	cluster := validCluster()
+	nodeEnvironment := nodeStatefulSet(cluster).Spec.Template.Spec.Containers[0].Env
+	if !containsEnvironment(nodeEnvironment, "EPOCH_AUDIT_PATH", "/var/lib/epoch/audit.ndjson") {
+		t.Fatalf("node audit path is not on the data PVC: %#v", nodeEnvironment)
+	}
+	controlEnvironment := controlStatefulSet(cluster).Spec.Template.Spec.Containers[0].Env
+	if !containsEnvironment(controlEnvironment, "EPOCH_CONTROL_AUDIT_PATH", "/var/lib/epoch-control/audit.ndjson") {
+		t.Fatalf("control audit path is not on the data PVC: %#v", controlEnvironment)
+	}
+}
+
 func TestObjectMatchesDesiredIgnoresApiDefaultsButDetectsOwnedDrift(t *testing.T) {
 	t.Parallel()
 	cluster := validCluster()

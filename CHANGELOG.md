@@ -6,6 +6,44 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+## [0.2.0-beta.10] - 2026-09-12
+
+### Added
+
+- Added identity policy v2 with backward-compatible fingerprint principals and
+  offline-verifiable Ed25519 OIDC access tokens across the Go control plane and
+  Rust regional boundary.
+- Added bounded issuer, audience, key, role, tenant-scope, lifetime, clock-skew,
+  and emergency token-ID revocation policy with strict duplicate-field and
+  canonical-input rejection.
+- Added owner-only, fsynced, SHA-256-linked authorization journals for Go and
+  Rust, plus tenant-filtered `audit.read` exports with browser-safe cursors.
+- Added an end-to-end Identity & audit documentation page and a shared schema,
+  example, ADR, operating guide, and cross-language golden journal record.
+
+### Security and recovery
+
+- Allowed operations now wait for their durable authorization record. Audit
+  append or detected integrity failure makes the process fail protected work
+  unavailable instead of continuing without history.
+- Startup and every export verify the complete journal. Unit and HTTP tests
+  cover partial tails, same-length tampering, sticky failure, strict paging,
+  tenant filtering, and credential exclusion.
+- Compose and the Kubernetes operator place each Rust node journal on its node
+  volume and the Go control journal on its control volume. The real regional
+  campaign recomputes every digest and proves journal-prefix continuity across
+  control `SIGKILL` and all-node same-volume reopen.
+
+### Limitations
+
+- OIDC uses statically pinned OKP/Ed25519 keys. Discovery, remote JWKS refresh,
+  RS256/ES256, interactive browser token exchange, and hot or replicated policy
+  reload remain open.
+- The audit journal is tamper-evident local storage, not an external WORM
+  archive. Retention enforcement, acknowledged remote delivery, policy-change
+  history, a complete sensitive-action taxonomy, and signed merged cross-node
+  exports remain open.
+
 ## [0.2.0-beta.9] - 2026-09-11
 
 ### Added

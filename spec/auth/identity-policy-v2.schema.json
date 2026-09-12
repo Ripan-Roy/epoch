@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://epoch.dev/spec/auth/identity-policy-v2.schema.json",
+  "title": "Epoch identity and authorization policy v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format_version", "policy_id"],
+  "anyOf": [
+    {
+      "required": ["principals"],
+      "properties": { "principals": { "minItems": 1 } }
+    },
+    { "required": ["oidc"] }
+  ],
+  "properties": {
+    "format_version": { "const": 2 },
+    "policy_id": { "$ref": "#/$defs/policyId" },
+    "principals": {
+      "type": "array",
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/bootstrapPrincipal" }
+    },
+    "oidc": { "$ref": "#/$defs/oidc" }
+  },
+  "$defs": {
+    "policyId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "principalId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$"
+    },
+    "claimName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "scopeValue": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^(\\*|[A-Za-z0-9][A-Za-z0-9._-]*)$"
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["organization", "project", "environment", "namespace"],
+      "properties": {
+        "organization": { "$ref": "#/$defs/scopeValue" },
+        "project": { "$ref": "#/$defs/scopeValue" },
+        "environment": { "$ref": "#/$defs/scopeValue" },
+        "namespace": { "$ref": "#/$defs/scopeValue" }
+      }
+    },
+    "action": {
+      "enum": [
+        "audit.read",
+        "backup.create",
+        "catalog.apply",
+        "catalog.delete",
+        "catalog.read",
+        "data.read",
+        "data.write",
+        "resource.apply",
+        "resource.delete",
+        "resource.read",
+        "route.read",
+        "topology.read"
+      ]
+    },
+    "actions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/action" }
+    },
+    "bootstrapPrincipal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "token_sha256", "actions", "scope"],
+      "properties": {
+        "id": { "$ref": "#/$defs/principalId" },
+        "token_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "actions": { "$ref": "#/$defs/actions" },
+        "scope": { "$ref": "#/$defs/scope" }
+      }
+    },
+    "oidc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role_claim", "scope_claims", "roles", "issuers"],
+      "properties": {
+        "role_claim": { "$ref": "#/$defs/claimName" },
+        "scope_claims": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["organization", "project", "environment", "namespace"],
+          "properties": {
+            "organization": { "$ref": "#/$defs/claimName" },
+            "project": { "$ref": "#/$defs/claimName" },
+            "environment": { "$ref": "#/$defs/claimName" },
+            "namespace": { "$ref": "#/$defs/claimName" }
+          }
+        },
+        "roles": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "actions"],
+            "properties": {
+              "id": { "$ref": "#/$defs/policyId" },
+              "actions": { "$ref": "#/$defs/actions" }
+            }
+          }
+        },
+        "issuers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "issuer",
+              "audiences",
+              "clock_skew_seconds",
+              "maximum_token_lifetime_seconds",
+              "keys"
+            ],
+            "properties": {
+              "issuer": {
+                "type": "string",
+                "minLength": 9,
+                "maxLength": 256,
+                "pattern": "^https://(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\\[[0-9A-Fa-f:.]+\\])(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*)?$"
+              },
+              "audiences": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+                }
+              },
+              "clock_skew_seconds": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 300
+              },
+              "maximum_token_lifetime_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 86400
+              },
+              "keys": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["kid", "kty", "crv", "x"],
+                  "properties": {
+                    "kid": { "$ref": "#/$defs/policyId" },
+                    "kty": { "const": "OKP" },
+                    "crv": { "const": "Ed25519" },
+                    "x": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{43}$"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "revoked_jti_sha256": {
+          "type": "array",
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    }
+  }
+}

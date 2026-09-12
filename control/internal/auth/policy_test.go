@@ -1,6 +1,9 @@
 package auth
 
 import (
+	"bytes"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -86,7 +90,7 @@ func TestBootstrapPolicyRejectsAmbiguousOrUnboundedDocuments(t *testing.T) {
 		{
 			name: "unknown format",
 			mutate: func(candidate map[string]any) {
-				candidate["format_version"] = float64(2)
+				candidate["format_version"] = float64(3)
 			},
 		},
 		{
@@ -154,6 +158,249 @@ func TestBootstrapPolicyRejectsAmbiguousOrUnboundedDocuments(t *testing.T) {
 			}
 		})
 	}
+	duplicateField := strings.Replace(
+		string(valid),
+		`"format_version": 1`,
+		`"format_version": 1, "format_version": 1`,
+		1,
+	)
+	if _, err := ParsePolicy([]byte(duplicateField)); err == nil {
+		t.Fatal("ParsePolicy() accepted a duplicate JSON field")
+	}
+}
+
+func TestOIDCEdDSAAuthenticationEnforcesSignatureLifetimeRoleScopeAndRevocation(t *testing.T) {
+	policy, err := LoadPolicy(fixturePath("identity-policy-v2.example.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := map[string]any{
+		"iss":                "https://identity.epoch.example",
+		"aud":                []string{"unrelated", "epoch-api"},
+		"sub":                "workload-orders",
+		"iat":                uint64(1_000),
+		"nbf":                uint64(1_000),
+		"exp":                uint64(1_600),
+		"jti":                "active-token-1",
+		"epoch_roles":        []string{"reader", "writer"},
+		"epoch_organization": "acme",
+		"epoch_project":      "payments",
+		"epoch_environment":  "production",
+		"epoch_namespace":    "orders",
+	}
+	token := signedOIDCToken(t, claims)
+	principal, err := policy.AuthenticateBearerAt("Bearer "+token, time.Unix(1_200, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if principal.AuthenticationMethod() != AuthenticationOIDCEdDSA ||
+		!strings.HasPrefix(principal.ID(), "oidc:") ||
+		!strings.HasSuffix(principal.ID(), ":workload-orders") {
+		t.Fatalf("OIDC principal = %#v", principal)
+	}
+	if !principal.Allows(ActionDataWrite, Scope{
+		Organization: "acme", Project: "payments", Environment: "production", Namespace: "orders",
+	}) || principal.Allows(ActionDataWrite, Scope{
+		Organization: "acme", Project: "payments", Environment: "production", Namespace: "other",
+	}) {
+		t.Fatal("OIDC role/scope evaluation did not fail closed")
+	}
+	assertAuthenticationKind(t, policy, token, time.Unix(1_631, 0), AuthenticationExpired)
+	assertAuthenticationKind(t, policy, token, time.Unix(969, 0), AuthenticationNotYetValid)
+
+	revokedClaims := cloneAnyMap(claims)
+	revokedClaims["jti"] = "revoked-token-1"
+	assertAuthenticationKind(
+		t,
+		policy,
+		signedOIDCToken(t, revokedClaims),
+		time.Unix(1_200, 0),
+		AuthenticationRevoked,
+	)
+	wrongAudienceClaims := cloneAnyMap(claims)
+	wrongAudienceClaims["aud"] = "another-service"
+	assertAuthenticationKind(
+		t,
+		policy,
+		signedOIDCToken(t, wrongAudienceClaims),
+		time.Unix(1_200, 0),
+		AuthenticationInvalid,
+	)
+}
+
+func TestOIDCPolicyRejectsUnknownAlgorithmsKeysClaimsAndUnboundedLifetimes(t *testing.T) {
+	valid := fixtureBytes(t, "identity-policy-v2.example.json")
+	var issuerWithPath map[string]any
+	if err := json.Unmarshal(valid, &issuerWithPath); err != nil {
+		t.Fatal(err)
+	}
+	issuerWithPath["oidc"].(map[string]any)["issuers"].([]any)[0].(map[string]any)["issuer"] =
+		"https://identity.epoch.example/realms/production/"
+	encodedIssuerWithPath, err := json.Marshal(issuerWithPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParsePolicy(encodedIssuerWithPath); err != nil {
+		t.Fatalf("valid path-based issuer rejected: %v", err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{
+			name: "duplicate claims",
+			mutate: func(candidate map[string]any) {
+				oidc := candidate["oidc"].(map[string]any)
+				oidc["scope_claims"].(map[string]any)["organization"] = "epoch_roles"
+			},
+		},
+		{
+			name: "non HTTPS issuer",
+			mutate: func(candidate map[string]any) {
+				issuer := candidate["oidc"].(map[string]any)["issuers"].([]any)[0].(map[string]any)
+				issuer["issuer"] = "http://issuer"
+			},
+		},
+		{
+			name: "issuer without a hostname character",
+			mutate: func(candidate map[string]any) {
+				issuer := candidate["oidc"].(map[string]any)["issuers"].([]any)[0].(map[string]any)
+				issuer["issuer"] = "https://-"
+			},
+		},
+		{
+			name: "issuer with user information",
+			mutate: func(candidate map[string]any) {
+				issuer := candidate["oidc"].(map[string]any)["issuers"].([]any)[0].(map[string]any)
+				issuer["issuer"] = "https://user@issuer.example"
+			},
+		},
+		{
+			name: "issuer with query",
+			mutate: func(candidate map[string]any) {
+				issuer := candidate["oidc"].(map[string]any)["issuers"].([]any)[0].(map[string]any)
+				issuer["issuer"] = "https://issuer.example?tenant=1"
+			},
+		},
+		{
+			name: "unsupported curve",
+			mutate: func(candidate map[string]any) {
+				issuer := candidate["oidc"].(map[string]any)["issuers"].([]any)[0].(map[string]any)
+				issuer["keys"].([]any)[0].(map[string]any)["crv"] = "X25519"
+			},
+		},
+		{
+			name: "unbounded lifetime",
+			mutate: func(candidate map[string]any) {
+				issuer := candidate["oidc"].(map[string]any)["issuers"].([]any)[0].(map[string]any)
+				issuer["maximum_token_lifetime_seconds"] = float64(86_401)
+			},
+		},
+		{
+			name: "unknown field",
+			mutate: func(candidate map[string]any) {
+				candidate["oidc"].(map[string]any)["discovery"] = true
+			},
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			var candidate map[string]any
+			if err := json.Unmarshal(valid, &candidate); err != nil {
+				t.Fatal(err)
+			}
+			testCase.mutate(candidate)
+			encoded, err := json.Marshal(candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ParsePolicy(encoded); err == nil {
+				t.Fatal("ParsePolicy() succeeded")
+			}
+		})
+	}
+}
+
+func TestOIDCAuthenticationRejectsDuplicateSignedHeaderAndClaimNames(t *testing.T) {
+	policy, err := LoadPolicy(fixturePath("identity-policy-v2.example.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := []byte(`{"iss":"https://identity.epoch.example","aud":"epoch-api","sub":"workload-orders","iat":1000,"exp":1600,"jti":"active-token-1","epoch_roles":["reader"],"epoch_organization":"acme","epoch_project":"payments","epoch_environment":"production","epoch_namespace":"orders"}`)
+	duplicateHeader := []byte(`{"alg":"EdDSA","alg":"EdDSA","kid":"epoch-test-ed25519-1","typ":"JWT"}`)
+	assertAuthenticationKind(
+		t,
+		policy,
+		signedOIDCBytes(t, duplicateHeader, claims),
+		time.Unix(1_200, 0),
+		AuthenticationMalformed,
+	)
+	header := []byte(`{"alg":"EdDSA","kid":"epoch-test-ed25519-1","typ":"JWT"}`)
+	duplicateClaims := bytes.Replace(
+		claims,
+		[]byte(`"sub":"workload-orders"`),
+		[]byte(`"sub":"workload-orders","sub":"workload-orders"`),
+		1,
+	)
+	assertAuthenticationKind(
+		t,
+		policy,
+		signedOIDCBytes(t, header, duplicateClaims),
+		time.Unix(1_200, 0),
+		AuthenticationMalformed,
+	)
+	unknownHeader := []byte(`{"alg":"EdDSA","kid":"epoch-test-ed25519-1","crit":[]}`)
+	assertAuthenticationKind(
+		t,
+		policy,
+		signedOIDCBytes(t, unknownHeader, claims),
+		time.Unix(1_200, 0),
+		AuthenticationInvalid,
+	)
+}
+
+func signedOIDCToken(t *testing.T, claims map[string]any) string {
+	t.Helper()
+	header := map[string]any{"alg": "EdDSA", "kid": "epoch-test-ed25519-1", "typ": "JWT"}
+	headerBytes, _ := json.Marshal(header)
+	claimsBytes, _ := json.Marshal(claims)
+	return signedOIDCBytes(t, headerBytes, claimsBytes)
+}
+
+func signedOIDCBytes(t *testing.T, headerBytes, claimsBytes []byte) string {
+	t.Helper()
+	seed, err := base64.RawURLEncoding.DecodeString("nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKey := ed25519.NewKeyFromSeed(seed)
+	signingInput := base64.RawURLEncoding.EncodeToString(headerBytes) + "." +
+		base64.RawURLEncoding.EncodeToString(claimsBytes)
+	signature := ed25519.Sign(privateKey, []byte(signingInput))
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(signature)
+}
+
+func assertAuthenticationKind(
+	t *testing.T,
+	policy *Policy,
+	token string,
+	now time.Time,
+	want AuthenticationErrorKind,
+) {
+	t.Helper()
+	_, err := policy.AuthenticateBearerAt("Bearer "+token, now)
+	var authenticationError *AuthenticationError
+	if !errors.As(err, &authenticationError) || authenticationError.Kind != want {
+		t.Fatalf("AuthenticateBearerAt() error = %#v, want %q", err, want)
+	}
+}
+
+func cloneAnyMap(source map[string]any) map[string]any {
+	clone := make(map[string]any, len(source))
+	for key, value := range source {
+		clone[key] = value
+	}
+	return clone
 }
 
 func TestPrincipalIdentityAndActionsAreImmutableCopies(t *testing.T) {

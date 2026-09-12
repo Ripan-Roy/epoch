@@ -48,7 +48,7 @@ will not create a workload until all referenced objects are valid:
 
 | Reference | Required data | Purpose |
 |---|---|---|
-| `authPolicyConfigMap` | `bootstrap-policy.json` | Strict bearer authorization policy |
+| `authPolicyConfigMap` | `bootstrap-policy.json` | Strict v1 fingerprint or v2 OIDC authorization policy |
 | `credentialSecret` | `regional-token` | Go control and backup authorization |
 | `transportSecurity.dataPlaneSecret` | `ca.crt`, `tls.crt`, `tls.key` | Rust HTTPS server and peer mTLS identity |
 | `transportSecurity.controlPlaneSecret` | `ca.crt`, `tls.crt`, `tls.key` | Go HTTPS/gRPC server and Rust client identity |
@@ -73,6 +73,14 @@ certificate. Epoch verifies the requested server name and trust chain; do not
 disable hostname verification. Certificate issuance and rotation belong to
 cert-manager, a private CA, or the deployment's secret manager—private keys are
 never checked into this repository.
+
+The operator places each Rust journal at `/var/lib/epoch/audit.ndjson` on that
+node's data PVC and the Go journal at
+`/var/lib/epoch-control/audit.ndjson` on the control PVC. Journal corruption or
+an unavailable durable write fails protected operations closed. The filename in
+the ConfigMap remains `bootstrap-policy.json` for compatibility but may contain
+the v2 schema. Mounted policy/JWK/revocation changes require workload restart in
+this beta.
 
 Create the references after issuance:
 
@@ -215,7 +223,7 @@ and postflight verification. Only then does it release the next lower ordinal.
 
 ```yaml
 spec:
-  nodeImage: registry.example/epoch-node:v0.2.0-beta.9
+  nodeImage: registry.example/epoch-node:v0.2.0-beta.10
   upgrade:
     backupMaxAgeSeconds: 3600
     stepDeadlineSeconds: 900

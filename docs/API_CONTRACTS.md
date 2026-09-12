@@ -484,16 +484,26 @@ The TypeScript console calls this Go endpoint only. Browser CORS is granted to
 exact HTTP(S) origins configured by `EPOCH_CONTROL_ALLOWED_ORIGINS`; wildcards,
 paths, query strings, opaque origins, and credentials are rejected. Requests
 without `Origin` remain available to non-browser clients, but every `/v1`
-request still requires bootstrap bearer authentication.
+request still requires bearer authentication.
 
-### 6.8 Bootstrap authentication and authorization
+### 6.8 Identity authentication and authorization
 
-The current managed and regional alpha uses the strict policy defined by
-`spec/auth/bootstrap-policy-v1.schema.json`. HTTP callers send
-`Authorization: Bearer <token>`; gRPC callers send the same value in
-`authorization` metadata. A caller may also send one printable
+The managed and regional beta accepts the backward-compatible fingerprint
+policy in `spec/auth/bootstrap-policy-v1.schema.json` or the OIDC-capable policy
+in `spec/auth/identity-policy-v2.schema.json`. HTTP callers send `Authorization:
+Bearer <token>`; gRPC callers send the same value in `authorization` metadata. A
+caller may also send one printable
 `X-Request-ID`/`x-request-id` of at most 128 bytes. The server generates a safe
 identifier otherwise and returns it in the response.
+
+Policy v2 verifies pinned OKP/Ed25519 (`EdDSA`) JWT access tokens offline. Exact
+issuer, audience and key ID, bounded lifetime/skew, optional `nbf`, stable `sub`
+and `jti`, configured roles, and all four tenant-scope claims are required.
+Actions come only from the policy role map. Canonical base64url, integer time
+claims, and unambiguous JSON are mandatory. Unknown algorithms/keys/roles and a
+SHA-256-revoked `jti` fail closed. Policy files and pinned keys are loaded at
+startup; discovery, remote JWKS refresh, RS256/ES256, and hot reload are not in
+this beta contract.
 
 Health endpoints and CORS `OPTIONS` are public. Missing, malformed, repeated, or
 invalid credentials fail before a managed or regional handler runs. HTTP
@@ -509,6 +519,7 @@ The implemented action mapping is:
 | Go HTTP/gRPC | Apply resource | `resource.apply` |
 | Go HTTP/gRPC | Delete resource | `resource.delete` |
 | Go HTTP/gRPC | Get/List/inventory | `resource.read` |
+| Go HTTP | Export authorization history | `audit.read` |
 | Rust regional | Catalog PUT | `catalog.apply` |
 | Rust regional | Catalog DELETE | `catalog.delete` |
 | Rust regional | Catalog GET | `catalog.read` |
@@ -516,6 +527,9 @@ The implemented action mapping is:
 | Rust regional | Typed data GET | `data.read` |
 | Rust regional | Event Bus archive replay/delivery query POST | `data.read` |
 | Rust regional | Typed data mutation | `data.write` |
+| Rust regional | Create regional backup | `backup.create` |
+| Rust regional | Read node topology | `topology.read` |
+| Rust regional | Export authorization history | `audit.read` |
 
 Single-resource operations authorize the fully qualified
 organization/project/environment/namespace before lookup or mutation.
@@ -524,6 +538,31 @@ an unauthorized tenant record is not disclosed. `epoch-control` uses the
 separate workload credential from `EPOCH_CONTROL_REGIONAL_TOKEN` for every Rust
 authority request. Authorization decisions never place that credential in
 errors or audit fields.
+
+Both public boundaries append authentication failures and authorization
+allow/deny decisions to an owner-only, fsynced, SHA-256-linked NDJSON journal
+before an allowed operation continues. The Go control plane uses
+`EPOCH_CONTROL_AUDIT_PATH`; each regional Rust node uses `EPOCH_AUDIT_PATH` or
+defaults to `<EPOCH_DATA_DIR>/audit.ndjson`. A write or detected integrity
+failure makes the journal unavailable and a protected allow path returns HTTP
+`503 {"code":"audit_unavailable",...}` or gRPC `UNAVAILABLE`.
+
+Authorized callers read bounded tenant-filtered pages through:
+
+```http
+GET /v1/audit/events?after_sequence=0&limit=100
+GET /v1/admin/audit/events?after_sequence=0&limit=100
+```
+
+The first path is the Go control-plane journal; the second is one Rust node's
+journal. `limit` defaults to 100 and must be 1–1,000. Each query parameter may
+occur at most once and decimal cursors are canonical unsigned integers. The
+response contains `records`, `next_sequence`, and `end_of_journal`. Sequences
+and event times are decimal strings. Reading is itself audited, the complete
+chain is verified before export, and records outside the caller's scope are not
+returned. The stable record is defined by
+`spec/auth/audit-journal-v1.schema.json`; the two paths are separate per-process
+histories, not a globally ordered merged stream.
 
 ## 7. Typed errors
 

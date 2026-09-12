@@ -10,7 +10,7 @@ use std::{
 };
 
 use clap::Parser;
-use epoch_auth::BootstrapPolicy;
+use epoch_auth::{AuditJournal, BootstrapPolicy};
 use epoch_bus::BusConfig;
 use epoch_cache::CacheConfig;
 use epoch_core::{DeploymentMode, SystemClock};
@@ -137,6 +137,8 @@ struct Args {
     regional_restore_path: Option<PathBuf>,
     #[arg(long, env = "EPOCH_AUTH_POLICY_PATH")]
     auth_policy_path: Option<PathBuf>,
+    #[arg(long, env = "EPOCH_AUDIT_PATH")]
+    audit_path: Option<PathBuf>,
     #[arg(
         long,
         env = "EPOCH_REGIONAL_MAX_GROUPS",
@@ -311,6 +313,7 @@ struct RegionalRuntimeLaunch {
     listen: SocketAddr,
     data_dir: PathBuf,
     auth_policy_path: PathBuf,
+    audit_path: PathBuf,
     max_groups: usize,
     read_barrier_timeout: Duration,
     maintenance_interval: Duration,
@@ -567,6 +570,7 @@ where
         .as_ref()
         .map(|artifact| artifact.manifest_sha256.clone());
     let policy = Arc::new(BootstrapPolicy::load(&launch.auth_policy_path)?);
+    let audit = Arc::new(AuditJournal::open(&launch.audit_path)?);
     let auth_policy_id = policy.id().to_owned();
     let peer_authentication = if peer_tls.is_some() { "mtls" } else { "none" };
     let peer_listener = TcpListener::bind(launch.listen).await?;
@@ -596,7 +600,7 @@ where
         publish_restore_completion(&launch.data_dir, manifest_sha256)?;
     }
     let regional_public = with_public_http_layers_using(
-        with_regional_auth(runtime.public_router(), policy),
+        with_regional_auth(runtime.public_router(), policy, Arc::clone(&audit)),
         allowed_origins,
         metrics,
     )?;
@@ -619,8 +623,9 @@ where
         zone = launch.topology.zone(),
         node_class = launch.topology.node_class(),
         data_dir = %launch.data_dir.display(),
+        audit_path = %launch.audit_path.display(),
         profile_guarantee_ceiling = "experimental_fixed_voter_majority",
-        regional_http_authentication = "bootstrap_bearer",
+        regional_http_authentication = "bearer_policy_v1_v2",
         auth_policy_id,
         peer_authentication,
         "experimental regional multi-tablet runtime is listening"
@@ -648,7 +653,8 @@ where
     }
     .map_err(boxed_error);
     let runtime_result = runtime.shutdown().await.map_err(boxed_error);
-    server_result.and(runtime_result)
+    let audit_result = audit.sync().map_err(boxed_error);
+    server_result.and(runtime_result).and(audit_result)
 }
 
 fn publish_restore_completion(data_dir: &Path, manifest_sha256: &str) -> std::io::Result<()> {
@@ -995,6 +1001,10 @@ fn regional_runtime_launch(
         listen: args.consensus_listen,
         data_dir: args.data_dir.clone(),
         auth_policy_path,
+        audit_path: args
+            .audit_path
+            .clone()
+            .unwrap_or_else(|| args.data_dir.join("audit.ndjson")),
         max_groups: args.regional_max_groups,
         read_barrier_timeout: Duration::from_millis(args.regional_read_barrier_timeout_ms),
         maintenance_interval: Duration::from_millis(args.regional_maintenance_interval_ms),
@@ -1614,6 +1624,10 @@ mod tests {
         assert_eq!(
             launch.auth_policy_path,
             PathBuf::from("/etc/epoch/bootstrap-policy.json")
+        );
+        assert_eq!(
+            launch.audit_path,
+            PathBuf::from("/tmp/epoch-regional-test/audit.ndjson")
         );
         assert_eq!(launch.max_groups, 64);
         assert_eq!(launch.read_barrier_timeout, Duration::from_millis(750));

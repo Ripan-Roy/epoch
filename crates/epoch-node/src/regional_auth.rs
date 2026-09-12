@@ -10,21 +10,23 @@ use std::{
 };
 
 use axum::{
-    Json, Router,
-    extract::{Request, State},
+    Extension, Json, Router,
+    extract::{Query, Request, State},
     http::{
         HeaderMap, HeaderValue, Method, StatusCode,
         header::{AUTHORIZATION, HeaderName},
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
+    routing::get,
 };
 use epoch_auth::{
-    Action, AuthenticationError, AuthenticationErrorKind, BootstrapPolicy, Decision, DecisionEvent,
-    DecisionReason, Principal, ResourceScope,
+    Action, AuditJournal, AuthenticationError, AuthenticationErrorKind, AuthenticationMethod,
+    BootstrapPolicy, Decision, DecisionEvent, DecisionEventFields, DecisionReason, Principal,
+    ResourceScope,
 };
 use percent_encoding::percent_decode_str;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 
 const CATALOG_ROOT: &str = "/experimental/v1/regional/catalog";
@@ -33,6 +35,7 @@ const CATALOG_TABLET_PREFIX: &str = "/experimental/v1/regional/catalog/tablets/"
 const RESOURCE_PREFIX: &str = "/experimental/v1/regional/resources/";
 const TOPOLOGY_PATH: &str = "/experimental/v1/regional/topology";
 const BACKUP_PATH: &str = "/v1/admin/backups";
+const AUDIT_PATH: &str = "/v1/admin/audit/events";
 const NATIVE_RESOURCE_PREFIX: &str = "/v1/organizations/";
 const MAX_REQUEST_ID_BYTES: usize = 128;
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -41,6 +44,7 @@ static REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
 #[derive(Debug, Clone)]
 struct RegionalAuthState {
     policy: Arc<BootstrapPolicy>,
+    audit: Arc<AuditJournal>,
 }
 
 #[derive(Debug, Serialize)]
@@ -51,9 +55,15 @@ struct AuthErrorBody {
 
 /// Applies deny-by-default authentication and scoped authorization to every
 /// route already registered in a regional router.
-pub fn with_regional_auth(router: Router, policy: Arc<BootstrapPolicy>) -> Router {
+pub fn with_regional_auth(
+    router: Router,
+    policy: Arc<BootstrapPolicy>,
+    audit: Arc<AuditJournal>,
+) -> Router {
+    let state = RegionalAuthState { policy, audit };
+    let router = router.route(AUDIT_PATH, get(read_audit_events));
     router.route_layer(middleware::from_fn_with_state(
-        RegionalAuthState { policy },
+        state,
         authorize_regional_request,
     ))
 }
@@ -69,15 +79,24 @@ async fn authorize_regional_request(
     let principal = match state.policy.authenticate_bearer(authorization) {
         Ok(principal) => principal,
         Err(authentication_error) => {
-            record_decision(
-                &request_id,
-                "anonymous",
-                state.policy.id(),
-                action,
-                Decision::Deny,
-                authentication_reason(&authentication_error),
-                ResourceScope::new("", "", "", ""),
-            );
+            if record_decision(
+                &state.audit,
+                authentication_failure_fields(
+                    &request_id,
+                    state.policy.id(),
+                    action,
+                    &authentication_error,
+                ),
+            )
+            .is_err()
+            {
+                return auth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "audit_unavailable",
+                    "audit journal is unavailable",
+                    &request_id,
+                );
+            }
             return auth_error(
                 StatusCode::UNAUTHORIZED,
                 "unauthenticated",
@@ -94,21 +113,37 @@ async fn authorize_regional_request(
             &request_id,
         );
     };
-    let allowed = principal.allows(action, &scope);
+    let decision_scope = if action == Action::AuditRead {
+        principal.scope().clone()
+    } else {
+        scope.clone()
+    };
+    let allowed = if action == Action::AuditRead {
+        principal.has_action(action)
+    } else {
+        principal.allows(action, &scope)
+    };
     let reason = decision_reason(&principal, action, allowed);
-    record_decision(
-        &request_id,
-        principal.id(),
-        principal.policy_id(),
-        action,
-        if allowed {
-            Decision::Allow
-        } else {
-            Decision::Deny
-        },
-        reason,
-        scope,
-    );
+    if record_decision(
+        &state.audit,
+        authorization_decision_fields(
+            &request_id,
+            &principal,
+            action,
+            allowed,
+            reason,
+            decision_scope,
+        ),
+    )
+    .is_err()
+    {
+        return auth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "audit_unavailable",
+            "audit journal is unavailable",
+            &request_id,
+        );
+    }
     if !allowed {
         return auth_error(
             StatusCode::FORBIDDEN,
@@ -121,6 +156,8 @@ async fn authorize_regional_request(
     // Downstream profile routers do not need credential material. Removing it
     // narrows the chance of future middleware accidentally serializing it.
     request.headers_mut().remove(AUTHORIZATION);
+    request.extensions_mut().insert(principal);
+    request.extensions_mut().insert(Arc::clone(&state.audit));
     request
         .headers_mut()
         .insert(REQUEST_ID_HEADER.clone(), request_id_header(&request_id));
@@ -144,6 +181,51 @@ fn authentication_reason(error: &AuthenticationError) -> DecisionReason {
         AuthenticationErrorKind::Missing => DecisionReason::MissingCredential,
         AuthenticationErrorKind::Malformed => DecisionReason::MalformedCredential,
         AuthenticationErrorKind::Invalid => DecisionReason::InvalidCredential,
+        AuthenticationErrorKind::Expired => DecisionReason::ExpiredCredential,
+        AuthenticationErrorKind::NotYetValid => DecisionReason::NotYetValidCredential,
+        AuthenticationErrorKind::Revoked => DecisionReason::RevokedCredential,
+    }
+}
+
+fn authentication_failure_fields(
+    request_id: &str,
+    policy_id: &str,
+    action: Action,
+    error: &AuthenticationError,
+) -> DecisionEventFields {
+    DecisionEventFields {
+        request_id: request_id.to_owned(),
+        principal_id: "anonymous".into(),
+        policy_id: policy_id.to_owned(),
+        authentication_method: None,
+        action,
+        decision: Decision::Deny,
+        reason: authentication_reason(error),
+        scope: ResourceScope::new("", "", "", ""),
+    }
+}
+
+fn authorization_decision_fields(
+    request_id: &str,
+    principal: &Principal,
+    action: Action,
+    allowed: bool,
+    reason: DecisionReason,
+    scope: ResourceScope,
+) -> DecisionEventFields {
+    DecisionEventFields {
+        request_id: request_id.to_owned(),
+        principal_id: principal.id().to_owned(),
+        policy_id: principal.policy_id().to_owned(),
+        authentication_method: Some(principal.authentication_method()),
+        action,
+        decision: if allowed {
+            Decision::Allow
+        } else {
+            Decision::Deny
+        },
+        reason,
+        scope,
     }
 }
 
@@ -158,6 +240,9 @@ fn decision_reason(principal: &Principal, action: Action, allowed: bool) -> Deci
 }
 
 fn action_for_request(method: &Method, path: &str) -> Action {
+    if path == AUDIT_PATH {
+        return Action::AuditRead;
+    }
     if path == BACKUP_PATH {
         return Action::BackupCreate;
     }
@@ -210,6 +295,7 @@ fn scope_for_path(path: &str) -> Result<ResourceScope, ()> {
     if path == CATALOG_ROOT
         || path == TOPOLOGY_PATH
         || path == BACKUP_PATH
+        || path == AUDIT_PATH
         || path.starts_with(CATALOG_TABLET_PREFIX)
     {
         return Ok(ResourceScope::new("", "", "", ""));
@@ -225,12 +311,13 @@ fn scope_for_path(path: &str) -> Result<ResourceScope, ()> {
     if segments.len() < 6 {
         return Err(());
     }
-    Ok(ResourceScope::new(
+    let scope = ResourceScope::new(
         decode_segment(segments[0])?,
         decode_segment(segments[1])?,
         decode_segment(segments[2])?,
         decode_segment(segments[3])?,
-    ))
+    );
+    valid_target_scope(&scope).then_some(scope).ok_or(())
 }
 
 #[derive(Debug)]
@@ -267,13 +354,17 @@ fn native_resource_request(path: &str) -> Result<Option<NativeResourceRequest>, 
             return Err(());
         }
     }
+    let scope = ResourceScope::new(
+        decode_segment(segments[0])?,
+        decode_segment(segments[2])?,
+        decode_segment(segments[4])?,
+        decode_segment(segments[6])?,
+    );
+    if !valid_target_scope(&scope) {
+        return Err(());
+    }
     Ok(Some(NativeResourceRequest {
-        scope: ResourceScope::new(
-            decode_segment(segments[0])?,
-            decode_segment(segments[2])?,
-            decode_segment(segments[4])?,
-            decode_segment(segments[6])?,
-        ),
+        scope,
         data_operation: segments.len() > 11,
         query_post: segments[7] == "buses"
             && matches!(
@@ -288,6 +379,27 @@ fn decode_segment(segment: &str) -> Result<String, ()> {
         .decode_utf8()
         .map(String::from)
         .map_err(|_| ())
+}
+
+fn valid_target_scope(scope: &ResourceScope) -> bool {
+    [
+        scope.organization.as_str(),
+        scope.project.as_str(),
+        scope.environment.as_str(),
+        scope.namespace.as_str(),
+    ]
+    .into_iter()
+    .all(valid_target_scope_value)
+}
+
+fn valid_target_scope_value(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 128
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn request_id(headers: &HeaderMap) -> String {
@@ -328,29 +440,17 @@ fn auth_error(
     response
 }
 
-#[allow(clippy::too_many_arguments)]
 fn record_decision(
-    request_id: &str,
-    principal_id: &str,
-    policy_id: &str,
-    action: Action,
-    decision: Decision,
-    reason: DecisionReason,
-    scope: ResourceScope,
-) {
-    let event = match DecisionEvent::new(
-        request_id,
-        principal_id,
-        policy_id,
-        action,
-        decision,
-        reason,
-        scope,
-    ) {
+    audit: &AuditJournal,
+    fields: DecisionEventFields,
+) -> Result<(), epoch_auth::AuditJournalError> {
+    let event = match DecisionEvent::new(fields) {
         Ok(event) => event,
         Err(audit_error) => {
             error!(error = %audit_error, "authorization audit event rejected");
-            return;
+            return Err(epoch_auth::AuditJournalError::InvalidEvent(
+                audit_error.to_string(),
+            ));
         }
     };
     info!(
@@ -358,6 +458,9 @@ fn record_decision(
         request_id = event.request_id(),
         principal_id = event.principal_id(),
         policy_id = event.policy_id(),
+        authentication_method = event
+            .authentication_method()
+            .map_or("none", AuthenticationMethod::as_str),
         action = event.action().as_str(),
         decision = event.decision().as_str(),
         reason = event.reason().as_str(),
@@ -367,6 +470,60 @@ fn record_decision(
         namespace = event.scope().namespace,
         "authorization decision"
     );
+    audit.record(&event)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuditPageQuery {
+    after_sequence: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn read_audit_events(
+    Extension(principal): Extension<Principal>,
+    Extension(audit): Extension<Arc<AuditJournal>>,
+    Query(query): Query<AuditPageQuery>,
+) -> Response {
+    let after_sequence = match query.after_sequence.as_deref() {
+        None => 0,
+        Some(value) => match value.parse::<u64>() {
+            Ok(parsed) if parsed.to_string() == value => parsed,
+            _ => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(AuthErrorBody {
+                        code: "invalid_argument",
+                        message: "after_sequence must be a canonical decimal uint64",
+                    }),
+                )
+                    .into_response();
+            }
+        },
+    };
+    let limit = query.limit.unwrap_or(100);
+    match audit.read_page(after_sequence, limit, &principal) {
+        Ok(page) => Json(page).into_response(),
+        Err(epoch_auth::AuditJournalError::InvalidPageSize) => (
+            StatusCode::BAD_REQUEST,
+            Json(AuthErrorBody {
+                code: "invalid_argument",
+                message: "limit must be between 1 and 1000",
+            }),
+        )
+            .into_response(),
+        Err(error) => {
+            error!(error = %error, "audit journal export failed");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(AuthErrorBody {
+                    code: "audit_unavailable",
+                    message: "audit journal could not be verified",
+                }),
+            )
+                .into_response()
+        }
+    }
 }
 
 #[cfg(test)]

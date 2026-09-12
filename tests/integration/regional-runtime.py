@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import importlib
 import os
@@ -46,6 +47,8 @@ RESULT_FAULTS = (
     "all_voter_sigkill_reopen",
 )
 RESULT_INVARIANTS = (
+    "authorization_audit_chain_verified",
+    "authorization_audit_reopened",
     "catalog_digest_preserved",
     "profile_state_converged",
     "managed_intent_replayed",
@@ -134,6 +137,55 @@ def exact_int(value: object) -> int | None:
     return None
 
 
+def audit_record_digest(record: dict[str, Any]) -> str:
+    sequence = exact_int(record.get("sequence"))
+    previous = record.get("previous_sha256")
+    event = record.get("event")
+    assert sequence is not None and sequence > 0, record
+    assert isinstance(previous, str) and len(previous) == 64, record
+    assert isinstance(event, dict), record
+    event_bytes = json.dumps(
+        event,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest = hashlib.sha256()
+    digest.update(b"epoch/audit-journal/v1\0")
+    digest.update(sequence.to_bytes(8, "big"))
+    digest.update(bytes.fromhex(previous))
+    digest.update(len(event_bytes).to_bytes(8, "big"))
+    digest.update(event_bytes)
+    return digest.hexdigest()
+
+
+def verify_audit_page(
+    document: dict[str, Any],
+    after_sequence: int,
+    previous_digest: str,
+) -> tuple[list[dict[str, Any]], int, str, bool]:
+    records = document.get("records")
+    next_sequence = exact_int(document.get("next_sequence"))
+    end_of_journal = document.get("end_of_journal")
+    assert isinstance(records, list), document
+    assert next_sequence is not None and next_sequence >= after_sequence, document
+    assert isinstance(end_of_journal, bool), document
+    expected_sequence = after_sequence + 1
+    for raw_record in records:
+        assert isinstance(raw_record, dict), raw_record
+        sequence = exact_int(raw_record.get("sequence"))
+        assert sequence == expected_sequence, raw_record
+        assert raw_record.get("format_version") == 1, raw_record
+        assert raw_record.get("previous_sha256") == previous_digest, raw_record
+        digest = audit_record_digest(raw_record)
+        assert raw_record.get("record_sha256") == digest, raw_record
+        previous_digest = digest
+        expected_sequence += 1
+    if records:
+        assert next_sequence == expected_sequence - 1, document
+    return records, next_sequence, previous_digest, end_of_journal
+
+
 def wait_until(
     description: str,
     check: Callable[[], Any],
@@ -174,6 +226,7 @@ class RegionalCluster:
         self.control_state_path = (
             Path(self.temporary_directory.name) / "control-registry.db"
         )
+        self.control_audit_path = Path(self.temporary_directory.name) / "audit.ndjson"
         self.control_log = (
             Path(self.temporary_directory.name) / "epoch-control.log"
         ).open("w+", encoding="utf-8")
@@ -266,6 +319,7 @@ class RegionalCluster:
                 "EPOCH_CONTROL_ALLOWED_ORIGINS": "https://console.example.test",
                 "EPOCH_CONTROL_RECONCILE_INTERVAL": "100ms",
                 "EPOCH_CONTROL_STATE_PATH": str(self.control_state_path),
+                "EPOCH_CONTROL_AUDIT_PATH": str(self.control_audit_path),
                 "EPOCH_AUTH_POLICY_PATH": str(AUTH_POLICY_PATH),
                 "EPOCH_CONTROL_REGIONAL_TOKEN": CONTROL_TOKEN,
             }
@@ -425,6 +479,45 @@ class RegionalCluster:
                 json.loads(raw) if raw else {},
                 dict(response.headers.items()),
             )
+
+    def control_audit_records(self) -> list[dict[str, Any]]:
+        return self._all_audit_records(
+            lambda after: self.control_request(
+                "GET", f"/v1/audit/events?after_sequence={after}&limit=1000"
+            )
+        )
+
+    def node_audit_records(self, node: int) -> list[dict[str, Any]]:
+        return self._all_audit_records(
+            lambda after: self.request(
+                node,
+                "GET",
+                f"/v1/admin/audit/events?after_sequence={after}&limit=1000",
+                headers={"authorization": f"Bearer {ADMIN_TOKEN}"},
+            )
+        )
+
+    @staticmethod
+    def _all_audit_records(
+        request_page: Callable[[int], HttpResponse],
+    ) -> list[dict[str, Any]]:
+        after_sequence = 0
+        previous_digest = "0" * 64
+        collected: list[dict[str, Any]] = []
+        for _ in range(128):
+            response = request_page(after_sequence)
+            assert response.status == 200, response
+            records, next_sequence, previous_digest, end_of_journal = verify_audit_page(
+                response.document, after_sequence, previous_digest
+            )
+            assert records, response
+            collected.extend(records)
+            encoded = json.dumps(records, separators=(",", ":"))
+            assert ADMIN_TOKEN not in encoded and CONTROL_TOKEN not in encoded, response
+            after_sequence = next_sequence
+            if end_of_journal:
+                return collected
+        raise AssertionError("audit export did not reach the journal tail in 128 pages")
 
 
 def wait_for_nodes(cluster: RegionalCluster, nodes: tuple[int, ...] = NODES) -> None:
@@ -2945,8 +3038,15 @@ def run_campaign(cluster: RegionalCluster) -> dict[str, Any]:
     prove_capacity_rejection(cluster)
     write_profile(cluster, MANAGED_RESOURCE, 1)
     wait_for_profile_apply(cluster, MANAGED_RESOURCE, 1)
+    control_audit_before_restart = cluster.control_audit_records()
+    assert control_audit_before_restart
     cluster.crash_control()
     cluster.start_control()
+    control_audit_after_restart = cluster.control_audit_records()
+    assert control_audit_after_restart[: len(control_audit_before_restart)] == (
+        control_audit_before_restart
+    )
+    assert len(control_audit_after_restart) > len(control_audit_before_restart)
     replay_managed_resource(cluster, MANAGED_RESOURCE)
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
     assert_managed_governance(cluster, MANAGED_RESOURCE, MANAGED_STREAM_SHARDS)
@@ -3070,10 +3170,17 @@ def run_campaign(cluster: RegionalCluster) -> dict[str, Any]:
 
     wait_for_automatic_checkpoints(cluster, 1 + expected_tablets, False)
 
+    node_audit_before_restart = cluster.node_audit_records(1)
+    assert node_audit_before_restart
     cluster.crash_all()
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "pending", 0)
     cluster.restart_all()
     wait_for_nodes(cluster)
+    node_audit_after_restart = cluster.node_audit_records(1)
+    assert node_audit_after_restart[: len(node_audit_before_restart)] == (
+        node_audit_before_restart
+    )
+    assert len(node_audit_after_restart) > len(node_audit_before_restart)
     assert (
         wait_for_catalog(cluster, expected_resources, expected_tablets)
         == initial_catalog_digest
@@ -3118,6 +3225,8 @@ def run_campaign(cluster: RegionalCluster) -> dict[str, Any]:
             "resources": expected_resources,
             "tablets": expected_tablets,
             "physical_nodes": len(NODES),
+            "control_audit_records": len(control_audit_after_restart),
+            "node_audit_records": len(node_audit_after_restart),
         },
     }
 

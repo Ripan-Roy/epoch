@@ -22,6 +22,7 @@ func TestLoadConfigUsesExplicitRegionalEndpointsAndInterval(t *testing.T) {
 		" http://127.0.0.1:5173,https://console.example.com ,,",
 	)
 	t.Setenv("EPOCH_CONTROL_STATE_PATH", "/tmp/epoch-control-test/registry.db")
+	t.Setenv("EPOCH_CONTROL_AUDIT_PATH", "/tmp/epoch-control-test/audit.ndjson")
 	t.Setenv("EPOCH_CONTROL_RECONCILE_INTERVAL", "250ms")
 	t.Setenv("EPOCH_CONTROL_OBSERVABILITY_MAX_TENANTS", "12")
 	t.Setenv("EPOCH_OTLP_ENDPOINT", "http://collector:4318")
@@ -38,6 +39,7 @@ func TestLoadConfigUsesExplicitRegionalEndpointsAndInterval(t *testing.T) {
 		len(config.regionalMetricsEndpoints) != 2 ||
 		len(config.allowedOrigins) != 2 ||
 		config.statePath != "/tmp/epoch-control-test/registry.db" ||
+		config.auditPath != "/tmp/epoch-control-test/audit.ndjson" ||
 		config.authPolicyPath != "/etc/epoch/bootstrap-policy.json" ||
 		string(config.regionalToken) != "control-workload-token" ||
 		config.reconcileInterval != 250*time.Millisecond ||

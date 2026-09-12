@@ -93,6 +93,7 @@ physical-node inventory. Go services do not read or mutate Epoch storage files.
 - [Cache SDK](docs/REGIONAL_CACHE_SDK.md)
 - [Event Bus SDK](docs/REGIONAL_EVENT_BUS_SDK.md)
 - [Redis, Kafka, and RabbitMQ compatibility](docs/PROTOCOL_COMPATIBILITY.md)
+- [Identity, authorization, and audit](spec/auth/README.md)
 - [Kubernetes operator](docs/KUBERNETES_OPERATOR.md)
 - [Testing and release evidence](docs/TESTING.md)
 - [Security policy](docs/SECURITY.md)

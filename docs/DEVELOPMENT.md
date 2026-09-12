@@ -315,10 +315,15 @@ owned state. The console uses `VITE_EPOCH_CONTROL_BASE_URL` and never receives
 Rust node URLs for regional placement. Node and control allowlists reject
 wildcards, paths, query strings, credentials, and non-HTTP(S) origins.
 
-Managed and regional alpha processes also require the shared bootstrap policy:
+Managed and regional beta processes also require one shared identity policy and
+durable audit path:
 
-- `EPOCH_AUTH_POLICY_PATH` points to a strict version-one JSON policy for both
-  `epoch-control` and a regional `epoch-node`.
+- `EPOCH_AUTH_POLICY_PATH` points to either the strict fingerprint-only v1
+  policy or the OIDC-capable v2 policy for both `epoch-control` and a regional
+  `epoch-node`.
+- `EPOCH_CONTROL_AUDIT_PATH` is the Go journal. `EPOCH_AUDIT_PATH` is the Rust
+  journal and defaults to `<EPOCH_DATA_DIR>/audit.ndjson`. Put both on durable,
+  single-writer storage with owner-only permissions.
 - `EPOCH_CONTROL_REGIONAL_TOKEN` supplies the Go service's raw regional
   workload credential. Never print it, pass it on a command line, or commit a
   non-fixture value.
@@ -328,10 +333,13 @@ Managed and regional alpha processes also require the shared bootstrap policy:
   `sessionStorage`. There is intentionally no `VITE_*` token setting because
   Vite values are compiled into the static bundle.
 
-The example policy and decision corpus under `spec/auth/` contain public
+The v1 example policy and decision corpus under `spec/auth/` contain public
 development tokens. They are safe only for disposable loopback/Compose tests.
-Production OIDC, mTLS, secret injection, policy distribution, and immutable
-audit export remain open.
+The v2 example uses a public test Ed25519 key; replace its issuer, audiences,
+keys, roles, and scopes. Offline OIDC verification, short token lifetimes,
+bounded `jti` revocation, mTLS, and hash-linked local audit export are
+implemented. Interactive login, JWKS refresh, hot/replicated policy, external
+WORM audit delivery, and production secret injection remain open.
 
 For a fresh data directory, the standalone node stores its active engine
 journal in `$EPOCH_DATA_DIR/engine-wal/`. Files are named `segment-*.wal`; the
@@ -446,6 +454,7 @@ make compose-regional-config
 make compose-regional-up
 EPOCH_CONTROL_REGIONAL_ENDPOINTS=http://127.0.0.1:18661,http://127.0.0.1:18662,http://127.0.0.1:18663 \
 EPOCH_CONTROL_STATE_PATH=.epoch/control/registry.db \
+EPOCH_CONTROL_AUDIT_PATH=.epoch/control/audit.ndjson \
 EPOCH_AUTH_POLICY_PATH=spec/auth/bootstrap-policy-v1.example.json \
 EPOCH_CONTROL_REGIONAL_TOKEN=epoch-dev-control-v1 \
   go run ./control/cmd/epoch-control

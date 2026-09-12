@@ -1,0 +1,87 @@
+{
+  "format_version": 2,
+  "policy_id": "epoch-identity-v2",
+  "principals": [
+    {
+      "id": "break-glass-admin",
+      "token_sha256": "dae2068ce258900bd0cc8e0ae8f157c6b0980d562479f65bfb469ea433d7bc45",
+      "actions": [
+        "audit.read",
+        "backup.create",
+        "catalog.apply",
+        "catalog.delete",
+        "catalog.read",
+        "data.read",
+        "data.write",
+        "resource.apply",
+        "resource.delete",
+        "resource.read",
+        "route.read",
+        "topology.read"
+      ],
+      "scope": {
+        "organization": "*",
+        "project": "*",
+        "environment": "*",
+        "namespace": "*"
+      }
+    }
+  ],
+  "oidc": {
+    "role_claim": "epoch_roles",
+    "scope_claims": {
+      "organization": "epoch_organization",
+      "project": "epoch_project",
+      "environment": "epoch_environment",
+      "namespace": "epoch_namespace"
+    },
+    "roles": [
+      {
+        "id": "auditor",
+        "actions": ["audit.read"]
+      },
+      {
+        "id": "reader",
+        "actions": ["catalog.read", "data.read", "resource.read", "route.read"]
+      },
+      {
+        "id": "writer",
+        "actions": ["data.read", "data.write", "resource.read", "route.read"]
+      },
+      {
+        "id": "operator",
+        "actions": [
+          "backup.create",
+          "audit.read",
+          "catalog.apply",
+          "catalog.delete",
+          "catalog.read",
+          "resource.apply",
+          "resource.delete",
+          "resource.read",
+          "route.read",
+          "topology.read"
+        ]
+      }
+    ],
+    "issuers": [
+      {
+        "issuer": "https://identity.epoch.example",
+        "audiences": ["epoch-api"],
+        "clock_skew_seconds": 30,
+        "maximum_token_lifetime_seconds": 3600,
+        "keys": [
+          {
+            "kid": "epoch-test-ed25519-1",
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "x": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+          }
+        ]
+      }
+    ],
+    "revoked_jti_sha256": [
+      "a96a7c69ddaa983c47919b318ba0eabfad8fef0ef33f77d665f07b1420cdd343"
+    ]
+  }
+}

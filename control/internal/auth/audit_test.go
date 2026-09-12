@@ -104,6 +104,7 @@ func TestDecisionEventValidationRejectsUnboundedOrIncompleteFields(t *testing.T)
 		{name: "unknown action", mutate: func(event *DecisionEvent) { event.Action = "root" }},
 		{name: "unknown decision", mutate: func(event *DecisionEvent) { event.Decision = "maybe" }},
 		{name: "unknown reason", mutate: func(event *DecisionEvent) { event.Reason = "because" }},
+		{name: "invalid scope", mutate: func(event *DecisionEvent) { event.Scope.Project = "payments/<unsafe>" }},
 		{
 			name: "oversized principal",
 			mutate: func(event *DecisionEvent) {
