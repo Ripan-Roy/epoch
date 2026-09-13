@@ -16,7 +16,7 @@ import regionalBusPythonSource from "../quickstarts/regional_bus/quickstart.py?r
 
 export const repositoryUrl = "https://github.com/Ripan-Roy/epoch";
 export const repositoryDocsUrl = `${repositoryUrl}/blob/main/docs`;
-export const releaseVersion = "0.2.0-beta.10";
+export const releaseVersion = "0.2.0-beta.11";
 
 export type LanguageId = "go" | "java" | "python";
 
@@ -227,7 +227,7 @@ cd /secure/evidence/epoch-kubernetes-alpha-exit
 sha256sum --check manifest.sha256`;
 
 export const releaseArtifactVerification = `# Exact tags are discovery handles; deploy the verified digest.
-export EPOCH_RELEASE_TAG=v0.2.0-beta.10
+export EPOCH_RELEASE_TAG=v0.2.0-beta.11
 export EPOCH_IMAGE=ghcr.io/ripan-roy/epoch-node
 
 docker buildx imagetools inspect "$EPOCH_IMAGE:$EPOCH_RELEASE_TAG"
@@ -289,7 +289,7 @@ epoch-backup decrypt \
   --output /tmp/epoch-regional-backup.json`;
 
 export const guardedUpgradeSpec = `spec:
-  nodeImage: ghcr.io/ripan-roy/epoch-node:v0.2.0-beta.10
+  nodeImage: ghcr.io/ripan-roy/epoch-node:v0.2.0-beta.11
   upgrade:
     backupMaxAgeSeconds: 3600
     stepDeadlineSeconds: 900

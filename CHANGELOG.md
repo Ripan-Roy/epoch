@@ -6,6 +6,46 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+## [0.2.0-beta.11] - 2026-09-14
+
+### Added
+
+- Added bounded Redis `MULTI`/`EXEC`/`DISCARD` and optimistic `WATCH`/`UNWATCH`
+  transactions over one revision-fenced native Cache operation.
+- Added node-local Redis Pub/Sub plus a durable shard-zero Streams subset with
+  append, range/read, consumer groups, acknowledgements, and pending state.
+- Added non-transactional Kafka idempotent producer initialization, replicated
+  producer epochs and sequence spans, exact replay, gap rejection, and fencing.
+- Added Cache-backed durable AMQP exchanges, bindings, and dead-letter
+  declarations, including named-DLX routing and bounded RabbitMQ-compatible
+  `x-death` plus first/last-death metadata.
+- Expanded the migration scanner, compatibility matrix, architecture/semantics
+  docs, Pages examples, ADR-0049, and release evidence for the new surface.
+
+### Safety and recovery
+
+- Reserved the `__epoch:` Redis key prefix for compatibility metadata and reject
+  direct, watched, or queued access before native Cache mutation.
+- Advanced Stream state commands to version 8 for atomic idempotent batches while
+  retaining version-7 history decode and rejecting the new command under v7.
+- Corrected passive AMQP exchange declarations so released RabbitMQ clients can
+  reopen durable topology without inventing a type or durability redeclaration.
+- The 21-check production-image campaign passes with Redis CLI 8.8.2, Kafka Java
+  4.3.1, and RabbitMQ Java 5.35.0 across gateway replacement, separate
+  Cache/Stream/Queue leader loss, replica convergence, and all-voter reopen.
+
+### Limitations
+
+- Cache eviction remains explicitly configured and deterministic; Epoch does not
+  adaptively switch policies based on workload.
+- Redis Lua/functions, extended Streams trim/claim/multi-stream behavior, cluster
+  mode, and TLS are not supported by the compatibility gateway.
+- Kafka transactions/control batches, cooperative/new consumer groups, SASL, and
+  the broad admin surface remain unsupported.
+- Arbitrary AMQP dead-letter fanout, policies, transactions, AMQP 1.0, TLS, and
+  plugins remain unsupported. Differential fuzz, matched performance, and
+  protected beta.11 evidence remain release gates.
+
 ## [0.2.0-beta.10] - 2026-09-12
 
 ### Added

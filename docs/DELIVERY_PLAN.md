@@ -38,12 +38,13 @@ reviewable.
 Releases 1–5 shipped through `v0.1.0-alpha.9`: governance, complete
 non-deferred Cache, complete Stream, complete Queue, and the native
 Event/integration development platform. Product/runtime closure and subsequent
-beta hardening now ship through `v0.2.0-beta.9`: source ingestion, the Go
+beta hardening now ship through `v0.2.0-beta.10`: source ingestion, the Go
 operator and CLI, secure transport, recovery and guarded upgrades, OCI supply
 chain, bounded observability, Redis/Kafka/RabbitMQ compatibility, and automatic
-topology repair/rebalance. The current `v0.2.0-beta.10` release boundary is
-strict OIDC workload identity plus durable, tenant-filtered authorization
-audit across Go, Rust, deployment, restart evidence, and public docs.
+topology repair/rebalance, strict OIDC workload identity, and durable
+authorization audit. The current `v0.2.0-beta.11` release boundary expands the
+bounded Redis, Kafka, and RabbitMQ gateways across native replicated state,
+released-client conformance, restart evidence, scanner, and public docs.
 
 The published release train extends the authenticated regional
 multi-tablet M1/M2 boundary. Protected `main` evidence covers the consensus-backed catalog, durable

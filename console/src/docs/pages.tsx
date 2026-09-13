@@ -2480,9 +2480,9 @@ export function ReferenceBody() {
           />
           <ReferenceCard
             eyebrow="Release"
-            title="v0.2.0-beta.10 release notes"
-            description="OIDC workload identity, durable authorization audit, restart evidence, deployment guidance, and explicit beta limitations."
-            href={`${repositoryDocsUrl}/releases/v0.2.0-beta.10.md`}
+            title="v0.2.0-beta.11 release notes"
+            description="Redis transactions, Pub/Sub and Streams, Kafka idempotence, durable AMQP topology, recovery evidence, and explicit beta limits."
+            href={`${repositoryDocsUrl}/releases/v0.2.0-beta.11.md`}
           />
         </div>
       </Topic>

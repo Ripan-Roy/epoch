@@ -1,9 +1,9 @@
 # Epoch Delivery Checklist
 
-**Last reviewed:** 12 September 2026
-**Current published release:** `v0.2.0-beta.9`
-**Current release target:** `v0.2.0-beta.10`
-**Current core target:** OIDC workload identity and durable authorization audit
+**Last reviewed:** 14 September 2026
+**Current published release:** `v0.2.0-beta.10`
+**Current release target:** `v0.2.0-beta.11`
+**Current core target:** Redis, Kafka, and RabbitMQ compatibility closure
 
 This is the operational checklist for turning PRD scope into verified,
 releasable increments. [PRD.md](PRD.md) owns product scope,
@@ -34,12 +34,12 @@ protected-branch evidence agree.
 | G2 | Storage and recovery | 🟡 | Checksummed formats, crash recovery, corruption policy, snapshots, compaction, retention, tiering | Segmented WAL, compatible EPSN v1/v2 checkpoints, native images for all five profiles, checkpoint-plus-tail reopen, fixed-voter catch-up, physical EPRS reclamation, Stream retention, automatic voter checkpoints, Cache backup/PITR and cold reads pass protected `main`. The Stream candidate adds sparse compaction snapshots and checksum-verified embedded historical objects; protected evidence, product-wide external tiering, managed restore campaigns, and production repair remain open |
 | G3 | Consensus, catalog, and placement | 🟡 | Quorum safety, persistent catalog, multi-group supervision, membership, placement, repair, read barriers | Dedicated Catalog consensus, shared multi-group supervision, safe leader ReadIndex barriers, durable three/five-voter membership, learner catch-up, joint replacement, rack/exclusion-aware N-node placement, and serialized automatic policy/topology repair plus load rebalance pass protected beta.9. Transactional multi-plan reservation, split/merge, follower reads, and broader model/chaos evidence remain open. |
 | G4 | Native profile cores | 🟡 | Cache, Stream, Queue, and Bus P0 semantics with truthful public routing and fault evidence | All four typed tablet cores run simultaneously behind resource/shard routing and authenticated three-language clients. Cache, Stream, Queue, and the native Event Bus development surface shipped through alpha.9; production protocol/scale evidence remains open. |
-| G5 | Trust and observability | 🟡 | Identity, authorization, TLS/mTLS, encryption, audit, telemetry, quotas, explain | The protected baseline includes shared fingerprint authorization, TLS/mTLS, bounded telemetry, W3C propagation, OTLP, and measured diagnostics. The beta.10 candidate adds strict Go/Rust EdDSA OIDC parity, bounded lifetime and emergency revocation, owner-only fsynced hash-chained journals, tenant-filtered export, sticky fail-closed integrity behavior, persistent deployment paths, and public operating docs. Discovery/JWKS refresh, certificate issuance/revocation, replicated policy, external WORM retention, complete sensitive-event coverage, quotas, support bundles, and production security/SLO evidence remain open. |
+| G5 | Trust and observability | 🟡 | Identity, authorization, TLS/mTLS, encryption, audit, telemetry, quotas, explain | The protected beta.10 baseline includes shared fingerprint authorization, TLS/mTLS, strict Go/Rust EdDSA OIDC parity, bounded lifetime and emergency revocation, owner-only fsynced hash-chained journals, tenant-filtered export, sticky fail-closed integrity behavior, bounded telemetry, W3C propagation, OTLP, and measured diagnostics. Discovery/JWKS refresh, certificate issuance/revocation, replicated policy, external WORM retention, complete sensitive-event coverage, quotas, support bundles, and production security/SLO evidence remain open. |
 | G6 | Compatibility gateways | 🟡 | Named protocol/client matrix, differential tests, fuzzing, malformed frames, migration evidence | The current local candidate adds bounded Redis transactions/Pub/Sub/Streams, Kafka idempotent Produce, and durable AMQP topology/named-DLX/`x-death` to the protected beta.8 baseline. Both the exact-client fixture and production-image regional-v2 campaign are green: 21 checks survive gateway replacement, separate Cache/Stream/Queue leader failures, convergence, and all-voter same-volume reopen. Protected CI remains required. Differential/fuzz certification, Redis Lua/broader Streams, full static/cooperative/new-group Kafka protocols and transactions, arbitrary AMQP DLX/transactions/1.0, MQTT, and comparative performance remain open. |
 | G7 | Data services and integrations | 🟡 | Schemas, pipes, connectors, target execution, checkpoints, transaction boundaries | Replicated schemas/validation, transforms/enrichment, MQTT state, catalogs/endpoints, connector checkpoints/replay, leader-owned signed/Epoch/API/function/managed-target execution, HTTP/CloudEvents polling, and bounded immutable-object/PostgreSQL/MySQL/Kafka readers are implemented. Their pinned MinIO/database/broker conformance passes exact-main CI `34401493735`; private egress, live Azure/GCS identity, load/soak, and broader crash certification remain open. |
-| G8 | Managed operations | 🟡 | Durable Go reconciliation, operator, autoscaling, backup, metering, billing, private networking | The leader-elected operator reconciles 3–1,024 physical nodes, independent three/five-voter placements, a durable control owner, stable storage/network identity, encrypted backup/restore, guarded upgrade, learner-first replacement, and beta.9 automatic exclusion/domain repair plus load rebalance. The beta.10 candidate persists Rust node and Go control audit journals on their existing PVCs. Kubernetes topology attestation, cloud CSI, autoscaling, metering/billing, and private networking remain open. |
+| G8 | Managed operations | 🟡 | Durable Go reconciliation, operator, autoscaling, backup, metering, billing, private networking | The leader-elected operator reconciles 3–1,024 physical nodes, independent three/five-voter placements, a durable control owner, stable storage/network identity, encrypted backup/restore, guarded upgrade, learner-first replacement, automatic exclusion/domain repair plus load rebalance, and beta.10 persistent Rust/Go audit journals on existing PVCs. Kubernetes topology attestation, cloud CSI, autoscaling, metering/billing, and private networking remain open. |
 | G9 | Geo | ⬜ | Replication, RPO/RTO, promotion, failback, residency, split-brain drills | Not implemented |
-| G10 | Release readiness | 🟡 | Synchronized versions, CI, Pages, notes, verified tag provenance, artifacts, security and compatibility statements | `v0.2.0-beta.9` is published from exact `main` commit `538ea7a`; CI `34615713914`, Pages `34615714056`, and tag verification `34618651846` passed. Beta.10 identity/audit code, synchronized versions, release notes, complete `make check`/`make build`, deployment config validation, docs-bundle assertions, and the rebuilt regional Docker restart campaign pass locally; protected PR/main evidence, tag, and artifacts remain. Raw signed binaries, package-manager artifacts, clean-cluster digest-pull evidence, and GA operating evidence stay open. |
+| G10 | Release readiness | 🟡 | Synchronized versions, CI, Pages, notes, verified tag provenance, artifacts, security and compatibility statements | `v0.2.0-beta.10` is published from exact `main` commit `310a5e1`; CI `34712116208`, Pages `34712116234`, and tag verification `34713205601` passed. The beta.11 compatibility candidate has synchronized versions, curated notes, complete local checks/builds, Pages assertions, exact-client conformance, and the 21-check regional Docker restart campaign; protected PR/main evidence, tag, and artifacts remain. Raw signed binaries, package-manager artifacts, clean-cluster digest-pull evidence, and GA operating evidence stay open. |
 
 ## Milestone readiness
 
@@ -610,19 +610,19 @@ complete.
 
 | Order | Release action | Required evidence | State for next release |
 |---:|---|---|---:|
-| 1 | Select a completed, merged milestone boundary | The beta.10 candidate is one OIDC and durable-authorization-audit vertical slice across Go, Rust, deployment, real restart evidence, contracts, and public docs; all local gates pass, while merge and protected evidence remain | 🟡 |
-| 2 | Choose the next semantic prerelease version | `v0.2.0-beta.10` follows published beta.9 and does not already exist | ✅ |
-| 3 | Synchronize Rust, Go, Java, Python, TypeScript, SDK user agents, and lockfiles | `./scripts/check-release-version.sh` passes locally at `0.2.0-beta.10`; protected verification remains | ✅ |
-| 4 | Write curated, version-controlled release notes | `docs/releases/v0.2.0-beta.10.md` covers behavior, artifacts, upgrade guidance, verification, and explicit IAM/audit limitations | ✅ |
+| 1 | Select a completed, merged milestone boundary | The beta.11 candidate is one protocol-compatibility vertical slice across Rust gateway/tablets, exact clients, real restart evidence, contracts, scanner, and public docs; all local gates pass, while merge and protected evidence remain | 🟡 |
+| 2 | Choose the next semantic prerelease version | `v0.2.0-beta.11` follows published beta.10 and does not already exist | ✅ |
+| 3 | Synchronize Rust, Go, Java, Python, TypeScript, SDK user agents, and lockfiles | `./scripts/check-release-version.sh` passes locally at `0.2.0-beta.11`; protected verification remains | ✅ |
+| 4 | Write curated, version-controlled release notes | `docs/releases/v0.2.0-beta.11.md` covers behavior, artifacts, upgrade guidance, verification, and explicit compatibility limitations | ✅ |
 | 5 | Pass protected `main` CI and main-only Pages | Both workflow runs green at the release commit | ⬜ |
-| 6 | Verify the live docs show beta.10 notes and the identity/audit operating guide | Public Pages bundle assertions | ⬜ |
+| 6 | Verify the live docs show beta.11 notes and the compatibility operating guide | Public Pages bundle assertions | ⬜ |
 | 7 | Create an annotated tag at the exact current `main` commit | Local and remote commit IDs match | ⬜ |
 | 8 | Pass tag/version/main provenance workflow | Release-tag workflow green | ⬜ |
-| 9 | Publish the GitHub release from the checked-in notes | GitHub prerelease targets `v0.2.0-beta.10` | ⬜ |
+| 9 | Publish the GitHub release from the checked-in notes | GitHub prerelease targets `v0.2.0-beta.11` | ⬜ |
 | 10 | Verify downloads and package claims | Five OCI manifests and ten platform SBOM assets match the notes; package-manager publication remains deferred | ⬜ |
 | 11 | Start the next `Unreleased` section | Changelog prepared for continued delivery | ✅ |
 
-This table tracks the `v0.2.0-beta.10` sequence. The completed beta.9 evidence
+This table tracks the `v0.2.0-beta.11` sequence. The completed beta.10 evidence
 remains recorded in G10 and the versioned release notes.
 
 ## Feature delivery template
