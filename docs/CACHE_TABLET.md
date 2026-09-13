@@ -160,6 +160,11 @@ next revision and key. Canonical key order breaks ties. Volatile policies may
 choose only expiring keys and reject atomically if the eligible set cannot make
 room. Mutation targets are protected from becoming their own victims.
 
+The resource selects one policy when it is created. Epoch does not observe the
+traffic mix and automatically change between LRU, LFU, TTL, random, or
+no-eviction. The deterministic ranking is replication-safe policy execution,
+not adaptive policy selection.
+
 Item versions are allocated from the shard-global revision rather than from a
 per-key counter. They therefore do not reset when a key is deleted or expires.
 An expected item version of `0` means the key must be logically absent. The

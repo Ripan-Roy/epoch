@@ -155,6 +155,9 @@ once, including across idempotent retry; `Observe` is pure and never changes
 victim order. LRU/LFU/TTL ties use canonical keys and random policies rank
 candidates with a deterministic digest. Admission, eviction, and an ordered
 same-shard batch are one staged transition, so rejection has no partial result.
+The selected policy is immutable resource configuration. Epoch does not infer
+the workload or automatically switch between LRU, LFU, TTL, random, and
+no-eviction; “adaptive cache policy” is not a current product claim.
 
 Snapshots and change logs do not retroactively make a volatile write durable.
 
@@ -217,7 +220,7 @@ An idempotent producer has a producer ID, epoch, and monotonic sequence per
 partition. A lower producer epoch is fenced. A repeated sequence with the same
 input returns the original result; conflicting input is rejected.
 
-The regional command-v7 implementation retains at most 4,096 producers and
+The regional state-command-v8 implementation retains at most 4,096 producers and
 the most recent 256 contiguous sequence receipts per producer. Epochs and
 sequences use exact unsigned 64-bit decimal wire values. Each mutation stages
 the log plus producer state and publishes neither if its bounded canonical
@@ -247,7 +250,7 @@ assignment, but does not atomically install its fence in every checkpoint; see
 Read-committed consumers skip prepared and aborted transactional entries. They
 may wait behind an unresolved transaction up to a documented bound.
 
-The current v7 transaction domain is exactly one Stream tablet and at most 128
+The current v8 transaction domain is exactly one Stream tablet and at most 128
 records. Commit changes every record from hidden to visible and may advance one
 consumer offset in the same state transition. Abort permanently hides its
 records from read-committed. Push and dedicated long polls wake only after the

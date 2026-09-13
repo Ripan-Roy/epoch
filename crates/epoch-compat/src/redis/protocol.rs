@@ -15,6 +15,7 @@ pub enum RespValue {
     Bulk(Vec<u8>),
     Null,
     Array(Vec<RespValue>),
+    Push(Vec<RespValue>),
     Set(Vec<RespValue>),
     Map(Vec<(RespValue, RespValue)>),
     Boolean(bool),
@@ -151,6 +152,12 @@ fn encode_into(value: &RespValue, resp3: bool, output: &mut Vec<u8>) {
         RespValue::Null => output.extend_from_slice(b"$-1\r\n"),
         RespValue::Array(values) => {
             encode_aggregate(b'*', values.len(), output);
+            for value in values {
+                encode_into(value, resp3, output);
+            }
+        }
+        RespValue::Push(values) => {
+            encode_aggregate(if resp3 { b'>' } else { b'*' }, values.len(), output);
             for value in values {
                 encode_into(value, resp3, output);
             }
@@ -293,5 +300,16 @@ mod tests {
         let set = RespValue::Set(vec![RespValue::Bulk(b"member".to_vec())]);
         assert_eq!(encode_response(&set, true), b"~1\r\n$6\r\nmember\r\n");
         assert_eq!(encode_response(&set, false), b"*1\r\n$6\r\nmember\r\n");
+    }
+
+    #[test]
+    fn emits_resp3_push_and_resp2_compatible_pubsub_arrays() {
+        let notification = RespValue::Push(vec![
+            RespValue::Bulk(b"message".to_vec()),
+            RespValue::Bulk(b"events".to_vec()),
+            RespValue::Bulk(b"payload".to_vec()),
+        ]);
+        assert_eq!(encode_response(&notification, true)[0], b'>');
+        assert_eq!(encode_response(&notification, false)[0], b'*');
     }
 }

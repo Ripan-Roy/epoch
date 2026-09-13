@@ -544,13 +544,7 @@ impl StreamTabletCommand {
                 validate_session_command(session)?;
             }
             StreamTabletOperation::State(state) => {
-                if self.format_version != STREAM_TABLET_STATE_COMMAND_FORMAT_VERSION {
-                    return Err(TabletError::InvalidCommand(format!(
-                        "state-service mutation requires format_version {STREAM_TABLET_STATE_COMMAND_FORMAT_VERSION}; observed {}",
-                        self.format_version
-                    )));
-                }
-                validate_stream_state_command(state)?;
+                validate_stream_state_command(self.format_version, state)?;
             }
         }
         Ok(())
@@ -1725,6 +1719,21 @@ fn apply_stream_state_transition(
             sequence,
             partition,
             *envelope,
+            applied_at_ms,
+        )?),
+        StreamStateCommand::AppendIdempotentBatch {
+            producer_id,
+            producer_epoch,
+            base_sequence,
+            partition,
+            envelopes,
+        } => StreamTabletStateResult::ProducerAppend(services.append_idempotent_batch(
+            stream,
+            &producer_id,
+            producer_epoch,
+            base_sequence,
+            partition,
+            envelopes,
             applied_at_ms,
         )?),
         StreamStateCommand::BeginTransaction {

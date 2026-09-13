@@ -4,7 +4,7 @@
 
 **Tagline:** One runtime. Every real-time workload.  
 **Document version:** 0.3  
-**Date:** 10 September 2026
+**Date:** 13 September 2026
 **Status:** Implementation-backed private beta candidate; later managed-service milestones remain open
 **Audience:** Founders, product, distributed-systems engineering, infrastructure, security, and design
 
@@ -47,20 +47,20 @@ operational telemetry, geo, managed-service, 30-day, package-manager,
 production SLO, and GA rows remain open. See ADR-0039, ADR-0037, ADR-0042,
 ADR-0045, ADR-0046, and the delivery checklist.
 
-**Protocol implementation note (10 September 2026):** Beta.8 makes Redis
-`MSET`/`MSETNX` one bounded,
-revision-fenced native transaction; adds Kafka static identity reuse with
-instance checks on every implemented group operation; and adds string-only
-AMQP headers exchanges plus provisioned default-exchange DLX forwarding through
-the replicated Queue outbox. Exact Redis CLI 8.8.2, Kafka Java 4.3.1, and
-RabbitMQ Java 5.35.0 fixture conformance passes. Simultaneous duplicate static
-owners, cooperative/new Kafka group protocols, Redis scripts/transactions,
-durable AMQP topology, named-DLX routing, and full differential/fuzz/performance
-evidence remain open and are not implied by this slice. Production node and
-gateway images also pass protected evidence-v2 campaigns through gateway
-replacement, profile-leader loss, all-voter `SIGKILL`/same-volume reopen, and
-replica-digest convergence. Feature PR #123, exact-main CI/Pages, tag
-verification, and the published beta.8 prerelease are green. See ADR-0046.
+**Protocol implementation note (13 September 2026):** The current compatibility
+candidate adds bounded atomic Redis `MULTI`/`EXEC` with key-version `WATCH`,
+node-local at-most-once Redis Pub/Sub, and a durable Redis Streams subset backed
+by native Stream records plus replicated consumer-group ledgers. Kafka Java
+idempotent producers use `InitProducerId` and sequence-fenced atomic native
+batches with exact replay. AMQP durable exchange/binding declarations survive
+gateway replacement in a configured replicated Cache, named DLX declarations
+are validated against the provisioned Queue target, and delivered messages
+carry bounded `x-death` arrays. Exact Redis CLI 8.8.2, Kafka Java 4.3.1, and
+RabbitMQ Java 5.35.0 fixture conformance passes locally. Redis Lua/functions,
+Kafka transactions/control batches, simultaneous duplicate static owners,
+cooperative/new Kafka group protocols, AMQP transactions/1.0, and protected
+differential/fuzz/performance evidence remain open and are not implied by this
+slice. See ADR-0049.
 
 **Implementation note (13 August 2026):** The fixed-three-voter regional Rust
 runtime now owns automatic maintenance for the implemented time-driven profile
@@ -88,6 +88,12 @@ and the leader-loss/reopen campaign exercises it. Multi-shard routing,
 automatic coalescing, RESP compatibility, production performance/identity,
 managed backup scheduling/encryption, and CACHE-015 CRDTs remain open under
 their separate requirements. See ADR-0034.
+
+Cache eviction is explicitly configured per resource; Epoch does not infer a
+workload and switch policies automatically. Replicated LRU, LFU, TTL, and random
+selection is exact and deterministic so every voter chooses the same victim,
+whereas Redis commonly uses sampled approximations. Automatic policy selection
+or workload-driven promotion is not part of the current cache contract.
 
 **Stream implementation note (21 August 2026):** The fixed-three-voter
 regional Stream now carries bounded producer epochs/sequences, tablet-local
@@ -656,7 +662,9 @@ This engine backs Stream Log resources and supplies the changelog/WAL primitive 
 - Shard-local single-writer or deterministic command execution to preserve atomic command semantics.
 - Pipelining, multiplexed connections, batched replication, and client-side shard routing.
 - TTL wheel plus active and passive expiry.
-- Pluggable eviction: no-eviction, LRU/LFU approximations, volatile/all-keys, TTL-based, and random.
+- Pluggable eviction: no-eviction plus deterministic all-key/volatile LRU, LFU,
+  random, and volatile TTL. The policy is configured, not automatically adapted
+  from workload observations.
 - Optional durable mode using a replicated changelog plus snapshots.
 - Optional flash tier for cold values, with a clearly different latency class.
 - Change-data stream for durable tables and selected cache events.
@@ -787,17 +795,16 @@ Compatibility is a migration surface, not the internal architecture.
 Implementation evidence is tracked separately from the full target below in
 [Protocol compatibility](PROTOCOL_COMPATIBILITY.md) and delivery items PC-01
 through PC-10. The current compatibility candidate adds atomic Redis
-hash/list/set/sorted-set operations plus all-or-nothing `MSET`/`MSETNX`, classic
-Kafka consumer groups backed by replicated native sessions and
-generation-fenced shard claims, bounded `group.instance.id` identity reuse, and
-AMQP direct/fanout/topic/headers routing with mandatory returns, native Queue
-TTL, and provisioned default-exchange DLX forwarding. The combined
-named-client/regional recovery campaign also covers lossless Kafka CreateTime
-and ordered duplicate headers plus fail-closed native mutation receipts. Static
-duplicate-live-owner fencing, cooperative Kafka handoff, durable AMQP topology,
-and named-DLX routing remain explicit boundaries. These bounded slices do not
-remove the richer protocol, differential/fuzz, or performance requirements in
-this PRD.
+hash/list/set/sorted-set operations, all-or-nothing `MSET`/`MSETNX`, bounded
+`MULTI`/`EXEC` plus `WATCH`, node-local Pub/Sub, and a durable Redis Streams
+subset. Classic Kafka consumer groups remain backed by replicated native
+sessions and generation-fenced shard claims; non-transactional idempotent
+producers now use sequence-fenced native batches with exact retry. AMQP
+direct/fanout/topic/headers routing now persists durable topology in a selected
+replicated Cache and supports provisioned named DLX routing with bounded
+`x-death` history. Redis scripts, Kafka transactions/control batches,
+cooperative Kafka handoff, AMQP transactions/1.0, and the broader
+differential/fuzz/performance requirements remain explicit boundaries.
 
 | Surface | Initial target | Compatibility promise | Known boundary |
 |---|---|---|---|

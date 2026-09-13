@@ -17,9 +17,10 @@ use base64::{
     engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
 };
 use epoch_compat::{
-    BackendError, CacheCollectionMutation, CacheCollectionResult, CacheMultiSetEntry,
-    CacheSetCondition, CacheSetOptions, CacheValue, CompatibilityBackend, NativeHttpBackend,
-    NativeHttpConfig, QueueMessage, StreamGroupIdentity, StreamRecord,
+    BackendError, CacheAtomicMutation, CacheCollectionMutation, CacheCollectionResult,
+    CacheMultiSetEntry, CacheSetCondition, CacheSetOptions, CacheStorageClass, CacheValue,
+    CompatibilityBackend, NativeHttpBackend, NativeHttpConfig, QueueMessage, StreamGroupIdentity,
+    StreamRecord,
 };
 use epoch_tablet::{StreamBatchPayload, StreamCompression, decode_stream_batch_payload};
 use serde_json::{Value, json};
@@ -151,10 +152,28 @@ async fn native_response(
         }
     }
 
-    let document = if method == Method::GET && path.ends_with("/observations") {
-        cache_observation(&path)
+    let document = if method == Method::POST && path.ends_with("/pubsub/subscriptions") {
+        json!({"subscription_id":"cache-7-1"})
+    } else if method == Method::DELETE && path.ends_with("/pubsub/subscriptions/cache-7-1") {
+        json!({"subscription_id":"cache-7-1", "deleted":true})
+    } else if method == Method::POST && path.ends_with("/pubsub/messages") {
+        json!({"sequence":"1", "delivered_subscriptions":2, "dropped_subscriptions":0})
+    } else if method == Method::GET && path.ends_with("/pubsub/subscriptions/cache-7-1/messages") {
+        json!({"messages":[{
+            "sequence":"1",
+            "channel":"orders.created",
+            "payload":{"redis_base64":STANDARD_NO_PAD.encode(b"a\0b")},
+            "published_at_ms":"10",
+        }], "dropped_messages_since_last_poll":"0", "remaining_messages":0})
+    } else if method == Method::GET && path.ends_with("/observations") {
+        cache_observation(&path, query.as_deref())
     } else if method == Method::POST && path.ends_with("/records/batches") {
         json!({"receipt":{"offset":"5"}})
+    } else if method == Method::POST && path.ends_with("/state") {
+        json!({"receipt":{"result":{"kind":"producer_append", "value":{
+            "positions":[{"partition":0, "offset":"5"}],
+            "replayed":false
+        }}}})
     } else if method == Method::GET && path.ends_with("/records") {
         json!({"records":[{
             "offset":"5",
@@ -169,7 +188,7 @@ async fn native_response(
             }
         }]})
     } else if method == Method::GET && path.ends_with("/retention") {
-        json!({"retention":{"end_offset":"6"}})
+        json!({"retention":{"base_offset":"1", "end_offset":"6"}})
     } else if method == Method::POST && path.ends_with("/groups/billing/sessions") {
         session_receipt(
             body.get("member_id")
@@ -238,9 +257,17 @@ fn committed_conflict(detail: &str) -> Response {
         .into_response()
 }
 
-fn cache_observation(path: &str) -> Value {
+fn cache_observation(path: &str, query: Option<&str>) -> Value {
     let item = if path.contains("/caches/empty/") {
         Value::Null
+    } else if path.contains("/caches/rejected/")
+        || query.is_some_and(|query| query.contains("key=visits"))
+    {
+        json!({
+            "value":{"kind":"blob", "value":b"40"},
+            "version":"3",
+            "expires_at_ms":null,
+        })
     } else if path.contains("/caches/cold/") {
         json!({
             "value":{"kind":"hash", "value":{"field":"value"}},
@@ -363,6 +390,107 @@ async fn collection_mutations_compile_to_one_version_fenced_native_write() {
 }
 
 #[tokio::test]
+async fn cache_snapshot_and_compare_apply_preserve_one_native_atomic_boundary() {
+    let api = MockNativeApi::start().await;
+    let backend = backend(api.endpoint.clone());
+    let snapshot = backend
+        .cache_snapshot("sessions", &["first".into(), "second".into()])
+        .await
+        .unwrap();
+    assert_eq!(snapshot.revision, 11);
+    assert_eq!(snapshot.entries.len(), 2);
+    backend
+        .cache_compare_and_apply(
+            "sessions",
+            snapshot.revision,
+            &[
+                CacheAtomicMutation::Put {
+                    key: "first".into(),
+                    value: CacheValue::Blob(b"updated".to_vec()),
+                    ttl_ms: Some(5_000),
+                    storage_class: CacheStorageClass::Memory,
+                },
+                CacheAtomicMutation::Delete {
+                    key: "second".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let observed = api.observed.lock().unwrap();
+    let mutations = observed
+        .iter()
+        .filter(|request| request.method == Method::POST && request.path.ends_with("/mutations"))
+        .collect::<Vec<_>>();
+    assert_eq!(mutations.len(), 1);
+    assert_eq!(
+        mutations[0].body.pointer("/operation"),
+        Some(&json!({
+            "kind":"transaction",
+            "shard":0,
+            "expected_revision":"11",
+            "mutations":[
+                {
+                    "kind":"set", "key":"first",
+                    "value":{"kind":"blob", "value":b"updated"},
+                    "ttl_ms":"5000", "storage_class":"memory",
+                },
+                {"kind":"delete", "key":"second"},
+            ],
+            "lock_guards":[],
+        }))
+    );
+}
+
+#[tokio::test]
+async fn redis_pubsub_uses_binary_safe_node_affine_native_routes() {
+    let api = MockNativeApi::start().await;
+    let backend = backend(api.endpoint.clone());
+    let subscription = backend
+        .cache_pubsub_subscribe("sessions", &["orders.created".into()], &["orders.*".into()])
+        .await
+        .unwrap();
+    assert_eq!(subscription, "cache-7-1");
+    assert_eq!(
+        backend
+            .cache_pubsub_publish("sessions", "orders.created", b"a\0b")
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        backend
+            .cache_pubsub_poll("sessions", &subscription, 100)
+            .await
+            .unwrap(),
+        vec![epoch_compat::CachePubSubMessage {
+            channel: "orders.created".into(),
+            payload: b"a\0b".to_vec(),
+        }]
+    );
+    backend
+        .cache_pubsub_unsubscribe("sessions", &subscription)
+        .await
+        .unwrap();
+
+    let observed = api.observed.lock().unwrap();
+    let pubsub = observed
+        .iter()
+        .filter(|request| request.path.contains("/pubsub/"))
+        .collect::<Vec<_>>();
+    assert_eq!(pubsub.len(), 4);
+    assert_eq!(pubsub[0].body["channels"], json!(["orders.created"]));
+    assert_eq!(pubsub[0].body["patterns"], json!(["orders.*"]));
+    assert_eq!(
+        pubsub[1].body.pointer("/payload/redis_base64"),
+        Some(&json!(STANDARD_NO_PAD.encode(b"a\0b")))
+    );
+    assert_eq!(pubsub[2].query.as_deref(), Some("limit=100"));
+    assert_eq!(pubsub[3].method, Method::DELETE);
+}
+
+#[tokio::test]
 async fn kafka_group_sessions_and_partition_claims_use_replicated_native_routes() {
     let api = MockNativeApi::start().await;
     let backend = backend(api.endpoint.clone());
@@ -450,6 +578,77 @@ async fn kafka_group_sessions_and_partition_claims_use_replicated_native_routes(
     assert!(session_requests.iter().all(|request| {
         request.generation.as_deref() == Some("7") && request.tablet_epoch.as_deref() == Some("8")
     }));
+}
+
+#[tokio::test]
+async fn kafka_idempotent_batch_uses_one_sequence_fenced_native_state_command() {
+    let api = MockNativeApi::start().await;
+    let backend = backend(api.endpoint.clone());
+    let offset = backend
+        .stream_append_idempotent(
+            "events",
+            2,
+            41,
+            3,
+            7,
+            vec![
+                StreamRecord {
+                    offset: 0,
+                    timestamp_ms: 1_234,
+                    key: Some(b"first".to_vec()),
+                    value: Some(b"one".to_vec()),
+                    headers: vec![],
+                },
+                StreamRecord {
+                    offset: 0,
+                    timestamp_ms: 1_235,
+                    key: Some(b"second".to_vec()),
+                    value: Some(b"two".to_vec()),
+                    headers: vec![],
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(offset, 5);
+
+    let observed = api.observed.lock().unwrap();
+    let request = observed
+        .iter()
+        .find(|request| request.method == Method::POST && request.path.ends_with("/state"))
+        .unwrap();
+    assert_eq!(request.body["expected_term"], "9");
+    assert_eq!(request.body["idempotency_key"], "kafka-41-4-2-7");
+    assert_eq!(
+        request.body.pointer("/operation/action"),
+        Some(&json!("append_idempotent_batch"))
+    );
+    assert_eq!(
+        request.body.pointer("/operation/producer_id"),
+        Some(&json!("kafka-41"))
+    );
+    assert_eq!(
+        request.body.pointer("/operation/producer_epoch"),
+        Some(&json!("4"))
+    );
+    assert_eq!(
+        request.body.pointer("/operation/base_sequence"),
+        Some(&json!("7"))
+    );
+    assert_eq!(
+        request.body.pointer("/operation/partition"),
+        Some(&json!(0))
+    );
+    assert_eq!(
+        request
+            .body
+            .pointer("/operation/envelopes")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(request.generation.as_deref(), Some("7"));
+    assert_eq!(request.tablet_epoch.as_deref(), Some("8"));
 }
 
 fn mutation_response(body: &Value) -> Value {
@@ -788,6 +987,7 @@ async fn prove_stream_port(backend: &NativeHttpBackend) {
     assert_eq!(records[0].offset, 5);
     assert_eq!(records[0].value.as_deref(), Some(b"value".as_slice()));
     assert_eq!(backend.stream_end_offset("events", 2).await.unwrap(), 6);
+    assert_eq!(backend.stream_start_offset("events", 2).await.unwrap(), 1);
     backend
         .stream_commit_offset("billing", "events", 2, 6, None)
         .await

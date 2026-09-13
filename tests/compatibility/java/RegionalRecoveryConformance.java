@@ -27,6 +27,9 @@ public final class RegionalRecoveryConformance {
   private static final List<String> CODECS = List.of("gzip", "snappy", "lz4", "zstd");
   private static final byte[] BODY = new byte[] {0, 1, 2, (byte) 255};
   private static final long TIMESTAMP = 1_700_000_000_000L;
+  private static final String DEAD_EXCHANGE = "epoch.dead.topic";
+  private static final String DEAD_QUEUE = "failed-jobs";
+  private static final String DEAD_SOURCE = "dead-letter-source";
 
   private RegionalRecoveryConformance() {}
 
@@ -59,9 +62,7 @@ public final class RegionalRecoveryConformance {
     factory.setHandshakeTimeout(5_000);
     try (var connection = factory.newConnection("epoch-regional-recovery");
         var channel = connection.createChannel()) {
-      for (var queue : List.of("jobs", "leases")) {
-        channel.queueDeclare(queue, true, false, false, Map.of());
-      }
+      configureAmqpTopology(channel, phase.equals("seed"));
       channel.confirmSelect();
       switch (phase) {
         case "seed" -> seedAmqp(channel);
@@ -70,6 +71,8 @@ public final class RegionalRecoveryConformance {
         case "empty" -> {
           require(channel.basicGet("jobs", false) == null, "acknowledged job stayed absent");
           require(channel.basicGet("leases", false) == null, "acknowledged lease stayed absent");
+          require(channel.basicGet(DEAD_SOURCE, false) == null, "dead-letter source stayed absent");
+          require(channel.basicGet(DEAD_QUEUE, false) == null, "dead-letter target stayed absent");
         }
         default -> throw new AssertionError("unreachable phase");
       }
@@ -82,10 +85,11 @@ public final class RegionalRecoveryConformance {
     properties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrap);
     properties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
     properties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
-    properties.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, false);
+    properties.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
     properties.put(ProducerConfig.ACKS_CONFIG, "all");
-    // The harness never masks unknown outcomes by resubmitting a non-idempotent write.
-    properties.put(ProducerConfig.RETRIES_CONFIG, 0);
+    // Retries retain the broker-issued producer identity and sequence, so the
+    // recovery campaign exercises exact replay instead of duplicating writes.
+    properties.put(ProducerConfig.RETRIES_CONFIG, 5);
     properties.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, codec);
     properties.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, 5_000);
     properties.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, 10_000);
@@ -190,6 +194,26 @@ public final class RegionalRecoveryConformance {
     channel.waitForConfirmsOrDie(5_000);
   }
 
+  private static void configureAmqpTopology(Channel channel, boolean create) throws Exception {
+    if (create) {
+      channel.exchangeDeclare(DEAD_EXCHANGE, "topic", true, false, Map.of());
+      channel.queueDeclare(DEAD_QUEUE, true, false, false, Map.of());
+      channel.queueBind(DEAD_QUEUE, DEAD_EXCHANGE, "failed.#");
+      var deadLetterArguments =
+          Map.<String, Object>of(
+              "x-dead-letter-exchange", DEAD_EXCHANGE,
+              "x-dead-letter-routing-key", "failed.jobs");
+      channel.queueDeclare("jobs", true, false, false, deadLetterArguments);
+      channel.queueDeclare(DEAD_SOURCE, true, false, false, deadLetterArguments);
+      channel.queueDeclare("leases", true, false, false, Map.of());
+      return;
+    }
+    channel.exchangeDeclarePassive(DEAD_EXCHANGE);
+    for (var queue : List.of("jobs", "leases", DEAD_SOURCE, DEAD_QUEUE)) {
+      channel.queueDeclarePassive(queue);
+    }
+  }
+
   private static void seedAmqp(Channel channel) throws Exception {
     publish(channel, "jobs");
     var acknowledged = channel.basicGet("jobs", false);
@@ -221,6 +245,33 @@ public final class RegionalRecoveryConformance {
     channel.basicReject(requeued.getEnvelope().getDeliveryTag(), true);
     // A synchronous RPC waits until the preceding no-response settlement was processed.
     channel.queueDeclarePassive("jobs");
+    verifyNamedDeadLetter(channel);
+  }
+
+  private static void verifyNamedDeadLetter(Channel channel) throws Exception {
+    publish(channel, DEAD_SOURCE);
+    var source = requireMessage(channel, DEAD_SOURCE);
+    channel.basicReject(source.getEnvelope().getDeliveryTag(), false);
+    channel.queueDeclarePassive(DEAD_SOURCE);
+    GetResponse deadLetter = null;
+    var deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos();
+    while (deadLetter == null && System.nanoTime() < deadline) {
+      deadLetter = channel.basicGet(DEAD_QUEUE, false);
+      if (deadLetter == null) {
+        Thread.sleep(100);
+      }
+    }
+    require(deadLetter != null, "named dead-letter delivery");
+    require(
+        DEAD_EXCHANGE.equals(deadLetter.getEnvelope().getExchange())
+            && "failed.jobs".equals(deadLetter.getEnvelope().getRoutingKey()),
+        "named dead-letter route survives gateway state");
+    require(
+        deadLetter.getProps().getHeaders().get("x-death") instanceof List<?> deaths
+            && !deaths.isEmpty(),
+        "RabbitMQ x-death history");
+    require(deadLetter.getProps().getExpiration() == null, "dead-letter expiration removed");
+    channel.basicAck(deadLetter.getEnvelope().getDeliveryTag(), false);
   }
 
   private static void settleAmqp(Channel channel) throws Exception {

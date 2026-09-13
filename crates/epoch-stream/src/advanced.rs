@@ -474,9 +474,59 @@ impl StreamStateServices {
             producer_id,
             producer_epoch,
             sequence,
+            1,
             digest,
             None,
             vec![envelope],
+            partition,
+            now_ms,
+        )?;
+        *stream = next_stream;
+        *self = next;
+        Ok(outcome)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the producer identity, Kafka sequence span, target, payload, and clock are independent protocol fields"
+    )]
+    pub fn append_idempotent_batch(
+        &mut self,
+        stream: &mut Stream,
+        producer_id: &str,
+        producer_epoch: u64,
+        base_sequence: u64,
+        partition: u32,
+        envelopes: Vec<EventEnvelope>,
+        now_ms: u64,
+    ) -> EpochResult<StreamProducerAppendOutcome> {
+        if envelopes.is_empty() || envelopes.len() > MAX_STREAM_TRANSACTION_RECORDS {
+            return Err(EpochError::InvalidArgument(format!(
+                "idempotent batch must contain between 1 and {MAX_STREAM_TRANSACTION_RECORDS} records"
+            )));
+        }
+        if envelopes
+            .iter()
+            .any(|envelope| envelope.transaction_id.is_some())
+        {
+            return Err(EpochError::InvalidArgument(
+                "idempotent batch envelopes cannot include a transaction_id".into(),
+            ));
+        }
+        let sequence_span = u64::try_from(envelopes.len())
+            .map_err(|_| EpochError::Capacity("idempotent batch sequence span overflow".into()))?;
+        let digest = digest_json(&(partition, &envelopes, sequence_span))?;
+        let mut next_stream = stream.clone();
+        let mut next = self.clone();
+        let outcome = next.apply_sequence(
+            &mut next_stream,
+            producer_id,
+            producer_epoch,
+            base_sequence,
+            sequence_span,
+            digest,
+            None,
+            envelopes,
             partition,
             now_ms,
         )?;
@@ -582,6 +632,7 @@ impl StreamStateServices {
             producer_id,
             producer_epoch,
             sequence,
+            1,
             digest,
             Some(transaction_id.to_owned()),
             envelopes,
@@ -1405,6 +1456,7 @@ impl StreamStateServices {
         producer_id: &str,
         producer_epoch: u64,
         sequence: u64,
+        sequence_span: u64,
         digest: [u8; 32],
         transaction_id: Option<String>,
         envelopes: Vec<EventEnvelope>,
@@ -1453,7 +1505,7 @@ impl StreamStateServices {
         }
         producer.next_sequence = producer
             .next_sequence
-            .checked_add(1)
+            .checked_add(sequence_span)
             .ok_or_else(|| EpochError::Capacity("producer sequence exhausted".into()))?;
         producer.history.insert(
             sequence,
@@ -2083,6 +2135,53 @@ mod tests {
                 .unwrap()
                 .starts_with(b"{\"format_version\":2")
         );
+    }
+
+    #[test]
+    fn idempotent_batches_advance_by_record_count_and_replay_atomically() {
+        let mut stream = Stream::new(StreamConfig::default()).unwrap();
+        let mut services = StreamStateServices::new("west").unwrap();
+        let batch = vec![
+            event("one", Some("a"), json!({"value": 1})),
+            event("two", Some("b"), json!({"value": 2})),
+            event("three", Some("c"), json!({"value": 3})),
+        ];
+        let first = services
+            .append_idempotent_batch(&mut stream, "kafka-7", 1, 0, 0, batch.clone(), 10)
+            .unwrap();
+        assert_eq!(first.positions.len(), 3);
+        assert_eq!(stream.partition(0).unwrap().next_offset, 3);
+        let replay = services
+            .append_idempotent_batch(&mut stream, "kafka-7", 1, 0, 0, batch, 11)
+            .unwrap();
+        assert_eq!(replay.disposition, StreamProducerDisposition::Duplicate);
+        assert_eq!(replay.positions, first.positions);
+        assert_eq!(stream.partition(0).unwrap().next_offset, 3);
+
+        services
+            .append_idempotent_batch(
+                &mut stream,
+                "kafka-7",
+                1,
+                3,
+                0,
+                vec![event("four", None, json!({"value": 4}))],
+                12,
+            )
+            .unwrap();
+        assert_eq!(stream.partition(0).unwrap().next_offset, 4);
+        assert!(matches!(
+            services.append_idempotent_batch(
+                &mut stream,
+                "kafka-7",
+                1,
+                1,
+                0,
+                vec![event("overlap", None, json!({}))],
+                13,
+            ),
+            Err(EpochError::Conflict(_))
+        ));
     }
 
     #[test]

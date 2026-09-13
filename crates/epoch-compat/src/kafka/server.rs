@@ -13,9 +13,9 @@ use kafka_protocol::{
     ResponseError,
     messages::{
         ApiKey, ApiVersionsResponse, FetchResponse, FindCoordinatorResponse, HeartbeatResponse,
-        JoinGroupResponse, LeaveGroupResponse, ListOffsetsResponse, MetadataResponse,
-        OffsetCommitResponse, OffsetFetchResponse, ProduceResponse, RequestKind, ResponseHeader,
-        ResponseKind, SyncGroupResponse, TopicName,
+        InitProducerIdResponse, JoinGroupResponse, LeaveGroupResponse, ListOffsetsResponse,
+        MetadataResponse, OffsetCommitResponse, OffsetFetchResponse, ProduceResponse, RequestKind,
+        ResponseHeader, ResponseKind, SyncGroupResponse, TopicName,
         api_versions_response::ApiVersion,
         fetch_response::{FetchableTopicResponse, PartitionData},
         find_coordinator_response::Coordinator,
@@ -37,6 +37,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 use tracing::Instrument as _;
+use uuid::Uuid;
 
 use crate::{
     CompatibilityBackend, MAX_FRAME_BYTES, MAX_MESSAGE_BYTES,
@@ -62,6 +63,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::SyncGroup, 0, 5),
     (ApiKey::Heartbeat, 0, 4),
     (ApiKey::LeaveGroup, 0, 5),
+    (ApiKey::InitProducerId, 0, 5),
     (ApiKey::ApiVersions, 0, 4),
 ];
 
@@ -264,6 +266,10 @@ async fn dispatch<B: CompatibilityBackend>(
                 emit,
             ))
         }
+        RequestKind::InitProducerId(request) => Ok((
+            ResponseKind::InitProducerId(init_producer_id_response(&request)),
+            true,
+        )),
         RequestKind::Fetch(request) => Ok((
             ResponseKind::Fetch(fetch_response(request, backend).await),
             true,
@@ -302,6 +308,33 @@ async fn dispatch<B: CompatibilityBackend>(
         )),
         _ => bail!("Kafka API was advertised without a dispatcher"),
     }
+}
+
+fn init_producer_id_response(
+    request: &kafka_protocol::messages::InitProducerIdRequest,
+) -> InitProducerIdResponse {
+    if request.transactional_id.is_some() {
+        return InitProducerIdResponse::default()
+            .with_error_code(ResponseError::UnsupportedForMessageFormat.code());
+    }
+    if request.transaction_timeout_ms <= 0 {
+        return InitProducerIdResponse::default()
+            .with_error_code(ResponseError::InvalidRequest.code());
+    }
+    if request.producer_id.0 >= 0 && request.producer_epoch >= 0 {
+        let Some(epoch) = request.producer_epoch.checked_add(1) else {
+            return InitProducerIdResponse::default()
+                .with_error_code(ResponseError::InvalidProducerEpoch.code());
+        };
+        return InitProducerIdResponse::default()
+            .with_producer_id(request.producer_id)
+            .with_producer_epoch(epoch);
+    }
+    let bytes = Uuid::now_v7().into_bytes();
+    let producer_id = i64::from_be_bytes(bytes[..8].try_into().unwrap_or_default()) & i64::MAX;
+    InitProducerIdResponse::default()
+        .with_producer_id(producer_id.max(1).into())
+        .with_producer_epoch(0)
 }
 
 fn find_coordinator_response(
@@ -1043,9 +1076,9 @@ async fn produce_response<B: CompatibilityBackend>(
                 Ok(base_offset) => PartitionProduceResponse::default()
                     .with_index(partition.index)
                     .with_base_offset(i64::try_from(base_offset).unwrap_or(i64::MAX)),
-                Err(error) => PartitionProduceResponse::default()
+                Err((error, idempotent)) => PartitionProduceResponse::default()
                     .with_index(partition.index)
-                    .with_error_code(kafka_error(&error).code()),
+                    .with_error_code(kafka_produce_error(&error, idempotent).code()),
             });
         }
         responses.push(
@@ -1062,21 +1095,40 @@ async fn produce_partition<B: CompatibilityBackend>(
     stream: &str,
     partition: i32,
     records: Option<Bytes>,
-) -> Result<u64, BackendError> {
-    let partition = u32::try_from(partition)
-        .map_err(|_| BackendError::Invalid("negative Kafka partition".into()))?;
-    let mut bytes = records.ok_or_else(|| BackendError::Invalid("empty Kafka batch".into()))?;
+) -> Result<u64, (BackendError, bool)> {
+    let partition = u32::try_from(partition).map_err(|_| {
+        (
+            BackendError::Invalid("negative Kafka partition".into()),
+            false,
+        )
+    })?;
+    let mut bytes =
+        records.ok_or_else(|| (BackendError::Invalid("empty Kafka batch".into()), false))?;
     if bytes.len() > MAX_MESSAGE_BYTES {
-        return Err(BackendError::Invalid("Kafka batch exceeds limit".into()));
+        return Err((
+            BackendError::Invalid("Kafka batch exceeds limit".into()),
+            false,
+        ));
     }
-    let batches = validate_kafka_batch_headers(&bytes)?;
+    let batches = validate_kafka_batch_headers(&bytes).map_err(|error| (error, false))?;
+    let producer = batches.first().and_then(|batch| {
+        (batch.producer_id >= 0).then_some((
+            batch.producer_id,
+            batch.producer_epoch,
+            batch.base_sequence,
+        ))
+    });
     let mut total = 0_usize;
     let mut translated = Vec::new();
     for batch in batches {
         // Metadata decoding already checked each complete magic-2 frame and CRC.
         bytes.advance(8);
-        let length = usize::try_from(bytes.get_i32())
-            .map_err(|_| BackendError::Invalid("negative Kafka batch length".into()))?;
+        let length = usize::try_from(bytes.get_i32()).map_err(|_| {
+            (
+                BackendError::Invalid("negative Kafka batch length".into()),
+                producer.is_some(),
+            )
+        })?;
         let mut frame = bytes.split_to(length);
         frame.advance(49);
         let decoded = (|| -> Result<_> {
@@ -1087,10 +1139,31 @@ async fn produce_partition<B: CompatibilityBackend>(
             anyhow::ensure!(total <= MAX_MESSAGE_BYTES, "Kafka expansion exceeds limit");
             decode_records(decompressed, &batch)
         })()
-        .map_err(|_| BackendError::Invalid("malformed or oversized Kafka record batch".into()))?;
+        .map_err(|_| {
+            (
+                BackendError::Invalid("malformed or oversized Kafka record batch".into()),
+                producer.is_some(),
+            )
+        })?;
         translated.extend(decoded);
     }
-    backend.stream_append(stream, partition, translated).await
+    match producer {
+        Some((producer_id, producer_epoch, base_sequence)) => backend
+            .stream_append_idempotent(
+                stream,
+                partition,
+                producer_id,
+                producer_epoch,
+                base_sequence,
+                translated,
+            )
+            .await
+            .map_err(|error| (error, true)),
+        None => backend
+            .stream_append(stream, partition, translated)
+            .await
+            .map_err(|error| (error, false)),
+    }
 }
 
 fn validate_kafka_batch_headers(records: &Bytes) -> Result<Vec<BatchDecodeInfo>, BackendError> {
@@ -1109,9 +1182,15 @@ fn validate_kafka_batch_headers(records: &Bytes) -> Result<Vec<BatchDecodeInfo>,
                 "Kafka transactional/control batches are unsupported".into(),
             ));
         }
-        if batch.producer_id != -1 || batch.producer_epoch != -1 {
+        let producer_fields = [
+            batch.producer_id >= 0,
+            batch.producer_epoch >= 0,
+            batch.base_sequence >= 0,
+        ];
+        if producer_fields.iter().any(|value| *value) && !producer_fields.iter().all(|value| *value)
+        {
             return Err(BackendError::Invalid(
-                "Kafka idempotent producer identity is unsupported".into(),
+                "Kafka idempotent producer metadata is incomplete".into(),
             ));
         }
         let batch_count = usize::try_from(batch.record_count)
@@ -1127,6 +1206,33 @@ fn validate_kafka_batch_headers(records: &Bytes) -> Result<Vec<BatchDecodeInfo>,
     }
     if record_count == 0 {
         return Err(BackendError::Invalid("empty Kafka batch".into()));
+    }
+    let idempotent = batches.first().is_some_and(|batch| batch.producer_id >= 0);
+    if batches
+        .iter()
+        .any(|batch| (batch.producer_id >= 0) != idempotent)
+    {
+        return Err(BackendError::Invalid(
+            "Kafka produce cannot mix idempotent and ordinary batches".into(),
+        ));
+    }
+    if idempotent {
+        let first = &batches[0];
+        let mut expected_sequence = first.base_sequence;
+        for batch in &batches {
+            if batch.producer_id != first.producer_id
+                || batch.producer_epoch != first.producer_epoch
+                || batch.base_sequence != expected_sequence
+            {
+                return Err(BackendError::Invalid(
+                    "Kafka idempotent batches must have one producer and contiguous sequences"
+                        .into(),
+                ));
+            }
+            expected_sequence = expected_sequence
+                .checked_add(batch.record_count)
+                .ok_or_else(|| BackendError::Invalid("Kafka producer sequence overflow".into()))?;
+        }
     }
     Ok(batches)
 }
@@ -1337,6 +1443,14 @@ fn kafka_error(error: &BackendError) -> ResponseError {
     }
 }
 
+fn kafka_produce_error(error: &BackendError, idempotent: bool) -> ResponseError {
+    if idempotent && matches!(error, BackendError::Conflict) {
+        ResponseError::OutOfOrderSequenceNumber
+    } else {
+        kafka_error(error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1344,8 +1458,8 @@ mod tests {
     use kafka_protocol::{
         messages::{
             ApiVersionsRequest, FindCoordinatorRequest, GroupId, HeartbeatRequest,
-            JoinGroupRequest, LeaveGroupRequest, OffsetCommitRequest, OffsetFetchRequest,
-            RequestHeader, SyncGroupRequest,
+            InitProducerIdRequest, JoinGroupRequest, LeaveGroupRequest, OffsetCommitRequest,
+            OffsetFetchRequest, RequestHeader, SyncGroupRequest,
             join_group_request::JoinGroupRequestProtocol,
             leave_group_request::MemberIdentity,
             offset_commit_request::{OffsetCommitRequestPartition, OffsetCommitRequestTopic},
@@ -1410,6 +1524,29 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(actual, expected);
         assert!(!bytes.has_remaining());
+    }
+
+    #[test]
+    fn initializes_and_rotates_non_transactional_producer_identity() {
+        let response = init_producer_id_response(
+            &InitProducerIdRequest::default()
+                .with_transactional_id(None)
+                .with_transaction_timeout_ms(60_000),
+        );
+        assert_eq!(response.error_code, 0);
+        assert!(response.producer_id.0 > 0);
+        assert_eq!(response.producer_epoch, 0);
+
+        let rotated = init_producer_id_response(
+            &InitProducerIdRequest::default()
+                .with_transactional_id(None)
+                .with_transaction_timeout_ms(60_000)
+                .with_producer_id(response.producer_id)
+                .with_producer_epoch(response.producer_epoch),
+        );
+        assert_eq!(rotated.error_code, 0);
+        assert_eq!(rotated.producer_id, response.producer_id);
+        assert_eq!(rotated.producer_epoch, 1);
     }
 
     #[tokio::test]
@@ -1494,7 +1631,9 @@ mod tests {
         let error = produce_partition(&backend, "events", 0, Some(batch.freeze()))
             .await
             .unwrap_err();
-        assert!(matches!(error, BackendError::Invalid(message) if message.contains("oversized")));
+        assert!(
+            matches!(error, (BackendError::Invalid(message), false) if message.contains("oversized"))
+        );
     }
 
     #[tokio::test]
@@ -1518,31 +1657,88 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(error, BackendError::Invalid(message) if message.contains("record count"))
+            matches!(error, (BackendError::Invalid(message), false) if message.contains("record count"))
         );
     }
 
     #[tokio::test]
-    async fn rejects_unimplemented_idempotent_producer_identity() {
+    async fn idempotent_produce_replays_exact_batches_and_enforces_sequences() {
         let backend = MemoryBackend::with_resources("sessions", "events", 2, "jobs");
-        let mut record = test_record(Bytes::from_static(b"uncommitted"), 0);
-        record.producer_id = 42;
-        record.producer_epoch = 1;
+        let first = idempotent_batch(42, 1, 0, &[b"first", b"second"]);
+        assert_eq!(
+            produce_partition(&backend, "events", 0, Some(first.clone()))
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            produce_partition(&backend, "events", 0, Some(first))
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(backend.stream_end_offset("events", 0).await.unwrap(), 2);
+
+        let next = idempotent_batch(42, 1, 2, &[b"third"]);
+        assert_eq!(
+            produce_partition(&backend, "events", 0, Some(next))
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(backend.stream_end_offset("events", 0).await.unwrap(), 3);
+
+        for rejected in [
+            idempotent_batch(42, 1, 0, &[b"different"]),
+            idempotent_batch(42, 1, 4, &[b"gap"]),
+            idempotent_batch(42, 0, 0, &[b"stale"]),
+        ] {
+            assert!(matches!(
+                produce_partition(&backend, "events", 0, Some(rejected)).await,
+                Err((BackendError::Conflict, true))
+            ));
+        }
+        assert_eq!(backend.stream_end_offset("events", 0).await.unwrap(), 3);
+
+        let next_epoch = idempotent_batch(42, 2, 0, &[b"new-epoch"]);
+        assert_eq!(
+            produce_partition(&backend, "events", 0, Some(next_epoch))
+                .await
+                .unwrap(),
+            3
+        );
+        assert_eq!(backend.stream_end_offset("events", 0).await.unwrap(), 4);
+    }
+
+    fn idempotent_batch(
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: usize,
+        values: &[&[u8]],
+    ) -> Bytes {
+        let records = values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let sequence = base_sequence + index;
+                let mut record = test_record(Bytes::copy_from_slice(value), sequence);
+                record.producer_id = producer_id;
+                record.producer_epoch = producer_epoch;
+                record.sequence = i32::try_from(sequence).unwrap();
+                record
+            })
+            .collect::<Vec<_>>();
         let mut batch = BytesMut::new();
         RecordBatchEncoder::encode(
             &mut batch,
-            &[record],
+            &records,
             &RecordEncodeOptions {
                 version: 2,
                 compression: Compression::None,
             },
         )
         .unwrap();
-        assert!(matches!(
-            produce_partition(&backend, "events", 0, Some(batch.freeze())).await,
-            Err(BackendError::Invalid(_))
-        ));
-        assert_eq!(backend.stream_end_offset("events", 0).await.unwrap(), 0);
+        batch.freeze()
     }
 
     fn test_record(value: Bytes, sequence: usize) -> Record {
@@ -1555,7 +1751,7 @@ mod tests {
             producer_epoch: -1,
             timestamp_type: TimestampType::Creation,
             offset: i64::try_from(sequence).unwrap(),
-            sequence: i32::try_from(sequence).unwrap(),
+            sequence: -1,
             timestamp: 1_700_000_000_000,
             key: None,
             value: Some(value),

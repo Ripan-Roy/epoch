@@ -16,7 +16,8 @@ use crate::{
     common::{deserialize_u64_from_number_or_decimal, serialize_u64_as_decimal},
 };
 
-pub const STREAM_TABLET_STATE_COMMAND_FORMAT_VERSION: u16 = 7;
+pub(crate) const LEGACY_STREAM_TABLET_STATE_COMMAND_FORMAT_VERSION: u16 = 7;
+pub const STREAM_TABLET_STATE_COMMAND_FORMAT_VERSION: u16 = 8;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -35,6 +36,21 @@ pub enum StreamStateCommand {
         sequence: u64,
         partition: u32,
         envelope: Box<EventEnvelope>,
+    },
+    AppendIdempotentBatch {
+        producer_id: String,
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
+        producer_epoch: u64,
+        #[serde(
+            serialize_with = "serialize_u64_as_decimal",
+            deserialize_with = "deserialize_u64_from_number_or_decimal"
+        )]
+        base_sequence: u64,
+        partition: u32,
+        envelopes: Vec<EventEnvelope>,
     },
     BeginTransaction {
         transaction_id: String,
@@ -203,7 +219,26 @@ pub struct StreamTabletStateReceipt {
     clippy::too_many_lines,
     reason = "the validator exhaustively pins every variant of the versioned wire protocol"
 )]
-pub(crate) fn validate_stream_state_command(command: &StreamStateCommand) -> TabletResult<()> {
+pub(crate) fn validate_stream_state_command(
+    format_version: u16,
+    command: &StreamStateCommand,
+) -> TabletResult<()> {
+    if !matches!(
+        format_version,
+        LEGACY_STREAM_TABLET_STATE_COMMAND_FORMAT_VERSION
+            | STREAM_TABLET_STATE_COMMAND_FORMAT_VERSION
+    ) {
+        return Err(TabletError::InvalidCommand(format!(
+            "state-service mutation requires format_version {LEGACY_STREAM_TABLET_STATE_COMMAND_FORMAT_VERSION} or {STREAM_TABLET_STATE_COMMAND_FORMAT_VERSION}; observed {format_version}"
+        )));
+    }
+    if format_version == LEGACY_STREAM_TABLET_STATE_COMMAND_FORMAT_VERSION
+        && matches!(command, StreamStateCommand::AppendIdempotentBatch { .. })
+    {
+        return Err(TabletError::InvalidCommand(format!(
+            "idempotent batch append requires format_version {STREAM_TABLET_STATE_COMMAND_FORMAT_VERSION}; observed {format_version}"
+        )));
+    }
     match command {
         StreamStateCommand::AppendIdempotent {
             producer_id,
@@ -221,6 +256,30 @@ pub(crate) fn validate_stream_state_command(command: &StreamStateCommand) -> Tab
                 ));
             }
             envelope.validate()?;
+        }
+        StreamStateCommand::AppendIdempotentBatch {
+            producer_id,
+            producer_epoch,
+            partition,
+            envelopes,
+            ..
+        } => {
+            validate_identifier("producer ID", producer_id)?;
+            validate_epoch(*producer_epoch)?;
+            validate_partition(*partition)?;
+            if envelopes.is_empty() || envelopes.len() > MAX_STREAM_TRANSACTION_RECORDS {
+                return Err(TabletError::InvalidCommand(format!(
+                    "idempotent batch must contain between 1 and {MAX_STREAM_TRANSACTION_RECORDS} records"
+                )));
+            }
+            for envelope in envelopes {
+                if envelope.transaction_id.is_some() {
+                    return Err(TabletError::InvalidCommand(
+                        "idempotent batch envelope cannot include a transaction_id".into(),
+                    ));
+                }
+                envelope.validate()?;
+            }
         }
         StreamStateCommand::BeginTransaction {
             transaction_id,

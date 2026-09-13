@@ -197,9 +197,16 @@ jobs:
           assert_bundle_contains 'retained_log_first_index'
           assert_bundle_contains 'Multi-tablet operations'
           assert_bundle_contains 'client.hset'
+          assert_bundle_contains 'transaction.watch'
+          assert_bundle_contains 'client.xadd'
+          assert_bundle_contains 'idempotent KafkaProducer'
+          assert_bundle_contains 'ENABLE_IDEMPOTENCE_CONFIG'
           assert_bundle_contains 'consumer.subscribe'
           assert_bundle_contains 'epoch.events'
-          assert_bundle_contains 'process-shared direct/fanout/topic/headers exchanges'
+          assert_bundle_contains 'durable Cache-backed topology'
+          assert_bundle_contains 'epoch.dead.topic'
+          assert_bundle_contains 'x-death'
+          assert_bundle_contains 'workload-driven automatic policy switching is not currently claimed'
           release_version="$(cat VERSION)"
           assert_bundle_contains "v${release_version} release notes"
           if grep -Eq '(src|href)="/assets/' console/dist/index.html; then

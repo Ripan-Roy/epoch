@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -7,11 +7,12 @@ use std::{
 use async_trait::async_trait;
 
 use crate::backend::{
-    BackendError, CacheCollectionMutation, CacheCollectionResult, CacheEntry, CacheMultiSetEntry,
-    CacheSetCondition, CacheSetOptions, CacheSetOutcome, CacheStorageClass, CacheValue,
-    CompatibilityBackend, QueueDelivery, QueueMessage, StreamGroupIdentity, StreamGroupMember,
-    StreamGroupRejection, StreamGroupSession, StreamGroupSessionResult, StreamRecord,
-    plan_collection_mutation, validate_cache_multi_set,
+    BackendError, CacheAtomicMutation, CacheCollectionMutation, CacheCollectionResult, CacheEntry,
+    CacheMultiSetEntry, CachePubSubMessage, CacheSetCondition, CacheSetOptions, CacheSetOutcome,
+    CacheSnapshot, CacheStorageClass, CacheValue, CompatibilityBackend, QueueDelivery,
+    QueueMessage, StreamGroupIdentity, StreamGroupMember, StreamGroupRejection, StreamGroupSession,
+    StreamGroupSessionResult, StreamRecord, plan_collection_mutation,
+    validate_cache_atomic_mutations, validate_cache_multi_set,
 };
 
 #[derive(Debug, Default)]
@@ -27,11 +28,14 @@ struct State {
     stream_partitions: BTreeMap<String, u32>,
     offsets: BTreeMap<(String, String, u32), u64>,
     stream_groups: BTreeMap<(String, String), MemoryStreamGroup>,
+    stream_producers: BTreeMap<(String, u32, i64), MemoryStreamProducer>,
     group_claims: BTreeMap<(String, String, u32), (String, u64)>,
     queues: BTreeMap<String, VecDeque<QueueMessage>>,
     queue_dead_letter_targets: BTreeMap<String, String>,
     leases: BTreeMap<String, (String, QueueMessage)>,
     next_lease: u64,
+    pubsub_subscriptions: BTreeMap<String, MemoryPubSubSubscription>,
+    next_pubsub_subscription: u64,
 }
 
 #[derive(Debug, Default)]
@@ -44,6 +48,20 @@ struct MemoryStreamGroup {
 struct MemoryGroupMember {
     deadline_ms: u64,
     session_timeout_ms: u64,
+}
+
+#[derive(Debug, Default)]
+struct MemoryStreamProducer {
+    epoch: i16,
+    next_sequence: i32,
+    history: BTreeMap<i32, (Vec<StreamRecord>, u64)>,
+}
+
+#[derive(Debug, Default)]
+struct MemoryPubSubSubscription {
+    channels: BTreeSet<String>,
+    patterns: BTreeSet<String>,
+    messages: VecDeque<CachePubSubMessage>,
 }
 
 impl MemoryBackend {
@@ -67,6 +85,15 @@ impl MemoryBackend {
             .or_default();
     }
 
+    pub fn add_stream(&self, stream: &str, partitions: u32) {
+        assert!(partitions > 0, "Stream must have at least one partition");
+        self.state
+            .lock()
+            .unwrap()
+            .stream_partitions
+            .insert(stream.into(), partitions);
+    }
+
     pub fn configure_queue_dead_letter(&self, queue: &str, target: &str) {
         let mut state = self.state.lock().unwrap();
         assert!(state.queues.contains_key(queue), "source Queue must exist");
@@ -84,6 +111,33 @@ fn now_ms() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+fn glob_matches(pattern: &[u8], value: &[u8]) -> bool {
+    let (mut pattern_index, mut value_index) = (0, 0);
+    let (mut star_index, mut star_value_index) = (None, 0);
+    while value_index < value.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == b'?' || pattern[pattern_index] == value[value_index])
+        {
+            pattern_index += 1;
+            value_index += 1;
+        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            star_index = Some(pattern_index);
+            pattern_index += 1;
+            star_value_index = value_index;
+        } else if let Some(star) = star_index {
+            pattern_index = star + 1;
+            star_value_index += 1;
+            value_index = star_value_index;
+        } else {
+            return false;
+        }
+    }
+    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+        pattern_index += 1;
+    }
+    pattern_index == pattern.len()
 }
 
 fn live_entry(state: &mut State, cache: &str, key: &str) -> Option<CacheEntry> {
@@ -169,6 +223,151 @@ impl CompatibilityBackend for MemoryBackend {
         Ok(live_entry(&mut self.state.lock().unwrap(), cache, key))
     }
 
+    async fn cache_snapshot(
+        &self,
+        cache: &str,
+        keys: &[String],
+    ) -> Result<CacheSnapshot, BackendError> {
+        let keys = keys.iter().collect::<std::collections::BTreeSet<_>>();
+        if keys.is_empty() || keys.len() > crate::backend::MAX_CACHE_MULTI_SET_ENTRIES {
+            return Err(BackendError::Invalid(
+                "invalid Cache snapshot key count".into(),
+            ));
+        }
+        let mut state = self.state.lock().unwrap();
+        let mut entries = BTreeMap::new();
+        for key in keys {
+            entries.insert(key.clone(), live_entry(&mut state, cache, key));
+        }
+        Ok(CacheSnapshot {
+            revision: state.version,
+            entries,
+        })
+    }
+
+    async fn cache_compare_and_apply(
+        &self,
+        cache: &str,
+        expected_revision: u64,
+        mutations: &[CacheAtomicMutation],
+    ) -> Result<(), BackendError> {
+        validate_cache_atomic_mutations(mutations)?;
+        let mut state = self.state.lock().unwrap();
+        if state.version != expected_revision {
+            return Err(BackendError::Conflict);
+        }
+        let next_version = state.version.saturating_add(1);
+        for mutation in mutations {
+            match mutation {
+                CacheAtomicMutation::Put {
+                    key,
+                    value,
+                    ttl_ms,
+                    storage_class,
+                } => {
+                    state.caches.insert(
+                        (cache.to_owned(), key.clone()),
+                        CacheEntry {
+                            value: value.clone(),
+                            version: next_version,
+                            expires_at_ms: ttl_ms.map(|ttl| now_ms().saturating_add(ttl)),
+                            storage_class: *storage_class,
+                        },
+                    );
+                }
+                CacheAtomicMutation::Delete { key } => {
+                    state.caches.remove(&(cache.to_owned(), key.clone()));
+                }
+            }
+        }
+        state.version = next_version;
+        Ok(())
+    }
+
+    async fn cache_pubsub_subscribe(
+        &self,
+        _cache: &str,
+        channels: &[String],
+        patterns: &[String],
+    ) -> Result<String, BackendError> {
+        if channels.is_empty() && patterns.is_empty() {
+            return Err(BackendError::Invalid("Pub/Sub filter is required".into()));
+        }
+        let mut state = self.state.lock().unwrap();
+        state.next_pubsub_subscription = state.next_pubsub_subscription.saturating_add(1);
+        let id = format!("memory-pubsub-{}", state.next_pubsub_subscription);
+        state.pubsub_subscriptions.insert(
+            id.clone(),
+            MemoryPubSubSubscription {
+                channels: channels.iter().cloned().collect(),
+                patterns: patterns.iter().cloned().collect(),
+                messages: VecDeque::new(),
+            },
+        );
+        Ok(id)
+    }
+
+    async fn cache_pubsub_unsubscribe(
+        &self,
+        _cache: &str,
+        subscription_id: &str,
+    ) -> Result<(), BackendError> {
+        self.state
+            .lock()
+            .unwrap()
+            .pubsub_subscriptions
+            .remove(subscription_id)
+            .map(|_| ())
+            .ok_or(BackendError::NotFound)
+    }
+
+    async fn cache_pubsub_publish(
+        &self,
+        _cache: &str,
+        channel: &str,
+        payload: &[u8],
+    ) -> Result<u64, BackendError> {
+        let mut state = self.state.lock().unwrap();
+        let mut delivered = 0_u64;
+        for subscription in state.pubsub_subscriptions.values_mut() {
+            if subscription.channels.contains(channel)
+                || subscription
+                    .patterns
+                    .iter()
+                    .any(|pattern| glob_matches(pattern.as_bytes(), channel.as_bytes()))
+            {
+                subscription.messages.push_back(CachePubSubMessage {
+                    channel: channel.to_owned(),
+                    payload: payload.to_vec(),
+                });
+                delivered = delivered.saturating_add(1);
+            }
+        }
+        Ok(delivered)
+    }
+
+    async fn cache_pubsub_poll(
+        &self,
+        _cache: &str,
+        subscription_id: &str,
+        limit: u16,
+    ) -> Result<Vec<CachePubSubMessage>, BackendError> {
+        if limit == 0 {
+            return Err(BackendError::Invalid(
+                "Pub/Sub poll limit is required".into(),
+            ));
+        }
+        let mut state = self.state.lock().unwrap();
+        let subscription = state
+            .pubsub_subscriptions
+            .get_mut(subscription_id)
+            .ok_or(BackendError::NotFound)?;
+        Ok(subscription
+            .messages
+            .drain(..usize::from(limit).min(subscription.messages.len()))
+            .collect())
+    }
+
     async fn cache_set(
         &self,
         cache: &str,
@@ -230,9 +429,9 @@ impl CompatibilityBackend for MemoryBackend {
         {
             return Ok(false);
         }
+        state.version = state.version.saturating_add(1);
+        let version = state.version;
         for entry in entries {
-            state.version = state.version.saturating_add(1);
-            let version = state.version;
             state.caches.insert(
                 (cache.to_owned(), entry.key.clone()),
                 CacheEntry {
@@ -259,6 +458,9 @@ impl CompatibilityBackend for MemoryBackend {
                 deleted += 1;
             }
         }
+        if deleted > 0 {
+            state.version = state.version.saturating_add(1);
+        }
         Ok(deleted)
     }
 
@@ -276,6 +478,10 @@ impl CompatibilityBackend for MemoryBackend {
             Some(CacheValue::String(value)) => value
                 .parse()
                 .map_err(|_| BackendError::Invalid("value is not an integer".into()))?,
+            Some(CacheValue::Blob(value)) => std::str::from_utf8(value)
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .ok_or_else(|| BackendError::Invalid("value is not an integer".into()))?,
             Some(_) => return Err(BackendError::Invalid("value is not an integer".into())),
         };
         let value = value
@@ -306,7 +512,13 @@ impl CompatibilityBackend for MemoryBackend {
         let Some(entry) = state.caches.get_mut(&(cache.to_owned(), key.to_owned())) else {
             return Ok(false);
         };
+        if entry.expires_at_ms == ttl_ms.map(|ttl| now_ms().saturating_add(ttl))
+            || (ttl_ms.is_none() && entry.expires_at_ms.is_none())
+        {
+            return Ok(false);
+        }
         entry.expires_at_ms = ttl_ms.map(|ttl| now_ms().saturating_add(ttl));
+        state.version = state.version.saturating_add(1);
         Ok(true)
     }
 
@@ -383,6 +595,81 @@ impl CompatibilityBackend for MemoryBackend {
         Ok(first)
     }
 
+    async fn stream_append_idempotent(
+        &self,
+        stream: &str,
+        partition: u32,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+        records: Vec<StreamRecord>,
+    ) -> Result<u64, BackendError> {
+        if producer_id < 0 || producer_epoch < 0 || base_sequence < 0 || records.is_empty() {
+            return Err(BackendError::Invalid(
+                "invalid idempotent producer batch".into(),
+            ));
+        }
+        let sequence_span = i32::try_from(records.len())
+            .map_err(|_| BackendError::Invalid("idempotent producer batch is too large".into()))?;
+        let next_sequence = base_sequence
+            .checked_add(sequence_span)
+            .ok_or_else(|| BackendError::Invalid("producer sequence overflow".into()))?;
+        let mut state = self.state.lock().unwrap();
+        let count = state
+            .stream_partitions
+            .get(stream)
+            .copied()
+            .ok_or(BackendError::NotFound)?;
+        if partition >= count {
+            return Err(BackendError::NotFound);
+        }
+        let producer_key = (stream.to_owned(), partition, producer_id);
+        if let Some(producer) = state.stream_producers.get_mut(&producer_key) {
+            if producer_epoch < producer.epoch {
+                return Err(BackendError::Conflict);
+            }
+            if producer_epoch > producer.epoch {
+                producer.epoch = producer_epoch;
+                producer.next_sequence = 0;
+                producer.history.clear();
+            }
+            if base_sequence < producer.next_sequence {
+                return producer
+                    .history
+                    .get(&base_sequence)
+                    .filter(|(previous, _)| previous == &records)
+                    .map(|(_, offset)| *offset)
+                    .ok_or(BackendError::Conflict);
+            }
+            if base_sequence != producer.next_sequence {
+                return Err(BackendError::Conflict);
+            }
+        } else if base_sequence != 0 {
+            return Err(BackendError::Conflict);
+        }
+        let input = records.clone();
+        let log = state
+            .streams
+            .entry((stream.to_owned(), partition))
+            .or_default();
+        let first = u64::try_from(log.len()).unwrap_or(u64::MAX);
+        for mut record in records {
+            record.offset = u64::try_from(log.len()).unwrap_or(u64::MAX);
+            log.push(record);
+        }
+        let producer = state.stream_producers.entry(producer_key).or_default();
+        producer.epoch = producer_epoch;
+        producer.next_sequence = next_sequence;
+        producer.history.insert(base_sequence, (input, first));
+        while producer.history.len() > 128 {
+            let Some(sequence) = producer.history.keys().next().copied() else {
+                break;
+            };
+            producer.history.remove(&sequence);
+        }
+        Ok(first)
+    }
+
     async fn stream_fetch(
         &self,
         stream: &str,
@@ -420,6 +707,16 @@ impl CompatibilityBackend for MemoryBackend {
             .map_or(0, |records| {
                 u64::try_from(records.len()).unwrap_or(u64::MAX)
             }))
+    }
+
+    async fn stream_start_offset(&self, stream: &str, partition: u32) -> Result<u64, BackendError> {
+        let state = self.state.lock().unwrap();
+        if !state.stream_partitions.contains_key(stream)
+            || partition >= state.stream_partitions[stream]
+        {
+            return Err(BackendError::NotFound);
+        }
+        Ok(0)
     }
 
     async fn stream_commit_offset(
@@ -739,22 +1036,59 @@ impl CompatibilityBackend for MemoryBackend {
             state.queues.get_mut(&queue).unwrap().push_front(message);
         } else if let Some(target) = state.queue_dead_letter_targets.get(&queue).cloned() {
             let first_exchange = message.exchange.clone().unwrap_or_default();
+            let first_routing_key = message.routing_key.clone().unwrap_or_default();
             message.expiration = None;
             message.ttl_ms = None;
-            message.exchange = Some(String::new());
-            message.routing_key = Some(target.clone());
+            message.exchange = Some(
+                message
+                    .headers
+                    .remove("x-epoch-compat-dlx-exchange")
+                    .unwrap_or_default(),
+            );
+            message.routing_key = Some(
+                message
+                    .headers
+                    .remove("x-epoch-compat-dlx-routing-key")
+                    .unwrap_or_else(|| target.clone()),
+            );
             message
                 .headers
                 .entry("x-first-death-exchange".into())
-                .or_insert(first_exchange);
+                .or_insert(first_exchange.clone());
             message
                 .headers
                 .entry("x-first-death-queue".into())
-                .or_insert(queue);
+                .or_insert(queue.clone());
             message
                 .headers
                 .entry("x-first-death-reason".into())
                 .or_insert_with(|| "rejected".into());
+            message
+                .headers
+                .insert("x-last-death-exchange".into(), first_exchange.clone());
+            message
+                .headers
+                .insert("x-last-death-queue".into(), queue.clone());
+            message
+                .headers
+                .insert("x-last-death-reason".into(), "rejected".into());
+            let mut history = message
+                .headers
+                .get("x-epoch-compat-death-history")
+                .and_then(|history| serde_json::from_str::<Vec<serde_json::Value>>(history).ok())
+                .unwrap_or_default();
+            history.push(serde_json::json!({
+                "count":1,
+                "exchange":first_exchange,
+                "queue":queue,
+                "reason":"rejected",
+                "routing_keys":[first_routing_key],
+            }));
+            if let Ok(history) = serde_json::to_string(&history) {
+                message
+                    .headers
+                    .insert("x-epoch-compat-death-history".into(), history);
+            }
             state
                 .queues
                 .get_mut(&target)

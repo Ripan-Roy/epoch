@@ -8,10 +8,11 @@ use std::{
 use amq_protocol::{
     frame::{AMQPContentHeader, AMQPFrame, ProtocolVersion, WriteContext, gen_frame, parse_frame},
     protocol::{AMQPClass, BasicProperties, basic, channel, confirm, connection, exchange, queue},
-    types::{AMQPValue, FieldTable, LongString},
+    types::{AMQPValue, FieldArray, FieldTable, LongString},
 };
 use anyhow::{Context, Result, bail};
 use epoch_observability::{MetricsRegistry, Outcome, Protocol, ProtocolOperation};
+use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -21,13 +22,23 @@ use tracing::Instrument as _;
 
 use crate::{
     CompatibilityBackend, MAX_FRAME_BYTES, MAX_MESSAGE_BYTES, MAX_REQUEST_ITEMS,
-    backend::{BackendError, QueueDelivery, QueueMessage},
+    backend::{
+        BackendError, CacheAtomicMutation, CacheEntry, CacheStorageClass, CacheValue,
+        QueueDelivery, QueueMessage,
+    },
     observe_protocol,
 };
 
 const AMQP_PROTOCOL_HEADER: &[u8; 8] = b"AMQP\0\0\x09\x01";
 const AMQP_FRAME_END: u8 = 0xce;
 const MAX_CHANNELS: u16 = 2_048;
+const TOPOLOGY_KEY: &str = "__epoch:amqp:topology:v1";
+const TOPOLOGY_VERSION: u16 = 1;
+const MAX_TOPOLOGY_ENTRIES: usize = 4_096;
+const MAX_TOPOLOGY_UPDATE_ATTEMPTS: usize = 4;
+const DLX_EXCHANGE_HEADER: &str = "x-epoch-compat-dlx-exchange";
+const DLX_ROUTING_KEY_HEADER: &str = "x-epoch-compat-dlx-routing-key";
+const DEATH_HISTORY_HEADER: &str = "x-epoch-compat-death-history";
 
 #[derive(Clone)]
 pub struct AmqpConfig {
@@ -35,6 +46,8 @@ pub struct AmqpConfig {
     pub password: String,
     pub max_connections: usize,
     pub heartbeat_seconds: u16,
+    /// Replicated Cache used for durable exchange and binding metadata.
+    pub topology_cache: String,
 }
 
 impl fmt::Debug for AmqpConfig {
@@ -45,6 +58,7 @@ impl fmt::Debug for AmqpConfig {
             .field("password", &"<redacted>")
             .field("max_connections", &self.max_connections)
             .field("heartbeat_seconds", &self.heartbeat_seconds)
+            .field("topology_cache", &self.topology_cache)
             .finish()
     }
 }
@@ -59,9 +73,14 @@ pub struct AmqpServer<B> {
 
 impl<B: CompatibilityBackend> AmqpServer<B> {
     pub fn new(backend: Arc<B>, config: AmqpConfig) -> Result<Self, BackendError> {
-        if config.username.is_empty() || config.password.is_empty() || config.max_connections == 0 {
+        if config.username.is_empty()
+            || config.password.is_empty()
+            || config.max_connections == 0
+            || config.topology_cache.trim().is_empty()
+        {
             return Err(BackendError::Invalid(
-                "AMQP credentials and positive connection limit are required".into(),
+                "AMQP credentials, topology Cache, and positive connection limit are required"
+                    .into(),
             ));
         }
         Ok(Self {
@@ -186,13 +205,14 @@ async fn serve_connection<B: CompatibilityBackend>(
     )
     .await?;
 
-    run_session(stream, backend, topology, metrics).await
+    run_session(stream, backend, topology, config.topology_cache, metrics).await
 }
 
 async fn run_session<B: CompatibilityBackend>(
     stream: TcpStream,
     backend: Arc<B>,
     topology: Arc<Mutex<Topology>>,
+    topology_cache: String,
     metrics: Option<&MetricsRegistry>,
 ) -> Result<()> {
     let (mut reader, mut writer) = stream.into_split();
@@ -206,7 +226,7 @@ async fn run_session<B: CompatibilityBackend>(
             }
         }
     });
-    let mut session = Session::with_topology(backend, topology);
+    let mut session = Session::with_topology_cache(backend, topology, topology_cache);
     let mut poll = tokio::time::interval(std::time::Duration::from_millis(10));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = async {
@@ -290,7 +310,8 @@ struct PendingPublish {
     body: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum ExchangeKind {
     Direct,
     Fanout,
@@ -310,19 +331,22 @@ impl ExchangeKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum HeaderMatch {
     All,
     Any,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HeaderBinding {
     mode: HeaderMatch,
     values: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Binding {
     exchange: String,
     routing_key: String,
@@ -330,24 +354,238 @@ struct Binding {
     headers: Option<HeaderBinding>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExchangeDefinition {
+    kind: ExchangeKind,
+    durable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueueDeadLetter {
+    exchange: String,
+    routing_key: String,
+    target_queue: String,
+    durable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueueDeadLetterRequest {
+    exchange: String,
+    routing_key: String,
+}
+
+#[derive(Debug, Clone)]
 struct Topology {
-    exchanges: BTreeMap<String, ExchangeKind>,
+    exchanges: BTreeMap<String, ExchangeDefinition>,
     bindings: BTreeSet<Binding>,
+    dead_letters: BTreeMap<String, QueueDeadLetter>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedTopology {
+    version: u16,
+    exchanges: BTreeMap<String, ExchangeDefinition>,
+    bindings: BTreeSet<Binding>,
+    dead_letters: BTreeMap<String, QueueDeadLetter>,
 }
 
 impl Default for Topology {
     fn default() -> Self {
         Self {
             exchanges: BTreeMap::from([
-                ("amq.direct".into(), ExchangeKind::Direct),
-                ("amq.fanout".into(), ExchangeKind::Fanout),
-                ("amq.topic".into(), ExchangeKind::Topic),
-                ("amq.headers".into(), ExchangeKind::Headers),
+                (
+                    "amq.direct".into(),
+                    ExchangeDefinition {
+                        kind: ExchangeKind::Direct,
+                        durable: true,
+                    },
+                ),
+                (
+                    "amq.fanout".into(),
+                    ExchangeDefinition {
+                        kind: ExchangeKind::Fanout,
+                        durable: true,
+                    },
+                ),
+                (
+                    "amq.topic".into(),
+                    ExchangeDefinition {
+                        kind: ExchangeKind::Topic,
+                        durable: true,
+                    },
+                ),
+                (
+                    "amq.headers".into(),
+                    ExchangeDefinition {
+                        kind: ExchangeKind::Headers,
+                        durable: true,
+                    },
+                ),
             ]),
             bindings: BTreeSet::new(),
+            dead_letters: BTreeMap::new(),
         }
     }
+}
+
+impl PersistedTopology {
+    fn decode(entry: Option<&CacheEntry>) -> Result<Topology> {
+        let Some(entry) = entry else {
+            return Ok(Topology::default());
+        };
+        let bytes = match &entry.value {
+            CacheValue::Blob(value) => value.as_slice(),
+            CacheValue::String(value) => value.as_bytes(),
+            _ => bail!("AMQP durable topology has an incompatible Cache value type"),
+        };
+        let persisted: Self =
+            serde_json::from_slice(bytes).context("AMQP durable topology document is malformed")?;
+        if persisted.version != TOPOLOGY_VERSION
+            || persisted.exchanges.len() > MAX_TOPOLOGY_ENTRIES
+            || persisted.bindings.len() > MAX_TOPOLOGY_ENTRIES
+            || persisted.dead_letters.len() > MAX_TOPOLOGY_ENTRIES
+            || persisted
+                .exchanges
+                .values()
+                .any(|exchange| !exchange.durable)
+            || persisted
+                .dead_letters
+                .values()
+                .any(|declaration| !declaration.durable)
+        {
+            bail!("AMQP durable topology document violates its version or bounds");
+        }
+        let mut topology = Topology::default();
+        for (name, definition) in persisted.exchanges {
+            validate_topology_name(&name, "exchange")?;
+            if name.starts_with("amq.") || topology.exchanges.insert(name, definition).is_some() {
+                bail!("AMQP durable topology overrides a reserved exchange");
+            }
+        }
+        for binding in persisted.bindings {
+            validate_topology_name(&binding.exchange, "exchange")?;
+            validate_topology_name(&binding.queue, "queue")?;
+            if !topology.exchanges.contains_key(&binding.exchange) {
+                bail!("AMQP durable binding references an unknown exchange");
+            }
+            topology.bindings.insert(binding);
+        }
+        for (queue, declaration) in persisted.dead_letters {
+            validate_topology_name(&queue, "queue")?;
+            validate_topology_name(&declaration.target_queue, "queue")?;
+            if !declaration.exchange.is_empty()
+                && !topology.exchanges.contains_key(&declaration.exchange)
+            {
+                bail!("AMQP durable dead-letter declaration references an unknown exchange");
+            }
+            topology.dead_letters.insert(queue, declaration);
+        }
+        validate_dead_letter_routes(&topology)?;
+        Ok(topology)
+    }
+
+    fn from_topology(topology: &Topology) -> Self {
+        let exchanges = topology
+            .exchanges
+            .iter()
+            .filter(|(name, definition)| !name.starts_with("amq.") && definition.durable)
+            .map(|(name, definition)| (name.clone(), *definition))
+            .collect::<BTreeMap<_, _>>();
+        let bindings = topology
+            .bindings
+            .iter()
+            .filter(|binding| {
+                topology
+                    .exchanges
+                    .get(&binding.exchange)
+                    .is_some_and(|definition| definition.durable)
+            })
+            .cloned()
+            .collect();
+        let dead_letters = topology
+            .dead_letters
+            .iter()
+            .filter(|(_, declaration)| declaration.durable)
+            .map(|(queue, declaration)| (queue.clone(), declaration.clone()))
+            .collect();
+        Self {
+            version: TOPOLOGY_VERSION,
+            exchanges,
+            bindings,
+            dead_letters,
+        }
+    }
+
+    fn encode(topology: &Topology) -> Result<Vec<u8>> {
+        validate_dead_letter_routes(topology)?;
+        let bytes = serde_json::to_vec(&Self::from_topology(topology))
+            .context("encode AMQP durable topology")?;
+        if bytes.len() > MAX_MESSAGE_BYTES {
+            bail!("AMQP durable topology exceeds the storage limit");
+        }
+        Ok(bytes)
+    }
+}
+
+impl Topology {
+    fn merge_ephemeral(mut self, local: &Self) -> Self {
+        for (name, definition) in &local.exchanges {
+            if !definition.durable {
+                self.exchanges.insert(name.clone(), *definition);
+            }
+        }
+        self.bindings.extend(
+            local
+                .bindings
+                .iter()
+                .filter(|binding| {
+                    local
+                        .exchanges
+                        .get(&binding.exchange)
+                        .is_some_and(|definition| !definition.durable)
+                })
+                .cloned(),
+        );
+        self.dead_letters.extend(
+            local
+                .dead_letters
+                .iter()
+                .filter(|(_, declaration)| !declaration.durable)
+                .map(|(queue, declaration)| (queue.clone(), declaration.clone())),
+        );
+        self
+    }
+}
+
+fn validate_topology_name(value: &str, kind: &str) -> Result<()> {
+    if value.is_empty() || value.len() > 255 || value.chars().any(char::is_control) {
+        bail!("AMQP {kind} name is empty, too long, or contains control characters");
+    }
+    Ok(())
+}
+
+fn validate_dead_letter_routes(topology: &Topology) -> Result<()> {
+    for declaration in topology.dead_letters.values() {
+        if declaration.exchange.is_empty() {
+            if declaration.routing_key != declaration.target_queue {
+                bail!("AMQP default dead-letter route changed its native target");
+            }
+            continue;
+        }
+        let targets = resolve_topology_queues(
+            topology,
+            &declaration.exchange,
+            &declaration.routing_key,
+            &BTreeMap::new(),
+        )?;
+        if targets.as_slice() != [declaration.target_queue.as_str()] {
+            bail!("AMQP named dead-letter route no longer resolves to its native target");
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -394,20 +632,86 @@ struct Session<B> {
     backend: Arc<B>,
     channels: BTreeMap<u16, ChannelState>,
     topology: Arc<Mutex<Topology>>,
+    topology_cache: String,
 }
 
 impl<B: CompatibilityBackend> Session<B> {
     #[cfg(test)]
     fn new(backend: Arc<B>) -> Self {
-        Self::with_topology(backend, Arc::new(Mutex::new(Topology::default())))
+        Self::with_topology_cache(
+            backend,
+            Arc::new(Mutex::new(Topology::default())),
+            "sessions".into(),
+        )
     }
 
+    #[cfg(test)]
     fn with_topology(backend: Arc<B>, topology: Arc<Mutex<Topology>>) -> Self {
+        Self::with_topology_cache(backend, topology, "sessions".into())
+    }
+
+    fn with_topology_cache(
+        backend: Arc<B>,
+        topology: Arc<Mutex<Topology>>,
+        topology_cache: String,
+    ) -> Self {
         Self {
             backend,
             channels: BTreeMap::new(),
             topology,
+            topology_cache,
         }
+    }
+
+    async fn current_topology(&self) -> Result<Topology> {
+        let snapshot = self
+            .backend
+            .cache_snapshot(&self.topology_cache, &[TOPOLOGY_KEY.to_owned()])
+            .await?;
+        let persisted =
+            PersistedTopology::decode(snapshot.entries.get(TOPOLOGY_KEY).and_then(Option::as_ref))?;
+        let local = self.topology.lock().unwrap().clone();
+        let merged = persisted.merge_ephemeral(&local);
+        *self.topology.lock().unwrap() = merged.clone();
+        Ok(merged)
+    }
+
+    async fn mutate_durable_topology<R, F>(&self, mut mutate: F) -> Result<R>
+    where
+        F: FnMut(&mut Topology) -> Result<R>,
+    {
+        for attempt in 0..MAX_TOPOLOGY_UPDATE_ATTEMPTS {
+            let snapshot = self
+                .backend
+                .cache_snapshot(&self.topology_cache, &[TOPOLOGY_KEY.to_owned()])
+                .await?;
+            let persisted = PersistedTopology::decode(
+                snapshot.entries.get(TOPOLOGY_KEY).and_then(Option::as_ref),
+            )?;
+            let local = self.topology.lock().unwrap().clone();
+            let mut topology = persisted.merge_ephemeral(&local);
+            let result = mutate(&mut topology)?;
+            let document = PersistedTopology::encode(&topology)?;
+            let mutation = CacheAtomicMutation::Put {
+                key: TOPOLOGY_KEY.to_owned(),
+                value: CacheValue::Blob(document),
+                ttl_ms: None,
+                storage_class: CacheStorageClass::Memory,
+            };
+            match self
+                .backend
+                .cache_compare_and_apply(&self.topology_cache, snapshot.revision, &[mutation])
+                .await
+            {
+                Ok(()) => {
+                    *self.topology.lock().unwrap() = topology;
+                    return Ok(result);
+                }
+                Err(BackendError::Conflict) if attempt + 1 < MAX_TOPOLOGY_UPDATE_ATTEMPTS => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(BackendError::Conflict.into())
     }
 
     #[allow(
@@ -442,21 +746,92 @@ impl<B: CompatibilityBackend> Session<B> {
             }
             AMQPFrame::Method(id, AMQPClass::Queue(queue::AMQPMethod::Declare(declare))) => {
                 self.require_channel(id)?;
-                let name = declare.queue.as_str();
-                if name.is_empty() {
-                    bail!("server-named queues are unsupported");
-                }
-                if !self.backend.queue_exists(name).await? {
+                let name = declare.queue.to_string();
+                validate_topology_name(&name, "queue")?;
+                if !self.backend.queue_exists(&name).await? {
                     bail!("AMQP queue does not map to a provisioned Epoch Queue");
                 }
-                if let Some(requested_target) =
-                    parse_queue_dead_letter_arguments(&declare.arguments)?
-                {
-                    let configured_target = self.backend.queue_dead_letter_target(name).await?;
-                    if configured_target.as_deref() != Some(requested_target.as_str()) {
+                if !declare.passive && (declare.exclusive || declare.auto_delete) {
+                    bail!("exclusive and auto-delete AMQP queues are unsupported");
+                }
+                let topology = self.current_topology().await?;
+                let request = parse_queue_dead_letter_arguments(&declare.arguments)?;
+                let requested = if let Some(request) = request {
+                    let targets = if request.exchange.is_empty() {
+                        vec![request.routing_key.clone()]
+                    } else {
+                        let definition = topology
+                            .exchanges
+                            .get(&request.exchange)
+                            .context("AMQP dead-letter exchange does not exist")?;
+                        if definition.kind == ExchangeKind::Headers {
+                            bail!("headers exchanges cannot be used as an AMQP dead-letter target");
+                        }
+                        resolve_topology_queues(
+                            &topology,
+                            &request.exchange,
+                            &request.routing_key,
+                            &BTreeMap::new(),
+                        )?
+                    };
+                    let [target_queue] = targets.as_slice() else {
+                        bail!("AMQP dead-letter route must resolve to exactly one native Queue");
+                    };
+                    let configured_target = self.backend.queue_dead_letter_target(&name).await?;
+                    if configured_target.as_deref() != Some(target_queue.as_str()) {
                         bail!(
                             "AMQP dead-letter arguments do not match the provisioned Epoch Queue"
                         );
+                    }
+                    Some(QueueDeadLetter {
+                        exchange: request.exchange,
+                        routing_key: request.routing_key,
+                        target_queue: target_queue.clone(),
+                        durable: declare.durable,
+                    })
+                } else {
+                    None
+                };
+                if !declare.passive {
+                    match (topology.dead_letters.get(&name), &requested) {
+                        (Some(existing), Some(requested)) if existing != requested => {
+                            bail!("AMQP queue redeclaration changed dead-letter arguments");
+                        }
+                        (Some(_), None) => {
+                            bail!("AMQP queue redeclaration removed dead-letter arguments");
+                        }
+                        (None, Some(requested)) if requested.durable => {
+                            self.mutate_durable_topology(|topology| {
+                                match topology.dead_letters.get(&name) {
+                                    Some(existing) if existing != requested => {
+                                        bail!(
+                                            "AMQP queue redeclaration changed dead-letter arguments"
+                                        );
+                                    }
+                                    None => {
+                                        if topology.dead_letters.len() >= MAX_TOPOLOGY_ENTRIES {
+                                            bail!("AMQP dead-letter declaration limit exceeded");
+                                        }
+                                        topology
+                                            .dead_letters
+                                            .insert(name.clone(), requested.clone());
+                                    }
+                                    Some(_) => {}
+                                }
+                                Ok(())
+                            })
+                            .await?;
+                        }
+                        (None, Some(requested)) => {
+                            let mut topology = self.topology.lock().unwrap();
+                            if topology.dead_letters.len() >= MAX_TOPOLOGY_ENTRIES {
+                                bail!("AMQP dead-letter declaration limit exceeded");
+                            }
+                            topology
+                                .dead_letters
+                                .insert(name.clone(), requested.clone());
+                        }
+                        _ => {}
                     }
                 }
                 if declare.nowait {
@@ -474,29 +849,76 @@ impl<B: CompatibilityBackend> Session<B> {
             AMQPFrame::Method(id, AMQPClass::Exchange(exchange::AMQPMethod::Declare(declare))) => {
                 self.require_channel(id)?;
                 let name = declare.exchange.to_string();
+                validate_topology_name(&name, "exchange")?;
+                if declare.passive {
+                    if name.is_empty() {
+                        bail!("the default AMQP exchange cannot be declared");
+                    }
+                    let topology = self.current_topology().await?;
+                    if !topology.exchanges.contains_key(&name) {
+                        bail!("AMQP exchange does not exist");
+                    }
+                    if declare.nowait {
+                        return Ok(Vec::new());
+                    }
+                    return Ok(vec![method_frame(
+                        id,
+                        AMQPClass::Exchange(exchange::AMQPMethod::DeclareOk(
+                            exchange::DeclareOk::default(),
+                        )),
+                    )]);
+                }
                 let Some(kind) = ExchangeKind::parse(declare.kind.as_str()) else {
                     bail!("unsupported AMQP exchange type");
                 };
                 if name.is_empty()
                     || declare.internal
                     || declare.auto_delete
-                    || declare.durable
                     || !declare.arguments.inner().is_empty()
                 {
                     bail!("unsupported AMQP exchange declaration options");
                 }
-                {
-                    let mut topology = self.topology.lock().unwrap();
-                    match topology.exchanges.get(&name) {
-                        Some(existing) if *existing != kind => {
-                            bail!("AMQP exchange redeclaration changed its type");
-                        }
-                        None if declare.passive => bail!("AMQP exchange does not exist"),
-                        None => {
-                            topology.exchanges.insert(name, kind);
-                        }
-                        Some(_) => {}
+                let requested = ExchangeDefinition {
+                    kind,
+                    durable: declare.durable,
+                };
+                let topology = self.current_topology().await?;
+                match topology.exchanges.get(&name) {
+                    Some(existing) if *existing != requested => {
+                        bail!("AMQP exchange redeclaration changed its type or durability");
                     }
+                    None if declare.passive => bail!("AMQP exchange does not exist"),
+                    None if name.starts_with("amq.") => {
+                        bail!("AMQP reserved exchange does not exist");
+                    }
+                    None if declare.durable => {
+                        self.mutate_durable_topology(|topology| {
+                            match topology.exchanges.get(&name) {
+                                Some(existing) if *existing != requested => {
+                                    bail!(
+                                        "AMQP exchange redeclaration changed its type or durability"
+                                    );
+                                }
+                                None => {
+                                    if topology.exchanges.len() >= MAX_TOPOLOGY_ENTRIES {
+                                        bail!("AMQP exchange limit exceeded");
+                                    }
+                                    topology.exchanges.insert(name.clone(), requested);
+                                }
+                                Some(_) => {}
+                            }
+                            Ok(())
+                        })
+                        .await?;
+                    }
+                    None => {
+                        let mut topology = self.topology.lock().unwrap();
+                        if topology.exchanges.len() >= MAX_TOPOLOGY_ENTRIES {
+                            bail!("AMQP exchange limit exceeded");
+                        }
+                        topology.exchanges.insert(name, requested);
+                    }
+                    Some(_) => {}
                 }
                 if declare.nowait {
                     return Ok(Vec::new());
@@ -514,21 +936,36 @@ impl<B: CompatibilityBackend> Session<B> {
                 if name.starts_with("amq.") || name.is_empty() {
                     bail!("built-in AMQP exchanges cannot be deleted");
                 }
-                let mut topology = self.topology.lock().unwrap();
-                if !topology.exchanges.contains_key(&name) {
-                    bail!("AMQP exchange does not exist");
+                let topology = self.current_topology().await?;
+                let definition = topology
+                    .exchanges
+                    .get(&name)
+                    .copied()
+                    .context("AMQP exchange does not exist")?;
+                let remove = |topology: &mut Topology| -> Result<()> {
+                    if !topology.exchanges.contains_key(&name) {
+                        bail!("AMQP exchange does not exist");
+                    }
+                    if delete.if_unused
+                        && topology
+                            .bindings
+                            .iter()
+                            .any(|binding| binding.exchange == name)
+                    {
+                        bail!("AMQP exchange is still in use");
+                    }
+                    topology.exchanges.remove(&name);
+                    topology.bindings.retain(|binding| binding.exchange != name);
+                    topology
+                        .dead_letters
+                        .retain(|_, declaration| declaration.exchange != name);
+                    Ok(())
+                };
+                if definition.durable {
+                    self.mutate_durable_topology(remove).await?;
+                } else {
+                    remove(&mut self.topology.lock().unwrap())?;
                 }
-                if delete.if_unused
-                    && topology
-                        .bindings
-                        .iter()
-                        .any(|binding| binding.exchange == name)
-                {
-                    bail!("AMQP exchange is still in use");
-                }
-                topology.exchanges.remove(&name);
-                topology.bindings.retain(|binding| binding.exchange != name);
-                drop(topology);
                 if delete.nowait {
                     return Ok(Vec::new());
                 }
@@ -544,20 +981,46 @@ impl<B: CompatibilityBackend> Session<B> {
                 if !self.backend.queue_exists(bind.queue.as_str()).await? {
                     bail!("AMQP queue binding targets an unknown Queue");
                 }
-                let mut topology = self.topology.lock().unwrap();
-                let kind = topology
+                validate_topology_name(bind.queue.as_str(), "queue")?;
+                let topology = self.current_topology().await?;
+                let definition = topology
                     .exchanges
                     .get(bind.exchange.as_str())
                     .copied()
                     .context("AMQP exchange does not exist")?;
-                let headers = parse_binding_headers(kind, &bind.arguments)?;
-                topology.bindings.insert(Binding {
+                let binding = Binding {
                     exchange: bind.exchange.to_string(),
                     routing_key: bind.routing_key.to_string(),
                     queue: bind.queue.to_string(),
-                    headers,
-                });
-                drop(topology);
+                    headers: parse_binding_headers(definition.kind, &bind.arguments)?,
+                };
+                if definition.durable {
+                    self.mutate_durable_topology(|topology| {
+                        let current = topology
+                            .exchanges
+                            .get(&binding.exchange)
+                            .context("AMQP exchange does not exist")?;
+                        if *current != definition {
+                            bail!("AMQP exchange changed during binding");
+                        }
+                        if topology.bindings.len() >= MAX_TOPOLOGY_ENTRIES
+                            && !topology.bindings.contains(&binding)
+                        {
+                            bail!("AMQP binding limit exceeded");
+                        }
+                        topology.bindings.insert(binding.clone());
+                        Ok(())
+                    })
+                    .await?;
+                } else {
+                    let mut topology = self.topology.lock().unwrap();
+                    if topology.bindings.len() >= MAX_TOPOLOGY_ENTRIES
+                        && !topology.bindings.contains(&binding)
+                    {
+                        bail!("AMQP binding limit exceeded");
+                    }
+                    topology.bindings.insert(binding);
+                }
                 if bind.nowait {
                     return Ok(Vec::new());
                 }
@@ -568,10 +1031,8 @@ impl<B: CompatibilityBackend> Session<B> {
             }
             AMQPFrame::Method(id, AMQPClass::Queue(queue::AMQPMethod::Unbind(unbind))) => {
                 self.require_channel(id)?;
-                let kind = self
-                    .topology
-                    .lock()
-                    .unwrap()
+                let topology = self.current_topology().await?;
+                let definition = topology
                     .exchanges
                     .get(unbind.exchange.as_str())
                     .copied()
@@ -580,9 +1041,17 @@ impl<B: CompatibilityBackend> Session<B> {
                     exchange: unbind.exchange.to_string(),
                     routing_key: unbind.routing_key.to_string(),
                     queue: unbind.queue.to_string(),
-                    headers: parse_binding_headers(kind, &unbind.arguments)?,
+                    headers: parse_binding_headers(definition.kind, &unbind.arguments)?,
                 };
-                if !self.topology.lock().unwrap().bindings.remove(&binding) {
+                if definition.durable {
+                    self.mutate_durable_topology(|topology| {
+                        if !topology.bindings.remove(&binding) {
+                            bail!("AMQP queue binding does not exist");
+                        }
+                        Ok(())
+                    })
+                    .await?;
+                } else if !self.topology.lock().unwrap().bindings.remove(&binding) {
                     bail!("AMQP queue binding does not exist");
                 }
                 Ok(vec![method_frame(
@@ -674,7 +1143,7 @@ impl<B: CompatibilityBackend> Session<B> {
                 )])
             }
             AMQPFrame::Method(id, AMQPClass::Basic(basic::AMQPMethod::Publish(publish))) => {
-                self.validate_publish(&publish)?;
+                self.validate_publish(&publish).await?;
                 let state = self.require_channel_mut(id)?;
                 if state.pending_publish.is_some() {
                     bail!("interleaved AMQP publishes are unsupported");
@@ -798,15 +1267,14 @@ impl<B: CompatibilityBackend> Session<B> {
         Ok(frames)
     }
 
-    fn validate_publish(&self, publish: &basic::Publish) -> Result<()> {
+    async fn validate_publish(&self, publish: &basic::Publish) -> Result<()> {
         if publish.immediate {
             bail!("AMQP immediate publishing is unsupported");
         }
         if !publish.exchange.as_str().is_empty()
             && !self
-                .topology
-                .lock()
-                .unwrap()
+                .current_topology()
+                .await?
                 .exchanges
                 .contains_key(publish.exchange.as_str())
         {
@@ -828,22 +1296,8 @@ impl<B: CompatibilityBackend> Session<B> {
                 Ok(Vec::new())
             };
         }
-        let topology = self.topology.lock().unwrap();
-        let kind = topology
-            .exchanges
-            .get(exchange)
-            .copied()
-            .context("AMQP exchange does not exist")?;
-        Ok(topology
-            .bindings
-            .iter()
-            .filter(|binding| {
-                binding.exchange == exchange && binding_matches(kind, binding, routing_key, headers)
-            })
-            .map(|binding| binding.queue.clone())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect())
+        let topology = self.current_topology().await?;
+        resolve_topology_queues(&topology, exchange, routing_key, headers)
     }
 
     async fn finish_publish(&mut self, id: u16) -> Result<Vec<AMQPFrame>> {
@@ -878,8 +1332,19 @@ impl<B: CompatibilityBackend> Session<B> {
             expiration,
             ttl_ms,
         };
+        let topology = self.current_topology().await?;
         for queue in &queues {
-            self.backend.queue_publish(queue, message.clone()).await?;
+            let mut message = message.clone();
+            if let Some(dead_letter) = topology.dead_letters.get(queue) {
+                message
+                    .headers
+                    .insert(DLX_EXCHANGE_HEADER.into(), dead_letter.exchange.clone());
+                message.headers.insert(
+                    DLX_ROUTING_KEY_HEADER.into(),
+                    dead_letter.routing_key.clone(),
+                );
+            }
+            self.backend.queue_publish(queue, message).await?;
         }
         let mut frames = Vec::new();
         if queues.is_empty() && pending.mandatory {
@@ -1064,6 +1529,30 @@ impl<B: CompatibilityBackend> Session<B> {
     }
 }
 
+fn resolve_topology_queues(
+    topology: &Topology,
+    exchange: &str,
+    routing_key: &str,
+    headers: &BTreeMap<String, String>,
+) -> Result<Vec<String>> {
+    let definition = topology
+        .exchanges
+        .get(exchange)
+        .copied()
+        .context("AMQP exchange does not exist")?;
+    Ok(topology
+        .bindings
+        .iter()
+        .filter(|binding| {
+            binding.exchange == exchange
+                && binding_matches(definition.kind, binding, routing_key, headers)
+        })
+        .map(|binding| binding.queue.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect())
+}
+
 fn binding_matches(
     kind: ExchangeKind,
     binding: &Binding,
@@ -1183,7 +1672,9 @@ fn parse_expiration(value: &str) -> Result<u64> {
     value.parse().context("AMQP expiration exceeds u64")
 }
 
-fn parse_queue_dead_letter_arguments(arguments: &FieldTable) -> Result<Option<String>> {
+fn parse_queue_dead_letter_arguments(
+    arguments: &FieldTable,
+) -> Result<Option<QueueDeadLetterRequest>> {
     if arguments.inner().is_empty() {
         return Ok(None);
     }
@@ -1194,11 +1685,10 @@ fn parse_queue_dead_letter_arguments(arguments: &FieldTable) -> Result<Option<St
         .inner()
         .get("x-dead-letter-exchange")
         .context("AMQP Queue dead-letter exchange is missing")?;
-    if !amqp_string(exchange)
-        .context("AMQP Queue dead-letter exchange must be a string")?
-        .is_empty()
-    {
-        bail!("AMQP Queue dead-lettering supports only the default exchange");
+    let exchange =
+        amqp_string(exchange).context("AMQP Queue dead-letter exchange must be a string")?;
+    if !exchange.is_empty() {
+        validate_topology_name(&exchange, "dead-letter exchange")?;
     }
     let target = arguments
         .inner()
@@ -1209,7 +1699,10 @@ fn parse_queue_dead_letter_arguments(arguments: &FieldTable) -> Result<Option<St
     if target.is_empty() {
         bail!("AMQP Queue dead-letter routing key cannot be empty");
     }
-    Ok(Some(target))
+    Ok(Some(QueueDeadLetterRequest {
+        exchange,
+        routing_key: target,
+    }))
 }
 
 fn string_headers(properties: &BasicProperties) -> Result<BTreeMap<String, String>> {
@@ -1223,6 +1716,9 @@ fn string_headers(properties: &BasicProperties) -> Result<BTreeMap<String, Strin
         .inner()
         .iter()
         .map(|(name, value)| {
+            if name.as_str().starts_with("x-epoch-compat-") {
+                bail!("reserved AMQP compatibility header");
+            }
             let value = amqp_string(value).context("only AMQP string headers are supported")?;
             Ok((name.to_string(), value))
         })
@@ -1246,6 +1742,15 @@ fn delivery_properties(message: &QueueMessage) -> BasicProperties {
     if !message.headers.is_empty() {
         let mut headers = FieldTable::default();
         for (name, value) in &message.headers {
+            if name == DEATH_HISTORY_HEADER {
+                if let Some(history) = x_death_value(value) {
+                    headers.insert("x-death".into(), history);
+                }
+                continue;
+            }
+            if name.starts_with("x-epoch-compat-") {
+                continue;
+            }
             headers.insert(
                 name.as_str().into(),
                 AMQPValue::LongString(value.as_str().into()),
@@ -1254,6 +1759,59 @@ fn delivery_properties(message: &QueueMessage) -> BasicProperties {
         properties = properties.with_headers(headers);
     }
     properties
+}
+
+fn x_death_value(encoded: &str) -> Option<AMQPValue> {
+    let entries = serde_json::from_str::<Vec<serde_json::Value>>(encoded).ok()?;
+    if entries.is_empty() || entries.len() > 32 {
+        return None;
+    }
+    let mut deaths = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let count = entry.get("count")?.as_u64()?;
+        let count = i64::try_from(count).ok()?;
+        let exchange = entry.get("exchange")?.as_str()?;
+        let queue = entry.get("queue")?.as_str()?;
+        let reason = entry.get("reason")?.as_str()?;
+        let routing_keys = entry.get("routing_keys")?.as_array()?;
+        if exchange.len() > 255
+            || queue.is_empty()
+            || queue.len() > 255
+            || reason.is_empty()
+            || reason.len() > 255
+            || routing_keys.len() > 32
+        {
+            return None;
+        }
+        let routing_keys = routing_keys
+            .iter()
+            .map(|routing_key| {
+                let routing_key = routing_key.as_str()?;
+                (routing_key.len() <= 255)
+                    .then(|| AMQPValue::LongString(routing_key.as_bytes().into()))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let mut death = FieldTable::default();
+        death.insert("count".into(), AMQPValue::LongLongInt(count));
+        death.insert(
+            "exchange".into(),
+            AMQPValue::LongString(exchange.as_bytes().into()),
+        );
+        death.insert(
+            "queue".into(),
+            AMQPValue::LongString(queue.as_bytes().into()),
+        );
+        death.insert(
+            "reason".into(),
+            AMQPValue::LongString(reason.as_bytes().into()),
+        );
+        death.insert(
+            "routing-keys".into(),
+            AMQPValue::FieldArray(FieldArray::from(routing_keys)),
+        );
+        deaths.push(AMQPValue::FieldTable(death));
+    }
+    Some(AMQPValue::FieldArray(FieldArray::from(deaths)))
 }
 
 fn take_leases(state: &mut ChannelState, tag: u64, multiple: bool) -> Result<Vec<DeliveryLease>> {
@@ -1363,6 +1921,7 @@ mod tests {
             password: "amqp-super-secret".into(),
             max_connections: 8,
             heartbeat_seconds: 10,
+            topology_cache: "sessions".into(),
         };
         let debug = format!("{config:?}");
         assert!(!debug.contains("amqp-super-secret"));
@@ -1525,7 +2084,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_dead_letter_arguments_are_limited_to_one_default_exchange_target() {
+    fn queue_dead_letter_arguments_accept_default_and_named_exchange_routes() {
         assert_eq!(
             parse_queue_dead_letter_arguments(&FieldTable::default()).unwrap(),
             None
@@ -1541,7 +2100,10 @@ mod tests {
         );
         assert_eq!(
             parse_queue_dead_letter_arguments(&valid).unwrap(),
-            Some("failed-jobs".into())
+            Some(QueueDeadLetterRequest {
+                exchange: String::new(),
+                routing_key: "failed-jobs".into(),
+            })
         );
 
         let mut named_exchange = valid.clone();
@@ -1549,7 +2111,13 @@ mod tests {
             "x-dead-letter-exchange".into(),
             AMQPValue::LongString("events.failed".as_bytes().into()),
         );
-        assert!(parse_queue_dead_letter_arguments(&named_exchange).is_err());
+        assert_eq!(
+            parse_queue_dead_letter_arguments(&named_exchange).unwrap(),
+            Some(QueueDeadLetterRequest {
+                exchange: "events.failed".into(),
+                routing_key: "failed-jobs".into(),
+            })
+        );
 
         let mut unknown = valid.clone();
         unknown.insert(
@@ -1557,6 +2125,28 @@ mod tests {
             AMQPValue::LongString("1000".as_bytes().into()),
         );
         assert!(parse_queue_dead_letter_arguments(&unknown).is_err());
+    }
+
+    #[test]
+    fn death_history_becomes_a_bounded_rabbitmq_x_death_table_array() {
+        let history = serde_json::json!([{
+            "count":2,
+            "exchange":"orders",
+            "queue":"jobs",
+            "reason":"rejected",
+            "routing_keys":["orders.created"]
+        }]);
+        let AMQPValue::FieldArray(deaths) = x_death_value(&history.to_string()).unwrap() else {
+            panic!("x-death must be a field array");
+        };
+        let [AMQPValue::FieldTable(death)] = deaths.as_slice() else {
+            panic!("x-death must contain one table");
+        };
+        assert_eq!(death.inner().get("count"), Some(&AMQPValue::LongLongInt(2)));
+        assert!(matches!(
+            death.inner().get("queue"),
+            Some(AMQPValue::LongString(value)) if value.as_bytes() == b"jobs"
+        ));
     }
 
     async fn bind_headers(
@@ -1703,6 +2293,111 @@ mod tests {
                 AMQPFrame::Body(1, body),
             ] if value.reply_code == 312 && body == b"no-match"
         ));
+    }
+
+    #[tokio::test]
+    async fn durable_exchange_and_binding_survive_independent_gateway_state() {
+        let backend = Arc::new(MemoryBackend::with_resources(
+            "sessions", "events", 2, "jobs",
+        ));
+        let mut setup = Session::new(Arc::clone(&backend));
+        open_channel(&mut setup).await;
+        setup
+            .handle(method_frame(
+                1,
+                AMQPClass::Exchange(exchange::AMQPMethod::Declare(exchange::Declare {
+                    exchange: "events.durable".into(),
+                    kind: "topic".into(),
+                    durable: true,
+                    ..exchange::Declare::default()
+                })),
+            ))
+            .await
+            .unwrap();
+        setup
+            .handle(method_frame(
+                1,
+                AMQPClass::Queue(queue::AMQPMethod::Bind(queue::Bind {
+                    queue: "jobs".into(),
+                    exchange: "events.durable".into(),
+                    routing_key: "orders.#".into(),
+                    ..queue::Bind::default()
+                })),
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(
+            backend.cache_get("sessions", TOPOLOGY_KEY).await.unwrap(),
+            Some(CacheEntry {
+                value: CacheValue::Blob(_),
+                ..
+            })
+        ));
+
+        // A distinct local topology simulates another gateway process or a
+        // restart and must load the replicated document before routing.
+        let mut recovered = Session::new(Arc::clone(&backend));
+        open_channel(&mut recovered).await;
+        assert!(
+            publish_to(
+                &mut recovered,
+                "events.durable",
+                "orders.created",
+                true,
+                BasicProperties::default(),
+                b"survived",
+            )
+            .await
+            .is_empty()
+        );
+        assert!(matches!(
+            get_from(&mut recovered, "jobs", true).await.as_slice(),
+            [.., AMQPFrame::Body(1, body)] if body == b"survived"
+        ));
+        assert!(matches!(
+            recovered
+                .handle(method_frame(
+                    1,
+                    AMQPClass::Exchange(exchange::AMQPMethod::Declare(exchange::Declare {
+                        exchange: "events.durable".into(),
+                        passive: true,
+                        ..exchange::Declare::default()
+                    })),
+                ))
+                .await
+                .unwrap()
+                .as_slice(),
+            [AMQPFrame::Method(
+                1,
+                AMQPClass::Exchange(exchange::AMQPMethod::DeclareOk(_))
+            )]
+        ));
+
+        recovered
+            .handle(method_frame(
+                1,
+                AMQPClass::Exchange(exchange::AMQPMethod::Delete(exchange::Delete {
+                    exchange: "events.durable".into(),
+                    ..exchange::Delete::default()
+                })),
+            ))
+            .await
+            .unwrap();
+        let mut after_delete = Session::new(backend);
+        open_channel(&mut after_delete).await;
+        assert!(
+            after_delete
+                .handle(method_frame(
+                    1,
+                    AMQPClass::Basic(basic::AMQPMethod::Publish(basic::Publish {
+                        exchange: "events.durable".into(),
+                        routing_key: "orders.created".into(),
+                        ..basic::Publish::default()
+                    })),
+                ))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1855,6 +2550,7 @@ mod tests {
             password: "secret".into(),
             max_connections: 1,
             heartbeat_seconds: 30,
+            topology_cache: "sessions".into(),
         };
         let valid = connection::StartOk {
             mechanism: "PLAIN".into(),
@@ -2076,7 +2772,14 @@ mod tests {
             get_from(&mut session, "failed-jobs", true)
                 .await
                 .as_slice(),
-            [.., AMQPFrame::Body(1, body)] if body == b"poison"
+            [
+                AMQPFrame::Method(1, AMQPClass::Basic(basic::AMQPMethod::GetOk(_))),
+                AMQPFrame::Header(1, header),
+                AMQPFrame::Body(1, body),
+            ] if body == b"poison"
+                && header.properties.headers().as_ref().is_some_and(|headers| {
+                    matches!(headers.inner().get("x-death"), Some(AMQPValue::FieldArray(values)) if values.as_slice().len() == 1)
+                })
         ));
         assert!(matches!(
             get(&mut session).await.as_slice(),
@@ -2084,6 +2787,100 @@ mod tests {
                 1,
                 AMQPClass::Basic(basic::AMQPMethod::GetEmpty(_))
             )]
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one scenario proves named DLX declaration, durable recovery, native target validation, retargeting, and x-death metadata"
+    )]
+    async fn named_dead_letter_exchange_routes_to_the_provisioned_native_target() {
+        let backend = Arc::new(MemoryBackend::with_resources(
+            "sessions", "events", 2, "jobs",
+        ));
+        backend.add_queue("failed-jobs");
+        backend.configure_queue_dead_letter("jobs", "failed-jobs");
+        let mut setup = Session::new(Arc::clone(&backend));
+        open_channel(&mut setup).await;
+        setup
+            .handle(method_frame(
+                1,
+                AMQPClass::Exchange(exchange::AMQPMethod::Declare(exchange::Declare {
+                    exchange: "dead.events".into(),
+                    kind: "topic".into(),
+                    durable: true,
+                    ..exchange::Declare::default()
+                })),
+            ))
+            .await
+            .unwrap();
+        setup
+            .handle(method_frame(
+                1,
+                AMQPClass::Queue(queue::AMQPMethod::Bind(queue::Bind {
+                    queue: "failed-jobs".into(),
+                    exchange: "dead.events".into(),
+                    routing_key: "failed.#".into(),
+                    ..queue::Bind::default()
+                })),
+            ))
+            .await
+            .unwrap();
+        let mut arguments = FieldTable::default();
+        arguments.insert(
+            "x-dead-letter-exchange".into(),
+            AMQPValue::LongString("dead.events".as_bytes().into()),
+        );
+        arguments.insert(
+            "x-dead-letter-routing-key".into(),
+            AMQPValue::LongString("failed.jobs".as_bytes().into()),
+        );
+        setup
+            .handle(method_frame(
+                1,
+                AMQPClass::Queue(queue::AMQPMethod::Declare(queue::Declare {
+                    queue: "jobs".into(),
+                    durable: true,
+                    arguments,
+                    ..queue::Declare::default()
+                })),
+            ))
+            .await
+            .unwrap();
+
+        let mut recovered = Session::new(backend);
+        open_channel(&mut recovered).await;
+        assert!(publish(&mut recovered, b"named-poison").await.is_empty());
+        assert!(matches!(
+            get(&mut recovered).await.as_slice(),
+            [
+                AMQPFrame::Method(1, AMQPClass::Basic(basic::AMQPMethod::GetOk(_))),
+                ..
+            ]
+        ));
+        recovered
+            .handle(method(
+                1,
+                basic::AMQPMethod::Reject(basic::Reject {
+                    delivery_tag: 1,
+                    requeue: false,
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(
+            get_from(&mut recovered, "failed-jobs", true).await.as_slice(),
+            [
+                AMQPFrame::Method(1, AMQPClass::Basic(basic::AMQPMethod::GetOk(get))),
+                AMQPFrame::Header(1, header),
+                AMQPFrame::Body(1, body),
+            ] if get.exchange.as_str() == "dead.events"
+                && get.routing_key.as_str() == "failed.jobs"
+                && body == b"named-poison"
+                && header.properties.headers().as_ref().is_some_and(|headers| {
+                    matches!(headers.inner().get("x-death"), Some(AMQPValue::FieldArray(values)) if values.as_slice().len() == 1)
+                })
         ));
     }
 

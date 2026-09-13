@@ -45,8 +45,8 @@ public final class ProtocolConformance {
     producerProperties.put(ProducerConfig.CLIENT_ID_CONFIG, "epoch-conformance-producer");
     producerProperties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
     producerProperties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
-    producerProperties.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, false);
-    producerProperties.put(ProducerConfig.ACKS_CONFIG, "1");
+    producerProperties.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
+    producerProperties.put(ProducerConfig.ACKS_CONFIG, "all");
     producerProperties.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, 5_000);
     producerProperties.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, 10_000);
     try (var producer = new KafkaProducer<byte[], byte[]>(producerProperties)) {
@@ -148,11 +148,13 @@ public final class ProtocolConformance {
     factory.setHandshakeTimeout(5_000);
     try (var connection = factory.newConnection("epoch-conformance");
         var channel = connection.createChannel()) {
+      channel.exchangeDeclare("epoch.dead.topic", "topic", true, false, Map.of());
+      channel.queueDeclare("failed-jobs", true, false, false, Map.of());
+      channel.queueBind("failed-jobs", "epoch.dead.topic", "failed.#");
       var deadLetterArguments =
           Map.<String, Object>of(
-              "x-dead-letter-exchange", "",
-              "x-dead-letter-routing-key", "failed-jobs");
-      channel.queueDeclare("failed-jobs", true, false, false, Map.of());
+              "x-dead-letter-exchange", "epoch.dead.topic",
+              "x-dead-letter-routing-key", "failed.jobs");
       channel.queueDeclare("audit", true, false, false, Map.of());
       channel.queueDeclare("jobs", true, false, false, deadLetterArguments);
       channel.confirmSelect();
@@ -278,13 +280,19 @@ public final class ProtocolConformance {
       }
       require(deadLetter != null, "AMQP native dead-letter forwarding");
       require(
+          deadLetter.getEnvelope().getExchange().equals("epoch.dead.topic")
+              && deadLetter.getEnvelope().getRoutingKey().equals("failed.jobs"),
+          "AMQP named dead-letter route");
+      require(
+          deadLetter.getProps().getHeaders().get("x-death") instanceof List<?> deaths
+              && !deaths.isEmpty(),
+          "AMQP x-death history");
+      require(
           new String(deadLetter.getBody(), StandardCharsets.UTF_8).equals("rabbit-poison"),
           "AMQP dead-letter body");
       require(
-          deadLetter.getEnvelope().getExchange().isEmpty()
-              && deadLetter.getEnvelope().getRoutingKey().equals("failed-jobs")
-              && deadLetter.getProps().getExpiration() == null,
-          "AMQP dead-letter rerouting and expiration removal");
+          deadLetter.getProps().getExpiration() == null,
+          "AMQP dead-letter expiration removal");
       require(
           "jobs".equals(deadLetter.getProps().getHeaders().get("x-first-death-queue").toString())
               && "rejected"

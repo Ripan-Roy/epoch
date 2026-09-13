@@ -38,12 +38,13 @@ reviewable.
 Releases 1–5 shipped through `v0.1.0-alpha.9`: governance, complete
 non-deferred Cache, complete Stream, complete Queue, and the native
 Event/integration development platform. Product/runtime closure and subsequent
-beta hardening now ship through `v0.2.0-beta.9`: source ingestion, the Go
+beta hardening now ship through `v0.2.0-beta.10`: source ingestion, the Go
 operator and CLI, secure transport, recovery and guarded upgrades, OCI supply
 chain, bounded observability, Redis/Kafka/RabbitMQ compatibility, and automatic
-topology repair/rebalance. The current `v0.2.0-beta.10` release boundary is
-strict OIDC workload identity plus durable, tenant-filtered authorization
-audit across Go, Rust, deployment, restart evidence, and public docs.
+topology repair/rebalance, strict OIDC workload identity, and durable
+authorization audit. The current `v0.2.0-beta.11` release boundary expands the
+bounded Redis, Kafka, and RabbitMQ gateways across native replicated state,
+released-client conformance, restart evidence, scanner, and public docs.
 
 The published release train extends the authenticated regional
 multi-tablet M1/M2 boundary. Protected `main` evidence covers the consensus-backed catalog, durable
@@ -553,13 +554,12 @@ Exit gate:
 - Two design partners complete cutover and rollback drills with checksums, lag, offsets, sampled reads, and retained reverse replication.
 
 The current compatibility-depth candidate completes a larger locally testable
-slice of this milestone: atomic Redis hash/list/set/sorted-set commands,
-all-or-nothing `MSET`/`MSETNX`, replicated classic Kafka
-membership/assignment/claims/fenced commits plus bounded static identity reuse,
-and process-shared AMQP direct/fanout/topic/headers routing with native
-per-message TTL, mandatory returns, and provisioned default-exchange DLX
-forwarding. It does not complete M3: full static/cooperative Kafka ownership,
-durable AMQP topology, named-DLX routing, differential/fuzz/performance
+slice of this milestone: bounded atomic Redis transactions plus transient
+Pub/Sub and durable Streams, replicated classic Kafka membership/fencing plus
+non-transactional idempotent Produce, and Cache-backed durable AMQP topology
+with provisioned named-DLX forwarding and `x-death`. It does not complete M3:
+Redis Lua/broader Streams, full static/cooperative Kafka ownership and
+transactions, arbitrary AMQP DLX/transactions/1.0, differential/fuzz/performance
 evidence, design-partner drills, the documented unsupported protocol families,
 and protected-branch execution remain promotion gates.
 

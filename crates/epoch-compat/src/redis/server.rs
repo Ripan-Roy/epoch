@@ -1,6 +1,6 @@
 use epoch_observability::{MetricsRegistry, Outcome, Protocol, ProtocolOperation};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fmt,
     sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -22,6 +22,13 @@ use crate::{
 };
 
 use super::protocol::{RespDecodeError, RespValue, decode_request, encode_response};
+
+#[path = "pubsub.rs"]
+mod pubsub;
+#[path = "streams.rs"]
+mod streams;
+#[path = "transaction.rs"]
+mod transaction;
 
 #[derive(Clone)]
 pub struct RedisConfig {
@@ -109,6 +116,16 @@ async fn serve_connection<B: CompatibilityBackend>(
     mut session: RedisSession<B>,
     metrics: Option<&MetricsRegistry>,
 ) -> Result<(), std::io::Error> {
+    let result = run_connection(&mut stream, &mut session, metrics).await;
+    session.close().await;
+    result
+}
+
+async fn run_connection<B: CompatibilityBackend>(
+    stream: &mut TcpStream,
+    session: &mut RedisSession<B>,
+    metrics: Option<&MetricsRegistry>,
+) -> Result<(), std::io::Error> {
     let mut buffer = Vec::with_capacity(16 * 1024);
     loop {
         match decode_request(&buffer) {
@@ -134,6 +151,11 @@ async fn serve_connection<B: CompatibilityBackend>(
                 stream
                     .write_all(&encode_response(&response, session.resp3))
                     .await?;
+                let resp3 = session.resp3;
+                let pending = session.drain_pending_responses().collect::<Vec<_>>();
+                for response in pending {
+                    stream.write_all(&encode_response(&response, resp3)).await?;
+                }
                 if session.quit {
                     return Ok(());
                 }
@@ -145,7 +167,21 @@ async fn serve_connection<B: CompatibilityBackend>(
                         .await?;
                     return Ok(());
                 }
-                if stream.read_buf(&mut buffer).await? == 0 {
+                if session.pubsub.active() {
+                    tokio::select! {
+                        read = stream.read_buf(&mut buffer) => {
+                            if read? == 0 {
+                                return Ok(());
+                            }
+                        }
+                        () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {
+                            let resp3 = session.resp3;
+                            for message in session.poll_pubsub().await {
+                                stream.write_all(&encode_response(&message, resp3)).await?;
+                            }
+                        }
+                    }
+                } else if stream.read_buf(&mut buffer).await? == 0 {
                     return Ok(());
                 }
             }
@@ -187,6 +223,10 @@ fn redis_operation(arguments: &[Vec<u8>]) -> ProtocolOperation {
         b"ZCARD",
         b"ZSCORE",
         b"ZRANGE",
+        b"XLEN",
+        b"XRANGE",
+        b"XREAD",
+        b"XPENDING",
     ]
     .iter()
     .any(|candidate| command.eq_ignore_ascii_case(candidate))
@@ -214,6 +254,20 @@ fn redis_operation(arguments: &[Vec<u8>]) -> ProtocolOperation {
         b"SREM",
         b"ZADD",
         b"ZREM",
+        b"PUBLISH",
+        b"SUBSCRIBE",
+        b"PSUBSCRIBE",
+        b"UNSUBSCRIBE",
+        b"PUNSUBSCRIBE",
+        b"MULTI",
+        b"EXEC",
+        b"DISCARD",
+        b"WATCH",
+        b"UNWATCH",
+        b"XADD",
+        b"XGROUP",
+        b"XREADGROUP",
+        b"XACK",
     ]
     .iter()
     .any(|candidate| command.eq_ignore_ascii_case(candidate))
@@ -244,6 +298,9 @@ pub struct RedisSession<B> {
     authenticated: bool,
     client_name: Option<String>,
     quit: bool,
+    transaction: transaction::TransactionState,
+    pubsub: pubsub::PubSubState,
+    pending_responses: VecDeque<RespValue>,
 }
 
 impl<B: CompatibilityBackend> RedisSession<B> {
@@ -256,6 +313,9 @@ impl<B: CompatibilityBackend> RedisSession<B> {
             authenticated,
             client_name: None,
             quit: false,
+            transaction: transaction::TransactionState::default(),
+            pubsub: pubsub::PubSubState::default(),
+            pending_responses: VecDeque::new(),
         }
     }
 
@@ -273,6 +333,86 @@ impl<B: CompatibilityBackend> RedisSession<B> {
         let command = command.to_ascii_uppercase();
         if !self.authenticated && !matches!(command.as_str(), "AUTH" | "HELLO" | "QUIT") {
             return RespValue::Error("NOAUTH Authentication required.".into());
+        }
+        if touches_reserved_cache_key(&command, &arguments[1..]) {
+            if self.transaction.queue.is_some() {
+                return self.transaction.queue(arguments);
+            }
+            return error("key uses Epoch's reserved compatibility namespace");
+        }
+        match command.as_str() {
+            "SUBSCRIBE" | "PSUBSCRIBE" => {
+                let responses = self
+                    .pubsub
+                    .subscribe(
+                        &self.backend,
+                        &self.config.cache,
+                        &arguments[1..],
+                        command == "PSUBSCRIBE",
+                        self.resp3,
+                    )
+                    .await;
+                return self.first_response(responses);
+            }
+            "UNSUBSCRIBE" | "PUNSUBSCRIBE" => {
+                let responses = self
+                    .pubsub
+                    .unsubscribe(
+                        &self.backend,
+                        &self.config.cache,
+                        &arguments[1..],
+                        command == "PUNSUBSCRIBE",
+                        self.resp3,
+                    )
+                    .await;
+                return self.first_response(responses);
+            }
+            "PUBLISH" if self.transaction.queue.is_none() => {
+                return pubsub::PubSubState::publish(
+                    &self.backend,
+                    &self.config.cache,
+                    &arguments[1..],
+                )
+                .await;
+            }
+            _ => {}
+        }
+        if self.pubsub.active()
+            && !self.resp3
+            && !matches!(command.as_str(), "PING" | "QUIT" | "RESET")
+        {
+            return error(
+                "only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT allowed in this context",
+            );
+        }
+        match command.as_str() {
+            "MULTI" if arguments.len() == 1 => return self.transaction.begin(),
+            "EXEC" if arguments.len() == 1 => {
+                return self
+                    .transaction
+                    .execute(&self.backend, &self.config.cache)
+                    .await;
+            }
+            "DISCARD" if arguments.len() == 1 => return self.transaction.discard(),
+            "WATCH" => {
+                return self
+                    .transaction
+                    .watch(&self.backend, &self.config.cache, &arguments[1..])
+                    .await;
+            }
+            "UNWATCH" if arguments.len() == 1 => return self.transaction.unwatch(),
+            "MULTI" | "EXEC" | "DISCARD" | "UNWATCH" => {
+                return arity(&command.to_ascii_lowercase());
+            }
+            _ if self.transaction.queue.is_some() => return self.transaction.queue(arguments),
+            _ => {}
+        }
+        if matches!(
+            command.as_str(),
+            "XADD" | "XLEN" | "XRANGE" | "XREAD" | "XGROUP" | "XREADGROUP" | "XACK" | "XPENDING"
+        ) {
+            return streams::execute(&self.backend, &self.config.cache, &command, &arguments[1..])
+                .await;
         }
         match command.as_str() {
             "HELLO" => self.hello(&arguments[1..]),
@@ -332,6 +472,29 @@ impl<B: CompatibilityBackend> RedisSession<B> {
                 command.to_ascii_lowercase()
             )),
         }
+    }
+
+    fn first_response(&mut self, responses: Vec<RespValue>) -> RespValue {
+        let mut responses = responses.into_iter();
+        let first = responses
+            .next()
+            .unwrap_or_else(|| RespValue::Simple("OK".into()));
+        self.pending_responses.extend(responses);
+        first
+    }
+
+    fn drain_pending_responses(&mut self) -> impl Iterator<Item = RespValue> + '_ {
+        self.pending_responses.drain(..)
+    }
+
+    async fn poll_pubsub(&self) -> Vec<RespValue> {
+        self.pubsub
+            .poll(&self.backend, &self.config.cache, self.resp3)
+            .await
+    }
+
+    async fn close(&mut self) {
+        self.pubsub.close(&self.backend, &self.config.cache).await;
     }
 
     fn hello(&mut self, args: &[Vec<u8>]) -> RespValue {
@@ -1219,7 +1382,7 @@ fn select(args: &[Vec<u8>]) -> RespValue {
 fn command_metadata(args: &[Vec<u8>]) -> RespValue {
     match args.first().and_then(|value| upper(value)).as_deref() {
         None | Some("INFO" | "DOCS") => RespValue::Array(Vec::new()),
-        Some("COUNT") => RespValue::Integer(22),
+        Some("COUNT") => RespValue::Integer(55),
         _ => error("unsupported COMMAND subcommand"),
     }
 }
@@ -1261,6 +1424,32 @@ fn arity(command: &str) -> RespValue {
 
 fn text(value: &[u8]) -> Option<&str> {
     std::str::from_utf8(value).ok()
+}
+
+const RESERVED_CACHE_KEY_PREFIX: &[u8] = b"__epoch:";
+
+pub(super) fn is_reserved_cache_key(value: &[u8]) -> bool {
+    value.starts_with(RESERVED_CACHE_KEY_PREFIX)
+}
+
+fn touches_reserved_cache_key(command: &str, args: &[Vec<u8>]) -> bool {
+    match command {
+        "WATCH" | "DEL" | "EXISTS" | "MGET" => {
+            args.iter().any(|value| is_reserved_cache_key(value))
+        }
+        "MSET" | "MSETNX" => args
+            .iter()
+            .step_by(2)
+            .any(|value| is_reserved_cache_key(value)),
+        "GET" | "SET" | "INCR" | "DECR" | "INCRBY" | "DECRBY" | "TTL" | "PTTL" | "EXPIRE"
+        | "PEXPIRE" | "PERSIST" | "TYPE" | "HSET" | "HGET" | "HMGET" | "HDEL" | "HEXISTS"
+        | "HLEN" | "HGETALL" | "LPUSH" | "RPUSH" | "LPOP" | "RPOP" | "LLEN" | "LRANGE"
+        | "LINDEX" | "SADD" | "SREM" | "SMEMBERS" | "SCARD" | "SISMEMBER" | "ZADD" | "ZREM"
+        | "ZCARD" | "ZSCORE" | "ZRANGE" => args
+            .first()
+            .is_some_and(|value| is_reserved_cache_key(value)),
+        _ => false,
+    }
 }
 
 fn upper(value: &[u8]) -> Option<String> {
@@ -1623,6 +1812,18 @@ mod tests {
         let mut session = session(None);
         assert_eq!(
             session
+                .execute(command(&[b"SET", b"text-count", b"40"]))
+                .await,
+            RespValue::Simple("OK".into())
+        );
+        assert_eq!(
+            session
+                .execute(command(&[b"INCRBY", b"text-count", b"2"]))
+                .await,
+            RespValue::Integer(42)
+        );
+        assert_eq!(
+            session
                 .execute(command(&[b"INCRBY", b"count", b"41"]))
                 .await,
             RespValue::Integer(41)
@@ -1825,6 +2026,388 @@ mod tests {
         assert_eq!(
             session.execute(command(&[b"GET", b"scalar"])).await,
             RespValue::Bulk(b"safe".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_exec_is_sequential_atomic_and_preserves_runtime_errors() {
+        let mut session = session(None);
+        assert_eq!(
+            session.execute(command(&[b"MULTI"])).await,
+            RespValue::Simple("OK".into())
+        );
+        for queued in [
+            command(&[b"SET", b"counter", b"1"]),
+            command(&[b"INCRBY", b"counter", b"2"]),
+            command(&[b"GET", b"counter"]),
+            command(&[b"HSET", b"counter", b"field", b"bad"]),
+            command(&[b"SET", b"after", b"committed"]),
+        ] {
+            assert_eq!(
+                session.execute(queued).await,
+                RespValue::Simple("QUEUED".into())
+            );
+        }
+        let RespValue::Array(results) = session.execute(command(&[b"EXEC"])).await else {
+            panic!("EXEC must return an array");
+        };
+        assert_eq!(results[0], RespValue::Simple("OK".into()));
+        assert_eq!(results[1], RespValue::Integer(3));
+        assert_eq!(results[2], RespValue::Bulk(b"3".to_vec()));
+        assert!(matches!(
+            &results[3],
+            RespValue::Error(message) if message.contains("WRONGTYPE")
+        ));
+        assert_eq!(results[4], RespValue::Simple("OK".into()));
+        assert_eq!(
+            session.execute(command(&[b"GET", b"counter"])).await,
+            RespValue::Bulk(b"3".to_vec())
+        );
+        assert_eq!(
+            session.execute(command(&[b"GET", b"after"])).await,
+            RespValue::Bulk(b"committed".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_aborts_only_when_a_watched_key_version_changes() {
+        let backend = Arc::new(MemoryBackend::with_resources(
+            "sessions", "events", 2, "jobs",
+        ));
+        let config = RedisConfig {
+            cache: "sessions".into(),
+            password: None,
+            max_connections: 4,
+        };
+        let mut first = RedisSession::new(Arc::clone(&backend), config.clone());
+        let mut second = RedisSession::new(backend, config);
+        assert_eq!(
+            first.execute(command(&[b"WATCH", b"protected"])).await,
+            RespValue::Simple("OK".into())
+        );
+        assert_eq!(
+            second
+                .execute(command(&[b"SET", b"unrelated", b"one"]))
+                .await,
+            RespValue::Simple("OK".into())
+        );
+        assert_eq!(
+            first.execute(command(&[b"MULTI"])).await,
+            RespValue::Simple("OK".into())
+        );
+        assert_eq!(
+            first
+                .execute(command(&[b"SET", b"protected", b"first"]))
+                .await,
+            RespValue::Simple("QUEUED".into())
+        );
+        assert!(matches!(
+            first.execute(command(&[b"EXEC"])).await,
+            RespValue::Array(_)
+        ));
+
+        assert_eq!(
+            first.execute(command(&[b"WATCH", b"protected"])).await,
+            RespValue::Simple("OK".into())
+        );
+        assert_eq!(
+            second
+                .execute(command(&[b"SET", b"protected", b"second"]))
+                .await,
+            RespValue::Simple("OK".into())
+        );
+        assert_eq!(
+            first.execute(command(&[b"MULTI"])).await,
+            RespValue::Simple("OK".into())
+        );
+        assert_eq!(
+            first.execute(command(&[b"GET", b"protected"])).await,
+            RespValue::Simple("QUEUED".into())
+        );
+        assert_eq!(first.execute(command(&[b"EXEC"])).await, RespValue::Null);
+    }
+
+    #[tokio::test]
+    async fn reserved_compatibility_cache_keys_fail_closed() {
+        let mut session = session(None);
+        for request in [
+            command(&[b"SET", b"__epoch:amqp:topology:v1", b"corrupt"]),
+            command(&[b"GET", b"__epoch:redis-stream-group:known"]),
+            command(&[b"WATCH", b"__epoch:amqp:topology:v1"]),
+        ] {
+            assert!(matches!(
+                session.execute(request).await,
+                RespValue::Error(message) if message.contains("reserved")
+            ));
+        }
+
+        assert_eq!(
+            session
+                .execute(command(&[b"SET", b"user:__epoch:key", b"allowed"]))
+                .await,
+            RespValue::Simple("OK".into())
+        );
+        assert_eq!(
+            session.execute(command(&[b"MULTI"])).await,
+            RespValue::Simple("OK".into())
+        );
+        assert!(matches!(
+            session
+                .execute(command(&[b"SET", b"__epoch:internal", b"corrupt"]))
+                .await,
+            RespValue::Error(message) if message.contains("reserved")
+        ));
+        assert!(matches!(
+            session.execute(command(&[b"EXEC"])).await,
+            RespValue::Error(message) if message.contains("EXECABORT")
+        ));
+    }
+
+    #[tokio::test]
+    async fn queue_time_errors_abort_exec_and_discard_clears_state() {
+        let mut session = session(None);
+        session.execute(command(&[b"MULTI"])).await;
+        assert!(matches!(
+            session.execute(command(&[b"GET"])).await,
+            RespValue::Error(_)
+        ));
+        assert!(matches!(
+            session.execute(command(&[b"EXEC"])).await,
+            RespValue::Error(message) if message.starts_with("EXECABORT")
+        ));
+        session.execute(command(&[b"MULTI"])).await;
+        session
+            .execute(command(&[b"SET", b"discarded", b"value"]))
+            .await;
+        assert_eq!(
+            session.execute(command(&[b"DISCARD"])).await,
+            RespValue::Simple("OK".into())
+        );
+        assert_eq!(
+            session.execute(command(&[b"GET", b"discarded"])).await,
+            RespValue::Null
+        );
+    }
+
+    #[tokio::test]
+    async fn pubsub_delivers_binary_exact_and_pattern_messages_and_unsubscribes() {
+        let backend = Arc::new(MemoryBackend::with_resources(
+            "sessions", "events", 2, "jobs",
+        ));
+        let config = RedisConfig {
+            cache: "sessions".into(),
+            password: None,
+            max_connections: 4,
+        };
+        let mut subscriber = RedisSession::new(Arc::clone(&backend), config.clone());
+        let mut publisher = RedisSession::new(backend, config);
+        assert_eq!(
+            subscriber
+                .execute(command(&[b"SUBSCRIBE", b"orders.created"]))
+                .await,
+            RespValue::Array(vec![
+                bulk("subscribe"),
+                bulk("orders.created"),
+                RespValue::Integer(1),
+            ])
+        );
+        assert_eq!(
+            subscriber
+                .execute(command(&[b"PSUBSCRIBE", b"orders.*"]))
+                .await,
+            RespValue::Array(vec![
+                bulk("psubscribe"),
+                bulk("orders.*"),
+                RespValue::Integer(2),
+            ])
+        );
+        assert_eq!(
+            publisher
+                .execute(command(&[b"PUBLISH", b"orders.created", b"a\0b"]))
+                .await,
+            RespValue::Integer(1)
+        );
+        assert_eq!(
+            subscriber.poll_pubsub().await,
+            vec![
+                RespValue::Array(vec![
+                    bulk("message"),
+                    bulk("orders.created"),
+                    RespValue::Bulk(b"a\0b".to_vec()),
+                ]),
+                RespValue::Array(vec![
+                    bulk("pmessage"),
+                    bulk("orders.*"),
+                    bulk("orders.created"),
+                    RespValue::Bulk(b"a\0b".to_vec()),
+                ]),
+            ]
+        );
+        assert_eq!(
+            subscriber.execute(command(&[b"UNSUBSCRIBE"])).await,
+            RespValue::Array(vec![
+                bulk("unsubscribe"),
+                bulk("orders.created"),
+                RespValue::Integer(1),
+            ])
+        );
+        assert_eq!(
+            subscriber.execute(command(&[b"PUNSUBSCRIBE"])).await,
+            RespValue::Array(vec![
+                bulk("punsubscribe"),
+                bulk("orders.*"),
+                RespValue::Integer(0),
+            ])
+        );
+        assert!(!subscriber.pubsub.active());
+    }
+
+    #[tokio::test]
+    async fn resp3_pubsub_notifications_use_push_frames() {
+        let mut session = session(None);
+        assert!(matches!(
+            session.execute(command(&[b"HELLO", b"3"])).await,
+            RespValue::Map(_)
+        ));
+        assert!(matches!(
+            session.execute(command(&[b"SUBSCRIBE", b"events"])).await,
+            RespValue::Push(_)
+        ));
+        session.close().await;
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one lifecycle scenario proves durable entries, replay, groups, pending ranges, acknowledgements, and deletion"
+    )]
+    async fn redis_streams_are_durable_replayable_and_track_group_pending_entries() {
+        let backend = Arc::new(MemoryBackend::with_resources(
+            "sessions", "events", 2, "jobs",
+        ));
+        let config = RedisConfig {
+            cache: "sessions".into(),
+            password: None,
+            max_connections: 4,
+        };
+        let mut writer = RedisSession::new(Arc::clone(&backend), config.clone());
+        let first_id = match writer
+            .execute(command(&[
+                b"XADD", b"events", b"*", b"binary", b"a\0b", b"status", b"created",
+            ]))
+            .await
+        {
+            RespValue::Bulk(id) => id,
+            response => panic!("unexpected XADD response: {response:?}"),
+        };
+        assert_eq!(
+            writer.execute(command(&[b"XLEN", b"events"])).await,
+            RespValue::Integer(1)
+        );
+        let range = writer
+            .execute(command(&[b"XRANGE", b"events", b"-", b"+"]))
+            .await;
+        assert!(matches!(
+            &range,
+            RespValue::Array(entries)
+                if matches!(entries.first(), Some(RespValue::Array(entry)) if entry.first() == Some(&RespValue::Bulk(first_id.clone())))
+        ));
+        assert!(matches!(
+            writer
+                .execute(command(&[b"XREAD", b"COUNT", b"10", b"STREAMS", b"events", b"0-0"]))
+                .await,
+            RespValue::Array(streams) if streams.len() == 1
+        ));
+        assert_eq!(
+            writer
+                .execute(command(&[
+                    b"XGROUP", b"CREATE", b"events", b"workers", b"0-0"
+                ]))
+                .await,
+            RespValue::Simple("OK".into())
+        );
+        assert!(matches!(
+            writer
+                .execute(command(&[
+                    b"XGROUP", b"CREATE", b"missing", b"workers", b"0-0"
+                ]))
+                .await,
+            RespValue::Error(message) if message.contains("does not exist")
+        ));
+
+        // A fresh gateway session proves the group ledger is backend state,
+        // not connection-local bookkeeping.
+        let mut reader = RedisSession::new(backend, config);
+        let delivered = reader
+            .execute(command(&[
+                b"XREADGROUP",
+                b"GROUP",
+                b"workers",
+                b"worker-a",
+                b"COUNT",
+                b"10",
+                b"STREAMS",
+                b"events",
+                b">",
+            ]))
+            .await;
+        assert!(matches!(delivered, RespValue::Array(streams) if streams.len() == 1));
+        assert!(matches!(
+            reader
+                .execute(command(&[b"XPENDING", b"events", b"workers"]))
+                .await,
+            RespValue::Array(summary) if summary.first() == Some(&RespValue::Integer(1))
+        ));
+        assert!(matches!(
+            reader
+                .execute(command(&[
+                    b"XPENDING",
+                    b"events",
+                    b"workers",
+                    b"-",
+                    b"+",
+                    b"10",
+                    b"worker-a",
+                ]))
+                .await,
+            RespValue::Array(entries) if entries.len() == 1
+        ));
+        let exclusive_start = [b"(".as_slice(), first_id.as_slice()].concat();
+        assert_eq!(
+            reader
+                .execute(vec![
+                    b"XPENDING".to_vec(),
+                    b"events".to_vec(),
+                    b"workers".to_vec(),
+                    exclusive_start,
+                    b"+".to_vec(),
+                    b"10".to_vec(),
+                ])
+                .await,
+            RespValue::Array(Vec::new())
+        );
+        assert_eq!(
+            reader
+                .execute(vec![
+                    b"XACK".to_vec(),
+                    b"events".to_vec(),
+                    b"workers".to_vec(),
+                    first_id,
+                ])
+                .await,
+            RespValue::Integer(1)
+        );
+        assert!(matches!(
+            reader
+                .execute(command(&[b"XPENDING", b"events", b"workers"]))
+                .await,
+            RespValue::Array(summary) if summary.first() == Some(&RespValue::Integer(0))
+        ));
+        assert_eq!(
+            reader
+                .execute(command(&[b"XGROUP", b"DESTROY", b"events", b"workers"]))
+                .await,
+            RespValue::Integer(1)
         );
     }
 }

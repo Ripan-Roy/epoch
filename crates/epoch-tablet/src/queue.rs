@@ -26,6 +26,10 @@ pub use model::*;
 const LEGACY_QUEUE_TABLET_SNAPSHOT_FORMAT_VERSION: u16 = 1;
 pub const QUEUE_TABLET_SNAPSHOT_FORMAT_VERSION: u16 = 2;
 pub const MAX_QUEUE_TABLET_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
+const AMQP_DLX_EXCHANGE_HEADER: &str = "x-epoch-compat-dlx-exchange";
+const AMQP_DLX_ROUTING_KEY_HEADER: &str = "x-epoch-compat-dlx-routing-key";
+const AMQP_DEATH_HISTORY_HEADER: &str = "x-epoch-compat-death-history";
+const MAX_AMQP_DEATH_HISTORY: usize = 32;
 
 #[derive(Debug, Clone)]
 struct QueueTabletBusinessState {
@@ -1413,16 +1417,48 @@ fn prepare_amqp_dead_letter_forward(
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_owned();
+    let first_routing_key = payload
+        .get("routing_key")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let dead_letter_exchange = envelope
+        .headers
+        .remove(AMQP_DLX_EXCHANGE_HEADER)
+        .unwrap_or_default();
+    let dead_letter_routing_key = envelope
+        .headers
+        .remove(AMQP_DLX_ROUTING_KEY_HEADER)
+        .unwrap_or_else(|| target_queue.to_owned());
     payload.remove("expiration");
-    payload.insert("exchange".into(), serde_json::Value::String(String::new()));
+    payload.insert(
+        "exchange".into(),
+        serde_json::Value::String(dead_letter_exchange),
+    );
     payload.insert(
         "routing_key".into(),
-        serde_json::Value::String(target_queue.to_owned()),
+        serde_json::Value::String(dead_letter_routing_key),
     );
+    record_amqp_death(
+        envelope,
+        source_queue,
+        reason,
+        &first_exchange,
+        &first_routing_key,
+    );
+}
+
+fn record_amqp_death(
+    envelope: &mut QueueTabletEnvelope,
+    source_queue: &str,
+    reason: &str,
+    first_exchange: &str,
+    first_routing_key: &str,
+) {
     envelope
         .headers
         .entry("x-first-death-exchange".into())
-        .or_insert(first_exchange);
+        .or_insert_with(|| first_exchange.to_owned());
     envelope
         .headers
         .entry("x-first-death-queue".into())
@@ -1437,6 +1473,53 @@ fn prepare_amqp_dead_letter_forward(
                 reason.to_owned()
             }
         });
+    envelope
+        .headers
+        .insert("x-last-death-exchange".into(), first_exchange.to_owned());
+    envelope
+        .headers
+        .insert("x-last-death-queue".into(), source_queue.to_owned());
+    let normalized_reason = if reason == "amqp.basic.reject" {
+        "rejected"
+    } else {
+        reason
+    };
+    envelope
+        .headers
+        .insert("x-last-death-reason".into(), normalized_reason.to_owned());
+    let mut history = envelope
+        .headers
+        .get(AMQP_DEATH_HISTORY_HEADER)
+        .and_then(|history| serde_json::from_str::<Vec<serde_json::Value>>(history).ok())
+        .unwrap_or_default();
+    if let Some(entry) = history.iter_mut().find(|entry| {
+        entry.get("queue").and_then(serde_json::Value::as_str) == Some(source_queue)
+            && entry.get("reason").and_then(serde_json::Value::as_str) == Some(normalized_reason)
+            && entry.get("exchange").and_then(serde_json::Value::as_str) == Some(first_exchange)
+    }) {
+        let count = entry
+            .get("count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(1)
+            .saturating_add(1);
+        entry["count"] = serde_json::json!(count);
+    } else {
+        history.push(serde_json::json!({
+            "count":1,
+            "exchange":first_exchange,
+            "queue":source_queue,
+            "reason":normalized_reason,
+            "routing_keys":[first_routing_key],
+        }));
+        if history.len() > MAX_AMQP_DEATH_HISTORY {
+            history.drain(..history.len().saturating_sub(MAX_AMQP_DEATH_HISTORY));
+        }
+    }
+    if let Ok(history) = serde_json::to_string(&history) {
+        envelope
+            .headers
+            .insert(AMQP_DEATH_HISTORY_HEADER.into(), history);
+    }
 }
 
 fn tablet_delivery(queue: &Queue, delivery: epoch_queue::Delivery) -> QueueTabletDelivery {

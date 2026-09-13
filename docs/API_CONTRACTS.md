@@ -1245,7 +1245,7 @@ assigns logical shards but does not atomically replace each shard's independent
 v3 checkpoint-owner generation. Regional leader-owned deadline maintenance now
 expires idle members; cooperative revoke and a persistent bidirectional push
 transport remain open. Bounded push/dedicated HTTP long poll and same-tablet
-transactional offset commit are command-v7 contracts. See
+transactional offset commit are state-service contracts. See
 [ADR-0025](adr/0025-stream-consumer-sessions.md).
 
 Canonical Stream command v6 adds an offset-preserving per-shard claim:
@@ -1280,7 +1280,7 @@ offsets and do not prove assignment. Low-level claims use namespace
 member-bound. See
 [ADR-0029](adr/0029-stream-session-fenced-consumption.md).
 
-Canonical Stream command v7 adds a strict `state` mutation union for
+Canonical Stream command v7 added a strict `state` mutation union for
 idempotent producer append; begin/append/commit/abort transaction; compaction;
 tiering; manual capture; automatic capture configuration/maintenance; and
 cross-cluster replication ingress. All unsigned 64-bit values serialize as
@@ -1307,6 +1307,13 @@ merged transparently during fetch. Capture intervals are 1,000 through
 and pending transactions stop its checkpoint boundary. Replication batches
 contain 1–128 contiguous source records and reject a traversed path containing
 the local cluster. See [ADR-0035](adr/0035-stream-state-services.md).
+
+Command v8 adds atomic idempotent producer batches used by the Kafka gateway.
+One command carries a producer ID, epoch, base sequence, partition, and 1–128
+envelopes; the sequence span advances by the number of records. Exact retries
+return the original offsets and conflicting input, gaps, or stale epochs are
+rejected without a partial append. Version-7 state-command history remains
+decodable, but the new batch action requires version 8.
 
 State-dependent business failures are committed outcomes, not actor failures.
 They return ordinary committed HTTP `201` responses (or `200` on exact replay)
@@ -1480,10 +1487,14 @@ RESP2/RESP3, Kafka, and AMQP 0-9-1 subsets in the public compatibility matrix
 through authenticated, fenced regional Cache, Stream, and Queue operations. Its
 classic Kafka group state and bounded static identities are replicated by
 Stream. Redis `MSET`/`MSETNX` use one revision-fenced Cache transaction. Its
-AMQP direct/fanout/topic/headers exchange and binding topology is process-scoped
-and is not a durable management API; default-exchange DLX declarations are
-validated against the Queue's native dead-letter target and forwarding remains
-replicated Queue state. The experimental Stream,
+supported `MULTI`/`EXEC` set uses the same bounded atomic boundary; Pub/Sub is
+node-local while Streams records and group state are durable native
+Stream/Cache state. Kafka non-transactional idempotent Produce uses a
+sequence-fenced state-command-v8 batch. Durable AMQP direct/fanout/topic/headers
+exchange, binding, and dead-letter declarations live in a configured replicated
+Cache; a default or named DLX must resolve to the Queue's native dead-letter
+target and forwarding remains replicated Queue state with bounded `x-death`
+history. The experimental Stream,
 Queue, Cache, and Event Bus tablets expose only the mutation/read surfaces
 described above. Typed Go, Java, and Python clients cover both provisional
 standalone routes and the versioned regional Stream, Queue, Cache, and Event Bus
