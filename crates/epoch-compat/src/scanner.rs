@@ -186,11 +186,16 @@ fn assess_redis(tokens: &[String]) -> (SupportLevel, &'static str) {
         | "decrby" | "ttl" | "pttl" | "expire" | "pexpire" | "persist" | "type" | "hset"
         | "hget" | "hmget" | "hdel" | "hexists" | "hlen" | "hgetall" | "lpush" | "rpush"
         | "lpop" | "rpop" | "llen" | "lrange" | "lindex" | "sadd" | "srem" | "smembers"
-        | "scard" | "sismember" | "zadd" | "zrem" | "zcard" | "zscore" | "zrange" => {
+        | "scard" | "sismember" | "zadd" | "zrem" | "zcard" | "zscore" | "zrange" | "multi"
+        | "exec" | "discard" | "watch" | "unwatch" | "publish" | "subscribe" | "psubscribe"
+        | "unsubscribe" | "punsubscribe" => {
             (SupportLevel::Supported, "implemented in the RESP gateway")
         }
-        "multi" | "exec" | "watch" | "eval" | "evalsha" | "publish" | "subscribe" | "xadd"
-        | "xread" | "xgroup" | "blpop" | "brpop" => (
+        "xadd" | "xlen" | "xrange" | "xread" | "xgroup" | "xreadgroup" | "xack" | "xpending" => (
+            SupportLevel::Partial,
+            "implemented with the Redis Streams subset and limits in the public matrix",
+        ),
+        "eval" | "evalsha" | "blpop" | "brpop" => (
             SupportLevel::Unsupported,
             "known Redis feature outside the published beta subset",
         ),
@@ -211,7 +216,7 @@ fn assess_kafka(tokens: &[String]) -> (SupportLevel, &'static str) {
         "offsetcommit" => Some(2..=9),
         "findcoordinator" | "apiversions" | "heartbeat" => Some(0..=4),
         "joingroup" => Some(0..=9),
-        "syncgroup" | "leavegroup" => Some(0..=5),
+        "syncgroup" | "leavegroup" | "initproducerid" => Some(0..=5),
         _ => None,
     };
     if let Some(range) = supported_range {
@@ -246,6 +251,17 @@ fn assess_kafka(tokens: &[String]) -> (SupportLevel, &'static str) {
                 "static identity rejoin is supported without simultaneous duplicate-owner fencing",
             );
         }
+        if feature == "initproducerid"
+            && tokens
+                .iter()
+                .skip(2)
+                .any(|option| option == "transactional")
+        {
+            return (
+                SupportLevel::Unsupported,
+                "Kafka transactional producer initialization is outside the current subset",
+            );
+        }
         return if range.contains(&version) {
             (
                 SupportLevel::Supported,
@@ -259,9 +275,8 @@ fn assess_kafka(tokens: &[String]) -> (SupportLevel, &'static str) {
         };
     }
     match feature {
-        "createtopics" | "deletetopics" | "initproducerid" | "addpartitionstotxn"
-        | "addoffsetstotxn" | "endtxn" | "txnoffsetcommit" | "saslauthenticate"
-        | "saslhandshake" => (
+        "createtopics" | "deletetopics" | "addpartitionstotxn" | "addoffsetstotxn" | "endtxn"
+        | "txnoffsetcommit" | "saslauthenticate" | "saslhandshake" => (
             SupportLevel::Unsupported,
             "known Kafka API outside the published beta subset",
         ),
@@ -366,6 +381,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.supported, 1);
+        assert_eq!(report.partial, 1);
+        assert_eq!(report.unsupported, 1);
+    }
+
+    #[test]
+    fn reports_new_redis_and_idempotent_kafka_compatibility_boundaries() {
+        let report = scan(
+            Cursor::new(
+                "redis MULTI\nredis WATCH\nredis PUBLISH\nredis XREADGROUP\nkafka InitProducerId 5\nkafka InitProducerId 5 transactional\n",
+            ),
+            None,
+        )
+        .unwrap();
+        assert_eq!(report.supported, 4);
         assert_eq!(report.partial, 1);
         assert_eq!(report.unsupported, 1);
     }

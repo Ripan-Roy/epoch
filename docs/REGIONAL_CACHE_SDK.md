@@ -42,6 +42,9 @@ not process RSS. Supported eviction policies are `no_eviction`, all-key
 LRU/LFU/random, and volatile LRU/LFU/random/TTL. Regional durability accepts
 `quorum_durable` or `replicated_memory`; the persisted fixed-voter runtime
 reports when the latter is fulfilled by the stronger quorum-durable path.
+The policy is immutable configuration and is never changed automatically from
+workload observations. LRU/LFU access and random victim ranking are committed
+deterministically so every voter makes the same choice.
 
 The public docs embed and compile these exact programs:
 

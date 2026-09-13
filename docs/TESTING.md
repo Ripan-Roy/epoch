@@ -284,9 +284,11 @@ reopens every node and observes the same session. The regional campaign now
 waits for the shard-zero leader to propose expiry instead of calling
 maintenance. This does not prove cooperative revoke, atomic per-shard offset handoff,
 cooperative revoke, scale fairness, or a production fault matrix. Same-tablet
-transactions and bounded long polling are covered by the v7 corpus below.
+transactions and bounded long polling are covered by the state-services corpus
+below.
 
-The Stream state-services corpus exercises command v7 and snapshot v4 across
+The Stream state-services corpus exercises state command v8, legacy v7 decode,
+and snapshot v4 across
 the core, tablet, HTTP adapter, three real EPRS-backed voters, and Go/Java/Python
 clients. It covers producer gaps/conflicts/fencing/exact retry; transaction
 visibility, abort, atomic offset commit, and pending-capture barriers; sparse
@@ -708,6 +710,14 @@ translation disclosures.
 Unsupported behavior must fail explicitly. A test that happens to pass outside
 the published subset does not expand the compatibility promise.
 
+`bash tests/integration/protocol-compatibility.sh` is the fast exact-client
+gate. It exercises Redis CLI transactions, live Pub/Sub, and Streams group
+pending/acknowledgement; Kafka Java with idempotence enabled; and RabbitMQ Java
+durable named-DLX routing with `x-death`. Unit and native-adapter suites
+separately cover watched-key contention, producer sequence gaps/replay/fencing,
+durable topology reload, malformed persisted metadata, bounds, and reserved-key
+protection.
+
 `make test-protocol-regional` runs Redis CLI 8.8.2, Kafka Java 4.3.1, and
 RabbitMQ Java 5.35.0 through the production gateway image and three authenticated
 regional nodes. Prepare the two images, then run:
@@ -726,6 +736,7 @@ run; cleanup removes only that campaign's containers and disposable test data.
 Java 17+ and Docker are required. CI reuses its five-image build's node/gateway
 candidates, so this gate does not add a second Rust image build.
 
+The current local candidate passes this complete campaign with all 21 checks.
 The `epoch.protocol-regional.evidence/v2` result records exact client versions,
 source revision/dirty state, local image identities, old/new leaders and terms,
 and completed checks. Client logs, gateway logs, and node diagnostics accompany
@@ -736,11 +747,13 @@ durable fenced checkpoints; AMQP topic routing, per-message TTL, mandatory
 returns, capacity refusal, confirms, requeue, lease redelivery and ack
 permanence; gateway replacement;
 per-profile leader loss; and all-voter SIGKILL/same-volume reopen with converged
-replicas. The v2 campaign additionally proves atomic `MSET`/`MSETNX` outcomes,
-bounded Kafka static identity rejoin, AMQP headers `all`/`any` routing, and
-provisioned native dead-letter forwarding with expiration removal and
-first-death metadata. It never resubmits an uncertain non-idempotent write to
-hide failure.
+replicas. The v2 campaign additionally proves atomic `MSET`/`MSETNX` and
+`MULTI`/`EXEC` outcomes, live node-affine Pub/Sub, durable Streams group pending
+and acknowledgement state, bounded Kafka static identity rejoin and idempotent
+producer sequencing, AMQP headers `all`/`any` routing, durable topology reload,
+and named native dead-letter forwarding with expiration removal, bounded
+`x-death`, and first/last-death metadata. It never resubmits an uncertain
+non-idempotent write to hide failure.
 `make test-protocol-regional-runner` rejects incomplete client/fault evidence
 and accepts either text- or byte-mode subprocess diagnostics so the original
 Docker failure remains visible.

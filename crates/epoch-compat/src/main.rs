@@ -104,6 +104,8 @@ struct Args {
         default_value_t = 30
     )]
     amqp_heartbeat_seconds: u16,
+    #[arg(long, env = "EPOCH_COMPAT_AMQP_TOPOLOGY_CACHE")]
+    amqp_topology_cache: Option<String>,
     #[arg(long, env = "EPOCH_LOG", default_value = "info")]
     log: String,
     #[arg(long, env = "EPOCH_JSON_LOGS")]
@@ -185,6 +187,9 @@ async fn main() -> Result<()> {
         timeout: Duration::from_millis(args.backend_timeout_ms),
     })?);
     let redis_cache = args.redis_cache;
+    let amqp_topology_cache = args
+        .amqp_topology_cache
+        .unwrap_or_else(|| redis_cache.clone());
     let redis = RedisServer::new(
         Arc::clone(&backend),
         RedisConfig {
@@ -211,6 +216,7 @@ async fn main() -> Result<()> {
             password: amqp_password,
             max_connections: args.max_connections,
             heartbeat_seconds: args.amqp_heartbeat_seconds,
+            topology_cache: amqp_topology_cache,
         },
     )?
     .with_observability(metrics.clone());

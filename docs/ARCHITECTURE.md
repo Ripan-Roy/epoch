@@ -665,7 +665,10 @@ LRU/LFU/random/TTL eviction. Item versions are drawn
 from a checked shard-global revision so delete/recreate and expiry/recreate do
 not repeat versions. Reads treat an expired value as absent without mutating
 state; maintenance reclaims values in `(deadline, key)` order. In the regional
-profile, the current leader automatically proposes that existing bounded
+profile the eviction policy is immutable configuration, not a workload-driven
+adaptive choice. Exact deterministic ranking keeps replicas convergent; no
+automatic LRU/LFU/policy switching is claimed. The current regional leader
+automatically proposes the existing bounded
 command at the earliest value or lock deadline; explicit calls remain valid.
 Committed Cache commands clamp candidate time to the prior effective time.
 Advisory locks use `(tablet_epoch, acquisition_log_index)` as their downstream
@@ -822,16 +825,23 @@ it cannot partially commit record-by-record. AMQP confirms follow native Queue
 commit, while Redis commands use only their explicit native semantic boundary.
 Unknown mutation outcomes are surfaced rather than retried under a new identity.
 
-`MSET` and `MSETNX` are the bounded exception to independent multi-key
-translation: up to 128 distinct keys become one revision-fenced native Cache
-transaction, so success is all-or-nothing. Other multi-key commands do not
-imply a reusable cross-command snapshot or Redis transaction context.
+`MSET`, `MSETNX`, and the supported `MULTI`/`EXEC` command set use one bounded,
+revision-fenced native Cache transaction over at most 128 distinct keys.
+`WATCH` compares per-key versions, so unrelated shard writes do not abort it;
+queue-time errors abort the transaction and runtime errors remain ordered
+results. Lua/functions and cross-shard transaction domains are not exposed.
 
 Structured Redis hash, list, set, and sorted-set values are encoded as one
 bounded Cache item. Each command observes the item linearly, computes a
 replacement, and submits one item-version or missing-key shard-revision fence;
-successful replacements retain native expiry and storage class. Kafka's bounded
-classic `consumer` group subset keeps membership, generation, shard assignment,
+successful replacements retain native expiry and storage class.
+
+Redis Pub/Sub delegates to the existing node-local, at-most-once Cache hub;
+Redis Streams delegates records to native Stream shard 0 while storing bounded
+consumer-group/pending state in a configured replicated Cache. These are
+deliberately different delivery contracts: Pub/Sub is transient, Streams is
+durable and replayable. Kafka's bounded classic `consumer` group subset keeps
+membership, generation, shard assignment,
 heartbeat deadlines, ownership claims, and committed offsets in replicated
 Stream state. A gateway-issued member token carries the Stream and, for bounded
 static identities, the `group.instance.id` needed to recover that state after a
@@ -840,16 +850,25 @@ an offset. A separate live-owner epoch for simultaneous duplicate static
 members is not implemented, so cooperative/full static-member fencing is not
 claimed.
 
+Kafka non-transactional idempotent producers use `InitProducerId` plus one
+producer ID, epoch, and contiguous sequence span per native atomic Stream batch.
+Exact retries return the original offset; gaps, conflicting replay, and stale
+epochs fail closed. Stream state-command v8 introduces the batch form while
+remaining able to decode v7 history. Transactional IDs and Kafka control
+batches remain outside the advertised surface.
+
 AMQP Queue messages and settlements remain native and durable. Exchange and
 binding topology for the supported direct, fanout, topic, and string-only
-headers subset is shared
-between connections only inside one gateway process; it is intentionally lost
-when that process restarts. Per-message expiration becomes native Queue TTL,
+headers subset persists durable declarations in a configured replicated Cache;
+non-durable declarations remain local to a gateway process. Per-message
+expiration becomes native Queue TTL,
 mandatory unroutable publishes return to the publisher, and only UTF-8 string
 headers cross the current envelope. A Queue may validate default-exchange DLX
 arguments against its provisioned native dead-letter target; reject/nack then
 uses the replicated Queue dead-letter outbox, removes the old expiration, and
-retargets the forwarded envelope. Durable topology, named-DLX routing, general
+retargets the forwarded envelope. A named DLX route is accepted only when it
+resolves to exactly the provisioned target, and delivery reconstructs bounded
+`x-death` tables plus first/last-death metadata. Arbitrary DLX fanout, general
 policy arguments, field-table header parity, transactions, and AMQP 1.0 remain
 outside the advertised boundary.
 
@@ -859,7 +878,8 @@ implemented dispatch. See [Protocol compatibility](PROTOCOL_COMPATIBILITY.md)
 and [ADR-0042](adr/0042-bounded-protocol-compatibility-gateways.md),
 [ADR-0043](adr/0043-lossless-protocol-recovery-contract.md), and
 [ADR-0044](adr/0044-native-backed-protocol-state.md), and
-[ADR-0046](adr/0046-private-beta-protocol-compatibility.md).
+[ADR-0046](adr/0046-private-beta-protocol-compatibility.md), and
+[ADR-0049](adr/0049-core-protocol-semantics.md).
 
 ## 9. Time, leases, and fencing
 
@@ -1297,3 +1317,6 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0044: Native-Backed Protocol State](adr/0044-native-backed-protocol-state.md)
 - [ADR-0045: Bounded Observability and Trace Propagation](adr/0045-bounded-observability-and-trace-propagation.md)
 - [ADR-0046: Private-Beta Protocol Compatibility Closure](adr/0046-private-beta-protocol-compatibility.md)
+- [ADR-0047: Automatic Topology Repair and Serialized Rebalance](adr/0047-automatic-topology-repair-and-rebalance.md)
+- [ADR-0048: OIDC and Durable Authorization Audit](adr/0048-oidc-and-durable-authorization-audit.md)
+- [ADR-0049: Core Protocol Semantics](adr/0049-core-protocol-semantics.md)

@@ -62,29 +62,33 @@ production support limits remain open G10 work.
 
 The protocol-compatibility candidate supplies partial G6 evidence. A separate
 bounded Rust process translates a named RESP2/RESP3 string/counter/TTL and
-hash/list/set/sorted-set subset plus all-or-nothing multi-set, Kafka
-producer/manual/classic-group consumer APIs with bounded static identity reuse,
-and AMQP 0-9-1 direct/fanout/topic/headers Queue
-publish/return/confirm/consume/settlement into the fenced native regional ports.
+hash/list/set/sorted-set subset plus all-or-nothing multi-set and transactions,
+node-local Pub/Sub, durable Streams, Kafka idempotent producer/manual/classic-
+group consumer APIs with bounded static identity reuse, and AMQP 0-9-1 durable
+topology plus direct/fanout/topic/headers Queue publish/return/confirm/consume/
+settlement into the fenced native regional ports.
 Redis CLI 8.8.2, Kafka Java 4.3.1, and RabbitMQ Java 5.35.0 execute the
 real wire listeners; native adapter contracts separately prove bearer identity,
 generation/tablet/term fences, routes, payloads, and responses. Parser/semantic
-tests, all four Kafka compression paths, the DX-007 versioned migration scanner,
+tests, all four Kafka compression paths, state-command-v8 idempotent batches,
+the DX-007 versioned migration scanner,
 the public matrix, Pages UI, and a fifth signed non-root OCI component are local.
-The current candidate passes combined real-regional conformance locally:
+The current regional-v2 candidate passes combined real-regional conformance locally:
 production node and gateway images preserve binary Cache state plus atomic conditional
-set/previous-value, atomic multi-set, and structured collection results, Kafka
-CreateTime, ordered duplicate headers, replicated group sessions/static
-identities/claims/checkpoints, and AMQP topic/headers routing, TTL, provisioned
-DLX forwarding, mandatory returns, confirms/leases/acks through gateway
-replacement, profile-leader losses, and all-voter SIGKILL/reopen. A full Queue's
-committed rejection is never confirmed. Local fault evidence passes; protected
-execution of this combined gate remains required. Differential and fuzz
-evidence, remaining Redis commands, Kafka simultaneous duplicate-static-owner
-fencing/cooperative/new-group protocols and transactions, durable AMQP
-topology/named-DLX routing/AMQP 1.0, MQTT, and performance parity remain open;
+set/previous-value, atomic multi-set, structures, Redis transactions and durable
+Streams-group state; Kafka CreateTime, ordered duplicate headers, replicated group
+sessions/static identities/claims/checkpoints, and idempotent producer state; and
+AMQP topic/headers routing, TTL, durable topology, named-DLX forwarding, `x-death`,
+mandatory returns, confirms/leases/acks. All 21 checks survive gateway replacement,
+separate Cache/Stream/Queue leader and term changes, converged replicas, and all-voter
+SIGKILL/same-volume reopen. A full Queue's committed rejection is never confirmed.
+Protected execution remains required. Differential and fuzz
+evidence, Redis Lua/functions and broader Streams behavior, Kafka simultaneous
+duplicate-static-owner fencing/cooperative/new-group protocols and
+transactions/control batches, arbitrary AMQP DLX fanout/transactions/AMQP 1.0,
+MQTT, and performance parity remain open;
 no G6 completion is claimed. See
-[ADR-0046](adr/0046-private-beta-protocol-compatibility.md).
+[ADR-0049](adr/0049-core-protocol-semantics.md).
 
 The trust slice supplies partial G5 evidence. The protected baseline has shared
 fingerprint authorization, required operator TLS/mTLS, custom-CA/client
@@ -121,8 +125,9 @@ because log-based semantic PITR, product-wide derived-index rebuild, external
 tier providers, protected cloud-storage/RPO evidence, and general production
 replica recovery are not implemented. Stream logical time/size/combined retention now
 advances through a separate replicated v4 state transition; command v7 adds
-key compaction and checksum-verified embedded historical objects, while
-product-wide retention governance remains open. Regional Streams materialize several independent
+key compaction and checksum-verified embedded historical objects. Command v8
+adds atomic sequence-span producer batches without dropping v7 decode.
+Product-wide retention governance remains open. Regional Streams materialize several independent
 ordered shard tablets, publish one versioned cross-language UTF-8 key
 partitioner, and bind logical shard identity outside compatibility-pinned
 tablet/snapshot bytes. Expand-only allocation preserves existing tablets and
@@ -235,7 +240,7 @@ durability.
 | STREAM-004 | P0 | Partition order and acknowledgement policy | M1 prototype → M2 | Slice | G0, G2, G3, G4 | Local fsync-before-apply plus experimental fixed-voter majority-before-local-profile-apply receipts (`durable_voter_acks=2`), minority non-commit, ordered offsets, semantic retry/rebinding, and conflict tests; pending: placement-aware public/multi-policy durable ack matrix |
 | STREAM-005 | P0 | Zone replication, election, ISR visibility | M1 prototype → M2 | Slice | G2, G3, G5 | Fixed-voter deterministic histories plus typed real-runtime/container leader replacement, old-voter catch-up, and all-voter `SIGKILL` replay; pending: placement domains and authenticated replica/ISR visibility |
 | STREAM-006 | P0 | Batching and required compression paths | M2 | Slice | G2, G4, G6 | Canonical command v2 carries bounded atomic batches through `none`, gzip, LZ4 frame, Snappy framed, and Zstd frame paths; strict unit/golden/malformed/bomb tests and real three-runtime commit/retry/rebuild preserve v1 bytes/digests. Go/Java/Python regional clients expose one explicit-shard atomic operation with canonical none/gzip encoders, exact caller frames for all five codecs, and exact-frame/idempotency retry. Cross-language unit and published-source tests plus the Python post-leader-loss batch, catch-up, and all-node recovery campaign pass protected alpha.7 CI. Regional responses externalize the target logical shard. Pending: stable bidirectional Produce, producer auto-batching and negotiation, cross-shard planning, non-atomic partial results, fuzz corpus, and matched compression benchmarks |
-| STREAM-007 | P1 | Idempotent producer sequencing | M5 | Complete | G2, G3, G7 | Replicated producer epochs, contiguous sequences, payload conflict, 256-entry exact retry history, fencing, canonical snapshots, real three-voter commit, and full-cluster reopen pass. Go/Java/Python preserve the complete unsigned-64-bit epoch and sequence contract. |
+| STREAM-007 | P1 | Idempotent producer sequencing | M5 | Complete | G2, G3, G7 | Replicated producer epochs, contiguous sequences, payload conflict, 256-entry exact retry history, fencing, canonical snapshots, real three-voter commit, and full-cluster reopen pass. Go/Java/Python preserve the complete unsigned-64-bit epoch and sequence contract. State command v8 adds an atomic sequence-span batch while preserving v7 decode; Kafka `InitProducerId` and idempotent Produce map to it. |
 | STREAM-008 | P1 | Transactions, atomic offsets, read-committed | M5 | Complete | G0, G2, G3, G7 | Bounded tablet-local transactions atomically expose up to 128 records and one consumer offset. Pending/aborted visibility, read committed/uncommitted, exact retry, push wakeup after commit, snapshot reinstall, and real quorum recovery pass. Cross-shard/external-sink atomicity is not claimed. |
 | STREAM-009 | P1 | Key compaction and tombstones | M3 | Complete | G2, G4, G7 | Deterministic compaction keeps the latest committed keyed value and unkeyed records, removes aborted/superseded values, expires null tombstones inclusively, preserves offset holes in v2 snapshots, and requires compaction before immutable tiering. |
 | STREAM-010 | P1 | Object-tier historical fetch | M3 | Complete | G2, G5, G7 | Bounded immutable objects retain exact covered ranges, canonical record bytes, and SHA-256 checksums. Isolation-aware reads verify and merge historical plus hot records; corruption, overlap, compaction order, aborted history, snapshot, quorum, and restart tests pass. Alpha bytes remain embedded in replicated state; external-provider outage/SLO evidence is a production gate. |
@@ -344,7 +349,7 @@ durability.
 | DX-004 | P0 | Test containers and ephemeral namespaces | M1 → M2 | Slice | G1, G5, G10 | A unique three-node Compose project uses independent volumes, dynamic loopback ports, mounted policy, Go recovery, simultaneous four-profile failover/catch-up/all-node recovery, and post-failover Python lifecycles. The beta.10 campaign additionally recomputes every Go/Rust audit link and compares complete journal prefixes across control and all-node restart; it passes locally. The resumable alpha-exit and digest-pinned Kind campaigns retain typed evidence for mTLS install, all-profile traffic, backup, compacted-log voter replacement, guarded rollout, fresh restore, and post-restore writes. Pending: protected evidence for the updated audit campaign, elapsed 30-day operation, parallel campaigns, Go/Java live regional execution, and injected disk/network matrices. |
 | DX-005 | P1 | Audited/redacted console message browser | M3 → M4 | Planned | G5, G7, G8 | Pending: access/redaction/action audit matrix |
 | DX-006 | P0 | Explain live guarantees and cost drivers | M1 basic → M2 | Slice | G0, G3, G5 | The TypeScript console consumes only the Go BFF with an interactively entered session-only bearer, displays desired/observed/Catalog generations without rounding, placement risk, governance filters, and cost drivers. The same bearer slot now accepts externally issued v2 OIDC access tokens, and the beta.10 docs explain exact OIDC/audit guarantees and limits. Pending: protected beta.10 evidence, interactive browser OIDC/session exchange, achieved durability, usage/rate/currency inputs, accessibility evidence, and historical topology context. |
-| DX-007 | P1 | Compatibility usage scanner | M3 | Slice | G0, G6 | `epoch-compat scan` accepts bounded auto/fixed-protocol newline manifests, preserves source lines, evaluates Kafka API versions and Redis option/database boundaries, emits the versioned `epoch.compatibility-scan/v1` text/JSON report, and fails CI at partial/unknown/unsupported thresholds. The unsupported/unknown fixture corpus passes locally; live traffic capture and protected evidence remain open. |
+| DX-007 | P1 | Compatibility usage scanner | M3 | Slice | G0, G6 | `epoch-compat scan` accepts bounded auto/fixed-protocol newline manifests, preserves source lines, evaluates Kafka API versions and Redis option/database boundaries, emits the versioned `epoch.compatibility-scan/v1` text/JSON report, and fails CI at partial/unknown/unsupported thresholds. It recognizes Redis transaction/Pub/Sub, the partial Streams boundary, and non-transactional Kafka `InitProducerId` 0–5. The unsupported/unknown fixture corpus passes locally; live traffic capture and protected evidence remain open. |
 | DX-008 | P1 | End-to-end event trace | M4 | Planned | G1, G4, G5, G7 | Pending: trace/history reconciliation |
 | DX-009 | P1 | TypeScript, Rust, .NET SDKs | M3 | Planned | G0, G1, G6, G10 | Pending: multi-language client matrix |
 

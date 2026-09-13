@@ -35,6 +35,7 @@ async fn main() -> Result<()> {
     ));
     backend.add_queue("audit");
     backend.add_queue("failed-jobs");
+    backend.add_stream("redis-events", 1);
     backend.configure_queue_dead_letter("jobs", "failed-jobs");
     let redis = RedisServer::new(
         Arc::clone(&backend),
@@ -60,6 +61,7 @@ async fn main() -> Result<()> {
             password: "compat-secret".into(),
             max_connections: 64,
             heartbeat_seconds: 10,
+            topology_cache: "sessions".into(),
         },
     )?;
     let redis_listener = TcpListener::bind(args.redis_listen)

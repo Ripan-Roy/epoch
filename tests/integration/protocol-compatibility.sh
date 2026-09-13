@@ -7,6 +7,8 @@ epoch_compat_tmp="$(mktemp -d "${TMPDIR:-/tmp}/epoch-protocol-compat.XXXXXX")"
 epoch_target_dir="${EPOCH_COMPAT_TARGET_DIR:-${epoch_repo_root}/target}"
 epoch_fixture_log="${EPOCH_COMPAT_LOG:-${epoch_compat_tmp}/fixture.log}"
 epoch_fixture_pid=""
+epoch_subscriber_pid=""
+epoch_subscriber_container=""
 epoch_redis_image="redis@sha256:2b42a93631132be6df7a31f843b91ea8a907011e955b03395b7edbb13a20a99d"
 epoch_docker_host="${EPOCH_COMPAT_DOCKER_HOST:-host.docker.internal}"
 epoch_docker_network_args=(--add-host host.docker.internal:host-gateway)
@@ -26,6 +28,12 @@ cleanup() {
   if [[ -n "$epoch_fixture_pid" ]]; then
     kill "$epoch_fixture_pid" 2>/dev/null || true
     wait "$epoch_fixture_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$epoch_subscriber_container" ]]; then
+    docker rm --force "$epoch_subscriber_container" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$epoch_subscriber_pid" ]]; then
+    wait "$epoch_subscriber_pid" 2>/dev/null || true
   fi
   if (( epoch_status != 0 )) && [[ -f "$epoch_fixture_log" ]]; then
     printf 'Protocol compatibility fixture logs:\n' >&2
@@ -177,6 +185,64 @@ assert_equal PONG "$(docker run --rm \
   -h "$epoch_docker_host" \
   -p "$epoch_redis_port" \
   -a compat-secret PING)" "Redis RESP3 negotiation"
+
+epoch_transaction="$(printf 'MULTI\nSET transaction-count 1\nINCR transaction-count\nGET transaction-count\nEXEC\n' | docker run --rm --interactive \
+  "${epoch_docker_network_args[@]}" \
+  "$epoch_redis_image" \
+  redis-cli --raw --no-auth-warning \
+  -h "$epoch_docker_host" \
+  -p "$epoch_redis_port" \
+  -a compat-secret)"
+assert_equal $'OK\nQUEUED\nQUEUED\nQUEUED\nOK\n2\n2' "$epoch_transaction" \
+  "Redis MULTI/EXEC sequential atomicity"
+
+epoch_stream_id="$(redis_cli XADD redis-events '*' binary 'stream-value' status created)"
+if [[ ! "$epoch_stream_id" =~ ^[0-9]+-0$ ]]; then
+  printf 'Redis XADD returned an invalid ID: %s\n' "$epoch_stream_id" >&2
+  exit 1
+fi
+assert_equal 1 "$(redis_cli XLEN redis-events)" "Redis Streams length"
+assert_equal OK "$(redis_cli XGROUP CREATE redis-events workers 0-0)" \
+  "Redis Streams group creation"
+epoch_stream_delivery="$(redis_cli XREADGROUP GROUP workers cli COUNT 1 STREAMS redis-events '>')"
+if [[ "$epoch_stream_delivery" != *"stream-value"* ]]; then
+  printf 'Redis XREADGROUP did not return the durable entry: %s\n' "$epoch_stream_delivery" >&2
+  exit 1
+fi
+if [[ "$(redis_cli XPENDING redis-events workers)" != 1$'\n'* ]]; then
+  printf 'Redis XPENDING did not retain the delivered entry\n' >&2
+  exit 1
+fi
+assert_equal 1 "$(redis_cli XACK redis-events workers "$epoch_stream_id")" \
+  "Redis Streams acknowledgement"
+
+epoch_subscriber_container="epoch-redis-subscribe-$$"
+docker run --rm --name "$epoch_subscriber_container" \
+  "${epoch_docker_network_args[@]}" \
+  "$epoch_redis_image" \
+  redis-cli --raw --no-auth-warning \
+  -h "$epoch_docker_host" \
+  -p "$epoch_redis_port" \
+  -a compat-secret SUBSCRIBE epoch.live >"$epoch_compat_tmp/redis-subscribe.out" &
+epoch_subscriber_pid=$!
+for _ in {1..100}; do
+  if grep -q '^epoch.live$' "$epoch_compat_tmp/redis-subscribe.out" 2>/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+assert_equal 1 "$(redis_cli PUBLISH epoch.live transient-message)" "Redis Pub/Sub delivery count"
+for _ in {1..100}; do
+  if grep -q '^transient-message$' "$epoch_compat_tmp/redis-subscribe.out" 2>/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+grep -q '^transient-message$' "$epoch_compat_tmp/redis-subscribe.out"
+docker rm --force "$epoch_subscriber_container" >/dev/null
+wait "$epoch_subscriber_pid" 2>/dev/null || true
+epoch_subscriber_pid=""
+epoch_subscriber_container=""
 
 ./scripts/retry-command.sh 3 2 \
   ./sdk/java/mvnw --file tests/compatibility/java/pom.xml \

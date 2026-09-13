@@ -1610,7 +1610,9 @@ export function RegionalCacheBody() {
           >
             Managed configuration reaches every voter. <code>Get</code> records LRU/LFU access exactly once;
             pure <code>Observe</code> never changes order. All-key and volatile LRU, LFU, random, and TTL
-            admissions stage memory/cold byte accounting, eviction, and the write atomically.
+            admissions stage memory/cold byte accounting, eviction, and the write atomically. The selected
+            policy is immutable resource configuration; workload-driven automatic policy switching is not
+            currently claimed.
           </EvidenceCard>
           <EvidenceCard
             label="Deterministic expiry"
@@ -1937,6 +1939,7 @@ const compatibilityGatewayRun = `cargo run -p epoch-compat -- \\
   --redis-cache sessions \\
   --redis-password local-redis-password \\
   --kafka-advertised-host 127.0.0.1 \\
+  --amqp-topology-cache sessions \\
   --amqp-username epoch \\
   --amqp-password local-amqp-password`;
 
@@ -1956,7 +1959,28 @@ assert client.incrby("requests", 5) == 5
 client.mset({"profile:42:name": "Ada", "profile:42:stage": "beta"})
 assert client.msetnx({"new:one": "1", "new:two": "2"}) is True
 assert client.hset("profile:42", mapping={"name": "Ada", "stage": "beta"}) == 2
-assert client.zadd("ranking", {"ada": 1.5, "grace": 0.5}) == 2`;
+assert client.zadd("ranking", {"ada": 1.5, "grace": 0.5}) == 2
+
+with client.pipeline(transaction=True) as transaction:
+    transaction.watch("profile:42:stage")
+    transaction.multi()
+    transaction.set("profile:42:stage", "ready")
+    transaction.incr("profile:42:revision")
+    transaction.execute()
+
+entry_id = client.xadd("events", {b"type": b"order.created", b"body": b"binary\\x00value"})
+assert client.xrange("events", min=entry_id, max=entry_id)`;
+
+const compatibilityKafkaProducerJava = `var properties = new java.util.HashMap<String, Object>();
+properties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "127.0.0.1:9092");
+properties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
+properties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
+properties.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true");
+properties.put(ProducerConfig.ACKS_CONFIG, "all");
+
+try (var producer = new KafkaProducer<byte[], byte[]>(properties)) {
+  producer.send(new ProducerRecord<>("events", 0, "order-42".getBytes(), "created".getBytes())).get();
+}`;
 
 const compatibilityKafkaJava = `var properties = new java.util.HashMap<String, Object>();
 properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "127.0.0.1:9092");
@@ -1981,9 +2005,11 @@ factory.setPassword("local-amqp-password");
 
 try (var connection = factory.newConnection(); var channel = connection.createChannel()) {
   channel.queueDeclare("failed-jobs", true, false, false, java.util.Map.of());
+  channel.exchangeDeclare("epoch.dead.topic", "topic", true, false, java.util.Map.of());
+  channel.queueBind("failed-jobs", "epoch.dead.topic", "failed.#");
   channel.queueDeclare("jobs", true, false, false, java.util.Map.of(
-    "x-dead-letter-exchange", "",
-    "x-dead-letter-routing-key", "failed-jobs"));
+    "x-dead-letter-exchange", "epoch.dead.topic",
+    "x-dead-letter-routing-key", "failed.jobs"));
   channel.exchangeDeclare("epoch.events", "topic", false, false, java.util.Map.of());
   channel.queueBind("jobs", "epoch.events", "orders.*");
   channel.confirmSelect();
@@ -2025,8 +2051,8 @@ export function ProtocolCompatibilityBody() {
         <p>
           First provision <code>sessions</code> as a Cache, <code>events</code> as a Stream, and{" "}
           <code>jobs</code> as a Queue in <code>acme/shop/dev/core</code>. Then start all three listeners from
-          one gateway process. Native data remains durable; the bounded AMQP exchange/binding catalog is
-          process-scoped in this slice.
+          one gateway process. Durable AMQP topology and Redis Streams group ledgers use the configured Cache;
+          select quorum durability and restrict direct native writes. AMQP topology may use a dedicated Cache.
         </p>
         <CodeBlock label="shell" value={compatibilityGatewayRun} />
         <div className="table-wrap">
@@ -2073,7 +2099,8 @@ export function ProtocolCompatibilityBody() {
         <p>
           Supported today: connection negotiation and authentication, binary-safe strings, conditional{" "}
           <code>SET</code>, multi-get/set, deletion and existence, signed counters, TTL/PTTL, expire and
-          persist, pipelining, and client setup commands used by current SDKs.
+          persist, pipelining, bounded transactions, Pub/Sub, Streams, and client setup commands used by
+          current SDKs.
         </p>
         <p>
           <code>SET ... GET</code> returns the previous value from the same fenced mutation. A non-string
@@ -2081,22 +2108,23 @@ export function ProtocolCompatibilityBody() {
           and returns a retryable error.
         </p>
         <p>
-          Hashes, lists, sets, and sorted sets use version-fenced native collection replacements that retain
-          TTL and storage class. Their fields and members must be UTF-8 and each collection is bounded to
-          1,024 items. Pub/Sub, Streams, blocking calls, cluster mode, modules, Lua, and <code>MULTI</code>/
-          <code>EXEC</code> are not exposed yet. <code>MSET</code> and <code>MSETNX</code> commit up to 128
-          distinct keys through one revision-fenced native transaction; a failed <code>MSETNX</code> writes
-          nothing.
+          Hashes, lists, sets, and sorted sets retain TTL and storage class. <code>MULTI</code>/
+          <code>EXEC</code>
+          commits up to 128 commands and keys atomically; <code>WATCH</code> observes key versions, not
+          unrelated shard writes. Pub/Sub is node-local, at-most-once, and non-replayable. Streams stores
+          binary fields in native Stream shard 0 and durable group/pending state in the configured Cache.
+          Lua/functions, stream trim/claim, cluster mode, and modules remain unsupported. The{" "}
+          <code>__epoch:</code> metadata namespace is inaccessible through Redis commands.
         </p>
         <CodeBlock label="python · redis-py" value={compatibilityRedisPython} />
       </Topic>
 
       <Topic id="kafka" title="Apache Kafka producer and classic consumer groups">
         <p>
-          Produce, Fetch, Metadata, ListOffsets, ApiVersions, FindCoordinator, JoinGroup, SyncGroup,
-          Heartbeat, LeaveGroup, OffsetCommit, and OffsetFetch are implemented. gzip, Snappy, LZ4, and Zstd
-          batches translate into native Stream records while keys, nullable values, timestamps, and headers
-          round-trip.
+          Produce, Fetch, Metadata, ListOffsets, ApiVersions, InitProducerId, FindCoordinator, JoinGroup,
+          SyncGroup, Heartbeat, LeaveGroup, OffsetCommit, and OffsetFetch are implemented. gzip, Snappy, LZ4,
+          and Zstd batches translate into native Stream records while keys, nullable values, timestamps, and
+          headers round-trip.
         </p>
         <p>
           Each Produce partition is submitted as one canonical native batch and becomes visible atomically. It
@@ -2113,19 +2141,23 @@ export function ProtocolCompatibilityBody() {
           per member with the <code>range</code> protocol. Replicated native sessions assign any configured
           shard count, SyncGroup claims ownership, and commits are member/generation fenced. A bounded
           <code>group.instance.id</code> reuses the same native identity and is checked by join, sync,
-          heartbeat, commit, and leave. Simultaneous duplicate-owner fencing, multi-topic, regex, cooperative,
-          and new consumer-group protocols remain unsupported, as do idempotent/transactional producers, admin
-          mutations, SASL, ACLs, auto-creation, and timestamp offset lookup.
+          heartbeat, commit, and leave. Non-transactional idempotent producers use one sequence-fenced native
+          batch and resolve exact retry to the original offset. Simultaneous duplicate-owner fencing,
+          multi-topic, regex, cooperative and new consumer-group protocols remain unsupported, as do Kafka
+          transactions/control batches, admin mutations, SASL, ACLs, auto-creation, and timestamp offset
+          lookup.
         </p>
+        <CodeBlock label="java · idempotent KafkaProducer" value={compatibilityKafkaProducerJava} />
         <CodeBlock label="java · KafkaConsumer" value={compatibilityKafkaJava} />
       </Topic>
 
       <Topic id="amqp" title="RabbitMQ / AMQP 0-9-1">
         <p>
-          Existing Queue declaration, process-shared direct/fanout/topic/headers exchanges, multi-queue
-          bindings, bind/unbind and exchange deletion, publish, mandatory returns, per-message expiration,
-          confirms, push consumers, basic.get, prefetch, automatic/manual acknowledgement, nack/reject,
-          cancellation, heartbeats, and content/correlation/reply/string-header metadata are implemented.
+          Existing Queue declaration, direct/fanout/topic/headers exchanges, durable Cache-backed topology,
+          multi-queue bindings, bind/unbind and exchange deletion, publish, mandatory returns, per-message
+          expiration, confirms, push consumers, basic.get, prefetch, automatic/manual acknowledgement,
+          nack/reject, cancellation, heartbeats, and content/correlation/reply/string-header metadata are
+          implemented.
         </p>
         <p>
           Native Queue capacity and retry limits remain authoritative. Headers bindings accept bounded string
@@ -2133,13 +2165,12 @@ export function ProtocolCompatibilityBody() {
           rejection is never publisher-confirmed, even when its HTTP response is successful.
         </p>
         <p>
-          A Queue may declare the default exchange plus the routing key from its provisioned native
-          dead-letter target. Reject/nack without requeue is then forwarded by the replicated Queue outbox;
-          expiration is removed and <code>x-first-death-*</code> string metadata is added. Named DLX routing,
-          <code>x-death</code> arrays, AMQP 1.0, durable or auto-delete gateway exchange metadata,
-          server-named queues, policy arguments, non-string headers, immediate publishing, transactions, and
-          RabbitMQ plugins remain unsupported. Queue data and delivery state remain native and durable;
-          exchange/binding metadata survives connections but not a gateway-process restart.
+          A Queue may declare a default or named DLX route that resolves to exactly its provisioned native
+          dead-letter target. Reject/nack without requeue is forwarded by the replicated Queue outbox;
+          expiration is removed and bounded <code>x-death</code> plus first/last-death metadata is added.
+          Durable declarations survive independent gateway state through the configured Cache. Arbitrary DLX
+          fanout, AMQP 1.0, auto-delete exchanges, server-named queues, general policies/non-string headers,
+          immediate publishing, transactions, and RabbitMQ plugins remain unsupported.
         </p>
         <CodeBlock label="java · RabbitMQ client" value={compatibilityAmqpJava} />
       </Topic>
@@ -2148,10 +2179,13 @@ export function ProtocolCompatibilityBody() {
         <p>
           The regional campaign runs the pinned clients through production gateway and node images. It
           replaces the gateway, kills each profile&apos;s leader, and reopens all voter volumes after SIGKILL,
-          checking Cache state, atomic conditional set/get, atomic multi-set and structured collections, Kafka
-          metadata, consumer groups, static identity reuse and checkpoints, AMQP topic/headers routing,
-          TTL/DLX/mandatory-return behavior, lease redelivery, durable acknowledgements, and capacity refusal.
-          This verifies the documented subset, not full broker parity or production SLOs.
+          checking Cache state, Redis transactions, structured collections, live Pub/Sub, durable
+          Streams-group state, Kafka codecs, consumer groups, checkpoints and idempotent sequencing, plus AMQP
+          durable topology, topic/headers routing, named-DLX delivery with <code>x-death</code>, lease
+          redelivery, acknowledgements, and capacity refusal. The current production-image candidate passes
+          all 21 local checks with separate Cache/Stream/Queue leader and term transitions. This verifies the
+          documented subset, not full broker parity or production SLOs; protected CI remains required for
+          promotion.
         </p>
         <CodeBlock
           label="shell · prebuilt node and gateway images"

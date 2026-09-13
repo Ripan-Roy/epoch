@@ -59,6 +59,36 @@ fn amqp_dead_letter_forward_removes_expiry_and_retargets_the_default_exchange() 
     assert_eq!(envelope.headers["x-first-death-exchange"], "orders");
     assert_eq!(envelope.headers["x-first-death-queue"], "jobs");
     assert_eq!(envelope.headers["x-first-death-reason"], "rejected");
+    assert_eq!(envelope.headers["x-last-death-queue"], "jobs");
+    let history = serde_json::from_str::<Vec<serde_json::Value>>(
+        &envelope.headers["x-epoch-compat-death-history"],
+    )
+    .unwrap();
+    assert_eq!(history[0]["count"], 1);
+    assert_eq!(history[0]["routing_keys"], json!(["jobs.created"]));
+}
+
+#[test]
+fn amqp_dead_letter_forward_preserves_a_validated_named_exchange_route() {
+    let mut envelope = QueueTabletEnvelope::from(amqp_event("poison"));
+    envelope
+        .headers
+        .insert("x-epoch-compat-dlx-exchange".into(), "dead.events".into());
+    envelope.headers.insert(
+        "x-epoch-compat-dlx-routing-key".into(),
+        "failed.jobs".into(),
+    );
+
+    prepare_amqp_dead_letter_forward(&mut envelope, "jobs", "failed-jobs", "amqp.basic.reject");
+
+    assert_eq!(envelope.payload["exchange"], "dead.events");
+    assert_eq!(envelope.payload["routing_key"], "failed.jobs");
+    assert!(!envelope.headers.contains_key("x-epoch-compat-dlx-exchange"));
+    assert!(
+        !envelope
+            .headers
+            .contains_key("x-epoch-compat-dlx-routing-key")
+    );
 }
 
 #[test]

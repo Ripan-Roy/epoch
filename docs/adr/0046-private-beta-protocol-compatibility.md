@@ -4,6 +4,7 @@
 - Date: 2026-09-09
 - Owners: data plane, protocol compatibility, verification
 - Extends: [ADR-0044](0044-native-backed-protocol-state.md)
+- Extended by: [ADR-0049](0049-core-protocol-semantics.md)
 
 ## Context
 

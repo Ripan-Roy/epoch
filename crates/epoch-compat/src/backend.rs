@@ -104,6 +104,40 @@ pub struct CacheSetOutcome {
     pub previous: Option<CacheEntry>,
 }
 
+/// One coherent, linearizable Cache image used to plan a compatibility
+/// transaction. Missing keys are retained so callers can distinguish a
+/// watched absence from a key that was not requested.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CacheSnapshot {
+    pub revision: u64,
+    pub entries: BTreeMap<String, Option<CacheEntry>>,
+}
+
+/// One final-state mutation committed by a compatibility transaction.
+///
+/// Compatibility protocols plan their sequential command semantics against a
+/// coherent snapshot, then collapse the result to at most one mutation per
+/// key. The backend commits the complete set at one native Cache revision.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CacheAtomicMutation {
+    Put {
+        key: String,
+        value: CacheValue,
+        ttl_ms: Option<u64>,
+        storage_class: CacheStorageClass,
+    },
+    Delete {
+        key: String,
+    },
+}
+
+/// One binary-safe message drained from the node-local Cache Pub/Sub hub.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachePubSubMessage {
+    pub channel: String,
+    pub payload: Vec<u8>,
+}
+
 /// One distinct binary-safe key/value pair in an atomic Redis multi-set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheMultiSetEntry {
@@ -228,6 +262,42 @@ pub enum BackendError {
 #[async_trait]
 pub trait CompatibilityBackend: Send + Sync + 'static {
     async fn cache_get(&self, cache: &str, key: &str) -> Result<Option<CacheEntry>, BackendError>;
+    /// Reads all requested keys from one logical Cache revision.
+    async fn cache_snapshot(
+        &self,
+        cache: &str,
+        keys: &[String],
+    ) -> Result<CacheSnapshot, BackendError>;
+    /// Commits every final-state mutation iff `expected_revision` is current.
+    async fn cache_compare_and_apply(
+        &self,
+        cache: &str,
+        expected_revision: u64,
+        mutations: &[CacheAtomicMutation],
+    ) -> Result<(), BackendError>;
+    async fn cache_pubsub_subscribe(
+        &self,
+        cache: &str,
+        channels: &[String],
+        patterns: &[String],
+    ) -> Result<String, BackendError>;
+    async fn cache_pubsub_unsubscribe(
+        &self,
+        cache: &str,
+        subscription_id: &str,
+    ) -> Result<(), BackendError>;
+    async fn cache_pubsub_publish(
+        &self,
+        cache: &str,
+        channel: &str,
+        payload: &[u8],
+    ) -> Result<u64, BackendError>;
+    async fn cache_pubsub_poll(
+        &self,
+        cache: &str,
+        subscription_id: &str,
+        limit: u16,
+    ) -> Result<Vec<CachePubSubMessage>, BackendError>;
     async fn cache_set(
         &self,
         cache: &str,
@@ -273,6 +343,17 @@ pub trait CompatibilityBackend: Send + Sync + 'static {
         partition: u32,
         records: Vec<StreamRecord>,
     ) -> Result<u64, BackendError>;
+    /// Atomically appends one Kafka record batch under its producer sequence
+    /// span. An exact retry returns the original base offset.
+    async fn stream_append_idempotent(
+        &self,
+        stream: &str,
+        partition: u32,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+        records: Vec<StreamRecord>,
+    ) -> Result<u64, BackendError>;
     async fn stream_fetch(
         &self,
         stream: &str,
@@ -281,6 +362,7 @@ pub trait CompatibilityBackend: Send + Sync + 'static {
         limit: u32,
     ) -> Result<Vec<StreamRecord>, BackendError>;
     async fn stream_end_offset(&self, stream: &str, partition: u32) -> Result<u64, BackendError>;
+    async fn stream_start_offset(&self, stream: &str, partition: u32) -> Result<u64, BackendError>;
     async fn stream_commit_offset(
         &self,
         group: &str,
@@ -725,6 +807,226 @@ impl CompatibilityBackend for NativeHttpBackend {
         Ok(self.observe_cache(cache, key).await?.entry)
     }
 
+    async fn cache_snapshot(
+        &self,
+        cache: &str,
+        keys: &[String],
+    ) -> Result<CacheSnapshot, BackendError> {
+        let keys = keys.iter().collect::<BTreeSet<_>>();
+        if keys.is_empty() || keys.len() > MAX_CACHE_MULTI_SET_ENTRIES {
+            return Err(BackendError::Invalid(format!(
+                "Cache snapshot keys must be between 1 and {MAX_CACHE_MULTI_SET_ENTRIES}"
+            )));
+        }
+        for attempt in 0..MAX_CACHE_SET_ATTEMPTS {
+            let mut revision = None;
+            let mut entries = BTreeMap::new();
+            let mut coherent = true;
+            for key in &keys {
+                let observation = self.observe_cache(cache, key).await?;
+                if revision.is_some_and(|revision| revision != observation.shard_revision) {
+                    coherent = false;
+                    break;
+                }
+                revision = Some(observation.shard_revision);
+                entries.insert((*key).clone(), observation.entry);
+            }
+            if coherent {
+                return Ok(CacheSnapshot {
+                    revision: revision.unwrap_or_default(),
+                    entries,
+                });
+            }
+            if attempt + 1 == MAX_CACHE_SET_ATTEMPTS {
+                return Err(BackendError::Conflict);
+            }
+        }
+        Err(BackendError::Conflict)
+    }
+
+    async fn cache_compare_and_apply(
+        &self,
+        cache: &str,
+        expected_revision: u64,
+        mutations: &[CacheAtomicMutation],
+    ) -> Result<(), BackendError> {
+        validate_cache_atomic_mutations(mutations)?;
+        let mutations = mutations
+            .iter()
+            .map(|mutation| match mutation {
+                CacheAtomicMutation::Put {
+                    key,
+                    value,
+                    ttl_ms,
+                    storage_class,
+                } => json!({
+                    "kind":"set",
+                    "key":key,
+                    "value":encode_cache_value(value.clone()),
+                    "ttl_ms":ttl_ms.map(|value| value.to_string()),
+                    "storage_class":encode_storage_class(*storage_class),
+                }),
+                CacheAtomicMutation::Delete { key } => json!({
+                    "kind":"delete",
+                    "key":key,
+                }),
+            })
+            .collect::<Vec<_>>();
+        let _: Value = self
+            .mutate(
+                "caches",
+                cache,
+                0,
+                json!({
+                    "kind":"transaction",
+                    "shard":0,
+                    "expected_revision":expected_revision.to_string(),
+                    "mutations":mutations,
+                    "lock_guards":[],
+                }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn cache_pubsub_subscribe(
+        &self,
+        cache: &str,
+        channels: &[String],
+        patterns: &[String],
+    ) -> Result<String, BackendError> {
+        let (base, route) = self.discover("caches", cache, 0).await?;
+        let response: Value = self
+            .send_json(
+                Method::POST,
+                suffix_url(&base, "/pubsub/subscriptions"),
+                Some(json!({"channels":channels, "patterns":patterns})),
+                &[
+                    ("x-epoch-resource-generation", &route.resource_generation),
+                    ("x-epoch-tablet-epoch", &route.tablet_epoch),
+                ],
+            )
+            .await?;
+        response
+            .get("subscription_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| invalid_response("Cache Pub/Sub subscription ID is missing"))
+    }
+
+    async fn cache_pubsub_unsubscribe(
+        &self,
+        cache: &str,
+        subscription_id: &str,
+    ) -> Result<(), BackendError> {
+        let (base, route) = self.discover("caches", cache, 0).await?;
+        let response: Value = self
+            .send_json(
+                Method::DELETE,
+                suffix_url(&base, &format!("/pubsub/subscriptions/{subscription_id}")),
+                None,
+                &[
+                    ("x-epoch-resource-generation", &route.resource_generation),
+                    ("x-epoch-tablet-epoch", &route.tablet_epoch),
+                ],
+            )
+            .await?;
+        if response.get("deleted").and_then(Value::as_bool) == Some(true) {
+            Ok(())
+        } else {
+            Err(BackendError::NotFound)
+        }
+    }
+
+    async fn cache_pubsub_publish(
+        &self,
+        cache: &str,
+        channel: &str,
+        payload: &[u8],
+    ) -> Result<u64, BackendError> {
+        if payload.len() > crate::MAX_MESSAGE_BYTES {
+            return Err(BackendError::Invalid(
+                "Redis Pub/Sub payload exceeds limit".into(),
+            ));
+        }
+        let (base, route) = self.discover("caches", cache, 0).await?;
+        let response: Value = self
+            .send_json(
+                Method::POST,
+                suffix_url(&base, "/pubsub/messages"),
+                Some(json!({
+                    "channel":channel,
+                    "payload":{"redis_base64":STANDARD_NO_PAD.encode(payload)},
+                })),
+                &[
+                    ("x-epoch-resource-generation", &route.resource_generation),
+                    ("x-epoch-tablet-epoch", &route.tablet_epoch),
+                ],
+            )
+            .await?;
+        response
+            .get("delivered_subscriptions")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| invalid_response("Cache Pub/Sub delivery count is missing"))
+    }
+
+    async fn cache_pubsub_poll(
+        &self,
+        cache: &str,
+        subscription_id: &str,
+        limit: u16,
+    ) -> Result<Vec<CachePubSubMessage>, BackendError> {
+        if limit == 0 || limit > 1_000 {
+            return Err(BackendError::Invalid(
+                "invalid Cache Pub/Sub poll limit".into(),
+            ));
+        }
+        let response: Value = self
+            .read_query(
+                "caches",
+                cache,
+                0,
+                &format!("/pubsub/subscriptions/{subscription_id}/messages"),
+                &[("limit", limit.to_string())],
+            )
+            .await?;
+        response
+            .get("messages")
+            .and_then(Value::as_array)
+            .ok_or_else(|| invalid_response("Cache Pub/Sub messages are missing"))?
+            .iter()
+            .map(|message| {
+                let channel = message
+                    .get("channel")
+                    .and_then(Value::as_str)
+                    .filter(|channel| !channel.is_empty())
+                    .ok_or_else(|| invalid_response("Cache Pub/Sub channel is missing"))?;
+                let payload = message
+                    .get("payload")
+                    .ok_or_else(|| invalid_response("Cache Pub/Sub payload is missing"))?;
+                let payload = payload
+                    .get("redis_base64")
+                    .and_then(Value::as_str)
+                    .map_or_else(
+                        || {
+                            serde_json::to_vec(payload)
+                                .map_err(|_| invalid_response("Cache Pub/Sub payload is invalid"))
+                        },
+                        |encoded| {
+                            STANDARD_NO_PAD
+                                .decode(encoded)
+                                .map_err(|_| invalid_response("Cache Pub/Sub payload is invalid"))
+                        },
+                    )?;
+                Ok(CachePubSubMessage {
+                    channel: channel.to_owned(),
+                    payload,
+                })
+            })
+            .collect()
+    }
+
     async fn cache_set(
         &self,
         cache: &str,
@@ -875,18 +1177,48 @@ impl CompatibilityBackend for NativeHttpBackend {
         key: &str,
         delta: i64,
     ) -> Result<i64, BackendError> {
-        let response: Value = self
-            .mutate(
-                "caches",
-                cache,
-                0,
-                json!({"kind":"increment", "shard":0, "key":key, "delta":delta.to_string()}),
-            )
-            .await?;
-        response
-            .pointer("/receipt/outcome/result/value")
-            .and_then(decimal_i64)
-            .ok_or_else(|| invalid_response("Cache increment outcome is missing"))
+        for attempt in 0..MAX_CACHE_SET_ATTEMPTS {
+            let observation = self.observe_cache(cache, key).await?;
+            let current = match observation.entry.as_ref().map(|entry| &entry.value) {
+                None => 0,
+                Some(CacheValue::Counter(value)) => *value,
+                Some(CacheValue::String(value)) => value
+                    .parse()
+                    .map_err(|_| BackendError::Invalid("value is not an integer".into()))?,
+                Some(CacheValue::Blob(value)) => std::str::from_utf8(value)
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .ok_or_else(|| BackendError::Invalid("value is not an integer".into()))?,
+                Some(_) => {
+                    return Err(BackendError::Invalid("value is not an integer".into()));
+                }
+            };
+            let value = current
+                .checked_add(delta)
+                .ok_or_else(|| BackendError::Invalid("integer overflow".into()))?;
+            let operation = observation.entry.as_ref().map_or_else(
+                || json!({
+                    "kind":"compare_and_set", "shard":0, "key":key,
+                    "expected":{"kind":"missing", "shard_revision":observation.shard_revision.to_string()},
+                    "value":encode_cache_value(CacheValue::Counter(value)),
+                }),
+                |entry| json!({
+                    "kind":"transform", "shard":0, "key":key,
+                    "transform":{
+                        "kind":"replace",
+                        "value":encode_cache_value(CacheValue::Counter(value)),
+                        "storage_class":encode_storage_class(entry.storage_class),
+                    },
+                    "expected_version":entry.version.to_string(),
+                }),
+            );
+            match self.mutate("caches", cache, 0, operation).await {
+                Ok(_) => return Ok(value),
+                Err(BackendError::Conflict) if attempt + 1 < MAX_CACHE_SET_ATTEMPTS => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(BackendError::Conflict)
     }
 
     async fn cache_expire(
@@ -1033,6 +1365,62 @@ impl CompatibilityBackend for NativeHttpBackend {
             .ok_or_else(|| invalid_response("Stream append offset is missing"))
     }
 
+    async fn stream_append_idempotent(
+        &self,
+        stream: &str,
+        partition: u32,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+        records: Vec<StreamRecord>,
+    ) -> Result<u64, BackendError> {
+        if producer_id < 0 || producer_epoch < 0 || base_sequence < 0 {
+            return Err(BackendError::Invalid(
+                "Kafka producer identity, epoch, and sequence must be non-negative".into(),
+            ));
+        }
+        if records.is_empty() || records.len() > usize::from(MAX_NATIVE_STREAM_BATCH_RECORDS) {
+            return Err(BackendError::Invalid(
+                "Kafka idempotent batch record count is out of range".into(),
+            ));
+        }
+        let producer_epoch = u64::try_from(producer_epoch)
+            .unwrap_or_default()
+            .saturating_add(1);
+        let base_sequence = u64::try_from(base_sequence).unwrap_or_default();
+        let envelopes = records.into_iter().map(stream_envelope).collect::<Vec<_>>();
+        let (base, route) = self.discover("streams", stream, partition).await?;
+        let response: Value = self
+            .send_json(
+                Method::POST,
+                suffix_url(&base, "/state"),
+                Some(json!({
+                    "idempotency_key":format!(
+                        "kafka-{producer_id}-{producer_epoch}-{partition}-{base_sequence}"
+                    ),
+                    "expected_term":route.term,
+                    "operation":{
+                        "action":"append_idempotent_batch",
+                        "producer_id":format!("kafka-{producer_id}"),
+                        "producer_epoch":producer_epoch.to_string(),
+                        "base_sequence":base_sequence.to_string(),
+                        "partition":0,
+                        "envelopes":envelopes,
+                    },
+                })),
+                &[
+                    ("x-epoch-resource-generation", &route.resource_generation),
+                    ("x-epoch-tablet-epoch", &route.tablet_epoch),
+                ],
+            )
+            .await?;
+        require_stream_state_applied(&response)?;
+        response
+            .pointer("/receipt/result/value/positions/0/offset")
+            .and_then(decimal_u64)
+            .ok_or_else(|| invalid_response("idempotent Stream base offset is missing"))
+    }
+
     async fn stream_fetch(
         &self,
         stream: &str,
@@ -1070,6 +1458,16 @@ impl CompatibilityBackend for NativeHttpBackend {
             .pointer("/retention/end_offset")
             .and_then(decimal_u64)
             .ok_or_else(|| invalid_response("Stream end offset is missing"))
+    }
+
+    async fn stream_start_offset(&self, stream: &str, partition: u32) -> Result<u64, BackendError> {
+        let response: Value = self
+            .read("streams", stream, partition, "/retention")
+            .await?;
+        response
+            .pointer("/retention/base_offset")
+            .and_then(decimal_u64)
+            .ok_or_else(|| invalid_response("Stream base offset is missing"))
     }
 
     async fn stream_commit_offset(
@@ -1384,6 +1782,30 @@ fn require_applied_mutation(response: &Value) -> Result<(), BackendError> {
     }
 }
 
+fn require_stream_state_applied(response: &Value) -> Result<(), BackendError> {
+    match response
+        .pointer("/receipt/result/kind")
+        .and_then(Value::as_str)
+    {
+        Some("producer_append") => Ok(()),
+        Some("rejected") => match response
+            .pointer("/receipt/result/value/code")
+            .and_then(Value::as_str)
+        {
+            Some("conflict" | "fenced" | "already_exists") => Err(BackendError::Conflict),
+            Some("not_found") => Err(BackendError::NotFound),
+            Some("invalid_argument") => Err(BackendError::Invalid(
+                "native Stream operation was rejected".into(),
+            )),
+            Some("capacity" | "unavailable") => Err(BackendError::Unavailable(
+                "native Stream capacity or availability rejection".into(),
+            )),
+            _ => Err(invalid_response("unknown native Stream rejection code")),
+        },
+        _ => Err(invalid_response("native Stream state outcome is missing")),
+    }
+}
+
 pub(crate) fn validate_cache_multi_set(entries: &[CacheMultiSetEntry]) -> Result<(), BackendError> {
     if entries.is_empty() || entries.len() > MAX_CACHE_MULTI_SET_ENTRIES {
         return Err(BackendError::Invalid(format!(
@@ -1397,6 +1819,29 @@ pub(crate) fn validate_cache_multi_set(entries: &[CacheMultiSetEntry]) -> Result
     {
         return Err(BackendError::Invalid(
             "Cache multi-set keys must be non-empty and distinct".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_cache_atomic_mutations(
+    mutations: &[CacheAtomicMutation],
+) -> Result<(), BackendError> {
+    if mutations.is_empty() || mutations.len() > MAX_CACHE_MULTI_SET_ENTRIES {
+        return Err(BackendError::Invalid(format!(
+            "Cache atomic mutations must be between 1 and {MAX_CACHE_MULTI_SET_ENTRIES}"
+        )));
+    }
+    let mut keys = BTreeSet::new();
+    let valid = mutations.iter().all(|mutation| {
+        let key = match mutation {
+            CacheAtomicMutation::Put { key, .. } | CacheAtomicMutation::Delete { key } => key,
+        };
+        !key.is_empty() && keys.insert(key.as_str())
+    });
+    if !valid {
+        return Err(BackendError::Invalid(
+            "Cache atomic mutation keys must be non-empty and distinct".into(),
         ));
     }
     Ok(())

@@ -222,7 +222,7 @@ fn producer_transactions_tiering_and_snapshot_recovery_are_one_replicated_histor
 }
 
 #[test]
-fn v7_state_command_is_canonical_version_and_kind_locked() {
+fn v8_state_command_is_canonical_and_v7_history_remains_readable() {
     let scope = scope();
     let command = StreamTabletCommand::state(
         &scope,
@@ -245,17 +245,25 @@ fn v7_state_command_is_canonical_version_and_kind_locked() {
     let encoded = command.encode(&scope).unwrap();
     assert_eq!(
         String::from_utf8(encoded.clone()).unwrap(),
-        r#"{"format_version":7,"tablet_id":7,"tablet_epoch":3,"resource":"orders","idempotency_key":"state-golden","applied_at_ms":10,"operation":{"kind":"state","action":"append_idempotent","producer_id":"checkout","producer_epoch":"1","sequence":"0","partition":0,"envelope":{"id":"one","source":"one","type":"order.updated","time_ms":1,"key":"order-1","headers":{},"content_type":"application/json","payload":{"value":1},"priority":0,"extensions":{}}}}"#
+        r#"{"format_version":8,"tablet_id":7,"tablet_epoch":3,"resource":"orders","idempotency_key":"state-golden","applied_at_ms":10,"operation":{"kind":"state","action":"append_idempotent","producer_id":"checkout","producer_epoch":"1","sequence":"0","partition":0,"envelope":{"id":"one","source":"one","type":"order.updated","time_ms":1,"key":"order-1","headers":{},"content_type":"application/json","payload":{"value":1},"priority":0,"extensions":{}}}}"#
     );
     assert_eq!(
         StreamTabletCommand::decode(&encoded, &scope).unwrap(),
         command
     );
 
-    let mut wrong_version: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-    wrong_version["format_version"] = json!(6);
+    let legacy_version = String::from_utf8(encoded.clone())
+        .unwrap()
+        .replacen(r#""format_version":8"#, r#""format_version":7"#, 1)
+        .into_bytes();
+    assert!(StreamTabletCommand::decode(&legacy_version, &scope).is_ok());
+
+    let wrong_version = String::from_utf8(encoded.clone())
+        .unwrap()
+        .replacen(r#""format_version":8"#, r#""format_version":6"#, 1)
+        .into_bytes();
     assert!(matches!(
-        StreamTabletCommand::decode(&serde_json::to_vec(&wrong_version).unwrap(), &scope),
+        StreamTabletCommand::decode(&wrong_version, &scope),
         Err(TabletError::InvalidCommand(_))
     ));
 
@@ -270,6 +278,37 @@ fn v7_state_command_is_canonical_version_and_kind_locked() {
     assert!(matches!(
         StreamTabletCommand::decode(&pretty, &scope),
         Err(TabletError::Decoding(_))
+    ));
+}
+
+#[test]
+fn idempotent_batch_is_locked_to_state_command_v8() {
+    let scope = scope();
+    let command = StreamTabletCommand::state(
+        &scope,
+        "state-batch",
+        StreamStateCommand::AppendIdempotentBatch {
+            producer_id: "checkout".into(),
+            producer_epoch: 1,
+            base_sequence: 0,
+            partition: 0,
+            envelopes: vec![event("one", Some("order-1"), 1)],
+        },
+        10,
+    )
+    .unwrap();
+    assert_eq!(
+        command.format_version,
+        STREAM_TABLET_STATE_COMMAND_FORMAT_VERSION
+    );
+
+    let legacy = String::from_utf8(command.encode(&scope).unwrap())
+        .unwrap()
+        .replacen(r#""format_version":8"#, r#""format_version":7"#, 1)
+        .into_bytes();
+    assert!(matches!(
+        StreamTabletCommand::decode(&legacy, &scope),
+        Err(TabletError::InvalidCommand(_))
     ));
 }
 

@@ -11,6 +11,12 @@ import protocol_regional as campaign
 
 
 class ProtocolRegionalContractTest(unittest.TestCase):
+    def test_fault_plan_keeps_one_representative_per_tablet_profile(self) -> None:
+        self.assertEqual(
+            [resource.kind for resource in campaign.LEADER_FAILURE_RESOURCES],
+            ["cache", "stream", "queue"],
+        )
+
     def test_reported_java_client_versions_match_manifest(self) -> None:
         manifest = Path(__file__).parents[1] / "compatibility/java/pom.xml"
         namespace = {"m": "http://maven.apache.org/POM/4.0.0"}

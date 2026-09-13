@@ -32,13 +32,18 @@ REQUIRED_CHECKS = (
     "redis_binary_counter_ttl",
     "redis_atomic_set_get",
     "redis_atomic_multi_set",
+    "redis_atomic_transaction",
     "redis_native_collections",
+    "redis_pubsub",
+    "redis_stream_groups",
     "kafka_four_codecs_nullable_headers_checkpoint",
+    "kafka_idempotent_producer",
     "kafka_native_consumer_groups",
     "kafka_static_identity_rejoin",
     "amqp_confirm_nack_requeue",
     "amqp_topic_ttl_mandatory_return",
     "amqp_headers_and_native_dead_letter",
+    "amqp_durable_topology_named_dlx_xdeath",
     "native_rejection_not_acknowledged",
     "disconnected_lease_redelivery",
     "acknowledged_messages_stay_absent",
@@ -48,11 +53,18 @@ REQUIRED_CHECKS = (
 RESOURCES = (
     (regional.Resource("cache", "sessions"), 1),
     (regional.Resource("stream", "events"), 2),
+    (regional.Resource("stream", "redis-events"), 1),
     (regional.Resource("queue", "jobs"), 1),
     (regional.Resource("queue", "leases"), 1),
     (regional.Resource("queue", "limited"), 1),
     (regional.Resource("queue", "audit"), 1),
     (regional.Resource("queue", "failed-jobs"), 1),
+    (regional.Resource("queue", "dead-letter-source"), 1),
+)
+LEADER_FAILURE_RESOURCES = (
+    regional.Resource("cache", "sessions"),
+    regional.Resource("stream", "events"),
+    regional.Resource("queue", "jobs"),
 )
 RESOURCE_COUNT = len(RESOURCES)
 TABLET_COUNT = sum(shards for _, shards in RESOURCES)
@@ -104,6 +116,8 @@ class ProtocolCampaign:
         self.gateway = f"{self.cluster.project}-compat"
         self.gateway_created = False
         self.classpath = ""
+        self.redis_stream_id = ""
+        self.redis_stream_settled = False
         self.log = (self.directory / "clients.log").open("w+", encoding="utf-8")
 
     def command(self, *arguments: str, **kwargs: Any) -> subprocess.CompletedProcess:
@@ -177,12 +191,12 @@ class ProtocolCampaign:
         self.command(*arguments)
         print(f"Protocol client phase passed: {phase}", flush=True)
 
-    def redis(self, *arguments: str, body: bytes | None = None) -> bytes:
+    def redis_command(self) -> list[str]:
         network = ["--add-host", "host.docker.internal:host-gateway"]
         host = "host.docker.internal"
         if platform.system() == "Linux":
             network, host = ["--network", "host"], "127.0.0.1"
-        command = [
+        return [
             "docker",
             "run",
             "--rm",
@@ -199,9 +213,39 @@ class ProtocolCampaign:
             "-a",
             "compat-secret",
         ]
+
+    def redis(self, *arguments: str, body: bytes | None = None) -> bytes:
+        command = self.redis_command()
         if body is not None:
             command.append("-x")
         return self.command(*command, *arguments, input=body).stdout
+
+    def redis_session(self, commands: bytes) -> bytes:
+        return self.command(*self.redis_command(), input=commands).stdout
+
+    def verify_redis_pubsub(self) -> None:
+        subscriber = f"{self.gateway}-redis-subscriber"
+        command = self.redis_command()
+        command[command.index("--rm")] = "--detach"
+        command[3:3] = ["--name", subscriber]
+        command.extend(["SUBSCRIBE", "regional-events"])
+        self.command(*command)
+        try:
+
+            def subscribed() -> bool:
+                logs = self.command("docker", "logs", subscriber).stdout
+                return b"subscribe\nregional-events\n1\n" in logs
+
+            regional.wait_until("Redis Pub/Sub subscriber", subscribed)
+            assert self.redis("PUBLISH", "regional-events", "live") == b"1\n"
+
+            def received() -> bool:
+                logs = self.command("docker", "logs", subscriber).stdout
+                return b"message\nregional-events\nlive\n" in logs
+
+            regional.wait_until("Redis Pub/Sub message", received)
+        finally:
+            self.command("docker", "rm", "--force", subscriber)
 
     def start_gateway(self) -> None:
         environment = {
@@ -275,6 +319,13 @@ class ProtocolCampaign:
                 "shard_count": shards,
                 "replica_count": 3,
             }
+            if resource.kind == "cache":
+                body["configuration"] = {
+                    "max_entries": 10_000,
+                    "default_ttl_ms": None,
+                    "eviction": "no_eviction",
+                    "durability": "quorum_durable",
+                }
             if resource.kind == "queue":
                 # Requeue verification intentionally consumes delivery attempts.
                 # Keep the campaign below an explicit native retry ceiling.
@@ -292,7 +343,7 @@ class ProtocolCampaign:
                     },
                     "dedupe_window_ms": 60_000,
                 }
-                if resource.name == "jobs":
+                if resource.name in ("jobs", "dead-letter-source"):
                     body["configuration"]["advanced"] = {
                         "dead_letter_target": "failed-jobs"
                     }
@@ -315,6 +366,52 @@ class ProtocolCampaign:
             for shard in range(shards):
                 regional.wait_for_routes(self.cluster, resource, nodes, shard)
 
+    def seed_redis_advanced(self) -> None:
+        transaction = self.redis_session(
+            b"MULTI\nSET durable-transaction 1\n"
+            b"INCR durable-transaction\nGET durable-transaction\nEXEC\n"
+        )
+        assert transaction.splitlines() == [
+            b"OK",
+            b"QUEUED",
+            b"QUEUED",
+            b"QUEUED",
+            b"OK",
+            b"2",
+            b"2",
+        ], transaction
+        self.redis_stream_id = (
+            self.redis(
+                "XADD",
+                "redis-events",
+                "*",
+                "type",
+                "order.created",
+                "body",
+                "durable",
+            )
+            .decode()
+            .strip()
+        )
+        assert self.redis_stream_id.endswith("-0"), self.redis_stream_id
+        assert (
+            self.redis("XGROUP", "CREATE", "redis-events", "regional-workers", "0-0")
+            == b"OK\n"
+        )
+        delivered = self.redis(
+            "XREADGROUP",
+            "GROUP",
+            "regional-workers",
+            "worker-a",
+            "COUNT",
+            "1",
+            "STREAMS",
+            "redis-events",
+            ">",
+        )
+        assert self.redis_stream_id.encode() in delivered, delivered
+        self.verify_redis_pubsub()
+
     def verify_redis(self) -> None:
         assert self.redis("GET", "durable-binary") == b"persisted\x00\xffvalue\n"
         assert self.redis("GET", "durable-counter") == b"7\n"
@@ -334,6 +431,30 @@ class ProtocolCampaign:
         assert self.redis("ZSCORE", "durable-ranking", "grace") == b"0.5\n"
         structured_ttl = int(self.redis("PTTL", "durable-hash"))
         assert 0 < structured_ttl <= 600_000, structured_ttl
+        assert self.redis("GET", "durable-transaction") == b"2\n"
+        assert self.redis("XLEN", "redis-events") == b"1\n"
+        assert self.redis_stream_id.encode() in self.redis(
+            "XRANGE", "redis-events", "-", "+"
+        )
+        pending = self.redis("XPENDING", "redis-events", "regional-workers")
+        expected_pending = b"0\n" if self.redis_stream_settled else b"1\n"
+        assert pending.startswith(expected_pending), pending
+        self.verify_redis_pubsub()
+
+    def settle_redis_stream(self) -> None:
+        assert (
+            self.redis(
+                "XACK",
+                "redis-events",
+                "regional-workers",
+                self.redis_stream_id,
+            )
+            == b"1\n"
+        )
+        self.redis_stream_settled = True
+        assert self.redis("XPENDING", "redis-events", "regional-workers").startswith(
+            b"0\n"
+        )
 
     def verify(self, phase: str = "verify") -> None:
         self.verify_redis()
@@ -375,13 +496,14 @@ class ProtocolCampaign:
             self.redis("ZADD", "durable-ranking", "1.5", "ada", "0.5", "grace")
             == b"2\n"
         )
+        self.seed_redis_advanced()
         self.java("seed")
         self.verify()
         faults: list[dict[str, Any]] = []
         self.replace_gateway()
         self.verify()
         faults.append({"kind": "gateway_sigkill"})
-        for resource, _ in RESOURCES[:3]:
+        for resource in LEADER_FAILURE_RESOURCES:
             leader, term = regional.wait_for_routes(self.cluster, resource)
             container = self.cluster.compose(
                 "ps", "--all", "--quiet", self.cluster.service(leader)
@@ -409,6 +531,7 @@ class ProtocolCampaign:
             regional.wait_for_nodes(self.cluster)
             self.routes()
         self.java("settle")
+        self.settle_redis_stream()
         for resource, shards in RESOURCES:
             for shard in range(shards):
                 regional.wait_for_profile_convergence(
