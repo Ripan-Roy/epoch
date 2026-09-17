@@ -35,6 +35,9 @@ notes explicitly list additional verified artifacts.
 - The regional recovery campaign now waits for a stable writable Stream leader
   after an all-voter restart before exercising SDK operations, while retaining
   separate health, stale-read convergence, and quorum-unavailable assertions.
+- The Kubernetes restore proof compares native Catalog resources, durable
+  managed intent and tablet identity, and every profile digest while excluding
+  runtime-only leader, reachability, lease-clock, and reconcile-history drift.
 
 ### Limitations
 

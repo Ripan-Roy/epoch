@@ -10,7 +10,8 @@ operator, and proves the complete managed lifecycle:
 * encrypted semantic backup;
 * one policy-driven automatic joint-consensus voter repair;
 * backup-gated, one-node-at-a-time guarded image rollout; and
-* fresh-cluster restore with exact Catalog and profile digest comparison.
+* fresh-cluster restore with exact durable Catalog intent and profile digest
+  comparison.
 
 The upgrade uses a second tag for the exact same locally built node image.  It
 therefore proves the operator's rollout orchestration and persistence gates,
@@ -106,6 +107,75 @@ def exact_int(value: object) -> int | None:
     if isinstance(value, str) and value.isdecimal():
         return int(value)
     return None
+
+
+def restorable_management_view(inventory: Any) -> list[dict[str, Any]]:
+    """Project management inventory onto state that must survive backup.
+
+    Leader identity, reachability, phase text, achieved topology, and capacity
+    are observations of the running cluster. They are expected to change while
+    a freshly restored cluster elects leaders and reconciles. Desired intent,
+    generation cursors, and durable tablet identity must remain exact.
+    """
+
+    require(isinstance(inventory, dict), "management inventory must be an object")
+    resources = inventory.get("resources")
+    require(isinstance(resources, list), "management inventory omitted resources")
+    projected: list[dict[str, Any]] = []
+    resource_fields = (
+        "canonical_name",
+        "kind",
+        "generation",
+        "observed_generation",
+        "catalog_generation",
+        "workload_profile",
+        "shard_count",
+        "governance",
+        "cache_configuration",
+    )
+    placement_fields = (
+        "allowed_regions",
+        "minimum_zones",
+        "minimum_racks",
+        "required_node_class",
+        "excluded_node_ids",
+    )
+    tablet_fields = (
+        "tablet_id",
+        "consensus_group_id",
+        "shard_index",
+        "tablet_epoch",
+        "resource_generation",
+        "desired_replicas",
+        "assigned_node_ids",
+        "bootstrap_voter_node_ids",
+        "target_voter_node_ids",
+        "voter_node_ids",
+    )
+    for resource in resources:
+        require(isinstance(resource, dict), "management resource must be an object")
+        canonical = resource.get("canonical_name")
+        require(
+            isinstance(canonical, str) and canonical,
+            "management resource omitted canonical_name",
+        )
+        item = {field: resource.get(field) for field in resource_fields}
+        placement = resource.get("placement")
+        require(isinstance(placement, dict), f"{canonical} omitted placement")
+        item["placement"] = {field: placement.get(field) for field in placement_fields}
+        tablets = resource.get("tablets")
+        require(isinstance(tablets, list), f"{canonical} omitted tablets")
+        durable_tablets: list[dict[str, Any]] = []
+        for tablet in tablets:
+            require(isinstance(tablet, dict), f"{canonical} has an invalid tablet")
+            durable_tablets.append(
+                {field: tablet.get(field) for field in tablet_fields}
+            )
+        durable_tablets.sort(key=lambda tablet: int(str(tablet["shard_index"])))
+        item["tablets"] = durable_tablets
+        projected.append(item)
+    projected.sort(key=lambda resource: str(resource["canonical_name"]))
+    return projected
 
 
 def wait_until(
@@ -1223,9 +1293,17 @@ class Campaign:
         profiles = self.wait_profile_convergence(cluster, minimum_applied=1)
         catalog = self.catalog_snapshot(cluster)
         resources = catalog.get("resources")
+        management = self.control_request(cluster, "GET", "/v1/regional/resources")
+        require(
+            management.status == 200 and isinstance(management.document, dict),
+            f"management inventory is unavailable for {cluster}: {management}",
+        )
+        durable_management = restorable_management_view(management.document)
         return {
-            "catalog_state_digest": catalog["state_digest"],
             "catalog_resources_sha256": sha256_bytes(canonical_json(resources)),
+            "catalog_management_sha256": sha256_bytes(
+                canonical_json(durable_management)
+            ),
             "resource_count": catalog["resource_count"],
             "tablet_count": catalog["tablet_count"],
             "profiles": profiles,
@@ -1588,7 +1666,7 @@ class Campaign:
             ),
         )
         self.record_step(
-            "fresh-cluster-restore-digests-match",
+            "fresh-cluster-restore-durable-state-matches",
             object_name=object_name,
             state=restored_state,
         )
@@ -1767,7 +1845,7 @@ class Campaign:
                     "automatic_policy_voter_repair_finalized": True,
                     "fresh_backup_gated_upgrade": True,
                     "one_node_at_a_time_maintenance_jobs": True,
-                    "catalog_digest_restored": True,
+                    "catalog_durable_state_restored": True,
                     "profile_digests_restored": True,
                     "restored_cluster_accepts_traffic": True,
                 },

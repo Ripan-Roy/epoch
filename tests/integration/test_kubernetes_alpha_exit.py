@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import inspect
 import tempfile
 import unittest
@@ -201,6 +202,70 @@ class KubernetesAlphaExitContractTest(unittest.TestCase):
         self.assertIsNone(campaign.exact_int(True))
         self.assertIsNone(campaign.exact_int(-1))
         self.assertIsNone(campaign.exact_int("7.0"))
+
+    def test_restorable_management_view_excludes_runtime_observations(self) -> None:
+        inventory = {
+            "resources": [
+                {
+                    "canonical_name": "acme/shop/dev/core/stream/orders",
+                    "kind": "stream",
+                    "generation": "2",
+                    "observed_generation": "2",
+                    "catalog_generation": "1",
+                    "workload_profile": "stream_log",
+                    "shard_count": 1,
+                    "phase": "ready",
+                    "message": "converged",
+                    "governance": {"owner": "team:platform"},
+                    "placement": {
+                        "allowed_regions": ["ap-south"],
+                        "minimum_zones": 3,
+                        "minimum_racks": 3,
+                        "required_node_class": "general-purpose",
+                        "excluded_node_ids": [1],
+                        "achieved_zones": 3,
+                        "achieved_racks": 3,
+                        "nodes": [{"node_id": "2", "available_consensus_groups": 5}],
+                    },
+                    "tablets": [
+                        {
+                            "tablet_id": "1",
+                            "consensus_group_id": "2",
+                            "shard_index": 0,
+                            "tablet_epoch": "1",
+                            "resource_generation": "1",
+                            "desired_replicas": 3,
+                            "assigned_node_ids": ["2", "3", "4"],
+                            "bootstrap_voter_node_ids": ["1", "2", "3"],
+                            "target_voter_node_ids": [],
+                            "voter_node_ids": ["2", "3", "4"],
+                            "reachable_voter_node_ids": ["2", "3", "4"],
+                            "leader_node_id": "2",
+                        }
+                    ],
+                }
+            ]
+        }
+        restarted = copy.deepcopy(inventory)
+        restarted_resource = restarted["resources"][0]
+        restarted_resource["phase"] = "degraded"
+        restarted_resource["message"] = "leader election in progress"
+        restarted_resource["placement"]["achieved_zones"] = 2
+        restarted_resource["placement"]["nodes"][0]["available_consensus_groups"] = 4
+        restarted_resource["tablets"][0]["reachable_voter_node_ids"] = ["3", "4"]
+        restarted_resource["tablets"][0]["leader_node_id"] = "3"
+
+        self.assertEqual(
+            campaign.restorable_management_view(inventory),
+            campaign.restorable_management_view(restarted),
+        )
+
+        changed = copy.deepcopy(restarted)
+        changed["resources"][0]["generation"] = "3"
+        self.assertNotEqual(
+            campaign.restorable_management_view(inventory),
+            campaign.restorable_management_view(changed),
+        )
 
 
 if __name__ == "__main__":
