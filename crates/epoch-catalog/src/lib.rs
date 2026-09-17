@@ -1453,7 +1453,9 @@ impl Catalog {
                 name: write.name.clone(),
                 generation,
                 desired: write.desired.clone(),
-                status: default_managed_status(),
+                status: current
+                    .as_ref()
+                    .map_or_else(default_managed_status, |resource| resource.status.clone()),
                 deletion_requested: false,
             };
             next_resources.insert(write.name.clone(), resource.clone());

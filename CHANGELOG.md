@@ -29,6 +29,9 @@ notes explicitly list additional verified artifacts.
 - Managed reconcile and membership retries resolve their durable Catalog
   outcome before resampling lease or capacity evidence, preventing a completed
   proposal token from being rebound to different command bytes.
+- Desired-state updates retain the last generation-fenced observed status, so
+  policy-only changes continue from the real native Catalog generation instead
+  of retrying an existing resource from generation zero.
 
 ### Limitations
 

@@ -242,6 +242,51 @@ fn desired_batch_is_atomic_idempotent_and_watch_resumable() {
 }
 
 #[test]
+fn desired_update_preserves_last_observed_status_for_reconciliation_cursor() {
+    let mut catalog = Catalog::new();
+    catalog
+        .apply(apply_desired(
+            "desired-orders-v1",
+            vec![desired("orders", Some(0))],
+        ))
+        .unwrap();
+    catalog
+        .apply(lease("lease-control-a", "control-a", 1_000))
+        .unwrap();
+    let observed = json!({
+        "phase": "ready",
+        "observed_generation": "1",
+        "catalog_generation": "7"
+    });
+    catalog
+        .apply(CatalogCommand::UpdateManagedStatus(
+            UpdateManagedResourceStatus {
+                request_token: "status-orders-v1".into(),
+                lease: guard("control-a", 1, 1_001),
+                name: name("orders"),
+                expected_generation: 1,
+                status: observed.clone(),
+            },
+        ))
+        .unwrap();
+
+    let mut updated = desired("orders", Some(1));
+    updated.desired["placement"] = json!({"excluded_node_ids": [1]});
+    let mutation = catalog
+        .apply(apply_desired("desired-orders-v2", vec![updated]))
+        .unwrap();
+    let CatalogMutation::DesiredApplied { resources, .. } = mutation else {
+        panic!("expected desired update");
+    };
+    assert_eq!(resources[0].resource.generation, 2);
+    assert_eq!(resources[0].resource.status, observed);
+    assert_eq!(
+        catalog.managed_resource(&name("orders")).unwrap().status,
+        observed
+    );
+}
+
+#[test]
 fn leases_fence_stale_controllers_and_survive_snapshot_recovery() {
     let mut catalog = Catalog::new();
     catalog
