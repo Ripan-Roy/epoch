@@ -424,9 +424,10 @@ export function ClusterMilestoneBody() {
         <p>
           A regional deployment accepts 3–1,024 physical Rust nodes. One dedicated Catalog and independent
           three- or five-voter Cache, Stream, Queue, and Event Bus tablets run behind resource/shard routing;
-          each node materializes only the groups assigned to it. The Go control plane reconciles desired state
-          through Rust, transactionally persists management metadata, and exposes observed placement to the
-          browser; the console never contacts a storage node. The public SDK quickstart remains standalone and
+          each node materializes only the groups assigned to it. Managed metadata commits through Rust Catalog
+          consensus; three replaceable Go replicas reconcile through one fenced owner and expose placement to
+          the browser; the console never contacts a storage node. The public SDK quickstart remains standalone
+          and
           <code> local_durable</code>.
         </p>
         <p>
@@ -434,9 +435,9 @@ export function ClusterMilestoneBody() {
           regions, minimum zones/racks, exclusions, class, distinct three/five-voter placement, and
           incremental capacity before touching the Catalog. From fresh topology it serializes one automatic
           policy repair, failure-domain repair, or load-improving move per resource. Rust adds the learner,
-          waits for catch-up, enters joint consensus, finalizes the target, and reopens durably. Transactional
-          cross-resource reservation and multi-owner Go control remain open; these regional routes remain
-          experimental.
+          waits for catch-up, enters joint consensus, finalizes the target, and reopens durably. Fleet-wide
+          topology-plan reservation and protected multi-control chaos remain open; these regional routes
+          remain experimental.
         </p>
         <p>
           Regional reads default to a safe leader <code>ReadIndex</code>, wait for majority confirmation and
@@ -584,21 +585,113 @@ export function ClusterMilestoneBody() {
   );
 }
 
+/* --------------------------------------------------------------------------
+   Replicated control metadata
+   -------------------------------------------------------------------------- */
+
+export function ControlPlaneHABody() {
+  return (
+    <>
+      <Topic id="ownership" title="One authority, three replaceable controllers">
+        <p>
+          Managed desired documents, status, generation high-water marks, tombstones, request outcomes, and
+          change cursors commit in the three- or five-voter Rust Catalog. Every read crosses a
+          quorum-confirmed
+          <code> ReadIndex</code> barrier. Go keeps only a replaceable lease cache and advisory count.
+        </p>
+        <p>
+          The operator runs three stable, host-anti-affined control pods with a two-pod disruption budget. A
+          replicated lease names the current owner, fence, and expiry. Status, materialization, membership
+          planning, and delete carry that guard, so a stale pod cannot mutate after failover.
+        </p>
+      </Topic>
+
+      <Topic id="atomicity" title="Keep related state changes atomic">
+        <div className="verification-grid">
+          <EvidenceCard label="Desired batch" claim="Commit 1–128 resource specs all or nothing.">
+            Names are normalized, distinct, and canonically sorted before one Catalog proposal. A generation
+            conflict leaves every member unchanged.
+          </EvidenceCard>
+          <EvidenceCard label="Admission" claim="Reserve capacity with native materialization.">
+            The command carries every placement plus a complete current node-capacity observation. Stale,
+            partial, or overcommitted input fails before allocating any tablet.
+          </EvidenceCard>
+          <EvidenceCard label="Delete" claim="Remove desired and native state under one fence.">
+            HTTP and gRPC both delegate through the reconciler; a crash cannot acknowledge only half of the
+            managed deletion.
+          </EvidenceCard>
+        </div>
+      </Topic>
+
+      <Topic id="operations" title="Resolve outcomes and resume change streams">
+        <p>
+          <code>BatchApplyResources</code> returns replicated desired results in canonical name order.
+          <code> GetOperation</code> requires the exact affected resource-name set and read authorization for
+          every scope; the request token by itself is not a credential. Rejected commands retain those names
+          so their definite failure is still safe to inspect. An uncommitted proposal has no durable identity
+          set and remains undisclosed until its outcome can be authorized exactly.
+        </p>
+        <CodeBlock
+          label="resume contract"
+          value={`WatchResourceChangesRequest { after_cursor: previous.next_cursor, batch_size: 100 }
+
+WatchResourceChangesResponse {
+  earliest_cursor: 37   // oldest retained cursor
+  latest_cursor: 812    // current Catalog high-water mark
+  next_cursor: 136      // last cursor scanned in this bounded page
+  changes: [...]        // only caller-authorized changes
+}`}
+          collapsible={false}
+        />
+        <p>
+          Resume with <code>next_cursor</code>, not <code>latest_cursor</code>. Tenant filtering can produce
+          an empty visible batch while the scanned checkpoint advances. Compacted and future cursors fail
+          explicitly rather than skipping state.
+        </p>
+      </Topic>
+
+      <Topic id="migration" title="Import the previous single-owner database once">
+        <p>
+          Ordered startup lets pod zero read one consistent bbolt image and atomically import live desired and
+          status records plus every live or tombstoned generation. The old file remains mounted as rollback
+          evidence before pods one and two start. Historical request tokens are not reconstructed because the
+          old record does not contain the new canonical Catalog command. The atomic import currently accepts
+          at most 128 live-or-tombstoned generation records; larger legacy registries fail startup and require
+          an explicit migration tool before upgrade.
+        </p>
+      </Topic>
+
+      <Topic id="limits" title="Current evidence boundary">
+        <p>
+          Local unit suites and real three-node tests cover ownership fencing, exact replay, batch conflicts,
+          capacity refusal, operation lookup, change resume, managed delete, snapshot recovery, and legacy
+          import. Protected multi-control chaos, a public request-token retention window, Catalog metadata
+          backup/restore, horizontal metadata sharding, and long-duration clock-fault evidence remain open.
+        </p>
+        <p>
+          Read the full decision in{" "}
+          <a href={`${repositoryDocsUrl}/adr/0050-replicated-control-metadata-and-ha.md`}>ADR-0050</a>.
+        </p>
+      </Topic>
+    </>
+  );
+}
+
 export function DeploymentBody() {
   return (
     <>
       <Note title="Private-beta installation boundary">
-        The operator installs N physical nodes with three- or five-voter groups, mandatory TLS/mTLS, one
-        durable control owner, scheduled encrypted semantic backups, guarded data-node upgrades, and explicit
-        learner-first voter replacement. Go can automatically repair an excluded voter; Kubernetes rack
-        attestation remains open. A clean local lifecycle passes with the same binary under two tags;
+        The operator installs N physical nodes with three- or five-voter groups, mandatory TLS/mTLS, one three
+        lease-fenced control replicas, scheduled encrypted semantic backups, guarded data-node upgrades, and
+        explicit learner-first voter replacement. Go can automatically repair an excluded voter; Kubernetes
+        rack attestation remains open. A clean local lifecycle passes with the same binary under two tags;
         mixed-version compatibility, cloud-object destinations, and protected candidate evidence remain open.
       </Note>
 
       <Topic id="kubernetes" title="Install on Kubernetes">
         <p>
           The <code>EpochCluster</code> controller accepts 3–1,024 physical nodes. It renders stable peer
-          identities, provisions one PVC per node and the control owner, validates policy, credential, TLS,
+          identities, provisions one PVC per data node and control replica, validates policy, credential, TLS,
           backup key, and RWX destination references before creating workloads, and reports observed readiness
           through status conditions.
         </p>
@@ -747,7 +840,7 @@ export function DeploymentBody() {
           <ReferenceCard
             eyebrow="Architecture decision"
             title="Product runtime closure"
-            description="The operator, control owner, CLI, source ingestion, deployment, and release-evidence boundaries delivered by the managed runtime."
+            description="The operator, replicated control set, CLI, source ingestion, deployment, and release-evidence boundaries delivered by the managed runtime."
             href={`${repositoryDocsUrl}/adr/0038-product-runtime-closure.md`}
           />
           <ReferenceCard

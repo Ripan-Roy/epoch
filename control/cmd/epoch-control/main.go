@@ -35,7 +35,7 @@ const (
 	defaultRegionalEndpoints        = "http://127.0.0.1:7601"
 	defaultRegionalMetricsEndpoints = "http://127.0.0.1:7602"
 	defaultAllowedOrigins           = "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:4173,http://localhost:4173"
-	defaultStatePath                = "data/control/registry.db"
+	defaultLegacyStatePath          = "data/control/registry.db"
 	defaultAuditPath                = "data/control/audit.ndjson"
 	defaultReconcileInterval        = time.Second
 	shutdownTimeout                 = 10 * time.Second
@@ -48,7 +48,8 @@ type controlConfig struct {
 	regionalEndpoints        []string
 	regionalMetricsEndpoints []string
 	allowedOrigins           []string
-	statePath                string
+	instanceID               string
+	legacyStatePath          string
 	authPolicyPath           string
 	auditPath                string
 	regionalToken            secret
@@ -147,9 +148,12 @@ func run(ctx context.Context, logger *slog.Logger) (runError error) {
 	if err != nil {
 		return fmt.Errorf("configure regional diagnostics: %w", err)
 	}
-	registry, err := resources.OpenDurableRegistry(config.statePath)
+	registry, err := regional.NewCatalogRegistry(authority, config.instanceID)
 	if err != nil {
-		return fmt.Errorf("open durable control metadata: %w", err)
+		return fmt.Errorf("configure replicated control metadata: %w", err)
+	}
+	if err := migrateLegacyRegistry(config.legacyStatePath, registry, logger); err != nil {
+		return err
 	}
 	defer func() {
 		runError = errors.Join(runError, registry.Close())
@@ -158,6 +162,7 @@ func run(ctx context.Context, logger *slog.Logger) (runError error) {
 	grpcOptions := []grpc.ServerOption{
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.UnaryInterceptor(controlauth.NewUnaryServerInterceptor(policy, audit)),
+		grpc.StreamInterceptor(controlauth.NewStreamServerInterceptor(policy, audit)),
 	}
 	if serverTLS != nil {
 		grpcOptions = append(grpcOptions, grpc.Creds(credentials.NewTLS(serverTLS.Clone())))
@@ -172,12 +177,13 @@ func run(ctx context.Context, logger *slog.Logger) (runError error) {
 			audit,
 		),
 	)
-	httpHandler, err := resources.NewAuthenticatedHTTPHandlerWithDiagnostics(
+	httpHandler, err := resources.NewAuthenticatedHTTPHandlerWithDiagnosticsAndDeleteCoordinator(
 		registry,
 		config.allowedOrigins,
 		policy,
 		audit,
 		diagnostics,
+		reconciler,
 	)
 	if err != nil {
 		return fmt.Errorf("configure control HTTP: %w", err)
@@ -246,6 +252,8 @@ func run(ctx context.Context, logger *slog.Logger) (runError error) {
 		config.allowedOrigins,
 		"registry",
 		registry.Mode(),
+		"instance_id",
+		config.instanceID,
 		"auth_policy_id",
 		policy.ID(),
 		"data_path_owner",
@@ -316,7 +324,68 @@ func stopGRPC(ctx context.Context, server *grpc.Server) error {
 	}
 }
 
+func migrateLegacyRegistry(
+	path string,
+	registry *regional.CatalogRegistry,
+	logger *slog.Logger,
+) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect legacy control metadata: %w", err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("legacy control metadata path is a directory")
+	}
+	legacy, err := resources.OpenDurableRegistry(path)
+	if err != nil {
+		return fmt.Errorf("open legacy control metadata: %w", err)
+	}
+	snapshot, exportErr := legacy.ExportLegacySnapshot()
+	closeErr := legacy.Close()
+	if err := errors.Join(exportErr, closeErr); err != nil {
+		return fmt.Errorf("read legacy control metadata: %w", err)
+	}
+	if len(snapshot.Generations) == 0 {
+		return nil
+	}
+	if err := registry.ImportLegacy(snapshot); err != nil {
+		return fmt.Errorf("import legacy control metadata: %w", err)
+	}
+	logger.Info(
+		"legacy control metadata imported into regional consensus",
+		"resource_count",
+		len(snapshot.Resources),
+		"generation_count",
+		len(snapshot.Generations),
+		"legacy_database_retained",
+		true,
+	)
+	return nil
+}
+
 func loadConfig() (controlConfig, error) {
+	instanceID := strings.TrimSpace(os.Getenv("EPOCH_CONTROL_INSTANCE_ID"))
+	if instanceID == "" {
+		hostname, err := os.Hostname()
+		if err != nil {
+			return controlConfig{}, fmt.Errorf("resolve control instance ID: %w", err)
+		}
+		instanceID = hostname
+	}
+	legacyStatePath := strings.TrimSpace(os.Getenv("EPOCH_CONTROL_LEGACY_STATE_PATH"))
+	if legacyStatePath == "" {
+		// EPOCH_CONTROL_STATE_PATH remains a read-only compatibility alias for
+		// upgrading the former single-process bbolt registry. New deployments
+		// should configure only EPOCH_CONTROL_LEGACY_STATE_PATH.
+		legacyStatePath = envOrDefault("EPOCH_CONTROL_STATE_PATH", defaultLegacyStatePath)
+	}
 	config := controlConfig{
 		httpAddress: envOrDefault("EPOCH_CONTROL_ADDR", defaultHTTPAddress),
 		grpcAddress: envOrDefault("EPOCH_CONTROL_GRPC_ADDR", defaultGRPCAddress),
@@ -334,7 +403,8 @@ func loadConfig() (controlConfig, error) {
 		allowedOrigins: splitEndpoints(
 			envOrDefault("EPOCH_CONTROL_ALLOWED_ORIGINS", defaultAllowedOrigins),
 		),
-		statePath:         envOrDefault("EPOCH_CONTROL_STATE_PATH", defaultStatePath),
+		instanceID:        instanceID,
+		legacyStatePath:   legacyStatePath,
 		authPolicyPath:    strings.TrimSpace(os.Getenv("EPOCH_AUTH_POLICY_PATH")),
 		auditPath:         envOrDefault("EPOCH_CONTROL_AUDIT_PATH", defaultAuditPath),
 		regionalToken:     secret(os.Getenv("EPOCH_CONTROL_REGIONAL_TOKEN")),

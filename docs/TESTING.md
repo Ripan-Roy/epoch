@@ -583,9 +583,10 @@ The process campaign performs a linearizable-by-default Stream read on the
 current leader and verifies the quorum barrier term, read index, applied index,
 and response headers. Polls that intentionally compare every follower opt into
 `local_stale`; no test depends on an implicit consistency downgrade.
-It then sends `SIGKILL` to the Go process, reopens
-the same bbolt metadata file, proves the original apply token replays without a
-second Rust mutation, and waits for placement to reconcile ready again. The
+It then sends `SIGKILL` to the Go process, reconnects to the same replicated
+Catalog metadata with the same control identity, proves the original apply
+token replays without a second Rust mutation, and waits for placement to
+reconcile ready again. The
 campaign also creates Cache, Stream, Queue, and Event Bus resources directly
 through the Rust catalog and commits one typed operation per profile. It kills
 the managed Stream leader, waits for the Go BFF to report degraded two-voter
@@ -617,7 +618,8 @@ for catalog plus all eight profile groups to checkpoint and physically compact
 on every voter: 27 local voter/group copies. Each old voter catches up before
 the campaign verifies durable applied/checkpoint/retained-first boundaries,
 kills every node, verifies Go clears stale placement while authority is
-unavailable, and reopens the same volumes before comparing those boundaries,
+unavailable and returns 503 rather than serving cached management state, and
+reopens the same volumes before comparing those boundaries,
 catalog/profile digests, and the increased applied-command index. The beta.10
 campaign also recomputes every canonical Go and Rust audit-record digest,
 checks chain continuity and credential exclusion, and compares complete journal

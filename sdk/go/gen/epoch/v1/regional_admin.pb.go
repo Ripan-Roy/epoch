@@ -21,6 +21,110 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type OperationState int32
+
+const (
+	OperationState_OPERATION_STATE_UNSPECIFIED OperationState = 0
+	OperationState_OPERATION_STATE_PENDING     OperationState = 1
+	OperationState_OPERATION_STATE_SUCCEEDED   OperationState = 2
+	OperationState_OPERATION_STATE_FAILED      OperationState = 3
+)
+
+// Enum value maps for OperationState.
+var (
+	OperationState_name = map[int32]string{
+		0: "OPERATION_STATE_UNSPECIFIED",
+		1: "OPERATION_STATE_PENDING",
+		2: "OPERATION_STATE_SUCCEEDED",
+		3: "OPERATION_STATE_FAILED",
+	}
+	OperationState_value = map[string]int32{
+		"OPERATION_STATE_UNSPECIFIED": 0,
+		"OPERATION_STATE_PENDING":     1,
+		"OPERATION_STATE_SUCCEEDED":   2,
+		"OPERATION_STATE_FAILED":      3,
+	}
+)
+
+func (x OperationState) Enum() *OperationState {
+	p := new(OperationState)
+	*p = x
+	return p
+}
+
+func (x OperationState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (OperationState) Descriptor() protoreflect.EnumDescriptor {
+	return file_epoch_v1_regional_admin_proto_enumTypes[0].Descriptor()
+}
+
+func (OperationState) Type() protoreflect.EnumType {
+	return &file_epoch_v1_regional_admin_proto_enumTypes[0]
+}
+
+func (x OperationState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use OperationState.Descriptor instead.
+func (OperationState) EnumDescriptor() ([]byte, []int) {
+	return file_epoch_v1_regional_admin_proto_rawDescGZIP(), []int{0}
+}
+
+type ResourceChangeKind int32
+
+const (
+	ResourceChangeKind_RESOURCE_CHANGE_KIND_UNSPECIFIED     ResourceChangeKind = 0
+	ResourceChangeKind_RESOURCE_CHANGE_KIND_DESIRED_APPLIED ResourceChangeKind = 1
+	ResourceChangeKind_RESOURCE_CHANGE_KIND_DESIRED_DELETED ResourceChangeKind = 2
+	ResourceChangeKind_RESOURCE_CHANGE_KIND_STATUS_UPDATED  ResourceChangeKind = 3
+)
+
+// Enum value maps for ResourceChangeKind.
+var (
+	ResourceChangeKind_name = map[int32]string{
+		0: "RESOURCE_CHANGE_KIND_UNSPECIFIED",
+		1: "RESOURCE_CHANGE_KIND_DESIRED_APPLIED",
+		2: "RESOURCE_CHANGE_KIND_DESIRED_DELETED",
+		3: "RESOURCE_CHANGE_KIND_STATUS_UPDATED",
+	}
+	ResourceChangeKind_value = map[string]int32{
+		"RESOURCE_CHANGE_KIND_UNSPECIFIED":     0,
+		"RESOURCE_CHANGE_KIND_DESIRED_APPLIED": 1,
+		"RESOURCE_CHANGE_KIND_DESIRED_DELETED": 2,
+		"RESOURCE_CHANGE_KIND_STATUS_UPDATED":  3,
+	}
+)
+
+func (x ResourceChangeKind) Enum() *ResourceChangeKind {
+	p := new(ResourceChangeKind)
+	*p = x
+	return p
+}
+
+func (x ResourceChangeKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ResourceChangeKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_epoch_v1_regional_admin_proto_enumTypes[1].Descriptor()
+}
+
+func (ResourceChangeKind) Type() protoreflect.EnumType {
+	return &file_epoch_v1_regional_admin_proto_enumTypes[1]
+}
+
+func (x ResourceChangeKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ResourceChangeKind.Descriptor instead.
+func (ResourceChangeKind) EnumDescriptor() ([]byte, []int) {
+	return file_epoch_v1_regional_admin_proto_rawDescGZIP(), []int{1}
+}
+
 type ApplyResourceRequest struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
 	RequestToken       string                 `protobuf:"bytes,1,opt,name=request_token,json=requestToken,proto3" json:"request_token,omitempty"`
@@ -549,6 +653,554 @@ func (x *DeleteResourceResponse) GetReplayed() bool {
 	return false
 }
 
+type BatchApplyResource struct {
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	Name               *ResourceName          `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Spec               *ResourceSpec          `protobuf:"bytes,2,opt,name=spec,proto3" json:"spec,omitempty"`
+	ExpectedGeneration *uint64                `protobuf:"varint,3,opt,name=expected_generation,json=expectedGeneration,proto3,oneof" json:"expected_generation,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *BatchApplyResource) Reset() {
+	*x = BatchApplyResource{}
+	mi := &file_epoch_v1_regional_admin_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BatchApplyResource) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BatchApplyResource) ProtoMessage() {}
+
+func (x *BatchApplyResource) ProtoReflect() protoreflect.Message {
+	mi := &file_epoch_v1_regional_admin_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BatchApplyResource.ProtoReflect.Descriptor instead.
+func (*BatchApplyResource) Descriptor() ([]byte, []int) {
+	return file_epoch_v1_regional_admin_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *BatchApplyResource) GetName() *ResourceName {
+	if x != nil {
+		return x.Name
+	}
+	return nil
+}
+
+func (x *BatchApplyResource) GetSpec() *ResourceSpec {
+	if x != nil {
+		return x.Spec
+	}
+	return nil
+}
+
+func (x *BatchApplyResource) GetExpectedGeneration() uint64 {
+	if x != nil && x.ExpectedGeneration != nil {
+		return *x.ExpectedGeneration
+	}
+	return 0
+}
+
+type BatchApplyResourcesRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequestToken  string                 `protobuf:"bytes,1,opt,name=request_token,json=requestToken,proto3" json:"request_token,omitempty"`
+	Resources     []*BatchApplyResource  `protobuf:"bytes,2,rep,name=resources,proto3" json:"resources,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BatchApplyResourcesRequest) Reset() {
+	*x = BatchApplyResourcesRequest{}
+	mi := &file_epoch_v1_regional_admin_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BatchApplyResourcesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BatchApplyResourcesRequest) ProtoMessage() {}
+
+func (x *BatchApplyResourcesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_epoch_v1_regional_admin_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BatchApplyResourcesRequest.ProtoReflect.Descriptor instead.
+func (*BatchApplyResourcesRequest) Descriptor() ([]byte, []int) {
+	return file_epoch_v1_regional_admin_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *BatchApplyResourcesRequest) GetRequestToken() string {
+	if x != nil {
+		return x.RequestToken
+	}
+	return ""
+}
+
+func (x *BatchApplyResourcesRequest) GetResources() []*BatchApplyResource {
+	if x != nil {
+		return x.Resources
+	}
+	return nil
+}
+
+type BatchApplyResourcesResponse struct {
+	state         protoimpl.MessageState   `protogen:"open.v1"`
+	Results       []*ApplyResourceResponse `protobuf:"bytes,1,rep,name=results,proto3" json:"results,omitempty"`
+	Replayed      bool                     `protobuf:"varint,2,opt,name=replayed,proto3" json:"replayed,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BatchApplyResourcesResponse) Reset() {
+	*x = BatchApplyResourcesResponse{}
+	mi := &file_epoch_v1_regional_admin_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BatchApplyResourcesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BatchApplyResourcesResponse) ProtoMessage() {}
+
+func (x *BatchApplyResourcesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_epoch_v1_regional_admin_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BatchApplyResourcesResponse.ProtoReflect.Descriptor instead.
+func (*BatchApplyResourcesResponse) Descriptor() ([]byte, []int) {
+	return file_epoch_v1_regional_admin_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *BatchApplyResourcesResponse) GetResults() []*ApplyResourceResponse {
+	if x != nil {
+		return x.Results
+	}
+	return nil
+}
+
+func (x *BatchApplyResourcesResponse) GetReplayed() bool {
+	if x != nil {
+		return x.Replayed
+	}
+	return false
+}
+
+type GetOperationRequest struct {
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	RequestToken string                 `protobuf:"bytes,1,opt,name=request_token,json=requestToken,proto3" json:"request_token,omitempty"`
+	// affected_resources is required and must exactly match the durable
+	// operation once it commits. This prevents cross-tenant token disclosure.
+	AffectedResources []*ResourceName `protobuf:"bytes,2,rep,name=affected_resources,json=affectedResources,proto3" json:"affected_resources,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *GetOperationRequest) Reset() {
+	*x = GetOperationRequest{}
+	mi := &file_epoch_v1_regional_admin_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetOperationRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetOperationRequest) ProtoMessage() {}
+
+func (x *GetOperationRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_epoch_v1_regional_admin_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetOperationRequest.ProtoReflect.Descriptor instead.
+func (*GetOperationRequest) Descriptor() ([]byte, []int) {
+	return file_epoch_v1_regional_admin_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *GetOperationRequest) GetRequestToken() string {
+	if x != nil {
+		return x.RequestToken
+	}
+	return ""
+}
+
+func (x *GetOperationRequest) GetAffectedResources() []*ResourceName {
+	if x != nil {
+		return x.AffectedResources
+	}
+	return nil
+}
+
+type GetOperationResponse struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	RequestToken      string                 `protobuf:"bytes,1,opt,name=request_token,json=requestToken,proto3" json:"request_token,omitempty"`
+	ProposalId        uint64                 `protobuf:"varint,2,opt,name=proposal_id,json=proposalId,proto3" json:"proposal_id,omitempty"`
+	State             OperationState         `protobuf:"varint,3,opt,name=state,proto3,enum=epoch.v1.OperationState" json:"state,omitempty"`
+	AffectedResources []*ResourceName        `protobuf:"bytes,4,rep,name=affected_resources,json=affectedResources,proto3" json:"affected_resources,omitempty"`
+	FailureCode       string                 `protobuf:"bytes,5,opt,name=failure_code,json=failureCode,proto3" json:"failure_code,omitempty"`
+	FailureMessage    string                 `protobuf:"bytes,6,opt,name=failure_message,json=failureMessage,proto3" json:"failure_message,omitempty"`
+	FirstChangeCursor uint64                 `protobuf:"varint,7,opt,name=first_change_cursor,json=firstChangeCursor,proto3" json:"first_change_cursor,omitempty"`
+	LastChangeCursor  uint64                 `protobuf:"varint,8,opt,name=last_change_cursor,json=lastChangeCursor,proto3" json:"last_change_cursor,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *GetOperationResponse) Reset() {
+	*x = GetOperationResponse{}
+	mi := &file_epoch_v1_regional_admin_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetOperationResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetOperationResponse) ProtoMessage() {}
+
+func (x *GetOperationResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_epoch_v1_regional_admin_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetOperationResponse.ProtoReflect.Descriptor instead.
+func (*GetOperationResponse) Descriptor() ([]byte, []int) {
+	return file_epoch_v1_regional_admin_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *GetOperationResponse) GetRequestToken() string {
+	if x != nil {
+		return x.RequestToken
+	}
+	return ""
+}
+
+func (x *GetOperationResponse) GetProposalId() uint64 {
+	if x != nil {
+		return x.ProposalId
+	}
+	return 0
+}
+
+func (x *GetOperationResponse) GetState() OperationState {
+	if x != nil {
+		return x.State
+	}
+	return OperationState_OPERATION_STATE_UNSPECIFIED
+}
+
+func (x *GetOperationResponse) GetAffectedResources() []*ResourceName {
+	if x != nil {
+		return x.AffectedResources
+	}
+	return nil
+}
+
+func (x *GetOperationResponse) GetFailureCode() string {
+	if x != nil {
+		return x.FailureCode
+	}
+	return ""
+}
+
+func (x *GetOperationResponse) GetFailureMessage() string {
+	if x != nil {
+		return x.FailureMessage
+	}
+	return ""
+}
+
+func (x *GetOperationResponse) GetFirstChangeCursor() uint64 {
+	if x != nil {
+		return x.FirstChangeCursor
+	}
+	return 0
+}
+
+func (x *GetOperationResponse) GetLastChangeCursor() uint64 {
+	if x != nil {
+		return x.LastChangeCursor
+	}
+	return 0
+}
+
+type ResourceChange struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Cursor        uint64                 `protobuf:"varint,1,opt,name=cursor,proto3" json:"cursor,omitempty"`
+	Kind          ResourceChangeKind     `protobuf:"varint,2,opt,name=kind,proto3,enum=epoch.v1.ResourceChangeKind" json:"kind,omitempty"`
+	Name          *ResourceName          `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	Generation    uint64                 `protobuf:"varint,4,opt,name=generation,proto3" json:"generation,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResourceChange) Reset() {
+	*x = ResourceChange{}
+	mi := &file_epoch_v1_regional_admin_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResourceChange) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResourceChange) ProtoMessage() {}
+
+func (x *ResourceChange) ProtoReflect() protoreflect.Message {
+	mi := &file_epoch_v1_regional_admin_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResourceChange.ProtoReflect.Descriptor instead.
+func (*ResourceChange) Descriptor() ([]byte, []int) {
+	return file_epoch_v1_regional_admin_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *ResourceChange) GetCursor() uint64 {
+	if x != nil {
+		return x.Cursor
+	}
+	return 0
+}
+
+func (x *ResourceChange) GetKind() ResourceChangeKind {
+	if x != nil {
+		return x.Kind
+	}
+	return ResourceChangeKind_RESOURCE_CHANGE_KIND_UNSPECIFIED
+}
+
+func (x *ResourceChange) GetName() *ResourceName {
+	if x != nil {
+		return x.Name
+	}
+	return nil
+}
+
+func (x *ResourceChange) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+type WatchResourceChangesRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AfterCursor   uint64                 `protobuf:"varint,1,opt,name=after_cursor,json=afterCursor,proto3" json:"after_cursor,omitempty"`
+	BatchSize     uint32                 `protobuf:"varint,2,opt,name=batch_size,json=batchSize,proto3" json:"batch_size,omitempty"`
+	Organization  string                 `protobuf:"bytes,3,opt,name=organization,proto3" json:"organization,omitempty"`
+	Project       string                 `protobuf:"bytes,4,opt,name=project,proto3" json:"project,omitempty"`
+	Environment   string                 `protobuf:"bytes,5,opt,name=environment,proto3" json:"environment,omitempty"`
+	Namespace     string                 `protobuf:"bytes,6,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	Kind          ResourceKind           `protobuf:"varint,7,opt,name=kind,proto3,enum=epoch.v1.ResourceKind" json:"kind,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WatchResourceChangesRequest) Reset() {
+	*x = WatchResourceChangesRequest{}
+	mi := &file_epoch_v1_regional_admin_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WatchResourceChangesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WatchResourceChangesRequest) ProtoMessage() {}
+
+func (x *WatchResourceChangesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_epoch_v1_regional_admin_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WatchResourceChangesRequest.ProtoReflect.Descriptor instead.
+func (*WatchResourceChangesRequest) Descriptor() ([]byte, []int) {
+	return file_epoch_v1_regional_admin_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *WatchResourceChangesRequest) GetAfterCursor() uint64 {
+	if x != nil {
+		return x.AfterCursor
+	}
+	return 0
+}
+
+func (x *WatchResourceChangesRequest) GetBatchSize() uint32 {
+	if x != nil {
+		return x.BatchSize
+	}
+	return 0
+}
+
+func (x *WatchResourceChangesRequest) GetOrganization() string {
+	if x != nil {
+		return x.Organization
+	}
+	return ""
+}
+
+func (x *WatchResourceChangesRequest) GetProject() string {
+	if x != nil {
+		return x.Project
+	}
+	return ""
+}
+
+func (x *WatchResourceChangesRequest) GetEnvironment() string {
+	if x != nil {
+		return x.Environment
+	}
+	return ""
+}
+
+func (x *WatchResourceChangesRequest) GetNamespace() string {
+	if x != nil {
+		return x.Namespace
+	}
+	return ""
+}
+
+func (x *WatchResourceChangesRequest) GetKind() ResourceKind {
+	if x != nil {
+		return x.Kind
+	}
+	return ResourceKind_RESOURCE_KIND_UNSPECIFIED
+}
+
+type WatchResourceChangesResponse struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	EarliestCursor uint64                 `protobuf:"varint,1,opt,name=earliest_cursor,json=earliestCursor,proto3" json:"earliest_cursor,omitempty"`
+	LatestCursor   uint64                 `protobuf:"varint,2,opt,name=latest_cursor,json=latestCursor,proto3" json:"latest_cursor,omitempty"`
+	Changes        []*ResourceChange      `protobuf:"bytes,3,rep,name=changes,proto3" json:"changes,omitempty"`
+	// next_cursor is the inclusive scanned checkpoint to supply as after_cursor.
+	// It may trail latest_cursor when another bounded page is immediately ready.
+	NextCursor    uint64 `protobuf:"varint,4,opt,name=next_cursor,json=nextCursor,proto3" json:"next_cursor,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WatchResourceChangesResponse) Reset() {
+	*x = WatchResourceChangesResponse{}
+	mi := &file_epoch_v1_regional_admin_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WatchResourceChangesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WatchResourceChangesResponse) ProtoMessage() {}
+
+func (x *WatchResourceChangesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_epoch_v1_regional_admin_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WatchResourceChangesResponse.ProtoReflect.Descriptor instead.
+func (*WatchResourceChangesResponse) Descriptor() ([]byte, []int) {
+	return file_epoch_v1_regional_admin_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *WatchResourceChangesResponse) GetEarliestCursor() uint64 {
+	if x != nil {
+		return x.EarliestCursor
+	}
+	return 0
+}
+
+func (x *WatchResourceChangesResponse) GetLatestCursor() uint64 {
+	if x != nil {
+		return x.LatestCursor
+	}
+	return 0
+}
+
+func (x *WatchResourceChangesResponse) GetChanges() []*ResourceChange {
+	if x != nil {
+		return x.Changes
+	}
+	return nil
+}
+
+func (x *WatchResourceChangesResponse) GetNextCursor() uint64 {
+	if x != nil {
+		return x.NextCursor
+	}
+	return 0
+}
+
 var File_epoch_v1_regional_admin_proto protoreflect.FileDescriptor
 
 const file_epoch_v1_regional_admin_proto_rawDesc = "" +
@@ -601,12 +1253,71 @@ const file_epoch_v1_regional_admin_proto_rawDesc = "" +
 	"generation\x18\x02 \x01(\x04R\n" +
 	"generation\x12\x18\n" +
 	"\adeleted\x18\x03 \x01(\bR\adeleted\x12\x1a\n" +
-	"\breplayed\x18\x04 \x01(\bR\breplayed2\xdb\x02\n" +
+	"\breplayed\x18\x04 \x01(\bR\breplayed\"\xba\x01\n" +
+	"\x12BatchApplyResource\x12*\n" +
+	"\x04name\x18\x01 \x01(\v2\x16.epoch.v1.ResourceNameR\x04name\x12*\n" +
+	"\x04spec\x18\x02 \x01(\v2\x16.epoch.v1.ResourceSpecR\x04spec\x124\n" +
+	"\x13expected_generation\x18\x03 \x01(\x04H\x00R\x12expectedGeneration\x88\x01\x01B\x16\n" +
+	"\x14_expected_generation\"}\n" +
+	"\x1aBatchApplyResourcesRequest\x12#\n" +
+	"\rrequest_token\x18\x01 \x01(\tR\frequestToken\x12:\n" +
+	"\tresources\x18\x02 \x03(\v2\x1c.epoch.v1.BatchApplyResourceR\tresources\"t\n" +
+	"\x1bBatchApplyResourcesResponse\x129\n" +
+	"\aresults\x18\x01 \x03(\v2\x1f.epoch.v1.ApplyResourceResponseR\aresults\x12\x1a\n" +
+	"\breplayed\x18\x02 \x01(\bR\breplayed\"\x81\x01\n" +
+	"\x13GetOperationRequest\x12#\n" +
+	"\rrequest_token\x18\x01 \x01(\tR\frequestToken\x12E\n" +
+	"\x12affected_resources\x18\x02 \x03(\v2\x16.epoch.v1.ResourceNameR\x11affectedResources\"\xfd\x02\n" +
+	"\x14GetOperationResponse\x12#\n" +
+	"\rrequest_token\x18\x01 \x01(\tR\frequestToken\x12\x1f\n" +
+	"\vproposal_id\x18\x02 \x01(\x04R\n" +
+	"proposalId\x12.\n" +
+	"\x05state\x18\x03 \x01(\x0e2\x18.epoch.v1.OperationStateR\x05state\x12E\n" +
+	"\x12affected_resources\x18\x04 \x03(\v2\x16.epoch.v1.ResourceNameR\x11affectedResources\x12!\n" +
+	"\ffailure_code\x18\x05 \x01(\tR\vfailureCode\x12'\n" +
+	"\x0ffailure_message\x18\x06 \x01(\tR\x0efailureMessage\x12.\n" +
+	"\x13first_change_cursor\x18\a \x01(\x04R\x11firstChangeCursor\x12,\n" +
+	"\x12last_change_cursor\x18\b \x01(\x04R\x10lastChangeCursor\"\xa6\x01\n" +
+	"\x0eResourceChange\x12\x16\n" +
+	"\x06cursor\x18\x01 \x01(\x04R\x06cursor\x120\n" +
+	"\x04kind\x18\x02 \x01(\x0e2\x1c.epoch.v1.ResourceChangeKindR\x04kind\x12*\n" +
+	"\x04name\x18\x03 \x01(\v2\x16.epoch.v1.ResourceNameR\x04name\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x04 \x01(\x04R\n" +
+	"generation\"\x89\x02\n" +
+	"\x1bWatchResourceChangesRequest\x12!\n" +
+	"\fafter_cursor\x18\x01 \x01(\x04R\vafterCursor\x12\x1d\n" +
+	"\n" +
+	"batch_size\x18\x02 \x01(\rR\tbatchSize\x12\"\n" +
+	"\forganization\x18\x03 \x01(\tR\forganization\x12\x18\n" +
+	"\aproject\x18\x04 \x01(\tR\aproject\x12 \n" +
+	"\venvironment\x18\x05 \x01(\tR\venvironment\x12\x1c\n" +
+	"\tnamespace\x18\x06 \x01(\tR\tnamespace\x12*\n" +
+	"\x04kind\x18\a \x01(\x0e2\x16.epoch.v1.ResourceKindR\x04kind\"\xc1\x01\n" +
+	"\x1cWatchResourceChangesResponse\x12'\n" +
+	"\x0fearliest_cursor\x18\x01 \x01(\x04R\x0eearliestCursor\x12#\n" +
+	"\rlatest_cursor\x18\x02 \x01(\x04R\flatestCursor\x122\n" +
+	"\achanges\x18\x03 \x03(\v2\x18.epoch.v1.ResourceChangeR\achanges\x12\x1f\n" +
+	"\vnext_cursor\x18\x04 \x01(\x04R\n" +
+	"nextCursor*\x89\x01\n" +
+	"\x0eOperationState\x12\x1f\n" +
+	"\x1bOPERATION_STATE_UNSPECIFIED\x10\x00\x12\x1b\n" +
+	"\x17OPERATION_STATE_PENDING\x10\x01\x12\x1d\n" +
+	"\x19OPERATION_STATE_SUCCEEDED\x10\x02\x12\x1a\n" +
+	"\x16OPERATION_STATE_FAILED\x10\x03*\xb7\x01\n" +
+	"\x12ResourceChangeKind\x12$\n" +
+	" RESOURCE_CHANGE_KIND_UNSPECIFIED\x10\x00\x12(\n" +
+	"$RESOURCE_CHANGE_KIND_DESIRED_APPLIED\x10\x01\x12(\n" +
+	"$RESOURCE_CHANGE_KIND_DESIRED_DELETED\x10\x02\x12'\n" +
+	"#RESOURCE_CHANGE_KIND_STATUS_UPDATED\x10\x032\xf7\x04\n" +
 	"\x14RegionalAdminService\x12P\n" +
 	"\rApplyResource\x12\x1e.epoch.v1.ApplyResourceRequest\x1a\x1f.epoch.v1.ApplyResourceResponse\x12J\n" +
 	"\vGetResource\x12\x1c.epoch.v1.GetResourceRequest\x1a\x1d.epoch.v1.GetResourceResponse\x12P\n" +
 	"\rListResources\x12\x1e.epoch.v1.ListResourcesRequest\x1a\x1f.epoch.v1.ListResourcesResponse\x12S\n" +
-	"\x0eDeleteResource\x12\x1f.epoch.v1.DeleteResourceRequest\x1a .epoch.v1.DeleteResourceResponseB\x92\x01\n" +
+	"\x0eDeleteResource\x12\x1f.epoch.v1.DeleteResourceRequest\x1a .epoch.v1.DeleteResourceResponse\x12b\n" +
+	"\x13BatchApplyResources\x12$.epoch.v1.BatchApplyResourcesRequest\x1a%.epoch.v1.BatchApplyResourcesResponse\x12M\n" +
+	"\fGetOperation\x12\x1d.epoch.v1.GetOperationRequest\x1a\x1e.epoch.v1.GetOperationResponse\x12g\n" +
+	"\x14WatchResourceChanges\x12%.epoch.v1.WatchResourceChangesRequest\x1a&.epoch.v1.WatchResourceChangesResponse0\x01B\x92\x01\n" +
 	"\fcom.epoch.v1B\x12RegionalAdminProtoP\x01Z-epoch.local/epoch/sdk/go/gen/epoch/v1;epochv1\xa2\x02\x03EXX\xaa\x02\bEpoch.V1\xca\x02\bEpoch\\V1\xe2\x02\x14Epoch\\V1\\GPBMetadata\xea\x02\tEpoch::V1b\x06proto3"
 
 var (
@@ -621,48 +1332,76 @@ func file_epoch_v1_regional_admin_proto_rawDescGZIP() []byte {
 	return file_epoch_v1_regional_admin_proto_rawDescData
 }
 
-var file_epoch_v1_regional_admin_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_epoch_v1_regional_admin_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_epoch_v1_regional_admin_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_epoch_v1_regional_admin_proto_goTypes = []any{
-	(*ApplyResourceRequest)(nil),   // 0: epoch.v1.ApplyResourceRequest
-	(*ApplyResourceResponse)(nil),  // 1: epoch.v1.ApplyResourceResponse
-	(*GetResourceRequest)(nil),     // 2: epoch.v1.GetResourceRequest
-	(*GetResourceResponse)(nil),    // 3: epoch.v1.GetResourceResponse
-	(*ListResourcesRequest)(nil),   // 4: epoch.v1.ListResourcesRequest
-	(*ListResourcesResponse)(nil),  // 5: epoch.v1.ListResourcesResponse
-	(*DeleteResourceRequest)(nil),  // 6: epoch.v1.DeleteResourceRequest
-	(*DeleteResourceResponse)(nil), // 7: epoch.v1.DeleteResourceResponse
-	nil,                            // 8: epoch.v1.ListResourcesRequest.TagsEntry
-	(*ResourceName)(nil),           // 9: epoch.v1.ResourceName
-	(*ResourceSpec)(nil),           // 10: epoch.v1.ResourceSpec
-	(*Resource)(nil),               // 11: epoch.v1.Resource
-	(ResourceKind)(0),              // 12: epoch.v1.ResourceKind
-	(DataClassification)(0),        // 13: epoch.v1.DataClassification
+	(OperationState)(0),                  // 0: epoch.v1.OperationState
+	(ResourceChangeKind)(0),              // 1: epoch.v1.ResourceChangeKind
+	(*ApplyResourceRequest)(nil),         // 2: epoch.v1.ApplyResourceRequest
+	(*ApplyResourceResponse)(nil),        // 3: epoch.v1.ApplyResourceResponse
+	(*GetResourceRequest)(nil),           // 4: epoch.v1.GetResourceRequest
+	(*GetResourceResponse)(nil),          // 5: epoch.v1.GetResourceResponse
+	(*ListResourcesRequest)(nil),         // 6: epoch.v1.ListResourcesRequest
+	(*ListResourcesResponse)(nil),        // 7: epoch.v1.ListResourcesResponse
+	(*DeleteResourceRequest)(nil),        // 8: epoch.v1.DeleteResourceRequest
+	(*DeleteResourceResponse)(nil),       // 9: epoch.v1.DeleteResourceResponse
+	(*BatchApplyResource)(nil),           // 10: epoch.v1.BatchApplyResource
+	(*BatchApplyResourcesRequest)(nil),   // 11: epoch.v1.BatchApplyResourcesRequest
+	(*BatchApplyResourcesResponse)(nil),  // 12: epoch.v1.BatchApplyResourcesResponse
+	(*GetOperationRequest)(nil),          // 13: epoch.v1.GetOperationRequest
+	(*GetOperationResponse)(nil),         // 14: epoch.v1.GetOperationResponse
+	(*ResourceChange)(nil),               // 15: epoch.v1.ResourceChange
+	(*WatchResourceChangesRequest)(nil),  // 16: epoch.v1.WatchResourceChangesRequest
+	(*WatchResourceChangesResponse)(nil), // 17: epoch.v1.WatchResourceChangesResponse
+	nil,                                  // 18: epoch.v1.ListResourcesRequest.TagsEntry
+	(*ResourceName)(nil),                 // 19: epoch.v1.ResourceName
+	(*ResourceSpec)(nil),                 // 20: epoch.v1.ResourceSpec
+	(*Resource)(nil),                     // 21: epoch.v1.Resource
+	(ResourceKind)(0),                    // 22: epoch.v1.ResourceKind
+	(DataClassification)(0),              // 23: epoch.v1.DataClassification
 }
 var file_epoch_v1_regional_admin_proto_depIdxs = []int32{
-	9,  // 0: epoch.v1.ApplyResourceRequest.name:type_name -> epoch.v1.ResourceName
-	10, // 1: epoch.v1.ApplyResourceRequest.spec:type_name -> epoch.v1.ResourceSpec
-	11, // 2: epoch.v1.ApplyResourceResponse.resource:type_name -> epoch.v1.Resource
-	9,  // 3: epoch.v1.GetResourceRequest.name:type_name -> epoch.v1.ResourceName
-	11, // 4: epoch.v1.GetResourceResponse.resource:type_name -> epoch.v1.Resource
-	12, // 5: epoch.v1.ListResourcesRequest.kind:type_name -> epoch.v1.ResourceKind
-	13, // 6: epoch.v1.ListResourcesRequest.classification:type_name -> epoch.v1.DataClassification
-	8,  // 7: epoch.v1.ListResourcesRequest.tags:type_name -> epoch.v1.ListResourcesRequest.TagsEntry
-	11, // 8: epoch.v1.ListResourcesResponse.resources:type_name -> epoch.v1.Resource
-	9,  // 9: epoch.v1.DeleteResourceRequest.name:type_name -> epoch.v1.ResourceName
-	9,  // 10: epoch.v1.DeleteResourceResponse.name:type_name -> epoch.v1.ResourceName
-	0,  // 11: epoch.v1.RegionalAdminService.ApplyResource:input_type -> epoch.v1.ApplyResourceRequest
-	2,  // 12: epoch.v1.RegionalAdminService.GetResource:input_type -> epoch.v1.GetResourceRequest
-	4,  // 13: epoch.v1.RegionalAdminService.ListResources:input_type -> epoch.v1.ListResourcesRequest
-	6,  // 14: epoch.v1.RegionalAdminService.DeleteResource:input_type -> epoch.v1.DeleteResourceRequest
-	1,  // 15: epoch.v1.RegionalAdminService.ApplyResource:output_type -> epoch.v1.ApplyResourceResponse
-	3,  // 16: epoch.v1.RegionalAdminService.GetResource:output_type -> epoch.v1.GetResourceResponse
-	5,  // 17: epoch.v1.RegionalAdminService.ListResources:output_type -> epoch.v1.ListResourcesResponse
-	7,  // 18: epoch.v1.RegionalAdminService.DeleteResource:output_type -> epoch.v1.DeleteResourceResponse
-	15, // [15:19] is the sub-list for method output_type
-	11, // [11:15] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	19, // 0: epoch.v1.ApplyResourceRequest.name:type_name -> epoch.v1.ResourceName
+	20, // 1: epoch.v1.ApplyResourceRequest.spec:type_name -> epoch.v1.ResourceSpec
+	21, // 2: epoch.v1.ApplyResourceResponse.resource:type_name -> epoch.v1.Resource
+	19, // 3: epoch.v1.GetResourceRequest.name:type_name -> epoch.v1.ResourceName
+	21, // 4: epoch.v1.GetResourceResponse.resource:type_name -> epoch.v1.Resource
+	22, // 5: epoch.v1.ListResourcesRequest.kind:type_name -> epoch.v1.ResourceKind
+	23, // 6: epoch.v1.ListResourcesRequest.classification:type_name -> epoch.v1.DataClassification
+	18, // 7: epoch.v1.ListResourcesRequest.tags:type_name -> epoch.v1.ListResourcesRequest.TagsEntry
+	21, // 8: epoch.v1.ListResourcesResponse.resources:type_name -> epoch.v1.Resource
+	19, // 9: epoch.v1.DeleteResourceRequest.name:type_name -> epoch.v1.ResourceName
+	19, // 10: epoch.v1.DeleteResourceResponse.name:type_name -> epoch.v1.ResourceName
+	19, // 11: epoch.v1.BatchApplyResource.name:type_name -> epoch.v1.ResourceName
+	20, // 12: epoch.v1.BatchApplyResource.spec:type_name -> epoch.v1.ResourceSpec
+	10, // 13: epoch.v1.BatchApplyResourcesRequest.resources:type_name -> epoch.v1.BatchApplyResource
+	3,  // 14: epoch.v1.BatchApplyResourcesResponse.results:type_name -> epoch.v1.ApplyResourceResponse
+	19, // 15: epoch.v1.GetOperationRequest.affected_resources:type_name -> epoch.v1.ResourceName
+	0,  // 16: epoch.v1.GetOperationResponse.state:type_name -> epoch.v1.OperationState
+	19, // 17: epoch.v1.GetOperationResponse.affected_resources:type_name -> epoch.v1.ResourceName
+	1,  // 18: epoch.v1.ResourceChange.kind:type_name -> epoch.v1.ResourceChangeKind
+	19, // 19: epoch.v1.ResourceChange.name:type_name -> epoch.v1.ResourceName
+	22, // 20: epoch.v1.WatchResourceChangesRequest.kind:type_name -> epoch.v1.ResourceKind
+	15, // 21: epoch.v1.WatchResourceChangesResponse.changes:type_name -> epoch.v1.ResourceChange
+	2,  // 22: epoch.v1.RegionalAdminService.ApplyResource:input_type -> epoch.v1.ApplyResourceRequest
+	4,  // 23: epoch.v1.RegionalAdminService.GetResource:input_type -> epoch.v1.GetResourceRequest
+	6,  // 24: epoch.v1.RegionalAdminService.ListResources:input_type -> epoch.v1.ListResourcesRequest
+	8,  // 25: epoch.v1.RegionalAdminService.DeleteResource:input_type -> epoch.v1.DeleteResourceRequest
+	11, // 26: epoch.v1.RegionalAdminService.BatchApplyResources:input_type -> epoch.v1.BatchApplyResourcesRequest
+	13, // 27: epoch.v1.RegionalAdminService.GetOperation:input_type -> epoch.v1.GetOperationRequest
+	16, // 28: epoch.v1.RegionalAdminService.WatchResourceChanges:input_type -> epoch.v1.WatchResourceChangesRequest
+	3,  // 29: epoch.v1.RegionalAdminService.ApplyResource:output_type -> epoch.v1.ApplyResourceResponse
+	5,  // 30: epoch.v1.RegionalAdminService.GetResource:output_type -> epoch.v1.GetResourceResponse
+	7,  // 31: epoch.v1.RegionalAdminService.ListResources:output_type -> epoch.v1.ListResourcesResponse
+	9,  // 32: epoch.v1.RegionalAdminService.DeleteResource:output_type -> epoch.v1.DeleteResourceResponse
+	12, // 33: epoch.v1.RegionalAdminService.BatchApplyResources:output_type -> epoch.v1.BatchApplyResourcesResponse
+	14, // 34: epoch.v1.RegionalAdminService.GetOperation:output_type -> epoch.v1.GetOperationResponse
+	17, // 35: epoch.v1.RegionalAdminService.WatchResourceChanges:output_type -> epoch.v1.WatchResourceChangesResponse
+	29, // [29:36] is the sub-list for method output_type
+	22, // [22:29] is the sub-list for method input_type
+	22, // [22:22] is the sub-list for extension type_name
+	22, // [22:22] is the sub-list for extension extendee
+	0,  // [0:22] is the sub-list for field type_name
 }
 
 func init() { file_epoch_v1_regional_admin_proto_init() }
@@ -673,18 +1412,20 @@ func file_epoch_v1_regional_admin_proto_init() {
 	file_epoch_v1_common_proto_init()
 	file_epoch_v1_regional_admin_proto_msgTypes[0].OneofWrappers = []any{}
 	file_epoch_v1_regional_admin_proto_msgTypes[6].OneofWrappers = []any{}
+	file_epoch_v1_regional_admin_proto_msgTypes[8].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_epoch_v1_regional_admin_proto_rawDesc), len(file_epoch_v1_regional_admin_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   9,
+			NumEnums:      2,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_epoch_v1_regional_admin_proto_goTypes,
 		DependencyIndexes: file_epoch_v1_regional_admin_proto_depIdxs,
+		EnumInfos:         file_epoch_v1_regional_admin_proto_enumTypes,
 		MessageInfos:      file_epoch_v1_regional_admin_proto_msgTypes,
 	}.Build()
 	File_epoch_v1_regional_admin_proto = out.File

@@ -3,6 +3,8 @@ package regional
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,9 +20,12 @@ import (
 )
 
 const (
-	maxAuthorityResponseBytes = 1 << 20
-	maxAuthorityBearerBytes   = 4 << 10
-	regionalTopologyPath      = "/experimental/v1/regional/topology"
+	maxAuthorityResponseBytes      = 1 << 20
+	maxAuthorityBearerBytes        = 4 << 10
+	regionalTopologyPath           = "/experimental/v1/regional/topology"
+	regionalControlReconcilePath   = "/experimental/v1/regional/control/reconcile"
+	regionalControlAllocationsPath = "/experimental/v1/regional/control/allocations"
+	regionalControlMembershipPath  = "/experimental/v1/regional/control/tablets/"
 )
 
 // HTTPAuthority adapts the current Rust regional catalog and discovery routes
@@ -136,6 +141,69 @@ type planMembershipAuthorityBody struct {
 	ExpectedTabletEpoch        string   `json:"expected_tablet_epoch"`
 	ExpectedResourceGeneration string   `json:"expected_resource_generation"`
 	TargetVoterNodeIDs         []uint64 `json:"target_voter_node_ids"`
+}
+
+type managedReconcileAuthorityBody struct {
+	RequestToken string                          `json:"request_token"`
+	Lease        managedLeaseAuthorityBody       `json:"lease"`
+	Capacity     []managedCapacityAuthorityBody  `json:"capacity"`
+	Resources    []managedPlacementAuthorityBody `json:"resources"`
+}
+
+type managedMembershipAuthorityBody struct {
+	RequestToken               string                         `json:"request_token"`
+	Lease                      managedLeaseAuthorityBody      `json:"lease"`
+	Capacity                   []managedCapacityAuthorityBody `json:"capacity"`
+	Name                       controlResourceNameDocument    `json:"name"`
+	ExpectedDesiredGeneration  string                         `json:"expected_desired_generation"`
+	ExpectedTabletEpoch        string                         `json:"expected_tablet_epoch"`
+	ExpectedResourceGeneration string                         `json:"expected_resource_generation"`
+	TargetVoterNodeIDs         []uint64                       `json:"target_voter_node_ids"`
+}
+
+type managedLeaseAuthorityBody struct {
+	OwnerID string `json:"owner_id"`
+	Fence   string `json:"fence"`
+	NowMS   string `json:"now_ms"`
+}
+
+type managedCapacityAuthorityBody struct {
+	NodeID              string `json:"node_id"`
+	MaxConsensusGroups  uint32 `json:"max_consensus_groups"`
+	UsedConsensusGroups uint32 `json:"used_consensus_groups"`
+	CatalogGroups       uint32 `json:"catalog_groups"`
+}
+
+type managedPlacementAuthorityBody struct {
+	Name                      controlResourceNameDocument `json:"name"`
+	ExpectedDesiredGeneration string                      `json:"expected_desired_generation"`
+	ExpectedCatalogGeneration string                      `json:"expected_catalog_generation"`
+	Spec                      managedNativeSpecDocument   `json:"spec"`
+	TabletPlacements          []TabletPlacement           `json:"tablet_placements"`
+}
+
+type managedNativeSpecDocument struct {
+	WorkloadProfile string                        `json:"workload_profile"`
+	ShardCount      uint32                        `json:"shard_count"`
+	ReplicaCount    uint16                        `json:"replica_count"`
+	Configuration   map[string]any                `json:"configuration,omitempty"`
+	Governance      *resources.ResourceGovernance `json:"governance,omitempty"`
+}
+
+type managedAllocationsDocument struct {
+	Allocations []managedAllocationDocument `json:"allocations"`
+}
+
+type managedAllocationDocument struct {
+	NodeID        decimalUint64 `json:"node_id"`
+	CatalogGroups uint32        `json:"catalog_groups"`
+}
+
+type managedReconcileDocument struct {
+	Mutation struct {
+		Kind      string                    `json:"kind"`
+		Resources []catalogResourceDocument `json:"resources"`
+	} `json:"mutation"`
 }
 
 type catalogApplyDocument struct {
@@ -314,6 +382,189 @@ func (authority *HTTPAuthority) Apply(
 		)
 	}
 	return authority.observePlacement(ctx, request.Key, applied.Mutation.Resource)
+}
+
+// ApplyManaged commits capacity reservation and native Catalog materialization
+// in one lease-fenced command. A concurrent controller or stale inventory is
+// rejected by the replicated state machine without partial tablet allocation.
+func (authority *HTTPAuthority) ApplyManaged(
+	ctx context.Context,
+	request AuthorityManagedApplyRequest,
+) (AuthorityObservation, error) {
+	capacity, err := authority.managedCapacityObservation(ctx)
+	if err != nil {
+		return AuthorityObservation{}, err
+	}
+	body := managedReconcileAuthorityBody{
+		RequestToken: managedApplyToken(request.RequestToken, request.Lease.Fence),
+		Lease: managedLeaseAuthorityBody{
+			OwnerID: request.Lease.OwnerID,
+			Fence:   strconv.FormatUint(request.Lease.Fence, 10),
+			NowMS:   strconv.FormatUint(request.Lease.NowMS, 10),
+		},
+		Capacity: capacity,
+		Resources: []managedPlacementAuthorityBody{{
+			Name:                      controlName(request.Key),
+			ExpectedDesiredGeneration: strconv.FormatUint(request.DesiredGeneration, 10),
+			ExpectedCatalogGeneration: strconv.FormatUint(request.ExpectedGeneration, 10),
+			Spec: managedNativeSpecDocument{
+				WorkloadProfile: profileName(request.Key.Kind),
+				ShardCount:      request.ShardCount,
+				ReplicaCount:    request.ReplicaCount,
+				Configuration:   request.Configuration,
+				Governance:      request.Governance,
+			},
+			TabletPlacements: cloneTabletPlacements(request.TabletPlacements),
+		}},
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return AuthorityObservation{}, invalidAuthorityError(err.Error())
+	}
+	response, err := authority.requestAny(
+		ctx,
+		http.MethodPost,
+		regionalControlReconcilePath,
+		encoded,
+	)
+	if err != nil {
+		return AuthorityObservation{}, err
+	}
+	var reconciled managedReconcileDocument
+	if err := decodeAuthorityJSON(response, &reconciled); err != nil {
+		return AuthorityObservation{}, err
+	}
+	if reconciled.Mutation.Kind != "managed_reconciled" ||
+		len(reconciled.Mutation.Resources) != 1 {
+		return AuthorityObservation{}, invalidAuthorityError(
+			"regional managed reconcile response did not contain exactly one resource",
+		)
+	}
+	return authority.observePlacement(ctx, request.Key, reconciled.Mutation.Resources[0])
+}
+
+// PlanManagedMembership reserves the transition's learner capacity and
+// commits its target under the same controller fence as managed apply.
+func (authority *HTTPAuthority) PlanManagedMembership(
+	ctx context.Context,
+	request AuthorityManagedMembershipPlanRequest,
+) (AuthorityObservation, error) {
+	capacity, err := authority.managedCapacityObservation(ctx)
+	if err != nil {
+		return AuthorityObservation{}, err
+	}
+	body := managedMembershipAuthorityBody{
+		RequestToken: managedMembershipToken(request.RequestToken, request.Lease.Fence),
+		Lease: managedLeaseAuthorityBody{
+			OwnerID: request.Lease.OwnerID,
+			Fence:   strconv.FormatUint(request.Lease.Fence, 10),
+			NowMS:   strconv.FormatUint(request.Lease.NowMS, 10),
+		},
+		Capacity:                   capacity,
+		Name:                       controlName(request.Key),
+		ExpectedDesiredGeneration:  strconv.FormatUint(request.DesiredGeneration, 10),
+		ExpectedTabletEpoch:        strconv.FormatUint(request.ExpectedTabletEpoch, 10),
+		ExpectedResourceGeneration: strconv.FormatUint(request.ExpectedResourceGeneration, 10),
+		TargetVoterNodeIDs:         append([]uint64(nil), request.TargetVoterNodeIDs...),
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return AuthorityObservation{}, invalidAuthorityError(err.Error())
+	}
+	path := regionalControlMembershipPath + strconv.FormatUint(request.TabletID, 10) + "/membership"
+	response, err := authority.requestAny(ctx, http.MethodPost, path, encoded)
+	if err != nil {
+		return AuthorityObservation{}, err
+	}
+	var planned catalogApplyDocument
+	if err := decodeAuthorityJSON(response, &planned); err != nil {
+		return AuthorityObservation{}, err
+	}
+	if planned.Mutation.Kind != "applied" {
+		return AuthorityObservation{}, invalidAuthorityError(
+			"regional managed membership response did not contain an applied resource",
+		)
+	}
+	return authority.observePlacement(ctx, request.Key, planned.Mutation.Resource)
+}
+
+func (authority *HTTPAuthority) managedCapacityObservation(
+	ctx context.Context,
+) ([]managedCapacityAuthorityBody, error) {
+	inventory, err := authority.Inventory(ctx)
+	if err != nil {
+		return nil, err
+	}
+	allocationResponse, err := authority.readControlAny(ctx, regionalControlAllocationsPath)
+	if err != nil {
+		return nil, err
+	}
+	var allocations managedAllocationsDocument
+	if err := decodeAuthorityJSON(allocationResponse, &allocations); err != nil {
+		return nil, err
+	}
+	byNode := make(map[uint64]uint32, len(allocations.Allocations))
+	for _, allocation := range allocations.Allocations {
+		nodeID := uint64(allocation.NodeID)
+		if nodeID == 0 {
+			return nil, invalidAuthorityError(
+				"regional Catalog returned a zero capacity-allocation node",
+			)
+		}
+		if _, duplicate := byNode[nodeID]; duplicate {
+			return nil, invalidAuthorityError(
+				"regional Catalog returned duplicate capacity allocations",
+			)
+		}
+		byNode[nodeID] = allocation.CatalogGroups
+	}
+	capacity := make([]managedCapacityAuthorityBody, 0, len(inventory.Nodes))
+	for _, node := range inventory.Nodes {
+		catalogGroups := byNode[node.NodeID]
+		if catalogGroups > node.UsedConsensusGroups {
+			return nil, invalidAuthorityError(
+				"regional topology used capacity trails Catalog allocations",
+			)
+		}
+		capacity = append(capacity, managedCapacityAuthorityBody{
+			NodeID:              strconv.FormatUint(node.NodeID, 10),
+			MaxConsensusGroups:  node.MaxConsensusGroups,
+			UsedConsensusGroups: node.UsedConsensusGroups,
+			CatalogGroups:       catalogGroups,
+		})
+		delete(byNode, node.NodeID)
+	}
+	if len(byNode) != 0 {
+		return nil, invalidAuthorityError(
+			"regional topology omits a node with Catalog allocations",
+		)
+	}
+	return capacity, nil
+}
+
+func profileName(kind resources.Kind) string {
+	switch kind {
+	case resources.KindCache, resources.KindTable:
+		return "cache_and_state"
+	case resources.KindStream:
+		return "stream_log"
+	case resources.KindQueue:
+		return "work_queue"
+	case resources.KindEventBus:
+		return "event_bus"
+	default:
+		return ""
+	}
+}
+
+func managedApplyToken(base string, fence uint64) string {
+	digest := sha256.Sum256([]byte(base + "\x00" + strconv.FormatUint(fence, 10)))
+	return "epoch-control.reconcile.v1." + hex.EncodeToString(digest[:])
+}
+
+func managedMembershipToken(base string, fence uint64) string {
+	digest := sha256.Sum256([]byte(base + "\x00" + strconv.FormatUint(fence, 10)))
+	return "epoch-control.membership.v1." + hex.EncodeToString(digest[:])
 }
 
 // Observe reads current catalog identity and samples placement without
@@ -586,7 +837,7 @@ func (authority *HTTPAuthority) requestEndpoint(
 	body []byte,
 ) ([]byte, int, error) {
 	target := *endpoint
-	target.Path = path
+	target.Path, target.RawQuery, _ = strings.Cut(path, "?")
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)

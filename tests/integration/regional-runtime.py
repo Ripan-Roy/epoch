@@ -36,7 +36,7 @@ RECOVERY_TIMEOUT_SECONDS = 90.0
 ADMIN_TOKEN = "epoch-dev-admin-v1"
 CONTROL_TOKEN = "epoch-dev-control-v1"
 AUTH_POLICY_PATH = REPO_ROOT / "spec/auth/bootstrap-policy-v1.example.json"
-RESULT_SCHEMA = "epoch.regional-runtime.evidence/v1"
+RESULT_SCHEMA = "epoch.regional-runtime.evidence/v2"
 RESULT_FAULTS = (
     "control_sigkill",
     "stream_leader_sigkill",
@@ -49,7 +49,7 @@ RESULT_FAULTS = (
 RESULT_INVARIANTS = (
     "authorization_audit_chain_verified",
     "authorization_audit_reopened",
-    "catalog_digest_preserved",
+    "catalog_consensus_recovered",
     "profile_state_converged",
     "managed_intent_replayed",
     "leadership_terms_advanced",
@@ -223,7 +223,7 @@ class RegionalCluster:
             prefix="epoch-regional-control-"
         )
         self.control_binary = Path(self.temporary_directory.name) / "epoch-control"
-        self.control_state_path = (
+        self.control_legacy_state_path = (
             Path(self.temporary_directory.name) / "control-registry.db"
         )
         self.control_audit_path = Path(self.temporary_directory.name) / "audit.ndjson"
@@ -318,7 +318,8 @@ class RegionalCluster:
                 ),
                 "EPOCH_CONTROL_ALLOWED_ORIGINS": "https://console.example.test",
                 "EPOCH_CONTROL_RECONCILE_INTERVAL": "100ms",
-                "EPOCH_CONTROL_STATE_PATH": str(self.control_state_path),
+                "EPOCH_CONTROL_INSTANCE_ID": "regional-runtime-control-0",
+                "EPOCH_CONTROL_LEGACY_STATE_PATH": str(self.control_legacy_state_path),
                 "EPOCH_CONTROL_AUDIT_PATH": str(self.control_audit_path),
                 "EPOCH_AUTH_POLICY_PATH": str(AUTH_POLICY_PATH),
                 "EPOCH_CONTROL_REGIONAL_TOKEN": CONTROL_TOKEN,
@@ -345,7 +346,7 @@ class RegionalCluster:
 
         wait_until("Go control plane to become healthy", healthy)
         health = self.control_request("GET", "/healthz")
-        assert health.document.get("registry") == "bbolt_v1", health
+        assert health.document.get("registry") == "catalog_consensus_v1", health
         assert health.document.get("registry_durable") is True, health
 
     def crash_control(self) -> None:
@@ -1001,6 +1002,28 @@ def wait_for_managed_placement(
     except AssertionError as error:
         inventory = json.dumps(last_inventory, sort_keys=True, separators=(",", ":"))
         raise AssertionError(f"{error}; last_inventory={inventory}") from error
+
+
+def wait_for_control_catalog_unavailable(cluster: RegionalCluster) -> HttpResponse:
+    def unavailable() -> HttpResponse | None:
+        response = cluster.control_request(
+            "GET",
+            "/v1/regional/resources",
+            headers={"origin": "https://console.example.test"},
+        )
+        if (
+            response.status == 503
+            and response.document.get("code") == "unavailable"
+            and response.headers.get("Access-Control-Allow-Origin")
+            == "https://console.example.test"
+        ):
+            return response
+        return None
+
+    return wait_until(
+        "Go BFF to fail closed while Catalog quorum is unavailable",
+        unavailable,
+    )
 
 
 def wait_for_routes(
@@ -3061,7 +3084,7 @@ def run_campaign(cluster: RegionalCluster) -> dict[str, Any]:
     expected_resources = len(RESOURCES) + 1
     expected_tablets = expected_resources + MANAGED_STREAM_SHARDS - 1
     wait_for_topology(cluster, 1 + expected_tablets)
-    initial_catalog_digest = wait_for_catalog(
+    pre_fault_catalog_digest = wait_for_catalog(
         cluster, expected_resources, expected_tablets
     )
     wait_for_automatic_checkpoints(cluster, 1 + expected_tablets, True)
@@ -3173,7 +3196,7 @@ def run_campaign(cluster: RegionalCluster) -> dict[str, Any]:
     node_audit_before_restart = cluster.node_audit_records(1)
     assert node_audit_before_restart
     cluster.crash_all()
-    wait_for_managed_placement(cluster, MANAGED_RESOURCE, "pending", 0)
+    wait_for_control_catalog_unavailable(cluster)
     cluster.restart_all()
     wait_for_nodes(cluster)
     node_audit_after_restart = cluster.node_audit_records(1)
@@ -3181,9 +3204,8 @@ def run_campaign(cluster: RegionalCluster) -> dict[str, Any]:
         node_audit_before_restart
     )
     assert len(node_audit_after_restart) > len(node_audit_before_restart)
-    assert (
-        wait_for_catalog(cluster, expected_resources, expected_tablets)
-        == initial_catalog_digest
+    recovered_catalog_digest = wait_for_catalog(
+        cluster, expected_resources, expected_tablets
     )
     wait_for_managed_placement(cluster, MANAGED_RESOURCE, "ready", 3)
     wait_for_profile_apply(cluster, stream, 11)
@@ -3221,7 +3243,8 @@ def run_campaign(cluster: RegionalCluster) -> dict[str, Any]:
         "faults": list(RESULT_FAULTS),
         "invariants": {name: True for name in RESULT_INVARIANTS},
         "observations": {
-            "catalog_digest": initial_catalog_digest,
+            "catalog_digest_before_faults": pre_fault_catalog_digest,
+            "catalog_digest_after_reopen": recovered_catalog_digest,
             "resources": expected_resources,
             "tablets": expected_tablets,
             "physical_nodes": len(NODES),

@@ -2,13 +2,30 @@ package resources
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
+
+	controlauth "epoch.local/epoch/control/internal/auth"
 )
+
+type recordingDeleteCoordinator struct {
+	request DeleteRequest
+	result  DeleteResult
+	err     error
+}
+
+func (coordinator *recordingDeleteCoordinator) Delete(
+	_ context.Context,
+	request DeleteRequest,
+) (DeleteResult, error) {
+	coordinator.request = request
+	return coordinator.result, coordinator.err
+}
 
 func TestHTTPResourceLifecycle(t *testing.T) {
 	registry := NewRegistry()
@@ -99,6 +116,60 @@ func TestHTTPResourceLifecycle(t *testing.T) {
 	missing := performRequest(t, handler, http.MethodGet, "/v1/resources/prod/queue/jobs", nil, nil)
 	if missing.Code != http.StatusNotFound {
 		t.Fatalf("GET deleted status = %d, body = %s", missing.Code, missing.Body.String())
+	}
+}
+
+func TestHTTPDeleteUsesConfiguredCoordinator(t *testing.T) {
+	registry := NewRegistry()
+	key := ResourceKey{Namespace: "prod", Kind: KindQueue, Name: "jobs"}
+	if _, err := registry.Apply(ApplyRequest{
+		RequestToken:       "create-jobs-for-coordinated-delete",
+		ExpectedGeneration: uint64Pointer(0),
+		Resource: DesiredResource{
+			ResourceKey: key,
+			Spec:        json.RawMessage(`{"max_attempts":8}`),
+		},
+	}); err != nil {
+		t.Fatalf("create coordinated-delete resource: %v", err)
+	}
+	coordinator := &recordingDeleteCoordinator{result: DeleteResult{
+		Key: key, Generation: 2, Deleted: true,
+	}}
+	handler, err := NewAuthenticatedHTTPHandlerWithDiagnosticsAndDeleteCoordinator(
+		registry,
+		nil,
+		loadHTTPAuthPolicy(t),
+		controlauth.NewMemoryAuditSink(),
+		&diagnosticStub{},
+		coordinator,
+	)
+	if err != nil {
+		t.Fatalf("NewAuthenticatedHTTPHandlerWithDiagnosticsAndDeleteCoordinator() error = %v", err)
+	}
+
+	response := performRequest(
+		t,
+		handler,
+		http.MethodDelete,
+		"/v1/resources/prod/queue/jobs",
+		nil,
+		map[string]string{
+			"Authorization":   "Bearer epoch-dev-admin-v1",
+			"Idempotency-Key": "delete-jobs",
+			"If-Match":        `"1"`,
+		},
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("DELETE status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if coordinator.request.RequestToken != "delete-jobs" ||
+		coordinator.request.ExpectedGeneration == nil ||
+		*coordinator.request.ExpectedGeneration != 1 ||
+		coordinator.request.Key != key {
+		t.Fatalf("coordinated delete request = %+v", coordinator.request)
+	}
+	if _, err := registry.Get(key); err != nil {
+		t.Fatalf("coordinator test unexpectedly mutated registry: %v", err)
 	}
 }
 

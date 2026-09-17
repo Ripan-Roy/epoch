@@ -283,7 +283,8 @@ The current managed-control alpha uses:
 | Go internal metrics | `127.0.0.1:9090` |
 | Rust authority endpoints | `http://127.0.0.1:7601` |
 | Reconcile interval | `1s` |
-| Go metadata database | `data/control/registry.db` |
+| Replicated management metadata | Rust Catalog consensus |
+| Optional legacy bbolt import | `data/control/registry.db` |
 | Console managed API | `http://127.0.0.1:8080` |
 
 The first node exposes its implemented native and administrative HTTP routes on
@@ -307,13 +308,18 @@ The Go BFF has an independent `EPOCH_CONTROL_ALLOWED_ORIGINS` exact-origin
 allowlist. Configure its comma-delimited Rust authority set with
 `EPOCH_CONTROL_REGIONAL_ENDPOINTS`, its HTTP/gRPC listeners with
 `EPOCH_CONTROL_ADDR` and `EPOCH_CONTROL_GRPC_ADDR`, and its positive interval
-with `EPOCH_CONTROL_RECONCILE_INTERVAL`. Set `EPOCH_CONTROL_STATE_PATH` to the
-single-owner bbolt metadata file. Desired resources, observed status, request
-outcomes, and generation tombstones commit there before acknowledgement;
-startup fails rather than discarding corrupt, unknown-version, or concurrently
-owned state. The console uses `VITE_EPOCH_CONTROL_BASE_URL` and never receives
-Rust node URLs for regional placement. Node and control allowlists reject
-wildcards, paths, query strings, credentials, and non-HTTP(S) origins.
+with `EPOCH_CONTROL_RECONCILE_INTERVAL`. The deprecated
+`EPOCH_CONTROL_STATE_PATH` name selects the former bbolt metadata file only
+while upgrading; prefer the explicit
+`EPOCH_CONTROL_LEGACY_STATE_PATH` name. Set a stable, unique
+`EPOCH_CONTROL_INSTANCE_ID` for each Go replica. Desired resources, observed
+status, request outcomes, generation tombstones, change cursors, and the active
+reconciler lease commit in Rust Catalog consensus before acknowledgement. A
+valid legacy database is imported idempotently and retained; corrupt or
+unknown-version legacy state fails startup closed. The console uses
+`VITE_EPOCH_CONTROL_BASE_URL` and never receives Rust node URLs for regional
+placement. Node and control allowlists reject wildcards, paths, query strings,
+credentials, and non-HTTP(S) origins.
 
 Managed and regional beta processes also require one shared identity policy and
 durable audit path:
@@ -453,7 +459,8 @@ Validate or run the regional multi-tablet topology:
 make compose-regional-config
 make compose-regional-up
 EPOCH_CONTROL_REGIONAL_ENDPOINTS=http://127.0.0.1:18661,http://127.0.0.1:18662,http://127.0.0.1:18663 \
-EPOCH_CONTROL_STATE_PATH=.epoch/control/registry.db \
+EPOCH_CONTROL_INSTANCE_ID=local-control-0 \
+EPOCH_CONTROL_LEGACY_STATE_PATH=.epoch/control/registry.db \
 EPOCH_CONTROL_AUDIT_PATH=.epoch/control/audit.ndjson \
 EPOCH_AUTH_POLICY_PATH=spec/auth/bootstrap-policy-v1.example.json \
 EPOCH_CONTROL_REGIONAL_TOKEN=epoch-dev-control-v1 \

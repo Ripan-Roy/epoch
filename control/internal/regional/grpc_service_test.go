@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"slices"
+	"sort"
 	"sync/atomic"
 	"testing"
 
@@ -16,6 +17,55 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/structpb"
 )
+
+type testControlRegistry struct {
+	resources.Store
+	operation ControlOperation
+	changes   []ControlChange
+}
+
+func (registry *testControlRegistry) BatchApply(
+	_ context.Context,
+	request BatchApplyRequest,
+) (BatchApplyResult, error) {
+	sort.Slice(request.Resources, func(left, right int) bool {
+		return controlNameLess(
+			controlName(request.Resources[left].Resource.ResourceKey),
+			controlName(request.Resources[right].Resource.ResourceKey),
+		)
+	})
+	result := BatchApplyResult{Results: make([]resources.ApplyResult, 0, len(request.Resources))}
+	for _, item := range request.Resources {
+		item.RequestToken = request.RequestToken + "-" + item.Resource.Name
+		applied, err := registry.Store.Apply(item)
+		if err != nil {
+			return BatchApplyResult{}, err
+		}
+		result.Results = append(result.Results, applied)
+	}
+	return result, nil
+}
+
+func (registry *testControlRegistry) ControlOperation(
+	_ context.Context,
+	_ string,
+) (ControlOperation, error) {
+	return registry.operation, nil
+}
+
+func (registry *testControlRegistry) ControlChanges(
+	_ context.Context,
+	after uint64,
+	limit uint32,
+) (ControlChangePage, error) {
+	page := ControlChangePage{EarliestCursor: 1, LatestCursor: uint64(len(registry.changes))}
+	for _, change := range registry.changes {
+		if change.Cursor > after && len(page.Changes) < int(limit) {
+			page.Changes = append(page.Changes, change)
+		}
+	}
+	return page, nil
+}
 
 func TestRegionalAdminGRPCLifecycleIsIdempotentAndObserved(t *testing.T) {
 	registry := resources.NewRegistry()
@@ -107,6 +157,91 @@ func TestRegionalAdminGRPCLifecycleIsIdempotentAndObserved(t *testing.T) {
 	_, err = client.GetResource(t.Context(), &epochv1.GetResourceRequest{Name: request.Name})
 	if status.Code(err) != codes.NotFound {
 		t.Fatalf("GetResource(deleted) error = %v", err)
+	}
+}
+
+func TestRegionalAdminAtomicBatchOperationAndResumableWatch(t *testing.T) {
+	local := resources.NewRegistry()
+	auditKey := regionalKey(resources.KindStream, "audit")
+	ordersKey := regionalKey(resources.KindStream, "orders")
+	queueKey := regionalKey(resources.KindQueue, "jobs")
+	registry := &testControlRegistry{
+		Store: local,
+		operation: ControlOperation{
+			RequestToken:      "grpc-batch-1",
+			ProposalID:        42,
+			State:             ControlOperationSucceeded,
+			ResourceKeys:      []resources.ResourceKey{auditKey, ordersKey},
+			FirstChangeCursor: 1,
+			LastChangeCursor:  2,
+		},
+		changes: []ControlChange{
+			{Cursor: 1, Kind: ControlChangeDesiredApplied, Key: auditKey, Generation: 1},
+			{Cursor: 2, Kind: ControlChangeDesiredApplied, Key: queueKey, Generation: 1},
+		},
+	}
+	authority := &fakeAuthority{
+		apply: func(AuthorityApplyRequest) (AuthorityObservation, error) {
+			panic("atomic desired batch must not materialize resources inline")
+		},
+	}
+	client := startRegionalAdminClient(t, registry, authority)
+	orders := applyProtoRequest(t, ordersKey, "unused")
+	audit := applyProtoRequest(t, auditKey, "unused")
+	applied, err := client.BatchApplyResources(t.Context(), &epochv1.BatchApplyResourcesRequest{
+		RequestToken: "grpc-batch-1",
+		Resources: []*epochv1.BatchApplyResource{
+			{Name: orders.Name, Spec: orders.Spec, ExpectedGeneration: uint64Pointer(0)},
+			{Name: audit.Name, Spec: audit.Spec, ExpectedGeneration: uint64Pointer(0)},
+		},
+	})
+	if err != nil || len(applied.GetResults()) != 2 ||
+		applied.GetResults()[0].GetResource().GetName().GetName() != "audit" ||
+		applied.GetResults()[1].GetResource().GetName().GetName() != "orders" {
+		t.Fatalf("BatchApplyResources() = %+v, %v", applied, err)
+	}
+	operation, err := client.GetOperation(t.Context(), &epochv1.GetOperationRequest{
+		RequestToken:      "grpc-batch-1",
+		AffectedResources: []*epochv1.ResourceName{orders.Name, audit.Name},
+	})
+	if err != nil || operation.GetState() != epochv1.OperationState_OPERATION_STATE_SUCCEEDED ||
+		operation.GetProposalId() != 42 || operation.GetLastChangeCursor() != 2 {
+		t.Fatalf("GetOperation() = %+v, %v", operation, err)
+	}
+	_, err = client.GetOperation(t.Context(), &epochv1.GetOperationRequest{
+		RequestToken:      "grpc-batch-1",
+		AffectedResources: []*epochv1.ResourceName{orders.Name},
+	})
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("GetOperation(scope mismatch) error = %v", err)
+	}
+	registry.operation = ControlOperation{
+		RequestToken: "grpc-batch-1",
+		ProposalID:   43,
+		State:        ControlOperationPending,
+	}
+	_, err = client.GetOperation(t.Context(), &epochv1.GetOperationRequest{
+		RequestToken:      "grpc-batch-1",
+		AffectedResources: []*epochv1.ResourceName{orders.Name, audit.Name},
+	})
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("GetOperation(unauthorizable pending operation) error = %v", err)
+	}
+	watchContext, cancel := context.WithCancel(t.Context())
+	watch, err := client.WatchResourceChanges(watchContext, &epochv1.WatchResourceChangesRequest{
+		BatchSize: 10,
+		Namespace: "core",
+		Kind:      epochv1.ResourceKind_RESOURCE_KIND_STREAM,
+	})
+	if err != nil {
+		t.Fatalf("WatchResourceChanges() error = %v", err)
+	}
+	batch, err := watch.Recv()
+	cancel()
+	if err != nil || batch.GetEarliestCursor() != 1 || batch.GetLatestCursor() != 2 ||
+		batch.GetNextCursor() != 2 || len(batch.GetChanges()) != 1 ||
+		batch.GetChanges()[0].GetName().GetName() != "audit" {
+		t.Fatalf("WatchResourceChanges().Recv() = %+v, %v", batch, err)
 	}
 }
 
@@ -220,7 +355,7 @@ func TestRegionalAdminRequiresGovernanceAndFiltersByExactMetadata(t *testing.T) 
 
 func startRegionalAdminClient(
 	t *testing.T,
-	registry *resources.Registry,
+	registry resources.Store,
 	authority Authority,
 ) epochv1.RegionalAdminServiceClient {
 	t.Helper()

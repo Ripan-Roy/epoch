@@ -11,7 +11,10 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
-use epoch_catalog::{Catalog, CatalogCommand, CatalogMutation, ResourceRecord};
+use epoch_catalog::{
+    Catalog, CatalogChangePage, CatalogCommand, CatalogError, CatalogMutation, CatalogOperation,
+    ControlLease, ManagedResourceRecord, ResourceRecord,
+};
 use epoch_consensus::{ApplicationSnapshot, CommittedProposal, LogIndex};
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +30,12 @@ const CATALOG_APPLICATION_SNAPSHOT_VERSION: u16 = 1;
 pub struct CatalogTabletScope {
     group_id: u64,
     group_epoch: u64,
+}
+
+#[derive(Debug)]
+pub enum CatalogTabletQueryError {
+    Unavailable(String),
+    Catalog(CatalogError),
 }
 
 impl CatalogTabletScope {
@@ -87,8 +96,16 @@ pub struct CatalogTabletSnapshot {
     pub resource_count: u64,
     #[serde(serialize_with = "serialize_u64_as_decimal")]
     pub tablet_count: u64,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    pub managed_resource_count: u64,
+    #[serde(serialize_with = "serialize_u64_as_decimal")]
+    pub latest_change_cursor: u64,
     pub state_digest: String,
     pub resources: Vec<ResourceRecord>,
+    pub managed_resources: Vec<ManagedResourceRecord>,
+    pub node_allocations: BTreeMap<u64, u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control_lease: Option<ControlLease>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +210,8 @@ impl CatalogTabletService {
             .map_err(|_| "catalog resource count exceeds u64".to_owned())?;
         let tablet_count = u64::try_from(state.catalog.tablet_count())
             .map_err(|_| "catalog tablet count exceeds u64".to_owned())?;
+        let managed_resource_count = u64::try_from(state.catalog.managed_resource_count())
+            .map_err(|_| "managed resource count exceeds u64".to_owned())?;
         let state_digest = state
             .catalog
             .state_digest()
@@ -205,9 +224,44 @@ impl CatalogTabletService {
             applied_command_count,
             resource_count,
             tablet_count,
+            managed_resource_count,
+            latest_change_cursor: state.catalog.latest_change_cursor(),
             state_digest,
             resources: state.catalog.resources().cloned().collect(),
+            managed_resources: state.catalog.managed_resources().cloned().collect(),
+            node_allocations: state
+                .catalog
+                .node_allocations()
+                .map_err(|error| error.to_string())?,
+            control_lease: state.catalog.control_lease().cloned(),
         })
+    }
+
+    pub fn operation(&self, request_token: &str) -> Result<Option<CatalogOperation>, String> {
+        self.ensure_healthy()?;
+        self.state
+            .read()
+            .map_err(|_| "catalog state read lock was poisoned".to_owned())
+            .map(|state| state.catalog.operation(request_token))
+    }
+
+    pub fn changes_after(
+        &self,
+        cursor: u64,
+        limit: usize,
+    ) -> Result<CatalogChangePage, CatalogTabletQueryError> {
+        self.ensure_healthy()
+            .map_err(CatalogTabletQueryError::Unavailable)?;
+        self.state
+            .read()
+            .map_err(|_| {
+                CatalogTabletQueryError::Unavailable(
+                    "catalog state read lock was poisoned".to_owned(),
+                )
+            })?
+            .catalog
+            .changes_after(cursor, limit)
+            .map_err(CatalogTabletQueryError::Catalog)
     }
 
     /// Reads the exact catalog inventory carried by a native application

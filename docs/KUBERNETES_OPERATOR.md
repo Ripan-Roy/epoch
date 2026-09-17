@@ -2,8 +2,9 @@
 
 Epoch ships a controller-runtime operator for the
 `platform.epoch.dev/v1alpha1` `EpochCluster` custom resource. One resource
-reconciles a regional Rust data plane, a durable single-owner Go control plane,
-peer/public/control Services, per-node PVCs, required workload identities, and
+reconciles a regional Rust data plane, three anti-affined Go control replicas
+over replicated Catalog metadata,
+peer/public/control Services, per-pod PVCs, required workload identities, and
 scheduled application-layer encrypted semantic backups.
 
 ## Topology contract
@@ -17,10 +18,18 @@ scheduled application-layer encrypted semantic backups.
   starting at one.
 - `spec.region` and `spec.nodeClass` define placement identity; the scheduled
   Kubernetes node name is the observed zone in this alpha-exit deployment.
-- Every data node owns a `ReadWriteOnce` PVC. The Go control owner has a
-  separate durable bbolt PVC. Semantic backups use a pre-provisioned
+- Every data node and every Go control replica owns a `ReadWriteOnce` PVC.
+  Control metadata lives in Rust Catalog consensus; each control PVC holds its
+  local audit journal and, for ordinal zero during upgrade, the retained legacy
+  bbolt database used by the one-time import. Semantic backups use a pre-provisioned
   `ReadWriteMany` PVC so any scheduled Job and every restore init container can
   access the same encrypted objects.
+- The control StatefulSet runs three ordered replicas with required hostname
+  anti-affinity and a `minAvailable: 2` disruption budget. The pod name is its
+  stable lease identity; one replicated TTL/fence lease owns reconciliation.
+- The automatic one-time bbolt import is bounded to 128 live-or-tombstoned
+  generation records. Larger legacy registries fail closed and require an
+  explicit migration before upgrading this candidate.
 - Two operator replicas use Kubernetes Lease leader election. Reconciliation
   is idempotent, treats API-server defaults as no-ops, and repairs drift in
   operator-owned objects.
@@ -176,7 +185,8 @@ kubectl -n epoch-system get jobs \
 Status distinguishes desired reconciliation from evidence:
 
 - `Available` reports configuration or workload readiness;
-- `Progressing` reports ready data nodes and the control owner;
+- `Progressing` reports ready data nodes and ready control replicas; two of
+  three control replicas are required for `Available`;
 - `BackupReady` reports whether the newest observed scheduled outcome is a
   success or failure; and
 - `UpgradeReady` is true only while the recorded data-node image is stable;

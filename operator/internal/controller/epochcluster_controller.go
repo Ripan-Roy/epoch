@@ -1,5 +1,5 @@
 // Package controller reconciles EpochCluster resources into a regional data
-// plane and its single-owner control-plane service.
+// plane and a lease-fenced, horizontally available control-plane service.
 package controller
 
 import (
@@ -17,6 +17,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -45,6 +46,8 @@ const (
 	backupPreviousKey  = "previous."
 	backupOwnerLabel   = "platform.epoch.dev/backup-owner"
 	requeueAfter       = 5 * time.Second
+	controlReplicas    = int32(3)
+	controlMinReady    = int32(2)
 )
 
 type EpochClusterReconciler struct {
@@ -97,6 +100,7 @@ func (reconciler *EpochClusterReconciler) Reconcile(
 		peerService(cluster),
 		publicService(cluster),
 		controlService(cluster),
+		controlPodDisruptionBudget(cluster),
 		controlStatefulSet(cluster),
 		backupCronJob(cluster),
 	} {
@@ -126,6 +130,7 @@ func (reconciler *EpochClusterReconciler) SetupWithManager(manager ctrl.Manager)
 		Owns(&corev1.Service{}).
 		Owns(&batchv1.CronJob{}).
 		Owns(&batchv1.Job{}).
+		Owns(&policyv1.PodDisruptionBudget{}).
 		Complete(reconciler)
 }
 
@@ -413,6 +418,9 @@ func objectMatchesDesired(desired, current client.Object) bool {
 	case *batchv1.CronJob:
 		observed, ok := current.(*batchv1.CronJob)
 		return ok && apiequality.Semantic.DeepDerivative(wanted.Spec, observed.Spec)
+	case *policyv1.PodDisruptionBudget:
+		observed, ok := current.(*policyv1.PodDisruptionBudget)
+		return ok && apiequality.Semantic.DeepDerivative(wanted.Spec, observed.Spec)
 	default:
 		return false
 	}
@@ -428,7 +436,7 @@ func (reconciler *EpochClusterReconciler) refreshStatus(
 	_ = reconciler.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: controlName(cluster)}, control)
 	cluster.Status.ObservedGeneration = cluster.Generation
 	cluster.Status.ReadyNodes = nodes.Status.ReadyReplicas
-	cluster.Status.ControlReady = control.Status.ReadyReplicas == 1
+	cluster.Status.ControlReady = control.Status.ReadyReplicas >= controlMinReady
 	cluster.Status.Endpoint = fmt.Sprintf("https://%s.%s.svc:8080", controlName(cluster), cluster.Namespace)
 	cluster.Status.Initialized = true
 	cluster.Status.RestoreObject = ""
@@ -443,7 +451,7 @@ func (reconciler *EpochClusterReconciler) refreshStatus(
 	available := nodes.Status.ReadyReplicas == cluster.Spec.Replicas && cluster.Status.ControlReady
 	status := metav1.ConditionFalse
 	reason := "ComponentsPending"
-	message := fmt.Sprintf("%d/%d data nodes and %d/1 control replicas are ready", nodes.Status.ReadyReplicas, cluster.Spec.Replicas, control.Status.ReadyReplicas)
+	message := fmt.Sprintf("%d/%d data nodes and %d/%d control replicas are ready", nodes.Status.ReadyReplicas, cluster.Spec.Replicas, control.Status.ReadyReplicas, controlReplicas)
 	if available {
 		status = metav1.ConditionTrue
 		reason = "ComponentsReady"
@@ -778,6 +786,20 @@ func controlService(cluster *epochv1alpha1.EpochCluster) *corev1.Service {
 	}
 }
 
+func controlPodDisruptionBudget(cluster *epochv1alpha1.EpochCluster) *policyv1.PodDisruptionBudget {
+	return &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      controlName(cluster),
+			Namespace: cluster.Namespace,
+			Labels:    labels(cluster, "control-plane"),
+		},
+		Spec: policyv1.PodDisruptionBudgetSpec{
+			MinAvailable: &intstr.IntOrString{Type: intstr.Int, IntVal: controlMinReady},
+			Selector:     &metav1.LabelSelector{MatchLabels: labels(cluster, "control-plane")},
+		},
+	}
+}
+
 func nodeStatefulSet(cluster *epochv1alpha1.EpochCluster) *appsv1.StatefulSet {
 	name := nodeName(cluster)
 	nodeImage := nodeRolloutImage(cluster)
@@ -915,7 +937,7 @@ func configureRestore(statefulSet *appsv1.StatefulSet, cluster *epochv1alpha1.Ep
 }
 
 func controlStatefulSet(cluster *epochv1alpha1.EpochCluster) *appsv1.StatefulSet {
-	one := int32(1)
+	replicas := controlReplicas
 	selector := labels(cluster, "control-plane")
 	endpoints := make([]string, cluster.Spec.Replicas)
 	for index := range endpoints {
@@ -928,22 +950,25 @@ func controlStatefulSet(cluster *epochv1alpha1.EpochCluster) *appsv1.StatefulSet
 	return &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{Name: controlName(cluster), Namespace: cluster.Namespace, Labels: selector},
 		Spec: appsv1.StatefulSetSpec{
-			ServiceName: controlName(cluster),
-			Replicas:    &one,
-			Selector:    &metav1.LabelSelector{MatchLabels: selector},
+			ServiceName:         controlName(cluster),
+			Replicas:            &replicas,
+			PodManagementPolicy: appsv1.OrderedReadyPodManagement,
+			Selector:            &metav1.LabelSelector{MatchLabels: selector},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: selector},
 				Spec: corev1.PodSpec{
 					SecurityContext: &corev1.PodSecurityContext{RunAsNonRoot: boolPointer(true), FSGroup: int64Pointer(10001)},
+					Affinity:        controlAffinity(cluster),
 					Containers: []corev1.Container{{
 						Name:            "epoch-control",
 						Image:           cluster.Spec.ControlImage,
 						ImagePullPolicy: corev1.PullIfNotPresent,
 						Env: []corev1.EnvVar{
+							{Name: "EPOCH_CONTROL_INSTANCE_ID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
 							{Name: "EPOCH_CONTROL_ADDR", Value: ":8080"},
 							{Name: "EPOCH_CONTROL_GRPC_ADDR", Value: ":8081"},
 							{Name: "EPOCH_CONTROL_METRICS_ADDR", Value: "0.0.0.0:9090"},
-							{Name: "EPOCH_CONTROL_STATE_PATH", Value: "/var/lib/epoch-control/registry.db"},
+							{Name: "EPOCH_CONTROL_LEGACY_STATE_PATH", Value: "/var/lib/epoch-control/registry.db"},
 							{Name: "EPOCH_CONTROL_AUDIT_PATH", Value: "/var/lib/epoch-control/audit.ndjson"},
 							{Name: "EPOCH_CONTROL_REGIONAL_ENDPOINTS", Value: strings.Join(endpoints, ",")},
 							{Name: "EPOCH_CONTROL_REGIONAL_METRICS_ENDPOINTS", Value: strings.Join(metricsEndpoints, ",")},
@@ -979,6 +1004,15 @@ func controlStatefulSet(cluster *epochv1alpha1.EpochCluster) *appsv1.StatefulSet
 			}},
 		},
 	}
+}
+
+func controlAffinity(cluster *epochv1alpha1.EpochCluster) *corev1.Affinity {
+	return &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+			LabelSelector: &metav1.LabelSelector{MatchLabels: labels(cluster, "control-plane")},
+			TopologyKey:   "kubernetes.io/hostname",
+		}},
+	}}
 }
 
 func effectiveAffinity(cluster *epochv1alpha1.EpochCluster) *corev1.Affinity {

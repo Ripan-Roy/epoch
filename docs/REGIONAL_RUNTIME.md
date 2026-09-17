@@ -68,17 +68,21 @@ Start the Go bridge against all three Rust endpoints:
 ```shell
 EPOCH_CONTROL_REGIONAL_ENDPOINTS=http://127.0.0.1:18661,http://127.0.0.1:18662,http://127.0.0.1:18663 \
 EPOCH_CONTROL_ALLOWED_ORIGINS=http://127.0.0.1:5173 \
-EPOCH_CONTROL_STATE_PATH=.epoch/control/registry.db \
+EPOCH_CONTROL_INSTANCE_ID=local-control-0 \
+EPOCH_CONTROL_LEGACY_STATE_PATH=.epoch/control/registry.db \
 EPOCH_CONTROL_AUDIT_PATH=.epoch/control/audit.ndjson \
 EPOCH_AUTH_POLICY_PATH=spec/auth/bootstrap-policy-v1.example.json \
 EPOCH_CONTROL_REGIONAL_TOKEN=epoch-dev-control-v1 \
 go run ./control/cmd/epoch-control
 ```
 
-The process owns that database exclusively. `GET /healthz` reports
-`"registry":"bbolt_v1"` and `"registry_durable":true`. Corruption, an unknown
-schema version, or another process already holding the file makes startup fail
-closed.
+`GET /healthz` reports `"registry":"catalog_consensus_v1"` and
+`"registry_durable":true`. The legacy path is read only for a one-time,
+idempotent import into Catalog consensus and the file is retained. Corruption
+or an unknown legacy schema fails startup closed. Additional Go replicas use
+distinct stable instance IDs and the same Rust endpoints; one replicated
+TTL/fence lease permits reconciliation while every replica can serve
+linearizable metadata reads and desired-state writes.
 
 Every regional node writes its authorization history to
 `/var/lib/epoch/audit.ndjson` in its independent Compose volume. The Go process
@@ -578,9 +582,12 @@ same-volume reopen. See [Resource Governance](RESOURCE_GOVERNANCE.md).
   immutable audit export, and certificate issuance remain open. The standalone
   local API and loopback Compose profile remain unauthenticated development
   surfaces.
-- Go management metadata is durable for one process and one bbolt file. It is
-  not replicated, multi-instance linearizable, backed up automatically, or
-  protected by management leader election.
+- Managed desired/status/tombstone/outcome metadata and change cursors are
+  replicated by the Rust Catalog. Go replicas share linearizable state while a
+  TTL/fence lease permits one reconciler to mutate native placement at a time.
+  A supported retention report, dedicated management backup/restore workflow,
+  horizontal Catalog sharding, and protected multi-control chaos evidence
+  remain open.
 - Governance filters and resource/shard attribution are implemented. ABAC
   enforcement, usage metering, pricing, billing, redaction, residency, and
   immutable audit export remain separate requirements.

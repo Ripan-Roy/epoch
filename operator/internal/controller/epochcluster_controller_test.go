@@ -12,6 +12,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apiresource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -93,6 +94,19 @@ func TestReconcileCreatesRunnableBoundedVoterTopology(t *testing.T) {
 		t.Fatalf("control StatefulSet was not created: %v", err)
 	}
 	controlContainer := control.Spec.Template.Spec.Containers[0]
+	if control.Spec.Replicas == nil || *control.Spec.Replicas != controlReplicas ||
+		control.Spec.PodManagementPolicy != appsv1.OrderedReadyPodManagement {
+		t.Fatalf("control HA topology is incomplete: replicas=%v policy=%s", control.Spec.Replicas, control.Spec.PodManagementPolicy)
+	}
+	if control.Spec.Template.Spec.Affinity == nil ||
+		control.Spec.Template.Spec.Affinity.PodAntiAffinity == nil ||
+		len(control.Spec.Template.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution) != 1 {
+		t.Fatal("control replicas must require distinct Kubernetes nodes")
+	}
+	if !containsFieldEnvironment(controlContainer.Env, "EPOCH_CONTROL_INSTANCE_ID", "metadata.name") ||
+		!containsEnvironment(controlContainer.Env, "EPOCH_CONTROL_LEGACY_STATE_PATH", "/var/lib/epoch-control/registry.db") {
+		t.Fatalf("control identity or migration configuration is absent: %#v", controlContainer.Env)
+	}
 	if !containsSecretEnvironment(controlContainer.Env, "EPOCH_CONTROL_REGIONAL_TOKEN", cluster.Spec.CredentialSecret, credentialKey) {
 		t.Fatal("control-to-data credential must come from the referenced Secret")
 	}
@@ -108,6 +122,13 @@ func TestReconcileCreatesRunnableBoundedVoterTopology(t *testing.T) {
 	}
 	if controlContainer.ReadinessProbe == nil || controlContainer.ReadinessProbe.TCPSocket == nil || controlContainer.ReadinessProbe.HTTPGet != nil {
 		t.Fatal("control-plane mTLS must not depend on an unauthenticated HTTP probe")
+	}
+	controlBudget := &policyv1.PodDisruptionBudget{}
+	if err := client.Get(context.Background(), types.NamespacedName{Namespace: cluster.Namespace, Name: controlName(cluster)}, controlBudget); err != nil {
+		t.Fatalf("control PodDisruptionBudget was not created: %v", err)
+	}
+	if controlBudget.Spec.MinAvailable == nil || controlBudget.Spec.MinAvailable.IntVal != controlMinReady {
+		t.Fatalf("control PodDisruptionBudget = %#v", controlBudget.Spec)
 	}
 	for _, serviceName := range []string{peerName(cluster), publicName(cluster), controlName(cluster)} {
 		service := &corev1.Service{}
@@ -600,6 +621,9 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	if err := batchv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
+	if err := policyv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
 	if err := epochv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
@@ -690,6 +714,16 @@ func tlsSecret(cluster *epochv1alpha1.EpochCluster, name string) *corev1.Secret 
 func containsEnvironment(environment []corev1.EnvVar, name, value string) bool {
 	for _, variable := range environment {
 		if variable.Name == name && variable.Value == value {
+			return true
+		}
+	}
+	return false
+}
+
+func containsFieldEnvironment(environment []corev1.EnvVar, name, fieldPath string) bool {
+	for _, variable := range environment {
+		if variable.Name == name && variable.ValueFrom != nil && variable.ValueFrom.FieldRef != nil &&
+			variable.ValueFrom.FieldRef.FieldPath == fieldPath {
 			return true
 		}
 	}

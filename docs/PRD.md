@@ -8,6 +8,21 @@
 **Status:** Implementation-backed private beta candidate; later managed-service milestones remain open
 **Audience:** Founders, product, distributed-systems engineering, infrastructure, security, and design
 
+**Control-plane HA implementation note (16 September 2026):** Managed desired
+resources, observed status, generation tombstones, request outcomes, and a
+resumable change log now live in Rust Catalog consensus rather than one Go
+bbolt owner. Linearizable reads use `ReadIndex`; a replicated TTL/fence lease
+permits one of three anti-affined Go replicas to reconcile. Complete capacity
+observations, initial materialization, learner-transition reservation, and
+managed deletion are atomic Catalog commands. The generated gRPC contract adds
+1–128-resource desired batches, exact-resource-authorized operation lookup, and
+tenant-filtered change streaming with an explicit scanned resume cursor. An
+ordered one-time import preserves legacy live and tombstoned generations while
+retaining the old database as rollback evidence. Protected multi-control chaos,
+Catalog metadata backup/sharding, legacy token migration, and a public token-
+retention window remain open. See
+[ADR-0050](adr/0050-replicated-control-metadata-and-ha.md).
+
 **Automatic placement implementation note (11 September 2026):** The beta.9
 candidate extends the N-node three/five-voter placement contract with explicit
 rack labels, minimum-rack policy, node exclusions, and deterministic serialized
@@ -21,9 +36,9 @@ zone/rack evidence. Go desired/observed generation is distinct from the Rust
 Catalog generation: a placement-policy-only update advances the former while
 `catalog_generation` and every tablet routing fence remain unchanged. This
 prevents a no-op Catalog apply from being retried under the same token with a
-different placement. Multi-resource transactional reservation, split/merge,
-Kubernetes rack attestation, multi-instance control ownership, and production
-chaos/SLO evidence remain open. See
+different placement. Fleet-wide topology-plan reservation, split/merge,
+Kubernetes rack attestation, and production multi-control chaos/SLO evidence
+remain open. See
 [ADR-0047](adr/0047-automatic-topology-repair-and-rebalance.md).
 
 **Beta implementation note (10 September 2026):** The `v0.2.0-beta.8` release

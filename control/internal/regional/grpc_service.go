@@ -6,11 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
+	"sort"
 	"time"
 
 	controlauth "epoch.local/epoch/control/internal/auth"
 	"epoch.local/epoch/control/internal/resources"
 	epochv1 "epoch.local/epoch/sdk/go/gen/epoch/v1"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -18,15 +21,30 @@ import (
 )
 
 const (
-	defaultPageSize = 50
-	maxPageSize     = 100
+	defaultPageSize        = 50
+	maxPageSize            = 100
+	defaultChangeBatchSize = 100
+	maxChangeBatchSize     = 1_000
+	changePollInterval     = 250 * time.Millisecond
 )
+
+type batchApplyStore interface {
+	BatchApply(context.Context, BatchApplyRequest) (BatchApplyResult, error)
+}
+
+type controlOperationStore interface {
+	ControlOperation(context.Context, string) (ControlOperation, error)
+}
+
+type controlChangeStore interface {
+	ControlChanges(context.Context, uint64, uint32) (ControlChangePage, error)
+}
 
 // RegionalAdminServer exposes the versioned managed-control contract while
 // delegating catalog and placement authority to Rust.
 type RegionalAdminServer struct {
 	epochv1.UnimplementedRegionalAdminServiceServer
-	registry   *resources.Registry
+	registry   resources.Store
 	reconciler *Reconciler
 	policy     *controlauth.Policy
 	audit      controlauth.AuditSink
@@ -34,7 +52,7 @@ type RegionalAdminServer struct {
 
 // NewRegionalAdminServer constructs the gRPC lifecycle service.
 func NewRegionalAdminServer(
-	registry *resources.Registry,
+	registry resources.Store,
 	reconciler *Reconciler,
 ) *RegionalAdminServer {
 	if registry == nil {
@@ -49,7 +67,7 @@ func NewRegionalAdminServer(
 // NewAuthenticatedRegionalAdminServer constructs the public lifecycle service
 // with explicit per-action and per-tenant authorization.
 func NewAuthenticatedRegionalAdminServer(
-	registry *resources.Registry,
+	registry resources.Store,
 	reconciler *Reconciler,
 	policy *controlauth.Policy,
 	audit controlauth.AuditSink,
@@ -96,7 +114,11 @@ func (server *RegionalAdminServer) ApplyResource(
 	if reconcileErr != nil && !IsRetryable(reconcileErr) {
 		return nil, reconciliationStatus(reconcileErr)
 	}
-	encoded, err := resourceToProto(reconciled)
+	responseResource := applied.Resource
+	if reconcileErr == nil {
+		responseResource = reconciled
+	}
+	encoded, err := resourceToProto(responseResource)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -108,7 +130,7 @@ func (server *RegionalAdminServer) ApplyResource(
 	}, nil
 }
 
-// GetResource returns desired and achieved state from the Go registry.
+// GetResource returns desired and achieved state from the replicated Catalog.
 func (server *RegionalAdminServer) GetResource(
 	ctx context.Context,
 	request *epochv1.GetResourceRequest,
@@ -135,8 +157,8 @@ func (server *RegionalAdminServer) GetResource(
 	return &epochv1.GetResourceResponse{Resource: encoded}, nil
 }
 
-// ListResources returns one bounded deterministic page. The first slice has no
-// continuation token because the in-memory registry is bounded and local.
+// ListResources returns one bounded deterministic page. The current contract
+// has no continuation token; larger hosted inventory pagination remains open.
 func (server *RegionalAdminServer) ListResources(
 	ctx context.Context,
 	request *epochv1.ListResourcesRequest,
@@ -234,6 +256,206 @@ func (server *RegionalAdminServer) DeleteResource(
 		Deleted:    deleted.Deleted,
 		Replayed:   deleted.Replayed,
 	}, nil
+}
+
+// BatchApplyResources commits all desired-state changes in one Catalog
+// command. Materialization remains an observable reconciliation phase.
+func (server *RegionalAdminServer) BatchApplyResources(
+	ctx context.Context,
+	request *epochv1.BatchApplyResourcesRequest,
+) (*epochv1.BatchApplyResourcesResponse, error) {
+	if request == nil || len(request.GetResources()) == 0 || len(request.GetResources()) > 128 {
+		return nil, status.Error(codes.InvalidArgument, "batch must contain between 1 and 128 resources")
+	}
+	store, ok := server.registry.(batchApplyStore)
+	if !ok {
+		return nil, status.Error(codes.Unimplemented, "atomic desired-state batches require the replicated Catalog store")
+	}
+	batchRequest := BatchApplyRequest{
+		RequestToken: request.GetRequestToken(),
+		Resources:    make([]resources.ApplyRequest, 0, len(request.GetResources())),
+	}
+	for _, item := range request.GetResources() {
+		if item == nil {
+			return nil, status.Error(codes.InvalidArgument, "batch resources cannot be null")
+		}
+		key, desired, err := desiredFromProto(&epochv1.ApplyResourceRequest{
+			Name:               item.GetName(),
+			Spec:               item.GetSpec(),
+			ExpectedGeneration: item.ExpectedGeneration,
+		})
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		if err := server.authorize(ctx, controlauth.ActionResourceApply, authScopeFromKey(key)); err != nil {
+			return nil, err
+		}
+		batchRequest.Resources = append(batchRequest.Resources, resources.ApplyRequest{
+			ExpectedGeneration: item.ExpectedGeneration,
+			Resource:           desired,
+		})
+	}
+	applied, err := store.BatchApply(ctx, batchRequest)
+	if err != nil {
+		return nil, registryStatus(err)
+	}
+	response := &epochv1.BatchApplyResourcesResponse{
+		Results:  make([]*epochv1.ApplyResourceResponse, 0, len(applied.Results)),
+		Replayed: applied.Replayed,
+	}
+	for _, result := range applied.Results {
+		encoded, err := resourceToProto(result.Resource)
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		response.Results = append(response.Results, &epochv1.ApplyResourceResponse{
+			Resource: encoded,
+			Created:  result.Created,
+			Changed:  result.Changed,
+			Replayed: result.Replayed,
+		})
+	}
+	return response, nil
+}
+
+// GetOperation returns one request-token outcome only when the caller supplies
+// and is authorized for the exact durable set of affected resources.
+func (server *RegionalAdminServer) GetOperation(
+	ctx context.Context,
+	request *epochv1.GetOperationRequest,
+) (*epochv1.GetOperationResponse, error) {
+	if request == nil || len(request.GetAffectedResources()) == 0 || len(request.GetAffectedResources()) > 128 {
+		return nil, status.Error(codes.InvalidArgument, "affected_resources must contain between 1 and 128 names")
+	}
+	store, ok := server.registry.(controlOperationStore)
+	if !ok {
+		return nil, status.Error(codes.Unimplemented, "operation lookup requires the replicated Catalog store")
+	}
+	expected := make([]resources.ResourceKey, 0, len(request.GetAffectedResources()))
+	for _, name := range request.GetAffectedResources() {
+		key, err := keyFromProto(name)
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		if err := server.authorize(ctx, controlauth.ActionResourceRead, authScopeFromKey(key)); err != nil {
+			return nil, err
+		}
+		expected = append(expected, key)
+	}
+	sortResourceKeys(expected)
+	if adjacentResourceKeyDuplicate(expected) {
+		return nil, status.Error(codes.InvalidArgument, "affected_resources must be distinct")
+	}
+	operation, err := store.ControlOperation(ctx, request.GetRequestToken())
+	if err != nil {
+		return nil, registryStatus(err)
+	}
+	// An uncommitted proposal has no durable affected-resource set yet. Do not
+	// reveal even its existence to a caller that guessed the token and supplied
+	// an unrelated scope; the committed outcome becomes queryable once Catalog
+	// can authorize its exact identities.
+	if len(operation.ResourceKeys) == 0 {
+		return nil, status.Error(codes.NotFound, "operation was not found for the affected resources")
+	}
+	if !slices.Equal(operation.ResourceKeys, expected) {
+		return nil, status.Error(codes.NotFound, "operation was not found for the affected resources")
+	}
+	return &epochv1.GetOperationResponse{
+		RequestToken:      operation.RequestToken,
+		ProposalId:        operation.ProposalID,
+		State:             protoOperationState(operation.State),
+		AffectedResources: protoResourceNames(expected),
+		FailureCode:       operation.FailureCode,
+		FailureMessage:    operation.FailureMessage,
+		FirstChangeCursor: operation.FirstChangeCursor,
+		LastChangeCursor:  operation.LastChangeCursor,
+	}, nil
+}
+
+// WatchResourceChanges streams global-cursor checkpoints with only changes
+// visible to the authenticated principal and requested exact filter.
+func (server *RegionalAdminServer) WatchResourceChanges(
+	request *epochv1.WatchResourceChangesRequest,
+	stream grpc.ServerStreamingServer[epochv1.WatchResourceChangesResponse],
+) error {
+	if request == nil {
+		return status.Error(codes.InvalidArgument, "request is required")
+	}
+	store, ok := server.registry.(controlChangeStore)
+	if !ok {
+		return status.Error(codes.Unimplemented, "resource change watch requires the replicated Catalog store")
+	}
+	batchSize := request.GetBatchSize()
+	if batchSize == 0 {
+		batchSize = defaultChangeBatchSize
+	}
+	if batchSize > maxChangeBatchSize {
+		return status.Errorf(codes.InvalidArgument, "batch_size must be between 1 and %d", maxChangeBatchSize)
+	}
+	kind, err := optionalKindFromProto(request.GetKind())
+	if err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	principal, err := server.authorizeCollection(stream.Context(), controlauth.ActionResourceRead)
+	if err != nil {
+		return err
+	}
+	filter := resources.ListFilter{
+		Organization: request.GetOrganization(),
+		Project:      request.GetProject(),
+		Environment:  request.GetEnvironment(),
+		Namespace:    request.GetNamespace(),
+		Kind:         kind,
+	}
+	cursor := request.GetAfterCursor()
+	first := true
+	for {
+		page, err := store.ControlChanges(stream.Context(), cursor, batchSize)
+		if err != nil {
+			return registryStatus(err)
+		}
+		nextCursor := cursor
+		if len(page.Changes) > 0 {
+			nextCursor = page.Changes[len(page.Changes)-1].Cursor
+		}
+		if first || nextCursor > cursor {
+			response := &epochv1.WatchResourceChangesResponse{
+				EarliestCursor: page.EarliestCursor,
+				LatestCursor:   page.LatestCursor,
+				NextCursor:     nextCursor,
+				Changes:        make([]*epochv1.ResourceChange, 0, len(page.Changes)),
+			}
+			for _, change := range page.Changes {
+				if !resourceKeyMatchesFilter(change.Key, filter) ||
+					(server.policy != nil && !principal.Allows(controlauth.ActionResourceRead, authScopeFromKey(change.Key))) {
+					continue
+				}
+				response.Changes = append(response.Changes, &epochv1.ResourceChange{
+					Cursor:     change.Cursor,
+					Kind:       protoControlChangeKind(change.Kind),
+					Name:       protoResourceName(change.Key),
+					Generation: change.Generation,
+				})
+			}
+			if err := stream.Send(response); err != nil {
+				return err
+			}
+			cursor = nextCursor
+			first = false
+			if cursor < page.LatestCursor && len(page.Changes) == int(batchSize) {
+				continue
+			}
+		}
+		timer := time.NewTimer(changePollInterval)
+		select {
+		case <-stream.Context().Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return stream.Context().Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (server *RegionalAdminServer) authorize(
@@ -676,6 +898,8 @@ func registryStatus(err error) error {
 		return status.Error(codes.NotFound, registryError.Message)
 	case resources.CodeConflict:
 		return status.Error(codes.Aborted, registryError.Message)
+	case resources.CodeUnavailable:
+		return status.Error(codes.Unavailable, registryError.Message)
 	default:
 		return status.Error(codes.Internal, "internal control-plane error")
 	}
@@ -705,4 +929,72 @@ func cloneStringMap(values map[string]string) map[string]string {
 		cloned[key] = value
 	}
 	return cloned
+}
+
+func protoResourceName(key resources.ResourceKey) *epochv1.ResourceName {
+	return &epochv1.ResourceName{
+		Organization: key.Organization,
+		Project:      key.Project,
+		Environment:  key.Environment,
+		Namespace:    key.Namespace,
+		Kind:         protoKind(key.Kind),
+		Name:         key.Name,
+	}
+}
+
+func protoResourceNames(keys []resources.ResourceKey) []*epochv1.ResourceName {
+	names := make([]*epochv1.ResourceName, 0, len(keys))
+	for _, key := range keys {
+		names = append(names, protoResourceName(key))
+	}
+	return names
+}
+
+func sortResourceKeys(keys []resources.ResourceKey) {
+	sort.Slice(keys, func(left, right int) bool {
+		return controlNameLess(controlName(keys[left]), controlName(keys[right]))
+	})
+}
+
+func adjacentResourceKeyDuplicate(keys []resources.ResourceKey) bool {
+	for index := 1; index < len(keys); index++ {
+		if keys[index] == keys[index-1] {
+			return true
+		}
+	}
+	return false
+}
+
+func protoOperationState(state ControlOperationState) epochv1.OperationState {
+	switch state {
+	case ControlOperationPending:
+		return epochv1.OperationState_OPERATION_STATE_PENDING
+	case ControlOperationSucceeded:
+		return epochv1.OperationState_OPERATION_STATE_SUCCEEDED
+	case ControlOperationFailed:
+		return epochv1.OperationState_OPERATION_STATE_FAILED
+	default:
+		return epochv1.OperationState_OPERATION_STATE_UNSPECIFIED
+	}
+}
+
+func protoControlChangeKind(kind ControlChangeKind) epochv1.ResourceChangeKind {
+	switch kind {
+	case ControlChangeDesiredApplied:
+		return epochv1.ResourceChangeKind_RESOURCE_CHANGE_KIND_DESIRED_APPLIED
+	case ControlChangeDesiredDeleted:
+		return epochv1.ResourceChangeKind_RESOURCE_CHANGE_KIND_DESIRED_DELETED
+	case ControlChangeStatusUpdated:
+		return epochv1.ResourceChangeKind_RESOURCE_CHANGE_KIND_STATUS_UPDATED
+	default:
+		return epochv1.ResourceChangeKind_RESOURCE_CHANGE_KIND_UNSPECIFIED
+	}
+}
+
+func resourceKeyMatchesFilter(key resources.ResourceKey, filter resources.ListFilter) bool {
+	return (filter.Organization == "" || key.Organization == filter.Organization) &&
+		(filter.Project == "" || key.Project == filter.Project) &&
+		(filter.Environment == "" || key.Environment == filter.Environment) &&
+		(filter.Namespace == "" || key.Namespace == filter.Namespace) &&
+		(filter.Kind == "" || key.Kind == filter.Kind)
 }

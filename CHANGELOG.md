@@ -6,6 +6,33 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+### Added
+
+- Moved managed desired state, observed status, generation tombstones, request
+  outcomes, and resumable change history into the replicated Rust Catalog.
+- Added a lease- and fence-protected active reconciler across three replaceable
+  Go control replicas, including atomic capacity/materialization and managed
+  deletion commands.
+- Added atomic multi-resource apply, durable operation lookup, and authorized
+  resumable change streaming to the generated RegionalAdmin gRPC contract.
+- Added ordered one-time import of the legacy bbolt registry and Kubernetes
+  anti-affinity, quorum readiness, and a two-replica disruption budget for the
+  control StatefulSet.
+
+### Security and recovery
+
+- Upgraded `rustls` to 0.23.45 to address RUSTSEC-2026-0285; the dependency
+  audit and the fail-closed TLS/mTLS transport tests pass on the patched build.
+- The regional container campaign now proves replicated control recovery,
+  stale-owner fencing, fail-closed behavior without Catalog quorum, and
+  same-volume all-voter recovery without a separate writable metadata owner.
+
+### Limitations
+
+- Catalog metadata backup/restore, horizontal sharding, bounded outcome/change
+  retention, protected multi-control chaos, and legacy idempotency-token import
+  remain release gates.
+
 ## [0.2.0-beta.11] - 2026-09-14
 
 ### Added

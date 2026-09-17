@@ -33,6 +33,31 @@ type AuthorityApplyRequest struct {
 	Governance         *resources.ResourceGovernance
 }
 
+// AuthorityControlLease fences every managed topology mutation to one current
+// Go controller instance.
+type AuthorityControlLease struct {
+	OwnerID string
+	Fence   uint64
+	NowMS   uint64
+}
+
+// AuthorityManagedApplyRequest atomically validates desired generation,
+// controller ownership, and the complete capacity observation with the native
+// Catalog apply.
+type AuthorityManagedApplyRequest struct {
+	AuthorityApplyRequest
+	DesiredGeneration uint64
+	Lease             AuthorityControlLease
+}
+
+// AuthorityManagedMembershipPlanRequest extends a learner-first transition
+// with replicated desired-state and controller-ownership fences.
+type AuthorityManagedMembershipPlanRequest struct {
+	AuthorityMembershipPlanRequest
+	DesiredGeneration uint64
+	Lease             AuthorityControlLease
+}
+
 // AuthorityObservation contains achieved catalog identity and placement.
 type AuthorityObservation struct {
 	Generation uint64
@@ -70,6 +95,34 @@ type Authority interface {
 	Observe(context.Context, resources.ResourceKey) (AuthorityObservation, error)
 	PlanMembership(context.Context, AuthorityMembershipPlanRequest) (AuthorityObservation, error)
 	Delete(context.Context, AuthorityDeleteRequest) (AuthorityDeleteObservation, error)
+}
+
+type managedAuthority interface {
+	ApplyManaged(context.Context, AuthorityManagedApplyRequest) (AuthorityObservation, error)
+	PlanManagedMembership(
+		context.Context,
+		AuthorityManagedMembershipPlanRequest,
+	) (AuthorityObservation, error)
+}
+
+type controlLeaseStore interface {
+	ControlLease() (AuthorityControlLease, error)
+}
+
+type managedDeleteStore interface {
+	DeleteManaged(
+		context.Context,
+		resources.DeleteRequest,
+		uint64,
+		uint64,
+	) (resources.DeleteResult, error)
+}
+
+type managedDeleteReplayStore interface {
+	ReplayManagedDelete(
+		context.Context,
+		resources.DeleteRequest,
+	) (resources.DeleteResult, bool, error)
 }
 
 type authorityErrorKind uint8
@@ -128,7 +181,7 @@ func IsRetryable(err error) bool {
 
 // Reconciler generation-fences all observed status updates.
 type Reconciler struct {
-	registry  *resources.Registry
+	registry  resources.Store
 	authority Authority
 	observer  ReconcileObserver
 	mutations sync.Mutex
@@ -140,13 +193,13 @@ type ReconcileObserver interface {
 }
 
 // NewReconciler constructs a regional reconciler.
-func NewReconciler(registry *resources.Registry, authority Authority) *Reconciler {
+func NewReconciler(registry resources.Store, authority Authority) *Reconciler {
 	return NewObservedReconciler(registry, authority, nil)
 }
 
 // NewObservedReconciler constructs a reconciler with lifecycle metrics.
 func NewObservedReconciler(
-	registry *resources.Registry,
+	registry resources.Store,
 	authority Authority,
 	observer ReconcileObserver,
 ) *Reconciler {
@@ -207,7 +260,7 @@ func (reconciler *Reconciler) Reconcile(
 		if err != nil {
 			return reconciler.fail(resource, IsRetryable(err), err)
 		}
-		observation, err = reconciler.authority.Apply(ctx, AuthorityApplyRequest{
+		applyRequest := AuthorityApplyRequest{
 			RequestToken:       applyToken(resource),
 			Key:                resource.ResourceKey,
 			ExpectedGeneration: expectedCatalogGeneration,
@@ -216,7 +269,29 @@ func (reconciler *Reconciler) Reconcile(
 			TabletPlacements:   cloneTabletPlacements(placement.TabletPlacements),
 			Configuration:      spec.Configuration,
 			Governance:         resource.Governance,
-		})
+		}
+		leaseStore, replicatedStore := reconciler.registry.(controlLeaseStore)
+		managed, managedAuthorityAvailable := reconciler.authority.(managedAuthority)
+		if replicatedStore != managedAuthorityAvailable {
+			return reconciler.fail(
+				resource,
+				false,
+				invalidAuthorityError("replicated registry and managed authority must be configured together"),
+			)
+		}
+		if replicatedStore {
+			lease, leaseErr := leaseStore.ControlLease()
+			if leaseErr != nil {
+				return reconciler.fail(resource, true, leaseErr)
+			}
+			observation, err = managed.ApplyManaged(ctx, AuthorityManagedApplyRequest{
+				AuthorityApplyRequest: applyRequest,
+				DesiredGeneration:     resource.Generation,
+				Lease:                 lease,
+			})
+		} else {
+			observation, err = reconciler.authority.Apply(ctx, applyRequest)
+		}
 	} else {
 		observation, err = reconciler.authority.Observe(ctx, resource.ResourceKey)
 		if err == nil {
@@ -389,14 +464,36 @@ func (reconciler *Reconciler) commitPlacementTransition(
 			"automatic membership plan no longer matches the observed tablet assignment",
 		)
 	}
-	planned, err := reconciler.authority.PlanMembership(ctx, AuthorityMembershipPlanRequest{
+	request := AuthorityMembershipPlanRequest{
 		RequestToken:               membershipPlanToken(resource, tablet, transition),
 		Key:                        resource.ResourceKey,
 		TabletID:                   tablet.TabletID,
 		ExpectedTabletEpoch:        tablet.TabletEpoch,
 		ExpectedResourceGeneration: tablet.ResourceGeneration,
 		TargetVoterNodeIDs:         append([]uint64(nil), transition.TargetVoterNodeIDs...),
-	})
+	}
+	leaseStore, replicatedStore := reconciler.registry.(controlLeaseStore)
+	managed, managedAuthorityAvailable := reconciler.authority.(managedAuthority)
+	if replicatedStore != managedAuthorityAvailable {
+		return AuthorityObservation{}, PlacementDecision{}, invalidAuthorityError(
+			"replicated registry and managed authority must be configured together",
+		)
+	}
+	var planned AuthorityObservation
+	var err error
+	if replicatedStore {
+		lease, leaseErr := leaseStore.ControlLease()
+		if leaseErr != nil {
+			return AuthorityObservation{}, PlacementDecision{}, leaseErr
+		}
+		planned, err = managed.PlanManagedMembership(ctx, AuthorityManagedMembershipPlanRequest{
+			AuthorityMembershipPlanRequest: request,
+			DesiredGeneration:              resource.Generation,
+			Lease:                          lease,
+		})
+	} else {
+		planned, err = reconciler.authority.PlanMembership(ctx, request)
+	}
 	if err != nil {
 		return AuthorityObservation{}, PlacementDecision{}, err
 	}
@@ -547,9 +644,19 @@ func (reconciler *Reconciler) Delete(
 
 	resource, err := reconciler.registry.Get(request.Key)
 	if err != nil {
-		// The registry checks completed tokens before it evaluates missing
-		// state. This preserves an exact delete replay after the first request
-		// has removed desired metadata, without invoking Rust authority twice.
+		var storeError *resources.RegistryError
+		if !errors.As(err, &storeError) || storeError.Code != resources.CodeNotFound {
+			return resources.DeleteResult{}, err
+		}
+		if replayStore, ok := reconciler.registry.(managedDeleteReplayStore); ok {
+			replayed, found, replayErr := replayStore.ReplayManagedDelete(ctx, request)
+			if replayErr != nil || found {
+				return replayed, replayErr
+			}
+		}
+		// The local registry checks completed tokens before evaluating missing
+		// state. The replicated store reaches this fallback only when no managed
+		// delete outcome exists for the token.
 		return reconciler.registry.Delete(request)
 	}
 	if request.ExpectedGeneration != nil &&
@@ -559,6 +666,32 @@ func (reconciler *Reconciler) Delete(
 			retryable: false,
 			cause:     conflictError("desired generation conflict"),
 		}
+	}
+	if managed, ok := reconciler.registry.(managedDeleteStore); ok {
+		catalogGeneration := resource.Status.EffectiveCatalogGeneration()
+		if resource.Generation == math.MaxUint64 || catalogGeneration == math.MaxUint64 {
+			return resources.DeleteResult{}, &reconcileError{
+				message:   "resource generation is exhausted",
+				retryable: false,
+				cause:     conflictError("resource generation exhausted"),
+			}
+		}
+		deleted, deleteErr := managed.DeleteManaged(
+			ctx,
+			request,
+			resource.Generation,
+			catalogGeneration,
+		)
+		if deleteErr != nil {
+			var storeError *resources.RegistryError
+			retryable := errors.As(deleteErr, &storeError) && storeError.Code == resources.CodeUnavailable
+			return resources.DeleteResult{}, &reconcileError{
+				message:   "managed regional delete failed: " + deleteErr.Error(),
+				retryable: retryable,
+				cause:     deleteErr,
+			}
+		}
+		return deleted, nil
 	}
 	if resource.Status.ObservedGeneration > 0 {
 		expectedCatalogGeneration := resource.Status.EffectiveCatalogGeneration()
