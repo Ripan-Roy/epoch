@@ -249,6 +249,109 @@ func TestHTTPAuthorityPlansMembershipWithGenerationAndEpochFences(t *testing.T) 
 	}
 }
 
+func TestHTTPAuthorityReplaysCompletedManagedMembershipBeforeResubmitting(t *testing.T) {
+	key := regionalKey(resources.KindStream, "orders")
+	var mu sync.Mutex
+	var posted bool
+	var posts int
+	var operationToken string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case request.Method == http.MethodGet &&
+			strings.HasPrefix(request.URL.Path, controlOperationsPath+"/"):
+			if !posted {
+				writeAuthorityJSON(writer, http.StatusNotFound, map[string]any{
+					"code": "catalog_not_found", "message": "operation was not found",
+				})
+				return
+			}
+			writeAuthorityJSON(writer, http.StatusOK, map[string]any{
+				"request_token":       operationToken,
+				"proposal_id":         "41",
+				"state":               "succeeded",
+				"resource_names":      []any{controlName(key)},
+				"mutation":            map[string]any{"kind": "applied"},
+				"first_change_cursor": "0",
+				"last_change_cursor":  "0",
+			})
+		case request.Method == http.MethodGet && request.URL.Path == regionalTopologyPath:
+			writeAuthorityJSON(writer, http.StatusOK, map[string]any{
+				"node_id": "1", "region": "local", "zone": "local-a", "rack": "rack-a",
+				"node_class": "general-purpose", "consensus_voter_node_ids": []string{"1"},
+				"capacity": map[string]any{
+					"max_consensus_groups": 16, "used_consensus_groups": 1,
+					"available_consensus_groups": 15,
+				},
+			})
+		case request.Method == http.MethodGet && request.URL.Path == regionalControlAllocationsPath:
+			writeAuthorityJSON(writer, http.StatusOK, map[string]any{
+				"allocations": []any{map[string]any{"node_id": "1", "catalog_groups": 1}},
+			})
+		case request.Method == http.MethodPost &&
+			request.URL.Path == regionalControlMembershipPath+"10/membership":
+			var body map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Errorf("decode managed membership: %v", err)
+			}
+			operationToken, _ = body["request_token"].(string)
+			posted = true
+			posts++
+			document := appliedDocument(7, 3)
+			tablet := document["mutation"].(map[string]any)["resource"].(map[string]any)["tablets"].([]map[string]any)[0]
+			tablet["bootstrap_voter_node_ids"] = []string{"1", "2", "3"}
+			tablet["target_voter_node_ids"] = []string{"2", "3", "4"}
+			writeAuthorityJSON(writer, http.StatusAccepted, document)
+		case request.Method == http.MethodGet && request.URL.Path == catalogResourcePath(key):
+			resource := resourceDocument(7, 3)
+			tablet := resource["tablets"].([]map[string]any)[0]
+			tablet["bootstrap_voter_node_ids"] = []string{"1", "2", "3"}
+			tablet["target_voter_node_ids"] = []string{"2", "3", "4"}
+			writeAuthorityJSON(writer, http.StatusOK, resource)
+		case request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/shards/"):
+			writeAuthorityJSON(writer, http.StatusOK, routeResponseDocument(1, 1, 7, request.URL.Path))
+		default:
+			t.Errorf("unexpected request: %s %s", request.Method, request.URL.Path)
+			http.Error(writer, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(server.Close)
+	authority, err := NewHTTPAuthority([]string{server.URL}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := AuthorityManagedMembershipPlanRequest{
+		AuthorityMembershipPlanRequest: AuthorityMembershipPlanRequest{
+			RequestToken:               "repair-orders-generation-2",
+			Key:                        key,
+			TabletID:                   10,
+			ExpectedTabletEpoch:        1,
+			ExpectedResourceGeneration: 7,
+			TargetVoterNodeIDs:         []uint64{2, 3, 4},
+		},
+		DesiredGeneration: 2,
+		Lease:             AuthorityControlLease{OwnerID: "epoch-control-0", Fence: 4, NowMS: 100},
+	}
+	if _, err := authority.PlanManagedMembership(t.Context(), first); err != nil {
+		t.Fatalf("first PlanManagedMembership() error = %v", err)
+	}
+	second := first
+	second.Lease.NowMS = 200
+	observation, err := authority.PlanManagedMembership(t.Context(), second)
+	if err != nil {
+		t.Fatalf("replayed PlanManagedMembership() error = %v", err)
+	}
+	if posts != 1 {
+		t.Fatalf("managed membership POSTs = %d, want one", posts)
+	}
+	if len(observation.Tablets) != 2 ||
+		!slices.Equal(observation.Tablets[0].TargetVoterNodeIDs, []uint64{2, 3, 4}) {
+		t.Fatalf("replayed observation = %+v", observation)
+	}
+}
+
 func TestHTTPAuthorityObserveReturnsTruthfulIncompletePlacement(t *testing.T) {
 	var servers []*httptest.Server
 	for node := 1; node <= 3; node++ {

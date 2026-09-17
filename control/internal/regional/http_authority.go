@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -172,6 +173,19 @@ type managedCapacityAuthorityBody struct {
 	MaxConsensusGroups  uint32 `json:"max_consensus_groups"`
 	UsedConsensusGroups uint32 `json:"used_consensus_groups"`
 	CatalogGroups       uint32 `json:"catalog_groups"`
+}
+
+type managedOperationMutationDocument struct {
+	Kind    string `json:"kind"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type managedOperationDocument struct {
+	RequestToken  string                            `json:"request_token"`
+	State         ControlOperationState             `json:"state"`
+	ResourceNames []controlResourceNameDocument     `json:"resource_names"`
+	Mutation      *managedOperationMutationDocument `json:"mutation"`
 }
 
 type managedPlacementAuthorityBody struct {
@@ -391,12 +405,23 @@ func (authority *HTTPAuthority) ApplyManaged(
 	ctx context.Context,
 	request AuthorityManagedApplyRequest,
 ) (AuthorityObservation, error) {
+	requestToken := managedApplyToken(request.RequestToken, request.Lease.Fence)
+	if replayed, replayErr := authority.replayManagedOperation(
+		ctx,
+		requestToken,
+		request.Key,
+		"managed_reconciled",
+	); replayErr != nil {
+		return AuthorityObservation{}, replayErr
+	} else if replayed {
+		return authority.Observe(ctx, request.Key)
+	}
 	capacity, err := authority.managedCapacityObservation(ctx)
 	if err != nil {
 		return AuthorityObservation{}, err
 	}
 	body := managedReconcileAuthorityBody{
-		RequestToken: managedApplyToken(request.RequestToken, request.Lease.Fence),
+		RequestToken: requestToken,
 		Lease: managedLeaseAuthorityBody{
 			OwnerID: request.Lease.OwnerID,
 			Fence:   strconv.FormatUint(request.Lease.Fence, 10),
@@ -428,6 +453,16 @@ func (authority *HTTPAuthority) ApplyManaged(
 		encoded,
 	)
 	if err != nil {
+		if replayed, replayErr := authority.replayManagedOperation(
+			ctx,
+			requestToken,
+			request.Key,
+			"managed_reconciled",
+		); replayErr != nil {
+			return AuthorityObservation{}, replayErr
+		} else if replayed {
+			return authority.Observe(ctx, request.Key)
+		}
 		return AuthorityObservation{}, err
 	}
 	var reconciled managedReconcileDocument
@@ -449,12 +484,23 @@ func (authority *HTTPAuthority) PlanManagedMembership(
 	ctx context.Context,
 	request AuthorityManagedMembershipPlanRequest,
 ) (AuthorityObservation, error) {
+	requestToken := managedMembershipToken(request.RequestToken, request.Lease.Fence)
+	if replayed, replayErr := authority.replayManagedOperation(
+		ctx,
+		requestToken,
+		request.Key,
+		"applied",
+	); replayErr != nil {
+		return AuthorityObservation{}, replayErr
+	} else if replayed {
+		return authority.Observe(ctx, request.Key)
+	}
 	capacity, err := authority.managedCapacityObservation(ctx)
 	if err != nil {
 		return AuthorityObservation{}, err
 	}
 	body := managedMembershipAuthorityBody{
-		RequestToken: managedMembershipToken(request.RequestToken, request.Lease.Fence),
+		RequestToken: requestToken,
 		Lease: managedLeaseAuthorityBody{
 			OwnerID: request.Lease.OwnerID,
 			Fence:   strconv.FormatUint(request.Lease.Fence, 10),
@@ -474,6 +520,16 @@ func (authority *HTTPAuthority) PlanManagedMembership(
 	path := regionalControlMembershipPath + strconv.FormatUint(request.TabletID, 10) + "/membership"
 	response, err := authority.requestAny(ctx, http.MethodPost, path, encoded)
 	if err != nil {
+		if replayed, replayErr := authority.replayManagedOperation(
+			ctx,
+			requestToken,
+			request.Key,
+			"applied",
+		); replayErr != nil {
+			return AuthorityObservation{}, replayErr
+		} else if replayed {
+			return authority.Observe(ctx, request.Key)
+		}
 		return AuthorityObservation{}, err
 	}
 	var planned catalogApplyDocument
@@ -565,6 +621,73 @@ func managedApplyToken(base string, fence uint64) string {
 func managedMembershipToken(base string, fence uint64) string {
 	digest := sha256.Sum256([]byte(base + "\x00" + strconv.FormatUint(fence, 10)))
 	return "epoch-control.membership.v1." + hex.EncodeToString(digest[:])
+}
+
+// replayManagedOperation resolves a previously submitted semantic mutation
+// before a controller recomputes volatile lease-time or capacity evidence.
+// Catalog proposal identity is token-derived, so a pending or completed token
+// must never be submitted again with newly sampled command bytes.
+func (authority *HTTPAuthority) replayManagedOperation(
+	ctx context.Context,
+	requestToken string,
+	key resources.ResourceKey,
+	expectedMutationKind string,
+) (bool, error) {
+	response, err := authority.readControlAny(
+		ctx,
+		controlOperationsPath+"/"+url.PathEscape(requestToken),
+	)
+	if errors.Is(err, errManagedResourceNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return true, err
+	}
+	var operation managedOperationDocument
+	if err := decodeAuthorityJSON(response, &operation); err != nil {
+		return true, err
+	}
+	if operation.RequestToken != requestToken || !validControlOperationState(operation.State) {
+		return true, invalidAuthorityError(
+			"regional Catalog returned an inconsistent managed operation",
+		)
+	}
+	if operation.State == ControlOperationPending {
+		return true, availabilityError("regional Catalog operation is still pending")
+	}
+	if len(operation.ResourceNames) != 1 {
+		return true, invalidAuthorityError(
+			"regional Catalog operation omitted its exact resource identity",
+		)
+	}
+	operationKey, keyErr := keyFromControlName(operation.ResourceNames[0])
+	if keyErr != nil || operationKey != key {
+		return true, conflictError(
+			"regional Catalog request token is bound to a different resource",
+		)
+	}
+	if operation.Mutation == nil {
+		return true, invalidAuthorityError(
+			"regional Catalog operation omitted its mutation outcome",
+		)
+	}
+	if operation.State == ControlOperationFailed {
+		if operation.Mutation.Kind != "rejected" || operation.Mutation.Message == "" {
+			return true, invalidAuthorityError(
+				"regional Catalog returned an inconsistent managed rejection",
+			)
+		}
+		if operation.Mutation.Code == "invalid_argument" {
+			return true, invalidAuthorityError(operation.Mutation.Message)
+		}
+		return true, conflictError(operation.Mutation.Message)
+	}
+	if operation.Mutation.Kind != expectedMutationKind {
+		return true, invalidAuthorityError(
+			"regional Catalog returned an unexpected managed mutation outcome",
+		)
+	}
+	return true, nil
 }
 
 // Observe reads current catalog identity and samples placement without

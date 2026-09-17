@@ -26,6 +26,9 @@ notes explicitly list additional verified artifacts.
 - The regional container campaign now proves replicated control recovery,
   stale-owner fencing, fail-closed behavior without Catalog quorum, and
   same-volume all-voter recovery without a separate writable metadata owner.
+- Managed reconcile and membership retries resolve their durable Catalog
+  outcome before resampling lease or capacity evidence, preventing a completed
+  proposal token from being rebound to different command bytes.
 
 ### Limitations
 
