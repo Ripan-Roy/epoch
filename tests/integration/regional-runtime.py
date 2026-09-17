@@ -3211,6 +3211,10 @@ def run_campaign(cluster: RegionalCluster) -> dict[str, Any]:
     wait_for_profile_apply(cluster, stream, 11)
     wait_for_profile_apply(cluster, stream, 5, shard=1)
     wait_for_profile_apply(cluster, stream, 4, shard=2)
+    # Health, Catalog convergence, and local data-state reads are deliberately
+    # available before a restarted Raft group has elected a writable leader.
+    # Close that recovery window explicitly before exercising SDK operations.
+    wait_for_routes(cluster, stream)
     assert_python_sdk_consumer_session(cluster, stream)
     assert_python_sdk_stream_batch(cluster, stream)
     assert_python_sdk_fenced_consumption(cluster, stream)

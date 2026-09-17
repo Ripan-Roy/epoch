@@ -32,6 +32,9 @@ notes explicitly list additional verified artifacts.
 - Desired-state updates retain the last generation-fenced observed status, so
   policy-only changes continue from the real native Catalog generation instead
   of retrying an existing resource from generation zero.
+- The regional recovery campaign now waits for a stable writable Stream leader
+  after an all-voter restart before exercising SDK operations, while retaining
+  separate health, stale-read convergence, and quorum-unavailable assertions.
 
 ### Limitations
 
