@@ -1036,18 +1036,28 @@ generation tombstones, request-token outcomes, and a bounded resumable change
 log through the Rust Catalog consensus group. Linearizable reads cross a
 `ReadIndex` barrier. One replicated owner lease fences every Go-driven status,
 materialization, membership, and delete mutation; standby control replicas do
-not challenge a live owner. Initial placement validates the complete current
+not challenge a live owner for periodic reconciliation. A standby may submit a
+user-requested delete guarded by the observed active lease, so a public request
+does not depend on sticky routing; generation and lease fences still serialize
+the mutation in Catalog. Initial placement validates the complete current
 capacity observation and commits every resource reservation atomically with
-native Catalog materialization. Desired-state batches commit 1–128 resources
-atomically, while operation lookup retains affected identities for tenant
-authorization and change watches expose an explicit scanned resume cursor.
+native Catalog materialization. Changed capacity evidence receives a distinct
+attempt identity, while exact ambiguous retries retain the same identity and an
+already materialized native result is recognized before resubmission. Desired-
+state batches commit 1–128 resources atomically, while operation lookup retains
+affected identities for tenant authorization and change watches expose an
+explicit scanned resume cursor. Internal inventory uses bounded keyset pages
+with one stable Catalog high-water cursor across the complete scan.
 
 The Kubernetes operator runs three stable, anti-affined control replicas with
-ordered startup and a two-instance disruption budget. A one-time pod-zero
-migration imports the previous bbolt live state plus all generation/tombstone
-high-water marks into an empty Catalog; the old database is retained as rollback
-evidence. Legacy token history is not reconstructible and is not silently
-claimed. See [ADR-0050](adr/0050-replicated-control-metadata-and-ha.md).
+ordered startup and a two-instance disruption budget. During a legacy
+one-replica upgrade it first updates and verifies ordinal zero, then scales the
+same StatefulSet to three. A one-time pod-zero migration imports up to 4,096
+previous bbolt generation/tombstone high-water records in one command, subject
+to the 512 KiB command and 4 MiB snapshot limits; the old database is retained
+as rollback evidence. Legacy token history is not reconstructible and is not
+silently claimed. See
+[ADR-0050](adr/0050-replicated-control-metadata-and-ha.md).
 
 Managed desired state now includes canonical governance metadata. New regional
 resources require owner, cost center, classification, and bounded tags. Go
@@ -1069,9 +1079,9 @@ decisions and pass one cross-language corpus. See
 [ADR-0011](adr/0011-bootstrap-authz-audit-baseline.md).
 
 This is replicated regional management metadata, not a global hosted-service
-database. Horizontal Catalog sharding, a public request-token retention window,
-Catalog backup/restore policy, replicated organization policy, immutable WORM
-audit export, and broader multi-control chaos remain open.
+database. Horizontal Catalog sharding/capacity, a public request-token
+retention window, replicated organization policy, immutable WORM audit export,
+and broader multi-control chaos remain open.
 
 ## 12. API contracts
 

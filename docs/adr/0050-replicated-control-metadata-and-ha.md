@@ -37,7 +37,9 @@ into Go.
    A replicated lease contains owner ID, monotonically increasing fence, and
    logical expiry. Status, materialization, membership planning, and managed
    deletion carry that lease guard. A standby observes a live foreign lease and
-   does not challenge it before expiry.
+   does not challenge it before expiry. It may submit a user-requested delete
+   with the observed active guard so public traffic needs no sticky routing;
+   periodic reconciliation remains owner-only.
 4. Make admission and materialization one transaction. A managed reconcile
    contains the desired and native Catalog generation fences, all resource
    placements, and a complete node-capacity observation. Rust rejects partial,
@@ -61,6 +63,13 @@ into Go.
    empty Catalog atomically, then later replicas start. The old database remains
    mounted as rollback evidence; its historical token ledger is not promoted
    because the old records do not contain the new canonical command shape.
+   The atomic import accepts at most 4,096 generation records within the
+   existing 512 KiB command and 4 MiB snapshot limits. An existing one-replica
+   StatefulSet updates and verifies ordinal zero before scaling to three.
+9. Page internal resource inventory with a canonical key cursor, at most 128
+   resources and 768 KiB per page, and one stable high-water cursor across the
+   scan. Bound recurring lease/status request outcomes to the newest internal
+   suffix while keeping public operation outcomes durable.
 
 ## Consequences
 
@@ -71,9 +80,9 @@ deletion no longer expose partially committed Go/Rust state. Existing regional
 data paths remain independent of Go availability.
 
 The Catalog consensus group now carries management metadata and therefore has
-an explicit scaling boundary. Horizontal metadata sharding, a public
-request-token retention window, Catalog backup/restore policy, long-duration
-lease-clock fault evidence, and protected multi-control chaos remain open.
+an explicit scaling boundary. Horizontal metadata sharding/capacity, a public
+request-token retention window, long-duration lease-clock fault evidence, and
+protected multi-control chaos remain open.
 Legacy token outcomes are not reconstructible during the one-time bbolt import;
 operators must retain the old file for rollback and treat an ambiguous
 pre-migration request as an operation requiring manual generation inspection.

@@ -96,12 +96,23 @@ func (reconciler *EpochClusterReconciler) Reconcile(
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
+	desiredControl := controlStatefulSet(cluster)
+	currentControl := &appsv1.StatefulSet{}
+	if err := reconciler.Get(
+		ctx,
+		client.ObjectKey{Namespace: cluster.Namespace, Name: controlName(cluster)},
+		currentControl,
+	); err == nil {
+		desiredControl = stageLegacyControlUpgrade(currentControl, desiredControl)
+	} else if !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
 	for _, object := range []client.Object{
 		peerService(cluster),
 		publicService(cluster),
 		controlService(cluster),
 		controlPodDisruptionBudget(cluster),
-		controlStatefulSet(cluster),
+		desiredControl,
 		backupCronJob(cluster),
 	} {
 		if err := reconciler.reconcileObject(ctx, cluster, object); err != nil {
@@ -1004,6 +1015,35 @@ func controlStatefulSet(cluster *epochv1alpha1.EpochCluster) *appsv1.StatefulSet
 			}},
 		},
 	}
+}
+
+// stageLegacyControlUpgrade preserves the only legacy registry volume until
+// ordinal zero is running the replicated-Catalog-aware template. OrderedReady
+// then makes scaling to the HA replica count safe: no new control endpoint can
+// serve before the legacy-bearing pod has completed its import and is ready.
+func stageLegacyControlUpgrade(
+	current *appsv1.StatefulSet,
+	desired *appsv1.StatefulSet,
+) *appsv1.StatefulSet {
+	staged := desired.DeepCopy()
+	if current == nil || current.Spec.Replicas == nil || desired.Spec.Replicas == nil ||
+		*current.Spec.Replicas != 1 || *desired.Spec.Replicas <= 1 {
+		return staged
+	}
+	templateCurrent := apiequality.Semantic.DeepDerivative(
+		desired.Spec.Template,
+		current.Spec.Template,
+	)
+	ordinalZeroReady := templateCurrent &&
+		current.Status.ReadyReplicas >= 1 &&
+		current.Status.UpdatedReplicas >= 1 &&
+		current.Status.CurrentRevision != "" &&
+		current.Status.CurrentRevision == current.Status.UpdateRevision
+	if !ordinalZeroReady {
+		one := int32(1)
+		staged.Spec.Replicas = &one
+	}
+	return staged
 }
 
 func controlAffinity(cluster *epochv1alpha1.EpochCluster) *corev1.Affinity {

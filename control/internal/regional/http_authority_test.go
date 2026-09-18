@@ -352,6 +352,153 @@ func TestHTTPAuthorityReplaysCompletedManagedMembershipBeforeResubmitting(t *tes
 	}
 }
 
+func TestHTTPAuthorityRetriesManagedAdmissionWithFreshCapacityEvidence(t *testing.T) {
+	key := regionalKey(resources.KindStream, "orders")
+	var (
+		posts      int
+		firstToken string
+		tokens     []string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, controlOperationsPath+"/"):
+			token := strings.TrimPrefix(request.URL.Path, controlOperationsPath+"/")
+			if posts > 0 && token == firstToken {
+				writeAuthorityJSON(writer, http.StatusOK, map[string]any{
+					"request_token": token,
+					"state":         "failed",
+					"resource_names": []any{
+						controlName(key),
+					},
+					"mutation": map[string]any{
+						"kind": "rejected", "code": "capacity_exceeded", "message": "capacity exhausted",
+					},
+				})
+				return
+			}
+			writeAuthorityJSON(writer, http.StatusNotFound, map[string]any{
+				"code": "catalog_not_found", "message": "operation was not found",
+			})
+		case request.Method == http.MethodGet && request.URL.Path == catalogResourcePath(key):
+			writeAuthorityJSON(writer, http.StatusNotFound, map[string]any{
+				"code": "catalog_not_found", "message": "resource was not found",
+			})
+		case request.Method == http.MethodGet && request.URL.Path == regionalTopologyPath:
+			available := 0
+			used := 16
+			if posts > 0 {
+				available = 15
+				used = 1
+			}
+			writeAuthorityJSON(writer, http.StatusOK, map[string]any{
+				"node_id": "1", "region": "local", "zone": "local-a", "rack": "rack-a",
+				"node_class": "general-purpose", "consensus_voter_node_ids": []string{"1"},
+				"capacity": map[string]any{
+					"max_consensus_groups": 16, "used_consensus_groups": used,
+					"available_consensus_groups": available,
+				},
+			})
+		case request.Method == http.MethodGet && request.URL.Path == regionalControlAllocationsPath:
+			writeAuthorityJSON(writer, http.StatusOK, map[string]any{
+				"allocations": []any{map[string]any{"node_id": "1", "catalog_groups": 1}},
+			})
+		case request.Method == http.MethodPost && request.URL.Path == regionalControlReconcilePath:
+			var body managedReconcileAuthorityBody
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Errorf("decode managed reconcile: %v", err)
+			}
+			posts++
+			tokens = append(tokens, body.RequestToken)
+			if posts == 1 {
+				firstToken = body.RequestToken
+				writeAuthorityJSON(writer, http.StatusConflict, map[string]any{
+					"code": "capacity_exceeded", "message": "capacity exhausted",
+				})
+				return
+			}
+			document := resourceDocument(1, 1)
+			writeAuthorityJSON(writer, http.StatusCreated, map[string]any{
+				"mutation": map[string]any{
+					"kind": "managed_reconciled", "resources": []any{document},
+				},
+			})
+		case request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/shards/"):
+			writeAuthorityJSON(writer, http.StatusOK, routeResponseDocument(1, 1, 1, request.URL.Path))
+		default:
+			t.Errorf("unexpected request: %s %s", request.Method, request.URL.Path)
+			http.Error(writer, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+	authority, err := NewHTTPAuthority([]string{server.URL}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := AuthorityManagedApplyRequest{
+		AuthorityApplyRequest: AuthorityApplyRequest{
+			RequestToken: "reconcile-orders-generation-1", Key: key,
+			ExpectedGeneration: 0, ShardCount: 1, ReplicaCount: 1,
+			TabletPlacements: []TabletPlacement{{ShardIndex: 0, VoterNodeIDs: []uint64{1}}},
+		},
+		DesiredGeneration: 1,
+		Lease:             AuthorityControlLease{OwnerID: "epoch-control-0", Fence: 1, NowMS: 100},
+	}
+	if _, err := authority.ApplyManaged(t.Context(), request); err == nil {
+		t.Fatal("first capacity-exhausted admission unexpectedly succeeded")
+	}
+	request.Lease.NowMS = 200
+	if _, err := authority.ApplyManaged(t.Context(), request); err != nil {
+		t.Fatalf("recovered ApplyManaged() error = %v", err)
+	}
+	if posts != 2 || len(tokens) != 2 || tokens[0] == tokens[1] {
+		t.Fatalf("managed admission attempts = %d, tokens = %v", posts, tokens)
+	}
+}
+
+func TestHTTPAuthorityRecoversACommittedManagedApplyFromMaterializedState(t *testing.T) {
+	key := regionalKey(resources.KindStream, "orders")
+	posts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == catalogResourcePath(key):
+			resource := resourceDocument(2, 1)
+			resource["workload_profile"] = "stream_log"
+			resource["shard_count"] = 1
+			resource["tablets"] = resource["tablets"].([]map[string]any)[:1]
+			writeAuthorityJSON(writer, http.StatusOK, resource)
+		case request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/shards/"):
+			route := routeResponseDocument(1, 1, 2, request.URL.Path)
+			route["voter_node_ids"] = []string{"1"}
+			writeAuthorityJSON(writer, http.StatusOK, route)
+		case request.Method == http.MethodPost:
+			posts++
+			t.Errorf("converged materialization was resubmitted: %s", request.URL.Path)
+			writer.WriteHeader(http.StatusInternalServerError)
+		default:
+			t.Errorf("unexpected request: %s %s", request.Method, request.URL.Path)
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	authority, err := NewHTTPAuthority([]string{server.URL}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	observation, err := authority.ApplyManaged(t.Context(), AuthorityManagedApplyRequest{
+		AuthorityApplyRequest: AuthorityApplyRequest{
+			RequestToken: "reconcile-orders-generation-2", Key: key,
+			ExpectedGeneration: 1, ShardCount: 1, ReplicaCount: 1,
+			TabletPlacements: []TabletPlacement{{ShardIndex: 0, VoterNodeIDs: []uint64{1}}},
+		},
+		DesiredGeneration: 2,
+		Lease:             AuthorityControlLease{OwnerID: "epoch-control-0", Fence: 1, NowMS: 200},
+	})
+	if err != nil || observation.Generation != 2 || posts != 0 {
+		t.Fatalf("ApplyManaged() = %+v, %v, posts = %d", observation, err, posts)
+	}
+}
+
 func TestHTTPAuthorityObserveReturnsTruthfulIncompletePlacement(t *testing.T) {
 	var servers []*httptest.Server
 	for node := 1; node <= 3; node++ {

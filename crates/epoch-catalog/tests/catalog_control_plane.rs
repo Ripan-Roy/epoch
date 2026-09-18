@@ -371,6 +371,26 @@ fn leases_fence_stale_controllers_and_survive_snapshot_recovery() {
 }
 
 #[test]
+fn periodic_control_lease_outcomes_have_bounded_retention() {
+    let mut catalog = Catalog::new();
+    for index in 0..32_u64 {
+        catalog
+            .apply(lease(
+                &format!("lease-control-a-{index:02}"),
+                "control-a",
+                1_000 + index,
+            ))
+            .unwrap();
+    }
+    assert!(catalog.operation("lease-control-a-00").is_none());
+    assert!(catalog.operation("lease-control-a-31").is_some());
+    let encoded = catalog.encode_snapshot().unwrap();
+    let restored = Catalog::decode_snapshot(&encoded).unwrap();
+    assert!(restored.operation("lease-control-a-00").is_none());
+    assert!(restored.operation("lease-control-a-31").is_some());
+}
+
+#[test]
 fn reconciliation_reserves_batch_capacity_atomically_across_controllers() {
     let mut catalog = Catalog::new();
     catalog
@@ -610,6 +630,43 @@ fn legacy_import_preserves_live_and_tombstoned_generations_atomically() {
     assert_eq!(
         restored.state_digest().unwrap(),
         catalog.state_digest().unwrap()
+    );
+}
+
+#[test]
+fn legacy_import_accepts_histories_larger_than_a_managed_write_batch() {
+    let generations = (0..129)
+        .map(|index| ResourceGeneration {
+            name: name(&format!("history-{index:03}")),
+            generation: u64::try_from(index + 1).unwrap(),
+        })
+        .collect();
+    let mut catalog = Catalog::new();
+    let mutation = catalog
+        .apply(CatalogCommand::ImportManaged(ImportManagedResources {
+            request_token: "legacy-import-large-history".into(),
+            resources: Vec::new(),
+            generations,
+        }))
+        .unwrap();
+    assert!(matches!(
+        mutation,
+        CatalogMutation::DesiredApplied { changed: false, .. }
+    ));
+    assert_eq!(
+        catalog
+            .apply(CatalogCommand::DeleteDesired(DeleteDesiredResource {
+                request_token: "delete-last-imported-generation".into(),
+                expected_generation: Some(0),
+                name: name("history-128"),
+            }))
+            .unwrap(),
+        CatalogMutation::DesiredDeleted {
+            name: name("history-128"),
+            generation: 129,
+            deleted: false,
+            replayed: false,
+        }
     );
 }
 

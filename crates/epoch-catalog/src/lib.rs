@@ -24,6 +24,8 @@ const MAX_GOVERNANCE_TAG_KEY_BYTES: usize = 63;
 const MAX_GOVERNANCE_TAG_VALUE_BYTES: usize = 256;
 const MAX_MANAGED_DOCUMENT_BYTES: usize = 128 * 1024;
 const MAX_MANAGED_BATCH_RESOURCES: usize = 128;
+const MAX_MANAGED_IMPORT_RECORDS: usize = 4_096;
+const MAX_TRANSIENT_CONTROL_REQUESTS: usize = 8;
 const MAX_CONTROL_OWNER_BYTES: usize = 128;
 const MIN_CONTROL_LEASE_TTL_MS: u64 = 1_000;
 const MAX_CONTROL_LEASE_TTL_MS: u64 = 60_000;
@@ -1063,7 +1065,31 @@ impl Catalog {
                 last_change_cursor,
             },
         );
+        self.prune_transient_control_requests();
         Ok(mutation)
+    }
+
+    fn prune_transient_control_requests(&mut self) {
+        let mut transient = self
+            .completed_requests
+            .iter()
+            .filter_map(|(token, completed)| {
+                let clock = match &completed.command {
+                    CatalogCommand::AcquireControlLease(request) => request.now_ms,
+                    CatalogCommand::UpdateManagedStatus(request) => request.lease.now_ms,
+                    _ => return None,
+                };
+                Some((clock, token.clone()))
+            })
+            .collect::<Vec<_>>();
+        if transient.len() <= MAX_TRANSIENT_CONTROL_REQUESTS {
+            return;
+        }
+        transient.sort();
+        let remove = transient.len() - MAX_TRANSIENT_CONTROL_REQUESTS;
+        for (_, token) in transient.into_iter().take(remove) {
+            self.completed_requests.remove(&token);
+        }
     }
 
     pub fn resource(&self, name: &ResourceName) -> CatalogResult<&ResourceRecord> {
@@ -2231,11 +2257,12 @@ fn validate_managed_batch_len(len: usize) -> CatalogResult<()> {
 
 fn validate_managed_import(request: &ImportManagedResources) -> CatalogResult<()> {
     if request.generations.is_empty()
-        || request.generations.len() > MAX_MANAGED_BATCH_RESOURCES
+        || request.generations.len() > MAX_MANAGED_IMPORT_RECORDS
+        || request.resources.len() > MAX_MANAGED_IMPORT_RECORDS
         || request.resources.len() > request.generations.len()
     {
         return Err(CatalogError::InvalidSpec(format!(
-            "managed import must contain 1-{MAX_MANAGED_BATCH_RESOURCES} generation records and no more live resources than generations"
+            "managed import must contain 1-{MAX_MANAGED_IMPORT_RECORDS} generation records and no more live resources than generations"
         )));
     }
     if request

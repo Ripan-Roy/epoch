@@ -142,6 +142,102 @@ func TestCatalogRegistryProvidesReplicatedApplyListGetAndDelete(t *testing.T) {
 	}
 }
 
+func TestCatalogRegistryPagesTheCatalogInventoryBeforeFiltering(t *testing.T) {
+	keys := []resources.ResourceKey{
+		regionalKey(resources.KindStream, "audit"),
+		regionalKey(resources.KindStream, "orders"),
+		regionalKey(resources.KindStream, "payments"),
+	}
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != controlResourcesPath {
+			t.Errorf("unexpected request: %s %s", request.Method, request.URL.Path)
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		requests++
+		if request.URL.Query().Get("limit") != "128" {
+			t.Errorf("page limit = %q", request.URL.Query().Get("limit"))
+		}
+		start := 0
+		if encoded := request.URL.Query().Get("after"); encoded != "" {
+			var after controlResourceNameDocument
+			if err := json.Unmarshal([]byte(encoded), &after); err != nil {
+				t.Errorf("decode page cursor: %v", err)
+			}
+			if after != controlName(keys[1]) {
+				t.Errorf("page cursor = %+v", after)
+			}
+			start = 2
+		}
+		listed := make([]map[string]any, 0, 2)
+		end := min(start+2, len(keys))
+		for _, key := range keys[start:end] {
+			desired, _ := json.Marshal(resources.DesiredResource{
+				ResourceKey: key,
+				Governance:  testGovernance(),
+				Spec:        json.RawMessage(`{"shard_count":1,"replica_count":3}`),
+			})
+			listed = append(listed, map[string]any{
+				"name": controlName(key), "generation": "1", "desired": json.RawMessage(desired),
+				"status": json.RawMessage(`{"phase":"pending"}`), "deletion_requested": false,
+			})
+		}
+		response := map[string]any{"latest_change_cursor": "3", "resources": listed}
+		if end < len(keys) {
+			response["next_page_after"] = controlName(keys[end-1])
+		}
+		writeJSON(t, writer, response)
+	}))
+	defer server.Close()
+	authority, err := NewHTTPAuthority([]string{server.URL}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := NewCatalogRegistry(authority, "epoch-control-0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	listed, err := registry.List(resources.ListFilter{Namespace: "core"})
+	if err != nil || len(listed) != 3 || listed[2].Name != "payments" {
+		t.Fatalf("List() = %+v, %v", listed, err)
+	}
+	if requests != 2 || registry.Count() != 3 {
+		t.Fatalf("inventory requests = %d, count = %d", requests, registry.Count())
+	}
+}
+
+func TestCatalogRegistryPreservesEscapedOperationTokens(t *testing.T) {
+	const token = "release/a%b c"
+	var escapedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		escapedPath = request.URL.EscapedPath()
+		writeJSON(t, writer, controlOperationDocument{
+			RequestToken: token,
+			ProposalID:   9,
+			State:        ControlOperationSucceeded,
+		})
+	}))
+	defer server.Close()
+	authority, err := NewHTTPAuthority([]string{server.URL}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := NewCatalogRegistry(authority, "epoch-control-0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := registry.ControlOperation(t.Context(), token); err != nil {
+		t.Fatalf("ControlOperation() error = %v", err)
+	}
+	want := controlOperationsPath + "/release%2Fa%25b%20c"
+	if escapedPath != want {
+		t.Fatalf("escaped request path = %q, want %q", escapedPath, want)
+	}
+}
+
 func TestCatalogRegistryProvidesAtomicBatchOperationsAndResumableChanges(t *testing.T) {
 	keys := []resources.ResourceKey{
 		regionalKey(resources.KindStream, "audit"),
@@ -311,6 +407,69 @@ func TestCatalogRegistryLeasePreflightAndStatusAreFenced(t *testing.T) {
 	}
 }
 
+func TestCatalogRegistryStatusTokenBindsTheCompleteLeaseGuard(t *testing.T) {
+	key := regionalKey(resources.KindStream, "orders")
+	nowMS := int64(1_000)
+	var tokens []string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == controlLeasePath:
+			writer.WriteHeader(http.StatusNotFound)
+			writeJSON(t, writer, map[string]any{"code": "not_found", "message": "missing"})
+		case request.Method == http.MethodPost && request.URL.Path == controlLeasePath:
+			writeJSON(t, writer, controlMutationReceiptDocument{Mutation: controlMutationDocument{
+				Kind:  "control_lease_acquired",
+				Lease: &controlLeaseDocument{OwnerID: "epoch-control-0", Fence: 7, ValidUntilMS: 11_000},
+			}})
+		case request.Method == http.MethodPut && request.URL.Path == controlStatusPath(key):
+			var body controlStatusBody
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Errorf("decode status: %v", err)
+			}
+			tokens = append(tokens, body.RequestToken)
+			desired, _ := json.Marshal(resources.DesiredResource{
+				ResourceKey: key,
+				Governance:  testGovernance(),
+				Spec:        json.RawMessage(`{"shard_count":1,"replica_count":3}`),
+			})
+			status, _ := json.Marshal(body.Status)
+			writeJSON(t, writer, controlMutationReceiptDocument{Mutation: controlMutationDocument{
+				Kind: "managed_status_updated",
+				Resource: &controlManagedResourceDocument{
+					Name: controlName(key), Generation: 1, Desired: desired, Status: status,
+				},
+			}})
+		default:
+			t.Errorf("unexpected request: %s %s", request.Method, request.URL.Path)
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	authority, err := NewHTTPAuthority([]string{server.URL}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := newCatalogRegistry(authority, "epoch-control-0", func() time.Time {
+		return time.UnixMilli(nowMS)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := resources.ResourceStatus{
+		Phase: resources.PhaseReady, ObservedGeneration: 1, CatalogGeneration: 1,
+	}
+	if _, err := registry.UpdateStatus(key, 1, status); err != nil {
+		t.Fatal(err)
+	}
+	nowMS = 2_000
+	if _, err := registry.UpdateStatus(key, 1, status); err != nil {
+		t.Fatal(err)
+	}
+	if len(tokens) != 2 || tokens[0] == tokens[1] {
+		t.Fatalf("status tokens did not bind lease now_ms: %v", tokens)
+	}
+}
+
 func TestCatalogRegistryImportsLegacyGenerationsWithStableReplayToken(t *testing.T) {
 	var firstToken string
 	requests := 0
@@ -442,6 +601,9 @@ func TestCatalogRegistryManagedDeleteIsLeaseFencedAndExactlyReplayable(t *testin
 				return
 			}
 			deletePosts++
+			if body.RequestToken != "delete-orders" {
+				t.Errorf("managed delete did not preserve public token: %q", body.RequestToken)
+			}
 			if deleteToken == "" {
 				deleteToken = body.RequestToken
 			} else if body.RequestToken != deleteToken {
@@ -534,6 +696,96 @@ func TestCatalogRegistryDoesNotChallengeAnotherLiveOwner(t *testing.T) {
 	assertStoreCode(t, err, resources.CodeUnavailable)
 	if leasePosts != 0 {
 		t.Fatalf("standby posted %d lease challenges", leasePosts)
+	}
+}
+
+func TestCatalogRegistryReplaysMissingDeleteByItsPublicToken(t *testing.T) {
+	key := regionalKey(resources.KindStream, "missing")
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.EscapedPath() != controlOperationsPath+"/delete-missing" {
+			t.Errorf("unexpected request: %s %s", request.Method, request.URL.EscapedPath())
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		name := controlName(key)
+		writeJSON(t, writer, controlOperationDocument{
+			RequestToken:  "delete-missing",
+			ProposalID:    12,
+			State:         ControlOperationSucceeded,
+			ResourceNames: []controlResourceNameDocument{name},
+			Mutation: &controlMutationDocument{
+				Kind: "desired_deleted", Name: &name, Generation: 0, Deleted: false,
+			},
+		})
+	}))
+	defer server.Close()
+	authority, err := NewHTTPAuthority([]string{server.URL}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := NewCatalogRegistry(authority, "epoch-control-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	replayed, found, err := registry.ReplayManagedDelete(t.Context(), resources.DeleteRequest{
+		RequestToken: "delete-missing",
+		Key:          key,
+	})
+	if err != nil || !found || replayed.Deleted || !replayed.Replayed {
+		t.Fatalf("ReplayManagedDelete() = %+v, %t, %v", replayed, found, err)
+	}
+}
+
+func TestCatalogRegistryUsesTheActiveLeaseForStandbyDeletes(t *testing.T) {
+	key := regionalKey(resources.KindStream, "orders")
+	deleteCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, controlOperationsPath+"/"):
+			writer.WriteHeader(http.StatusNotFound)
+			writeJSON(t, writer, map[string]any{"code": "not_found", "message": "missing"})
+		case request.Method == http.MethodGet && request.URL.Path == controlLeasePath:
+			writeJSON(t, writer, controlLeaseDocument{
+				OwnerID: "epoch-control-0", Fence: 4, ValidUntilMS: 20_000,
+			})
+		case request.Method == http.MethodDelete && request.URL.Path == controlMaterializationsPath+"/"+resourceSegments(key):
+			var body controlDeleteManagedBody
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Errorf("decode managed delete: %v", err)
+			}
+			deleteCalls++
+			if body.Lease.OwnerID != "epoch-control-0" || body.Lease.Fence != "4" {
+				t.Errorf("standby did not delegate through active lease: %+v", body.Lease)
+			}
+			name := controlName(key)
+			writeJSON(t, writer, controlMutationReceiptDocument{Mutation: controlMutationDocument{
+				Kind: "managed_deleted", Name: &name, DesiredGeneration: 3,
+				CatalogGeneration: 2, Deleted: true,
+			}})
+		default:
+			t.Errorf("unexpected request: %s %s", request.Method, request.URL.Path)
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	authority, err := NewHTTPAuthority([]string{server.URL}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := newCatalogRegistry(authority, "epoch-control-1", func() time.Time {
+		return time.UnixMilli(1_000)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry.count.Store(1)
+
+	result, err := registry.DeleteManaged(t.Context(), resources.DeleteRequest{
+		RequestToken: "delete-orders", Key: key,
+	}, 2, 1)
+	if err != nil || !result.Deleted || deleteCalls != 1 {
+		t.Fatalf("DeleteManaged() = %+v, %v, calls = %d", result, err, deleteCalls)
 	}
 }
 

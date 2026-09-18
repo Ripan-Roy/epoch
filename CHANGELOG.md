@@ -18,6 +18,8 @@ notes explicitly list additional verified artifacts.
 - Added ordered one-time import of the legacy bbolt registry and Kubernetes
   anti-affinity, quorum readiness, and a two-replica disruption budget for the
   control StatefulSet.
+- Added bounded keyset pagination for control inventory reads, including a
+  stable Catalog cursor across pages and fail-closed ordering validation.
 
 ### Security and recovery
 
@@ -26,9 +28,19 @@ notes explicitly list additional verified artifacts.
 - The regional container campaign now proves replicated control recovery,
   stale-owner fencing, fail-closed behavior without Catalog quorum, and
   same-volume all-voter recovery without a separate writable metadata owner.
-- Managed reconcile and membership retries resolve their durable Catalog
-  outcome before resampling lease or capacity evidence, preventing a completed
-  proposal token from being rebound to different command bytes.
+- Managed reconcile retries first recognize an already materialized native
+  result, then bind each new attempt to its complete lease and capacity
+  evidence. Exact ambiguous retries retain one token while changed evidence can
+  recover from an earlier capacity rejection without rebinding command bytes.
+- Public managed deletes retain the caller's operation token, including
+  missing-resource outcomes, and any control replica can submit the request
+  against the current active lease without taking over periodic reconciliation.
+- Periodic lease and status request outcomes retain only the newest bounded
+  internal suffix, preventing snapshots from growing with every renewal while
+  leaving public operation outcomes durable.
+- A legacy one-replica control StatefulSet updates and verifies ordinal zero
+  before scaling to three replicas; one atomic import accepts up to 4,096
+  generation records within the existing command and snapshot byte limits.
 - Desired-state updates retain the last generation-fenced observed status, so
   policy-only changes continue from the real native Catalog generation instead
   of retrying an existing resource from generation zero.
@@ -41,9 +53,9 @@ notes explicitly list additional verified artifacts.
 
 ### Limitations
 
-- Catalog metadata backup/restore, horizontal sharding, bounded outcome/change
-  retention, protected multi-control chaos, and legacy idempotency-token import
-  remain release gates.
+- Horizontal Catalog sharding/capacity, a public durable-operation retention
+  policy, protected multi-control chaos, and legacy idempotency-token import
+  remain production gates.
 
 ## [0.2.0-beta.11] - 2026-09-14
 

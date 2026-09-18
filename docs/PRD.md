@@ -4,7 +4,7 @@
 
 **Tagline:** One runtime. Every real-time workload.  
 **Document version:** 0.3  
-**Date:** 13 September 2026
+**Date:** 18 September 2026
 **Status:** Implementation-backed private beta candidate; later managed-service milestones remain open
 **Audience:** Founders, product, distributed-systems engineering, infrastructure, security, and design
 
@@ -17,10 +17,14 @@ observations, initial materialization, learner-transition reservation, and
 managed deletion are atomic Catalog commands. The generated gRPC contract adds
 1–128-resource desired batches, exact-resource-authorized operation lookup, and
 tenant-filtered change streaming with an explicit scanned resume cursor. An
-ordered one-time import preserves legacy live and tombstoned generations while
-retaining the old database as rollback evidence. Protected multi-control chaos,
-Catalog metadata backup/sharding, legacy token migration, and a public token-
-retention window remain open. See
+ordered one-time import preserves up to 4,096 legacy live and tombstoned
+generations within the existing 512 KiB command and 4 MiB snapshot bounds,
+while retaining the old database as rollback evidence. Legacy one-replica
+deployments update and verify ordinal zero before scaling to three. Internal
+inventory reads use bounded keyset pages, capacity retries bind their complete
+evidence, and public delete tokens remain discoverable after replay. Protected
+multi-control chaos, Catalog capacity/sharding, legacy token migration, and a
+public token-retention window remain open. See
 [ADR-0050](adr/0050-replicated-control-metadata-and-ha.md).
 
 **Automatic placement implementation note (11 September 2026):** The beta.9

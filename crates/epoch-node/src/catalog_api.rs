@@ -61,6 +61,8 @@ pub const REGIONAL_CONTROL_OPERATION_PATH: &str =
 pub const REGIONAL_CONTROL_CHANGES_PATH: &str = "/experimental/v1/regional/control/changes";
 pub const REGIONAL_CONTROL_ALLOCATIONS_PATH: &str = "/experimental/v1/regional/control/allocations";
 const CATALOG_REQUEST_BODY_BYTES: usize = 512 * 1024;
+const CONTROL_RESOURCE_PAGE_BYTES: usize = 768 * 1024;
+const MAX_CONTROL_RESOURCE_PAGE_SIZE: usize = 128;
 pub const DEFAULT_CATALOG_COMMIT_WAIT: Duration = Duration::from_secs(5);
 
 pub type SharedRegionalTabletMaterializer = Arc<Mutex<RegionalTabletMaterializer>>;
@@ -385,6 +387,19 @@ struct ControlChangesQuery {
     after: u64,
     #[serde(default = "default_control_change_limit")]
     limit: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ControlResourcesQuery {
+    #[serde(default)]
+    after: Option<String>,
+    #[serde(default = "default_control_resource_limit")]
+    limit: usize,
+}
+
+const fn default_control_resource_limit() -> usize {
+    MAX_CONTROL_RESOURCE_PAGE_SIZE
 }
 
 const fn default_control_change_limit() -> usize {
@@ -757,6 +772,8 @@ struct ControlResourceListResponse {
     #[serde(serialize_with = "serialize_u64_as_decimal")]
     latest_change_cursor: u64,
     resources: Vec<ManagedResourceResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_page_after: Option<ResourceName>,
 }
 
 #[derive(Debug, Serialize)]
@@ -900,15 +917,67 @@ async fn catalog_resource(
 
 async fn managed_resources(
     State(state): State<RegionalCatalogState>,
+    Query(query): Query<ControlResourcesQuery>,
 ) -> Result<Json<ControlResourceListResponse>, RegionalCatalogApiError> {
+    if query.limit == 0 || query.limit > MAX_CONTROL_RESOURCE_PAGE_SIZE {
+        return Err(RegionalCatalogApiError::Catalog(CatalogError::InvalidSpec(
+            format!(
+                "control resource page size must be between 1 and {MAX_CONTROL_RESOURCE_PAGE_SIZE}"
+            ),
+        )));
+    }
+    let after = query
+        .after
+        .as_deref()
+        .map(serde_json::from_str::<ResourceName>)
+        .transpose()
+        .map_err(|error| {
+            RegionalCatalogApiError::Catalog(CatalogError::InvalidSpec(format!(
+                "control resource page cursor is invalid: {error}"
+            )))
+        })?;
+    if let Some(after) = &after {
+        after.validate().map_err(RegionalCatalogApiError::Catalog)?;
+    }
     control_read_barrier(&state).await?;
     let snapshot = state
         .catalog
         .snapshot()
         .map_err(RegionalCatalogApiError::CatalogState)?;
+    let candidates = snapshot
+        .managed_resources
+        .iter()
+        .filter(|resource| after.as_ref().is_none_or(|after| resource.name > *after))
+        .take(query.limit)
+        .map(ManagedResourceResponse::from)
+        .collect::<Vec<_>>();
+    let mut resources = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        resources.push(candidate);
+        let probe = ControlResourceListResponse {
+            latest_change_cursor: snapshot.latest_change_cursor,
+            resources: resources.clone(),
+            next_page_after: None,
+        };
+        let encoded = serde_json::to_vec(&probe).map_err(|error| {
+            RegionalCatalogApiError::CatalogState(format!("encode control resource page: {error}"))
+        })?;
+        if encoded.len() > CONTROL_RESOURCE_PAGE_BYTES && resources.len() > 1 {
+            resources.pop();
+            break;
+        }
+    }
+    let last_name = resources.last().map(|resource| resource.name.clone());
+    let has_more = last_name.as_ref().is_some_and(|last| {
+        snapshot
+            .managed_resources
+            .iter()
+            .any(|resource| resource.name > *last)
+    });
     Ok(Json(ControlResourceListResponse {
         latest_change_cursor: snapshot.latest_change_cursor,
-        resources: snapshot.managed_resources.iter().map(Into::into).collect(),
+        resources,
+        next_page_after: has_more.then_some(last_name).flatten(),
     }))
 }
 
@@ -2056,7 +2125,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         json!({
-                            "request_token": "managed-orders-v1",
+                            "request_token": "managed/orders%v1 canary",
                             "resources": [{
                                 "name": stream_resource_name(),
                                 "expected_generation": "0",
@@ -2097,9 +2166,11 @@ mod tests {
             .app
             .clone()
             .oneshot(
-                Request::get("/experimental/v1/regional/control/operations/managed-orders-v1")
-                    .body(Body::empty())
-                    .unwrap(),
+                Request::get(
+                    "/experimental/v1/regional/control/operations/managed%2Forders%25v1%20canary",
+                )
+                .body(Body::empty())
+                .unwrap(),
             )
             .await
             .unwrap();
@@ -2436,6 +2507,94 @@ mod tests {
         let deleted = response_json(deleted).await;
         assert_eq!(deleted["mutation"]["generation"], "4");
         assert_eq!(deleted["mutation"]["deleted"], false);
+
+        for node in nodes {
+            node.peer_server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn replicated_control_inventory_is_keyset_paginated() {
+        let root = TempDir::new().unwrap();
+        let nodes = start_cluster(&root).await;
+        let leader = leader_index(&nodes).await;
+        let names = ["audit", "orders", "payments"].map(|value| {
+            ResourceName::new("acme", "shop", "dev", "core", ResourceKind::Stream, value).unwrap()
+        });
+        let desired = json!({
+            "workload_profile": "WORKLOAD_PROFILE_STREAM_LOG",
+            "replicas": 3,
+            "configuration": {"shard_count": 1},
+            "governance": {
+                "owner": "team-payments",
+                "cost_center": "payments",
+                "classification": "DATA_CLASSIFICATION_INTERNAL"
+            }
+        });
+        let resources = names
+            .iter()
+            .map(|name| {
+                json!({
+                    "name": name,
+                    "expected_generation": "0",
+                    "desired": desired
+                })
+            })
+            .collect::<Vec<_>>();
+        let response = nodes[leader]
+            .app
+            .clone()
+            .oneshot(
+                Request::put(REGIONAL_CONTROL_RESOURCES_PATH)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"request_token": "managed-page-v1", "resources": resources})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let first = nodes[leader]
+            .app
+            .clone()
+            .oneshot(
+                Request::get(format!("{REGIONAL_CONTROL_RESOURCES_PATH}?limit=2"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let first = response_json(first).await;
+        let first_resources = first["resources"].as_array().unwrap();
+        assert_eq!(first_resources.len(), 2);
+        assert_eq!(first_resources[0]["name"]["name"], "audit");
+        assert_eq!(first_resources[1]["name"]["name"], "orders");
+        assert_eq!(first["next_page_after"]["name"], "orders");
+
+        let cursor = serde_json::to_string(&first["next_page_after"]).unwrap();
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("limit", "2")
+            .append_pair("after", &cursor)
+            .finish();
+        let second = nodes[leader]
+            .app
+            .clone()
+            .oneshot(
+                Request::get(format!("{REGIONAL_CONTROL_RESOURCES_PATH}?{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        let second = response_json(second).await;
+        assert_eq!(second["resources"].as_array().unwrap().len(), 1);
+        assert_eq!(second["resources"][0]["name"]["name"], "payments");
+        assert!(second.get("next_page_after").is_none());
 
         for node in nodes {
             node.peer_server.abort();

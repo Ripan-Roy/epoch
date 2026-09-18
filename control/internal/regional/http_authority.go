@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"slices"
 	"sort"
 	"strconv"
@@ -236,9 +237,13 @@ type catalogDeleteDocument struct {
 }
 
 type catalogResourceDocument struct {
-	Generation   decimalUint64           `json:"generation"`
-	ReplicaCount uint16                  `json:"replica_count"`
-	Tablets      []catalogTabletDocument `json:"tablets"`
+	Generation      decimalUint64                 `json:"generation"`
+	WorkloadProfile string                        `json:"workload_profile"`
+	ShardCount      uint32                        `json:"shard_count"`
+	ReplicaCount    uint16                        `json:"replica_count"`
+	Configuration   map[string]any                `json:"configuration,omitempty"`
+	Governance      *resources.ResourceGovernance `json:"governance,omitempty"`
+	Tablets         []catalogTabletDocument       `json:"tablets"`
 }
 
 type catalogTabletDocument struct {
@@ -401,27 +406,105 @@ func (authority *HTTPAuthority) Apply(
 // ApplyManaged commits capacity reservation and native Catalog materialization
 // in one lease-fenced command. A concurrent controller or stale inventory is
 // rejected by the replicated state machine without partial tablet allocation.
+func (authority *HTTPAuthority) managedCatalogResource(
+	ctx context.Context,
+	key resources.ResourceKey,
+) (catalogResourceDocument, bool, error) {
+	var failures []string
+	missing := false
+	for _, endpoint := range authority.endpoints {
+		response, status, err := authority.requestEndpoint(
+			ctx,
+			endpoint,
+			http.MethodGet,
+			catalogResourcePath(key),
+			nil,
+		)
+		if err != nil {
+			failures = append(failures, err.Error())
+			continue
+		}
+		switch {
+		case status >= 200 && status < 300:
+			var resource catalogResourceDocument
+			if err := decodeAuthorityJSON(response, &resource); err != nil {
+				return catalogResourceDocument{}, false, err
+			}
+			return resource, true, nil
+		case status == http.StatusNotFound:
+			missing = true
+		case status == http.StatusConflict && authorityErrorCode(response) == "not_leader":
+			failures = append(failures, authorityErrorMessage(response, status))
+		case status >= 500 || status == http.StatusTooManyRequests:
+			failures = append(failures, authorityErrorMessage(response, status))
+		default:
+			return catalogResourceDocument{}, false, invalidAuthorityError(
+				authorityErrorMessage(response, status),
+			)
+		}
+	}
+	if missing {
+		return catalogResourceDocument{}, false, nil
+	}
+	return catalogResourceDocument{}, false, availabilityError(
+		"no regional authority endpoint returned the managed materialization: " +
+			strings.Join(failures, "; "),
+	)
+}
+
+func managedMaterializationMatches(
+	current catalogResourceDocument,
+	request AuthorityManagedApplyRequest,
+) bool {
+	if uint64(current.Generation) < request.ExpectedGeneration ||
+		current.WorkloadProfile != profileName(request.Key.Kind) ||
+		current.ShardCount != request.ShardCount ||
+		current.ReplicaCount != request.ReplicaCount ||
+		!reflect.DeepEqual(current.Configuration, request.Configuration) ||
+		!reflect.DeepEqual(current.Governance, request.Governance) ||
+		len(current.Tablets) != len(request.TabletPlacements) {
+		return false
+	}
+	placements := make(map[uint32][]uint64, len(request.TabletPlacements))
+	for _, placement := range request.TabletPlacements {
+		placements[placement.ShardIndex] = placement.VoterNodeIDs
+	}
+	for _, tablet := range current.Tablets {
+		wanted, ok := placements[tablet.ShardIndex]
+		if !ok || tablet.ReplicaCount != request.ReplicaCount {
+			return false
+		}
+		observed := make([]uint64, 0, len(tablet.VoterNodeIDs))
+		voters := tablet.VoterNodeIDs
+		if len(tablet.TargetVoterNodeIDs) > 0 {
+			voters = tablet.TargetVoterNodeIDs
+		}
+		for _, nodeID := range voters {
+			observed = append(observed, uint64(nodeID))
+		}
+		if !slices.Equal(observed, wanted) {
+			return false
+		}
+	}
+	return true
+}
+
 func (authority *HTTPAuthority) ApplyManaged(
 	ctx context.Context,
 	request AuthorityManagedApplyRequest,
 ) (AuthorityObservation, error) {
-	requestToken := managedApplyToken(request.RequestToken, request.Lease.Fence)
-	if replayed, replayErr := authority.replayManagedOperation(
-		ctx,
-		requestToken,
-		request.Key,
-		"managed_reconciled",
-	); replayErr != nil {
-		return AuthorityObservation{}, replayErr
-	} else if replayed {
-		return authority.Observe(ctx, request.Key)
+	current, found, err := authority.managedCatalogResource(ctx, request.Key)
+	if err != nil {
+		return AuthorityObservation{}, err
+	}
+	if found && managedMaterializationMatches(current, request) {
+		return authority.observePlacement(ctx, request.Key, current)
 	}
 	capacity, err := authority.managedCapacityObservation(ctx)
 	if err != nil {
 		return AuthorityObservation{}, err
 	}
 	body := managedReconcileAuthorityBody{
-		RequestToken: requestToken,
 		Lease: managedLeaseAuthorityBody{
 			OwnerID: request.Lease.OwnerID,
 			Fence:   strconv.FormatUint(request.Lease.Fence, 10),
@@ -442,6 +525,17 @@ func (authority *HTTPAuthority) ApplyManaged(
 			TabletPlacements: cloneTabletPlacements(request.TabletPlacements),
 		}},
 	}
+	body.RequestToken = managedApplyAttemptToken(request.RequestToken, body)
+	if replayed, replayErr := authority.replayManagedOperation(
+		ctx,
+		body.RequestToken,
+		request.Key,
+		"managed_reconciled",
+	); replayErr != nil {
+		return AuthorityObservation{}, replayErr
+	} else if replayed {
+		return authority.Observe(ctx, request.Key)
+	}
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		return AuthorityObservation{}, invalidAuthorityError(err.Error())
@@ -455,7 +549,7 @@ func (authority *HTTPAuthority) ApplyManaged(
 	if err != nil {
 		if replayed, replayErr := authority.replayManagedOperation(
 			ctx,
-			requestToken,
+			body.RequestToken,
 			request.Key,
 			"managed_reconciled",
 		); replayErr != nil {
@@ -613,9 +707,14 @@ func profileName(kind resources.Kind) string {
 	}
 }
 
-func managedApplyToken(base string, fence uint64) string {
-	digest := sha256.Sum256([]byte(base + "\x00" + strconv.FormatUint(fence, 10)))
-	return "epoch-control.reconcile.v1." + hex.EncodeToString(digest[:])
+func managedApplyAttemptToken(base string, body managedReconcileAuthorityBody) string {
+	body.RequestToken = ""
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		panic("validated managed reconciliation must encode")
+	}
+	digest := sha256.Sum256(append(append([]byte(base), 0), encoded...))
+	return "epoch-control.reconcile.v2." + hex.EncodeToString(digest[:])
 }
 
 func managedMembershipToken(base string, fence uint64) string {
@@ -960,7 +1059,13 @@ func (authority *HTTPAuthority) requestEndpoint(
 	body []byte,
 ) ([]byte, int, error) {
 	target := *endpoint
-	target.Path, target.RawQuery, _ = strings.Cut(path, "?")
+	reference, err := url.ParseRequestURI(path)
+	if err != nil || !strings.HasPrefix(reference.Path, "/") {
+		return nil, 0, fmt.Errorf("invalid regional authority request path %q", path)
+	}
+	target.Path = reference.Path
+	target.RawPath = reference.RawPath
+	target.RawQuery = reference.RawQuery
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)

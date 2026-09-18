@@ -380,6 +380,36 @@ func TestStatefulWorkloadsPersistAuditJournalsOnTheirDataVolumes(t *testing.T) {
 	}
 }
 
+func TestLegacyControlPlaneUpgradesOrdinalZeroBeforeScaling(t *testing.T) {
+	t.Parallel()
+	cluster := validCluster()
+	desired := controlStatefulSet(cluster)
+	current := desired.DeepCopy()
+	one := int32(1)
+	current.Spec.Replicas = &one
+	current.Spec.Template.Spec.Containers[0].Image = "ghcr.io/ripan-roy/epoch-control:v0.1.0-alpha"
+	current.Status.ReadyReplicas = 1
+	current.Status.UpdatedReplicas = 1
+	current.Status.CurrentRevision = "legacy"
+	current.Status.UpdateRevision = "legacy"
+
+	staged := stageLegacyControlUpgrade(current, desired)
+	if staged.Spec.Replicas == nil || *staged.Spec.Replicas != 1 {
+		t.Fatalf("legacy rollout scaled before ordinal zero upgraded: %#v", staged.Spec.Replicas)
+	}
+	if staged.Spec.Template.Spec.Containers[0].Image != cluster.Spec.ControlImage {
+		t.Fatalf("ordinal zero did not receive the target template: %q", staged.Spec.Template.Spec.Containers[0].Image)
+	}
+
+	current.Spec.Template = desired.Spec.Template
+	current.Status.CurrentRevision = "ha"
+	current.Status.UpdateRevision = "ha"
+	ready := stageLegacyControlUpgrade(current, desired)
+	if ready.Spec.Replicas == nil || *ready.Spec.Replicas != controlReplicas {
+		t.Fatalf("upgraded ordinal zero did not release HA scale-out: %#v", ready.Spec.Replicas)
+	}
+}
+
 func TestObjectMatchesDesiredIgnoresApiDefaultsButDetectsOwnedDrift(t *testing.T) {
 	t.Parallel()
 	cluster := validCluster()

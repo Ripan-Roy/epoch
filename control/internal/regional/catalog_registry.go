@@ -26,6 +26,7 @@ const (
 	controlMaterializationsPath = "/experimental/v1/regional/control/materializations"
 	controlOperationsPath       = "/experimental/v1/regional/control/operations"
 	controlChangesPath          = "/experimental/v1/regional/control/changes"
+	controlListPageLimit        = 128
 	controlLeaseTTL             = 10 * time.Second
 	controlCallTimeout          = 10 * time.Second
 	maxControlOwnerBytes        = 128
@@ -120,6 +121,7 @@ type controlMutationReceiptDocument struct {
 type controlResourceListDocument struct {
 	LatestChangeCursor decimalUint64                    `json:"latest_change_cursor"`
 	Resources          []controlManagedResourceDocument `json:"resources"`
+	NextPageAfter      *controlResourceNameDocument     `json:"next_page_after"`
 }
 
 type ControlOperationState string
@@ -573,26 +575,86 @@ func (registry *CatalogRegistry) List(filter resources.ListFilter) ([]resources.
 	if err := registry.ensureOpen(); err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), controlCallTimeout)
-	defer cancel()
-	response, err := registry.authority.readControlAny(ctx, controlResourcesPath)
-	if err != nil {
-		return nil, mapAuthorityStoreError(err, 0, 0)
-	}
-	var document controlResourceListDocument
-	if err := decodeAuthorityJSON(response, &document); err != nil {
-		return nil, storeUnavailable("decode desired inventory", err)
-	}
-	listed := make([]resources.Resource, 0, len(document.Resources))
-	for _, encoded := range document.Resources {
-		resource, err := managedResourceFromDocument(encoded)
-		if err != nil {
-			return nil, err
+	listed := make([]resources.Resource, 0)
+	var after *controlResourceNameDocument
+	var inventoryCursor *uint64
+	for {
+		query := url.Values{}
+		query.Set("limit", strconv.Itoa(controlListPageLimit))
+		if after != nil {
+			encoded, err := json.Marshal(after)
+			if err != nil {
+				return nil, storeUnavailable("encode desired inventory cursor", err)
+			}
+			query.Set("after", string(encoded))
 		}
-		listed = append(listed, resource)
+		ctx, cancel := context.WithTimeout(context.Background(), controlCallTimeout)
+		response, err := registry.authority.readControlAny(
+			ctx,
+			controlResourcesPath+"?"+query.Encode(),
+		)
+		cancel()
+		if err != nil {
+			return nil, mapAuthorityStoreError(err, 0, 0)
+		}
+		var document controlResourceListDocument
+		if err := decodeAuthorityJSON(response, &document); err != nil {
+			return nil, storeUnavailable("decode desired inventory", err)
+		}
+		cursor := uint64(document.LatestChangeCursor)
+		if inventoryCursor == nil {
+			inventoryCursor = &cursor
+		} else if *inventoryCursor != cursor {
+			return nil, storeUnavailable(
+				"decode desired inventory",
+				fmt.Errorf("catalog inventory changed while it was being paged"),
+			)
+		}
+		if len(document.Resources) > controlListPageLimit ||
+			(document.NextPageAfter != nil && len(document.Resources) == 0) {
+			return nil, storeUnavailable(
+				"decode desired inventory",
+				fmt.Errorf("catalog returned an invalid inventory page"),
+			)
+		}
+		for _, encoded := range document.Resources {
+			if after != nil && !controlNameLess(*after, encoded.Name) {
+				return nil, storeUnavailable(
+					"decode desired inventory",
+					fmt.Errorf("catalog inventory cursor did not advance"),
+				)
+			}
+			if len(listed) > 0 && !resourceKeyLessForCatalog(listed[len(listed)-1].ResourceKey, encoded.Name) {
+				return nil, storeUnavailable(
+					"decode desired inventory",
+					fmt.Errorf("catalog inventory is not strictly sorted"),
+				)
+			}
+			resource, err := managedResourceFromDocument(encoded)
+			if err != nil {
+				return nil, err
+			}
+			listed = append(listed, resource)
+		}
+		if document.NextPageAfter == nil {
+			break
+		}
+		last := document.Resources[len(document.Resources)-1].Name
+		if *document.NextPageAfter != last {
+			return nil, storeUnavailable(
+				"decode desired inventory",
+				fmt.Errorf("catalog inventory returned an inconsistent continuation cursor"),
+			)
+		}
+		next := *document.NextPageAfter
+		after = &next
 	}
 	registry.count.Store(int64(len(listed)))
 	return resources.FilterResourceList(listed, filter)
+}
+
+func resourceKeyLessForCatalog(left resources.ResourceKey, right controlResourceNameDocument) bool {
+	return controlNameLess(controlName(left), right)
 }
 
 // ControlOperation performs a linearizable lookup of one durable Catalog
@@ -856,14 +918,14 @@ func (registry *CatalogRegistry) DeleteManaged(
 			nil,
 		)
 	}
-	lease, nowMS, err := registry.ensureLease()
+	lease, nowMS, err := registry.leaseForManagedMutation()
 	if err != nil {
 		return resources.DeleteResult{}, err
 	}
 	body := controlDeleteManagedBody{
-		RequestToken: managedDeleteToken(request.RequestToken),
+		RequestToken: request.RequestToken,
 		Lease: controlLeaseGuardDocument{
-			OwnerID: registry.ownerID,
+			OwnerID: lease.OwnerID,
 			Fence:   strconv.FormatUint(uint64(lease.Fence), 10),
 			NowMS:   strconv.FormatUint(nowMS, 10),
 		},
@@ -933,7 +995,7 @@ func (registry *CatalogRegistry) ReplayManagedDelete(
 	if err := requireRegionalKey(request.Key); err != nil {
 		return resources.DeleteResult{}, false, err
 	}
-	token := managedDeleteToken(request.RequestToken)
+	token := request.RequestToken
 	document, err := registry.readControlOperation(ctx, token)
 	if errors.Is(err, errManagedResourceNotFound) {
 		return resources.DeleteResult{}, false, nil
@@ -982,8 +1044,28 @@ func (registry *CatalogRegistry) ReplayManagedDelete(
 		return resources.DeleteResult{}, true, storeErrorFromControlRejection(*document.Mutation)
 	}
 	mutation := *document.Mutation
-	if mutation.Kind != "managed_deleted" || !mutation.Deleted ||
-		uint64(mutation.DesiredGeneration) == 0 {
+	if mutation.Kind == "desired_deleted" {
+		if mutation.Name == nil || *mutation.Name != controlName(request.Key) {
+			return resources.DeleteResult{}, true, storeUnavailable(
+				"decode missing delete outcome",
+				fmt.Errorf("catalog returned an inconsistent desired delete"),
+			)
+		}
+		generation := uint64(mutation.Generation)
+		if request.ExpectedGeneration != nil && *request.ExpectedGeneration != generation {
+			return resources.DeleteResult{}, true, resources.NewStoreError(
+				resources.CodeConflict,
+				"request token is already bound to a different desired generation",
+				*request.ExpectedGeneration,
+				generation,
+				nil,
+			)
+		}
+		return resources.DeleteResult{
+			Key: request.Key, Generation: generation, Deleted: mutation.Deleted, Replayed: true,
+		}, true, nil
+	}
+	if mutation.Kind != "managed_deleted" || !mutation.Deleted || uint64(mutation.DesiredGeneration) == 0 {
 		return resources.DeleteResult{}, true, storeUnavailable(
 			"decode managed delete outcome",
 			fmt.Errorf("catalog returned an inconsistent successful delete"),
@@ -1026,6 +1108,7 @@ func (registry *CatalogRegistry) UpdateStatus(
 			normalized,
 			desiredGeneration,
 			uint64(lease.Fence),
+			nowMS,
 			status,
 		),
 		Lease: controlLeaseGuardDocument{
@@ -1105,6 +1188,18 @@ func (registry *CatalogRegistry) ensureOpen() error {
 }
 
 func (registry *CatalogRegistry) ensureLease() (controlLeaseDocument, uint64, error) {
+	return registry.ensureLeaseMode(false)
+}
+
+// leaseForManagedMutation delegates user-triggered materialization changes
+// through the current replicated lease. Reconciliation ownership remains
+// exclusive, while any healthy API replica can submit a generation-fenced
+// delete instead of depending on sticky routing to the lease owner.
+func (registry *CatalogRegistry) leaseForManagedMutation() (controlLeaseDocument, uint64, error) {
+	return registry.ensureLeaseMode(true)
+}
+
+func (registry *CatalogRegistry) ensureLeaseMode(allowCurrentOwner bool) (controlLeaseDocument, uint64, error) {
 	registry.leaseMu.Lock()
 	defer registry.leaseMu.Unlock()
 	if registry.closed {
@@ -1135,6 +1230,10 @@ func (registry *CatalogRegistry) ensureLease() (controlLeaseDocument, uint64, er
 		}
 		if uint64(current.ValidUntilMS) > nowMS {
 			if current.OwnerID != registry.ownerID {
+				registry.lease = current
+				if allowCurrentOwner {
+					return current, nowMS, nil
+				}
 				return controlLeaseDocument{}, 0, resources.NewStoreError(
 					resources.CodeUnavailable,
 					"another control instance currently owns reconciliation",
@@ -1344,24 +1443,21 @@ func statusMutationToken(
 	key resources.ResourceKey,
 	generation uint64,
 	leaseFence uint64,
+	leaseNowMS uint64,
 	status resources.ResourceStatus,
 ) string {
 	encoded, err := json.Marshal(struct {
 		Key        resources.ResourceKey    `json:"key"`
 		Generation uint64                   `json:"generation"`
 		LeaseFence uint64                   `json:"lease_fence"`
+		LeaseNowMS uint64                   `json:"lease_now_ms"`
 		Status     resources.ResourceStatus `json:"status"`
-	}{key, generation, leaseFence, status})
+	}{key, generation, leaseFence, leaseNowMS, status})
 	if err != nil {
 		panic("validated status must encode")
 	}
 	digest := sha256.Sum256(encoded)
-	return "epoch-control.status.v1." + hex.EncodeToString(digest[:])
-}
-
-func managedDeleteToken(base string) string {
-	digest := sha256.Sum256([]byte(base))
-	return "epoch-control.delete.v2." + hex.EncodeToString(digest[:])
+	return "epoch-control.status.v2." + hex.EncodeToString(digest[:])
 }
 
 func storeErrorFromControlRejection(mutation controlMutationDocument) error {
@@ -1423,12 +1519,45 @@ func sortDesiredWrites(writes []controlDesiredWriteDocument) {
 }
 
 func controlNameLess(left, right controlResourceNameDocument) bool {
-	leftParts := []string{left.Organization, left.Project, left.Environment, left.Namespace, left.Kind, left.Name}
-	rightParts := []string{right.Organization, right.Project, right.Environment, right.Namespace, right.Kind, right.Name}
+	leftParts := []string{left.Organization, left.Project, left.Environment, left.Namespace}
+	rightParts := []string{right.Organization, right.Project, right.Environment, right.Namespace}
 	for index := range leftParts {
 		if leftParts[index] != rightParts[index] {
 			return leftParts[index] < rightParts[index]
 		}
 	}
-	return false
+	leftKind, rightKind := controlKindOrder(left.Kind), controlKindOrder(right.Kind)
+	if leftKind != rightKind {
+		return leftKind < rightKind
+	}
+	return left.Name < right.Name
+}
+
+// Rust derives ResourceKind ordering by declaration order. Catalog cursors and
+// imported batches must use that exact order rather than lexical JSON names.
+func controlKindOrder(kind string) int {
+	switch resources.Kind(kind) {
+	case resources.KindCache:
+		return 0
+	case resources.KindTable:
+		return 1
+	case resources.KindStream:
+		return 2
+	case resources.KindQueue:
+		return 3
+	case resources.KindEventBus:
+		return 4
+	case resources.KindSubscription:
+		return 5
+	case resources.KindSchema:
+		return 6
+	case resources.KindPipe:
+		return 7
+	case resources.KindConnector:
+		return 8
+	case resources.KindPolicy:
+		return 9
+	default:
+		return 10
+	}
 }

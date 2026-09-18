@@ -290,6 +290,10 @@ zone and rack counts, a node class, and excluded physical node IDs. Before Rust
 catalog mutation, Go authenticates to every configured node, verifies a complete
 consistent inventory, and checks incremental group capacity. Unsatisfied
 constraints fail before catalog apply.
+The node-local control inventory is read in at most 128-resource keyset pages;
+every page is bounded below 768 KiB and must retain one Catalog high-water
+cursor. Go rejects reordered, oversized, non-advancing, or cross-cursor pages
+instead of constructing a partial capacity view.
 Desired state and operation outcomes are replicated by the Rust Catalog rather
 than a process-local Go database. Single-resource apply attempts immediate
 reconciliation and returns pending desired state when the region is unavailable.
@@ -321,17 +325,23 @@ Configuration is immutable within one resource generation in the current alpha.
 Omission preserves the legacy unconfigured/default catalog encoding so an
 upgrade cannot turn an exact old retry into a different command.
 
-This subset has bounded list pages but no opaque list continuation, plan,
+The public management subset has bounded list pages but no opaque list
+continuation, plan,
 backup, repair, or purge surface. Operation lookup and change streaming cover
 the committed desired/status lifecycle; they do not yet advertise a bounded
 request-token retention window or replace a general long-running workflow API.
 The one-time legacy import is one atomic command and currently accepts at most
-128 generation records; a larger former registry fails startup and requires an
-explicit migration tool before upgrade.
+4,096 generation records, subject to the existing 512 KiB command and 4 MiB
+Catalog snapshot limits; a larger former registry fails startup and requires
+an explicit migration tool before upgrade. A legacy one-replica StatefulSet
+must update and become ready at ordinal zero before the operator scales it to
+the three-replica control topology.
 Catalog consensus transactionally persists desired resources, observed status,
 generation tombstones, original request-token outcomes, and watch cursors
 before acknowledgement. A replicated TTL/fence lease serializes native
-reconciliation across multiple Go instances.
+reconciliation across multiple Go instances. Periodic lease and status
+outcomes retain only a small internal suffix; public operation outcomes remain
+durable until a separately specified retention policy is introduced.
 
 ## 6. Hosted management API
 
