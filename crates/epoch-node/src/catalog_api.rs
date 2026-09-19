@@ -1697,12 +1697,21 @@ async fn commit_command_with_mode(
                         .into(),
                     ));
                 }
+                ProposalLookup::Committed(committed) => {
+                    if let Some(receipt) = state
+                        .catalog
+                        .durable_replay_receipt(&committed)
+                        .map_err(RegionalCatalogApiError::CatalogState)?
+                    {
+                        return Ok(receipt);
+                    }
+                }
                 ProposalLookup::Unknown => {
                     return Err(RegionalCatalogApiError::Inconsistent(
                         "catalog proposal disappeared after submission".into(),
                     ));
                 }
-                ProposalLookup::Pending { .. } | ProposalLookup::Committed(_) => {}
+                ProposalLookup::Pending { .. } => {}
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

@@ -341,7 +341,11 @@ generation tombstones, original request-token outcomes, and watch cursors
 before acknowledgement. A replicated TTL/fence lease serializes native
 reconciliation across multiple Go instances. Periodic lease and status
 outcomes retain only a small internal suffix; public operation outcomes remain
-durable until a separately specified retention policy is introduced.
+durable until a separately specified retention policy is introduced. Native
+Catalog checkpoints omit duplicated periodic lease/status receipts from the
+consensus retry suffix and reconstruct a replay response from the retained
+token outcome, keeping valid retry traffic inside the 4 MiB application-image
+bound.
 
 ## 6. Hosted management API
 

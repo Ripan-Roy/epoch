@@ -8,6 +8,7 @@ import inspect
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import kubernetes_alpha_exit as campaign
 
@@ -195,6 +196,46 @@ class KubernetesAlphaExitContractTest(unittest.TestCase):
             campaign.wait_until(
                 "impossible fixture", lambda: None, timeout=0.01, interval=0.001
             )
+
+    def test_catalog_snapshot_retries_a_read_that_straddles_a_control_commit(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as evidence:
+            runner = campaign.Campaign(
+                argparse.Namespace(
+                    cluster_name="epoch-alpha-exit-unit",
+                    evidence_dir=Path(evidence),
+                    skip_build=True,
+                    keep_cluster=False,
+                )
+            )
+            self.addCleanup(runner.secure_directory.cleanup)
+            documents = iter(
+                [
+                    {"state_digest": "before", "resources": []},
+                    {"state_digest": "after", "resources": []},
+                    {"state_digest": "after", "resources": []},
+                    {"state_digest": "settled", "resources": []},
+                    {"state_digest": "settled", "resources": []},
+                    {"state_digest": "settled", "resources": []},
+                ]
+            )
+
+            def data_request(
+                *_args: object, **_kwargs: object
+            ) -> campaign.HTTPResponse:
+                return campaign.HTTPResponse(status=200, document=next(documents))
+
+            with (
+                mock.patch.object(
+                    runner, "data_request", side_effect=data_request
+                ) as request_mock,
+                mock.patch.object(campaign.time, "sleep", return_value=None),
+            ):
+                snapshot = runner.catalog_snapshot(campaign.SOURCE_CLUSTER)
+
+            self.assertEqual(snapshot["state_digest"], "settled")
+            self.assertEqual(request_mock.call_count, 6)
 
     def test_exact_int_accepts_internal_numbers_and_browser_safe_decimals(self) -> None:
         self.assertEqual(campaign.exact_int(7), 7)

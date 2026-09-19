@@ -69,7 +69,9 @@ into Go.
 9. Page internal resource inventory with a canonical key cursor, at most 128
    resources and 768 KiB per page, and one stable high-water cursor across the
    scan. Bound recurring lease/status request outcomes to the newest internal
-   suffix while keeping public operation outcomes durable.
+   suffix while keeping public operation outcomes durable. Do not duplicate
+   periodic command payloads and full receipts in the native checkpoint retry
+   suffix; a retained token outcome reconstructs the replayed mutation.
 
 ## Consequences
 

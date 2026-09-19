@@ -785,7 +785,8 @@ impl CatalogMutation {
         }
     }
 
-    fn as_replayed(&self) -> Self {
+    #[must_use]
+    pub fn as_replayed(&self) -> Self {
         match self {
             Self::Applied {
                 resource,

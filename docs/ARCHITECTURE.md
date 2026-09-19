@@ -1047,7 +1047,10 @@ already materialized native result is recognized before resubmission. Desired-
 state batches commit 1–128 resources atomically, while operation lookup retains
 affected identities for tenant authorization and change watches expose an
 explicit scanned resume cursor. Internal inventory uses bounded keyset pages
-with one stable Catalog high-water cursor across the complete scan.
+with one stable Catalog high-water cursor across the complete scan. Periodic
+lease/status outcomes retain a small deterministic suffix in Catalog, while
+native checkpoints omit their duplicated command/receipt copies and rebuild a
+replay response from that token outcome after recovery.
 
 The Kubernetes operator runs three stable, anti-affined control replicas with
 ordered startup and a two-instance disruption budget. During a legacy

@@ -6,7 +6,7 @@
 //! node-local reconciliation, and the future regional administration API.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, RwLock},
 };
 
@@ -198,6 +198,43 @@ impl CatalogTabletService {
             })
     }
 
+    /// Rebuilds a response for a deterministic proposal retained by consensus
+    /// when its application receipt was intentionally omitted from a compact
+    /// checkpoint. Catalog request-token outcomes remain the durable replay
+    /// authority; periodic outcomes may disappear after their bounded window.
+    pub fn durable_replay_receipt(
+        &self,
+        committed: &CommittedProposal,
+    ) -> Result<Option<CatalogTabletReceipt>, String> {
+        self.ensure_healthy()?;
+        if committed.receipt.group_id.get() != self.scope.group_id
+            || committed.receipt.group_epoch.get() != self.scope.group_epoch
+        {
+            return Err("catalog replay receipt has a foreign consensus scope".into());
+        }
+        let command =
+            CatalogCommand::decode(&committed.payload).map_err(|error| error.to_string())?;
+        let state = self
+            .state
+            .read()
+            .map_err(|_| "catalog state read lock was poisoned".to_owned())?;
+        let Some(operation) = state.catalog.operation(command.request_token()) else {
+            return Ok(None);
+        };
+        Ok(Some(CatalogTabletReceipt {
+            proposal_id: committed.receipt.proposal_id.get(),
+            term: committed.receipt.term.get(),
+            commit_index: committed.receipt.log_index.get(),
+            mutation: operation.mutation.as_replayed(),
+            state_digest: hex_digest(
+                state
+                    .catalog
+                    .state_digest()
+                    .map_err(|error| error.to_string())?,
+            ),
+        }))
+    }
+
     pub fn snapshot(&self) -> Result<CatalogTabletSnapshot, String> {
         self.ensure_healthy()?;
         let state = self
@@ -351,10 +388,10 @@ impl CommittedProposalApplier for CatalogTabletService {
         retained: &[CommittedProposal],
     ) -> Result<ApplicationSnapshot, String> {
         self.ensure_healthy()?;
-        let state = self
+        let mut state = self
             .state
-            .read()
-            .map_err(|_| "catalog state read lock was poisoned".to_owned())?;
+            .write()
+            .map_err(|_| "catalog state write lock was poisoned".to_owned())?;
         if state.last_applied_index > checkpoint_index.get() {
             return Err(format!(
                 "catalog applied index {} exceeds consensus checkpoint index {}",
@@ -375,12 +412,35 @@ impl CommittedProposalApplier for CatalogTabletService {
                     "catalog retry proposal {proposal_id} disagrees with consensus"
                 ));
             }
+            let decoded =
+                CatalogCommand::decode(&command.payload).map_err(|error| error.to_string())?;
+            // Lease renewals and status observations are internal periodic
+            // traffic. Their bounded outcomes already live in the Catalog
+            // image, and a surviving control replica retries them with a new
+            // logical clock after node recovery. Duplicating their large
+            // status documents in the application retry suffix can otherwise
+            // expand a valid 1 MiB consensus suffix past the 4 MiB native
+            // snapshot envelope.
+            if matches!(
+                decoded,
+                CatalogCommand::AcquireControlLease(_) | CatalogCommand::UpdateManagedStatus(_)
+            ) {
+                continue;
+            }
             applied.push(AppliedCatalogCheckpoint {
                 proposal_id,
                 command: command.clone(),
             });
         }
         applied.sort_by_key(|entry| entry.command.receipt.commit_index);
+        // Keep the complete consensus retry suffix in the live process so a
+        // response racing this checkpoint can still resolve its receipt. Only
+        // the durable image omits periodic control receipts; no client
+        // connection survives installing that image after a restart.
+        let retained_ids = retained
+            .iter()
+            .map(|entry| entry.receipt.proposal_id.get())
+            .collect::<BTreeSet<_>>();
         let catalog_bytes = state
             .catalog
             .encode_snapshot()
@@ -399,14 +459,19 @@ impl CommittedProposalApplier for CatalogTabletService {
             applied,
         };
         let payload = serde_json::to_vec(&checkpoint).map_err(|error| error.to_string())?;
-        ApplicationSnapshot::new(
+        let snapshot = ApplicationSnapshot::new(
             checkpoint_index,
             CATALOG_APPLICATION_SNAPSHOT_FORMAT_ID,
             CATALOG_APPLICATION_SNAPSHOT_VERSION,
             state_digest,
             payload,
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+        state.applied.retain(|proposal_id, command| {
+            command.receipt.commit_index > checkpoint_index.get()
+                || retained_ids.contains(proposal_id)
+        });
+        Ok(snapshot)
     }
 
     fn install_snapshot(&self, snapshot: &ApplicationSnapshot) -> Result<(), String> {
@@ -553,9 +618,17 @@ fn apply_committed(
 
 #[cfg(test)]
 mod tests {
-    use epoch_catalog::{ApplyResource, CatalogCommand, ResourceName, ResourceSpec};
-    use epoch_consensus::{CommitReceipt, GroupEpoch, GroupId, LogIndex, ProposalId, Term};
+    use epoch_catalog::{
+        AcquireControlLease, ApplyDesiredResources, ApplyResource, CatalogCommand, CatalogMutation,
+        ControlLeaseGuard, DesiredResourceWrite, ResourceName, ResourceSpec,
+        UpdateManagedResourceStatus,
+    };
+    use epoch_consensus::{
+        CommitReceipt, GroupEpoch, GroupId, LogIndex, MAX_APPLICATION_SNAPSHOT_BYTES, ProposalId,
+        Term,
+    };
     use epoch_core::{ResourceKind, WorkloadProfile};
+    use serde_json::json;
 
     use super::*;
 
@@ -689,6 +762,110 @@ mod tests {
             .apply(&committed(33, 2, 3, &command("next-v1", "next", 1)))
             .unwrap();
         assert_eq!(restored.snapshot().unwrap().resource_count, 3);
+    }
+
+    #[test]
+    fn native_snapshot_bounds_large_managed_retry_payloads() {
+        let service = CatalogTabletService::new(CatalogTabletScope::new(9, 4).unwrap());
+        let managed_name = ResourceName::new(
+            "acme",
+            "payments",
+            "production",
+            "core",
+            ResourceKind::Stream,
+            "managed-orders",
+        )
+        .unwrap();
+        let desired = CatalogCommand::ApplyDesired(ApplyDesiredResources {
+            request_token: "managed-desired".into(),
+            resources: vec![DesiredResourceWrite {
+                name: managed_name.clone(),
+                expected_generation: Some(0),
+                desired: json!({"padding": "d".repeat(60 * 1024)}),
+            }],
+        });
+        service.apply(&committed(100, 2, 1, &desired)).unwrap();
+        let lease = CatalogCommand::AcquireControlLease(AcquireControlLease {
+            request_token: "managed-lease".into(),
+            owner_id: "control-a".into(),
+            now_ms: 1_000,
+            ttl_ms: 60_000,
+        });
+        service.apply(&committed(101, 2, 2, &lease)).unwrap();
+
+        let mut retained = Vec::new();
+        for index in 0..14_u64 {
+            let status = CatalogCommand::UpdateManagedStatus(UpdateManagedResourceStatus {
+                request_token: format!("managed-status-{index:02}"),
+                lease: ControlLeaseGuard {
+                    owner_id: "control-a".into(),
+                    fence: 1,
+                    now_ms: 1_001 + index,
+                },
+                name: managed_name.clone(),
+                expected_generation: 1,
+                status: json!({
+                    "phase": "ready",
+                    "sequence": index,
+                    "padding": "s".repeat(60 * 1024),
+                }),
+            });
+            let applied = committed(102 + index, 2, 3 + index, &status);
+            service.apply(&applied).unwrap();
+            retained.push(applied);
+        }
+
+        let image = service
+            .capture_snapshot(LogIndex::new(16), &retained)
+            .expect("bounded retry payloads must fit a Catalog application snapshot");
+        assert!(image.payload().len() <= MAX_APPLICATION_SNAPSHOT_BYTES);
+        assert!(service.receipt(115).unwrap().is_some());
+        let restored = CatalogTabletService::new(CatalogTabletScope::new(9, 4).unwrap());
+        restored.install_snapshot(&image).unwrap();
+        assert!(restored.receipt(115).unwrap().is_none());
+        let replayed = restored
+            .durable_replay_receipt(retained.last().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(replayed.proposal_id, 115);
+        assert!(matches!(
+            replayed.mutation,
+            CatalogMutation::ManagedStatusUpdated { replayed: true, .. }
+        ));
+        assert_eq!(
+            restored
+                .snapshot()
+                .unwrap()
+                .managed_resources
+                .first()
+                .unwrap()
+                .status["sequence"],
+            13
+        );
+        let next_status = CatalogCommand::UpdateManagedStatus(UpdateManagedResourceStatus {
+            request_token: "managed-status-after-restore".into(),
+            lease: ControlLeaseGuard {
+                owner_id: "control-a".into(),
+                fence: 1,
+                now_ms: 1_015,
+            },
+            name: managed_name,
+            expected_generation: 1,
+            status: json!({"phase": "ready", "sequence": 14}),
+        });
+        restored
+            .apply(&committed(116, 2, 17, &next_status))
+            .unwrap();
+        assert_eq!(
+            restored
+                .snapshot()
+                .unwrap()
+                .managed_resources
+                .first()
+                .unwrap()
+                .status["sequence"],
+            14
+        );
     }
 
     #[test]

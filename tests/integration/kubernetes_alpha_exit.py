@@ -1142,25 +1142,40 @@ class Campaign:
         )
 
     def catalog_snapshot(self, cluster: str) -> dict[str, Any]:
-        observations: list[dict[str, Any]] = []
-        for ordinal in range(3):
-            response = self.data_request(
-                cluster, ordinal, "GET", "/experimental/v1/regional/catalog"
-            )
-            if response.status != 200 or not isinstance(response.document, dict):
-                raise CampaignError(
-                    f"catalog node {ordinal + 1} returned {response.status}: {response.document}"
+        def converged() -> dict[str, Any]:
+            observations: list[dict[str, Any]] = []
+            for ordinal in range(3):
+                response = self.data_request(
+                    cluster, ordinal, "GET", "/experimental/v1/regional/catalog"
                 )
-            observations.append(response.document)
-        digests = {item.get("state_digest") for item in observations}
-        resources = [canonical_json(item.get("resources")) for item in observations]
-        require(
-            len(digests) == 1 and None not in digests, "Catalog voters did not converge"
+                if response.status != 200 or not isinstance(response.document, dict):
+                    raise CampaignError(
+                        f"catalog node {ordinal + 1} returned {response.status}: "
+                        f"{response.document}"
+                    )
+                observations.append(response.document)
+            digests = {item.get("state_digest") for item in observations}
+            resources = [canonical_json(item.get("resources")) for item in observations]
+            require(
+                len(digests) == 1 and None not in digests,
+                f"Catalog voters did not converge: {sorted(str(item) for item in digests)}",
+            )
+            require(
+                len(set(resources)) == 1,
+                "Catalog resource descriptors did not converge",
+            )
+            return observations[0]
+
+        # Control leases and observed statuses are legitimate Catalog writes. A
+        # sequential read can straddle one such commit even when every voter is
+        # healthy, so convergence is an eventually observed condition rather
+        # than a valid single-sample assertion.
+        return wait_until(
+            f"{cluster} Catalog voters to converge",
+            converged,
+            timeout=60,
+            interval=0.25,
         )
-        require(
-            len(set(resources)) == 1, "Catalog resource descriptors did not converge"
-        )
-        return observations[0]
 
     def route_leader(
         self, cluster: str, kind: str, name: str

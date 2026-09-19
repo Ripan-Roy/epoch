@@ -38,6 +38,9 @@ notes explicitly list additional verified artifacts.
 - Periodic lease and status request outcomes retain only the newest bounded
   internal suffix, preventing snapshots from growing with every renewal while
   leaving public operation outcomes durable.
+- Catalog application checkpoints no longer duplicate periodic lease/status
+  command payloads and full status receipts in the consensus retry suffix;
+  retained token outcomes reconstruct the replayed mutation after recovery.
 - A legacy one-replica control StatefulSet updates and verifies ordinal zero
   before scaling to three replicas; one atomic import accepts up to 4,096
   generation records within the existing command and snapshot byte limits.
