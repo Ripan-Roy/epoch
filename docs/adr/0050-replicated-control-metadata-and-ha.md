@@ -71,7 +71,9 @@ into Go.
    scan. Bound recurring lease/status request outcomes to the newest internal
    suffix while keeping public operation outcomes durable. Do not duplicate
    periodic command payloads and full receipts in the native checkpoint retry
-   suffix; a retained token outcome reconstructs the replayed mutation.
+   suffix; a retained token outcome reconstructs the replayed mutation. A
+   subsequent checkpoint accepts an omitted periodic receipt only when the
+   installed image already covers its commit index.
 
 ## Consequences
 

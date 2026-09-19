@@ -401,9 +401,26 @@ impl CommittedProposalApplier for CatalogTabletService {
         let mut applied = Vec::with_capacity(retained.len());
         for committed in retained {
             let proposal_id = committed.receipt.proposal_id.get();
-            let command = state.applied.get(&proposal_id).ok_or_else(|| {
-                format!("catalog retry proposal {proposal_id} has no typed applied result")
-            })?;
+            let decoded =
+                CatalogCommand::decode(&committed.payload).map_err(|error| error.to_string())?;
+            let is_periodic_control = matches!(
+                decoded,
+                CatalogCommand::AcquireControlLease(_) | CatalogCommand::UpdateManagedStatus(_)
+            );
+            let Some(command) = state.applied.get(&proposal_id) else {
+                // Installing a compact checkpoint intentionally omits periodic
+                // receipts. Consensus can retain those proposals through the
+                // next checkpoint, so accept the omission only when the
+                // installed application image already covers their commit.
+                if is_periodic_control
+                    && committed.receipt.log_index.get() <= state.last_applied_index
+                {
+                    continue;
+                }
+                return Err(format!(
+                    "catalog retry proposal {proposal_id} has no typed applied result"
+                ));
+            };
             if command.payload != committed.payload
                 || command.receipt.term != committed.receipt.term.get()
                 || command.receipt.commit_index != committed.receipt.log_index.get()
@@ -412,8 +429,6 @@ impl CommittedProposalApplier for CatalogTabletService {
                     "catalog retry proposal {proposal_id} disagrees with consensus"
                 ));
             }
-            let decoded =
-                CatalogCommand::decode(&command.payload).map_err(|error| error.to_string())?;
             // Lease renewals and status observations are internal periodic
             // traffic. Their bounded outcomes already live in the Catalog
             // image, and a surviving control replica retries them with a new
@@ -421,10 +436,7 @@ impl CommittedProposalApplier for CatalogTabletService {
             // status documents in the application retry suffix can otherwise
             // expand a valid 1 MiB consensus suffix past the 4 MiB native
             // snapshot envelope.
-            if matches!(
-                decoded,
-                CatalogCommand::AcquireControlLease(_) | CatalogCommand::UpdateManagedStatus(_)
-            ) {
+            if is_periodic_control {
                 continue;
             }
             applied.push(AppliedCatalogCheckpoint {
@@ -674,6 +686,12 @@ mod tests {
         }
     }
 
+    fn managed_status_sequence(service: &CatalogTabletService) -> u64 {
+        service.snapshot().unwrap().managed_resources[0].status["sequence"]
+            .as_u64()
+            .unwrap()
+    }
+
     #[test]
     fn replay_rebuilds_resources_receipts_and_digest_in_commit_order() {
         let service = CatalogTabletService::new(CatalogTabletScope::new(9, 4).unwrap());
@@ -823,6 +841,17 @@ mod tests {
         let restored = CatalogTabletService::new(CatalogTabletScope::new(9, 4).unwrap());
         restored.install_snapshot(&image).unwrap();
         assert!(restored.receipt(115).unwrap().is_none());
+        let repeated = restored
+            .capture_snapshot(LogIndex::new(16), &retained)
+            .expect("a restored compact retry suffix must remain checkpointable");
+        assert!(repeated.payload().len() <= MAX_APPLICATION_SNAPSHOT_BYTES);
+        let missing_public = committed(100, 2, 1, &desired);
+        assert!(
+            restored
+                .capture_snapshot(LogIndex::new(16), &[missing_public])
+                .unwrap_err()
+                .contains("has no typed applied result")
+        );
         let replayed = restored
             .durable_replay_receipt(retained.last().unwrap())
             .unwrap()
@@ -832,16 +861,7 @@ mod tests {
             replayed.mutation,
             CatalogMutation::ManagedStatusUpdated { replayed: true, .. }
         ));
-        assert_eq!(
-            restored
-                .snapshot()
-                .unwrap()
-                .managed_resources
-                .first()
-                .unwrap()
-                .status["sequence"],
-            13
-        );
+        assert_eq!(managed_status_sequence(&restored), 13);
         let next_status = CatalogCommand::UpdateManagedStatus(UpdateManagedResourceStatus {
             request_token: "managed-status-after-restore".into(),
             lease: ControlLeaseGuard {
@@ -856,16 +876,7 @@ mod tests {
         restored
             .apply(&committed(116, 2, 17, &next_status))
             .unwrap();
-        assert_eq!(
-            restored
-                .snapshot()
-                .unwrap()
-                .managed_resources
-                .first()
-                .unwrap()
-                .status["sequence"],
-            14
-        );
+        assert_eq!(managed_status_sequence(&restored), 14);
     }
 
     #[test]

@@ -40,7 +40,8 @@ notes explicitly list additional verified artifacts.
   leaving public operation outcomes durable.
 - Catalog application checkpoints no longer duplicate periodic lease/status
   command payloads and full status receipts in the consensus retry suffix;
-  retained token outcomes reconstruct the replayed mutation after recovery.
+  retained token outcomes reconstruct the replayed mutation after recovery,
+  and the restored compact suffix remains valid for later checkpoints.
 - A legacy one-replica control StatefulSet updates and verifies ordinal zero
   before scaling to three replicas; one atomic import accepts up to 4,096
   generation records within the existing command and snapshot byte limits.

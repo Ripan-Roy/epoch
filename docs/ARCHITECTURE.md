@@ -1050,7 +1050,9 @@ explicit scanned resume cursor. Internal inventory uses bounded keyset pages
 with one stable Catalog high-water cursor across the complete scan. Periodic
 lease/status outcomes retain a small deterministic suffix in Catalog, while
 native checkpoints omit their duplicated command/receipt copies and rebuild a
-replay response from that token outcome after recovery.
+replay response from that token outcome after recovery. Re-checkpointing treats
+an omitted periodic receipt as valid only below the installed applied-index
+boundary; other missing retained receipts remain fail-stop errors.
 
 The Kubernetes operator runs three stable, anti-affined control replicas with
 ordered startup and a two-instance disruption budget. During a legacy

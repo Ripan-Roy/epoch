@@ -345,7 +345,8 @@ durable until a separately specified retention policy is introduced. Native
 Catalog checkpoints omit duplicated periodic lease/status receipts from the
 consensus retry suffix and reconstruct a replay response from the retained
 token outcome, keeping valid retry traffic inside the 4 MiB application-image
-bound.
+bound. A later checkpoint may accept a missing periodic receipt only when the
+installed application image already covers that proposal commit index.
 
 ## 6. Hosted management API
 
