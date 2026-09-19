@@ -1031,13 +1031,38 @@ console reads `GET /v1/regional/resources` from the Go BFF and never contacts a
 Rust storage node. Every 64-bit value in that browser contract is a decimal
 string and CORS is granted only to exact configured HTTP(S) origins.
 
-The same alpha now commits management-only desired resources, observed status,
-generation tombstones, and request-token outcomes to one versioned bbolt
-database before acknowledging or publishing a mutation in memory. Startup
-recovers that state and fails closed for corrupt records, unknown schemas, or a
-second file owner. Health exposes the `bbolt_v1` mode, and the regional campaign
-kills and reopens the real Go process against the same database before proving
-exact replay and reconciliation.
+Managed regional deployments now commit desired resources, observed status,
+generation tombstones, request-token outcomes, and a bounded resumable change
+log through the Rust Catalog consensus group. Linearizable reads cross a
+`ReadIndex` barrier. One replicated owner lease fences every Go-driven status,
+materialization, membership, and delete mutation; standby control replicas do
+not challenge a live owner for periodic reconciliation. A standby may submit a
+user-requested delete guarded by the observed active lease, so a public request
+does not depend on sticky routing; generation and lease fences still serialize
+the mutation in Catalog. Initial placement validates the complete current
+capacity observation and commits every resource reservation atomically with
+native Catalog materialization. Changed capacity evidence receives a distinct
+attempt identity, while exact ambiguous retries retain the same identity and an
+already materialized native result is recognized before resubmission. Desired-
+state batches commit 1–128 resources atomically, while operation lookup retains
+affected identities for tenant authorization and change watches expose an
+explicit scanned resume cursor. Internal inventory uses bounded keyset pages
+with one stable Catalog high-water cursor across the complete scan. Periodic
+lease/status outcomes retain a small deterministic suffix in Catalog, while
+native checkpoints omit their duplicated command/receipt copies and rebuild a
+replay response from that token outcome after recovery. Re-checkpointing treats
+an omitted periodic receipt as valid only below the installed applied-index
+boundary; other missing retained receipts remain fail-stop errors.
+
+The Kubernetes operator runs three stable, anti-affined control replicas with
+ordered startup and a two-instance disruption budget. During a legacy
+one-replica upgrade it first updates and verifies ordinal zero, then scales the
+same StatefulSet to three. A one-time pod-zero migration imports up to 4,096
+previous bbolt generation/tombstone high-water records in one command, subject
+to the 512 KiB command and 4 MiB snapshot limits; the old database is retained
+as rollback evidence. Legacy token history is not reconstructible and is not
+silently claimed. See
+[ADR-0050](adr/0050-replicated-control-metadata-and-ha.md).
 
 Managed desired state now includes canonical governance metadata. New regional
 resources require owner, cost center, classification, and bounded tags. Go
@@ -1058,10 +1083,10 @@ scope. Both implementations emit bounded credential-free authorization
 decisions and pass one cross-language corpus. See
 [ADR-0011](adr/0011-bootstrap-authz-audit-baseline.md).
 
-This is durable single-process hosted metadata, not a replicated management
-database. Multi-instance linearizability, management leader election, backups,
-OIDC/mTLS identity, replicated policy, immutable audit export, fleet
-automation, and an operator remain open.
+This is replicated regional management metadata, not a global hosted-service
+database. Horizontal Catalog sharding/capacity, a public request-token
+retention window, replicated organization policy, immutable WORM audit export,
+and broader multi-control chaos remain open.
 
 ## 12. API contracts
 
@@ -1076,7 +1101,7 @@ separate typed services rather than a generic `Execute` service:
 | Bus | `Publish`, `Pull`, `Subscribe` |
 | Transaction | `InitProducer`, `Begin`, `Commit`, `Abort`, `Lookup` |
 | Schema | `Resolve`, `Validate`, revision and compatibility operations |
-| Regional Admin | `Plan`, `ApplyResource`, `Delete`, `WatchOperation`, backup, restore, drain, transfer, rebalance |
+| Regional Admin | `ApplyResource`, `BatchApplyResources`, `GetOperation`, `WatchResourceChanges`, `DeleteResource`; future plan/backup/restore/drain/transfer/rebalance |
 
 High-throughput produce, fetch, send, receive, and settle paths support streaming
 and batching. Every mutation carries a deadline, request or idempotency token,
@@ -1320,3 +1345,4 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0047: Automatic Topology Repair and Serialized Rebalance](adr/0047-automatic-topology-repair-and-rebalance.md)
 - [ADR-0048: OIDC and Durable Authorization Audit](adr/0048-oidc-and-durable-authorization-audit.md)
 - [ADR-0049: Core Protocol Semantics](adr/0049-core-protocol-semantics.md)
+- [ADR-0050: Replicated Regional Control Metadata and Active-Owner Fencing](adr/0050-replicated-control-metadata-and-ha.md)

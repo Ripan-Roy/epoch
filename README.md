@@ -26,6 +26,9 @@ without erasing the semantics that make each model useful.
 - **Replicated regional runtime.** Independent profile tablets use fixed-voter
   consensus, linearizable reads, snapshots, encrypted backup, and fresh-cluster
   restore.
+- **Failure-tolerant management metadata.** Desired state and operation outcomes
+  share Catalog consensus; three replaceable Go replicas reconcile through a
+  lease/fence rather than owning separate databases.
 - **Data-plane independence.** The Rust data plane keeps serving configured paths
   when the Go management plane is unavailable.
 - **Typed SDKs.** Go, Java, and Python clients provide leader discovery, fencing,

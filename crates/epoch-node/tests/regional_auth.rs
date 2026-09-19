@@ -27,6 +27,7 @@ const OIDC_SIGNING_SEED: [u8; 32] = [
 const CATALOG_RESOURCE: &str = "/experimental/v1/regional/catalog/resources/{organization}/{project}/{environment}/{namespace}/{kind}/{name}";
 const CATALOG_TABLET_MEMBERSHIP: &str =
     "/experimental/v1/regional/catalog/tablets/{tablet_id}/membership";
+const CONTROL_ROUTE: &str = "/experimental/v1/regional/control/{*operation}";
 const RESOURCE_ROUTE: &str = "/experimental/v1/regional/resources/{organization}/{project}/{environment}/{namespace}/{kind}/{name}/shards/{shard}";
 const DATA_ROUTE: &str = "/experimental/v1/regional/resources/{organization}/{project}/{environment}/{namespace}/{kind}/{name}/shards/{shard}/data/{*operation}";
 const TOPOLOGY_ROUTE: &str = "/experimental/v1/regional/topology";
@@ -52,6 +53,7 @@ fn protected_router_with_policy(policy_document: &[u8]) -> Router {
             CATALOG_TABLET_MEMBERSHIP,
             any(|| async { StatusCode::NO_CONTENT }),
         )
+        .route(CONTROL_ROUTE, any(|| async { StatusCode::NO_CONTENT }))
         .route(RESOURCE_ROUTE, any(|| async { StatusCode::NO_CONTENT }))
         .route(DATA_ROUTE, any(|| async { StatusCode::NO_CONTENT }))
         .route(
@@ -169,6 +171,26 @@ async fn regional_control_workload_can_reconcile_catalog_but_not_data() {
     )
     .await;
     assert_eq!(reader_replacement.status(), StatusCode::FORBIDDEN);
+
+    for (method, path) in [
+        (Method::GET, "/experimental/v1/regional/control/resources"),
+        (Method::PUT, "/experimental/v1/regional/control/resources"),
+        (
+            Method::DELETE,
+            "/experimental/v1/regional/control/materializations/acme/payments/production/orders/stream/events",
+        ),
+    ] {
+        let response = call(router.clone(), method, path, Some("epoch-dev-control-v1")).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT, "{path}");
+    }
+    let tenant_reader_control = call(
+        router.clone(),
+        Method::GET,
+        "/experimental/v1/regional/control/resources",
+        Some("epoch-dev-reader-v1"),
+    )
+    .await;
+    assert_eq!(tenant_reader_control.status(), StatusCode::FORBIDDEN);
 
     let topology = call(
         router.clone(),

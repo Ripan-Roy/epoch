@@ -32,6 +32,7 @@ use tracing::{error, info};
 const CATALOG_ROOT: &str = "/experimental/v1/regional/catalog";
 const CATALOG_RESOURCE_PREFIX: &str = "/experimental/v1/regional/catalog/resources/";
 const CATALOG_TABLET_PREFIX: &str = "/experimental/v1/regional/catalog/tablets/";
+const CONTROL_PREFIX: &str = "/experimental/v1/regional/control/";
 const RESOURCE_PREFIX: &str = "/experimental/v1/regional/resources/";
 const TOPOLOGY_PATH: &str = "/experimental/v1/regional/topology";
 const BACKUP_PATH: &str = "/v1/admin/backups";
@@ -252,6 +253,7 @@ fn action_for_request(method: &Method, path: &str) -> Action {
     if path == CATALOG_ROOT
         || path.starts_with(CATALOG_RESOURCE_PREFIX)
         || path.starts_with(CATALOG_TABLET_PREFIX)
+        || path.starts_with(CONTROL_PREFIX)
     {
         return match *method {
             Method::PUT | Method::POST | Method::PATCH => Action::CatalogApply,
@@ -297,6 +299,7 @@ fn scope_for_path(path: &str) -> Result<ResourceScope, ()> {
         || path == BACKUP_PATH
         || path == AUDIT_PATH
         || path.starts_with(CATALOG_TABLET_PREFIX)
+        || path.starts_with(CONTROL_PREFIX)
     {
         return Ok(ResourceScope::new("", "", "", ""));
     }
@@ -556,6 +559,33 @@ mod tests {
         );
         assert_eq!(
             scope_for_path(path).unwrap(),
+            ResourceScope::new("", "", "", "")
+        );
+    }
+
+    #[test]
+    fn replicated_control_routes_are_cluster_scoped_catalog_operations() {
+        let resources = "/experimental/v1/regional/control/resources";
+        let managed_delete =
+            "/experimental/v1/regional/control/materializations/acme/shop/dev/core/stream/orders";
+        assert_eq!(
+            action_for_request(&Method::PUT, resources),
+            Action::CatalogApply
+        );
+        assert_eq!(
+            action_for_request(&Method::GET, resources),
+            Action::CatalogRead
+        );
+        assert_eq!(
+            action_for_request(&Method::DELETE, managed_delete),
+            Action::CatalogDelete
+        );
+        assert_eq!(
+            scope_for_path(resources).unwrap(),
+            ResourceScope::new("", "", "", "")
+        );
+        assert_eq!(
+            scope_for_path(managed_delete).unwrap(),
             ResourceScope::new("", "", "", "")
         );
     }

@@ -30,7 +30,7 @@ var defaultBrowserOrigins = []string{
 // NewHTTPHandler exposes the initial health and declarative resource API. It
 // deliberately depends only on this control registry and never on data-path
 // storage packages.
-func NewHTTPHandler(registry *Registry) http.Handler {
+func NewHTTPHandler(registry Store) http.Handler {
 	handler, err := NewHTTPHandlerWithOrigins(registry, defaultBrowserOrigins)
 	if err != nil {
 		panic("resources: invalid built-in browser origin: " + err.Error())
@@ -41,7 +41,7 @@ func NewHTTPHandler(registry *Registry) http.Handler {
 // NewHTTPHandlerWithOrigins exposes the managed HTTP API to an exact set of
 // browser origins. An empty set keeps the API available to non-browser clients
 // without granting cross-origin access.
-func NewHTTPHandlerWithOrigins(registry *Registry, allowedOrigins []string) (http.Handler, error) {
+func NewHTTPHandlerWithOrigins(registry Store, allowedOrigins []string) (http.Handler, error) {
 	return newHTTPHandler(registry, allowedOrigins, nil, nil, nil)
 }
 
@@ -49,7 +49,7 @@ func NewHTTPHandlerWithOrigins(registry *Registry, allowedOrigins []string) (htt
 // bootstrap policy. Health and CORS preflight remain public; every resource
 // operation requires a bearer principal and an explicit action/scope grant.
 func NewAuthenticatedHTTPHandler(
-	registry *Registry,
+	registry Store,
 	allowedOrigins []string,
 	policy *controlauth.Policy,
 	audit controlauth.AuditSink,
@@ -65,7 +65,7 @@ func NewAuthenticatedHTTPHandler(
 
 // NewAuthenticatedHTTPHandlerWithDiagnostics adds the tenant-scoped operational view.
 func NewAuthenticatedHTTPHandlerWithDiagnostics(
-	registry *Registry,
+	registry Store,
 	allowedOrigins []string,
 	policy *controlauth.Policy,
 	audit controlauth.AuditSink,
@@ -83,12 +83,62 @@ func NewAuthenticatedHTTPHandlerWithDiagnostics(
 	return newHTTPHandler(registry, allowedOrigins, policy, audit, diagnostics)
 }
 
-func newHTTPHandler(
-	registry *Registry,
+// DeleteCoordinator owns deletion of both desired and materialized state. The
+// production reconciler implements this boundary so an HTTP delete cannot
+// bypass consensus fencing or leave an orphaned regional resource.
+type DeleteCoordinator interface {
+	Delete(context.Context, DeleteRequest) (DeleteResult, error)
+}
+
+// NewAuthenticatedHTTPHandlerWithDiagnosticsAndDeleteCoordinator exposes the
+// authenticated API with a deletion workflow that can atomically remove
+// desired and materialized state. It is the production constructor; the
+// simpler constructors retain Store.Delete for in-memory and embedded use.
+func NewAuthenticatedHTTPHandlerWithDiagnosticsAndDeleteCoordinator(
+	registry Store,
 	allowedOrigins []string,
 	policy *controlauth.Policy,
 	audit controlauth.AuditSink,
 	diagnostics LatencyDiagnosticProvider,
+	deleteCoordinator DeleteCoordinator,
+) (http.Handler, error) {
+	if deleteCoordinator == nil {
+		return nil, fmt.Errorf("delete coordinator is required")
+	}
+	return newHTTPHandlerWithDeleteCoordinator(
+		registry,
+		allowedOrigins,
+		policy,
+		audit,
+		diagnostics,
+		deleteCoordinator,
+	)
+}
+
+func newHTTPHandler(
+	registry Store,
+	allowedOrigins []string,
+	policy *controlauth.Policy,
+	audit controlauth.AuditSink,
+	diagnostics LatencyDiagnosticProvider,
+) (http.Handler, error) {
+	return newHTTPHandlerWithDeleteCoordinator(
+		registry,
+		allowedOrigins,
+		policy,
+		audit,
+		diagnostics,
+		storeDeleteCoordinator{store: registry},
+	)
+}
+
+func newHTTPHandlerWithDeleteCoordinator(
+	registry Store,
+	allowedOrigins []string,
+	policy *controlauth.Policy,
+	audit controlauth.AuditSink,
+	diagnostics LatencyDiagnosticProvider,
+	deleteCoordinator DeleteCoordinator,
 ) (http.Handler, error) {
 	if registry == nil {
 		panic("resources: nil registry")
@@ -98,10 +148,11 @@ func newHTTPHandler(
 		return nil, err
 	}
 	handler := &httpHandler{
-		registry:    registry,
-		policy:      policy,
-		audit:       audit,
-		diagnostics: diagnostics,
+		registry:          registry,
+		deleteCoordinator: deleteCoordinator,
+		policy:            policy,
+		audit:             audit,
+		diagnostics:       diagnostics,
 	}
 	if reader, ok := audit.(controlauth.AuditReader); ok {
 		handler.auditReader = reader
@@ -121,11 +172,23 @@ func newHTTPHandler(
 }
 
 type httpHandler struct {
-	registry    *Registry
-	policy      *controlauth.Policy
-	audit       controlauth.AuditSink
-	auditReader controlauth.AuditReader
-	diagnostics LatencyDiagnosticProvider
+	registry          Store
+	deleteCoordinator DeleteCoordinator
+	policy            *controlauth.Policy
+	audit             controlauth.AuditSink
+	auditReader       controlauth.AuditReader
+	diagnostics       LatencyDiagnosticProvider
+}
+
+type storeDeleteCoordinator struct {
+	store Store
+}
+
+func (coordinator storeDeleteCoordinator) Delete(
+	_ context.Context,
+	request DeleteRequest,
+) (DeleteResult, error) {
+	return coordinator.store.Delete(request)
 }
 
 func (handler *httpHandler) auditEvents(writer http.ResponseWriter, request *http.Request) {
@@ -892,7 +955,7 @@ func (handler *httpHandler) delete(writer http.ResponseWriter, request *http.Req
 	) {
 		return
 	}
-	result, err := handler.registry.Delete(DeleteRequest{
+	result, err := handler.deleteCoordinator.Delete(request.Context(), DeleteRequest{
 		RequestToken:       payload.RequestToken,
 		ExpectedGeneration: payload.ExpectedGeneration,
 		Key:                key,
@@ -1073,6 +1136,8 @@ func writeError(writer http.ResponseWriter, err error) {
 			status = http.StatusNotFound
 		case CodeConflict:
 			status = http.StatusConflict
+		case CodeUnavailable:
+			status = http.StatusServiceUnavailable
 		}
 	}
 	writeJSON(writer, status, payload)

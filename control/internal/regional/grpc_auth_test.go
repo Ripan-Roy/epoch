@@ -115,9 +115,59 @@ func TestAuthenticatedRegionalAdminFiltersListByPrincipalScope(t *testing.T) {
 	}
 }
 
+func TestAuthenticatedRegionalAdminAuthenticatesAndScopeFiltersChangeStream(t *testing.T) {
+	local := resources.NewRegistry()
+	acme := resources.ResourceKey{
+		Organization: "acme",
+		Project:      "payments",
+		Environment:  "production",
+		Namespace:    "orders",
+		Kind:         resources.KindStream,
+		Name:         "orders",
+	}
+	other := acme
+	other.Organization = "otherco"
+	other.Name = "other-orders"
+	registry := &testControlRegistry{
+		Store: local,
+		changes: []ControlChange{
+			{Cursor: 1, Kind: ControlChangeDesiredApplied, Key: acme, Generation: 1},
+			{Cursor: 2, Kind: ControlChangeDesiredApplied, Key: other, Generation: 1},
+		},
+	}
+	audit := controlauth.NewMemoryAuditSink()
+	client := startAuthenticatedRegionalAdminClient(t, registry, audit)
+
+	unauthenticated, err := client.WatchResourceChanges(
+		t.Context(),
+		&epochv1.WatchResourceChangesRequest{BatchSize: 10},
+	)
+	if err == nil {
+		_, err = unauthenticated.Recv()
+	}
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("WatchResourceChanges(missing credential) error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(bearerGRPCContext(t.Context(), "epoch-dev-reader-v1"))
+	watch, err := client.WatchResourceChanges(
+		ctx,
+		&epochv1.WatchResourceChangesRequest{BatchSize: 10},
+	)
+	if err != nil {
+		t.Fatalf("WatchResourceChanges(reader) error = %v", err)
+	}
+	batch, err := watch.Recv()
+	cancel()
+	if err != nil || batch.GetNextCursor() != 2 || len(batch.GetChanges()) != 1 ||
+		batch.GetChanges()[0].GetName().GetOrganization() != "acme" {
+		t.Fatalf("WatchResourceChanges(reader).Recv() = %+v, %v", batch, err)
+	}
+}
+
 func startAuthenticatedRegionalAdminClient(
 	t *testing.T,
-	registry *resources.Registry,
+	registry resources.Store,
 	audit controlauth.AuditSink,
 ) epochv1.RegionalAdminServiceClient {
 	t.Helper()
@@ -141,9 +191,10 @@ func startAuthenticatedRegionalAdminClient(
 		},
 	}
 	listener := bufconn.Listen(1 << 20)
-	server := grpc.NewServer(grpc.UnaryInterceptor(
-		controlauth.NewUnaryServerInterceptor(policy, audit),
-	))
+	server := grpc.NewServer(
+		grpc.UnaryInterceptor(controlauth.NewUnaryServerInterceptor(policy, audit)),
+		grpc.StreamInterceptor(controlauth.NewStreamServerInterceptor(policy, audit)),
+	)
 	epochv1.RegisterRegionalAdminServiceServer(
 		server,
 		NewAuthenticatedRegionalAdminServer(

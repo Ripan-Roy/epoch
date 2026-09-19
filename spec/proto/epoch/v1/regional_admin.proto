@@ -17,6 +17,12 @@ service RegionalAdminService {
   rpc ListResources(ListResourcesRequest) returns (ListResourcesResponse);
   // DeleteResource removes desired resource state idempotently.
   rpc DeleteResource(DeleteResourceRequest) returns (DeleteResourceResponse);
+  // BatchApplyResources atomically commits 1-128 desired resource changes.
+  rpc BatchApplyResources(BatchApplyResourcesRequest) returns (BatchApplyResourcesResponse);
+  // GetOperation returns one durable request-token outcome.
+  rpc GetOperation(GetOperationRequest) returns (GetOperationResponse);
+  // WatchResourceChanges streams resumable, bounded change checkpoints.
+  rpc WatchResourceChanges(WatchResourceChangesRequest) returns (stream WatchResourceChangesResponse);
 }
 
 message ApplyResourceRequest {
@@ -71,4 +77,78 @@ message DeleteResourceResponse {
   uint64 generation = 2;
   bool deleted = 3;
   bool replayed = 4;
+}
+
+message BatchApplyResource {
+  ResourceName name = 1;
+  ResourceSpec spec = 2;
+  optional uint64 expected_generation = 3;
+}
+
+message BatchApplyResourcesRequest {
+  string request_token = 1;
+  repeated BatchApplyResource resources = 2;
+}
+
+message BatchApplyResourcesResponse {
+  repeated ApplyResourceResponse results = 1;
+  bool replayed = 2;
+}
+
+enum OperationState {
+  OPERATION_STATE_UNSPECIFIED = 0;
+  OPERATION_STATE_PENDING = 1;
+  OPERATION_STATE_SUCCEEDED = 2;
+  OPERATION_STATE_FAILED = 3;
+}
+
+message GetOperationRequest {
+  string request_token = 1;
+  // affected_resources is required and must exactly match the durable
+  // operation once it commits. This prevents cross-tenant token disclosure.
+  repeated ResourceName affected_resources = 2;
+}
+
+message GetOperationResponse {
+  string request_token = 1;
+  uint64 proposal_id = 2;
+  OperationState state = 3;
+  repeated ResourceName affected_resources = 4;
+  string failure_code = 5;
+  string failure_message = 6;
+  uint64 first_change_cursor = 7;
+  uint64 last_change_cursor = 8;
+}
+
+enum ResourceChangeKind {
+  RESOURCE_CHANGE_KIND_UNSPECIFIED = 0;
+  RESOURCE_CHANGE_KIND_DESIRED_APPLIED = 1;
+  RESOURCE_CHANGE_KIND_DESIRED_DELETED = 2;
+  RESOURCE_CHANGE_KIND_STATUS_UPDATED = 3;
+}
+
+message ResourceChange {
+  uint64 cursor = 1;
+  ResourceChangeKind kind = 2;
+  ResourceName name = 3;
+  uint64 generation = 4;
+}
+
+message WatchResourceChangesRequest {
+  uint64 after_cursor = 1;
+  uint32 batch_size = 2;
+  string organization = 3;
+  string project = 4;
+  string environment = 5;
+  string namespace = 6;
+  ResourceKind kind = 7;
+}
+
+message WatchResourceChangesResponse {
+  uint64 earliest_cursor = 1;
+  uint64 latest_cursor = 2;
+  repeated ResourceChange changes = 3;
+  // next_cursor is the inclusive scanned checkpoint to supply as after_cursor.
+  // It may trail latest_cursor when another bounded page is immediately ready.
+  uint64 next_cursor = 4;
 }
