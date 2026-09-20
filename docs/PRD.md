@@ -24,7 +24,8 @@ deployments update and verify ordinal zero before scaling to three. Internal
 inventory reads use bounded keyset pages, capacity retries bind their complete
 evidence, controller-generated outcomes retain a bounded suffix, standby lease
 guards normalize to the replicated clock, and the 4,096-entry change log also
-prunes against the complete snapshot byte budget. Public delete tokens remain
+prunes against the complete snapshot byte budget. Growth that still cannot fit
+commits a non-mutating capacity rejection. Public delete tokens remain
 discoverable after replay. Protected
 multi-control chaos, Catalog capacity/sharding, legacy token migration, and a
 public token-retention window remain open. See

@@ -629,8 +629,8 @@ fn apply_committed(
 mod tests {
     use epoch_catalog::{
         AcquireControlLease, ApplyDesiredResources, ApplyResource, CatalogCommand, CatalogMutation,
-        ControlLeaseGuard, DesiredResourceWrite, ReconcileManagedResources, ResourceName,
-        ResourceSpec, UpdateManagedResourceStatus,
+        CatalogRejectionCode, ControlLeaseGuard, DesiredResourceWrite, ReconcileManagedResources,
+        ResourceName, ResourceSpec, UpdateManagedResourceStatus,
     };
     use epoch_consensus::{
         CommitReceipt, GroupEpoch, GroupId, LogIndex, MAX_APPLICATION_SNAPSHOT_BYTES, ProposalId,
@@ -910,6 +910,52 @@ mod tests {
             replayed.mutation,
             CatalogMutation::Rejected { replayed: true, .. }
         ));
+    }
+
+    #[test]
+    fn snapshot_capacity_rejection_does_not_fail_stop_the_catalog_tablet() {
+        let service = CatalogTabletService::new(CatalogTabletScope::new(9, 4).unwrap());
+        let mut rejected = None;
+        for index in 0..32_u64 {
+            let command = CatalogCommand::ApplyDesired(ApplyDesiredResources {
+                request_token: format!("large-desired-{index}"),
+                resources: vec![DesiredResourceWrite {
+                    name: ResourceName::new(
+                        "acme",
+                        "payments",
+                        "production",
+                        "core",
+                        ResourceKind::Stream,
+                        format!("orders-{index}"),
+                    )
+                    .unwrap(),
+                    expected_generation: Some(0),
+                    desired: json!({"padding": "x".repeat(120 * 1024)}),
+                }],
+            });
+            let receipt = service
+                .apply_one(&committed(index + 1, 2, index + 1, &command))
+                .unwrap();
+            if matches!(
+                receipt.mutation,
+                CatalogMutation::Rejected {
+                    code: CatalogRejectionCode::CapacityExceeded,
+                    ..
+                }
+            ) {
+                rejected = Some(receipt);
+                break;
+            }
+        }
+        assert!(rejected.is_some(), "the bounded Catalog must reject growth");
+        service.ensure_healthy().unwrap();
+        service
+            .state
+            .read()
+            .unwrap()
+            .catalog
+            .encode_snapshot()
+            .unwrap();
     }
 
     #[test]

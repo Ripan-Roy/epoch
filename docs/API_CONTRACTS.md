@@ -353,6 +353,9 @@ later checkpoint may accept a missing internal receipt only when the installed
 application image already covers that proposal commit index. The watch history
 retains at most 4,096 changes and expires its oldest prefix sooner whenever the
 complete encoded Catalog image would otherwise exceed 4 MiB.
+If expiring the complete change-history prefix still cannot admit a command,
+the committed result is a `capacity_exceeded` rejection against unchanged
+state; snapshot admission never becomes a post-consensus applier failure.
 
 ## 6. Hosted management API
 

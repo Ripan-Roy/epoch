@@ -48,6 +48,9 @@ notes explicitly list additional verified artifacts.
 - Lease-fenced mutations normalize a lagging API replica's sampled time to the
   replicated Catalog clock, and change history expires by the remaining full
   snapshot byte budget as well as its 4,096-entry ceiling.
+- A command that cannot fit after change-history expiry commits a typed
+  capacity rejection against unchanged state instead of fail-stopping Catalog
+  replicas after consensus commit.
 - A legacy one-replica control StatefulSet updates and verifies ordinal zero
   before scaling to three replicas; one atomic import accepts up to 4,096
   generation records within the existing command and snapshot byte limits.

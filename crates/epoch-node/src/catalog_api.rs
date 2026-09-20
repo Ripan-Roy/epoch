@@ -1014,7 +1014,7 @@ async fn delete_desired_resource(
         name: path.resource_name()?,
     });
     let (receipt, request_replayed) = commit_command(&state, command).await?;
-    ensure_control_mutation_accepted(&receipt)?;
+    ensure_mutation_accepted(&receipt)?;
     Ok(Json(control_mutation_response(receipt, request_replayed)))
 }
 
@@ -1032,7 +1032,7 @@ async fn delete_managed_resource(
         expected_catalog_generation: request.expected_catalog_generation,
     });
     let (receipt, request_replayed) = commit_command(&state, command).await?;
-    ensure_control_mutation_accepted(&receipt)?;
+    ensure_mutation_accepted(&receipt)?;
     let materialization = state.reconcile_latest().await?;
     Ok(Json(mutation_response(
         receipt,
@@ -1059,7 +1059,7 @@ async fn apply_desired_resources(
             .collect(),
     });
     let (receipt, request_replayed) = commit_command(&state, command).await?;
-    ensure_control_mutation_accepted(&receipt)?;
+    ensure_mutation_accepted(&receipt)?;
     Ok((
         StatusCode::OK,
         Json(control_mutation_response(receipt, request_replayed)),
@@ -1094,7 +1094,7 @@ async fn import_managed_resources(
             .collect(),
     });
     let (receipt, request_replayed) = commit_command(&state, command).await?;
-    ensure_control_mutation_accepted(&receipt)?;
+    ensure_mutation_accepted(&receipt)?;
     Ok(Json(control_mutation_response(receipt, request_replayed)))
 }
 
@@ -1110,7 +1110,7 @@ async fn acquire_control_lease(
         ttl_ms: request.ttl_ms,
     });
     let (receipt, request_replayed) = commit_command(&state, command).await?;
-    ensure_control_mutation_accepted(&receipt)?;
+    ensure_mutation_accepted(&receipt)?;
     Ok(Json(control_mutation_response(receipt, request_replayed)))
 }
 
@@ -1146,7 +1146,7 @@ async fn update_managed_status(
         status: request.status,
     });
     let (receipt, request_replayed) = commit_command(&state, command).await?;
-    ensure_control_mutation_accepted(&receipt)?;
+    ensure_mutation_accepted(&receipt)?;
     Ok(Json(control_mutation_response(receipt, request_replayed)))
 }
 
@@ -1184,7 +1184,7 @@ async fn reconcile_managed_resources(
         resources,
     });
     let (receipt, request_replayed) = commit_command(&state, command).await?;
-    ensure_control_mutation_accepted(&receipt)?;
+    ensure_mutation_accepted(&receipt)?;
     let materialization = state.reconcile_latest().await?;
     Ok((
         StatusCode::ACCEPTED,
@@ -1223,7 +1223,7 @@ async fn plan_managed_tablet_membership(
         target_voter_node_ids: request.target_voter_node_ids,
     });
     let (receipt, request_replayed) = commit_command(&state, command).await?;
-    ensure_control_mutation_accepted(&receipt)?;
+    ensure_mutation_accepted(&receipt)?;
     let materialization = state.reconcile_latest().await?;
     Ok((
         StatusCode::ACCEPTED,
@@ -1357,6 +1357,7 @@ async fn apply_resource(
         tablet_placements: request.tablet_placements,
     });
     let (receipt, request_replayed) = commit_command(&state, command).await?;
+    ensure_mutation_accepted(&receipt)?;
     let materialization = state.reconcile_latest().await?;
     let status = match &receipt.mutation {
         CatalogMutation::Applied { created: true, .. } => StatusCode::CREATED,
@@ -1535,6 +1536,7 @@ async fn delete_resource(
         name: path.resource_name()?,
     });
     let (receipt, request_replayed) = commit_command(&state, command).await?;
+    ensure_mutation_accepted(&receipt)?;
     let materialization = state.reconcile_latest().await?;
     Ok(Json(mutation_response(
         receipt,
@@ -1557,6 +1559,7 @@ async fn plan_tablet_membership(
         target_voter_node_ids: request.target_voter_node_ids,
     });
     let (receipt, request_replayed) = commit_command(&state, command).await?;
+    ensure_mutation_accepted(&receipt)?;
     let materialization = state.reconcile_latest().await?;
     Ok((
         StatusCode::ACCEPTED,
@@ -1598,9 +1601,7 @@ fn control_mutation_response(
     }
 }
 
-fn ensure_control_mutation_accepted(
-    receipt: &CatalogTabletReceipt,
-) -> Result<(), RegionalCatalogApiError> {
+fn ensure_mutation_accepted(receipt: &CatalogTabletReceipt) -> Result<(), RegionalCatalogApiError> {
     if let CatalogMutation::Rejected { code, message, .. } = &receipt.mutation {
         return Err(RegionalCatalogApiError::CommittedRejection {
             code: *code,

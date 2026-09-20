@@ -777,7 +777,9 @@ impl CatalogRejectionCode {
             CatalogError::ControlLeaseFenced { .. } | CatalogError::ControlLeaseExpired { .. } => {
                 Self::Fenced
             }
-            CatalogError::CapacityExceeded { .. } => Self::CapacityExceeded,
+            CatalogError::CapacityExceeded { .. } | CatalogError::SnapshotTooLarge => {
+                Self::CapacityExceeded
+            }
             _ => Self::InvalidArgument,
         }
     }
@@ -1039,9 +1041,18 @@ impl Catalog {
 
         // Apply against a candidate so the snapshot byte admission below is
         // atomic. A command that would leave the Catalog uncheckpointable must
-        // not partially mutate live replicated state.
+        // not partially mutate live replicated state or fail-stop the applier
+        // after consensus has already committed it. Snapshot admission is a
+        // deterministic capacity rejection and leaves the current image
+        // unchanged.
         let mut candidate = self.clone();
-        let mutation = candidate.apply_new(command)?;
+        let mutation = match candidate.apply_new(command) {
+            Ok(mutation) => mutation,
+            Err(CatalogError::SnapshotTooLarge) => {
+                return Ok(rejected_mutation(&CatalogError::SnapshotTooLarge));
+            }
+            Err(error) => return Err(error),
+        };
         *self = candidate;
         Ok(mutation)
     }
@@ -3252,6 +3263,18 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn managed_test_name(index: usize) -> ResourceName {
+        ResourceName::new(
+            "acme",
+            "payments",
+            "production",
+            "core",
+            ResourceKind::Stream,
+            format!("orders-{index}"),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn change_history_is_pruned_against_the_complete_snapshot_byte_budget() {
         let component = "x".repeat(MAX_NAME_COMPONENT_BYTES);
@@ -3332,5 +3355,75 @@ mod tests {
         let encoded = catalog.encode_snapshot().unwrap();
         assert!(encoded.len() <= MAX_CATALOG_SNAPSHOT_BYTES);
         assert_eq!(Catalog::decode_snapshot(&encoded).unwrap(), catalog);
+    }
+
+    #[test]
+    fn snapshot_overflow_is_a_non_mutating_capacity_rejection() {
+        let document = json!({"padding": "x".repeat(110 * 1024)});
+        let mut catalog = Catalog::new();
+        for index in 0..7 {
+            let name = managed_test_name(index);
+            let resource = ManagedResourceRecord {
+                name: name.clone(),
+                generation: 1,
+                desired: document.clone(),
+                status: document.clone(),
+                deletion_requested: false,
+            };
+            catalog
+                .managed_resources
+                .insert(name.clone(), resource.clone());
+            catalog.managed_last_generations.insert(name.clone(), 1);
+            let token = format!("desired-{index}");
+            catalog.completed_requests.insert(
+                token.clone(),
+                CompletedRequest {
+                    command: CatalogCommand::ApplyDesired(ApplyDesiredResources {
+                        request_token: token,
+                        resources: vec![DesiredResourceWrite {
+                            name,
+                            expected_generation: Some(0),
+                            desired: document.clone(),
+                        }],
+                    }),
+                    mutation: CatalogMutation::DesiredApplied {
+                        resources: vec![ManagedResourceApplyResult {
+                            resource,
+                            created: true,
+                            changed: true,
+                        }],
+                        changed: true,
+                        replayed: false,
+                    },
+                    first_change_cursor: 0,
+                    last_change_cursor: 0,
+                },
+            );
+        }
+        assert!(
+            catalog.snapshot_upper_bound_len(&[]).unwrap() <= MAX_CATALOG_SNAPSHOT_BYTES,
+            "the pre-command Catalog must remain checkpointable"
+        );
+        let before = catalog.clone();
+        let mutation = catalog
+            .apply(CatalogCommand::ApplyDesired(ApplyDesiredResources {
+                request_token: "desired-overflow".into(),
+                resources: vec![DesiredResourceWrite {
+                    name: managed_test_name(7),
+                    expected_generation: Some(0),
+                    desired: json!({"padding": "y".repeat(120 * 1024)}),
+                }],
+            }))
+            .unwrap();
+        assert!(matches!(
+            mutation,
+            CatalogMutation::Rejected {
+                code: CatalogRejectionCode::CapacityExceeded,
+                ref message,
+                replayed: false,
+            } if message.contains("snapshot exceeds")
+        ));
+        assert_eq!(catalog, before);
+        Catalog::decode_snapshot(&catalog.encode_snapshot().unwrap()).unwrap();
     }
 }

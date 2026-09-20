@@ -76,7 +76,9 @@ into Go.
    suffix; a retained token outcome reconstructs the replayed mutation. A
    subsequent checkpoint accepts an omitted internal receipt only when the
    installed image already covers its commit index. Bound watch history by both
-   4,096 entries and the remaining complete encoded snapshot byte budget.
+   4,096 entries and the remaining complete encoded snapshot byte budget. If
+   no history suffix can make a new command fit, commit a typed non-mutating
+   capacity rejection rather than failing the post-consensus applier.
 
 ## Consequences
 

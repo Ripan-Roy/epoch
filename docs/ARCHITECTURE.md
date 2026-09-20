@@ -1059,6 +1059,8 @@ Re-checkpointing treats an omitted internal receipt as valid only below the
 installed applied-index boundary; other missing retained receipts remain
 fail-stop errors. The resumable change log is capped at 4,096 entries and also
 prunes its oldest prefix against the complete 4 MiB encoded snapshot budget.
+When no history remains to expire, further growth commits a typed capacity
+rejection without mutating the Catalog or fail-stopping its replicas.
 
 The Kubernetes operator runs three stable, anti-affined control replicas with
 ordered startup and a two-instance disruption budget. During a legacy
