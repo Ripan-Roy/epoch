@@ -35,13 +35,19 @@ notes explicitly list additional verified artifacts.
 - Public managed deletes retain the caller's operation token, including
   missing-resource outcomes, and any control replica can submit the request
   against the current active lease without taking over periodic reconciliation.
-- Periodic lease and status request outcomes retain only the newest bounded
-  internal suffix, preventing snapshots from growing with every renewal while
-  leaving public operation outcomes durable.
-- Catalog application checkpoints no longer duplicate periodic lease/status
-  command payloads and full status receipts in the consensus retry suffix;
-  retained token outcomes reconstruct the replayed mutation after recovery,
-  and the restored compact suffix remains valid for later checkpoints.
+- Controller-generated lease, status, reconciliation, and membership request
+  outcomes retain only the newest bounded internal suffix, preventing rejected
+  periodic attempts from growing snapshots while public outcomes stay durable.
+- Catalog application checkpoints no longer duplicate controller-generated
+  command payloads and receipts in the consensus retry suffix; retained token
+  outcomes reconstruct replayed mutations after recovery, and a restored
+  compact suffix remains valid for later checkpoints.
+- Managed membership attempts bind their complete lease and capacity evidence,
+  allowing a later healthy capacity sample to recover from a committed
+  rejection while preserving exact ambiguous-attempt replay.
+- Lease-fenced mutations normalize a lagging API replica's sampled time to the
+  replicated Catalog clock, and change history expires by the remaining full
+  snapshot byte budget as well as its 4,096-entry ceiling.
 - A legacy one-replica control StatefulSet updates and verifies ordinal zero
   before scaling to three replicas; one atomic import accepts up to 4,096
   generation records within the existing command and snapshot byte limits.

@@ -651,6 +651,19 @@ impl CatalogCommand {
         }
     }
 
+    /// Returns whether this command is controller-generated retry traffic.
+    /// These commands carry volatile lease/capacity observations and retain a
+    /// bounded outcome suffix instead of permanent public operation history.
+    pub const fn is_transient_control(&self) -> bool {
+        matches!(
+            self,
+            Self::AcquireControlLease(_)
+                | Self::UpdateManagedStatus(_)
+                | Self::ReconcileManaged(_)
+                | Self::PlanManagedMembership(_)
+        )
+    }
+
     fn resource_names(&self) -> Vec<ResourceName> {
         let mut names = match self {
             Self::Apply(request) => vec![request.name.clone()],
@@ -1024,6 +1037,16 @@ impl Catalog {
             return Ok(completed.mutation.as_replayed());
         }
 
+        // Apply against a candidate so the snapshot byte admission below is
+        // atomic. A command that would leave the Catalog uncheckpointable must
+        // not partially mutate live replicated state.
+        let mut candidate = self.clone();
+        let mutation = candidate.apply_new(command)?;
+        *self = candidate;
+        Ok(mutation)
+    }
+
+    fn apply_new(&mut self, command: CatalogCommand) -> CatalogResult<CatalogMutation> {
         let mutation = match &command {
             CatalogCommand::Apply(request) => self.apply_resource(request)?,
             CatalogCommand::Delete(request) => self.delete_resource(request)?,
@@ -1067,6 +1090,7 @@ impl Catalog {
             },
         );
         self.prune_transient_control_requests();
+        self.prune_change_history_to_snapshot_limit()?;
         Ok(mutation)
     }
 
@@ -1078,6 +1102,8 @@ impl Catalog {
                 let clock = match &completed.command {
                     CatalogCommand::AcquireControlLease(request) => request.now_ms,
                     CatalogCommand::UpdateManagedStatus(request) => request.lease.now_ms,
+                    CatalogCommand::ReconcileManaged(request) => request.lease.now_ms,
+                    CatalogCommand::PlanManagedMembership(request) => request.lease.now_ms,
                     _ => return None,
                 };
                 Some((clock, token.clone()))
@@ -1091,6 +1117,45 @@ impl Catalog {
         for (_, token) in transient.into_iter().take(remove) {
             self.completed_requests.remove(&token);
         }
+    }
+
+    fn prune_change_history_to_snapshot_limit(&mut self) -> CatalogResult<()> {
+        if self.snapshot_upper_bound_len(&self.changes)? <= MAX_CATALOG_SNAPSHOT_BYTES {
+            return Ok(());
+        }
+        if self.snapshot_upper_bound_len(&[])? > MAX_CATALOG_SNAPSHOT_BYTES {
+            return Err(CatalogError::SnapshotTooLarge);
+        }
+
+        // Find the smallest expired prefix that restores the byte invariant.
+        // The all-255 digest is the largest possible JSON representation of a
+        // SHA-256 byte array, so this admission remains conservative without
+        // depending on the digest value produced by a particular history.
+        let mut lower = 1;
+        let mut upper = self.changes.len();
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2;
+            if self.snapshot_upper_bound_len(&self.changes[middle..])? <= MAX_CATALOG_SNAPSHOT_BYTES
+            {
+                upper = middle;
+            } else {
+                lower = middle + 1;
+            }
+        }
+        self.changes.drain(..lower);
+        Ok(())
+    }
+
+    fn snapshot_upper_bound_len(&self, changes: &[CatalogChange]) -> CatalogResult<usize> {
+        let mut snapshot = self.snapshot();
+        snapshot.changes = changes.to_vec();
+        serde_json::to_vec(&VersionedCatalogSnapshot {
+            format_version: self.snapshot_format_version(),
+            state_digest: [u8::MAX; 32],
+            snapshot,
+        })
+        .map(|encoded| encoded.len())
+        .map_err(|error| CatalogError::Encoding(error.to_string()))
     }
 
     pub fn resource(&self, name: &ResourceName) -> CatalogResult<&ResourceRecord> {
@@ -1540,7 +1605,7 @@ impl Catalog {
         &mut self,
         request: &DeleteManagedResource,
     ) -> CatalogResult<CatalogMutation> {
-        self.validate_control_guard(&request.lease)?;
+        let effective_now_ms = self.validate_control_guard(&request.lease)?;
         request.name.validate()?;
         let desired = self.managed_resource(&request.name)?.clone();
         validate_expected_generation(
@@ -1572,7 +1637,7 @@ impl Catalog {
         candidate
             .managed_last_generations
             .insert(request.name.clone(), desired_generation);
-        candidate.control_clock_ms = request.lease.now_ms;
+        candidate.control_clock_ms = effective_now_ms;
         *self = candidate;
         Ok(CatalogMutation::ManagedDeleted {
             name: request.name.clone(),
@@ -1680,7 +1745,7 @@ impl Catalog {
         &mut self,
         request: &UpdateManagedResourceStatus,
     ) -> CatalogResult<CatalogMutation> {
-        self.validate_control_guard(&request.lease)?;
+        let effective_now_ms = self.validate_control_guard(&request.lease)?;
         request.name.validate()?;
         validate_managed_document("managed resource status", &request.status)?;
         let current = self
@@ -1701,7 +1766,7 @@ impl Catalog {
             self.managed_resources
                 .insert(request.name.clone(), resource.clone());
         }
-        self.control_clock_ms = request.lease.now_ms;
+        self.control_clock_ms = effective_now_ms;
         Ok(CatalogMutation::ManagedStatusUpdated {
             resource,
             changed,
@@ -1713,7 +1778,7 @@ impl Catalog {
         &mut self,
         request: &ReconcileManagedResources,
     ) -> CatalogResult<CatalogMutation> {
-        self.validate_control_guard(&request.lease)?;
+        let effective_now_ms = self.validate_control_guard(&request.lease)?;
         validate_managed_batch_len(request.resources.len())?;
         validate_strictly_sorted_placements(&request.resources)?;
         let current_allocations = catalog_group_allocations(&self.resources)?;
@@ -1754,7 +1819,7 @@ impl Catalog {
         }
         let next_allocations = catalog_group_allocations(&candidate.resources)?;
         validate_reserved_capacity(&request.capacity, &next_allocations)?;
-        candidate.control_clock_ms = request.lease.now_ms;
+        candidate.control_clock_ms = effective_now_ms;
         *self = candidate;
         Ok(CatalogMutation::ManagedReconciled {
             resources: results,
@@ -1767,7 +1832,7 @@ impl Catalog {
         &mut self,
         request: &PlanManagedTabletMembership,
     ) -> CatalogResult<CatalogMutation> {
-        self.validate_control_guard(&request.lease)?;
+        let effective_now_ms = self.validate_control_guard(&request.lease)?;
         request.name.validate()?;
         let desired = self.managed_resource(&request.name)?;
         validate_expected_generation(
@@ -1801,12 +1866,12 @@ impl Catalog {
         })?;
         let next_allocations = catalog_group_allocations(&candidate.resources)?;
         validate_reserved_capacity(&request.capacity, &next_allocations)?;
-        candidate.control_clock_ms = request.lease.now_ms;
+        candidate.control_clock_ms = effective_now_ms;
         *self = candidate;
         Ok(mutation)
     }
 
-    fn validate_control_guard(&self, guard: &ControlLeaseGuard) -> CatalogResult<()> {
+    fn validate_control_guard(&self, guard: &ControlLeaseGuard) -> CatalogResult<u64> {
         validate_control_owner(&guard.owner_id)?;
         let Some(active) = self.control_lease.as_ref() else {
             return Err(CatalogError::ControlLeaseFenced {
@@ -1820,17 +1885,18 @@ impl Catalog {
                 expected_fence: active.fence,
             });
         }
-        if guard.now_ms < self.control_clock_ms {
-            return Err(CatalogError::InvalidSpec(
-                "control mutation time must be monotonic".into(),
-            ));
-        }
-        if guard.now_ms >= active.valid_until_ms {
+        // A standby samples wall time before its linearizable lease read. The
+        // active owner may advance the replicated clock before the standby's
+        // command commits, so normalize to the authority clock instead of
+        // durably rejecting an otherwise valid fenced mutation. The supplied
+        // wall time still advances expiration when it is newer.
+        let effective_now_ms = guard.now_ms.max(self.control_clock_ms);
+        if effective_now_ms >= active.valid_until_ms {
             return Err(CatalogError::ControlLeaseExpired {
                 valid_until_ms: active.valid_until_ms,
             });
         }
-        Ok(())
+        Ok(effective_now_ms)
     }
 
     fn record_changes(&mut self, mutation: &CatalogMutation) -> CatalogResult<(u64, u64)> {
@@ -3179,4 +3245,92 @@ fn next_generation(current: u64) -> CatalogResult<u64> {
     current
         .checked_add(1)
         .ok_or(CatalogError::IdentityExhausted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn change_history_is_pruned_against_the_complete_snapshot_byte_budget() {
+        let component = "x".repeat(MAX_NAME_COMPONENT_BYTES);
+        let name = ResourceName::new(
+            component.clone(),
+            component.clone(),
+            component.clone(),
+            component.clone(),
+            ResourceKind::Stream,
+            component,
+        )
+        .unwrap();
+        let document = json!({"padding": "x".repeat(60 * 1024)});
+        let resource = ManagedResourceRecord {
+            name: name.clone(),
+            generation: MAX_CHANGE_HISTORY as u64,
+            desired: document.clone(),
+            status: document.clone(),
+            deletion_requested: false,
+        };
+        let mut catalog = Catalog::new();
+        catalog
+            .managed_resources
+            .insert(name.clone(), resource.clone());
+        catalog
+            .managed_last_generations
+            .insert(name.clone(), resource.generation);
+        catalog.control_lease = Some(ControlLease {
+            owner_id: "control-a".into(),
+            fence: 1,
+            valid_until_ms: 20_000,
+        });
+        catalog.next_control_fence = 2;
+        catalog.control_clock_ms = 1_008;
+        catalog.next_change_cursor = MAX_CHANGE_HISTORY as u64 + 1;
+        catalog.changes = (1..=MAX_CHANGE_HISTORY as u64)
+            .map(|cursor| CatalogChange {
+                cursor,
+                kind: CatalogChangeKind::StatusUpdated,
+                name: name.clone(),
+                generation: resource.generation,
+            })
+            .collect();
+        for index in 0..MAX_TRANSIENT_CONTROL_REQUESTS {
+            let token = format!("status-{index}");
+            catalog.completed_requests.insert(
+                token.clone(),
+                CompletedRequest {
+                    command: CatalogCommand::UpdateManagedStatus(UpdateManagedResourceStatus {
+                        request_token: token,
+                        lease: ControlLeaseGuard {
+                            owner_id: "control-a".into(),
+                            fence: 1,
+                            now_ms: 1_001 + index as u64,
+                        },
+                        name: name.clone(),
+                        expected_generation: resource.generation,
+                        status: document.clone(),
+                    }),
+                    mutation: CatalogMutation::ManagedStatusUpdated {
+                        resource: resource.clone(),
+                        changed: true,
+                        replayed: false,
+                    },
+                    first_change_cursor: 0,
+                    last_change_cursor: 0,
+                },
+            );
+        }
+
+        assert!(
+            catalog.snapshot_upper_bound_len(&catalog.changes).unwrap()
+                > MAX_CATALOG_SNAPSHOT_BYTES
+        );
+        catalog.prune_change_history_to_snapshot_limit().unwrap();
+        assert!(catalog.changes.len() < MAX_CHANGE_HISTORY);
+        assert!(catalog.changes.first().unwrap().cursor > 1);
+        let encoded = catalog.encode_snapshot().unwrap();
+        assert!(encoded.len() <= MAX_CATALOG_SNAPSHOT_BYTES);
+        assert_eq!(Catalog::decode_snapshot(&encoded).unwrap(), catalog);
+    }
 }

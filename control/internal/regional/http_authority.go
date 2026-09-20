@@ -578,23 +578,11 @@ func (authority *HTTPAuthority) PlanManagedMembership(
 	ctx context.Context,
 	request AuthorityManagedMembershipPlanRequest,
 ) (AuthorityObservation, error) {
-	requestToken := managedMembershipToken(request.RequestToken, request.Lease.Fence)
-	if replayed, replayErr := authority.replayManagedOperation(
-		ctx,
-		requestToken,
-		request.Key,
-		"applied",
-	); replayErr != nil {
-		return AuthorityObservation{}, replayErr
-	} else if replayed {
-		return authority.Observe(ctx, request.Key)
-	}
 	capacity, err := authority.managedCapacityObservation(ctx)
 	if err != nil {
 		return AuthorityObservation{}, err
 	}
 	body := managedMembershipAuthorityBody{
-		RequestToken: requestToken,
 		Lease: managedLeaseAuthorityBody{
 			OwnerID: request.Lease.OwnerID,
 			Fence:   strconv.FormatUint(request.Lease.Fence, 10),
@@ -607,6 +595,17 @@ func (authority *HTTPAuthority) PlanManagedMembership(
 		ExpectedResourceGeneration: strconv.FormatUint(request.ExpectedResourceGeneration, 10),
 		TargetVoterNodeIDs:         append([]uint64(nil), request.TargetVoterNodeIDs...),
 	}
+	body.RequestToken = managedMembershipAttemptToken(request.RequestToken, body)
+	if replayed, replayErr := authority.replayManagedOperation(
+		ctx,
+		body.RequestToken,
+		request.Key,
+		"applied",
+	); replayErr != nil {
+		return AuthorityObservation{}, replayErr
+	} else if replayed {
+		return authority.Observe(ctx, request.Key)
+	}
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		return AuthorityObservation{}, invalidAuthorityError(err.Error())
@@ -616,7 +615,7 @@ func (authority *HTTPAuthority) PlanManagedMembership(
 	if err != nil {
 		if replayed, replayErr := authority.replayManagedOperation(
 			ctx,
-			requestToken,
+			body.RequestToken,
 			request.Key,
 			"applied",
 		); replayErr != nil {
@@ -717,9 +716,14 @@ func managedApplyAttemptToken(base string, body managedReconcileAuthorityBody) s
 	return "epoch-control.reconcile.v2." + hex.EncodeToString(digest[:])
 }
 
-func managedMembershipToken(base string, fence uint64) string {
-	digest := sha256.Sum256([]byte(base + "\x00" + strconv.FormatUint(fence, 10)))
-	return "epoch-control.membership.v1." + hex.EncodeToString(digest[:])
+func managedMembershipAttemptToken(base string, body managedMembershipAuthorityBody) string {
+	body.RequestToken = ""
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		panic("validated managed membership plan must encode")
+	}
+	digest := sha256.Sum256(append(append([]byte(base), 0), encoded...))
+	return "epoch-control.membership.v2." + hex.EncodeToString(digest[:])
 }
 
 // replayManagedOperation resolves a previously submitted semantic mutation

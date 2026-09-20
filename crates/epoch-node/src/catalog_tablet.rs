@@ -403,10 +403,7 @@ impl CommittedProposalApplier for CatalogTabletService {
             let proposal_id = committed.receipt.proposal_id.get();
             let decoded =
                 CatalogCommand::decode(&committed.payload).map_err(|error| error.to_string())?;
-            let is_periodic_control = matches!(
-                decoded,
-                CatalogCommand::AcquireControlLease(_) | CatalogCommand::UpdateManagedStatus(_)
-            );
+            let is_periodic_control = decoded.is_transient_control();
             let Some(command) = state.applied.get(&proposal_id) else {
                 // Installing a compact checkpoint intentionally omits periodic
                 // receipts. Consensus can retain those proposals through the
@@ -429,13 +426,13 @@ impl CommittedProposalApplier for CatalogTabletService {
                     "catalog retry proposal {proposal_id} disagrees with consensus"
                 ));
             }
-            // Lease renewals and status observations are internal periodic
-            // traffic. Their bounded outcomes already live in the Catalog
-            // image, and a surviving control replica retries them with a new
-            // logical clock after node recovery. Duplicating their large
-            // status documents in the application retry suffix can otherwise
-            // expand a valid 1 MiB consensus suffix past the 4 MiB native
-            // snapshot envelope.
+            // Lease renewals, status observations, reconciliation attempts,
+            // and membership plans are internal controller traffic. Their
+            // bounded outcomes already live in the Catalog image, and a
+            // surviving controller retries them with fresh lease/capacity
+            // evidence after node recovery. Duplicating their command bodies
+            // in the application retry suffix can otherwise expand a valid
+            // consensus suffix past the native snapshot envelope.
             if is_periodic_control {
                 continue;
             }
@@ -632,8 +629,8 @@ fn apply_committed(
 mod tests {
     use epoch_catalog::{
         AcquireControlLease, ApplyDesiredResources, ApplyResource, CatalogCommand, CatalogMutation,
-        ControlLeaseGuard, DesiredResourceWrite, ResourceName, ResourceSpec,
-        UpdateManagedResourceStatus,
+        ControlLeaseGuard, DesiredResourceWrite, ReconcileManagedResources, ResourceName,
+        ResourceSpec, UpdateManagedResourceStatus,
     };
     use epoch_consensus::{
         CommitReceipt, GroupEpoch, GroupId, LogIndex, MAX_APPLICATION_SNAPSHOT_BYTES, ProposalId,
@@ -877,6 +874,42 @@ mod tests {
             .apply(&committed(116, 2, 17, &next_status))
             .unwrap();
         assert_eq!(managed_status_sequence(&restored), 14);
+    }
+
+    #[test]
+    fn native_snapshot_compacts_reconciliation_retry_receipts() {
+        let service = CatalogTabletService::new(CatalogTabletScope::new(9, 4).unwrap());
+        let lease = CatalogCommand::AcquireControlLease(AcquireControlLease {
+            request_token: "lease-a".into(),
+            owner_id: "control-a".into(),
+            now_ms: 1_000,
+            ttl_ms: 10_000,
+        });
+        service.apply(&committed(100, 2, 1, &lease)).unwrap();
+        let reconcile = CatalogCommand::ReconcileManaged(ReconcileManagedResources {
+            request_token: "reconcile-a".into(),
+            lease: ControlLeaseGuard {
+                owner_id: "control-a".into(),
+                fence: 1,
+                now_ms: 1_001,
+            },
+            capacity: Vec::new(),
+            resources: Vec::new(),
+        });
+        let retained = committed(101, 2, 2, &reconcile);
+        service.apply(&retained).unwrap();
+
+        let image = service
+            .capture_snapshot(LogIndex::new(2), std::slice::from_ref(&retained))
+            .unwrap();
+        let restored = CatalogTabletService::new(CatalogTabletScope::new(9, 4).unwrap());
+        restored.install_snapshot(&image).unwrap();
+        assert!(restored.receipt(101).unwrap().is_none());
+        let replayed = restored.durable_replay_receipt(&retained).unwrap().unwrap();
+        assert!(matches!(
+            replayed.mutation,
+            CatalogMutation::Rejected { replayed: true, .. }
+        ));
     }
 
     #[test]

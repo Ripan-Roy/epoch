@@ -68,12 +68,15 @@ into Go.
    StatefulSet updates and verifies ordinal zero before scaling to three.
 9. Page internal resource inventory with a canonical key cursor, at most 128
    resources and 768 KiB per page, and one stable high-water cursor across the
-   scan. Bound recurring lease/status request outcomes to the newest internal
-   suffix while keeping public operation outcomes durable. Do not duplicate
-   periodic command payloads and full receipts in the native checkpoint retry
+   scan. Bound recurring lease, status, reconciliation, and membership request
+   outcomes to the newest internal suffix while keeping public operation
+   outcomes durable. Bind reconciliation and membership attempt tokens to the
+   complete volatile lease/capacity evidence. Do not duplicate internal
+   controller command payloads and receipts in the native checkpoint retry
    suffix; a retained token outcome reconstructs the replayed mutation. A
-   subsequent checkpoint accepts an omitted periodic receipt only when the
-   installed image already covers its commit index.
+   subsequent checkpoint accepts an omitted internal receipt only when the
+   installed image already covers its commit index. Bound watch history by both
+   4,096 entries and the remaining complete encoded snapshot byte budget.
 
 ## Consequences
 

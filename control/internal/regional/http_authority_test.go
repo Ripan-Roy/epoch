@@ -338,7 +338,6 @@ func TestHTTPAuthorityReplaysCompletedManagedMembershipBeforeResubmitting(t *tes
 		t.Fatalf("first PlanManagedMembership() error = %v", err)
 	}
 	second := first
-	second.Lease.NowMS = 200
 	observation, err := authority.PlanManagedMembership(t.Context(), second)
 	if err != nil {
 		t.Fatalf("replayed PlanManagedMembership() error = %v", err)
@@ -349,6 +348,102 @@ func TestHTTPAuthorityReplaysCompletedManagedMembershipBeforeResubmitting(t *tes
 	if len(observation.Tablets) != 2 ||
 		!slices.Equal(observation.Tablets[0].TargetVoterNodeIDs, []uint64{2, 3, 4}) {
 		t.Fatalf("replayed observation = %+v", observation)
+	}
+}
+
+func TestHTTPAuthorityRetriesManagedMembershipWithFreshCapacityEvidence(t *testing.T) {
+	key := regionalKey(resources.KindStream, "orders")
+	var (
+		posts      int
+		firstToken string
+		tokens     []string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, controlOperationsPath+"/"):
+			token := strings.TrimPrefix(request.URL.Path, controlOperationsPath+"/")
+			if posts > 0 && token == firstToken {
+				writeAuthorityJSON(writer, http.StatusOK, map[string]any{
+					"request_token": token,
+					"state":         "failed",
+					"resource_names": []any{
+						controlName(key),
+					},
+					"mutation": map[string]any{
+						"kind": "rejected", "code": "capacity_exceeded", "message": "capacity exhausted",
+					},
+				})
+				return
+			}
+			writeAuthorityJSON(writer, http.StatusNotFound, map[string]any{
+				"code": "catalog_not_found", "message": "operation was not found",
+			})
+		case request.Method == http.MethodGet && request.URL.Path == regionalTopologyPath:
+			used := 16
+			if posts > 0 {
+				used = 1
+			}
+			writeAuthorityJSON(writer, http.StatusOK, map[string]any{
+				"node_id": "1", "region": "local", "zone": "local-a", "rack": "rack-a",
+				"node_class": "general-purpose", "consensus_voter_node_ids": []string{"1"},
+				"capacity": map[string]any{
+					"max_consensus_groups": 16, "used_consensus_groups": used,
+					"available_consensus_groups": 16 - used,
+				},
+			})
+		case request.Method == http.MethodGet && request.URL.Path == regionalControlAllocationsPath:
+			writeAuthorityJSON(writer, http.StatusOK, map[string]any{
+				"allocations": []any{map[string]any{"node_id": "1", "catalog_groups": 1}},
+			})
+		case request.Method == http.MethodPost &&
+			request.URL.Path == regionalControlMembershipPath+"10/membership":
+			var body managedMembershipAuthorityBody
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Errorf("decode managed membership: %v", err)
+			}
+			posts++
+			tokens = append(tokens, body.RequestToken)
+			if posts == 1 {
+				firstToken = body.RequestToken
+				writeAuthorityJSON(writer, http.StatusConflict, map[string]any{
+					"code": "capacity_exceeded", "message": "capacity exhausted",
+				})
+				return
+			}
+			document := appliedDocument(7, 3)
+			writeAuthorityJSON(writer, http.StatusAccepted, document)
+		case request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/shards/"):
+			writeAuthorityJSON(writer, http.StatusOK, routeResponseDocument(1, 1, 7, request.URL.Path))
+		default:
+			t.Errorf("unexpected request: %s %s", request.Method, request.URL.Path)
+			http.Error(writer, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+	authority, err := NewHTTPAuthority([]string{server.URL}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := AuthorityManagedMembershipPlanRequest{
+		AuthorityMembershipPlanRequest: AuthorityMembershipPlanRequest{
+			RequestToken:               "repair-orders-generation-2",
+			Key:                        key,
+			TabletID:                   10,
+			ExpectedTabletEpoch:        1,
+			ExpectedResourceGeneration: 7,
+			TargetVoterNodeIDs:         []uint64{1, 2, 3},
+		},
+		DesiredGeneration: 2,
+		Lease:             AuthorityControlLease{OwnerID: "epoch-control-0", Fence: 4, NowMS: 100},
+	}
+	if _, err := authority.PlanManagedMembership(t.Context(), request); err == nil {
+		t.Fatal("first capacity-exhausted membership plan unexpectedly succeeded")
+	}
+	if _, err := authority.PlanManagedMembership(t.Context(), request); err != nil {
+		t.Fatalf("recovered PlanManagedMembership() error = %v", err)
+	}
+	if posts != 2 || len(tokens) != 2 || tokens[0] == tokens[1] {
+		t.Fatalf("managed membership attempts = %d, tokens = %v", posts, tokens)
 	}
 }
 

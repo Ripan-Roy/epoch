@@ -4,7 +4,7 @@
 
 **Tagline:** One runtime. Every real-time workload.  
 **Document version:** 0.3  
-**Date:** 18 September 2026
+**Date:** 20 September 2026
 **Status:** Implementation-backed private beta candidate; later managed-service milestones remain open
 **Audience:** Founders, product, distributed-systems engineering, infrastructure, security, and design
 
@@ -22,7 +22,10 @@ generations within the existing 512 KiB command and 4 MiB snapshot bounds,
 while retaining the old database as rollback evidence. Legacy one-replica
 deployments update and verify ordinal zero before scaling to three. Internal
 inventory reads use bounded keyset pages, capacity retries bind their complete
-evidence, and public delete tokens remain discoverable after replay. Protected
+evidence, controller-generated outcomes retain a bounded suffix, standby lease
+guards normalize to the replicated clock, and the 4,096-entry change log also
+prunes against the complete snapshot byte budget. Public delete tokens remain
+discoverable after replay. Protected
 multi-control chaos, Catalog capacity/sharding, legacy token migration, and a
 public token-retention window remain open. See
 [ADR-0050](adr/0050-replicated-control-metadata-and-ha.md).

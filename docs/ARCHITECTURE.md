@@ -1043,16 +1043,22 @@ the mutation in Catalog. Initial placement validates the complete current
 capacity observation and commits every resource reservation atomically with
 native Catalog materialization. Changed capacity evidence receives a distinct
 attempt identity, while exact ambiguous retries retain the same identity and an
-already materialized native result is recognized before resubmission. Desired-
+already materialized native result is recognized before resubmission. Managed
+membership uses the same complete-evidence identity rule. Catalog normalizes a
+lease guard to its replicated control clock when a standby's wall-clock sample
+precedes a concurrent owner commit, while still rejecting an expired lease or
+changed fence. Desired-
 state batches commit 1–128 resources atomically, while operation lookup retains
 affected identities for tenant authorization and change watches expose an
 explicit scanned resume cursor. Internal inventory uses bounded keyset pages
-with one stable Catalog high-water cursor across the complete scan. Periodic
-lease/status outcomes retain a small deterministic suffix in Catalog, while
-native checkpoints omit their duplicated command/receipt copies and rebuild a
-replay response from that token outcome after recovery. Re-checkpointing treats
-an omitted periodic receipt as valid only below the installed applied-index
-boundary; other missing retained receipts remain fail-stop errors.
+with one stable Catalog high-water cursor across the complete scan. Controller
+lease, status, reconciliation, and membership outcomes retain a small
+deterministic suffix in Catalog, while native checkpoints omit their duplicated
+command/receipt copies and rebuild replay responses from retained outcomes.
+Re-checkpointing treats an omitted internal receipt as valid only below the
+installed applied-index boundary; other missing retained receipts remain
+fail-stop errors. The resumable change log is capped at 4,096 entries and also
+prunes its oldest prefix against the complete 4 MiB encoded snapshot budget.
 
 The Kubernetes operator runs three stable, anti-affined control replicas with
 ordered startup and a two-instance disruption budget. During a legacy

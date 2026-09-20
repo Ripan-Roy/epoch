@@ -391,6 +391,30 @@ fn periodic_control_lease_outcomes_have_bounded_retention() {
 }
 
 #[test]
+fn recurring_reconciliation_outcomes_have_bounded_retention() {
+    let mut catalog = Catalog::new();
+    catalog.apply(lease("lease-a", "control-a", 1_000)).unwrap();
+    for index in 0..32_u64 {
+        let mutation = catalog
+            .apply(CatalogCommand::ReconcileManaged(
+                ReconcileManagedResources {
+                    request_token: format!("reconcile-control-a-{index:02}"),
+                    lease: guard("control-a", 1, 1_001 + index),
+                    capacity: Vec::new(),
+                    resources: Vec::new(),
+                },
+            ))
+            .unwrap();
+        assert!(matches!(mutation, CatalogMutation::Rejected { .. }));
+    }
+    assert!(catalog.operation("reconcile-control-a-00").is_none());
+    assert!(catalog.operation("reconcile-control-a-31").is_some());
+    let restored = Catalog::decode_snapshot(&catalog.encode_snapshot().unwrap()).unwrap();
+    assert!(restored.operation("reconcile-control-a-00").is_none());
+    assert!(restored.operation("reconcile-control-a-31").is_some());
+}
+
+#[test]
 fn reconciliation_reserves_batch_capacity_atomically_across_controllers() {
     let mut catalog = Catalog::new();
     catalog
@@ -737,4 +761,47 @@ fn managed_delete_removes_desired_and_native_state_under_one_lease_fence() {
         restored.state_digest().unwrap(),
         catalog.state_digest().unwrap()
     );
+}
+
+#[test]
+fn managed_delete_normalizes_a_standby_clock_to_the_replicated_clock() {
+    let mut catalog = Catalog::new();
+    catalog
+        .apply(apply_desired(
+            "desired-orders",
+            vec![desired("orders", Some(0))],
+        ))
+        .unwrap();
+    catalog.apply(lease("lease-a", "control-a", 1_000)).unwrap();
+    catalog
+        .apply(CatalogCommand::UpdateManagedStatus(
+            UpdateManagedResourceStatus {
+                request_token: "status-ahead-of-standby".into(),
+                lease: guard("control-a", 1, 1_005),
+                name: name("orders"),
+                expected_generation: 1,
+                status: json!({"phase": "ready"}),
+            },
+        ))
+        .unwrap();
+
+    let mutation = catalog
+        .apply(CatalogCommand::DeleteManaged(DeleteManagedResource {
+            request_token: "delete-from-lagging-standby".into(),
+            lease: guard("control-a", 1, 1_001),
+            name: name("orders"),
+            expected_desired_generation: 1,
+            expected_catalog_generation: 0,
+        }))
+        .unwrap();
+    assert!(matches!(
+        mutation,
+        CatalogMutation::ManagedDeleted {
+            desired_generation: 2,
+            deleted: true,
+            ..
+        }
+    ));
+    assert!(catalog.managed_resource(&name("orders")).is_err());
+    Catalog::decode_snapshot(&catalog.encode_snapshot().unwrap()).unwrap();
 }

@@ -339,14 +339,20 @@ the three-replica control topology.
 Catalog consensus transactionally persists desired resources, observed status,
 generation tombstones, original request-token outcomes, and watch cursors
 before acknowledgement. A replicated TTL/fence lease serializes native
-reconciliation across multiple Go instances. Periodic lease and status
-outcomes retain only a small internal suffix; public operation outcomes remain
-durable until a separately specified retention policy is introduced. Native
-Catalog checkpoints omit duplicated periodic lease/status receipts from the
-consensus retry suffix and reconstruct a replay response from the retained
-token outcome, keeping valid retry traffic inside the 4 MiB application-image
-bound. A later checkpoint may accept a missing periodic receipt only when the
-installed application image already covers that proposal commit index.
+reconciliation across multiple Go instances. Controller-generated lease,
+status, reconciliation, and membership outcomes retain only a small internal
+suffix; public operation outcomes remain durable until a separately
+specified retention policy is introduced. Membership attempt identity binds
+the complete lease and capacity observation, so changed capacity can retry a
+recoverable rejection. Lease-fenced mutations use the greater of the supplied
+time and replicated control clock, preventing a standby read/commit race from
+binding a valid public request to a non-monotonic rejection. Native Catalog
+checkpoints omit duplicated internal-controller receipts from the consensus
+retry suffix and reconstruct replay responses from retained token outcomes. A
+later checkpoint may accept a missing internal receipt only when the installed
+application image already covers that proposal commit index. The watch history
+retains at most 4,096 changes and expires its oldest prefix sooner whenever the
+complete encoded Catalog image would otherwise exceed 4 MiB.
 
 ## 6. Hosted management API
 

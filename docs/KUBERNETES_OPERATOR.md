@@ -27,9 +27,10 @@ scheduled application-layer encrypted semantic backups.
 - The control StatefulSet runs three ordered replicas with required hostname
   anti-affinity and a `minAvailable: 2` disruption budget. The pod name is its
   stable lease identity; one replicated TTL/fence lease owns reconciliation.
-- The automatic one-time bbolt import is bounded to 128 live-or-tombstoned
-  generation records. Larger legacy registries fail closed and require an
-  explicit migration before upgrading this candidate.
+- The automatic one-time bbolt import is bounded to 4,096 live-or-tombstoned
+  generation records and remains subject to the 512 KiB command and 4 MiB
+  Catalog snapshot limits. Inputs beyond either bound fail closed and require
+  an explicit migration before upgrading this candidate.
 - Two operator replicas use Kubernetes Lease leader election. Reconciliation
   is idempotent, treats API-server defaults as no-ops, and repairs drift in
   operator-owned objects.
