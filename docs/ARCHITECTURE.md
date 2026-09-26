@@ -1053,21 +1053,23 @@ affected identities for tenant authorization and change watches expose an
 explicit scanned resume cursor. Internal inventory uses bounded keyset pages
 with one stable Catalog high-water cursor across the complete scan. Controller
 lease, status, reconciliation, and membership outcomes retain a small
-deterministic suffix in Catalog, while native checkpoints omit their duplicated
-command/receipt copies and rebuild replay responses from retained outcomes.
-Re-checkpointing treats an omitted internal receipt as valid only below the
-installed applied-index boundary; other missing retained receipts remain
-fail-stop errors. The resumable change log is capped at 4,096 entries and also
-prunes its oldest prefix against the complete 4 MiB encoded snapshot budget.
-When no history remains to expire, further growth commits a typed capacity
-rejection without mutating the Catalog or fail-stopping its replicas.
+deterministic suffix in Catalog. Native application checkpoint v2 stores raw
+Catalog bytes under the 4 MiB consensus envelope, reserves 64 bytes for its
+fixed binary header, omits all duplicated retry receipts, and still reads v1
+JSON/base64 images. Durable public outcomes rebuild replay responses; recurring
+internal outcomes retain their bounded policy. Re-checkpointing treats an
+omitted internal receipt as valid only below the installed applied-index
+boundary. The resumable change log is capped at 4,096 entries and also prunes
+its oldest prefix against the complete admitted snapshot budget. When no
+history remains to expire, further growth persists a token-bound capacity
+rejection without mutating business state or fail-stopping replicas.
 
 The Kubernetes operator runs three stable, anti-affined control replicas with
 ordered startup and a two-instance disruption budget. During a legacy
 one-replica upgrade it first updates and verifies ordinal zero, then scales the
 same StatefulSet to three. A one-time pod-zero migration imports up to 4,096
 previous bbolt generation/tombstone high-water records in one command, subject
-to the 512 KiB command and 4 MiB snapshot limits; the old database is retained
+to the 512 KiB command and 4 MiB native-checkpoint envelope; the old database is retained
 as rollback evidence. Legacy token history is not reconstructible and is not
 silently claimed. See
 [ADR-0050](adr/0050-replicated-control-metadata-and-ha.md).

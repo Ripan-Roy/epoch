@@ -313,7 +313,10 @@ Each streamed response includes `earliest_cursor`, the current
 `latest_cursor`, and the inclusive scanned `next_cursor`. Clients resume with
 `after_cursor = next_cursor`; they must not jump directly to `latest_cursor`
 when another bounded page may exist. A compacted or future cursor fails
-explicitly instead of silently skipping state.
+explicitly instead of silently skipping state. Cursor `0` means “from the
+beginning” only while `earliest_cursor == 1`; once compaction advances the
+retention floor, cursor `0` is stale and the caller must resynchronize from a
+linearizable inventory snapshot.
 
 For Cache resources, `ResourceSpec.configuration` is a strict object containing
 an optional matching `shard_count`, per-shard `max_entries`, optional
@@ -331,8 +334,8 @@ backup, repair, or purge surface. Operation lookup and change streaming cover
 the committed desired/status lifecycle; they do not yet advertise a bounded
 request-token retention window or replace a general long-running workflow API.
 The one-time legacy import is one atomic command and currently accepts at most
-4,096 generation records, subject to the existing 512 KiB command and 4 MiB
-Catalog snapshot limits; a larger former registry fails startup and requires
+4,096 generation records, subject to the 512 KiB command and 4 MiB native
+application-checkpoint envelope; a larger former registry fails startup and requires
 an explicit migration tool before upgrade. A legacy one-replica StatefulSet
 must update and become ready at ordinal zero before the operator scales it to
 the three-replica control topology.
@@ -347,15 +350,20 @@ the complete lease and capacity observation, so changed capacity can retry a
 recoverable rejection. Lease-fenced mutations use the greater of the supplied
 time and replicated control clock, preventing a standby read/commit race from
 binding a valid public request to a non-monotonic rejection. Native Catalog
-checkpoints omit duplicated internal-controller receipts from the consensus
-retry suffix and reconstruct replay responses from retained token outcomes. A
-later checkpoint may accept a missing internal receipt only when the installed
-application image already covers that proposal commit index. The watch history
+checkpoint v2 stores raw Catalog bytes, omits duplicated retry receipts, and
+reconstructs public replay responses from retained token outcomes. It reserves
+64 bytes inside the 4 MiB application envelope for its fixed binary header and
+keeps legacy v1 images readable. A later checkpoint may accept a missing
+internal receipt only when the installed application image already covers that
+proposal commit index. The watch history
 retains at most 4,096 changes and expires its oldest prefix sooner whenever the
-complete encoded Catalog image would otherwise exceed 4 MiB.
+complete encoded Catalog image would otherwise exceed the admitted checkpoint
+budget.
 If expiring the complete change-history prefix still cannot admit a command,
-the committed result is a `capacity_exceeded` rejection against unchanged
-state; snapshot admission never becomes a post-consensus applier failure.
+the committed result is a durably token-bound `capacity_exceeded` rejection
+against unchanged business state. Exact retries replay it and a different
+command cannot rebind the token even after later deletion frees capacity;
+snapshot admission never becomes a post-consensus applier failure.
 
 ## 6. Hosted management API
 

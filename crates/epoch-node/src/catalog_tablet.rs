@@ -24,7 +24,14 @@ use crate::{
 };
 
 const CATALOG_APPLICATION_SNAPSHOT_FORMAT_ID: [u8; 16] = *b"CATALOG_STATE_V1";
-const CATALOG_APPLICATION_SNAPSHOT_VERSION: u16 = 1;
+const LEGACY_CATALOG_APPLICATION_SNAPSHOT_VERSION: u16 = 1;
+const CATALOG_APPLICATION_SNAPSHOT_VERSION: u16 = 2;
+const CATALOG_APPLICATION_SNAPSHOT_MAGIC: [u8; 4] = *b"ECAT";
+const CATALOG_APPLICATION_SNAPSHOT_HEADER_BYTES: usize = 4 + 2 + (4 * 8) + 4;
+const _: () = assert!(
+    epoch_catalog::MAX_CATALOG_SNAPSHOT_BYTES + CATALOG_APPLICATION_SNAPSHOT_HEADER_BYTES
+        <= epoch_consensus::MAX_APPLICATION_SNAPSHOT_BYTES
+);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CatalogTabletScope {
@@ -116,7 +123,7 @@ struct AppliedCatalogCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CatalogApplicationCheckpoint {
+struct LegacyCatalogApplicationCheckpoint {
     format_version: u16,
     group_id: u64,
     group_epoch: u64,
@@ -131,6 +138,12 @@ struct CatalogApplicationCheckpoint {
 struct AppliedCatalogCheckpoint {
     proposal_id: u64,
     command: AppliedCatalogCommand,
+}
+
+struct DecodedCatalogApplicationCheckpoint {
+    catalog: Catalog,
+    last_applied_index: u64,
+    applied: BTreeMap<u64, AppliedCatalogCommand>,
 }
 
 #[derive(Debug)]
@@ -309,38 +322,8 @@ impl CatalogTabletService {
         scope: CatalogTabletScope,
         snapshot: &ApplicationSnapshot,
     ) -> Result<Vec<ResourceRecord>, String> {
-        if snapshot.format_id() != CATALOG_APPLICATION_SNAPSHOT_FORMAT_ID
-            || snapshot.format_version() != CATALOG_APPLICATION_SNAPSHOT_VERSION
-        {
-            return Err("application snapshot is not a supported Catalog image".into());
-        }
-        let checkpoint: CatalogApplicationCheckpoint =
-            serde_json::from_slice(snapshot.payload()).map_err(|error| error.to_string())?;
-        if serde_json::to_vec(&checkpoint).map_err(|error| error.to_string())? != snapshot.payload()
-        {
-            return Err("Catalog application snapshot is not canonical".into());
-        }
-        if checkpoint.format_version != CATALOG_APPLICATION_SNAPSHOT_VERSION
-            || checkpoint.group_id != scope.group_id
-            || checkpoint.group_epoch != scope.group_epoch
-            || checkpoint.checkpoint_index != snapshot.checkpoint_index().get()
-            || checkpoint.last_applied_index > checkpoint.checkpoint_index
-        {
-            return Err("Catalog application snapshot scope or index is invalid".into());
-        }
-        let catalog_bytes = STANDARD_NO_PAD
-            .decode(&checkpoint.catalog_base64)
-            .map_err(|error| format!("Catalog snapshot base64 is invalid: {error}"))?;
-        let catalog =
-            Catalog::decode_snapshot(&catalog_bytes).map_err(|error| error.to_string())?;
-        if !catalog.is_consensus_group_reserved(scope.group_id)
-            || catalog.state_digest().map_err(|error| error.to_string())? != snapshot.state_digest()
-        {
-            return Err(
-                "Catalog application snapshot state digest or reservation is invalid".into(),
-            );
-        }
-        Ok(catalog.resources().cloned().collect())
+        let checkpoint = decode_catalog_application_checkpoint(scope, snapshot)?;
+        Ok(checkpoint.catalog.resources().cloned().collect())
     }
 
     fn fail(&self, error: impl Into<String>) -> String {
@@ -398,54 +381,35 @@ impl CommittedProposalApplier for CatalogTabletService {
                 state.last_applied_index, checkpoint_index
             ));
         }
-        let mut applied = Vec::with_capacity(retained.len());
         for committed in retained {
             let proposal_id = committed.receipt.proposal_id.get();
             let decoded =
                 CatalogCommand::decode(&committed.payload).map_err(|error| error.to_string())?;
             let is_periodic_control = decoded.is_transient_control();
-            let Some(command) = state.applied.get(&proposal_id) else {
-                // Installing a compact checkpoint intentionally omits periodic
-                // receipts. Consensus can retain those proposals through the
-                // next checkpoint, so accept the omission only when the
-                // installed application image already covers their commit.
-                if is_periodic_control
-                    && committed.receipt.log_index.get() <= state.last_applied_index
+            if let Some(command) = state.applied.get(&proposal_id) {
+                if command.payload != committed.payload
+                    || command.receipt.term != committed.receipt.term.get()
+                    || command.receipt.commit_index != committed.receipt.log_index.get()
                 {
-                    continue;
+                    return Err(format!(
+                        "catalog retry proposal {proposal_id} disagrees with consensus"
+                    ));
                 }
-                return Err(format!(
-                    "catalog retry proposal {proposal_id} has no typed applied result"
-                ));
-            };
-            if command.payload != committed.payload
-                || command.receipt.term != committed.receipt.term.get()
-                || command.receipt.commit_index != committed.receipt.log_index.get()
+            } else if committed.receipt.log_index.get() > state.last_applied_index
+                || (!is_periodic_control
+                    && state.catalog.operation(decoded.request_token()).is_none())
             {
                 return Err(format!(
-                    "catalog retry proposal {proposal_id} disagrees with consensus"
+                    "catalog retry proposal {proposal_id} has no durable applied result"
                 ));
             }
-            // Lease renewals, status observations, reconciliation attempts,
-            // and membership plans are internal controller traffic. Their
-            // bounded outcomes already live in the Catalog image, and a
-            // surviving controller retries them with fresh lease/capacity
-            // evidence after node recovery. Duplicating their command bodies
-            // in the application retry suffix can otherwise expand a valid
-            // consensus suffix past the native snapshot envelope.
-            if is_periodic_control {
-                continue;
-            }
-            applied.push(AppliedCatalogCheckpoint {
-                proposal_id,
-                command: command.clone(),
-            });
         }
-        applied.sort_by_key(|entry| entry.command.receipt.commit_index);
         // Keep the complete consensus retry suffix in the live process so a
-        // response racing this checkpoint can still resolve its receipt. Only
-        // the durable image omits periodic control receipts; no client
-        // connection survives installing that image after a restart.
+        // response racing this checkpoint can still resolve its receipt. The
+        // durable Catalog already owns public request-token outcomes, so the
+        // application image does not duplicate the potentially 1 MiB retry
+        // suffix. Internal periodic outcomes intentionally use their bounded
+        // Catalog retention policy.
         let retained_ids = retained
             .iter()
             .map(|entry| entry.receipt.proposal_id.get())
@@ -458,16 +422,12 @@ impl CommittedProposalApplier for CatalogTabletService {
             .catalog
             .state_digest()
             .map_err(|error| error.to_string())?;
-        let checkpoint = CatalogApplicationCheckpoint {
-            format_version: CATALOG_APPLICATION_SNAPSHOT_VERSION,
-            group_id: self.scope.group_id,
-            group_epoch: self.scope.group_epoch,
-            checkpoint_index: checkpoint_index.get(),
-            last_applied_index: state.last_applied_index,
-            catalog_base64: STANDARD_NO_PAD.encode(catalog_bytes),
-            applied,
-        };
-        let payload = serde_json::to_vec(&checkpoint).map_err(|error| error.to_string())?;
+        let payload = encode_catalog_application_checkpoint(
+            self.scope,
+            checkpoint_index,
+            state.last_applied_index,
+            &catalog_bytes,
+        )?;
         let snapshot = ApplicationSnapshot::new(
             checkpoint_index,
             CATALOG_APPLICATION_SNAPSHOT_FORMAT_ID,
@@ -486,62 +446,10 @@ impl CommittedProposalApplier for CatalogTabletService {
     fn install_snapshot(&self, snapshot: &ApplicationSnapshot) -> Result<(), String> {
         self.ensure_healthy()?;
         let result: Result<CatalogTabletState, String> = (|| {
-            if snapshot.format_id() != CATALOG_APPLICATION_SNAPSHOT_FORMAT_ID
-                || snapshot.format_version() != CATALOG_APPLICATION_SNAPSHOT_VERSION
-            {
-                return Err("application snapshot is not a supported Catalog image".into());
-            }
-            let checkpoint: CatalogApplicationCheckpoint =
-                serde_json::from_slice(snapshot.payload()).map_err(|error| error.to_string())?;
-            if serde_json::to_vec(&checkpoint).map_err(|error| error.to_string())?
-                != snapshot.payload()
-            {
-                return Err("Catalog application snapshot is not canonical".into());
-            }
-            if checkpoint.format_version != CATALOG_APPLICATION_SNAPSHOT_VERSION
-                || checkpoint.group_id != self.scope.group_id
-                || checkpoint.group_epoch != self.scope.group_epoch
-                || checkpoint.checkpoint_index != snapshot.checkpoint_index().get()
-                || checkpoint.last_applied_index > checkpoint.checkpoint_index
-            {
-                return Err("Catalog application snapshot scope or index is invalid".into());
-            }
-            let catalog_bytes = STANDARD_NO_PAD
-                .decode(&checkpoint.catalog_base64)
-                .map_err(|error| format!("Catalog snapshot base64 is invalid: {error}"))?;
-            let catalog =
-                Catalog::decode_snapshot(&catalog_bytes).map_err(|error| error.to_string())?;
-            if !catalog.is_consensus_group_reserved(self.scope.group_id)
-                || catalog.state_digest().map_err(|error| error.to_string())?
-                    != snapshot.state_digest()
-            {
-                return Err(
-                    "Catalog application snapshot state digest or reservation is invalid".into(),
-                );
-            }
-
-            let mut applied = BTreeMap::new();
-            let mut previous_index = 0_u64;
-            for entry in checkpoint.applied {
-                let receipt = &entry.command.receipt;
-                if entry.proposal_id == 0
-                    || receipt.proposal_id != entry.proposal_id
-                    || receipt.term == 0
-                    || receipt.commit_index <= previous_index
-                    || receipt.commit_index > checkpoint.last_applied_index
-                    || applied
-                        .insert(entry.proposal_id, entry.command.clone())
-                        .is_some()
-                {
-                    return Err("Catalog application retry registry is invalid".into());
-                }
-                CatalogCommand::decode(&entry.command.payload)
-                    .map_err(|error| error.to_string())?;
-                previous_index = receipt.commit_index;
-            }
+            let checkpoint = decode_catalog_application_checkpoint(self.scope, snapshot)?;
             Ok(CatalogTabletState {
-                catalog,
-                applied,
+                catalog: checkpoint.catalog,
+                applied: checkpoint.applied,
                 last_applied_index: checkpoint.last_applied_index,
             })
         })();
@@ -557,9 +465,290 @@ impl CommittedProposalApplier for CatalogTabletService {
         }
     }
 
+    fn restore_checkpoint_receipts(&self, retained: &[CommittedProposal]) -> Result<(), String> {
+        self.ensure_healthy()?;
+        let result = self
+            .state
+            .write()
+            .map_err(|_| "catalog state write lock was poisoned".to_owned())
+            .and_then(|mut state| {
+                restore_catalog_checkpoint_receipts(self.scope, &mut state, retained)
+            });
+        result.map_err(|error| self.fail(error))
+    }
+
     fn supports_native_snapshots(&self) -> bool {
         true
     }
+}
+
+fn restore_catalog_checkpoint_receipts(
+    scope: CatalogTabletScope,
+    state: &mut CatalogTabletState,
+    retained: &[CommittedProposal],
+) -> Result<(), String> {
+    let mut retained = retained.to_vec();
+    retained.sort_by_key(|proposal| proposal.receipt.log_index.get());
+    let state_digest = hex_digest(
+        state
+            .catalog
+            .state_digest()
+            .map_err(|error| error.to_string())?,
+    );
+    for committed in retained {
+        if committed.receipt.group_id.get() != scope.group_id
+            || committed.receipt.group_epoch.get() != scope.group_epoch
+            || committed.receipt.log_index.get() > state.last_applied_index
+        {
+            return Err("Catalog checkpoint retry receipt has invalid scope or index".into());
+        }
+        let proposal_id = committed.receipt.proposal_id.get();
+        if let Some(existing) = state.applied.get(&proposal_id) {
+            if existing.payload != committed.payload
+                || existing.receipt.term != committed.receipt.term.get()
+                || existing.receipt.commit_index != committed.receipt.log_index.get()
+            {
+                return Err(format!(
+                    "catalog retry proposal {proposal_id} disagrees with its installed receipt"
+                ));
+            }
+            continue;
+        }
+        let command =
+            CatalogCommand::decode(&committed.payload).map_err(|error| error.to_string())?;
+        if command.is_transient_control() {
+            continue;
+        }
+        let operation = state
+            .catalog
+            .operation(command.request_token())
+            .ok_or_else(|| {
+                format!("catalog retry proposal {proposal_id} has no durable applied result")
+            })?;
+        let replayed = state
+            .catalog
+            .apply(command)
+            .map_err(|error| error.to_string())?;
+        if replayed != operation.mutation.as_replayed() {
+            return Err(format!(
+                "catalog retry proposal {proposal_id} disagrees with its durable outcome"
+            ));
+        }
+        let applied = AppliedCatalogCommand {
+            payload: committed.payload,
+            receipt: CatalogTabletReceipt {
+                proposal_id,
+                term: committed.receipt.term.get(),
+                commit_index: committed.receipt.log_index.get(),
+                mutation: operation.mutation,
+                state_digest: state_digest.clone(),
+            },
+        };
+        state.applied.insert(proposal_id, applied);
+    }
+    Ok(())
+}
+
+fn encode_catalog_application_checkpoint(
+    scope: CatalogTabletScope,
+    checkpoint_index: LogIndex,
+    last_applied_index: u64,
+    catalog_bytes: &[u8],
+) -> Result<Vec<u8>, String> {
+    if last_applied_index > checkpoint_index.get() {
+        return Err("Catalog application snapshot applied index is ahead of its checkpoint".into());
+    }
+    let catalog_len = u32::try_from(catalog_bytes.len())
+        .map_err(|_| "Catalog snapshot length exceeds u32".to_owned())?;
+    let capacity = CATALOG_APPLICATION_SNAPSHOT_HEADER_BYTES
+        .checked_add(catalog_bytes.len())
+        .ok_or_else(|| "Catalog application snapshot length overflow".to_owned())?;
+    let mut encoded = Vec::with_capacity(capacity);
+    encoded.extend_from_slice(&CATALOG_APPLICATION_SNAPSHOT_MAGIC);
+    encoded.extend_from_slice(&CATALOG_APPLICATION_SNAPSHOT_VERSION.to_be_bytes());
+    encoded.extend_from_slice(&scope.group_id.to_be_bytes());
+    encoded.extend_from_slice(&scope.group_epoch.to_be_bytes());
+    encoded.extend_from_slice(&checkpoint_index.get().to_be_bytes());
+    encoded.extend_from_slice(&last_applied_index.to_be_bytes());
+    encoded.extend_from_slice(&catalog_len.to_be_bytes());
+    encoded.extend_from_slice(catalog_bytes);
+    debug_assert_eq!(encoded.len(), capacity);
+    Ok(encoded)
+}
+
+fn decode_catalog_application_checkpoint(
+    scope: CatalogTabletScope,
+    snapshot: &ApplicationSnapshot,
+) -> Result<DecodedCatalogApplicationCheckpoint, String> {
+    if snapshot.format_id() != CATALOG_APPLICATION_SNAPSHOT_FORMAT_ID {
+        return Err("application snapshot is not a supported Catalog image".into());
+    }
+    let decoded = match snapshot.format_version() {
+        LEGACY_CATALOG_APPLICATION_SNAPSHOT_VERSION => {
+            decode_legacy_catalog_application_checkpoint(snapshot)?
+        }
+        CATALOG_APPLICATION_SNAPSHOT_VERSION => {
+            decode_binary_catalog_application_checkpoint(snapshot)?
+        }
+        _ => return Err("application snapshot is not a supported Catalog image".into()),
+    };
+    if decoded.0 != scope.group_id
+        || decoded.1 != scope.group_epoch
+        || decoded.2 != snapshot.checkpoint_index().get()
+        || decoded.3 > decoded.2
+    {
+        return Err("Catalog application snapshot scope or index is invalid".into());
+    }
+    let catalog = Catalog::decode_snapshot(&decoded.4).map_err(|error| error.to_string())?;
+    if !catalog.is_consensus_group_reserved(scope.group_id)
+        || catalog.state_digest().map_err(|error| error.to_string())? != snapshot.state_digest()
+    {
+        return Err("Catalog application snapshot state digest or reservation is invalid".into());
+    }
+    Ok(DecodedCatalogApplicationCheckpoint {
+        catalog,
+        last_applied_index: decoded.3,
+        applied: decoded.5,
+    })
+}
+
+type DecodedCatalogCheckpointFields = (
+    u64,
+    u64,
+    u64,
+    u64,
+    Vec<u8>,
+    BTreeMap<u64, AppliedCatalogCommand>,
+);
+
+fn decode_legacy_catalog_application_checkpoint(
+    snapshot: &ApplicationSnapshot,
+) -> Result<DecodedCatalogCheckpointFields, String> {
+    let checkpoint: LegacyCatalogApplicationCheckpoint =
+        serde_json::from_slice(snapshot.payload()).map_err(|error| error.to_string())?;
+    if serde_json::to_vec(&checkpoint).map_err(|error| error.to_string())? != snapshot.payload() {
+        return Err("Catalog application snapshot is not canonical".into());
+    }
+    if checkpoint.format_version != LEGACY_CATALOG_APPLICATION_SNAPSHOT_VERSION {
+        return Err("Catalog application snapshot version is invalid".into());
+    }
+    let catalog_bytes = STANDARD_NO_PAD
+        .decode(&checkpoint.catalog_base64)
+        .map_err(|error| format!("Catalog snapshot base64 is invalid: {error}"))?;
+    let applied =
+        validate_legacy_applied_registry(checkpoint.applied, checkpoint.last_applied_index)?;
+    Ok((
+        checkpoint.group_id,
+        checkpoint.group_epoch,
+        checkpoint.checkpoint_index,
+        checkpoint.last_applied_index,
+        catalog_bytes,
+        applied,
+    ))
+}
+
+fn validate_legacy_applied_registry(
+    entries: Vec<AppliedCatalogCheckpoint>,
+    last_applied_index: u64,
+) -> Result<BTreeMap<u64, AppliedCatalogCommand>, String> {
+    let mut applied = BTreeMap::new();
+    let mut previous_index = 0_u64;
+    for entry in entries {
+        let receipt = &entry.command.receipt;
+        if entry.proposal_id == 0
+            || receipt.proposal_id != entry.proposal_id
+            || receipt.term == 0
+            || receipt.commit_index <= previous_index
+            || receipt.commit_index > last_applied_index
+            || applied
+                .insert(entry.proposal_id, entry.command.clone())
+                .is_some()
+        {
+            return Err("Catalog application retry registry is invalid".into());
+        }
+        CatalogCommand::decode(&entry.command.payload).map_err(|error| error.to_string())?;
+        previous_index = receipt.commit_index;
+    }
+    Ok(applied)
+}
+
+fn decode_binary_catalog_application_checkpoint(
+    snapshot: &ApplicationSnapshot,
+) -> Result<DecodedCatalogCheckpointFields, String> {
+    let payload = snapshot.payload();
+    if payload.len() < CATALOG_APPLICATION_SNAPSHOT_HEADER_BYTES
+        || payload[..4] != CATALOG_APPLICATION_SNAPSHOT_MAGIC
+    {
+        return Err("Catalog application snapshot header is invalid".into());
+    }
+    let mut offset = 4;
+    let version = read_catalog_checkpoint_u16(payload, &mut offset, "version")?;
+    if version != CATALOG_APPLICATION_SNAPSHOT_VERSION {
+        return Err("Catalog application snapshot version is invalid".into());
+    }
+    let group_id = read_catalog_checkpoint_u64(payload, &mut offset, "group ID")?;
+    let group_epoch = read_catalog_checkpoint_u64(payload, &mut offset, "group epoch")?;
+    let checkpoint_index = read_catalog_checkpoint_u64(payload, &mut offset, "checkpoint index")?;
+    let last_applied_index =
+        read_catalog_checkpoint_u64(payload, &mut offset, "last applied index")?;
+    let catalog_len = usize::try_from(read_catalog_checkpoint_u32(
+        payload,
+        &mut offset,
+        "Catalog length",
+    )?)
+    .map_err(|_| "Catalog application snapshot length exceeds usize".to_owned())?;
+    if payload.len().checked_sub(offset) != Some(catalog_len) {
+        return Err("Catalog application snapshot length is invalid".into());
+    }
+    Ok((
+        group_id,
+        group_epoch,
+        checkpoint_index,
+        last_applied_index,
+        payload[offset..].to_vec(),
+        BTreeMap::new(),
+    ))
+}
+
+fn read_catalog_checkpoint_u16(
+    payload: &[u8],
+    offset: &mut usize,
+    label: &str,
+) -> Result<u16, String> {
+    read_catalog_checkpoint_array::<2>(payload, offset, label).map(u16::from_be_bytes)
+}
+
+fn read_catalog_checkpoint_u32(
+    payload: &[u8],
+    offset: &mut usize,
+    label: &str,
+) -> Result<u32, String> {
+    read_catalog_checkpoint_array::<4>(payload, offset, label).map(u32::from_be_bytes)
+}
+
+fn read_catalog_checkpoint_u64(
+    payload: &[u8],
+    offset: &mut usize,
+    label: &str,
+) -> Result<u64, String> {
+    read_catalog_checkpoint_array::<8>(payload, offset, label).map(u64::from_be_bytes)
+}
+
+fn read_catalog_checkpoint_array<const N: usize>(
+    payload: &[u8],
+    offset: &mut usize,
+    label: &str,
+) -> Result<[u8; N], String> {
+    let end = offset
+        .checked_add(N)
+        .ok_or_else(|| format!("Catalog application snapshot {label} offset overflow"))?;
+    let bytes = payload
+        .get(*offset..end)
+        .ok_or_else(|| format!("Catalog application snapshot {label} is truncated"))?;
+    *offset = end;
+    bytes
+        .try_into()
+        .map_err(|_| format!("Catalog application snapshot {label} is invalid"))
 }
 
 fn apply_committed(
@@ -752,7 +941,7 @@ mod tests {
     }
 
     #[test]
-    fn native_snapshot_restores_full_catalog_and_only_the_retained_retry_suffix() {
+    fn native_snapshot_restores_full_catalog_and_rebuilds_retained_receipts_durably() {
         let service = CatalogTabletService::new(CatalogTabletScope::new(9, 4).unwrap());
         let first = committed(31, 2, 1, &command("orders-v1", "orders", 2));
         let second = committed(32, 2, 2, &command("audit-v1", "audit", 1));
@@ -770,13 +959,69 @@ mod tests {
         assert_eq!(actual.resources, expected.resources);
         assert_eq!(actual.state_digest, expected.state_digest);
         assert_eq!(actual.last_applied_index, 2);
-        assert_eq!(actual.applied_command_count, 1);
+        assert_eq!(actual.applied_command_count, 0);
         assert!(restored.receipt(31).unwrap().is_none());
+        assert!(restored.receipt(32).unwrap().is_none());
+        let replayed = restored.durable_replay_receipt(&second).unwrap().unwrap();
+        assert_eq!(replayed.proposal_id, 32);
+        assert!(matches!(
+            replayed.mutation,
+            CatalogMutation::Applied { replayed: true, .. }
+        ));
+        restored
+            .restore_checkpoint_receipts(std::slice::from_ref(&second))
+            .unwrap();
+        assert_eq!(restored.snapshot().unwrap().applied_command_count, 1);
         assert_eq!(restored.receipt(32).unwrap(), service.receipt(32).unwrap());
         restored
             .apply(&committed(33, 2, 3, &command("next-v1", "next", 1)))
             .unwrap();
         assert_eq!(restored.snapshot().unwrap().resource_count, 3);
+    }
+
+    #[test]
+    fn native_snapshot_v2_keeps_v1_json_images_readable() {
+        let source = CatalogTabletService::new(CatalogTabletScope::new(9, 4).unwrap());
+        let proposal = committed(31, 2, 1, &command("orders-v1", "orders", 1));
+        source.apply(&proposal).unwrap();
+        let receipt = source.receipt(31).unwrap().unwrap();
+        let state = source.state.read().unwrap();
+        let catalog_bytes = state.catalog.encode_snapshot().unwrap();
+        let state_digest = state.catalog.state_digest().unwrap();
+        drop(state);
+        let legacy = LegacyCatalogApplicationCheckpoint {
+            format_version: LEGACY_CATALOG_APPLICATION_SNAPSHOT_VERSION,
+            group_id: 9,
+            group_epoch: 4,
+            checkpoint_index: 1,
+            last_applied_index: 1,
+            catalog_base64: STANDARD_NO_PAD.encode(catalog_bytes),
+            applied: vec![AppliedCatalogCheckpoint {
+                proposal_id: 31,
+                command: AppliedCatalogCommand {
+                    payload: proposal.payload.clone(),
+                    receipt,
+                },
+            }],
+        };
+        let payload = serde_json::to_vec(&legacy).unwrap();
+        let image = ApplicationSnapshot::new(
+            LogIndex::new(1),
+            CATALOG_APPLICATION_SNAPSHOT_FORMAT_ID,
+            LEGACY_CATALOG_APPLICATION_SNAPSHOT_VERSION,
+            state_digest,
+            payload,
+        )
+        .unwrap();
+
+        let restored = CatalogTabletService::new(CatalogTabletScope::new(9, 4).unwrap());
+        restored.install_snapshot(&image).unwrap();
+        restored
+            .restore_checkpoint_receipts(std::slice::from_ref(&proposal))
+            .unwrap();
+        assert_eq!(restored.snapshot().unwrap().resource_count, 1);
+        assert_eq!(restored.snapshot().unwrap().last_applied_index, 1);
+        assert_eq!(restored.snapshot().unwrap().applied_command_count, 1);
     }
 
     #[test]
@@ -842,13 +1087,10 @@ mod tests {
             .capture_snapshot(LogIndex::new(16), &retained)
             .expect("a restored compact retry suffix must remain checkpointable");
         assert!(repeated.payload().len() <= MAX_APPLICATION_SNAPSHOT_BYTES);
-        let missing_public = committed(100, 2, 1, &desired);
-        assert!(
-            restored
-                .capture_snapshot(LogIndex::new(16), &[missing_public])
-                .unwrap_err()
-                .contains("has no typed applied result")
-        );
+        let retained_public = committed(100, 2, 1, &desired);
+        restored
+            .capture_snapshot(LogIndex::new(16), &[retained_public])
+            .expect("a durable public outcome does not need a duplicate retry receipt");
         let replayed = restored
             .durable_replay_receipt(retained.last().unwrap())
             .unwrap()
@@ -933,9 +1175,8 @@ mod tests {
                     desired: json!({"padding": "x".repeat(120 * 1024)}),
                 }],
             });
-            let receipt = service
-                .apply_one(&committed(index + 1, 2, index + 1, &command))
-                .unwrap();
+            let committed = committed(index + 1, 2, index + 1, &command);
+            let receipt = service.apply_one(&committed).unwrap();
             if matches!(
                 receipt.mutation,
                 CatalogMutation::Rejected {
@@ -943,19 +1184,63 @@ mod tests {
                     ..
                 }
             ) {
-                rejected = Some(receipt);
+                rejected = Some((receipt, committed));
                 break;
             }
         }
-        assert!(rejected.is_some(), "the bounded Catalog must reject growth");
+        let (receipt, committed) = rejected.expect("the bounded Catalog must reject growth");
         service.ensure_healthy().unwrap();
-        service
+        let catalog_bytes = service
             .state
             .read()
             .unwrap()
             .catalog
             .encode_snapshot()
             .unwrap();
+        assert!(catalog_bytes.len() <= epoch_catalog::MAX_CATALOG_SNAPSHOT_BYTES);
+        assert!(matches!(
+            service
+                .operation(
+                    CatalogCommand::decode(&committed.payload)
+                        .unwrap()
+                        .request_token()
+                )
+                .unwrap()
+                .unwrap()
+                .mutation,
+            CatalogMutation::Rejected {
+                replayed: false,
+                ..
+            }
+        ));
+
+        let image = service
+            .capture_snapshot(
+                LogIndex::new(receipt.commit_index),
+                std::slice::from_ref(&committed),
+            )
+            .expect("a capacity-bound Catalog must remain checkpointable");
+        assert_eq!(image.format_version(), CATALOG_APPLICATION_SNAPSHOT_VERSION);
+        assert!(image.payload().len() <= MAX_APPLICATION_SNAPSHOT_BYTES);
+        assert!(
+            image
+                .payload()
+                .starts_with(&CATALOG_APPLICATION_SNAPSHOT_MAGIC)
+        );
+        let restored = CatalogTabletService::new(CatalogTabletScope::new(9, 4).unwrap());
+        restored.install_snapshot(&image).unwrap();
+        let replayed = restored
+            .durable_replay_receipt(&committed)
+            .unwrap()
+            .expect("capacity rejection must survive checkpoint restore");
+        assert!(matches!(
+            replayed.mutation,
+            CatalogMutation::Rejected {
+                code: CatalogRejectionCode::CapacityExceeded,
+                replayed: true,
+                ..
+            }
+        ));
     }
 
     #[test]

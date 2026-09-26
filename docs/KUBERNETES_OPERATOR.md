@@ -29,7 +29,8 @@ scheduled application-layer encrypted semantic backups.
   stable lease identity; one replicated TTL/fence lease owns reconciliation.
 - The automatic one-time bbolt import is bounded to 4,096 live-or-tombstoned
   generation records and remains subject to the 512 KiB command and 4 MiB
-  Catalog snapshot limits. Inputs beyond either bound fail closed and require
+  native application-checkpoint envelope, including its reserved binary
+  header. Inputs beyond either bound fail closed and require
   an explicit migration before upgrading this candidate.
 - Two operator replicas use Kubernetes Lease leader election. Reconciliation
   is idempotent, treats API-server defaults as no-ops, and repairs drift in

@@ -134,6 +134,14 @@ pub trait CommittedProposalApplier: fmt::Debug + Send + Sync + 'static {
         Err("profile-native snapshot installation is unsupported by this applier".into())
     }
 
+    /// Rebuilds any ephemeral exact-retry receipts represented by the
+    /// consensus checkpoint suffix after a native application image is
+    /// installed. The default is empty because most profile images carry
+    /// their own retry registry.
+    fn restore_checkpoint_receipts(&self, _retained: &[CommittedProposal]) -> Result<(), String> {
+        Ok(())
+    }
+
     fn supports_native_snapshots(&self) -> bool {
         false
     }
@@ -1257,19 +1265,27 @@ fn run_persistent_actor(
                 return Err(error);
             }
         };
-        let restoration =
-            if let Some(snapshot) = application_snapshot {
-                applier.install_snapshot(&snapshot).and_then(|()| {
-                    for committed in adapter.applied_proposals().iter().filter(|committed| {
-                        committed.receipt.log_index > snapshot.checkpoint_index()
-                    }) {
-                        applier.apply(committed)?;
-                    }
-                    Ok(())
-                })
-            } else {
-                applier.replay(adapter.applied_proposals())
-            };
+        let restoration = if let Some(snapshot) = application_snapshot {
+            applier.install_snapshot(&snapshot).and_then(|()| {
+                let retained = adapter
+                    .applied_proposals()
+                    .iter()
+                    .filter(|committed| committed.receipt.log_index <= snapshot.checkpoint_index())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                applier.restore_checkpoint_receipts(&retained)?;
+                for committed in adapter
+                    .applied_proposals()
+                    .iter()
+                    .filter(|committed| committed.receipt.log_index > snapshot.checkpoint_index())
+                {
+                    applier.apply(committed)?;
+                }
+                Ok(())
+            })
+        } else {
+            applier.replay(adapter.applied_proposals())
+        };
         if let Err(error) = restoration {
             let error = ConsensusProbeError::ProfileApplication(error);
             let _ = initialized.send(Err(error.clone()));
@@ -1597,6 +1613,15 @@ fn publish_output(
         if let Some(snapshot) = installed.application_snapshot.as_ref() {
             applier
                 .install_snapshot(snapshot)
+                .map_err(ConsensusProbeError::ProfileApplication)?;
+            let retained = installed
+                .proposals
+                .iter()
+                .filter(|committed| committed.receipt.log_index <= snapshot.checkpoint_index())
+                .cloned()
+                .collect::<Vec<_>>();
+            applier
+                .restore_checkpoint_receipts(&retained)
                 .map_err(ConsensusProbeError::ProfileApplication)?;
         } else {
             applier

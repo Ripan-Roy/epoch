@@ -38,19 +38,25 @@ notes explicitly list additional verified artifacts.
 - Controller-generated lease, status, reconciliation, and membership request
   outcomes retain only the newest bounded internal suffix, preventing rejected
   periodic attempts from growing snapshots while public outcomes stay durable.
-- Catalog application checkpoints no longer duplicate controller-generated
-  command payloads and receipts in the consensus retry suffix; retained token
-  outcomes reconstruct replayed mutations after recovery, and a restored
-  compact suffix remains valid for later checkpoints.
+- Catalog application checkpoint v2 stores the Catalog bytes directly under
+  the 4 MiB consensus envelope and no longer duplicates any retry command or
+  receipt; durable token outcomes reconstruct public replays after recovery,
+  bounded controller outcomes retain their existing policy, and v1 images
+  remain readable.
 - Managed membership attempts bind their complete lease and capacity evidence,
   allowing a later healthy capacity sample to recover from a committed
   rejection while preserving exact ambiguous-attempt replay.
 - Lease-fenced mutations normalize a lagging API replica's sampled time to the
   replicated Catalog clock, and change history expires by the remaining full
   snapshot byte budget as well as its 4,096-entry ceiling.
-- A command that cannot fit after change-history expiry commits a typed
-  capacity rejection against unchanged state instead of fail-stopping Catalog
+- A command that cannot fit after change-history expiry commits and persists a
+  typed capacity rejection against unchanged business state. Its token remains
+  replayable and cannot be rebound after space is freed; admission reserves
+  enough checkpoint space for that rejection instead of fail-stopping Catalog
   replicas after consensus commit.
+- Change cursor zero is an initial-history cursor only while the retention
+  floor is one; after compaction it fails as stale instead of silently skipping
+  the expired prefix.
 - A legacy one-replica control StatefulSet updates and verifies ordinal zero
   before scaling to three replicas; one atomic import accepts up to 4,096
   generation records within the existing command and snapshot byte limits.

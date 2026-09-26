@@ -54,7 +54,8 @@ into Go.
    the Go API can authorize the exact tenant set. The gRPC watch emits both the
    Catalog high-water mark and an explicit scanned `next_cursor`; filtered
    changes still advance the checkpoint. Stale and future cursors fail
-   explicitly.
+   explicitly. Cursor zero is valid only while the retention floor is one; it
+   becomes stale after prefix compaction and therefore cannot skip history.
 7. Run three `epoch-control` StatefulSet replicas with stable pod-derived owner
    IDs, required host anti-affinity, ordered startup, and a two-instance
    disruption budget. The replicas share no writable control database.
@@ -64,21 +65,24 @@ into Go.
    mounted as rollback evidence; its historical token ledger is not promoted
    because the old records do not contain the new canonical command shape.
    The atomic import accepts at most 4,096 generation records within the
-   existing 512 KiB command and 4 MiB snapshot limits. An existing one-replica
+   existing 512 KiB command and 4 MiB native-checkpoint envelope. An existing one-replica
    StatefulSet updates and verifies ordinal zero before scaling to three.
 9. Page internal resource inventory with a canonical key cursor, at most 128
    resources and 768 KiB per page, and one stable high-water cursor across the
    scan. Bound recurring lease, status, reconciliation, and membership request
    outcomes to the newest internal suffix while keeping public operation
    outcomes durable. Bind reconciliation and membership attempt tokens to the
-   complete volatile lease/capacity evidence. Do not duplicate internal
-   controller command payloads and receipts in the native checkpoint retry
-   suffix; a retained token outcome reconstructs the replayed mutation. A
-   subsequent checkpoint accepts an omitted internal receipt only when the
-   installed image already covers its commit index. Bound watch history by both
-   4,096 entries and the remaining complete encoded snapshot byte budget. If
-   no history suffix can make a new command fit, commit a typed non-mutating
-   capacity rejection rather than failing the post-consensus applier.
+   complete volatile lease/capacity evidence. Native application checkpoint v2
+   stores raw Catalog bytes under the 4 MiB consensus envelope, reserves 64
+   bytes for its binary header, and does not duplicate the consensus retry
+   suffix; retained public token outcomes reconstruct replayed mutations while
+   recurring internal outcomes follow their bounded policy. Continue reading
+   v1 JSON/base64 images during upgrade. A subsequent checkpoint accepts an
+   omitted internal receipt only when the installed image already covers its
+   commit index. Bound watch history by both 4,096 entries and the remaining
+   complete encoded snapshot byte budget. If no history suffix can make a new
+   command fit, persist a token-bound non-mutating capacity rejection rather
+   than failing the post-consensus applier.
 
 ## Consequences
 

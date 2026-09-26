@@ -44,7 +44,19 @@ pub const CATALOG_GOVERNANCE_SNAPSHOT_FORMAT_VERSION: u16 = 3;
 pub const CATALOG_PLACEMENT_SNAPSHOT_FORMAT_VERSION: u16 = 4;
 pub const CATALOG_MEMBERSHIP_SNAPSHOT_FORMAT_VERSION: u16 = 5;
 pub const CATALOG_CONTROL_SNAPSHOT_FORMAT_VERSION: u16 = 6;
-pub const MAX_CATALOG_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum Catalog image embedded in the native application checkpoint.
+///
+/// The consensus envelope admits 4 MiB application payloads. Native Catalog
+/// checkpoint v2 adds a fixed 42-byte binary header, so keep a small explicit
+/// margin rather than allowing a valid Catalog image that cannot be compacted.
+pub const MAX_CATALOG_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024 - 64;
+/// Space kept free in every ordinarily admitted Catalog image so a command
+/// that crosses the capacity boundary can still bind its token durably to the
+/// committed rejection. The command itself is capped at 512 KiB; the
+/// additional allowance covers its snapshot representation and receipt.
+const CATALOG_CAPACITY_REJECTION_RESERVE_BYTES: usize = MAX_COMMAND_BYTES + 128 * 1024;
+const MAX_CATALOG_ADMITTED_SNAPSHOT_BYTES: usize =
+    MAX_CATALOG_SNAPSHOT_BYTES - CATALOG_CAPACITY_REJECTION_RESERVE_BYTES;
 
 pub type CatalogResult<T> = Result<T, CatalogError>;
 
@@ -1043,13 +1055,29 @@ impl Catalog {
         // atomic. A command that would leave the Catalog uncheckpointable must
         // not partially mutate live replicated state or fail-stop the applier
         // after consensus has already committed it. Snapshot admission is a
-        // deterministic capacity rejection and leaves the current image
-        // unchanged.
+        // deterministic capacity rejection that leaves business state
+        // unchanged while durably binding the request token below.
         let mut candidate = self.clone();
-        let mutation = match candidate.apply_new(command) {
+        let mutation = match candidate.apply_new(command.clone()) {
             Ok(mutation) => mutation,
             Err(CatalogError::SnapshotTooLarge) => {
-                return Ok(rejected_mutation(&CatalogError::SnapshotTooLarge));
+                let mutation = rejected_mutation(&CatalogError::SnapshotTooLarge);
+                let mut rejected = self.clone();
+                let (first_change_cursor, last_change_cursor) =
+                    rejected.record_changes(&mutation)?;
+                rejected.completed_requests.insert(
+                    command.request_token().to_owned(),
+                    CompletedRequest {
+                        command,
+                        mutation: mutation.clone(),
+                        first_change_cursor,
+                        last_change_cursor,
+                    },
+                );
+                rejected.prune_transient_control_requests();
+                rejected.prune_change_history_to_limit(MAX_CATALOG_SNAPSHOT_BYTES)?;
+                *self = rejected;
+                return Ok(mutation);
             }
             Err(error) => return Err(error),
         };
@@ -1101,7 +1129,7 @@ impl Catalog {
             },
         );
         self.prune_transient_control_requests();
-        self.prune_change_history_to_snapshot_limit()?;
+        self.prune_change_history_to_limit(MAX_CATALOG_ADMITTED_SNAPSHOT_BYTES)?;
         Ok(mutation)
     }
 
@@ -1130,11 +1158,11 @@ impl Catalog {
         }
     }
 
-    fn prune_change_history_to_snapshot_limit(&mut self) -> CatalogResult<()> {
-        if self.snapshot_upper_bound_len(&self.changes)? <= MAX_CATALOG_SNAPSHOT_BYTES {
+    fn prune_change_history_to_limit(&mut self, limit: usize) -> CatalogResult<()> {
+        if self.snapshot_upper_bound_len(&self.changes)? <= limit {
             return Ok(());
         }
-        if self.snapshot_upper_bound_len(&[])? > MAX_CATALOG_SNAPSHOT_BYTES {
+        if self.snapshot_upper_bound_len(&[])? > limit {
             return Err(CatalogError::SnapshotTooLarge);
         }
 
@@ -1146,8 +1174,7 @@ impl Catalog {
         let mut upper = self.changes.len();
         while lower < upper {
             let middle = lower + (upper - lower) / 2;
-            if self.snapshot_upper_bound_len(&self.changes[middle..])? <= MAX_CATALOG_SNAPSHOT_BYTES
-            {
+            if self.snapshot_upper_bound_len(&self.changes[middle..])? <= limit {
                 upper = middle;
             } else {
                 lower = middle + 1;
@@ -1221,7 +1248,7 @@ impl Catalog {
             .changes
             .first()
             .map_or(self.next_change_cursor, |change| change.cursor);
-        if cursor != 0 && cursor.saturating_add(1) < earliest {
+        if cursor.saturating_add(1) < earliest {
             return Err(CatalogError::StaleChangeCursor {
                 requested: cursor,
                 earliest,
@@ -3033,6 +3060,14 @@ fn validate_completed_requests(
 fn completed_request_matches(command: &CatalogCommand, mutation: &CatalogMutation) -> bool {
     match (command, mutation) {
         (
+            _,
+            CatalogMutation::Rejected {
+                code: CatalogRejectionCode::CapacityExceeded,
+                replayed,
+                ..
+            },
+        ) => !replayed,
+        (
             CatalogCommand::Apply(request),
             CatalogMutation::Applied {
                 resource, replayed, ..
@@ -3275,6 +3310,69 @@ mod tests {
         .unwrap()
     }
 
+    fn assert_snapshot_capacity_rejection_is_durable(
+        catalog: &mut Catalog,
+        overflow: CatalogCommand,
+    ) {
+        let mutation = catalog.apply(overflow.clone()).unwrap();
+        assert!(matches!(
+            mutation,
+            CatalogMutation::Rejected {
+                code: CatalogRejectionCode::CapacityExceeded,
+                ref message,
+                replayed: false,
+            } if message.contains("snapshot exceeds")
+        ));
+        assert!(catalog.managed_resource(&managed_test_name(7)).is_err());
+        assert!(matches!(
+            catalog.operation("desired-overflow").unwrap().mutation,
+            CatalogMutation::Rejected {
+                replayed: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            catalog.apply(overflow).unwrap(),
+            CatalogMutation::Rejected { replayed: true, .. }
+        ));
+        assert_eq!(
+            catalog
+                .apply(CatalogCommand::ApplyDesired(ApplyDesiredResources {
+                    request_token: "desired-overflow".into(),
+                    resources: vec![DesiredResourceWrite {
+                        name: managed_test_name(8),
+                        expected_generation: Some(0),
+                        desired: json!({"padding": "different"}),
+                    }],
+                }))
+                .unwrap_err(),
+            CatalogError::IdempotencyConflict
+        );
+        let encoded = catalog.encode_snapshot().unwrap();
+        assert!(encoded.len() <= MAX_CATALOG_SNAPSHOT_BYTES);
+        let mut restored = Catalog::decode_snapshot(&encoded).unwrap();
+        assert!(matches!(
+            restored.operation("desired-overflow").unwrap().mutation,
+            CatalogMutation::Rejected {
+                replayed: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            restored
+                .apply(CatalogCommand::ApplyDesired(ApplyDesiredResources {
+                    request_token: "desired-overflow".into(),
+                    resources: vec![DesiredResourceWrite {
+                        name: managed_test_name(7),
+                        expected_generation: Some(0),
+                        desired: json!({"padding": "y".repeat(120 * 1024)}),
+                    }],
+                }))
+                .unwrap(),
+            CatalogMutation::Rejected { replayed: true, .. }
+        ));
+    }
+
     #[test]
     fn change_history_is_pruned_against_the_complete_snapshot_byte_budget() {
         let component = "x".repeat(MAX_NAME_COMPONENT_BYTES);
@@ -3349,11 +3447,20 @@ mod tests {
             catalog.snapshot_upper_bound_len(&catalog.changes).unwrap()
                 > MAX_CATALOG_SNAPSHOT_BYTES
         );
-        catalog.prune_change_history_to_snapshot_limit().unwrap();
+        catalog
+            .prune_change_history_to_limit(MAX_CATALOG_ADMITTED_SNAPSHOT_BYTES)
+            .unwrap();
         assert!(catalog.changes.len() < MAX_CHANGE_HISTORY);
         assert!(catalog.changes.first().unwrap().cursor > 1);
+        assert!(matches!(
+            catalog.changes_after(0, 10),
+            Err(CatalogError::StaleChangeCursor {
+                requested: 0,
+                earliest,
+            }) if earliest > 1
+        ));
         let encoded = catalog.encode_snapshot().unwrap();
-        assert!(encoded.len() <= MAX_CATALOG_SNAPSHOT_BYTES);
+        assert!(encoded.len() <= MAX_CATALOG_ADMITTED_SNAPSHOT_BYTES);
         assert_eq!(Catalog::decode_snapshot(&encoded).unwrap(), catalog);
     }
 
@@ -3404,26 +3511,14 @@ mod tests {
             catalog.snapshot_upper_bound_len(&[]).unwrap() <= MAX_CATALOG_SNAPSHOT_BYTES,
             "the pre-command Catalog must remain checkpointable"
         );
-        let before = catalog.clone();
-        let mutation = catalog
-            .apply(CatalogCommand::ApplyDesired(ApplyDesiredResources {
-                request_token: "desired-overflow".into(),
-                resources: vec![DesiredResourceWrite {
-                    name: managed_test_name(7),
-                    expected_generation: Some(0),
-                    desired: json!({"padding": "y".repeat(120 * 1024)}),
-                }],
-            }))
-            .unwrap();
-        assert!(matches!(
-            mutation,
-            CatalogMutation::Rejected {
-                code: CatalogRejectionCode::CapacityExceeded,
-                ref message,
-                replayed: false,
-            } if message.contains("snapshot exceeds")
-        ));
-        assert_eq!(catalog, before);
-        Catalog::decode_snapshot(&catalog.encode_snapshot().unwrap()).unwrap();
+        let overflow = CatalogCommand::ApplyDesired(ApplyDesiredResources {
+            request_token: "desired-overflow".into(),
+            resources: vec![DesiredResourceWrite {
+                name: managed_test_name(7),
+                expected_generation: Some(0),
+                desired: json!({"padding": "y".repeat(120 * 1024)}),
+            }],
+        });
+        assert_snapshot_capacity_rejection_is_durable(&mut catalog, overflow);
     }
 }
