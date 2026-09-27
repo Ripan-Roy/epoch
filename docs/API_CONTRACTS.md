@@ -343,11 +343,15 @@ the committed desired/status lifecycle; they do not yet advertise a bounded
 request-token retention window or replace a general long-running workflow API.
 Catalog admission reserves room for a maximum-size durable capacity rejection.
 If repeated unique rejections exhaust that finite reserve, the Catalog persists
-a terminal capacity seal and rejects all unknown commands without mutation or
-snapshot growth. Reads and exact retained-consensus retries remain available,
-but token-only lookup is not guaranteed for commands first received after the
-seal and accepting writes requires an operator-led migration or future
-horizontal Catalog sharding.
+a capacity growth seal. Reads remain available; ordinary commands and no-op
+deletes receive non-mutating capacity rejections. A delete may commit only when
+it removes live state and strictly reduces the complete encoded snapshot, so
+authorized cleanup can proceed incrementally without consuming more capacity.
+Ordinary admission resumes only after the full rejection reserve is restored.
+Snapshot v9 preserves consensus-retained rejection reconstruction after that
+transition. Token-only lookup is not guaranteed for commands first received
+during the seal, and a Catalog that cannot reclaim enough space requires
+operator-led migration or horizontal sharding.
 The one-time legacy import is one atomic command and currently accepts at most
 4,096 generation records, subject to the 512 KiB command and 4 MiB native
 application-checkpoint envelope; a larger former registry fails startup and requires

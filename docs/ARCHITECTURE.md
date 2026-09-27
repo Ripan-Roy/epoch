@@ -1066,12 +1066,16 @@ its oldest prefix against the complete admitted snapshot budget. When no
 history remains to expire, further growth persists a token-bound capacity
 rejection without mutating business state or fail-stopping replicas. Repeated
 unique refusals eventually consume that finite reserve; snapshot format v7
-marks atomic managed-delete history, while snapshot format v8 marks a terminal
-read-only capacity seal without adding a payload field. The
-sealed Catalog rejects every unknown command without growth and native restore
-reconstructs exact retained-consensus retries. Token-only lookup for commands
-first seen after sealing is not retained, and accepting writes again requires a
-Catalog migration or horizontal sharding.
+marks atomic managed-delete history, while snapshot format v8 marks a growth
+seal without adding a payload field. The sealed Catalog rejects ordinary
+commands and no-op deletes without growth, but applies an authorized delete
+only when it removes live state and strictly shrinks the complete encoded
+snapshot. It stays sealed across incremental cleanup until the normal rejection
+reserve is restored, then resumes ordinary admission under recovered snapshot
+format v9. Native restore reconstructs exact consensus-retained rejections
+before and after recovery. Token-only lookup for commands first seen during the
+seal is not retained; a Catalog that cannot reclaim sufficient space requires
+migration or horizontal sharding.
 
 Managed delete carries the desired generation and lease fence but derives the
 native Catalog generation inside the same replicated transition. This avoids a

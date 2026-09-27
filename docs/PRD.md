@@ -31,11 +31,14 @@ prunes against the complete snapshot byte budget. A binary application image
 avoids base64 expansion, admission reserves its fixed header and one maximum
 rejection record, and growth that still cannot fit commits a durable,
 non-mutating capacity rejection. If repeated unique refusals exhaust that
-reserve, snapshot v8 seals the Catalog read-only: every later command receives
-the same non-mutating capacity result, snapshots and exact consensus retries
-remain recoverable, and operators must migrate or shard the Catalog before
-accepting writes again. Token-only operation lookup is not guaranteed for
-commands first received after the seal. Cursor zero fails stale after the
+reserve, snapshot v8 seals the Catalog against growth: ordinary commands and
+no-op deletes receive the same non-mutating capacity result, while a real
+delete commits only when the complete encoded snapshot strictly shrinks.
+Incremental cleanup automatically resumes ordinary admission after restoring
+the rejection reserve; recovered snapshot v9 keeps consensus-retained retry
+reconstruction safe across restart. Operators must migrate or shard Catalogs
+that cannot reclaim enough space. Token-only operation lookup is not guaranteed
+for commands first received during the seal. Cursor zero fails stale after the
 history floor advances. Pre-seal public delete and capacity-rejection tokens
 remain discoverable after replay. Delete operation records expose the original
 optional generation precondition independently of the returned tombstone

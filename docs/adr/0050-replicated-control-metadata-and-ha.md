@@ -87,13 +87,16 @@ into Go.
    complete encoded snapshot byte budget. If no history suffix can make a new
    command fit, persist a token-bound non-mutating capacity rejection rather
    than failing the post-consensus applier. If unique rejected commands consume
-   the reserved rejection space, persist terminal snapshot format v8 and seal
-   the Catalog read-only. The format version is the seal marker, so the
-   transition adds no snapshot payload field. A sealed Catalog rejects all
-   unknown commands without state growth; native checkpoint restore can
-   reconstruct an exact retained-consensus retry from its command bytes.
-   Token-only operation lookup for commands first received after sealing is not
-   retained, and the Catalog cannot be unsealed in place: migrate or shard it.
+   the reserved rejection space, persist snapshot format v8 and seal Catalog
+   growth. The format version is the seal marker, so the transition adds no
+   snapshot payload field. A sealed Catalog rejects ordinary commands and
+   no-op deletes without state growth, but applies a delete when it removes live
+   state and strictly shrinks the complete encoded snapshot. Incremental cleanup
+   retains the seal until the ordinary rejection reserve is restored, then
+   resumes admission under recovered snapshot format v9. Native checkpoint
+   restore reconstructs exact consensus-retained retries in both states.
+   Token-only operation lookup for commands first received during sealing is
+   not retained; migrate or shard a Catalog that cannot reclaim enough space.
 10. Expose each durable operation's command kind and the original desired-delete
     generation precondition. Replay compares that retained command value,
     including the distinction between no precondition and generation zero,
@@ -119,9 +122,10 @@ an explicit scaling boundary. Horizontal metadata sharding/capacity, a public
 request-token retention window, long-duration lease-clock fault evidence, and
 protected multi-control chaos remain open.
 Capacity sealing is a safety boundary rather than a scaling mechanism: it
-preserves availability for reads, checkpointing, and deterministic refusals,
-but accepting writes again requires an operator-led migration to a Catalog with
-capacity.
+preserves availability for reads, checkpointing, deterministic refusals, and
+strictly space-reclaiming deletes. Ordinary writes resume only after cleanup
+restores the complete reserve. A Catalog without reclaimable live state still
+requires operator-led migration to a Catalog with capacity.
 Legacy token outcomes are not reconstructible during the one-time bbolt import;
 operators must retain the old file for rollback and treat an ambiguous
 pre-migration request as an operation requiring manual generation inspection.

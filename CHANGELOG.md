@@ -63,11 +63,13 @@ notes explicitly list additional verified artifacts.
   enough checkpoint space for that rejection instead of fail-stopping Catalog
   replicas after consensus commit.
 - Repeated unique capacity refusals can no longer consume the rejection reserve
-  and fail-stop a Catalog tablet. Snapshot format v8 records a terminal
-  capacity seal without increasing the payload; sealed Catalogs reject every
-  unknown command without mutation, remain checkpointable, and reconstruct
-  retained consensus retries after restore. Horizontal Catalog sharding remains
-  the operational recovery path for a sealed region.
+  and fail-stop a Catalog tablet. Snapshot format v8 records a growth seal
+  without increasing the payload. Sealed Catalogs reject unknown growth but
+  admit only real deletes that strictly shrink the complete encoded snapshot;
+  incremental cleanup resumes ordinary admission at the reserved-headroom
+  boundary. Recovered snapshot format v9 preserves exact consensus-retry
+  reconstruction across another checkpoint. Horizontal Catalog sharding
+  remains the long-term capacity path.
 - Control operation results now expose their original command kind and retained
   delete generation precondition. Missing-resource delete replay validates that
   command precondition instead of mistaking a later tombstone high-water mark

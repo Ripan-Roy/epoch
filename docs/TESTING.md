@@ -432,9 +432,12 @@ profile immutability, resource-kind/profile compatibility, strict name and
 capacity bounds, canonical versioned command decoding, and identical snapshots
 after command replay. Capacity-bound regressions submit distinct maximum-size
 commands until the finite rejection reserve is exhausted, prove the Catalog
-enters snapshot-v8 read-only seal without changing business state or
-fail-stopping its tablet, restore that snapshot, and reconstruct the retained
-consensus retry receipt. Cross-language control tests also pin the original
+enters a snapshot-v8 growth seal without changing business state or
+fail-stopping its tablet, restore that snapshot, reject no-op cleanup, and
+admit only deletes that strictly shrink the encoded checkpoint. The test
+deletes incrementally until normal headroom returns, checkpoints recovered
+snapshot v9, and reconstructs the original sealed consensus retry after another
+restore. Cross-language control tests also pin the original
 optional delete precondition independently of a retained tombstone generation.
 Atomic managed-delete tests leave status publication stale after native
 materialization, then prove deletion derives the native generation in Catalog;
