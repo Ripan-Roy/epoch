@@ -30,9 +30,20 @@ guards normalize to the replicated clock, and the 4,096-entry change log also
 prunes against the complete snapshot byte budget. A binary application image
 avoids base64 expansion, admission reserves its fixed header and one maximum
 rejection record, and growth that still cannot fit commits a durable,
-non-mutating capacity rejection. Cursor zero fails stale after the history
-floor advances. Public delete and capacity-rejection tokens remain
-discoverable after replay. Protected
+non-mutating capacity rejection. If repeated unique refusals exhaust that
+reserve, snapshot v8 seals the Catalog read-only: every later command receives
+the same non-mutating capacity result, snapshots and exact consensus retries
+remain recoverable, and operators must migrate or shard the Catalog before
+accepting writes again. Token-only operation lookup is not guaranteed for
+commands first received after the seal. Cursor zero fails stale after the
+history floor advances. Pre-seal public delete and capacity-rejection tokens
+remain discoverable after replay. Delete operation records expose the original
+optional generation precondition independently of the returned tombstone
+generation. Managed delete derives the current native generation inside the
+replicated command rather than trusting asynchronously published controller
+status, closing the materialization/status crash window while retaining legacy
+v6 command compatibility; new atomic managed deletes use command/snapshot v7.
+Protected
 multi-control chaos, Catalog capacity/sharding, legacy token migration, and a
 public token-retention window remain open. See
 [ADR-0050](adr/0050-replicated-control-metadata-and-ha.md).

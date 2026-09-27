@@ -690,6 +690,7 @@ func TestCatalogRegistryManagedDeleteIsLeaseFencedAndExactlyReplayable(t *testin
 	leasePosts := 0
 	deletePosts := 0
 	var deleteToken string
+	storedExpected := decimalUint64(4)
 	key := regionalKey(resources.KindStream, "orders")
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("content-type", "application/json")
@@ -702,10 +703,12 @@ func TestCatalogRegistryManagedDeleteIsLeaseFencedAndExactlyReplayable(t *testin
 			}
 			name := controlName(key)
 			writeJSON(t, writer, controlOperationDocument{
-				RequestToken:  deleteToken,
-				ProposalID:    37,
-				State:         ControlOperationSucceeded,
-				ResourceNames: []controlResourceNameDocument{name},
+				RequestToken:       deleteToken,
+				ProposalID:         37,
+				State:              ControlOperationSucceeded,
+				CommandKind:        "delete_managed",
+				ResourceNames:      []controlResourceNameDocument{name},
+				ExpectedGeneration: &storedExpected,
 				Mutation: &controlMutationDocument{
 					Kind:              "managed_deleted",
 					Name:              &name,
@@ -743,8 +746,7 @@ func TestCatalogRegistryManagedDeleteIsLeaseFencedAndExactlyReplayable(t *testin
 			} else if body.RequestToken != deleteToken {
 				t.Errorf("managed delete token changed: %q != %q", body.RequestToken, deleteToken)
 			}
-			if body.Lease.Fence != "9" || body.ExpectedDesiredGeneration != "4" ||
-				body.ExpectedCatalogGeneration != "3" {
+			if body.Lease.Fence != "9" || body.ExpectedDesiredGeneration != "4" {
 				t.Errorf("unexpected managed delete body: %+v", body)
 			}
 			name := controlName(key)
@@ -782,14 +784,14 @@ func TestCatalogRegistryManagedDeleteIsLeaseFencedAndExactlyReplayable(t *testin
 		ExpectedGeneration: &expected,
 		Key:                key,
 	}
-	deleted, err := registry.DeleteManaged(t.Context(), request, 4, 3)
+	deleted, err := registry.DeleteManaged(t.Context(), request, 4)
 	if err != nil || !deleted.Deleted || deleted.Generation != 5 || deleted.Replayed {
 		t.Fatalf("DeleteManaged() = %+v, %v", deleted, err)
 	}
 	registry.leaseMu.Lock()
 	registry.lease = controlLeaseDocument{}
 	registry.leaseMu.Unlock()
-	replayed, err := registry.DeleteManaged(t.Context(), request, 4, 3)
+	replayed, err := registry.DeleteManaged(t.Context(), request, 4)
 	if err != nil || !replayed.Replayed || replayed.Generation != 5 {
 		t.Fatalf("DeleteManaged(replay) = %+v, %v", replayed, err)
 	}
@@ -798,7 +800,7 @@ func TestCatalogRegistryManagedDeleteIsLeaseFencedAndExactlyReplayable(t *testin
 	}
 	wrongGeneration := uint64(3)
 	request.ExpectedGeneration = &wrongGeneration
-	_, err = registry.DeleteManaged(t.Context(), request, 3, 3)
+	_, err = registry.DeleteManaged(t.Context(), request, 3)
 	assertStoreCode(t, err, resources.CodeConflict)
 }
 
@@ -835,6 +837,7 @@ func TestCatalogRegistryDoesNotChallengeAnotherLiveOwner(t *testing.T) {
 
 func TestCatalogRegistryReplaysMissingDeleteByItsPublicToken(t *testing.T) {
 	key := regionalKey(resources.KindStream, "missing")
+	storedExpected := decimalUint64(0)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodGet || request.URL.EscapedPath() != controlOperationsPath+"/delete-missing" {
 			t.Errorf("unexpected request: %s %s", request.Method, request.URL.EscapedPath())
@@ -843,12 +846,14 @@ func TestCatalogRegistryReplaysMissingDeleteByItsPublicToken(t *testing.T) {
 		}
 		name := controlName(key)
 		writeJSON(t, writer, controlOperationDocument{
-			RequestToken:  "delete-missing",
-			ProposalID:    12,
-			State:         ControlOperationSucceeded,
-			ResourceNames: []controlResourceNameDocument{name},
+			RequestToken:       "delete-missing",
+			ProposalID:         12,
+			State:              ControlOperationSucceeded,
+			CommandKind:        "delete_desired",
+			ResourceNames:      []controlResourceNameDocument{name},
+			ExpectedGeneration: &storedExpected,
 			Mutation: &controlMutationDocument{
-				Kind: "desired_deleted", Name: &name, Generation: 0, Deleted: false,
+				Kind: "desired_deleted", Name: &name, Generation: 4, Deleted: false,
 			},
 		})
 	}))
@@ -862,13 +867,24 @@ func TestCatalogRegistryReplaysMissingDeleteByItsPublicToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	expected := uint64(0)
 	replayed, found, err := registry.ReplayManagedDelete(t.Context(), resources.DeleteRequest{
+		RequestToken:       "delete-missing",
+		ExpectedGeneration: &expected,
+		Key:                key,
+	})
+	if err != nil || !found || replayed.Deleted || !replayed.Replayed || replayed.Generation != 4 {
+		t.Fatalf("ReplayManagedDelete() = %+v, %t, %v", replayed, found, err)
+	}
+
+	_, found, err = registry.ReplayManagedDelete(t.Context(), resources.DeleteRequest{
 		RequestToken: "delete-missing",
 		Key:          key,
 	})
-	if err != nil || !found || replayed.Deleted || !replayed.Replayed {
-		t.Fatalf("ReplayManagedDelete() = %+v, %t, %v", replayed, found, err)
+	if !found {
+		t.Fatal("ReplayManagedDelete() did not find the retained operation")
 	}
+	assertStoreCode(t, err, resources.CodeConflict)
 }
 
 func TestCatalogRegistryUsesTheActiveLeaseForStandbyDeletes(t *testing.T) {
@@ -917,7 +933,7 @@ func TestCatalogRegistryUsesTheActiveLeaseForStandbyDeletes(t *testing.T) {
 
 	result, err := registry.DeleteManaged(t.Context(), resources.DeleteRequest{
 		RequestToken: "delete-orders", Key: key,
-	}, 2, 1)
+	}, 2)
 	if err != nil || !result.Deleted || deleteCalls != 1 {
 		t.Fatalf("DeleteManaged() = %+v, %v, calls = %d", result, err, deleteCalls)
 	}

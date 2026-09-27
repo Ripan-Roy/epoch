@@ -13,13 +13,13 @@ use epoch_bus::{BusConfig, EventBus};
 use epoch_cache::{CacheConfig, EvictionPolicy};
 use epoch_catalog::{
     AcquireControlLease, ApplyDesiredResources, ApplyResource, CatalogChange, CatalogCommand,
-    CatalogError, CatalogMutation, ControlLease, ControlLeaseGuard, DeleteDesiredResource,
-    DeleteManagedResource, DeleteResource, DesiredResourceWrite, FinalizeTabletMembership,
-    ImportManagedResources, ManagedResourceApplyResult, ManagedResourcePlacement,
-    ManagedResourceRecord, NodeCapacityObservation, PlanManagedTabletMembership,
-    PlanTabletMembership, ReconcileManagedResources, ResourceGeneration, ResourceGovernance,
-    ResourceName, ResourceRecord, ResourceSpec, TabletDescriptor, TabletPlacement,
-    UpdateManagedResourceStatus, catalog_proposal_id_for,
+    CatalogError, CatalogMutation, CatalogOperationKind, ControlLease, ControlLeaseGuard,
+    DeleteDesiredResource, DeleteManagedResource, DeleteResource, DesiredResourceWrite,
+    FinalizeTabletMembership, ImportManagedResources, ManagedResourceApplyResult,
+    ManagedResourcePlacement, ManagedResourceRecord, NodeCapacityObservation,
+    PlanManagedTabletMembership, PlanTabletMembership, ReconcileManagedResources,
+    ResourceGeneration, ResourceGovernance, ResourceName, ResourceRecord, ResourceSpec,
+    TabletDescriptor, TabletPlacement, UpdateManagedResourceStatus, catalog_proposal_id_for,
 };
 use epoch_consensus::{CommittedProposal, ConsensusError, ProposalLookup};
 use epoch_core::{DurabilityProfile, ResourceKind, WorkloadProfile};
@@ -328,8 +328,11 @@ struct DeleteManagedResourceRequest {
     lease: ControlLeaseGuardRequest,
     #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
     expected_desired_generation: u64,
-    #[serde(deserialize_with = "deserialize_u64_from_number_or_decimal")]
-    expected_catalog_generation: u64,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
+    )]
+    expected_catalog_generation: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -811,7 +814,11 @@ struct ControlOperationResponse {
     #[serde(serialize_with = "serialize_u64_as_decimal")]
     proposal_id: u64,
     state: ControlOperationState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command_kind: Option<CatalogOperationKind>,
     resource_names: Vec<ResourceName>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_generation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mutation: Option<CatalogMutationResponse>,
     #[serde(serialize_with = "serialize_u64_as_decimal")]
@@ -1259,7 +1266,9 @@ async fn control_operation(
             request_token,
             proposal_id,
             state: operation_state,
+            command_kind: Some(operation.command_kind),
             resource_names: operation.resource_names,
+            expected_generation: operation.expected_generation.map(|value| value.to_string()),
             mutation: Some((&operation.mutation).into()),
             first_change_cursor: operation.first_change_cursor,
             last_change_cursor: operation.last_change_cursor,
@@ -1271,7 +1280,9 @@ async fn control_operation(
                 request_token,
                 proposal_id,
                 state: ControlOperationState::Pending,
+                command_kind: None,
                 resource_names: Vec::new(),
+                expected_generation: None,
                 mutation: None,
                 first_change_cursor: 0,
                 last_change_cursor: 0,
@@ -1997,6 +2008,23 @@ mod tests {
         .expect("response should contain JSON")
     }
 
+    async fn assert_missing_delete_operation_precondition(app: &Router) {
+        let operation = app
+            .clone()
+            .oneshot(
+                Request::get("/experimental/v1/regional/control/operations/delete-missing-audit")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(operation.status(), StatusCode::OK);
+        let operation = response_json(operation).await;
+        assert_eq!(operation["command_kind"], "delete_desired");
+        assert_eq!(operation["expected_generation"], "0");
+        assert_eq!(operation["mutation"]["generation"], "4");
+    }
+
     fn catalog_resource_path() -> &'static str {
         "/experimental/v1/regional/catalog/resources/acme/shop/dev/core/stream/orders"
     }
@@ -2187,6 +2215,7 @@ mod tests {
         assert_eq!(operation.status(), StatusCode::OK);
         let operation = response_json(operation).await;
         assert_eq!(operation["state"], "succeeded");
+        assert_eq!(operation["command_kind"], "apply_desired");
         assert_eq!(operation["resource_names"][0]["name"], "orders");
         assert_eq!(operation["first_change_cursor"], "1");
 
@@ -2387,8 +2416,7 @@ mod tests {
                         json!({
                             "request_token": "managed-orders-delete-v1",
                             "lease": {"owner_id": "control-a", "fence": "1", "now_ms": "1004"},
-                            "expected_desired_generation": "1",
-                            "expected_catalog_generation": "1"
+                            "expected_desired_generation": "1"
                         })
                         .to_string(),
                     ))
@@ -2517,6 +2545,8 @@ mod tests {
         let deleted = response_json(deleted).await;
         assert_eq!(deleted["mutation"]["generation"], "4");
         assert_eq!(deleted["mutation"]["deleted"], false);
+
+        assert_missing_delete_operation_precondition(&nodes[leader].app).await;
 
         for node in nodes {
             node.peer_server.abort();

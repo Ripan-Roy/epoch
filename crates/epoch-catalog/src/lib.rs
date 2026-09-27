@@ -38,12 +38,18 @@ pub const CATALOG_GOVERNANCE_COMMAND_FORMAT_VERSION: u16 = 3;
 pub const CATALOG_PLACEMENT_COMMAND_FORMAT_VERSION: u16 = 4;
 pub const CATALOG_MEMBERSHIP_COMMAND_FORMAT_VERSION: u16 = 5;
 pub const CATALOG_CONTROL_COMMAND_FORMAT_VERSION: u16 = 6;
+pub const CATALOG_ATOMIC_DELETE_COMMAND_FORMAT_VERSION: u16 = 7;
 pub const CATALOG_SNAPSHOT_FORMAT_VERSION: u16 = 1;
 pub const CATALOG_CONFIG_SNAPSHOT_FORMAT_VERSION: u16 = 2;
 pub const CATALOG_GOVERNANCE_SNAPSHOT_FORMAT_VERSION: u16 = 3;
 pub const CATALOG_PLACEMENT_SNAPSHOT_FORMAT_VERSION: u16 = 4;
 pub const CATALOG_MEMBERSHIP_SNAPSHOT_FORMAT_VERSION: u16 = 5;
 pub const CATALOG_CONTROL_SNAPSHOT_FORMAT_VERSION: u16 = 6;
+pub const CATALOG_ATOMIC_DELETE_SNAPSHOT_FORMAT_VERSION: u16 = 7;
+/// Terminal read-only Catalog state entered when another durable capacity
+/// rejection cannot be retained. The format version itself is the seal marker,
+/// so entering the state does not require extra snapshot payload bytes.
+pub const CATALOG_CAPACITY_SEALED_SNAPSHOT_FORMAT_VERSION: u16 = 8;
 /// Maximum Catalog image embedded in the native application checkpoint.
 ///
 /// The consensus envelope admits 4 MiB application payloads. Native Catalog
@@ -458,7 +464,11 @@ pub struct DeleteManagedResource {
     pub lease: ControlLeaseGuard,
     pub name: ResourceName,
     pub expected_desired_generation: u64,
-    pub expected_catalog_generation: u64,
+    /// Legacy callers may fence a sampled native generation. New callers omit
+    /// it so the replicated command derives the current native generation and
+    /// deletes desired plus materialized state in one atomic transition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_catalog_generation: Option<u64>,
 }
 
 /// One-time import of the previous single-owner Go registry. Import is only
@@ -603,6 +613,7 @@ impl CatalogCommand {
                 | CATALOG_PLACEMENT_COMMAND_FORMAT_VERSION
                 | CATALOG_MEMBERSHIP_COMMAND_FORMAT_VERSION
                 | CATALOG_CONTROL_COMMAND_FORMAT_VERSION
+                | CATALOG_ATOMIC_DELETE_COMMAND_FORMAT_VERSION
         ) {
             return Err(CatalogError::UnsupportedCommandVersion(
                 envelope.format_version,
@@ -622,6 +633,9 @@ impl CatalogCommand {
 
     const fn format_version(&self) -> u16 {
         match self {
+            Self::DeleteManaged(request) if request.expected_catalog_generation.is_none() => {
+                CATALOG_ATOMIC_DELETE_COMMAND_FORMAT_VERSION
+            }
             Self::ApplyDesired(_)
             | Self::DeleteDesired(_)
             | Self::DeleteManaged(_)
@@ -712,6 +726,31 @@ impl CatalogCommand {
         names.sort();
         names.dedup();
         names
+    }
+
+    const fn delete_expected_generation(&self) -> Option<u64> {
+        match self {
+            Self::DeleteDesired(request) => request.expected_generation,
+            Self::DeleteManaged(request) => Some(request.expected_desired_generation),
+            _ => None,
+        }
+    }
+
+    const fn operation_kind(&self) -> CatalogOperationKind {
+        match self {
+            Self::Apply(_) => CatalogOperationKind::Apply,
+            Self::Delete(_) => CatalogOperationKind::Delete,
+            Self::PlanMembership(_) => CatalogOperationKind::PlanMembership,
+            Self::FinalizeMembership(_) => CatalogOperationKind::FinalizeMembership,
+            Self::ApplyDesired(_) => CatalogOperationKind::ApplyDesired,
+            Self::DeleteDesired(_) => CatalogOperationKind::DeleteDesired,
+            Self::DeleteManaged(_) => CatalogOperationKind::DeleteManaged,
+            Self::ImportManaged(_) => CatalogOperationKind::ImportManaged,
+            Self::AcquireControlLease(_) => CatalogOperationKind::AcquireControlLease,
+            Self::UpdateManagedStatus(_) => CatalogOperationKind::UpdateManagedStatus,
+            Self::ReconcileManaged(_) => CatalogOperationKind::ReconcileManaged,
+            Self::PlanManagedMembership(_) => CatalogOperationKind::PlanManagedMembership,
+        }
     }
 }
 
@@ -922,12 +961,34 @@ pub struct CatalogChangePage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogOperation {
     pub request_token: String,
+    pub command_kind: CatalogOperationKind,
     /// Canonical affected identities retained independently of the mutation
     /// result so rejected operations can still be authorized safely.
     pub resource_names: Vec<ResourceName>,
+    /// Original optimistic-concurrency precondition for a desired-state or
+    /// managed delete. This is derived from the retained command rather than
+    /// inferred from the resulting tombstone generation.
+    pub expected_generation: Option<u64>,
     pub mutation: CatalogMutation,
     pub first_change_cursor: u64,
     pub last_change_cursor: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogOperationKind {
+    Apply,
+    Delete,
+    PlanMembership,
+    FinalizeMembership,
+    ApplyDesired,
+    DeleteDesired,
+    DeleteManaged,
+    ImportManaged,
+    AcquireControlLease,
+    UpdateManagedStatus,
+    ReconcileManaged,
+    PlanManagedMembership,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1003,6 +1064,10 @@ pub struct Catalog {
     control_clock_ms: u64,
     next_change_cursor: u64,
     changes: Vec<CatalogChange>,
+    /// Once the bounded snapshot can no longer retain another exact capacity
+    /// rejection, all unknown commands are rejected without growing state.
+    /// Snapshot format v8 persists this terminal safety state.
+    capacity_sealed: bool,
 }
 
 impl Default for Catalog {
@@ -1028,6 +1093,7 @@ impl Catalog {
             control_clock_ms: 0,
             next_change_cursor: 1,
             changes: Vec::new(),
+            capacity_sealed: false,
         }
     }
 
@@ -1049,6 +1115,9 @@ impl Catalog {
                 return Err(CatalogError::IdempotencyConflict);
             }
             return Ok(completed.mutation.as_replayed());
+        }
+        if self.capacity_sealed {
+            return Ok(rejected_mutation(&CatalogError::SnapshotTooLarge));
         }
 
         // Apply against a candidate so the snapshot byte admission below is
@@ -1075,8 +1144,18 @@ impl Catalog {
                     },
                 );
                 rejected.prune_transient_control_requests();
-                rejected.prune_change_history_to_limit(MAX_CATALOG_SNAPSHOT_BYTES)?;
-                *self = rejected;
+                match rejected.prune_change_history_to_limit(MAX_CATALOG_SNAPSHOT_BYTES) {
+                    Ok(()) => *self = rejected,
+                    Err(CatalogError::SnapshotTooLarge) => {
+                        // A finite snapshot cannot retain an unbounded set of
+                        // unique rejected commands. Persist a terminal seal in
+                        // the format version and reject every unknown command
+                        // from now on, keeping the tablet checkpointable after
+                        // the already-committed entry is applied.
+                        *self = self.seal_at_capacity()?;
+                    }
+                    Err(error) => return Err(error),
+                }
                 return Ok(mutation);
             }
             Err(error) => return Err(error),
@@ -1156,6 +1235,16 @@ impl Catalog {
         for (_, token) in transient.into_iter().take(remove) {
             self.completed_requests.remove(&token);
         }
+    }
+
+    fn seal_at_capacity(&self) -> CatalogResult<Self> {
+        let mut sealed = self.clone();
+        sealed.capacity_sealed = true;
+        // v7 and v8 have the same encoded width, and the sealed digest is a
+        // permutation of the unsealed digest bytes. The terminal marker
+        // therefore cannot make an already checkpointable Catalog larger.
+        sealed.encode_snapshot()?;
+        Ok(sealed)
     }
 
     fn prune_change_history_to_limit(&mut self, limit: usize) -> CatalogResult<()> {
@@ -1272,7 +1361,9 @@ impl Catalog {
             .get(request_token)
             .map(|completed| CatalogOperation {
                 request_token: request_token.to_owned(),
+                command_kind: completed.command.operation_kind(),
                 resource_names: completed.command.resource_names(),
+                expected_generation: completed.command.delete_expected_generation(),
                 mutation: completed.mutation.clone(),
                 first_change_cursor: completed.first_change_cursor,
                 last_change_cursor: completed.last_change_cursor,
@@ -1312,6 +1403,10 @@ impl Catalog {
 
     pub fn is_consensus_group_reserved(&self, group_id: u64) -> bool {
         self.reserved_consensus_group_ids.contains(&group_id)
+    }
+
+    pub const fn is_capacity_sealed(&self) -> bool {
+        self.capacity_sealed
     }
 
     pub fn snapshot(&self) -> CatalogSnapshot {
@@ -1361,7 +1456,14 @@ impl Catalog {
                 .to_be_bytes(),
         );
         hasher.update(encoded);
-        Ok(hasher.finalize().into())
+        let mut digest: [u8; 32] = hasher.finalize().into();
+        if self.capacity_sealed {
+            // Snapshot format v8 is the persisted seal marker. Reversing the
+            // digest binds that marker to the state while preserving the exact
+            // decimal-array byte length of the v1 digest representation.
+            digest.reverse();
+        }
+        Ok(digest)
     }
 
     pub fn encode_snapshot(&self) -> CatalogResult<Vec<u8>> {
@@ -1391,12 +1493,17 @@ impl Catalog {
                 | CATALOG_PLACEMENT_SNAPSHOT_FORMAT_VERSION
                 | CATALOG_MEMBERSHIP_SNAPSHOT_FORMAT_VERSION
                 | CATALOG_CONTROL_SNAPSHOT_FORMAT_VERSION
+                | CATALOG_ATOMIC_DELETE_SNAPSHOT_FORMAT_VERSION
+                | CATALOG_CAPACITY_SEALED_SNAPSHOT_FORMAT_VERSION
         ) {
             return Err(CatalogError::UnsupportedSnapshotVersion(
                 envelope.format_version,
             ));
         }
-        let catalog = Self::from_snapshot(envelope.snapshot)?;
+        let catalog = Self::from_snapshot(
+            envelope.snapshot,
+            envelope.format_version == CATALOG_CAPACITY_SEALED_SNAPSHOT_FORMAT_VERSION,
+        )?;
         if envelope.format_version != catalog.snapshot_format_version() {
             return Err(CatalogError::UnsupportedSnapshotVersion(
                 envelope.format_version,
@@ -1412,6 +1519,18 @@ impl Catalog {
     }
 
     fn snapshot_format_version(&self) -> u16 {
+        if self.capacity_sealed {
+            return CATALOG_CAPACITY_SEALED_SNAPSHOT_FORMAT_VERSION;
+        }
+        if self.completed_requests.values().any(|completed| {
+            matches!(
+                &completed.command,
+                CatalogCommand::DeleteManaged(request)
+                    if request.expected_catalog_generation.is_none()
+            )
+        }) {
+            return CATALOG_ATOMIC_DELETE_SNAPSHOT_FORMAT_VERSION;
+        }
         if !self.managed_resources.is_empty()
             || !self.managed_last_generations.is_empty()
             || self.control_lease.is_some()
@@ -1495,7 +1614,7 @@ impl Catalog {
         }
     }
 
-    fn from_snapshot(snapshot: CatalogSnapshot) -> CatalogResult<Self> {
+    fn from_snapshot(snapshot: CatalogSnapshot, capacity_sealed: bool) -> CatalogResult<Self> {
         let reserved_consensus_group_ids = snapshot
             .reserved_consensus_group_ids
             .iter()
@@ -1540,6 +1659,7 @@ impl Catalog {
             control_clock_ms: snapshot.control_clock_ms,
             next_change_cursor: snapshot.next_change_cursor,
             changes: snapshot.changes,
+            capacity_sealed,
         })
     }
 
@@ -1652,10 +1772,13 @@ impl Catalog {
         )?;
 
         let mut candidate = self.clone();
-        let catalog_generation = if candidate.resources.contains_key(&request.name) {
+        let catalog_generation = if let Some(resource) = candidate.resources.get(&request.name) {
+            let expected_catalog_generation = request
+                .expected_catalog_generation
+                .unwrap_or(resource.generation);
             let mutation = candidate.delete_resource(&DeleteResource {
                 request_token: request.request_token.clone(),
-                expected_generation: Some(request.expected_catalog_generation),
+                expected_generation: Some(expected_catalog_generation),
                 name: request.name.clone(),
             })?;
             let CatalogMutation::Deleted { generation, .. } = mutation else {
@@ -1663,7 +1786,9 @@ impl Catalog {
             };
             generation
         } else {
-            validate_expected_generation(Some(request.expected_catalog_generation), 0)?;
+            if let Some(expected_catalog_generation) = request.expected_catalog_generation {
+                validate_expected_generation(Some(expected_catalog_generation), 0)?;
+            }
             candidate
                 .last_generations
                 .get(&request.name)
@@ -3373,6 +3498,66 @@ mod tests {
         ));
     }
 
+    fn capacity_test_catalog() -> Catalog {
+        let document = json!({"padding": "x".repeat(110 * 1024)});
+        let mut catalog = Catalog::new();
+        for index in 0..7 {
+            let name = managed_test_name(index);
+            let resource = ManagedResourceRecord {
+                name: name.clone(),
+                generation: 1,
+                desired: document.clone(),
+                status: document.clone(),
+                deletion_requested: false,
+            };
+            catalog
+                .managed_resources
+                .insert(name.clone(), resource.clone());
+            catalog.managed_last_generations.insert(name.clone(), 1);
+            let token = format!("desired-{index}");
+            catalog.completed_requests.insert(
+                token.clone(),
+                CompletedRequest {
+                    command: CatalogCommand::ApplyDesired(ApplyDesiredResources {
+                        request_token: token,
+                        resources: vec![DesiredResourceWrite {
+                            name,
+                            expected_generation: Some(0),
+                            desired: document.clone(),
+                        }],
+                    }),
+                    mutation: CatalogMutation::DesiredApplied {
+                        resources: vec![ManagedResourceApplyResult {
+                            resource,
+                            created: true,
+                            changed: true,
+                        }],
+                        changed: true,
+                        replayed: false,
+                    },
+                    first_change_cursor: 0,
+                    last_change_cursor: 0,
+                },
+            );
+        }
+        assert!(
+            catalog.snapshot_upper_bound_len(&[]).unwrap() <= MAX_CATALOG_SNAPSHOT_BYTES,
+            "the pre-command Catalog must remain checkpointable"
+        );
+        catalog
+    }
+
+    fn capacity_overflow_command(token: impl Into<String>, padding: char) -> CatalogCommand {
+        CatalogCommand::ApplyDesired(ApplyDesiredResources {
+            request_token: token.into(),
+            resources: vec![DesiredResourceWrite {
+                name: managed_test_name(7),
+                expected_generation: Some(0),
+                desired: json!({"padding": padding.to_string().repeat(120 * 1024)}),
+            }],
+        })
+    }
+
     #[test]
     fn change_history_is_pruned_against_the_complete_snapshot_byte_budget() {
         let component = "x".repeat(MAX_NAME_COMPONENT_BYTES);
@@ -3466,59 +3651,90 @@ mod tests {
 
     #[test]
     fn snapshot_overflow_is_a_non_mutating_capacity_rejection() {
-        let document = json!({"padding": "x".repeat(110 * 1024)});
-        let mut catalog = Catalog::new();
-        for index in 0..7 {
-            let name = managed_test_name(index);
-            let resource = ManagedResourceRecord {
-                name: name.clone(),
-                generation: 1,
-                desired: document.clone(),
-                status: document.clone(),
-                deletion_requested: false,
-            };
-            catalog
-                .managed_resources
-                .insert(name.clone(), resource.clone());
-            catalog.managed_last_generations.insert(name.clone(), 1);
-            let token = format!("desired-{index}");
-            catalog.completed_requests.insert(
-                token.clone(),
-                CompletedRequest {
-                    command: CatalogCommand::ApplyDesired(ApplyDesiredResources {
-                        request_token: token,
-                        resources: vec![DesiredResourceWrite {
-                            name,
-                            expected_generation: Some(0),
-                            desired: document.clone(),
-                        }],
-                    }),
-                    mutation: CatalogMutation::DesiredApplied {
-                        resources: vec![ManagedResourceApplyResult {
-                            resource,
-                            created: true,
-                            changed: true,
-                        }],
-                        changed: true,
-                        replayed: false,
-                    },
-                    first_change_cursor: 0,
-                    last_change_cursor: 0,
-                },
-            );
+        let mut catalog = capacity_test_catalog();
+        let overflow = capacity_overflow_command("desired-overflow", 'y');
+        assert_snapshot_capacity_rejection_is_durable(&mut catalog, overflow);
+    }
+
+    #[test]
+    fn repeated_capacity_rejections_seal_without_snapshot_growth() {
+        let mut catalog = capacity_test_catalog();
+        assert_snapshot_capacity_rejection_is_durable(
+            &mut catalog,
+            capacity_overflow_command("desired-overflow", 'y'),
+        );
+        for index in 0..16 {
+            let unsealed_len = catalog.encode_snapshot().unwrap().len();
+            let rejection = catalog
+                .apply(capacity_overflow_command(
+                    format!("desired-overflow-{index}"),
+                    'z',
+                ))
+                .unwrap();
+            assert!(matches!(
+                rejection,
+                CatalogMutation::Rejected {
+                    code: CatalogRejectionCode::CapacityExceeded,
+                    ..
+                }
+            ));
+            let encoded_len = catalog.encode_snapshot().unwrap().len();
+            if catalog.is_capacity_sealed() {
+                assert_eq!(encoded_len, unsealed_len);
+                break;
+            }
         }
         assert!(
-            catalog.snapshot_upper_bound_len(&[]).unwrap() <= MAX_CATALOG_SNAPSHOT_BYTES,
-            "the pre-command Catalog must remain checkpointable"
+            catalog.is_capacity_sealed(),
+            "unique capacity rejections must eventually seal the bounded Catalog"
         );
-        let overflow = CatalogCommand::ApplyDesired(ApplyDesiredResources {
-            request_token: "desired-overflow".into(),
-            resources: vec![DesiredResourceWrite {
-                name: managed_test_name(7),
-                expected_generation: Some(0),
-                desired: json!({"padding": "y".repeat(120 * 1024)}),
-            }],
-        });
-        assert_snapshot_capacity_rejection_is_durable(&mut catalog, overflow);
+
+        let digest = catalog.state_digest().unwrap();
+        let rejected_after_seal = catalog
+            .apply(CatalogCommand::ApplyDesired(ApplyDesiredResources {
+                request_token: "small-command-after-seal".into(),
+                resources: vec![DesiredResourceWrite {
+                    name: managed_test_name(8),
+                    expected_generation: Some(0),
+                    desired: json!({"padding": "small"}),
+                }],
+            }))
+            .unwrap();
+        assert!(matches!(
+            rejected_after_seal,
+            CatalogMutation::Rejected {
+                code: CatalogRejectionCode::CapacityExceeded,
+                replayed: false,
+                ..
+            }
+        ));
+        assert_eq!(catalog.state_digest().unwrap(), digest);
+        assert!(catalog.managed_resource(&managed_test_name(8)).is_err());
+
+        let encoded = catalog.encode_snapshot().unwrap();
+        let envelope: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(
+            envelope["format_version"],
+            CATALOG_CAPACITY_SEALED_SNAPSHOT_FORMAT_VERSION
+        );
+        let mut restored = Catalog::decode_snapshot(&encoded).unwrap();
+        assert!(restored.is_capacity_sealed());
+        assert_eq!(restored.state_digest().unwrap(), digest);
+        assert!(matches!(
+            restored
+                .apply(CatalogCommand::ApplyDesired(ApplyDesiredResources {
+                    request_token: "restored-command-after-seal".into(),
+                    resources: vec![DesiredResourceWrite {
+                        name: managed_test_name(8),
+                        expected_generation: Some(0),
+                        desired: json!({"padding": "small"}),
+                    }],
+                }))
+                .unwrap(),
+            CatalogMutation::Rejected {
+                code: CatalogRejectionCode::CapacityExceeded,
+                ..
+            }
+        ));
     }
 }

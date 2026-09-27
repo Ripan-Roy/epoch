@@ -114,7 +114,6 @@ type managedDeleteStore interface {
 		context.Context,
 		resources.DeleteRequest,
 		uint64,
-		uint64,
 	) (resources.DeleteResult, error)
 }
 
@@ -668,8 +667,7 @@ func (reconciler *Reconciler) Delete(
 		}
 	}
 	if managed, ok := reconciler.registry.(managedDeleteStore); ok {
-		catalogGeneration := resource.Status.EffectiveCatalogGeneration()
-		if resource.Generation == math.MaxUint64 || catalogGeneration == math.MaxUint64 {
+		if resource.Generation == math.MaxUint64 {
 			return resources.DeleteResult{}, &reconcileError{
 				message:   "resource generation is exhausted",
 				retryable: false,
@@ -680,7 +678,6 @@ func (reconciler *Reconciler) Delete(
 			ctx,
 			request,
 			resource.Generation,
-			catalogGeneration,
 		)
 		if deleteErr != nil {
 			var storeError *resources.RegistryError

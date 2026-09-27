@@ -1049,8 +1049,10 @@ lease guard to its replicated control clock when a standby's wall-clock sample
 precedes a concurrent owner commit, while still rejecting an expired lease or
 changed fence. Desired-
 state batches commit 1–128 resources atomically, while operation lookup retains
-affected identities for tenant authorization and change watches expose an
-explicit scanned resume cursor. Internal inventory uses bounded keyset pages
+affected identities, command kind, and the original delete generation
+precondition for exact replay and tenant authorization. A result's tombstone
+generation is never treated as that command precondition. Change watches expose
+an explicit scanned resume cursor. Internal inventory uses bounded keyset pages
 with one stable Catalog high-water cursor across the complete scan. Controller
 lease, status, reconciliation, and membership outcomes retain a small
 deterministic suffix in Catalog. Native application checkpoint v2 stores raw
@@ -1062,7 +1064,20 @@ omitted internal receipt as valid only below the installed applied-index
 boundary. The resumable change log is capped at 4,096 entries and also prunes
 its oldest prefix against the complete admitted snapshot budget. When no
 history remains to expire, further growth persists a token-bound capacity
-rejection without mutating business state or fail-stopping replicas.
+rejection without mutating business state or fail-stopping replicas. Repeated
+unique refusals eventually consume that finite reserve; snapshot format v7
+marks atomic managed-delete history, while snapshot format v8 marks a terminal
+read-only capacity seal without adding a payload field. The
+sealed Catalog rejects every unknown command without growth and native restore
+reconstructs exact retained-consensus retries. Token-only lookup for commands
+first seen after sealing is not retained, and accepting writes again requires a
+Catalog migration or horizontal sharding.
+
+Managed delete carries the desired generation and lease fence but derives the
+native Catalog generation inside the same replicated transition. This avoids a
+race in which materialization commits and the controller crashes before its
+status update publishes the new native generation. New commands use format v7;
+legacy v6 commands with an explicit native-generation fence remain readable.
 
 The Kubernetes operator runs three stable, anti-affined control replicas with
 ordered startup and a two-instance disruption budget. During a legacy

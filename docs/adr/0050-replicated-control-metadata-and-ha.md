@@ -86,7 +86,25 @@ into Go.
    commit index. Bound watch history by both 4,096 entries and the remaining
    complete encoded snapshot byte budget. If no history suffix can make a new
    command fit, persist a token-bound non-mutating capacity rejection rather
-   than failing the post-consensus applier.
+   than failing the post-consensus applier. If unique rejected commands consume
+   the reserved rejection space, persist terminal snapshot format v8 and seal
+   the Catalog read-only. The format version is the seal marker, so the
+   transition adds no snapshot payload field. A sealed Catalog rejects all
+   unknown commands without state growth; native checkpoint restore can
+   reconstruct an exact retained-consensus retry from its command bytes.
+   Token-only operation lookup for commands first received after sealing is not
+   retained, and the Catalog cannot be unsealed in place: migrate or shard it.
+10. Expose each durable operation's command kind and the original desired-delete
+    generation precondition. Replay compares that retained command value,
+    including the distinction between no precondition and generation zero,
+    rather than inferring it from a result generation that may be a retained
+    tombstone high-water mark.
+11. Derive the current native generation inside a lease-fenced managed-delete
+    transition instead of accepting the controller's asynchronously published
+    status value. This closes the crash window between committed
+    materialization and status publication. New atomic managed-delete commands
+    and snapshots use format v7; legacy v6 commands with an explicit native
+    generation fence remain canonical and readable.
 
 ## Consequences
 
@@ -100,6 +118,10 @@ The Catalog consensus group now carries management metadata and therefore has
 an explicit scaling boundary. Horizontal metadata sharding/capacity, a public
 request-token retention window, long-duration lease-clock fault evidence, and
 protected multi-control chaos remain open.
+Capacity sealing is a safety boundary rather than a scaling mechanism: it
+preserves availability for reads, checkpointing, and deterministic refusals,
+but accepting writes again requires an operator-led migration to a Catalog with
+capacity.
 Legacy token outcomes are not reconstructible during the one-time bbolt import;
 operators must retain the old file for rollback and treat an ambiguous
 pre-migration request as an operation requiring manual generation inspection.

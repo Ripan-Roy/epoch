@@ -1,10 +1,11 @@
 use epoch_catalog::{
-    AcquireControlLease, ApplyDesiredResources, Catalog, CatalogCommand, CatalogError,
-    CatalogMutation, CatalogRejectionCode, ControlLeaseGuard, DeleteDesiredResource,
-    DeleteManagedResource, DesiredResourceWrite, ImportManagedResources, ManagedResourcePlacement,
-    ManagedResourceRecord, NodeCapacityObservation, PlanManagedTabletMembership,
-    ReconcileManagedResources, ResourceGeneration, ResourceName, ResourceSpec, TabletDescriptor,
-    TabletPlacement, UpdateManagedResourceStatus,
+    AcquireControlLease, ApplyDesiredResources, CATALOG_ATOMIC_DELETE_COMMAND_FORMAT_VERSION,
+    CATALOG_ATOMIC_DELETE_SNAPSHOT_FORMAT_VERSION, CATALOG_CONTROL_COMMAND_FORMAT_VERSION, Catalog,
+    CatalogCommand, CatalogError, CatalogMutation, CatalogRejectionCode, ControlLeaseGuard,
+    DeleteDesiredResource, DeleteManagedResource, DesiredResourceWrite, ImportManagedResources,
+    ManagedResourcePlacement, ManagedResourceRecord, NodeCapacityObservation,
+    PlanManagedTabletMembership, ReconcileManagedResources, ResourceGeneration, ResourceName,
+    ResourceSpec, TabletDescriptor, TabletPlacement, UpdateManagedResourceStatus,
 };
 use epoch_core::{ResourceKind, WorkloadProfile};
 use serde_json::json;
@@ -720,7 +721,7 @@ fn managed_delete_removes_desired_and_native_state_under_one_lease_fence() {
             lease,
             name: name("orders"),
             expected_desired_generation: 1,
-            expected_catalog_generation: 1,
+            expected_catalog_generation: None,
         })
     };
     assert!(matches!(
@@ -739,6 +740,12 @@ fn managed_delete_removes_desired_and_native_state_under_one_lease_fence() {
     assert!(catalog.resource(&name("orders")).is_ok());
 
     let accepted = managed_delete("delete-orders", guard("control-a", 1, 1_002));
+    let command_document: serde_json::Value =
+        serde_json::from_slice(&accepted.encode().unwrap()).unwrap();
+    assert_eq!(
+        command_document["format_version"],
+        CATALOG_ATOMIC_DELETE_COMMAND_FORMAT_VERSION
+    );
     assert!(matches!(
         catalog.apply(accepted.clone()).unwrap(),
         CatalogMutation::ManagedDeleted {
@@ -756,6 +763,11 @@ fn managed_delete_removes_desired_and_native_state_under_one_lease_fence() {
         CatalogMutation::ManagedDeleted { replayed: true, .. }
     ));
     let encoded = catalog.encode_snapshot().unwrap();
+    let snapshot_document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(
+        snapshot_document["format_version"],
+        CATALOG_ATOMIC_DELETE_SNAPSHOT_FORMAT_VERSION
+    );
     let restored = Catalog::decode_snapshot(&encoded).unwrap();
     assert_eq!(
         restored.state_digest().unwrap(),
@@ -785,15 +797,24 @@ fn managed_delete_normalizes_a_standby_clock_to_the_replicated_clock() {
         ))
         .unwrap();
 
-    let mutation = catalog
-        .apply(CatalogCommand::DeleteManaged(DeleteManagedResource {
-            request_token: "delete-from-lagging-standby".into(),
-            lease: guard("control-a", 1, 1_001),
-            name: name("orders"),
-            expected_desired_generation: 1,
-            expected_catalog_generation: 0,
-        }))
-        .unwrap();
+    let legacy_command = CatalogCommand::DeleteManaged(DeleteManagedResource {
+        request_token: "delete-from-lagging-standby".into(),
+        lease: guard("control-a", 1, 1_001),
+        name: name("orders"),
+        expected_desired_generation: 1,
+        expected_catalog_generation: Some(0),
+    });
+    let command_document: serde_json::Value =
+        serde_json::from_slice(&legacy_command.encode().unwrap()).unwrap();
+    assert_eq!(
+        command_document["format_version"],
+        CATALOG_CONTROL_COMMAND_FORMAT_VERSION
+    );
+    assert_eq!(
+        CatalogCommand::decode(&legacy_command.encode().unwrap()).unwrap(),
+        legacy_command
+    );
+    let mutation = catalog.apply(legacy_command).unwrap();
     assert!(matches!(
         mutation,
         CatalogMutation::ManagedDeleted {

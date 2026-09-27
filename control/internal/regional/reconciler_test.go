@@ -31,7 +31,6 @@ type managedDeleteRegistry struct {
 	calls             int
 	replayCalls       int
 	desiredGeneration uint64
-	catalogGeneration uint64
 	result            resources.DeleteResult
 }
 
@@ -39,11 +38,9 @@ func (registry *managedDeleteRegistry) DeleteManaged(
 	_ context.Context,
 	request resources.DeleteRequest,
 	desiredGeneration uint64,
-	catalogGeneration uint64,
 ) (resources.DeleteResult, error) {
 	registry.calls++
 	registry.desiredGeneration = desiredGeneration
-	registry.catalogGeneration = catalogGeneration
 	result, err := registry.Store.Delete(request)
 	registry.result = result
 	return result, err
@@ -399,7 +396,7 @@ func TestReconcilerDeletesAndRecreatesAcrossSeparatedGenerationClocks(t *testing
 	}
 }
 
-func TestReconcilerUsesAtomicManagedDeleteWhenAvailable(t *testing.T) {
+func TestReconcilerUsesAtomicManagedDeleteAcrossStatusPublicationCrashWindow(t *testing.T) {
 	local := resources.NewRegistry()
 	resource := applyDesired(
 		t,
@@ -409,13 +406,6 @@ func TestReconcilerUsesAtomicManagedDeleteWhenAvailable(t *testing.T) {
 		1,
 		3,
 	)
-	status := resource.Status
-	status.Phase = resources.PhaseReady
-	status.ObservedGeneration = resource.Generation
-	status.CatalogGeneration = 1
-	if _, err := local.UpdateStatus(resource.ResourceKey, resource.Generation, status); err != nil {
-		t.Fatalf("UpdateStatus() error = %v", err)
-	}
 	registry := &managedDeleteRegistry{Store: local}
 	reconciler := NewReconciler(registry, &fakeAuthority{})
 	expected := resource.Generation
@@ -429,8 +419,7 @@ func TestReconcilerUsesAtomicManagedDeleteWhenAvailable(t *testing.T) {
 		t.Fatalf("Delete() error = %v", err)
 	}
 	if !deleted.Deleted || registry.calls != 1 ||
-		registry.desiredGeneration != resource.Generation ||
-		registry.catalogGeneration != 1 {
+		registry.desiredGeneration != resource.Generation {
 		t.Fatalf("Delete() = %+v, managed registry = %+v", deleted, registry)
 	}
 	replayed, err := reconciler.Delete(t.Context(), resources.DeleteRequest{

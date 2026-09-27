@@ -301,13 +301,21 @@ Batch apply commits 1–128 distinct, canonical-name-sorted desired resources as
 one all-or-nothing command and leaves materialization observable as a later
 reconciliation phase. Definitive conflicts fail; exact apply and delete retries
 return their original result without applying the mutation twice. Managed
-delete removes desired and native Catalog state in one lease-fenced command.
+delete removes desired and native Catalog state in one lease-fenced command and
+derives the native generation within that replicated transition. It does not
+trust the asynchronously published status generation, so a crash after native
+materialization but before status publication cannot poison the delete token.
 
 `GetOperation` requires the caller to provide the exact affected resource-name
 set and pass read authorization for every name; a token alone is never an
 authorization capability. An uncommitted proposal has no durable identity set,
 so lookup returns not found until its committed success or rejection can be
-authorized exactly. `WatchResourceChanges` reads bounded global Catalog pages
+authorized exactly. A completed operation also exposes `command_kind`; desired
+and managed delete operations expose the retained `expected_generation` as a
+decimal string when the original command had one. Delete replay compares this
+command precondition, not the mutation's result generation, because a
+missing-resource result can return a nonzero tombstone high-water mark.
+`WatchResourceChanges` reads bounded global Catalog pages
 and filters events by requested scope plus the authenticated principal.
 Each streamed response includes `earliest_cursor`, the current
 `latest_cursor`, and the inclusive scanned `next_cursor`. Clients resume with
@@ -333,6 +341,13 @@ continuation, plan,
 backup, repair, or purge surface. Operation lookup and change streaming cover
 the committed desired/status lifecycle; they do not yet advertise a bounded
 request-token retention window or replace a general long-running workflow API.
+Catalog admission reserves room for a maximum-size durable capacity rejection.
+If repeated unique rejections exhaust that finite reserve, the Catalog persists
+a terminal capacity seal and rejects all unknown commands without mutation or
+snapshot growth. Reads and exact retained-consensus retries remain available,
+but token-only lookup is not guaranteed for commands first received after the
+seal and accepting writes requires an operator-led migration or future
+horizontal Catalog sharding.
 The one-time legacy import is one atomic command and currently accepts at most
 4,096 generation records, subject to the 512 KiB command and 4 MiB native
 application-checkpoint envelope; a larger former registry fails startup and requires

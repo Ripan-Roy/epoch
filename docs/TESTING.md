@@ -430,7 +430,15 @@ routes during expansion, monotonic generation fencing, delete/recreate without
 tablet ID reuse, exact idempotency replay and token-rebinding rejection,
 profile immutability, resource-kind/profile compatibility, strict name and
 capacity bounds, canonical versioned command decoding, and identical snapshots
-after command replay.
+after command replay. Capacity-bound regressions submit distinct maximum-size
+commands until the finite rejection reserve is exhausted, prove the Catalog
+enters snapshot-v8 read-only seal without changing business state or
+fail-stopping its tablet, restore that snapshot, and reconstruct the retained
+consensus retry receipt. Cross-language control tests also pin the original
+optional delete precondition independently of a retained tombstone generation.
+Atomic managed-delete tests leave status publication stale after native
+materialization, then prove deletion derives the native generation in Catalog;
+format tests retain legacy fenced-v6 decoding and pin new atomic v7 recovery.
 
 Node integration tests extend that state machine through dedicated catalog
 consensus, shared peer-frame group/epoch demultiplexing, bounded multi-group

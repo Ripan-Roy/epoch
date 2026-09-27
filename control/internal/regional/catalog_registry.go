@@ -66,7 +66,6 @@ type controlDeleteManagedBody struct {
 	RequestToken              string                    `json:"request_token"`
 	Lease                     controlLeaseGuardDocument `json:"lease"`
 	ExpectedDesiredGeneration string                    `json:"expected_desired_generation"`
-	ExpectedCatalogGeneration string                    `json:"expected_catalog_generation"`
 }
 
 type controlImportResourceDocument struct {
@@ -136,13 +135,15 @@ const (
 )
 
 type controlOperationDocument struct {
-	RequestToken      string                        `json:"request_token"`
-	ProposalID        decimalUint64                 `json:"proposal_id"`
-	State             ControlOperationState         `json:"state"`
-	ResourceNames     []controlResourceNameDocument `json:"resource_names"`
-	Mutation          *controlMutationDocument      `json:"mutation"`
-	FirstChangeCursor decimalUint64                 `json:"first_change_cursor"`
-	LastChangeCursor  decimalUint64                 `json:"last_change_cursor"`
+	RequestToken       string                        `json:"request_token"`
+	ProposalID         decimalUint64                 `json:"proposal_id"`
+	State              ControlOperationState         `json:"state"`
+	CommandKind        string                        `json:"command_kind"`
+	ResourceNames      []controlResourceNameDocument `json:"resource_names"`
+	ExpectedGeneration *decimalUint64                `json:"expected_generation"`
+	Mutation           *controlMutationDocument      `json:"mutation"`
+	FirstChangeCursor  decimalUint64                 `json:"first_change_cursor"`
+	LastChangeCursor   decimalUint64                 `json:"last_change_cursor"`
 }
 
 type ControlOperation struct {
@@ -903,7 +904,6 @@ func (registry *CatalogRegistry) DeleteManaged(
 	ctx context.Context,
 	request resources.DeleteRequest,
 	desiredGeneration uint64,
-	catalogGeneration uint64,
 ) (resources.DeleteResult, error) {
 	request, err := resources.NormalizeDeleteRequest(request)
 	if err != nil {
@@ -941,7 +941,6 @@ func (registry *CatalogRegistry) DeleteManaged(
 			NowMS:   strconv.FormatUint(nowMS, 10),
 		},
 		ExpectedDesiredGeneration: strconv.FormatUint(desiredGeneration, 10),
-		ExpectedCatalogGeneration: strconv.FormatUint(catalogGeneration, 10),
 	}
 	encoded, err := json.Marshal(body)
 	if err != nil {
@@ -1045,6 +1044,39 @@ func (registry *CatalogRegistry) ReplayManagedDelete(
 			decodeErr,
 		)
 	}
+	switch document.CommandKind {
+	case "delete_desired":
+		if (request.ExpectedGeneration == nil) != (document.ExpectedGeneration == nil) ||
+			(request.ExpectedGeneration != nil &&
+				*request.ExpectedGeneration != uint64(*document.ExpectedGeneration)) {
+			return resources.DeleteResult{}, true, deleteReplayGenerationConflict(
+				request.ExpectedGeneration,
+				document.ExpectedGeneration,
+			)
+		}
+	case "delete_managed":
+		if document.ExpectedGeneration == nil {
+			return resources.DeleteResult{}, true, storeUnavailable(
+				"decode managed delete outcome",
+				fmt.Errorf("catalog operation omitted its expected desired generation"),
+			)
+		}
+		if request.ExpectedGeneration != nil &&
+			*request.ExpectedGeneration != uint64(*document.ExpectedGeneration) {
+			return resources.DeleteResult{}, true, deleteReplayGenerationConflict(
+				request.ExpectedGeneration,
+				document.ExpectedGeneration,
+			)
+		}
+	default:
+		return resources.DeleteResult{}, true, resources.NewStoreError(
+			resources.CodeConflict,
+			"request token is already bound to a different catalog command",
+			0,
+			0,
+			nil,
+		)
+	}
 	if document.Mutation == nil {
 		return resources.DeleteResult{}, true, storeUnavailable(
 			"decode managed delete outcome",
@@ -1063,15 +1095,6 @@ func (registry *CatalogRegistry) ReplayManagedDelete(
 			)
 		}
 		generation := uint64(mutation.Generation)
-		if request.ExpectedGeneration != nil && *request.ExpectedGeneration != generation {
-			return resources.DeleteResult{}, true, resources.NewStoreError(
-				resources.CodeConflict,
-				"request token is already bound to a different desired generation",
-				*request.ExpectedGeneration,
-				generation,
-				nil,
-			)
-		}
 		return resources.DeleteResult{
 			Key: request.Key, Generation: generation, Deleted: mutation.Deleted, Replayed: true,
 		}, true, nil
@@ -1082,23 +1105,30 @@ func (registry *CatalogRegistry) ReplayManagedDelete(
 			fmt.Errorf("catalog returned an inconsistent successful delete"),
 		)
 	}
-	if request.ExpectedGeneration != nil &&
-		(*request.ExpectedGeneration == ^uint64(0) ||
-			uint64(mutation.DesiredGeneration) != *request.ExpectedGeneration+1) {
-		return resources.DeleteResult{}, true, resources.NewStoreError(
-			resources.CodeConflict,
-			"request token is already bound to a different desired generation",
-			*request.ExpectedGeneration,
-			uint64(mutation.DesiredGeneration)-1,
-			nil,
-		)
-	}
 	return resources.DeleteResult{
 		Key:        request.Key,
 		Generation: uint64(mutation.DesiredGeneration),
 		Deleted:    true,
 		Replayed:   true,
 	}, true, nil
+}
+
+func deleteReplayGenerationConflict(requested *uint64, stored *decimalUint64) error {
+	expected := uint64(0)
+	actual := uint64(0)
+	if requested != nil {
+		expected = *requested
+	}
+	if stored != nil {
+		actual = uint64(*stored)
+	}
+	return resources.NewStoreError(
+		resources.CodeConflict,
+		"request token is already bound to a different desired generation",
+		expected,
+		actual,
+		nil,
+	)
 }
 
 func (registry *CatalogRegistry) UpdateStatus(

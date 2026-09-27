@@ -38,6 +38,11 @@ notes explicitly list additional verified artifacts.
 - Public managed deletes retain the caller's operation token, including
   missing-resource outcomes, and any control replica can submit the request
   against the current active lease without taking over periodic reconciliation.
+- New managed-delete command/snapshot format v7 derives the current native
+  Catalog generation inside the replicated transition. A controller crash
+  between native materialization and status publication can no longer bind the
+  public delete token to a stale generation; legacy explicitly fenced v6
+  commands and snapshots remain readable.
 - Controller-generated lease, status, reconciliation, and membership request
   outcomes retain only the newest bounded internal suffix, preventing rejected
   periodic attempts from growing snapshots while public outcomes stay durable.
@@ -57,6 +62,16 @@ notes explicitly list additional verified artifacts.
   replayable and cannot be rebound after space is freed; admission reserves
   enough checkpoint space for that rejection instead of fail-stopping Catalog
   replicas after consensus commit.
+- Repeated unique capacity refusals can no longer consume the rejection reserve
+  and fail-stop a Catalog tablet. Snapshot format v8 records a terminal
+  capacity seal without increasing the payload; sealed Catalogs reject every
+  unknown command without mutation, remain checkpointable, and reconstruct
+  retained consensus retries after restore. Horizontal Catalog sharding remains
+  the operational recovery path for a sealed region.
+- Control operation results now expose their original command kind and retained
+  delete generation precondition. Missing-resource delete replay validates that
+  command precondition instead of mistaking a later tombstone high-water mark
+  for the caller's expected generation.
 - Change cursor zero is an initial-history cursor only while the retention
   floor is one; after compaction it fails as stale instead of silently skipping
   the expired prefix.
