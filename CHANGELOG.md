@@ -63,6 +63,10 @@ notes explicitly list additional verified artifacts.
 - A legacy one-replica control StatefulSet updates and verifies ordinal zero
   before scaling to three replicas; one atomic import accepts up to 4,096
   generation records within the existing command and snapshot byte limits.
+- Valid legacy-local resource identities that omit organization, project, and
+  environment migrate into `epoch-legacy/local/default`; live resources and
+  tombstones use the same mapping, and any mapped identity collision fails
+  before Catalog mutation.
 - Desired-state updates retain the last generation-fenced observed status, so
   policy-only changes continue from the real native Catalog generation instead
   of retrying an existing resource from generation zero.

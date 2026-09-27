@@ -338,7 +338,11 @@ The one-time legacy import is one atomic command and currently accepts at most
 application-checkpoint envelope; a larger former registry fails startup and requires
 an explicit migration tool before upgrade. A legacy one-replica StatefulSet
 must update and become ready at ordinal zero before the operator scales it to
-the three-replica control topology.
+the three-replica control topology. A former local key with no organization,
+project, or environment is imported under `epoch-legacy/local/default` while
+preserving namespace, kind, name, desired/status state, and its generation
+high-water mark. The same mapping applies to tombstones. A collision with an
+already-qualified key fails before the Catalog import request is sent.
 Catalog consensus transactionally persists desired resources, observed status,
 generation tombstones, original request-token outcomes, and watch cursors
 before acknowledgement. A replicated TTL/fence lease serializes native

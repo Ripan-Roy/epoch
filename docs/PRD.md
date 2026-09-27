@@ -19,8 +19,11 @@ managed deletion are atomic Catalog commands. The generated gRPC contract adds
 tenant-filtered change streaming with an explicit scanned resume cursor. An
 ordered one-time import preserves up to 4,096 legacy live and tombstoned
 generations within the 512 KiB command and 4 MiB native checkpoint envelope,
-while retaining the old database as rollback evidence. Legacy one-replica
-deployments update and verify ordinal zero before scaling to three. Internal
+while retaining the old database as rollback evidence. Former local identities
+without organization/project/environment are translated consistently into
+`epoch-legacy/local/default`; a collision with an already-qualified identity
+fails before import. Legacy one-replica deployments update and verify ordinal
+zero before scaling to three. Internal
 inventory reads use bounded keyset pages, capacity retries bind their complete
 evidence, controller-generated outcomes retain a bounded suffix, standby lease
 guards normalize to the replicated clock, and the 4,096-entry change log also

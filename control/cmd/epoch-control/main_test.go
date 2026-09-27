@@ -100,12 +100,9 @@ func TestMigrateLegacyRegistryPreservesLiveAndTombstonedGenerations(t *testing.T
 		Classification: resources.ClassificationInternal,
 	}
 	key := resources.ResourceKey{
-		Organization: "acme",
-		Project:      "shop",
-		Environment:  "dev",
-		Namespace:    "core",
-		Kind:         resources.KindStream,
-		Name:         "orders",
+		Namespace: "core",
+		Kind:      resources.KindStream,
+		Name:      "orders",
 	}
 	created, err := legacy.Apply(resources.ApplyRequest{
 		RequestToken: "create-orders",
@@ -181,7 +178,10 @@ func TestMigrateLegacyRegistryPreservesLiveAndTombstonedGenerations(t *testing.T
 		}
 		if len(body.Resources) != 1 || body.Resources[0].Generation != "2" ||
 			len(body.Generations) != 2 || body.Generations[0].Name["name"] != "audit" ||
-			body.Generations[0].Generation != "2" || body.Generations[1].Generation != "2" {
+			body.Generations[0].Generation != "2" || body.Generations[1].Generation != "2" ||
+			body.Resources[0].Name["organization"] != "epoch-legacy" ||
+			body.Resources[0].Name["project"] != "local" ||
+			body.Resources[0].Name["environment"] != "default" {
 			t.Errorf("unexpected migration body: %+v", body)
 		}
 		imported = true

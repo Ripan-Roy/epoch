@@ -30,6 +30,9 @@ const (
 	controlLeaseTTL             = 10 * time.Second
 	controlCallTimeout          = 10 * time.Second
 	maxControlOwnerBytes        = 128
+	legacyImportOrganization    = "epoch-legacy"
+	legacyImportProject         = "local"
+	legacyImportEnvironment     = "default"
 )
 
 var errManagedResourceNotFound = errors.New("managed resource was not found")
@@ -417,7 +420,9 @@ func (registry *CatalogRegistry) ImportLegacy(snapshot resources.LegacyRegistryS
 		Resources:   make([]controlImportResourceDocument, 0, len(snapshot.Resources)),
 		Generations: make([]controlImportGenerationDocument, 0, len(snapshot.Generations)),
 	}
+	resourceMappings := make(map[resources.ResourceKey]resources.ResourceKey, len(snapshot.Resources))
 	for _, resource := range snapshot.Resources {
+		originalKey := resource.ResourceKey
 		normalized, err := resources.NormalizeApplyRequest(resources.ApplyRequest{
 			RequestToken: "legacy-import-validation",
 			Resource: resources.DesiredResource{
@@ -430,9 +435,14 @@ func (registry *CatalogRegistry) ImportLegacy(snapshot resources.LegacyRegistryS
 		if err != nil {
 			return fmt.Errorf("validate legacy resource %s: %w", resource.Name, err)
 		}
-		if err := requireRegionalKey(normalized.Resource.ResourceKey); err != nil {
+		translatedKey, err := translateLegacyImportKey(normalized.Resource.ResourceKey)
+		if err != nil {
 			return err
 		}
+		if err := rememberLegacyImportMapping(resourceMappings, originalKey, translatedKey); err != nil {
+			return err
+		}
+		normalized.Resource.ResourceKey = translatedKey
 		if resource.Generation == 0 {
 			return resources.NewStoreError(
 				resources.CodeInvalidArgument,
@@ -451,18 +461,19 @@ func (registry *CatalogRegistry) ImportLegacy(snapshot resources.LegacyRegistryS
 			return storeUnavailable("encode legacy resource status", err)
 		}
 		body.Resources = append(body.Resources, controlImportResourceDocument{
-			Name:       controlName(normalized.Resource.ResourceKey),
+			Name:       controlName(translatedKey),
 			Generation: strconv.FormatUint(resource.Generation, 10),
 			Desired:    desired,
 			Status:     status,
 		})
 	}
+	generationMappings := make(map[resources.ResourceKey]resources.ResourceKey, len(snapshot.Generations))
 	for _, generation := range snapshot.Generations {
-		normalized, err := resources.NormalizeKey(generation.Key)
+		normalized, err := translateLegacyImportKey(generation.Key)
 		if err != nil {
 			return err
 		}
-		if err := requireRegionalKey(normalized); err != nil {
+		if err := rememberLegacyImportMapping(generationMappings, generation.Key, normalized); err != nil {
 			return err
 		}
 		if generation.Generation == 0 {
@@ -1415,6 +1426,44 @@ func requireRegionalKey(key resources.ResourceKey) error {
 			nil,
 		)
 	}
+	return nil
+}
+
+func translateLegacyImportKey(key resources.ResourceKey) (resources.ResourceKey, error) {
+	normalized, err := resources.NormalizeKey(key)
+	if err != nil {
+		return resources.ResourceKey{}, err
+	}
+	if normalized.Organization == "" && normalized.Project == "" && normalized.Environment == "" {
+		normalized.Organization = legacyImportOrganization
+		normalized.Project = legacyImportProject
+		normalized.Environment = legacyImportEnvironment
+	}
+	if err := requireRegionalKey(normalized); err != nil {
+		return resources.ResourceKey{}, err
+	}
+	return normalized, nil
+}
+
+func rememberLegacyImportMapping(
+	seen map[resources.ResourceKey]resources.ResourceKey,
+	original resources.ResourceKey,
+	translated resources.ResourceKey,
+) error {
+	if previous, exists := seen[translated]; exists {
+		return resources.NewStoreError(
+			resources.CodeInvalidArgument,
+			fmt.Sprintf(
+				"legacy resource identities %v and %v collide after regional-scope translation",
+				previous,
+				original,
+			),
+			0,
+			0,
+			nil,
+		)
+	}
+	seen[translated] = original
 	return nil
 }
 

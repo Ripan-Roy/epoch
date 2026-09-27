@@ -552,6 +552,140 @@ func TestCatalogRegistryImportsLegacyGenerationsWithStableReplayToken(t *testing
 	}
 }
 
+func TestCatalogRegistryImportsUnqualifiedLegacyResourcesIntoReservedScope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("content-type", "application/json")
+		if request.Method != http.MethodPost || request.URL.Path != controlImportPath {
+			t.Errorf("unexpected request: %s %s", request.Method, request.URL.Path)
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var body controlImportBody
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Errorf("decode import: %v", err)
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(body.Resources) != 1 || len(body.Generations) != 2 {
+			t.Errorf("unexpected import cardinality: %+v", body)
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		for _, generation := range body.Generations {
+			if generation.Name.Organization != legacyImportOrganization ||
+				generation.Name.Project != legacyImportProject ||
+				generation.Name.Environment != legacyImportEnvironment {
+				t.Errorf("generation was not translated into the reserved scope: %+v", generation.Name)
+			}
+		}
+		var desired resources.DesiredResource
+		if err := json.Unmarshal(body.Resources[0].Desired, &desired); err != nil {
+			t.Errorf("decode desired resource: %v", err)
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if desired.Organization != legacyImportOrganization ||
+			desired.Project != legacyImportProject ||
+			desired.Environment != legacyImportEnvironment ||
+			body.Resources[0].Name != controlName(desired.ResourceKey) {
+			t.Errorf("desired resource was not translated consistently: %+v", desired.ResourceKey)
+		}
+		writeJSON(t, writer, controlMutationReceiptDocument{Mutation: controlMutationDocument{
+			Kind: "desired_applied",
+			Resources: []controlApplyResultDocument{{
+				Resource: controlManagedResourceDocument{
+					Name:       body.Resources[0].Name,
+					Generation: 3,
+					Desired:    body.Resources[0].Desired,
+					Status:     body.Resources[0].Status,
+				},
+				Created: true,
+				Changed: true,
+			}},
+		}})
+	}))
+	defer server.Close()
+	authority, err := NewHTTPAuthority([]string{server.URL}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := NewCatalogRegistry(authority, "epoch-control-0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localKey := resources.ResourceKey{
+		Namespace: "core",
+		Kind:      resources.KindStream,
+		Name:      "orders",
+	}
+	snapshot := resources.LegacyRegistrySnapshot{
+		Resources: []resources.Resource{{
+			ResourceKey: localKey,
+			Governance:  testGovernance(),
+			Spec:        json.RawMessage(`{"shard_count":1,"replica_count":3}`),
+			Generation:  3,
+			Status: resources.ResourceStatus{
+				Phase:              resources.PhaseReady,
+				ObservedGeneration: 3,
+				CatalogGeneration:  3,
+			},
+		}},
+		Generations: []resources.LegacyGeneration{
+			{Key: localKey, Generation: 3},
+			{Key: resources.ResourceKey{
+				Namespace: "core",
+				Kind:      resources.KindStream,
+				Name:      "deleted",
+			}, Generation: 4},
+		},
+	}
+	if err := registry.ImportLegacy(snapshot); err != nil {
+		t.Fatalf("ImportLegacy() error = %v", err)
+	}
+	if registry.Count() != 1 {
+		t.Fatalf("Count() = %d, want 1", registry.Count())
+	}
+}
+
+func TestCatalogRegistryRejectsLegacyScopeTranslationCollisionsBeforeImport(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests++
+		writer.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	authority, err := NewHTTPAuthority([]string{server.URL}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := NewCatalogRegistry(authority, "epoch-control-0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localKey := resources.ResourceKey{
+		Namespace: "core",
+		Kind:      resources.KindStream,
+		Name:      "orders",
+	}
+	regionalKey := localKey
+	regionalKey.Organization = legacyImportOrganization
+	regionalKey.Project = legacyImportProject
+	regionalKey.Environment = legacyImportEnvironment
+	err = registry.ImportLegacy(resources.LegacyRegistrySnapshot{
+		Generations: []resources.LegacyGeneration{
+			{Key: localKey, Generation: 2},
+			{Key: regionalKey, Generation: 3},
+		},
+	})
+	assertStoreCode(t, err, resources.CodeInvalidArgument)
+	if !strings.Contains(err.Error(), "collide after regional-scope translation") {
+		t.Fatalf("ImportLegacy() error = %v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
+	}
+}
+
 func TestCatalogRegistryManagedDeleteIsLeaseFencedAndExactlyReplayable(t *testing.T) {
 	leasePosts := 0
 	deletePosts := 0

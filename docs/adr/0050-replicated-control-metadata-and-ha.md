@@ -66,7 +66,11 @@ into Go.
    because the old records do not contain the new canonical command shape.
    The atomic import accepts at most 4,096 generation records within the
    existing 512 KiB command and 4 MiB native-checkpoint envelope. An existing one-replica
-   StatefulSet updates and verifies ordinal zero before scaling to three.
+   StatefulSet updates and verifies ordinal zero before scaling to three. A
+   valid former local identity with no organization/project/environment maps to
+   `epoch-legacy/local/default` in both live and tombstone records. Mapping is
+   deterministic and a collision with an already-qualified identity fails
+   before the import request.
 9. Page internal resource inventory with a canonical key cursor, at most 128
    resources and 768 KiB per page, and one stable high-water cursor across the
    scan. Bound recurring lease, status, reconciliation, and membership request

@@ -32,6 +32,10 @@ scheduled application-layer encrypted semantic backups.
   native application-checkpoint envelope, including its reserved binary
   header. Inputs beyond either bound fail closed and require
   an explicit migration before upgrading this candidate.
+- A valid former local key without organization/project/environment migrates
+  under `epoch-legacy/local/default`. Operators must grant and address that
+  explicit scope after upgrade. If a qualified legacy key already occupies the
+  translated identity, startup fails before changing Catalog state.
 - Two operator replicas use Kubernetes Lease leader election. Reconciliation
   is idempotent, treats API-server defaults as no-ops, and repairs drift in
   operator-owned objects.

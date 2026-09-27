@@ -1070,8 +1070,10 @@ one-replica upgrade it first updates and verifies ordinal zero, then scales the
 same StatefulSet to three. A one-time pod-zero migration imports up to 4,096
 previous bbolt generation/tombstone high-water records in one command, subject
 to the 512 KiB command and 4 MiB native-checkpoint envelope; the old database is retained
-as rollback evidence. Legacy token history is not reconstructible and is not
-silently claimed. See
+as rollback evidence. Unqualified former local identities map to the explicit
+`epoch-legacy/local/default` regional scope for both live state and tombstones;
+translation collisions fail before mutation. Legacy token history is not
+reconstructible and is not silently claimed. See
 [ADR-0050](adr/0050-replicated-control-metadata-and-ha.md).
 
 Managed desired state now includes canonical governance metadata. New regional
