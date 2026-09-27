@@ -1050,7 +1050,11 @@ precedes a concurrent owner commit, while still rejecting an expired lease or
 changed fence. Desired-
 state batches commit 1–128 resources atomically, while operation lookup retains
 affected identities, command kind, and the original delete generation
-precondition for exact replay and tenant authorization. A result's tombstone
+precondition for exact replay and tenant authorization. The Go authority
+adapter bounds every Rust response at 5 MiB, derived from the 4 MiB native
+Catalog checkpoint ceiling plus a 1 MiB JSON/envelope allowance, so a valid
+large batch remains synchronously and durably resolvable without an unbounded
+peer read. A result's tombstone
 generation is never treated as that command precondition. Change watches expose
 an explicit scanned resume cursor. Internal inventory uses bounded keyset pages
 with one stable Catalog high-water cursor across the complete scan. Controller

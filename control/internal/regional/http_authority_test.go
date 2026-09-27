@@ -1,6 +1,7 @@
 package regional
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,23 @@ import (
 
 	"epoch.local/epoch/control/internal/resources"
 )
+
+func TestHTTPAuthorityRejectsResponseAboveCatalogEnvelopeBound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write(bytes.Repeat([]byte("x"), maxAuthorityResponseBytes+1))
+	}))
+	t.Cleanup(server.Close)
+	authority, err := NewHTTPAuthority([]string{server.URL}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = authority.requestEndpoint(
+		t.Context(), authority.endpoints[0], http.MethodGet, "/oversized", nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "response exceeded") {
+		t.Fatalf("requestEndpoint() error = %v", err)
+	}
+}
 
 func TestHTTPAuthorityAppliesThroughAvailableNodeAndObservesPlacement(t *testing.T) {
 	var mu sync.Mutex

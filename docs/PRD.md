@@ -46,6 +46,10 @@ generation. Managed delete derives the current native generation inside the
 replicated command rather than trusting asynchronously published controller
 status, closing the materialization/status crash window while retaining legacy
 v6 command compatibility; new atomic managed deletes use command/snapshot v7.
+The Go-to-Rust authority client accepts at most 5 MiB per response, derived
+from the 4 MiB Catalog checkpoint ceiling plus a bounded 1 MiB response
+envelope. Atomic batch results and later operation lookup therefore remain
+resolvable when valid Catalog state exceeds the former 1 MiB transport cap.
 Protected
 multi-control chaos, Catalog capacity/sharding, legacy token migration, and a
 public token-retention window remain open. See

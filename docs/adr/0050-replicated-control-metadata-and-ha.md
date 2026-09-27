@@ -93,8 +93,12 @@ into Go.
    no-op deletes without state growth, but applies a delete when it removes live
    state and strictly shrinks the complete encoded snapshot. Incremental cleanup
    retains the seal until the ordinary rejection reserve is restored, then
-   resumes admission under recovered snapshot format v9. Native checkpoint
-   restore reconstructs exact consensus-retained retries in both states.
+   resumes admission under recovered snapshot format v9. Bound every Go
+   authority response to 5 MiB: the 4 MiB Catalog checkpoint ceiling plus a
+   1 MiB JSON/envelope allowance. This preserves synchronous resolution for a
+   valid large desired-state batch while retaining a finite peer-read bound.
+   Native checkpoint restore reconstructs exact consensus-retained retries in
+   both sealed and recovered states.
    Token-only operation lookup for commands first received during sealing is
    not retained; migrate or shard a Catalog that cannot reclaim enough space.
 10. Expose each durable operation's command kind and the original desired-delete

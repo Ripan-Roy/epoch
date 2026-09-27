@@ -51,6 +51,10 @@ notes explicitly list additional verified artifacts.
   receipt; durable token outcomes reconstruct public replays after recovery,
   bounded controller outcomes retain their existing policy, and v1 images
   remain readable.
+- Go accepts bounded Rust authority responses up to 5 MiB: the 4 MiB native
+  Catalog checkpoint ceiling plus a 1 MiB JSON/envelope allowance. This keeps
+  valid large atomic batches and durable operation lookup resolvable while
+  rejecting an unbounded or malformed peer response.
 - Managed membership attempts bind their complete lease and capacity evidence,
   allowing a later healthy capacity sample to recover from a committed
   rejection while preserving exact ambiguous-attempt replay.

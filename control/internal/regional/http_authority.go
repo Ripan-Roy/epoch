@@ -22,7 +22,11 @@ import (
 )
 
 const (
-	maxAuthorityResponseBytes      = 1 << 20
+	// A committed Catalog mutation is bounded by the 4 MiB native checkpoint.
+	// HTTP operation responses add decimal-string and affected-name envelopes,
+	// so retain a bounded 1 MiB allowance above that authoritative state limit.
+	maxCatalogCheckpointBytes      = 4 << 20
+	maxAuthorityResponseBytes      = maxCatalogCheckpointBytes + (1 << 20)
 	maxAuthorityBearerBytes        = 4 << 10
 	regionalTopologyPath           = "/experimental/v1/regional/topology"
 	regionalControlReconcilePath   = "/experimental/v1/regional/control/reconcile"

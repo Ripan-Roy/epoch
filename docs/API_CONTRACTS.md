@@ -378,7 +378,10 @@ reconstructs public replay responses from retained token outcomes. It reserves
 64 bytes inside the 4 MiB application envelope for its fixed binary header and
 keeps legacy v1 images readable. A later checkpoint may accept a missing
 internal receipt only when the installed application image already covers that
-proposal commit index. The watch history
+proposal commit index. The Go authority adapter reads at most 5 MiB from any
+Rust response: the 4 MiB Catalog checkpoint ceiling plus 1 MiB for the HTTP
+mutation/operation envelope. This admits a valid atomic batch response larger
+than 1 MiB without making authority reads unbounded. The watch history
 retains at most 4,096 changes and expires its oldest prefix sooner whenever the
 complete encoded Catalog image would otherwise exceed the admitted checkpoint
 budget.

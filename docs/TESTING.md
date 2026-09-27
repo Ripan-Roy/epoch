@@ -439,6 +439,9 @@ deletes incrementally until normal headroom returns, checkpoints recovered
 snapshot v9, and reconstructs the original sealed consensus retry after another
 restore. Cross-language control tests also pin the original
 optional delete precondition independently of a retained tombstone generation.
+The Go authority regression constructs a valid atomic batch response above the
+former 1 MiB cap, proves it decodes through `CatalogRegistry`, and separately
+rejects a response one byte beyond the 5 MiB Catalog-plus-envelope bound.
 Atomic managed-delete tests leave status publication stale after native
 materialization, then prove deletion derives the native generation in Catalog;
 format tests retain legacy fenced-v6 decoding and pin new atomic v7 recovery.

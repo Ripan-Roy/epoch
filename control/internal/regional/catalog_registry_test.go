@@ -3,6 +3,7 @@ package regional
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,78 @@ import (
 
 	"epoch.local/epoch/control/internal/resources"
 )
+
+func TestCatalogRegistryAcceptsCheckpointBoundedBatchResponse(t *testing.T) {
+	const resourcesInBatch = 9
+	status := json.RawMessage(
+		`{"phase":"pending","message":"` + strings.Repeat("x", 120<<10) + `"}`,
+	)
+	requests := make([]resources.ApplyRequest, 0, resourcesInBatch)
+	results := make([]controlApplyResultDocument, 0, resourcesInBatch)
+	for index := range resourcesInBatch {
+		key := regionalKey(resources.KindStream, fmt.Sprintf("orders-%02d", index))
+		desired := resources.DesiredResource{
+			ResourceKey: key,
+			Governance:  testGovernance(),
+			Spec:        json.RawMessage(`{"shard_count":1,"replica_count":3}`),
+		}
+		encodedDesired, err := json.Marshal(desired)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, resources.ApplyRequest{
+			ExpectedGeneration: uint64Pointer(1),
+			Resource:           desired,
+		})
+		results = append(results, controlApplyResultDocument{
+			Resource: controlManagedResourceDocument{
+				Name:       controlName(key),
+				Generation: 2,
+				Desired:    encodedDesired,
+				Status:     status,
+			},
+			Changed: true,
+		})
+	}
+	receipt, err := json.Marshal(controlMutationReceiptDocument{
+		Mutation: controlMutationDocument{Kind: "desired_applied", Resources: results},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receipt) <= 1<<20 || len(receipt) > maxAuthorityResponseBytes {
+		t.Fatalf("batch response bytes = %d", len(receipt))
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPut || request.URL.Path != controlResourcesPath {
+			t.Errorf("unexpected request: %s %s", request.Method, request.URL.Path)
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		writer.Header().Set("content-type", "application/json")
+		_, _ = writer.Write(receipt)
+	}))
+	t.Cleanup(server.Close)
+	authority, err := NewHTTPAuthority([]string{server.URL}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := newCatalogRegistry(authority, "epoch-control-0", time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := registry.BatchApply(t.Context(), BatchApplyRequest{
+		RequestToken: "large-status-batch",
+		Resources:    requests,
+	})
+	if err != nil {
+		t.Fatalf("BatchApply() error = %v", err)
+	}
+	if len(batch.Results) != resourcesInBatch || !batch.Results[0].Changed {
+		t.Fatalf("BatchApply() results = %d", len(batch.Results))
+	}
+}
 
 func TestCatalogRegistryProvidesReplicatedApplyListGetAndDelete(t *testing.T) {
 	var (
