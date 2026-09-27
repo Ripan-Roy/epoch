@@ -820,9 +820,9 @@ export function DeploymentBody() {
           Regional topology exposes source poll passes, batches, applied/error-routed records, checkpoints,
           errors, backup/checkpoint state, and the last bounded error. Real-process tests prove cursor
           propagation, distributed backup capture, all-profile restore, all-voter restart, and exact state
-          reopen. A pinned live service matrix covers MinIO/S3, PostgreSQL, MySQL, and Kafka. Azure/GCS live
-          emulators, cloud workload identity, load/soak, and crash-at-every-network-boundary certification
-          remain production gates.
+          reopen. A pinned live service matrix covers SeaweedFS/S3, PostgreSQL, MySQL, and Kafka. Azure/GCS
+          live emulators, cloud workload identity, load/soak, and crash-at-every-network-boundary
+          certification remain production gates.
         </p>
         <div className="reference-grid">
           <ReferenceCard

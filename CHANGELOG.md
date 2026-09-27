@@ -23,6 +23,9 @@ notes explicitly list additional verified artifacts.
 
 ### Security and recovery
 
+- Replaced the withdrawn MinIO conformance images with a digest-pinned,
+  multi-architecture SeaweedFS S3 fixture that creates its test bucket during
+  startup, keeping connector CI reproducible without registry credentials.
 - Upgraded `rustls` to 0.23.45 to address RUSTSEC-2026-0285; the dependency
   audit and the fail-closed TLS/mTLS transport tests pass on the patched build.
 - The regional container campaign now proves replicated control recovery,

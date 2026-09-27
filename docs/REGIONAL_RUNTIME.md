@@ -536,7 +536,7 @@ The native real-process campaign also serves two successive HTTP source
 batches, asserts the exact cursor header, waits for replicated checkpoint
 convergence, reopens every voter, and verifies that stable proposal identities
 did not duplicate Bus ingress. A separate pinned Compose matrix exercises
-MinIO/S3, PostgreSQL logical replication, MySQL row binlogs, and Kafka group
+SeaweedFS/S3, PostgreSQL logical replication, MySQL row binlogs, and Kafka group
 consumption against real protocol servers, including post-checkpoint upstream
 acknowledgement and stateful-session release.
 

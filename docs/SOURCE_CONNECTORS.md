@@ -276,16 +276,14 @@ Pinned live conformance:
 
 ```bash
 docker compose -f deploy/compose/docker-compose.connectors.yml \
-  up --detach --wait minio postgres mysql kafka
-docker compose -f deploy/compose/docker-compose.connectors.yml \
-  run --rm minio-init
+  up --detach --wait object-store postgres mysql kafka
 cargo test -p epoch-node source_adapters --lib -- \
   --ignored --nocapture --test-threads=1
 docker compose -f deploy/compose/docker-compose.connectors.yml \
   down --volumes --remove-orphans
 ```
 
-CI runs the same MinIO/S3, PostgreSQL, MySQL, and Kafka contracts in the
+CI runs the same SeaweedFS/S3, PostgreSQL, MySQL, and Kafka contracts in the
 `Source connector conformance` job. Live Azure and GCS emulator campaigns,
 cloud IAM/workload identity, load/soak, and crash-at-every-network-boundary
 certification remain production gates; beta implementation does not imply

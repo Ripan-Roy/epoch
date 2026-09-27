@@ -1,32 +1,19 @@
 name: epoch-connector-conformance
 
 services:
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
-    command: server /data --console-address :9001
+  object-store:
+    image: ghcr.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882
     environment:
-      MINIO_ROOT_USER: epoch-access
-      MINIO_ROOT_PASSWORD: epoch-secret-key
+      AWS_ACCESS_KEY_ID: epoch-access
+      AWS_SECRET_ACCESS_KEY: epoch-secret-key
+      S3_BUCKET: events
     ports:
-      - "127.0.0.1:19000:9000"
+      - "127.0.0.1:19000:8333"
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:9000/minio/health/live"]
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8333/healthz"]
       interval: 2s
       timeout: 2s
       retries: 30
-
-  minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
-    depends_on:
-      minio:
-        condition: service_healthy
-    entrypoint:
-      - /bin/sh
-      - -ec
-      - |
-        mc alias set epoch http://minio:9000 epoch-access epoch-secret-key
-        mc mb --ignore-existing epoch/events
-    restart: "no"
 
   postgres:
     image: postgres:17.5

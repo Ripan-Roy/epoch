@@ -409,7 +409,7 @@ ordering/overwrite detection and cursors, PostgreSQL transaction/LSN assembly,
 MySQL transaction/binlog positions, Kafka partition offsets/error routing,
 credential and transport policy, crash-before-upstream-ack reconciliation, and
 session cleanup. The pinned connector-conformance Compose stack then runs
-MinIO/S3, PostgreSQL 17 logical replication, MySQL 8 row binlogs, and Kafka 4
+SeaweedFS/S3, PostgreSQL 17 logical replication, MySQL 8 row binlogs, and Kafka 4
 against those adapters.
 The container gate adds follower rejection,
 majority-before-success, acquire/ack replication, leader loss, catch-up,

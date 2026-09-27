@@ -215,7 +215,7 @@ sources through a shared record-before-checkpoint pipeline. Stable per-record
 proposal identities make replay after a crash duplicate-safe; every applied or
 error-routed result commits before the exact object, LSN, binlog, or partition-
 offset cursor. PostgreSQL feedback and Kafka group commits occur only after the
-Epoch checkpoint. Deterministic tests and a pinned MinIO/PostgreSQL/MySQL/Kafka
+Epoch checkpoint. Deterministic tests and a pinned SeaweedFS/PostgreSQL/MySQL/Kafka
 Compose matrix exercise real protocols locally; live Azure/GCS cloud identity,
 sustained load/soak, and the broader crash-point matrix remain release evidence.
 The same branch adds mandatory TLS/mTLS deployment wiring, secure Go/Java/Python
