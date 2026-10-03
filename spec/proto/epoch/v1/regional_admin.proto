@@ -118,6 +118,11 @@ message GetOperationResponse {
   string failure_message = 6;
   uint64 first_change_cursor = 7;
   uint64 last_change_cursor = 8;
+  // Stable Catalog command discriminator (for example delete_desired).
+  string command_kind = 9;
+  // Original delete precondition. Presence distinguishes an omitted
+  // precondition from an explicit generation zero.
+  optional uint64 expected_generation = 10;
 }
 
 enum ResourceChangeKind {

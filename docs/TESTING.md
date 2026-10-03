@@ -443,9 +443,12 @@ rejects changed command bytes before proposal. Defensive tablet coverage then
 applies that changed compacted retry as a deterministic conflict rather than a
 fail-stop and rebuilds its receipt through another checkpoint. A separate
 exhaustion regression fills the compact ledger, proves snapshot v10 terminally
-rejects even cleanup, and round-trips that fail-closed state. Cross-language
-control tests also pin the original optional delete precondition independently
-of a retained tombstone generation.
+rejects even cleanup, round-trips that fail-closed state, and exercises an
+artificial exact boundary where only the extra byte for the two-digit v10
+marker remains. Cross-language control tests also pin the original optional
+delete precondition independently of a retained tombstone generation and prove
+that generated `GetOperation` responses preserve both its presence and the
+Catalog command kind.
 The Go authority regression constructs a valid atomic batch response above the
 former 1 MiB cap, proves it decodes through `CatalogRegistry`, and separately
 rejects a response one byte beyond the 5 MiB Catalog-plus-envelope bound.

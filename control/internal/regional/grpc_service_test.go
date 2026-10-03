@@ -215,9 +215,26 @@ func TestRegionalAdminAtomicBatchOperationAndResumableWatch(t *testing.T) {
 	if status.Code(err) != codes.NotFound {
 		t.Fatalf("GetOperation(scope mismatch) error = %v", err)
 	}
+	expectedDeleteGeneration := uint64(0)
+	registry.operation = ControlOperation{
+		RequestToken:       "grpc-delete-1",
+		ProposalID:         43,
+		State:              ControlOperationSucceeded,
+		CommandKind:        "delete_desired",
+		ResourceKeys:       []resources.ResourceKey{ordersKey},
+		ExpectedGeneration: &expectedDeleteGeneration,
+	}
+	deleteOperation, err := client.GetOperation(t.Context(), &epochv1.GetOperationRequest{
+		RequestToken:      "grpc-delete-1",
+		AffectedResources: []*epochv1.ResourceName{orders.Name},
+	})
+	if err != nil || deleteOperation.GetCommandKind() != "delete_desired" ||
+		deleteOperation.ExpectedGeneration == nil || deleteOperation.GetExpectedGeneration() != 0 {
+		t.Fatalf("GetOperation(delete metadata) = %+v, %v", deleteOperation, err)
+	}
 	registry.operation = ControlOperation{
 		RequestToken: "grpc-batch-1",
-		ProposalID:   43,
+		ProposalID:   44,
 		State:        ControlOperationPending,
 	}
 	_, err = client.GetOperation(t.Context(), &epochv1.GetOperationRequest{

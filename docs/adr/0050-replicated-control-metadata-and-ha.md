@@ -96,8 +96,10 @@ into Go.
    resumes admission under recovered snapshot format v9 without discarding the
    compact bindings. If that bounded ledger itself fills, snapshot format v10
    enters an irreversible seal that rejects all mutations, including cleanup,
-   until migration; this prevents an unrecorded rejection from ever becoming a
-   later mutation. Bound every Go
+   until migration; every mutable v8/v9 image reserves the additional encoded
+   byte needed for the two-digit v10 marker, so even an exact-boundary
+   transition remains checkpointable. This prevents an unrecorded rejection
+   from ever becoming a later mutation. Bound every Go
    authority response to 5 MiB: the 4 MiB Catalog checkpoint ceiling plus a
    1 MiB JSON/envelope allowance. This preserves synchronous resolution for a
    valid large desired-state batch while retaining a finite peer-read bound.

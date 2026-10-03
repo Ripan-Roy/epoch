@@ -1080,7 +1080,10 @@ resumes ordinary admission under recovered snapshot format v9 while retaining
 the compact ledger. Native restore therefore preserves exact replay and
 token-rebinding conflicts even after the original proposal is compacted. If
 another compact binding cannot fit, snapshot v10 terminally seals every
-mutation until migration or horizontal sharding. Token-only operation lookup
+mutation until migration or horizontal sharding. Every mutable v8/v9 sealed
+image reserves the extra serialized byte needed to change its one-digit marker
+to v10, so the terminal transition remains checkpointable at the exact ceiling.
+Token-only operation lookup
 for compacted outcomes is not retained because their full authorization context
 is absent.
 

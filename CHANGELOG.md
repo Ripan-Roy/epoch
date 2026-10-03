@@ -15,6 +15,8 @@ notes explicitly list additional verified artifacts.
   deletion commands.
 - Added atomic multi-resource apply, durable operation lookup, and authorized
   resumable change streaming to the generated RegionalAdmin gRPC contract.
+  `GetOperationResponse` now carries the durable Catalog command kind and the
+  presence-aware original delete generation precondition.
 - Added ordered one-time import of the legacy bbolt registry and Kubernetes
   anti-affinity, quorum readiness, and a two-replica disruption budget for the
   control StatefulSet.
@@ -78,7 +80,9 @@ notes explicitly list additional verified artifacts.
   Recovered snapshot v9 preserves replay and token-conflict identity after the
   original proposal leaves the consensus retry suffix. If the compact ledger
   itself fills, snapshot v10 terminally rejects all mutation until migration,
-  rather than allowing an unrecorded rejection to be rebound. Regional
+  rather than allowing an unrecorded rejection to be rebound. One byte is
+  reserved in every mutable sealed image for the two-digit v10 marker so the
+  terminal transition remains checkpointable at the hard limit. Regional
   admission checks durable bindings before proposal; the tablet also
   reconstructs a deterministic conflict receipt if a changed compacted retry
   reaches committed replay. Horizontal Catalog sharding remains the long-term

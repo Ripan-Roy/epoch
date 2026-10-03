@@ -147,14 +147,16 @@ type controlOperationDocument struct {
 }
 
 type ControlOperation struct {
-	RequestToken      string
-	ProposalID        uint64
-	State             ControlOperationState
-	ResourceKeys      []resources.ResourceKey
-	FailureCode       string
-	FailureMessage    string
-	FirstChangeCursor uint64
-	LastChangeCursor  uint64
+	RequestToken       string
+	ProposalID         uint64
+	State              ControlOperationState
+	CommandKind        string
+	ResourceKeys       []resources.ResourceKey
+	ExpectedGeneration *uint64
+	FailureCode        string
+	FailureMessage     string
+	FirstChangeCursor  uint64
+	LastChangeCursor   uint64
 }
 
 type ControlChangeKind string
@@ -702,9 +704,14 @@ func (registry *CatalogRegistry) ControlOperation(
 		RequestToken:      token,
 		ProposalID:        uint64(document.ProposalID),
 		State:             document.State,
+		CommandKind:       document.CommandKind,
 		ResourceKeys:      make([]resources.ResourceKey, 0, len(document.ResourceNames)),
 		FirstChangeCursor: uint64(document.FirstChangeCursor),
 		LastChangeCursor:  uint64(document.LastChangeCursor),
+	}
+	if document.ExpectedGeneration != nil {
+		expectedGeneration := uint64(*document.ExpectedGeneration)
+		operation.ExpectedGeneration = &expectedGeneration
 	}
 	for index, name := range document.ResourceNames {
 		key, decodeErr := keyFromControlName(name)

@@ -361,14 +361,16 @@ func (server *RegionalAdminServer) GetOperation(
 		return nil, status.Error(codes.NotFound, "operation was not found for the affected resources")
 	}
 	return &epochv1.GetOperationResponse{
-		RequestToken:      operation.RequestToken,
-		ProposalId:        operation.ProposalID,
-		State:             protoOperationState(operation.State),
-		AffectedResources: protoResourceNames(expected),
-		FailureCode:       operation.FailureCode,
-		FailureMessage:    operation.FailureMessage,
-		FirstChangeCursor: operation.FirstChangeCursor,
-		LastChangeCursor:  operation.LastChangeCursor,
+		RequestToken:       operation.RequestToken,
+		ProposalId:         operation.ProposalID,
+		State:              protoOperationState(operation.State),
+		AffectedResources:  protoResourceNames(expected),
+		FailureCode:        operation.FailureCode,
+		FailureMessage:     operation.FailureMessage,
+		FirstChangeCursor:  operation.FirstChangeCursor,
+		LastChangeCursor:   operation.LastChangeCursor,
+		CommandKind:        operation.CommandKind,
+		ExpectedGeneration: operation.ExpectedGeneration,
 	}, nil
 }
 

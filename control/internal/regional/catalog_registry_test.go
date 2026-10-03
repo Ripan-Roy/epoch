@@ -941,6 +941,11 @@ func TestCatalogRegistryReplaysMissingDeleteByItsPublicToken(t *testing.T) {
 	}
 
 	expected := uint64(0)
+	operation, err := registry.ControlOperation(t.Context(), "delete-missing")
+	if err != nil || operation.CommandKind != "delete_desired" ||
+		operation.ExpectedGeneration == nil || *operation.ExpectedGeneration != expected {
+		t.Fatalf("ControlOperation(delete metadata) = %+v, %v", operation, err)
+	}
 	replayed, found, err := registry.ReplayManagedDelete(t.Context(), resources.DeleteRequest{
 		RequestToken:       "delete-missing",
 		ExpectedGeneration: &expected,

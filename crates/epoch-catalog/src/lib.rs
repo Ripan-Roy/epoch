@@ -63,6 +63,12 @@ pub const CATALOG_CAPACITY_HARD_SEALED_SNAPSHOT_FORMAT_VERSION: u16 = 10;
 /// checkpoint v2 adds a fixed 42-byte binary header, so keep a small explicit
 /// margin rather than allowing a valid Catalog image that cannot be compacted.
 pub const MAX_CATALOG_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024 - 64;
+/// A soft capacity seal uses the one-digit v8/v9 markers, while the terminal
+/// seal uses v10. Keep the extra decimal byte free in every mutable sealed
+/// image so entering the fail-closed state can never overflow the checkpoint.
+const CATALOG_HARD_SEAL_MARKER_RESERVE_BYTES: usize = 1;
+const MAX_CATALOG_SOFT_SEALED_SNAPSHOT_BYTES: usize =
+    MAX_CATALOG_SNAPSHOT_BYTES - CATALOG_HARD_SEAL_MARKER_RESERVE_BYTES;
 /// Space kept free in every ordinarily admitted Catalog image so a command
 /// that crosses the capacity boundary can still bind its token durably to the
 /// committed rejection. The command itself is capped at 512 KiB; the
@@ -1332,6 +1338,17 @@ impl Catalog {
         &mut self,
         command: &CatalogCommand,
     ) -> CatalogResult<CatalogMutation> {
+        self.bind_capacity_rejection_with_snapshot_limit(command, MAX_CATALOG_SNAPSHOT_BYTES)
+    }
+
+    fn bind_capacity_rejection_with_snapshot_limit(
+        &mut self,
+        command: &CatalogCommand,
+        snapshot_limit: usize,
+    ) -> CatalogResult<CatalogMutation> {
+        let soft_seal_limit = snapshot_limit
+            .checked_sub(CATALOG_HARD_SEAL_MARKER_RESERVE_BYTES)
+            .ok_or(CatalogError::SnapshotTooLarge)?;
         let mut bound = self.clone();
         bound.capacity_rejection_history = true;
         bound.capacity_rejections.insert(
@@ -1339,15 +1356,22 @@ impl Catalog {
             capacity_rejection_command_digest(command)?,
         );
         match bound.encode_snapshot() {
-            Ok(_) => *self = bound,
-            Err(CatalogError::SnapshotTooLarge) => {
-                // The current rejection cannot be recorded in bounded state.
-                // Enter an irreversible seal before returning it so neither
-                // this token nor any later unknown token can ever mutate.
-                self.capacity_sealed = true;
-                self.capacity_rejection_history = true;
-                self.capacity_hard_sealed = true;
-                self.encode_snapshot()?;
+            Ok(encoded) if encoded.len() <= soft_seal_limit => {
+                *self = bound;
+            }
+            Ok(_) | Err(CatalogError::SnapshotTooLarge) => {
+                // Keep one byte available for the v8/v9 -> v10 marker before
+                // admitting another compact binding. The current rejection
+                // is then covered by the irreversible terminal seal even at
+                // the exact snapshot boundary.
+                let mut hard_sealed = self.clone();
+                hard_sealed.capacity_sealed = true;
+                hard_sealed.capacity_rejection_history = true;
+                hard_sealed.capacity_hard_sealed = true;
+                if hard_sealed.encode_snapshot()?.len() > snapshot_limit {
+                    return Err(CatalogError::SnapshotTooLarge);
+                }
+                *self = hard_sealed;
             }
             Err(error) => return Err(error),
         }
@@ -1376,8 +1400,8 @@ impl Catalog {
             .capacity_rejections
             .insert(token.clone(), capacity_rejection_command_digest(command)?);
         match sealed.encode_snapshot() {
-            Ok(_) => {}
-            Err(CatalogError::SnapshotTooLarge) => {
+            Ok(encoded) if encoded.len() <= MAX_CATALOG_SOFT_SEALED_SNAPSHOT_BYTES => {}
+            Ok(_) | Err(CatalogError::SnapshotTooLarge) => {
                 sealed.capacity_rejections.remove(&token);
                 sealed.capacity_hard_sealed = true;
                 sealed.encode_snapshot()?;
@@ -4213,5 +4237,45 @@ mod tests {
             }
         ));
         assert!(restored.managed_resource(&managed_test_name(0)).is_ok());
+    }
+
+    #[test]
+    fn compact_rejection_reserves_the_two_digit_hard_seal_marker() {
+        let mut catalog = seal_capacity_test_catalog();
+        let soft_sealed_len = catalog.encode_snapshot().unwrap().len();
+        assert_eq!(
+            catalog.snapshot_format_version(),
+            CATALOG_CAPACITY_SEALED_SNAPSHOT_FORMAT_VERSION
+        );
+
+        let command = CatalogCommand::ApplyDesired(ApplyDesiredResources {
+            request_token: "hard-seal-marker-boundary".into(),
+            resources: vec![DesiredResourceWrite {
+                name: managed_test_name(9),
+                expected_generation: Some(0),
+                desired: json!({"padding": "small"}),
+            }],
+        });
+        let mutation = catalog
+            .bind_capacity_rejection_with_snapshot_limit(&command, soft_sealed_len + 1)
+            .unwrap();
+
+        assert!(matches!(
+            mutation,
+            CatalogMutation::Rejected {
+                code: CatalogRejectionCode::CapacityExceeded,
+                replayed: false,
+                ..
+            }
+        ));
+        assert!(catalog.capacity_hard_sealed);
+        assert_eq!(
+            catalog.encode_snapshot().unwrap().len(),
+            soft_sealed_len + 1
+        );
+        assert_eq!(
+            catalog.snapshot_format_version(),
+            CATALOG_CAPACITY_HARD_SEALED_SNAPSHOT_FORMAT_VERSION
+        );
     }
 }

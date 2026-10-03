@@ -881,8 +881,13 @@ type GetOperationResponse struct {
 	FailureMessage    string                 `protobuf:"bytes,6,opt,name=failure_message,json=failureMessage,proto3" json:"failure_message,omitempty"`
 	FirstChangeCursor uint64                 `protobuf:"varint,7,opt,name=first_change_cursor,json=firstChangeCursor,proto3" json:"first_change_cursor,omitempty"`
 	LastChangeCursor  uint64                 `protobuf:"varint,8,opt,name=last_change_cursor,json=lastChangeCursor,proto3" json:"last_change_cursor,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Stable Catalog command discriminator (for example delete_desired).
+	CommandKind string `protobuf:"bytes,9,opt,name=command_kind,json=commandKind,proto3" json:"command_kind,omitempty"`
+	// Original delete precondition. Presence distinguishes an omitted
+	// precondition from an explicit generation zero.
+	ExpectedGeneration *uint64 `protobuf:"varint,10,opt,name=expected_generation,json=expectedGeneration,proto3,oneof" json:"expected_generation,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *GetOperationResponse) Reset() {
@@ -967,6 +972,20 @@ func (x *GetOperationResponse) GetFirstChangeCursor() uint64 {
 func (x *GetOperationResponse) GetLastChangeCursor() uint64 {
 	if x != nil {
 		return x.LastChangeCursor
+	}
+	return 0
+}
+
+func (x *GetOperationResponse) GetCommandKind() string {
+	if x != nil {
+		return x.CommandKind
+	}
+	return ""
+}
+
+func (x *GetOperationResponse) GetExpectedGeneration() uint64 {
+	if x != nil && x.ExpectedGeneration != nil {
+		return *x.ExpectedGeneration
 	}
 	return 0
 }
@@ -1267,7 +1286,7 @@ const file_epoch_v1_regional_admin_proto_rawDesc = "" +
 	"\breplayed\x18\x02 \x01(\bR\breplayed\"\x81\x01\n" +
 	"\x13GetOperationRequest\x12#\n" +
 	"\rrequest_token\x18\x01 \x01(\tR\frequestToken\x12E\n" +
-	"\x12affected_resources\x18\x02 \x03(\v2\x16.epoch.v1.ResourceNameR\x11affectedResources\"\xfd\x02\n" +
+	"\x12affected_resources\x18\x02 \x03(\v2\x16.epoch.v1.ResourceNameR\x11affectedResources\"\xee\x03\n" +
 	"\x14GetOperationResponse\x12#\n" +
 	"\rrequest_token\x18\x01 \x01(\tR\frequestToken\x12\x1f\n" +
 	"\vproposal_id\x18\x02 \x01(\x04R\n" +
@@ -1277,7 +1296,11 @@ const file_epoch_v1_regional_admin_proto_rawDesc = "" +
 	"\ffailure_code\x18\x05 \x01(\tR\vfailureCode\x12'\n" +
 	"\x0ffailure_message\x18\x06 \x01(\tR\x0efailureMessage\x12.\n" +
 	"\x13first_change_cursor\x18\a \x01(\x04R\x11firstChangeCursor\x12,\n" +
-	"\x12last_change_cursor\x18\b \x01(\x04R\x10lastChangeCursor\"\xa6\x01\n" +
+	"\x12last_change_cursor\x18\b \x01(\x04R\x10lastChangeCursor\x12!\n" +
+	"\fcommand_kind\x18\t \x01(\tR\vcommandKind\x124\n" +
+	"\x13expected_generation\x18\n" +
+	" \x01(\x04H\x00R\x12expectedGeneration\x88\x01\x01B\x16\n" +
+	"\x14_expected_generation\"\xa6\x01\n" +
 	"\x0eResourceChange\x12\x16\n" +
 	"\x06cursor\x18\x01 \x01(\x04R\x06cursor\x120\n" +
 	"\x04kind\x18\x02 \x01(\x0e2\x1c.epoch.v1.ResourceChangeKindR\x04kind\x12*\n" +
@@ -1413,6 +1436,7 @@ func file_epoch_v1_regional_admin_proto_init() {
 	file_epoch_v1_regional_admin_proto_msgTypes[0].OneofWrappers = []any{}
 	file_epoch_v1_regional_admin_proto_msgTypes[6].OneofWrappers = []any{}
 	file_epoch_v1_regional_admin_proto_msgTypes[8].OneofWrappers = []any{}
+	file_epoch_v1_regional_admin_proto_msgTypes[12].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

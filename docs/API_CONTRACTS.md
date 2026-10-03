@@ -311,9 +311,11 @@ set and pass read authorization for every name; a token alone is never an
 authorization capability. An uncommitted proposal has no durable identity set,
 so lookup returns not found until its committed success or rejection can be
 authorized exactly. A completed operation also exposes `command_kind`; desired
-and managed delete operations expose the retained `expected_generation` as a
-decimal string when the original command had one. Delete replay compares this
-command precondition, not the mutation's result generation, because a
+and managed delete operations expose the retained, presence-aware
+`expected_generation` when the original command had one. The generated gRPC
+field is an optional `uint64`; the internal authority JSON represents the same
+value as a decimal string. Delete replay compares this command precondition,
+not the mutation's result generation, because a
 missing-resource result can return a nonzero tombstone high-water mark.
 `WatchResourceChanges` reads bounded global Catalog pages
 and filters events by requested scope plus the authenticated principal.
