@@ -23,6 +23,9 @@ notes explicitly list additional verified artifacts.
 
 ### Security and recovery
 
+- Updated the workspace `brace-expansion` override to 5.0.12 after the
+  newly published GHSA-qhr7-859c-m2p7, GHSA-6j4f-fj2g-mc7p, and
+  GHSA-q2hr-2g5m-vwhr advisories affected ESLint's transitive dependency.
 - Replaced the withdrawn MinIO conformance images with a digest-pinned,
   multi-architecture SeaweedFS S3 fixture that creates its test bucket during
   startup, keeping connector CI reproducible without registry credentials.
