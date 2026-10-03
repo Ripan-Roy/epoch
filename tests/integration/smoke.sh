@@ -5,12 +5,10 @@ set -Eeuo pipefail
 epoch_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 epoch_smoke_tmp="$(mktemp -d "${TMPDIR:-/tmp}/epoch-smoke.XXXXXX")"
 epoch_node_addr="${EPOCH_SMOKE_NODE_ADDR:-127.0.0.1:17651}"
-epoch_control_addr="${EPOCH_SMOKE_CONTROL_ADDR:-127.0.0.1:18081}"
 epoch_target_dir="${EPOCH_SMOKE_TARGET_DIR:-${epoch_repo_root}/target}"
 epoch_node_data="$epoch_smoke_tmp/node-data"
 epoch_wal_segment_bytes="${EPOCH_SMOKE_WAL_SEGMENT_BYTES:-512}"
 epoch_node_pid=""
-epoch_control_pid=""
 
 cleanup() {
   epoch_status=$?
@@ -19,15 +17,9 @@ cleanup() {
     kill "$epoch_node_pid" 2>/dev/null || true
     wait "$epoch_node_pid" 2>/dev/null || true
   fi
-  if [[ -n "$epoch_control_pid" ]]; then
-    kill "$epoch_control_pid" 2>/dev/null || true
-    wait "$epoch_control_pid" 2>/dev/null || true
-  fi
   if (( epoch_status != 0 )); then
     printf 'Epoch node log:\n' >&2
     tail -n 100 "$epoch_smoke_tmp/node.log" 2>/dev/null >&2 || true
-    printf 'Epoch control-plane log:\n' >&2
-    tail -n 100 "$epoch_smoke_tmp/control.log" 2>/dev/null >&2 || true
   fi
   rm -rf -- "$epoch_smoke_tmp"
   exit "$epoch_status"
@@ -117,30 +109,17 @@ assert_wal_rotated() {
 
 cd "$epoch_repo_root"
 CARGO_TARGET_DIR="$epoch_target_dir" cargo build --locked -p epoch-node -p epoch-cli
-go build -o "$epoch_smoke_tmp/epoch-control" ./control/cmd/epoch-control
 
 start_node
 assert_second_node_rejected
-
-EPOCH_CONTROL_ADDR="$epoch_control_addr" \
-EPOCH_CONTROL_STATE_PATH="$epoch_smoke_tmp/control-registry.db" \
-EPOCH_AUTH_POLICY_PATH="$epoch_repo_root/spec/auth/bootstrap-policy-v1.example.json" \
-EPOCH_CONTROL_REGIONAL_TOKEN="epoch-dev-control-v1" \
-  "$epoch_smoke_tmp/epoch-control" >"$epoch_smoke_tmp/control.log" 2>&1 &
-epoch_control_pid=$!
-
-wait_for_health "Epoch control plane" "http://${epoch_control_addr}/healthz"
 
 "$epoch_target_dir/debug/epoch" \
   --url "http://${epoch_node_addr}" health >/dev/null
 
 EPOCH_SMOKE_NODE_URL="http://${epoch_node_addr}" \
-EPOCH_SMOKE_CONTROL_URL="http://${epoch_control_addr}" \
 PYTHONPATH="$epoch_repo_root/sdk/python/src" \
 python3 <<'PYTHON'
-import json
 import os
-from urllib.request import Request, urlopen
 
 from epoch_sdk import EpochClient, EventEnvelope, EventFilter, Subscription, SubscriptionTarget
 
@@ -217,44 +196,6 @@ publish = client.publish(
 assert publish["routes"][0]["status"] == "delivered"
 assert client.replay_bus("events", event_type="order.*")[0]["envelope"]["id"] == "order-2"
 assert len(client.resources()) == 5
-
-control_url = os.environ["EPOCH_SMOKE_CONTROL_URL"] + "/v1/resources"
-body = json.dumps(
-    {
-        "request_token": "smoke-apply-1",
-        "expected_generation": 0,
-        "resource": {
-            "namespace": "smoke",
-            "kind": "stream",
-            "name": "orders",
-            "labels": {"environment": "test"},
-            "spec": {"partitions": 1, "durability": "volatile"},
-        },
-    }
-).encode()
-
-
-def apply_control_resource() -> tuple[int, dict]:
-    request = Request(
-        control_url,
-        data=body,
-        method="PUT",
-        headers={
-            "authorization": "Bearer epoch-dev-admin-v1",
-            "content-type": "application/json",
-        },
-    )
-    with urlopen(request, timeout=5) as response:
-        return response.status, json.load(response)
-
-
-status, created = apply_control_resource()
-assert status == 201
-assert created["created"] is True
-status, replayed = apply_control_resource()
-assert status == 200
-assert replayed["replayed"] is True
-assert replayed["resource"]["generation"] == 1
 PYTHON
 
 (

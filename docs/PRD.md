@@ -4,9 +4,65 @@
 
 **Tagline:** One runtime. Every real-time workload.  
 **Document version:** 0.3  
-**Date:** 13 September 2026
+**Date:** 27 September 2026
 **Status:** Implementation-backed private beta candidate; later managed-service milestones remain open
 **Audience:** Founders, product, distributed-systems engineering, infrastructure, security, and design
+
+**Control-plane HA implementation note (16 September 2026):** Managed desired
+resources, observed status, generation tombstones, request outcomes, and a
+resumable change log now live in Rust Catalog consensus rather than one Go
+bbolt owner. Linearizable reads use `ReadIndex`; a replicated TTL/fence lease
+permits one of three anti-affined Go replicas to reconcile. Complete capacity
+observations, initial materialization, learner-transition reservation, and
+managed deletion are atomic Catalog commands. The generated gRPC contract adds
+1–128-resource desired batches, exact-resource-authorized operation lookup, and
+tenant-filtered change streaming with an explicit scanned resume cursor. An
+ordered one-time import preserves up to 4,096 legacy live and tombstoned
+generations within the 512 KiB command and 4 MiB native checkpoint envelope,
+while retaining the old database as rollback evidence. Former local identities
+without organization/project/environment are translated consistently into
+`epoch-legacy/local/default`; a collision with an already-qualified identity
+fails before import. Legacy one-replica deployments update and verify ordinal
+zero before scaling to three. Internal
+inventory reads use bounded keyset pages, capacity retries bind their complete
+evidence, controller-generated outcomes retain a bounded suffix, standby lease
+guards normalize to the replicated clock, and the 4,096-entry change log also
+prunes against the complete snapshot byte budget. A binary application image
+avoids base64 expansion, admission reserves its fixed header and one maximum
+rejection record, and growth that still cannot fit commits a durable,
+non-mutating capacity rejection. If repeated unique refusals exhaust that
+reserve, snapshot v8 compacts snapshot-capacity outcomes into exact request
+token plus canonical command-digest bindings, together with bounded command
+kind, affected-resource, and delete-precondition metadata, and seals the
+Catalog against growth. Ordinary commands and no-op deletes add the same compact binding and
+receive the same non-mutating capacity result, while a real delete commits only
+when the complete encoded snapshot strictly shrinks. Incremental cleanup
+automatically resumes ordinary admission after restoring the rejection reserve;
+recovered snapshot v9 retains the compact ledger so an exact retry still
+replays and different command bytes still conflict after checkpoint compaction.
+If even another compact binding cannot fit, snapshot v10 enters a terminal
+fail-closed seal in which no command, including cleanup, may mutate; operators
+must migrate or shard that Catalog. Compacted outcomes remain discoverable
+through exact affected-resource-authorized operation lookup; the unrecorded
+rejection that triggers a terminal seal cannot be reconstructed after an
+ambiguous disconnect and requires operator migration. Cursor zero fails stale
+after the history floor advances. Pre-seal public deletes and non-snapshot
+capacity rejections remain discoverable after replay. Delete operation records
+expose the original optional caller generation precondition independently of
+both the controller's mandatory desired-generation fence and the returned
+tombstone generation. Managed delete derives the current native
+generation inside the replicated command rather than trusting asynchronously
+published controller status, closing the materialization/status crash window
+while retaining legacy v6 command compatibility; new atomic managed deletes use
+command/snapshot v7.
+The Go-to-Rust authority client accepts at most 5 MiB per response, derived
+from the 4 MiB Catalog checkpoint ceiling plus a bounded 1 MiB response
+envelope. Atomic batch results and later operation lookup therefore remain
+resolvable when valid Catalog state exceeds the former 1 MiB transport cap.
+Protected
+multi-control chaos, Catalog capacity/sharding, legacy token migration, and a
+public token-retention window remain open. See
+[ADR-0050](adr/0050-replicated-control-metadata-and-ha.md).
 
 **Automatic placement implementation note (11 September 2026):** The beta.9
 candidate extends the N-node three/five-voter placement contract with explicit
@@ -21,9 +77,9 @@ zone/rack evidence. Go desired/observed generation is distinct from the Rust
 Catalog generation: a placement-policy-only update advances the former while
 `catalog_generation` and every tablet routing fence remain unchanged. This
 prevents a no-op Catalog apply from being retried under the same token with a
-different placement. Multi-resource transactional reservation, split/merge,
-Kubernetes rack attestation, multi-instance control ownership, and production
-chaos/SLO evidence remain open. See
+different placement. Fleet-wide topology-plan reservation, split/merge,
+Kubernetes rack attestation, and production multi-control chaos/SLO evidence
+remain open. See
 [ADR-0047](adr/0047-automatic-topology-repair-and-rebalance.md).
 
 **Beta implementation note (10 September 2026):** The `v0.2.0-beta.8` release
@@ -189,7 +245,7 @@ sources through a shared record-before-checkpoint pipeline. Stable per-record
 proposal identities make replay after a crash duplicate-safe; every applied or
 error-routed result commits before the exact object, LSN, binlog, or partition-
 offset cursor. PostgreSQL feedback and Kafka group commits occur only after the
-Epoch checkpoint. Deterministic tests and a pinned MinIO/PostgreSQL/MySQL/Kafka
+Epoch checkpoint. Deterministic tests and a pinned SeaweedFS/PostgreSQL/MySQL/Kafka
 Compose matrix exercise real protocols locally; live Azure/GCS cloud identity,
 sustained load/soak, and the broader crash-point matrix remain release evidence.
 The same branch adds mandatory TLS/mTLS deployment wiring, secure Go/Java/Python

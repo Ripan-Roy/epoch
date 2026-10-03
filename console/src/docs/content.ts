@@ -68,7 +68,8 @@ curl --fail-with-body --request POST \
 
 export const regionalControl = `# Terminal B · keep the managed bridge running
 EPOCH_CONTROL_REGIONAL_ENDPOINTS=http://127.0.0.1:18661,http://127.0.0.1:18662,http://127.0.0.1:18663 \
-EPOCH_CONTROL_STATE_PATH=.epoch/control/registry.db \
+EPOCH_CONTROL_INSTANCE_ID=epoch-control-local \
+EPOCH_CONTROL_LEGACY_STATE_PATH=.epoch/control/registry.db \
 EPOCH_CONTROL_AUDIT_PATH=.epoch/control/audit.ndjson \
 EPOCH_AUTH_POLICY_PATH=spec/auth/bootstrap-policy-v1.example.json \
 EPOCH_CONTROL_REGIONAL_TOKEN=epoch-dev-control-v1 \

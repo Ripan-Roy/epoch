@@ -26,6 +26,39 @@ type fakeAuthority struct {
 	delete         func(AuthorityDeleteRequest) (AuthorityDeleteObservation, error)
 }
 
+type managedDeleteRegistry struct {
+	resources.Store
+	calls             int
+	replayCalls       int
+	desiredGeneration uint64
+	result            resources.DeleteResult
+}
+
+func (registry *managedDeleteRegistry) DeleteManaged(
+	_ context.Context,
+	request resources.DeleteRequest,
+	desiredGeneration uint64,
+) (resources.DeleteResult, error) {
+	registry.calls++
+	registry.desiredGeneration = desiredGeneration
+	result, err := registry.Store.Delete(request)
+	registry.result = result
+	return result, err
+}
+
+func (registry *managedDeleteRegistry) ReplayManagedDelete(
+	_ context.Context,
+	_ resources.DeleteRequest,
+) (resources.DeleteResult, bool, error) {
+	registry.replayCalls++
+	if !registry.result.Deleted {
+		return resources.DeleteResult{}, false, nil
+	}
+	replayed := registry.result
+	replayed.Replayed = true
+	return replayed, true, nil
+}
+
 func (authority *fakeAuthority) PlanMembership(
 	_ context.Context,
 	request AuthorityMembershipPlanRequest,
@@ -360,6 +393,43 @@ func TestReconcilerDeletesAndRecreatesAcrossSeparatedGenerationClocks(t *testing
 	if reopened.Status.ObservedGeneration != 4 || reopened.Status.CatalogGeneration != 3 ||
 		reopened.Status.Tablets[0].ResourceGeneration != 3 {
 		t.Fatalf("recreated separated status = %+v", reopened.Status)
+	}
+}
+
+func TestReconcilerUsesAtomicManagedDeleteAcrossStatusPublicationCrashWindow(t *testing.T) {
+	local := resources.NewRegistry()
+	resource := applyDesired(
+		t,
+		local,
+		"create-managed-delete",
+		regionalKey(resources.KindStream, "managed-delete"),
+		1,
+		3,
+	)
+	registry := &managedDeleteRegistry{Store: local}
+	reconciler := NewReconciler(registry, &fakeAuthority{})
+	expected := resource.Generation
+
+	deleted, err := reconciler.Delete(t.Context(), resources.DeleteRequest{
+		RequestToken:       "delete-managed",
+		ExpectedGeneration: &expected,
+		Key:                resource.ResourceKey,
+	})
+	if err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if !deleted.Deleted || registry.calls != 1 ||
+		registry.desiredGeneration != resource.Generation {
+		t.Fatalf("Delete() = %+v, managed registry = %+v", deleted, registry)
+	}
+	replayed, err := reconciler.Delete(t.Context(), resources.DeleteRequest{
+		RequestToken:       "delete-managed",
+		ExpectedGeneration: &expected,
+		Key:                resource.ResourceKey,
+	})
+	if err != nil || !replayed.Deleted || !replayed.Replayed ||
+		registry.calls != 1 || registry.replayCalls != 1 {
+		t.Fatalf("Delete(replay) = %+v, %v, managed registry = %+v", replayed, err, registry)
 	}
 }
 

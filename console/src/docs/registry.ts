@@ -5,6 +5,7 @@ import {
   BackupRestoreBody,
   ClusterMilestoneBody,
   ConsensusRecoveryBody,
+  ControlPlaneHABody,
   DeploymentBody,
   GuardedUpgradeBody,
   GuaranteesBody,
@@ -30,6 +31,7 @@ export type DocsPageId =
   | "restart"
   | "guarantees"
   | "cluster-milestone"
+  | "control-plane-ha"
   | "deployment"
   | "identity-audit"
   | "observability"
@@ -148,6 +150,22 @@ export const docsPages: ReadonlyArray<DocsPageMeta> = [
       { id: "proofs", label: "Run the proofs" },
     ],
     Body: ClusterMilestoneBody,
+  },
+  {
+    id: "control-plane-ha",
+    group: "Core concepts",
+    label: "Control-plane HA",
+    title: "Replicated control metadata",
+    summary:
+      "Keep desired state and operation outcomes in Catalog consensus while three replaceable Go replicas reconcile through one fenced owner lease.",
+    headings: [
+      { id: "ownership", label: "Ownership & failover" },
+      { id: "atomicity", label: "Atomic mutations" },
+      { id: "operations", label: "Operations & watch" },
+      { id: "migration", label: "Legacy migration" },
+      { id: "limits", label: "Current limits" },
+    ],
+    Body: ControlPlaneHABody,
   },
   {
     id: "deployment",

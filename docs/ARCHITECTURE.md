@@ -1031,13 +1031,81 @@ console reads `GET /v1/regional/resources` from the Go BFF and never contacts a
 Rust storage node. Every 64-bit value in that browser contract is a decimal
 string and CORS is granted only to exact configured HTTP(S) origins.
 
-The same alpha now commits management-only desired resources, observed status,
-generation tombstones, and request-token outcomes to one versioned bbolt
-database before acknowledging or publishing a mutation in memory. Startup
-recovers that state and fails closed for corrupt records, unknown schemas, or a
-second file owner. Health exposes the `bbolt_v1` mode, and the regional campaign
-kills and reopens the real Go process against the same database before proving
-exact replay and reconciliation.
+Managed regional deployments now commit desired resources, observed status,
+generation tombstones, request-token outcomes, and a bounded resumable change
+log through the Rust Catalog consensus group. Linearizable reads cross a
+`ReadIndex` barrier. One replicated owner lease fences every Go-driven status,
+materialization, membership, and delete mutation; standby control replicas do
+not challenge a live owner for periodic reconciliation. A standby may submit a
+user-requested delete guarded by the observed active lease, so a public request
+does not depend on sticky routing; generation and lease fences still serialize
+the mutation in Catalog. Initial placement validates the complete current
+capacity observation and commits every resource reservation atomically with
+native Catalog materialization. Changed capacity evidence receives a distinct
+attempt identity, while exact ambiguous retries retain the same identity and an
+already materialized native result is recognized before resubmission. Managed
+membership uses the same complete-evidence identity rule. Catalog normalizes a
+lease guard to its replicated control clock when a standby's wall-clock sample
+precedes a concurrent owner commit, while still rejecting an expired lease or
+changed fence. Desired-
+state batches commit 1–128 resources atomically, while operation lookup retains
+affected identities, command kind, and the original delete generation
+precondition for exact replay and tenant authorization. The Go authority
+adapter bounds every Rust response at 5 MiB, derived from the 4 MiB native
+Catalog checkpoint ceiling plus a 1 MiB JSON/envelope allowance, so a valid
+large batch remains synchronously and durably resolvable without an unbounded
+peer read. A result's tombstone
+generation is never treated as that command precondition. Change watches expose
+an explicit scanned resume cursor. Internal inventory uses bounded keyset pages
+with one stable Catalog high-water cursor across the complete scan. Controller
+lease, status, reconciliation, and membership outcomes retain a small
+deterministic suffix in Catalog. Native application checkpoint v2 stores raw
+Catalog bytes under the 4 MiB consensus envelope, reserves 64 bytes for its
+fixed binary header, omits all duplicated retry receipts, and still reads v1
+JSON/base64 images. Durable public outcomes rebuild replay responses; recurring
+internal outcomes retain their bounded policy. Re-checkpointing treats an
+omitted internal receipt as valid only below the installed applied-index
+boundary. The resumable change log is capped at 4,096 entries and also prunes
+its oldest prefix against the complete admitted snapshot budget. When no
+history remains to expire, further growth persists a token-bound capacity
+rejection without mutating business state or fail-stopping replicas. Repeated
+unique refusals eventually consume that finite reserve; snapshot format v7
+marks atomic managed-delete history, while snapshot format v8 compacts
+snapshot-capacity records into exact token/command-digest bindings plus bounded
+command kind, affected identities, and delete-precondition metadata, and seals
+growth. The sealed Catalog binds and rejects ordinary commands and no-op
+deletes, but applies an authorized delete only when it removes live state and
+strictly shrinks the complete encoded snapshot. It stays sealed across
+incremental cleanup until the normal rejection reserve is restored, then
+resumes ordinary admission under recovered snapshot format v9 while retaining
+the compact ledger. Native restore therefore preserves exact replay and
+token-rebinding conflicts even after the original proposal is compacted. If
+another compact binding cannot fit, snapshot v10 terminally seals every
+mutation until migration or horizontal sharding. Every mutable v8/v9 sealed
+image reserves the extra serialized byte needed to change its one-digit marker
+to v10, so the terminal transition remains checkpointable at the exact ceiling.
+Exact affected-resource-authorized operation lookup reconstructs compacted
+rejections. The terminal-seal-triggering rejection is the sole unrecorded case
+once even the bounded compact record no longer fits.
+
+Managed delete carries the mandatory internal desired generation, the original
+optional caller precondition, and the lease fence as distinct fields, but derives the
+native Catalog generation inside the same replicated transition. This avoids a
+race in which materialization commits and the controller crashes before its
+status update publishes the new native generation. New commands use format v7;
+legacy v6 commands with an explicit native-generation fence remain readable.
+
+The Kubernetes operator runs three stable, anti-affined control replicas with
+ordered startup and a two-instance disruption budget. During a legacy
+one-replica upgrade it first updates and verifies ordinal zero, then scales the
+same StatefulSet to three. A one-time pod-zero migration imports up to 4,096
+previous bbolt generation/tombstone high-water records in one command, subject
+to the 512 KiB command and 4 MiB native-checkpoint envelope; the old database is retained
+as rollback evidence. Unqualified former local identities map to the explicit
+`epoch-legacy/local/default` regional scope for both live state and tombstones;
+translation collisions fail before mutation. Legacy token history is not
+reconstructible and is not silently claimed. See
+[ADR-0050](adr/0050-replicated-control-metadata-and-ha.md).
 
 Managed desired state now includes canonical governance metadata. New regional
 resources require owner, cost center, classification, and bounded tags. Go
@@ -1058,10 +1126,10 @@ scope. Both implementations emit bounded credential-free authorization
 decisions and pass one cross-language corpus. See
 [ADR-0011](adr/0011-bootstrap-authz-audit-baseline.md).
 
-This is durable single-process hosted metadata, not a replicated management
-database. Multi-instance linearizability, management leader election, backups,
-OIDC/mTLS identity, replicated policy, immutable audit export, fleet
-automation, and an operator remain open.
+This is replicated regional management metadata, not a global hosted-service
+database. Horizontal Catalog sharding/capacity, a public request-token
+retention window, replicated organization policy, immutable WORM audit export,
+and broader multi-control chaos remain open.
 
 ## 12. API contracts
 
@@ -1076,7 +1144,7 @@ separate typed services rather than a generic `Execute` service:
 | Bus | `Publish`, `Pull`, `Subscribe` |
 | Transaction | `InitProducer`, `Begin`, `Commit`, `Abort`, `Lookup` |
 | Schema | `Resolve`, `Validate`, revision and compatibility operations |
-| Regional Admin | `Plan`, `ApplyResource`, `Delete`, `WatchOperation`, backup, restore, drain, transfer, rebalance |
+| Regional Admin | `ApplyResource`, `BatchApplyResources`, `GetOperation`, `WatchResourceChanges`, `DeleteResource`; future plan/backup/restore/drain/transfer/rebalance |
 
 High-throughput produce, fetch, send, receive, and settle paths support streaming
 and batching. Every mutation carries a deadline, request or idempotency token,
@@ -1320,3 +1388,4 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0047: Automatic Topology Repair and Serialized Rebalance](adr/0047-automatic-topology-repair-and-rebalance.md)
 - [ADR-0048: OIDC and Durable Authorization Audit](adr/0048-oidc-and-durable-authorization-audit.md)
 - [ADR-0049: Core Protocol Semantics](adr/0049-core-protocol-semantics.md)
+- [ADR-0050: Replicated Regional Control Metadata and Active-Owner Fencing](adr/0050-replicated-control-metadata-and-ha.md)

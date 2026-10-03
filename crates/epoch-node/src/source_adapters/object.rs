@@ -847,10 +847,10 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires deploy/compose/docker-compose.connectors.yml"]
-    async fn minio_conformance_reads_and_resumes_immutable_objects() {
+    async fn s3_compatible_conformance_reads_and_resumes_immutable_objects() {
         let config = crate::source_adapters::test_delivery_config(&json!([{
             "kind": "connector_credentials",
-            "reference": "minio-creds",
+            "reference": "s3-fixture-creds",
             "values": {
                 "access_key_id": "epoch-access",
                 "secret_access_key": "epoch-secret-key"
@@ -861,12 +861,12 @@ mod tests {
         registry
             .upsert(
                 ConnectorSpec {
-                    name: "minio-source".into(),
+                    name: "s3-fixture-source".into(),
                     kind: ConnectorKind::S3Compatible,
                     direction: ConnectorDirection::Source,
-                    secret_refs: BTreeSet::from(["minio-creds".into()]),
+                    secret_refs: BTreeSet::from(["s3-fixture-creds".into()]),
                     outbound_allowlist: BTreeSet::from(["127.0.0.1".into()]),
-                    identity: "minio-reader".into(),
+                    identity: "s3-fixture-reader".into(),
                     config: BTreeMap::from([
                         ("bucket".into(), "events".into()),
                         ("region".into(), "us-east-1".into()),
@@ -879,20 +879,23 @@ mod tests {
             )
             .unwrap();
         let source = adapter
-            .resolve("minio-source", registry.connector("minio-source").unwrap())
+            .resolve(
+                "s3-fixture-source",
+                registry.connector("s3-fixture-source").unwrap(),
+            )
             .unwrap()
             .unwrap();
         let store = adapter.build_store(&source).unwrap();
         store
             .put(
                 &Path::from("conformance/0001.jsonl"),
-                PutPayload::from(serde_json::to_vec(&event("minio-event-1")).unwrap()),
+                PutPayload::from(serde_json::to_vec(&event("s3-fixture-event-1")).unwrap()),
             )
             .await
             .unwrap();
 
         let batch = adapter.fetch(&source, "0").await.unwrap().unwrap();
-        assert_eq!(batch.records[0].record_id(), "minio-event-1");
+        assert_eq!(batch.records[0].record_id(), "s3-fixture-event-1");
         assert!(
             adapter
                 .fetch(&source, &batch.source_to)

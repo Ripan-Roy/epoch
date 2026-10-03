@@ -35,39 +35,87 @@ func NewUnaryServerInterceptor(
 		info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
 	) (any, error) {
-		incoming, _ := metadata.FromIncomingContext(ctx)
-		requestID := requestIDFromMetadata(incoming)
-		_ = grpc.SetHeader(ctx, metadata.Pairs("x-request-id", requestID))
-		authorizationValues := incoming.Get("authorization")
-		authorization := ""
-		if len(authorizationValues) == 1 {
-			authorization = authorizationValues[0]
-		} else if len(authorizationValues) > 1 {
-			authorization = "malformed"
-		}
-		principal, err := policy.AuthenticateBearer(authorization)
+		ctx, err := authenticateGRPCContext(ctx, info.FullMethod, policy, audit)
 		if err != nil {
-			if auditErr := audit.Record(ctx, DecisionEvent{
-				Timestamp:   time.Now().UTC(),
-				RequestID:   requestID,
-				PrincipalID: "anonymous",
-				PolicyID:    policy.ID(),
-				Action:      actionForGRPCMethod(info.FullMethod),
-				Decision:    DecisionDeny,
-				Reason:      authenticationReason(err),
-				Scope:       Scope{},
-			}); auditErr != nil {
-				return nil, status.Error(codes.Unavailable, "audit journal is unavailable")
-			}
-			return nil, status.Error(
-				codes.Unauthenticated,
-				"valid bearer authentication is required",
-			)
+			return nil, err
 		}
-		ctx = ContextWithPrincipal(ctx, principal)
-		ctx = ContextWithRequestID(ctx, requestID)
 		return handler(ctx, request)
 	}
+}
+
+// NewStreamServerInterceptor applies the same authentication and audit
+// contract to server-streaming APIs before their handlers can read state.
+func NewStreamServerInterceptor(
+	policy *Policy,
+	audit AuditSink,
+) grpc.StreamServerInterceptor {
+	if policy == nil {
+		panic("auth: nil gRPC policy")
+	}
+	if audit == nil {
+		panic("auth: nil gRPC audit sink")
+	}
+	return func(
+		service any,
+		stream grpc.ServerStream,
+		info *grpc.StreamServerInfo,
+		handler grpc.StreamHandler,
+	) error {
+		ctx, err := authenticateGRPCContext(stream.Context(), info.FullMethod, policy, audit)
+		if err != nil {
+			return err
+		}
+		return handler(service, &authenticatedServerStream{ServerStream: stream, ctx: ctx})
+	}
+}
+
+type authenticatedServerStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (stream *authenticatedServerStream) Context() context.Context {
+	return stream.ctx
+}
+
+func authenticateGRPCContext(
+	ctx context.Context,
+	method string,
+	policy *Policy,
+	audit AuditSink,
+) (context.Context, error) {
+	incoming, _ := metadata.FromIncomingContext(ctx)
+	requestID := requestIDFromMetadata(incoming)
+	_ = grpc.SetHeader(ctx, metadata.Pairs("x-request-id", requestID))
+	authorizationValues := incoming.Get("authorization")
+	authorization := ""
+	if len(authorizationValues) == 1 {
+		authorization = authorizationValues[0]
+	} else if len(authorizationValues) > 1 {
+		authorization = "malformed"
+	}
+	principal, err := policy.AuthenticateBearer(authorization)
+	if err != nil {
+		if auditErr := audit.Record(ctx, DecisionEvent{
+			Timestamp:   time.Now().UTC(),
+			RequestID:   requestID,
+			PrincipalID: "anonymous",
+			PolicyID:    policy.ID(),
+			Action:      actionForGRPCMethod(method),
+			Decision:    DecisionDeny,
+			Reason:      authenticationReason(err),
+			Scope:       Scope{},
+		}); auditErr != nil {
+			return nil, status.Error(codes.Unavailable, "audit journal is unavailable")
+		}
+		return nil, status.Error(
+			codes.Unauthenticated,
+			"valid bearer authentication is required",
+		)
+	}
+	ctx = ContextWithPrincipal(ctx, principal)
+	ctx = ContextWithRequestID(ctx, requestID)
+	return ctx, nil
 }
 
 func authenticationReason(err error) DecisionReason {
@@ -93,7 +141,8 @@ func authenticationReason(err error) DecisionReason {
 
 func actionForGRPCMethod(method string) Action {
 	switch method {
-	case "/epoch.v1.RegionalAdminService/ApplyResource":
+	case "/epoch.v1.RegionalAdminService/ApplyResource",
+		"/epoch.v1.RegionalAdminService/BatchApplyResources":
 		return ActionResourceApply
 	case "/epoch.v1.RegionalAdminService/DeleteResource":
 		return ActionResourceDelete

@@ -12,7 +12,7 @@ does not establish a managed-service availability or latency SLO.
 
 ## What one round proves
 
-The regional driver emits `epoch.regional-runtime.evidence/v1` only after all of
+The regional driver emits `epoch.regional-runtime.evidence/v2` only after all of
 these fault boundaries and invariants pass:
 
 | Boundary | Required observation |

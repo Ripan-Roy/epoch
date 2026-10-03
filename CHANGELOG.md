@@ -6,6 +6,119 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+### Added
+
+- Moved managed desired state, observed status, generation tombstones, request
+  outcomes, and resumable change history into the replicated Rust Catalog.
+- Added a lease- and fence-protected active reconciler across three replaceable
+  Go control replicas, including atomic capacity/materialization and managed
+  deletion commands.
+- Added atomic multi-resource apply, durable operation lookup, and authorized
+  resumable change streaming to the generated RegionalAdmin gRPC contract.
+  `GetOperationResponse` now carries the durable Catalog command kind and the
+  presence-aware original delete generation precondition.
+- Added ordered one-time import of the legacy bbolt registry and Kubernetes
+  anti-affinity, quorum readiness, and a two-replica disruption budget for the
+  control StatefulSet.
+- Added bounded keyset pagination for control inventory reads, including a
+  stable Catalog cursor across pages and fail-closed ordering validation.
+
+### Security and recovery
+
+- Updated the workspace `brace-expansion` override to 5.0.12 after the
+  newly published GHSA-qhr7-859c-m2p7, GHSA-6j4f-fj2g-mc7p, and
+  GHSA-q2hr-2g5m-vwhr advisories affected ESLint's transitive dependency.
+- Replaced the withdrawn MinIO conformance images with a digest-pinned,
+  multi-architecture SeaweedFS S3 fixture that creates its test bucket during
+  startup, keeping connector CI reproducible without registry credentials.
+- Upgraded `rustls` to 0.23.45 to address RUSTSEC-2026-0285; the dependency
+  audit and the fail-closed TLS/mTLS transport tests pass on the patched build.
+- The regional container campaign now proves replicated control recovery,
+  stale-owner fencing, fail-closed behavior without Catalog quorum, and
+  same-volume all-voter recovery without a separate writable metadata owner.
+- Managed reconcile retries first recognize an already materialized native
+  result, then bind each new attempt to its complete lease and capacity
+  evidence. Exact ambiguous retries retain one token while changed evidence can
+  recover from an earlier capacity rejection without rebinding command bytes.
+- Public managed deletes retain the caller's operation token, including
+  missing-resource outcomes, and any control replica can submit the request
+  against the current active lease without taking over periodic reconciliation.
+- New managed-delete command/snapshot format v7 derives the current native
+  Catalog generation inside the replicated transition. A controller crash
+  between native materialization and status publication can no longer bind the
+  public delete token to a stale generation; legacy explicitly fenced v6
+  commands and snapshots remain readable.
+- Controller-generated lease, status, reconciliation, and membership request
+  outcomes retain only the newest bounded internal suffix, preventing rejected
+  periodic attempts from growing snapshots while public outcomes stay durable.
+- Catalog application checkpoint v2 stores the Catalog bytes directly under
+  the 4 MiB consensus envelope and no longer duplicates any retry command or
+  receipt; durable token outcomes reconstruct public replays after recovery,
+  bounded controller outcomes retain their existing policy, and v1 images
+  remain readable.
+- Go accepts bounded Rust authority responses up to 5 MiB: the 4 MiB native
+  Catalog checkpoint ceiling plus a 1 MiB JSON/envelope allowance. This keeps
+  valid large atomic batches and durable operation lookup resolvable while
+  rejecting an unbounded or malformed peer response.
+- Managed membership attempts bind their complete lease and capacity evidence,
+  allowing a later healthy capacity sample to recover from a committed
+  rejection while preserving exact ambiguous-attempt replay.
+- Lease-fenced mutations normalize a lagging API replica's sampled time to the
+  replicated Catalog clock, and change history expires by the remaining full
+  snapshot byte budget as well as its 4,096-entry ceiling.
+- A command that cannot fit after change-history expiry commits and persists a
+  typed capacity rejection against unchanged business state. Its token remains
+  replayable and cannot be rebound after space is freed; admission reserves
+  enough checkpoint space for that rejection instead of fail-stopping Catalog
+  replicas after consensus commit.
+- Repeated unique snapshot-capacity refusals can no longer consume the full
+  rejection reserve and fail-stop a Catalog tablet. Snapshot format v8 compacts
+  them into exact request-token/canonical-command-digest bindings plus bounded
+  authorization and operation metadata, and seals growth. Sealed Catalogs bind and reject unknown growth but admit only real
+  deletes that strictly shrink the complete encoded snapshot; incremental
+  cleanup resumes ordinary admission at the reserved-headroom boundary.
+  Recovered snapshot v9 preserves replay and token-conflict identity after the
+  original proposal leaves the consensus retry suffix. If the compact ledger
+  itself fills, snapshot v10 terminally rejects all mutation until migration,
+  rather than allowing an unrecorded rejection to be rebound. One byte is
+  reserved in every mutable sealed image for the two-digit v10 marker so the
+  terminal transition remains checkpointable at the hard limit. Regional
+  admission checks durable bindings before proposal; the tablet also
+  reconstructs a deterministic conflict receipt if a changed compacted retry
+  reaches committed replay. Horizontal Catalog sharding remains the long-term
+  capacity path. Exact affected-resource-authorized lookup reconstructs a
+  compacted rejection after consensus compaction.
+- Control operation results now expose their original command kind and retained
+  caller-supplied delete generation precondition, separately from the managed
+  controller's mandatory desired-generation fence. Missing-resource delete replay validates that
+  command precondition instead of mistaking a later tombstone high-water mark
+  for the caller's expected generation.
+- Change cursor zero is an initial-history cursor only while the retention
+  floor is one; after compaction it fails as stale instead of silently skipping
+  the expired prefix.
+- A legacy one-replica control StatefulSet updates and verifies ordinal zero
+  before scaling to three replicas; one atomic import accepts up to 4,096
+  generation records within the existing command and snapshot byte limits.
+- Valid legacy-local resource identities that omit organization, project, and
+  environment migrate into `epoch-legacy/local/default`; live resources and
+  tombstones use the same mapping, and any mapped identity collision fails
+  before Catalog mutation.
+- Desired-state updates retain the last generation-fenced observed status, so
+  policy-only changes continue from the real native Catalog generation instead
+  of retrying an existing resource from generation zero.
+- The regional recovery campaign now waits for a stable writable Stream leader
+  after an all-voter restart before exercising SDK operations, while retaining
+  separate health, stale-read convergence, and quorum-unavailable assertions.
+- The Kubernetes restore proof compares native Catalog resources, durable
+  managed intent and tablet identity, and every profile digest while excluding
+  runtime-only leader, reachability, lease-clock, and reconcile-history drift.
+
+### Limitations
+
+- Horizontal Catalog sharding/capacity, a public durable-operation retention
+  policy, protected multi-control chaos, and legacy idempotency-token import
+  remain production gates.
+
 ## [0.2.0-beta.11] - 2026-09-14
 
 ### Added
