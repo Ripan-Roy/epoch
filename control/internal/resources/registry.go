@@ -209,6 +209,7 @@ const (
 	CodeInvalidArgument ErrorCode = "invalid_argument"
 	CodeNotFound        ErrorCode = "not_found"
 	CodeConflict        ErrorCode = "conflict"
+	CodeUnavailable     ErrorCode = "unavailable"
 	CodeInternal        ErrorCode = "internal"
 )
 
@@ -227,6 +228,24 @@ func (err *RegistryError) Error() string {
 
 func (err *RegistryError) Unwrap() error {
 	return err.cause
+}
+
+// NewStoreError preserves the stable public error taxonomy for Store
+// implementations whose authoritative state is outside this package.
+func NewStoreError(
+	code ErrorCode,
+	message string,
+	expectedGeneration uint64,
+	actualGeneration uint64,
+	cause error,
+) *RegistryError {
+	return &RegistryError{
+		Code:               code,
+		Message:            message,
+		ExpectedGeneration: expectedGeneration,
+		ActualGeneration:   actualGeneration,
+		cause:              cause,
+	}
 }
 
 type tokenRecord struct {
@@ -256,6 +275,38 @@ type registryPersistence interface {
 	Close() error
 	Mode() string
 }
+
+// Store is the managed desired-state boundary used by the public HTTP/gRPC
+// surfaces and the reconciler. The local Registry and the replicated regional
+// implementation share this contract so tests and standalone deployments do
+// not depend on a networked Catalog.
+type Store interface {
+	Apply(ApplyRequest) (ApplyResult, error)
+	Get(ResourceKey) (Resource, error)
+	List(ListFilter) ([]Resource, error)
+	Delete(DeleteRequest) (DeleteResult, error)
+	Count() int
+	UpdateStatus(ResourceKey, uint64, ResourceStatus) (Resource, error)
+	Mode() string
+	Close() error
+}
+
+// LegacyGeneration is one generation high-water mark exported from the
+// previous single-owner registry for a one-time consensus migration.
+type LegacyGeneration struct {
+	Key        ResourceKey `json:"key"`
+	Generation uint64      `json:"generation"`
+}
+
+// LegacyRegistrySnapshot is a consistent desired-state migration image. The
+// old token ledger cannot be reconstructed into the new command schema, so
+// callers must retain the legacy database as rollback evidence.
+type LegacyRegistrySnapshot struct {
+	Resources   []Resource         `json:"resources"`
+	Generations []LegacyGeneration `json:"generations"`
+}
+
+var _ Store = (*Registry)(nil)
 
 // Registry is a concurrency-safe declarative registry. NewRegistry is
 // intentionally memory-only for unit and embedded use; OpenDurableRegistry
@@ -412,6 +463,19 @@ func (registry *Registry) Get(key ResourceKey) (Resource, error) {
 
 // List returns defensive copies in deterministic namespace/kind/name order.
 func (registry *Registry) List(filter ListFilter) ([]Resource, error) {
+	registry.mu.RLock()
+	resources := make([]Resource, 0, len(registry.resources))
+	for _, resource := range registry.resources {
+		resources = append(resources, cloneResource(resource))
+	}
+	registry.mu.RUnlock()
+	return FilterResourceList(resources, filter)
+}
+
+// FilterResourceList applies the canonical inventory filter and stable sort to
+// a detached resource snapshot. Replicated stores use it after one
+// linearizable Catalog read.
+func FilterResourceList(resources []Resource, filter ListFilter) ([]Resource, error) {
 	filter.Organization = strings.TrimSpace(filter.Organization)
 	filter.Project = strings.TrimSpace(filter.Project)
 	filter.Environment = strings.TrimSpace(filter.Environment)
@@ -425,9 +489,8 @@ func (registry *Registry) List(filter ListFilter) ([]Resource, error) {
 		return nil, err
 	}
 
-	registry.mu.RLock()
-	resources := make([]Resource, 0, len(registry.resources))
-	for _, resource := range registry.resources {
+	filtered := make([]Resource, 0, len(resources))
+	for _, resource := range resources {
 		if filter.Organization != "" && resource.Organization != filter.Organization {
 			continue
 		}
@@ -446,41 +509,39 @@ func (registry *Registry) List(filter ListFilter) ([]Resource, error) {
 		if !governanceMatches(resource.Governance, filter) {
 			continue
 		}
-		resources = append(resources, cloneResource(resource))
+		filtered = append(filtered, cloneResource(resource))
 	}
-	registry.mu.RUnlock()
 
-	sort.Slice(resources, func(left, right int) bool {
-		if resources[left].Organization != resources[right].Organization {
-			return resources[left].Organization < resources[right].Organization
-		}
-		if resources[left].Project != resources[right].Project {
-			return resources[left].Project < resources[right].Project
-		}
-		if resources[left].Environment != resources[right].Environment {
-			return resources[left].Environment < resources[right].Environment
-		}
-		if resources[left].Namespace != resources[right].Namespace {
-			return resources[left].Namespace < resources[right].Namespace
-		}
-		if resources[left].Kind != resources[right].Kind {
-			return resources[left].Kind < resources[right].Kind
-		}
-		return resources[left].Name < resources[right].Name
+	sort.Slice(filtered, func(left, right int) bool {
+		return resourceKeyLess(filtered[left].ResourceKey, filtered[right].ResourceKey)
 	})
-	return resources, nil
+	return filtered, nil
+}
+
+func resourceKeyLess(left, right ResourceKey) bool {
+	if left.Organization != right.Organization {
+		return left.Organization < right.Organization
+	}
+	if left.Project != right.Project {
+		return left.Project < right.Project
+	}
+	if left.Environment != right.Environment {
+		return left.Environment < right.Environment
+	}
+	if left.Namespace != right.Namespace {
+		return left.Namespace < right.Namespace
+	}
+	if left.Kind != right.Kind {
+		return left.Kind < right.Kind
+	}
+	return left.Name < right.Name
 }
 
 // Delete removes desired state while retaining the monotonic generation
 // counter. A retry with the same token returns the original result.
 func (registry *Registry) Delete(request DeleteRequest) (DeleteResult, error) {
-	normalizedKey, err := normalizeKey(request.Key)
+	request, err := NormalizeDeleteRequest(request)
 	if err != nil {
-		return DeleteResult{}, err
-	}
-	request.Key = normalizedKey
-	request.RequestToken = strings.TrimSpace(request.RequestToken)
-	if err := validateToken(request.RequestToken); err != nil {
 		return DeleteResult{}, err
 	}
 
@@ -567,11 +628,65 @@ func (registry *Registry) Delete(request DeleteRequest) (DeleteResult, error) {
 	return result, nil
 }
 
+// NormalizeDeleteRequest applies the shared key and request-token contract.
+func NormalizeDeleteRequest(request DeleteRequest) (DeleteRequest, error) {
+	key, err := normalizeKey(request.Key)
+	if err != nil {
+		return DeleteRequest{}, err
+	}
+	request.Key = key
+	request.RequestToken, err = NormalizeRequestToken(request.RequestToken)
+	if err != nil {
+		return DeleteRequest{}, err
+	}
+	return request, nil
+}
+
+// NormalizeRequestToken applies the shared idempotency-token contract to
+// operations, including atomic batches, that are not represented by ApplyRequest.
+func NormalizeRequestToken(token string) (string, error) {
+	token = strings.TrimSpace(token)
+	if err := validateToken(token); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
 // Count returns the number of live resources.
 func (registry *Registry) Count() int {
 	registry.mu.RLock()
 	defer registry.mu.RUnlock()
 	return len(registry.resources)
+}
+
+// ExportLegacySnapshot returns one consistent, key-sorted migration image.
+func (registry *Registry) ExportLegacySnapshot() (LegacyRegistrySnapshot, error) {
+	registry.mu.RLock()
+	if registry.closed {
+		registry.mu.RUnlock()
+		return LegacyRegistrySnapshot{}, internal("control metadata registry is closed", nil)
+	}
+	snapshot := LegacyRegistrySnapshot{
+		Resources:   make([]Resource, 0, len(registry.resources)),
+		Generations: make([]LegacyGeneration, 0, len(registry.lastGeneration)),
+	}
+	for _, resource := range registry.resources {
+		snapshot.Resources = append(snapshot.Resources, cloneResource(resource))
+	}
+	for key, generation := range registry.lastGeneration {
+		snapshot.Generations = append(snapshot.Generations, LegacyGeneration{
+			Key:        key,
+			Generation: generation,
+		})
+	}
+	registry.mu.RUnlock()
+	sort.Slice(snapshot.Resources, func(left, right int) bool {
+		return resourceKeyLess(snapshot.Resources[left].ResourceKey, snapshot.Resources[right].ResourceKey)
+	})
+	sort.Slice(snapshot.Generations, func(left, right int) bool {
+		return resourceKeyLess(snapshot.Generations[left].Key, snapshot.Generations[right].Key)
+	})
+	return snapshot, nil
 }
 
 // UpdateStatus atomically records an observation only while the desired
@@ -675,6 +790,13 @@ func normalizeApply(request ApplyRequest) (ApplyRequest, error) {
 		return ApplyRequest{}, invalid("spec must be one valid JSON object")
 	}
 	return request, nil
+}
+
+// NormalizeApplyRequest applies the same canonical validation used by the
+// in-process Registry so replicated Store implementations cannot drift at the
+// public contract boundary.
+func NormalizeApplyRequest(request ApplyRequest) (ApplyRequest, error) {
+	return normalizeApply(request)
 }
 
 func normalizeKey(key ResourceKey) (ResourceKey, error) {

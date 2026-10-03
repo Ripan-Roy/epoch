@@ -19,10 +19,13 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	RegionalAdminService_ApplyResource_FullMethodName  = "/epoch.v1.RegionalAdminService/ApplyResource"
-	RegionalAdminService_GetResource_FullMethodName    = "/epoch.v1.RegionalAdminService/GetResource"
-	RegionalAdminService_ListResources_FullMethodName  = "/epoch.v1.RegionalAdminService/ListResources"
-	RegionalAdminService_DeleteResource_FullMethodName = "/epoch.v1.RegionalAdminService/DeleteResource"
+	RegionalAdminService_ApplyResource_FullMethodName        = "/epoch.v1.RegionalAdminService/ApplyResource"
+	RegionalAdminService_GetResource_FullMethodName          = "/epoch.v1.RegionalAdminService/GetResource"
+	RegionalAdminService_ListResources_FullMethodName        = "/epoch.v1.RegionalAdminService/ListResources"
+	RegionalAdminService_DeleteResource_FullMethodName       = "/epoch.v1.RegionalAdminService/DeleteResource"
+	RegionalAdminService_BatchApplyResources_FullMethodName  = "/epoch.v1.RegionalAdminService/BatchApplyResources"
+	RegionalAdminService_GetOperation_FullMethodName         = "/epoch.v1.RegionalAdminService/GetOperation"
+	RegionalAdminService_WatchResourceChanges_FullMethodName = "/epoch.v1.RegionalAdminService/WatchResourceChanges"
 )
 
 // RegionalAdminServiceClient is the client API for RegionalAdminService service.
@@ -40,6 +43,12 @@ type RegionalAdminServiceClient interface {
 	ListResources(ctx context.Context, in *ListResourcesRequest, opts ...grpc.CallOption) (*ListResourcesResponse, error)
 	// DeleteResource removes desired resource state idempotently.
 	DeleteResource(ctx context.Context, in *DeleteResourceRequest, opts ...grpc.CallOption) (*DeleteResourceResponse, error)
+	// BatchApplyResources atomically commits 1-128 desired resource changes.
+	BatchApplyResources(ctx context.Context, in *BatchApplyResourcesRequest, opts ...grpc.CallOption) (*BatchApplyResourcesResponse, error)
+	// GetOperation returns one durable request-token outcome.
+	GetOperation(ctx context.Context, in *GetOperationRequest, opts ...grpc.CallOption) (*GetOperationResponse, error)
+	// WatchResourceChanges streams resumable, bounded change checkpoints.
+	WatchResourceChanges(ctx context.Context, in *WatchResourceChangesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WatchResourceChangesResponse], error)
 }
 
 type regionalAdminServiceClient struct {
@@ -90,6 +99,45 @@ func (c *regionalAdminServiceClient) DeleteResource(ctx context.Context, in *Del
 	return out, nil
 }
 
+func (c *regionalAdminServiceClient) BatchApplyResources(ctx context.Context, in *BatchApplyResourcesRequest, opts ...grpc.CallOption) (*BatchApplyResourcesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BatchApplyResourcesResponse)
+	err := c.cc.Invoke(ctx, RegionalAdminService_BatchApplyResources_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *regionalAdminServiceClient) GetOperation(ctx context.Context, in *GetOperationRequest, opts ...grpc.CallOption) (*GetOperationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetOperationResponse)
+	err := c.cc.Invoke(ctx, RegionalAdminService_GetOperation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *regionalAdminServiceClient) WatchResourceChanges(ctx context.Context, in *WatchResourceChangesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WatchResourceChangesResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &RegionalAdminService_ServiceDesc.Streams[0], RegionalAdminService_WatchResourceChanges_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WatchResourceChangesRequest, WatchResourceChangesResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RegionalAdminService_WatchResourceChangesClient = grpc.ServerStreamingClient[WatchResourceChangesResponse]
+
 // RegionalAdminServiceServer is the server API for RegionalAdminService service.
 // All implementations must embed UnimplementedRegionalAdminServiceServer
 // for forward compatibility.
@@ -105,6 +153,12 @@ type RegionalAdminServiceServer interface {
 	ListResources(context.Context, *ListResourcesRequest) (*ListResourcesResponse, error)
 	// DeleteResource removes desired resource state idempotently.
 	DeleteResource(context.Context, *DeleteResourceRequest) (*DeleteResourceResponse, error)
+	// BatchApplyResources atomically commits 1-128 desired resource changes.
+	BatchApplyResources(context.Context, *BatchApplyResourcesRequest) (*BatchApplyResourcesResponse, error)
+	// GetOperation returns one durable request-token outcome.
+	GetOperation(context.Context, *GetOperationRequest) (*GetOperationResponse, error)
+	// WatchResourceChanges streams resumable, bounded change checkpoints.
+	WatchResourceChanges(*WatchResourceChangesRequest, grpc.ServerStreamingServer[WatchResourceChangesResponse]) error
 	mustEmbedUnimplementedRegionalAdminServiceServer()
 }
 
@@ -126,6 +180,15 @@ func (UnimplementedRegionalAdminServiceServer) ListResources(context.Context, *L
 }
 func (UnimplementedRegionalAdminServiceServer) DeleteResource(context.Context, *DeleteResourceRequest) (*DeleteResourceResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DeleteResource not implemented")
+}
+func (UnimplementedRegionalAdminServiceServer) BatchApplyResources(context.Context, *BatchApplyResourcesRequest) (*BatchApplyResourcesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method BatchApplyResources not implemented")
+}
+func (UnimplementedRegionalAdminServiceServer) GetOperation(context.Context, *GetOperationRequest) (*GetOperationResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetOperation not implemented")
+}
+func (UnimplementedRegionalAdminServiceServer) WatchResourceChanges(*WatchResourceChangesRequest, grpc.ServerStreamingServer[WatchResourceChangesResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method WatchResourceChanges not implemented")
 }
 func (UnimplementedRegionalAdminServiceServer) mustEmbedUnimplementedRegionalAdminServiceServer() {}
 func (UnimplementedRegionalAdminServiceServer) testEmbeddedByValue()                              {}
@@ -220,6 +283,53 @@ func _RegionalAdminService_DeleteResource_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RegionalAdminService_BatchApplyResources_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BatchApplyResourcesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RegionalAdminServiceServer).BatchApplyResources(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RegionalAdminService_BatchApplyResources_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RegionalAdminServiceServer).BatchApplyResources(ctx, req.(*BatchApplyResourcesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RegionalAdminService_GetOperation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetOperationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RegionalAdminServiceServer).GetOperation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RegionalAdminService_GetOperation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RegionalAdminServiceServer).GetOperation(ctx, req.(*GetOperationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RegionalAdminService_WatchResourceChanges_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WatchResourceChangesRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(RegionalAdminServiceServer).WatchResourceChanges(m, &grpc.GenericServerStream[WatchResourceChangesRequest, WatchResourceChangesResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RegionalAdminService_WatchResourceChangesServer = grpc.ServerStreamingServer[WatchResourceChangesResponse]
+
 // RegionalAdminService_ServiceDesc is the grpc.ServiceDesc for RegionalAdminService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -243,7 +353,21 @@ var RegionalAdminService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "DeleteResource",
 			Handler:    _RegionalAdminService_DeleteResource_Handler,
 		},
+		{
+			MethodName: "BatchApplyResources",
+			Handler:    _RegionalAdminService_BatchApplyResources_Handler,
+		},
+		{
+			MethodName: "GetOperation",
+			Handler:    _RegionalAdminService_GetOperation_Handler,
+		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "WatchResourceChanges",
+			Handler:       _RegionalAdminService_WatchResourceChanges_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "epoch/v1/regional_admin.proto",
 }

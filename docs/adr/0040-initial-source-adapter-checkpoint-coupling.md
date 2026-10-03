@@ -102,7 +102,7 @@ connector may still run.
 - Deterministic adapter tests cover strict configuration, cursors, transaction
   assembly, ordering, overwrite/gap detection, stable errors, secret redaction,
   transport policy, pending-ack reconciliation, and session cleanup.
-- A pinned Compose campaign exercises MinIO/S3, PostgreSQL logical replication,
+- A pinned Compose campaign exercises SeaweedFS/S3, PostgreSQL logical replication,
   MySQL row binlogs, and Kafka consumer groups through real protocol servers.
 - The existing real three-process HTTP campaign proves shared Bus checkpoint
   convergence, leader failover, stable replay, and all-voter reopen.

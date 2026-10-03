@@ -47,8 +47,11 @@ bounded Redis, Kafka, and RabbitMQ gateways across native replicated state,
 released-client conformance, restart evidence, scanner, and public docs.
 
 The published release train extends the authenticated regional
-multi-tablet M1/M2 boundary. Protected `main` evidence covers the consensus-backed catalog, durable
-single-owner hosted control, topology admission, quorum-confirmed leader reads,
+multi-tablet M1/M2 boundary. Protected `main` evidence covers the
+consensus-backed catalog, while the current feature candidate adds replicated
+multi-instance hosted control, atomic managed lifecycle commands, and a
+resumable operation/change surface. Published evidence also covers topology
+admission, quorum-confirmed leader reads,
 all four regional profile SDKs, multi-shard Stream routing, atomic batches,
 retention, coordinated and session-fenced consumption, profile-native
 checkpoints with physical EPRS reclamation, and automatic maintenance and
@@ -83,8 +86,8 @@ logical superstreams. `v0.1.0-alpha.8` closed QUEUE-007–015 with bounded
 admission/overflow, idle expiry, FIFO session locks, priority aging, dispatch
 protection, deferred/request-reply state, and crash-safe Queue DLQ forwarding.
 `v0.1.0-alpha.9` then closed the bounded Event/integration development surface.
-Stable streaming protocols, replicated multi-instance hosted metadata,
-complete production IAM and externally immutable audit, follower routing,
+Stable streaming protocols, complete production IAM and externally immutable
+audit, follower routing,
 transactional fleet-wide placement, geo recovery, and the broader security,
 performance, and operating-SLO gates remain open.
 
@@ -173,7 +176,7 @@ The traceability register marks the following as **Slice**. A Slice entry can be
 | Route slice | Rust | Bounded envelope-normalized direct/fan-out plan, independent delivery ledger, signed HTTP/webhook worker, and generation-pinned Epoch Queue/Stream worker with canonical replicated commands | Route/filter truth table, atomic outbox capacity, fenced acquire/ack/fail/reject, retry/DLQ isolation, exact replay, signed 503/204 receiver retry, cross-group Queue/Stream commit, and full-voter reopen; unsigned/custom target execution remains open |
 | Standalone and cluster lifecycle | Rust | One selectable node binary, local admin API, truthful mode/guarantee health | Disconnected standalone and three-node smoke suites |
 | CLI, SDK, emulator | Rust, Go, Java, Python | Create, append/publish, consume/ack, inspect, deterministic local testing | Cross-language executable quickstarts in CI |
-| Control-plane contract and durable registry | Go | Reconciler using only administration contracts plus versioned transactional management metadata; no record-path ownership | Boundary/dependency audit, commit-before-visible tests, and real-process metadata reopen |
+| Control-plane contract and replicated registry | Go + Rust Catalog | Reconciler using only administration contracts plus consensus-backed versioned management metadata, lease fencing, atomic managed lifecycle commands, and no record-path ownership | Boundary/dependency audit, commit-before-visible tests, multi-instance fencing, and real-process Catalog reopen |
 | Trust and diagnostics baseline | Rust | mTLS-ready identity boundary, audit event skeleton, golden metrics/traces, explain output | Required-event/metric fault assertions |
 | Packaging | Release tooling | Development OCI image, Kubernetes dev manifest, signed development binary/SBOM path | Clean-room install and signature CI |
 

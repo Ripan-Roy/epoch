@@ -24,7 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 REGIONAL_DRIVER = REPO_ROOT / "tests/integration/regional-runtime.py"
 STATE_SCHEMA = "epoch.soak.state/v1"
 MANIFEST_SCHEMA = "epoch.soak.evidence/v1"
-REGIONAL_SCHEMA = "epoch.regional-runtime.evidence/v1"
+REGIONAL_SCHEMA = "epoch.regional-runtime.evidence/v2"
 EVENT_LOG_NAME = "events.jsonl"
 MANIFEST_NAME = "evidence.json"
 SIGNATURE_NAME = "evidence.sig"
@@ -41,7 +41,7 @@ REQUIRED_FAULTS = (
     "all_voter_sigkill_reopen",
 )
 REQUIRED_INVARIANTS = (
-    "catalog_digest_preserved",
+    "catalog_consensus_recovered",
     "profile_state_converged",
     "managed_intent_replayed",
     "leadership_terms_advanced",

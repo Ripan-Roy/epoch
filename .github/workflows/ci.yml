@@ -257,11 +257,7 @@ jobs:
       - name: Start pinned connector services
         run: >-
           docker compose -f deploy/compose/docker-compose.connectors.yml
-          up --detach --wait minio postgres mysql kafka
-      - name: Create object-store conformance bucket
-        run: >-
-          docker compose -f deploy/compose/docker-compose.connectors.yml
-          run --rm minio-init
+          up --detach --wait object-store postgres mysql kafka
       - name: Run live object, CDC, and Kafka contracts
         run: >-
           cargo test --locked -p epoch-node source_adapters --lib --

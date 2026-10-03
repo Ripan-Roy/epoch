@@ -409,7 +409,7 @@ ordering/overwrite detection and cursors, PostgreSQL transaction/LSN assembly,
 MySQL transaction/binlog positions, Kafka partition offsets/error routing,
 credential and transport policy, crash-before-upstream-ack reconciliation, and
 session cleanup. The pinned connector-conformance Compose stack then runs
-MinIO/S3, PostgreSQL 17 logical replication, MySQL 8 row binlogs, and Kafka 4
+SeaweedFS/S3, PostgreSQL 17 logical replication, MySQL 8 row binlogs, and Kafka 4
 against those adapters.
 The container gate adds follower rejection,
 majority-before-success, acquire/ack replication, leader loss, catch-up,
@@ -430,7 +430,31 @@ routes during expansion, monotonic generation fencing, delete/recreate without
 tablet ID reuse, exact idempotency replay and token-rebinding rejection,
 profile immutability, resource-kind/profile compatibility, strict name and
 capacity bounds, canonical versioned command decoding, and identical snapshots
-after command replay.
+after command replay. Capacity-bound regressions submit distinct maximum-size
+commands until the finite rejection reserve is exhausted, prove the Catalog
+compacts full snapshot-capacity outcomes into exact token/command-digest
+bindings, enters a snapshot-v8 growth seal without changing business state or
+fail-stopping its tablet, restores that snapshot, binds no-op cleanup
+rejections, and admits only deletes that strictly shrink the encoded
+checkpoint. The test deletes incrementally until normal headroom returns,
+checkpoints recovered snapshot v9 without the earlier proposals in the
+consensus retry suffix, replays both seal-triggering and post-seal tokens, and
+rejects changed command bytes before proposal. Defensive tablet coverage then
+applies that changed compacted retry as a deterministic conflict rather than a
+fail-stop and rebuilds its receipt through another checkpoint. A separate
+exhaustion regression fills the compact ledger, proves snapshot v10 terminally
+rejects even cleanup, round-trips that fail-closed state, and exercises an
+artificial exact boundary where only the extra byte for the two-digit v10
+marker remains. Cross-language control tests also pin the original optional
+delete precondition independently of a retained tombstone generation and prove
+that generated `GetOperation` responses preserve both its presence and the
+Catalog command kind.
+The Go authority regression constructs a valid atomic batch response above the
+former 1 MiB cap, proves it decodes through `CatalogRegistry`, and separately
+rejects a response one byte beyond the 5 MiB Catalog-plus-envelope bound.
+Atomic managed-delete tests leave status publication stale after native
+materialization, then prove deletion derives the native generation in Catalog;
+format tests retain legacy fenced-v6 decoding and pin new atomic v7 recovery.
 
 Node integration tests extend that state machine through dedicated catalog
 consensus, shared peer-frame group/epoch demultiplexing, bounded multi-group
@@ -583,9 +607,10 @@ The process campaign performs a linearizable-by-default Stream read on the
 current leader and verifies the quorum barrier term, read index, applied index,
 and response headers. Polls that intentionally compare every follower opt into
 `local_stale`; no test depends on an implicit consistency downgrade.
-It then sends `SIGKILL` to the Go process, reopens
-the same bbolt metadata file, proves the original apply token replays without a
-second Rust mutation, and waits for placement to reconcile ready again. The
+It then sends `SIGKILL` to the Go process, reconnects to the same replicated
+Catalog metadata with the same control identity, proves the original apply
+token replays without a second Rust mutation, and waits for placement to
+reconcile ready again. The
 campaign also creates Cache, Stream, Queue, and Event Bus resources directly
 through the Rust catalog and commits one typed operation per profile. It kills
 the managed Stream leader, waits for the Go BFF to report degraded two-voter
@@ -617,7 +642,8 @@ for catalog plus all eight profile groups to checkpoint and physically compact
 on every voter: 27 local voter/group copies. Each old voter catches up before
 the campaign verifies durable applied/checkpoint/retained-first boundaries,
 kills every node, verifies Go clears stale placement while authority is
-unavailable, and reopens the same volumes before comparing those boundaries,
+unavailable and returns 503 rather than serving cached management state, and
+reopens the same volumes before comparing those boundaries,
 catalog/profile digests, and the increased applied-command index. The beta.10
 campaign also recomputes every canonical Go and Rust audit-record digest,
 checks chain continuity and credential exclusion, and compares complete journal

@@ -281,19 +281,52 @@ snapshot. Watch resumes from an opaque resource version and returns an explicit
 compaction error when that version is no longer available.
 
 The current generated `epoch.v1.RegionalAdminService` is a bounded Go-hosted
-bridge with `ApplyResource`, `GetResource`, `ListResources`, and
-`DeleteResource`. Apply validates a fully qualified data-bearing resource,
+bridge with `ApplyResource`, atomic `BatchApplyResources`, `GetResource`,
+`ListResources`, `DeleteResource`, `GetOperation`, and resumable
+`WatchResourceChanges`. Apply validates a fully qualified data-bearing resource,
 profile/kind agreement, nonzero shard count, and an explicit replica count of
 three or five. `ResourceSpec.placement` can require allowed regions, minimum
 zone and rack counts, a node class, and excluded physical node IDs. Before Rust
 catalog mutation, Go authenticates to every configured node, verifies a complete
 consistent inventory, and checks incremental group capacity. Unsatisfied
 constraints fail before catalog apply.
-It stores desired state, immediately reconciles through the Rust authority, and
-returns pending desired state when the region is unavailable. Definitive
-conflicts fail; exact apply and delete retries return their original result
-without applying the Rust mutation twice. Delete commits the Rust tombstone
-before removing Go desired metadata.
+The node-local control inventory is read in at most 128-resource keyset pages;
+every page is bounded below 768 KiB and must retain one Catalog high-water
+cursor. Go rejects reordered, oversized, non-advancing, or cross-cursor pages
+instead of constructing a partial capacity view.
+Desired state and operation outcomes are replicated by the Rust Catalog rather
+than a process-local Go database. Single-resource apply attempts immediate
+reconciliation and returns pending desired state when the region is unavailable.
+Batch apply commits 1–128 distinct, canonical-name-sorted desired resources as
+one all-or-nothing command and leaves materialization observable as a later
+reconciliation phase. Definitive conflicts fail; exact apply and delete retries
+return their original result without applying the mutation twice. Managed
+delete removes desired and native Catalog state in one lease-fenced command and
+derives the native generation within that replicated transition. It does not
+trust the asynchronously published status generation, so a crash after native
+materialization but before status publication cannot poison the delete token.
+
+`GetOperation` requires the caller to provide the exact affected resource-name
+set and pass read authorization for every name; a token alone is never an
+authorization capability. An uncommitted proposal has no durable identity set,
+so lookup returns not found until its committed success or rejection can be
+authorized exactly. A completed operation also exposes `command_kind`; desired
+and managed delete operations expose the retained, presence-aware
+`expected_generation` when the original command had one. The generated gRPC
+field is an optional `uint64`; the internal authority JSON represents the same
+value as a decimal string. Delete replay compares this command precondition,
+not the mutation's result generation, because a
+missing-resource result can return a nonzero tombstone high-water mark.
+`WatchResourceChanges` reads bounded global Catalog pages
+and filters events by requested scope plus the authenticated principal.
+Each streamed response includes `earliest_cursor`, the current
+`latest_cursor`, and the inclusive scanned `next_cursor`. Clients resume with
+`after_cursor = next_cursor`; they must not jump directly to `latest_cursor`
+when another bounded page may exist. A compacted or future cursor fails
+explicitly instead of silently skipping state. Cursor `0` means “from the
+beginning” only while `earliest_cursor == 1`; once compaction advances the
+retention floor, cursor `0` is stale and the caller must resynchronize from a
+linearizable inventory snapshot.
 
 For Cache resources, `ResourceSpec.configuration` is a strict object containing
 an optional matching `shard_count`, per-shard `max_entries`, optional
@@ -305,13 +338,67 @@ Configuration is immutable within one resource generation in the current alpha.
 Omission preserves the legacy unconfigured/default catalog encoding so an
 upgrade cannot turn an exact old retry into a different command.
 
-This subset has bounded list pages but no watch, opaque continuation, plan,
-backup, repair, purge, or long-running operation surface. Its single-owner Go
-registry transactionally persists desired resources, observed status,
-generation tombstones, and original request-token outcomes before
-acknowledgement. Startup rejects corruption, an unknown schema, or concurrent
-ownership. This is process-crash durability, not multi-instance linearizability
-or a replicated hosted database.
+The public management subset has bounded list pages but no opaque list
+continuation, plan,
+backup, repair, or purge surface. Operation lookup and change streaming cover
+the committed desired/status lifecycle; they do not yet advertise a bounded
+request-token retention window or replace a general long-running workflow API.
+Catalog admission reserves room for a maximum-size durable capacity rejection.
+If repeated unique rejections exhaust that finite reserve, the Catalog persists
+a capacity growth seal and compacts full snapshot-capacity outcomes into exact
+request-token/canonical-command-digest bindings. Reads remain available;
+ordinary commands and no-op deletes persist the compact binding and receive
+non-mutating capacity rejections. A delete may commit only when it removes live
+state and strictly reduces the complete encoded snapshot, so authorized cleanup
+can proceed incrementally without consuming more capacity. Ordinary admission
+resumes only after the full rejection reserve is restored. Snapshot v9 retains
+the compact ledger after that transition, so exact retries replay and changed
+command bytes conflict even after the original proposal leaves the consensus
+retry suffix. Regional admission checks the durable binding before proposing;
+the tablet defensively commits a deterministic conflict receipt if a changed
+compacted retry nevertheless reaches applied replay. Token-only operation
+lookup is not guaranteed for compacted outcomes because their full
+affected-resource authorization context is absent.
+If the compact ledger itself fills, snapshot v10 rejects every mutation,
+including cleanup, until operator-led migration or horizontal sharding.
+The one-time legacy import is one atomic command and currently accepts at most
+4,096 generation records, subject to the 512 KiB command and 4 MiB native
+application-checkpoint envelope; a larger former registry fails startup and requires
+an explicit migration tool before upgrade. A legacy one-replica StatefulSet
+must update and become ready at ordinal zero before the operator scales it to
+the three-replica control topology. A former local key with no organization,
+project, or environment is imported under `epoch-legacy/local/default` while
+preserving namespace, kind, name, desired/status state, and its generation
+high-water mark. The same mapping applies to tombstones. A collision with an
+already-qualified key fails before the Catalog import request is sent.
+Catalog consensus transactionally persists desired resources, observed status,
+generation tombstones, original request-token outcomes, and watch cursors
+before acknowledgement. A replicated TTL/fence lease serializes native
+reconciliation across multiple Go instances. Controller-generated lease,
+status, reconciliation, and membership outcomes retain only a small internal
+suffix; public operation outcomes remain durable until a separately
+specified retention policy is introduced. Membership attempt identity binds
+the complete lease and capacity observation, so changed capacity can retry a
+recoverable rejection. Lease-fenced mutations use the greater of the supplied
+time and replicated control clock, preventing a standby read/commit race from
+binding a valid public request to a non-monotonic rejection. Native Catalog
+checkpoint v2 stores raw Catalog bytes, omits duplicated retry receipts, and
+reconstructs public replay responses from retained token outcomes. It reserves
+64 bytes inside the 4 MiB application envelope for its fixed binary header and
+keeps legacy v1 images readable. A later checkpoint may accept a missing
+internal receipt only when the installed application image already covers that
+proposal commit index. The Go authority adapter reads at most 5 MiB from any
+Rust response: the 4 MiB Catalog checkpoint ceiling plus 1 MiB for the HTTP
+mutation/operation envelope. This admits a valid atomic batch response larger
+than 1 MiB without making authority reads unbounded. The watch history
+retains at most 4,096 changes and expires its oldest prefix sooner whenever the
+complete encoded Catalog image would otherwise exceed the admitted checkpoint
+budget.
+If expiring the complete change-history prefix still cannot admit a command,
+the committed result is a durably token-bound `capacity_exceeded` rejection
+against unchanged business state. Exact retries replay it and a different
+command cannot rebind the token even after later deletion frees capacity;
+snapshot admission never becomes a post-consensus applier failure.
 
 ## 6. Hosted management API
 
@@ -1515,13 +1602,15 @@ substitute for stable generated native telemetry APIs. See
 
 Node browser calls use exact origins from `EPOCH_ALLOWED_ORIGINS`; Go BFF calls
 use `EPOCH_CONTROL_ALLOWED_ORIGINS`. Requests without an `Origin` header remain
-available to native clients. The Go control registry uses a versioned,
-single-owner bbolt database selected by `EPOCH_CONTROL_STATE_PATH`; its health
-response names `bbolt_v1` and reports durable registry state. The console has no
-compile-time credential: its operator enters a bootstrap token that is kept
-only in browser session storage. The current bootstrap policy, HTTP payloads,
-storage schema, and Rust error enum remain provisional scaffolding that may
-change before any public compatibility promise.
+available to native clients. The Go control registry uses Rust Catalog
+consensus and its health response names `catalog_consensus_v1` with durable
+registry state. `EPOCH_CONTROL_INSTANCE_ID` is the stable lease identity;
+`EPOCH_CONTROL_LEGACY_STATE_PATH` selects an optional former bbolt database for
+one-time import only. The console has no compile-time credential: its operator
+enters a bootstrap token that is kept only in browser session storage. The
+current bootstrap policy, HTTP payloads, storage schema, and Rust error enum
+remain provisional scaffolding that may change before any public compatibility
+promise.
 
 The Cache tablet installs a compatible native profile snapshot when available,
 replays the retained EPRS tail before readiness, and separately supports a
