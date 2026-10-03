@@ -432,13 +432,20 @@ profile immutability, resource-kind/profile compatibility, strict name and
 capacity bounds, canonical versioned command decoding, and identical snapshots
 after command replay. Capacity-bound regressions submit distinct maximum-size
 commands until the finite rejection reserve is exhausted, prove the Catalog
-enters a snapshot-v8 growth seal without changing business state or
-fail-stopping its tablet, restore that snapshot, reject no-op cleanup, and
-admit only deletes that strictly shrink the encoded checkpoint. The test
-deletes incrementally until normal headroom returns, checkpoints recovered
-snapshot v9, and reconstructs the original sealed consensus retry after another
-restore. Cross-language control tests also pin the original
-optional delete precondition independently of a retained tombstone generation.
+compacts full snapshot-capacity outcomes into exact token/command-digest
+bindings, enters a snapshot-v8 growth seal without changing business state or
+fail-stopping its tablet, restores that snapshot, binds no-op cleanup
+rejections, and admits only deletes that strictly shrink the encoded
+checkpoint. The test deletes incrementally until normal headroom returns,
+checkpoints recovered snapshot v9 without the earlier proposals in the
+consensus retry suffix, replays both seal-triggering and post-seal tokens, and
+rejects changed command bytes before proposal. Defensive tablet coverage then
+applies that changed compacted retry as a deterministic conflict rather than a
+fail-stop and rebuilds its receipt through another checkpoint. A separate
+exhaustion regression fills the compact ledger, proves snapshot v10 terminally
+rejects even cleanup, and round-trips that fail-closed state. Cross-language
+control tests also pin the original optional delete precondition independently
+of a retained tombstone generation.
 The Go authority regression constructs a valid atomic batch response above the
 former 1 MiB cap, proves it decodes through `CatalogRegistry`, and separately
 rejects a response one byte beyond the 5 MiB Catalog-plus-envelope bound.

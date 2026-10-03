@@ -31,21 +31,27 @@ prunes against the complete snapshot byte budget. A binary application image
 avoids base64 expansion, admission reserves its fixed header and one maximum
 rejection record, and growth that still cannot fit commits a durable,
 non-mutating capacity rejection. If repeated unique refusals exhaust that
-reserve, snapshot v8 seals the Catalog against growth: ordinary commands and
-no-op deletes receive the same non-mutating capacity result, while a real
-delete commits only when the complete encoded snapshot strictly shrinks.
-Incremental cleanup automatically resumes ordinary admission after restoring
-the rejection reserve; recovered snapshot v9 keeps consensus-retained retry
-reconstruction safe across restart. Operators must migrate or shard Catalogs
-that cannot reclaim enough space. Token-only operation lookup is not guaranteed
-for commands first received during the seal. Cursor zero fails stale after the
-history floor advances. Pre-seal public delete and capacity-rejection tokens
-remain discoverable after replay. Delete operation records expose the original
-optional generation precondition independently of the returned tombstone
-generation. Managed delete derives the current native generation inside the
-replicated command rather than trusting asynchronously published controller
-status, closing the materialization/status crash window while retaining legacy
-v6 command compatibility; new atomic managed deletes use command/snapshot v7.
+reserve, snapshot v8 compacts snapshot-capacity outcomes into exact request
+token plus canonical command-digest bindings and seals the Catalog against
+growth. Ordinary commands and no-op deletes add the same compact binding and
+receive the same non-mutating capacity result, while a real delete commits only
+when the complete encoded snapshot strictly shrinks. Incremental cleanup
+automatically resumes ordinary admission after restoring the rejection reserve;
+recovered snapshot v9 retains the compact ledger so an exact retry still
+replays and different command bytes still conflict after checkpoint compaction.
+If even another compact binding cannot fit, snapshot v10 enters a terminal
+fail-closed seal in which no command, including cleanup, may mutate; operators
+must migrate or shard that Catalog. Token-only operation lookup is not
+guaranteed for compacted capacity outcomes because their affected-resource
+authorization context is intentionally not retained. Cursor zero fails stale
+after the history floor advances. Pre-seal public deletes and non-snapshot
+capacity rejections remain discoverable after replay. Delete operation records
+expose the original optional generation precondition independently of the
+returned tombstone generation. Managed delete derives the current native
+generation inside the replicated command rather than trusting asynchronously
+published controller status, closing the materialization/status crash window
+while retaining legacy v6 command compatibility; new atomic managed deletes use
+command/snapshot v7.
 The Go-to-Rust authority client accepts at most 5 MiB per response, derived
 from the 4 MiB Catalog checkpoint ceiling plus a bounded 1 MiB response
 envelope. Atomic batch results and later operation lookup therefore remain

@@ -1635,6 +1635,21 @@ enum CatalogSubmissionMode {
     Forwarded,
 }
 
+fn validate_catalog_request_binding(
+    state: &RegionalCatalogState,
+    command: &CatalogCommand,
+) -> Result<(), RegionalCatalogApiError> {
+    state
+        .catalog
+        .validate_request_binding(command)
+        .map_err(|error| match error {
+            CatalogTabletQueryError::Catalog(error) => RegionalCatalogApiError::Catalog(error),
+            CatalogTabletQueryError::Unavailable(error) => {
+                RegionalCatalogApiError::CatalogState(error)
+            }
+        })
+}
+
 async fn commit_command_with_mode(
     state: &RegionalCatalogState,
     command: CatalogCommand,
@@ -1652,6 +1667,7 @@ async fn commit_command_with_mode(
     )?;
     let payload = command.encode()?;
     let _write_guard = state.write_serial.lock().await;
+    validate_catalog_request_binding(state, &command)?;
     let initial = state.consensus.lookup(proposal_id).await?;
     let request_replayed = !matches!(initial, ProposalLookup::Unknown);
     match initial {

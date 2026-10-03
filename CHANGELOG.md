@@ -66,14 +66,20 @@ notes explicitly list additional verified artifacts.
   replayable and cannot be rebound after space is freed; admission reserves
   enough checkpoint space for that rejection instead of fail-stopping Catalog
   replicas after consensus commit.
-- Repeated unique capacity refusals can no longer consume the rejection reserve
-  and fail-stop a Catalog tablet. Snapshot format v8 records a growth seal
-  without increasing the payload. Sealed Catalogs reject unknown growth but
-  admit only real deletes that strictly shrink the complete encoded snapshot;
-  incremental cleanup resumes ordinary admission at the reserved-headroom
-  boundary. Recovered snapshot format v9 preserves exact consensus-retry
-  reconstruction across another checkpoint. Horizontal Catalog sharding
-  remains the long-term capacity path.
+- Repeated unique snapshot-capacity refusals can no longer consume the full
+  rejection reserve and fail-stop a Catalog tablet. Snapshot format v8 compacts
+  them into exact request-token/canonical-command-digest bindings and seals
+  growth. Sealed Catalogs bind and reject unknown growth but admit only real
+  deletes that strictly shrink the complete encoded snapshot; incremental
+  cleanup resumes ordinary admission at the reserved-headroom boundary.
+  Recovered snapshot v9 preserves replay and token-conflict identity after the
+  original proposal leaves the consensus retry suffix. If the compact ledger
+  itself fills, snapshot v10 terminally rejects all mutation until migration,
+  rather than allowing an unrecorded rejection to be rebound. Regional
+  admission checks durable bindings before proposal; the tablet also
+  reconstructs a deterministic conflict receipt if a changed compacted retry
+  reaches committed replay. Horizontal Catalog sharding remains the long-term
+  capacity path.
 - Control operation results now expose their original command kind and retained
   delete generation precondition. Missing-resource delete replay validates that
   command precondition instead of mistaking a later tombstone high-water mark

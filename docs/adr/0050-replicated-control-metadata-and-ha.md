@@ -87,20 +87,27 @@ into Go.
    complete encoded snapshot byte budget. If no history suffix can make a new
    command fit, persist a token-bound non-mutating capacity rejection rather
    than failing the post-consensus applier. If unique rejected commands consume
-   the reserved rejection space, persist snapshot format v8 and seal Catalog
-   growth. The format version is the seal marker, so the transition adds no
-   snapshot payload field. A sealed Catalog rejects ordinary commands and
-   no-op deletes without state growth, but applies a delete when it removes live
-   state and strictly shrinks the complete encoded snapshot. Incremental cleanup
+   the reserved rejection space, compact snapshot-capacity records into exact
+   request-token/canonical-command-digest bindings, persist snapshot format v8,
+   and seal Catalog growth. A sealed Catalog binds and rejects ordinary
+   commands and no-op deletes, but applies a delete when it removes live state
+   and strictly shrinks the complete encoded snapshot. Incremental cleanup
    retains the seal until the ordinary rejection reserve is restored, then
-   resumes admission under recovered snapshot format v9. Bound every Go
+   resumes admission under recovered snapshot format v9 without discarding the
+   compact bindings. If that bounded ledger itself fills, snapshot format v10
+   enters an irreversible seal that rejects all mutations, including cleanup,
+   until migration; this prevents an unrecorded rejection from ever becoming a
+   later mutation. Bound every Go
    authority response to 5 MiB: the 4 MiB Catalog checkpoint ceiling plus a
    1 MiB JSON/envelope allowance. This preserves synchronous resolution for a
    valid large desired-state batch while retaining a finite peer-read bound.
    Native checkpoint restore reconstructs exact consensus-retained retries in
-   both sealed and recovered states.
-   Token-only operation lookup for commands first received during sealing is
-   not retained; migrate or shard a Catalog that cannot reclaim enough space.
+   both sealed and recovered states, and compacted proposals remain exact after
+   leaving the retry suffix. Check durable bindings before proposal and
+   defensively materialize a deterministic conflict receipt if changed bytes
+   nevertheless reach applied replay. Token-only operation lookup for compacted
+   capacity outcomes is not retained; migrate or shard a terminally sealed
+   Catalog.
 10. Expose each durable operation's command kind and the original desired-delete
     generation precondition. Replay compares that retained command value,
     including the distinction between no precondition and generation zero,

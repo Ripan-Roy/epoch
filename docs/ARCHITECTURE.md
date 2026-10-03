@@ -1070,16 +1070,19 @@ its oldest prefix against the complete admitted snapshot budget. When no
 history remains to expire, further growth persists a token-bound capacity
 rejection without mutating business state or fail-stopping replicas. Repeated
 unique refusals eventually consume that finite reserve; snapshot format v7
-marks atomic managed-delete history, while snapshot format v8 marks a growth
-seal without adding a payload field. The sealed Catalog rejects ordinary
-commands and no-op deletes without growth, but applies an authorized delete
-only when it removes live state and strictly shrinks the complete encoded
-snapshot. It stays sealed across incremental cleanup until the normal rejection
-reserve is restored, then resumes ordinary admission under recovered snapshot
-format v9. Native restore reconstructs exact consensus-retained rejections
-before and after recovery. Token-only lookup for commands first seen during the
-seal is not retained; a Catalog that cannot reclaim sufficient space requires
-migration or horizontal sharding.
+marks atomic managed-delete history, while snapshot format v8 compacts
+snapshot-capacity records into exact token/command-digest bindings and seals
+growth. The sealed Catalog binds and rejects ordinary commands and no-op
+deletes, but applies an authorized delete only when it removes live state and
+strictly shrinks the complete encoded snapshot. It stays sealed across
+incremental cleanup until the normal rejection reserve is restored, then
+resumes ordinary admission under recovered snapshot format v9 while retaining
+the compact ledger. Native restore therefore preserves exact replay and
+token-rebinding conflicts even after the original proposal is compacted. If
+another compact binding cannot fit, snapshot v10 terminally seals every
+mutation until migration or horizontal sharding. Token-only operation lookup
+for compacted outcomes is not retained because their full authorization context
+is absent.
 
 Managed delete carries the desired generation and lease fence but derives the
 native Catalog generation inside the same replicated transition. This avoids a

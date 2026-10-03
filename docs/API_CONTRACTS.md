@@ -343,15 +343,22 @@ the committed desired/status lifecycle; they do not yet advertise a bounded
 request-token retention window or replace a general long-running workflow API.
 Catalog admission reserves room for a maximum-size durable capacity rejection.
 If repeated unique rejections exhaust that finite reserve, the Catalog persists
-a capacity growth seal. Reads remain available; ordinary commands and no-op
-deletes receive non-mutating capacity rejections. A delete may commit only when
-it removes live state and strictly reduces the complete encoded snapshot, so
-authorized cleanup can proceed incrementally without consuming more capacity.
-Ordinary admission resumes only after the full rejection reserve is restored.
-Snapshot v9 preserves consensus-retained rejection reconstruction after that
-transition. Token-only lookup is not guaranteed for commands first received
-during the seal, and a Catalog that cannot reclaim enough space requires
-operator-led migration or horizontal sharding.
+a capacity growth seal and compacts full snapshot-capacity outcomes into exact
+request-token/canonical-command-digest bindings. Reads remain available;
+ordinary commands and no-op deletes persist the compact binding and receive
+non-mutating capacity rejections. A delete may commit only when it removes live
+state and strictly reduces the complete encoded snapshot, so authorized cleanup
+can proceed incrementally without consuming more capacity. Ordinary admission
+resumes only after the full rejection reserve is restored. Snapshot v9 retains
+the compact ledger after that transition, so exact retries replay and changed
+command bytes conflict even after the original proposal leaves the consensus
+retry suffix. Regional admission checks the durable binding before proposing;
+the tablet defensively commits a deterministic conflict receipt if a changed
+compacted retry nevertheless reaches applied replay. Token-only operation
+lookup is not guaranteed for compacted outcomes because their full
+affected-resource authorization context is absent.
+If the compact ledger itself fills, snapshot v10 rejects every mutation,
+including cleanup, until operator-led migration or horizontal sharding.
 The one-time legacy import is one atomic command and currently accepts at most
 4,096 generation records, subject to the 512 KiB command and 4 MiB native
 application-checkpoint envelope; a larger former registry fails startup and requires

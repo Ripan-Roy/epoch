@@ -13,7 +13,7 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use epoch_catalog::{
     Catalog, CatalogChangePage, CatalogCommand, CatalogError, CatalogMutation, CatalogOperation,
-    ControlLease, ManagedResourceRecord, ResourceRecord,
+    CatalogRejectionCode, ControlLease, ManagedResourceRecord, ResourceRecord,
 };
 use epoch_consensus::{ApplicationSnapshot, CommittedProposal, LogIndex};
 use serde::{Deserialize, Serialize};
@@ -231,18 +231,18 @@ impl CatalogTabletService {
             .state
             .read()
             .map_err(|_| "catalog state read lock was poisoned".to_owned())?;
-        let mutation = if let Some(operation) = state.catalog.operation(command.request_token()) {
-            operation.mutation.as_replayed()
-        } else if let Some(rejection) = state.catalog.omitted_capacity_rejection() {
-            rejection.as_replayed()
-        } else {
+        let Some(mutation) = state
+            .catalog
+            .durable_outcome(&command)
+            .map_err(|error| error.to_string())?
+        else {
             return Ok(None);
         };
         Ok(Some(CatalogTabletReceipt {
             proposal_id: committed.receipt.proposal_id.get(),
             term: committed.receipt.term.get(),
             commit_index: committed.receipt.log_index.get(),
-            mutation,
+            mutation: mutation.as_replayed(),
             state_digest: hex_digest(
                 state
                     .catalog
@@ -297,6 +297,24 @@ impl CatalogTabletService {
             .read()
             .map_err(|_| "catalog state read lock was poisoned".to_owned())
             .map(|state| state.catalog.operation(request_token))
+    }
+
+    pub fn validate_request_binding(
+        &self,
+        command: &CatalogCommand,
+    ) -> Result<(), CatalogTabletQueryError> {
+        self.ensure_healthy()
+            .map_err(CatalogTabletQueryError::Unavailable)?;
+        self.state
+            .read()
+            .map_err(|_| {
+                CatalogTabletQueryError::Unavailable(
+                    "catalog state read lock was poisoned".to_owned(),
+                )
+            })?
+            .catalog
+            .validate_request_binding(command)
+            .map_err(CatalogTabletQueryError::Catalog)
     }
 
     pub fn changes_after(
@@ -390,6 +408,11 @@ impl CommittedProposalApplier for CatalogTabletService {
             let decoded =
                 CatalogCommand::decode(&committed.payload).map_err(|error| error.to_string())?;
             let is_periodic_control = decoded.is_transient_control();
+            let has_durable_outcome = state
+                .catalog
+                .durable_outcome(&decoded)
+                .map_err(|error| error.to_string())?
+                .is_some();
             if let Some(command) = state.applied.get(&proposal_id) {
                 if command.payload != committed.payload
                     || command.receipt.term != committed.receipt.term.get()
@@ -400,9 +423,7 @@ impl CommittedProposalApplier for CatalogTabletService {
                     ));
                 }
             } else if committed.receipt.log_index.get() > state.last_applied_index
-                || (!is_periodic_control
-                    && state.catalog.omitted_capacity_rejection().is_none()
-                    && state.catalog.operation(decoded.request_token()).is_none())
+                || (!is_periodic_control && !has_durable_outcome)
             {
                 return Err(format!(
                     "catalog retry proposal {proposal_id} has no durable applied result"
@@ -524,21 +545,11 @@ fn restore_catalog_checkpoint_receipts(
         if command.is_transient_control() {
             continue;
         }
-        let operation = state.catalog.operation(command.request_token());
-        let mutation = if let Some(operation) = operation {
-            let replayed = state
-                .catalog
-                .apply(command)
-                .map_err(|error| error.to_string())?;
-            if replayed != operation.mutation.as_replayed() {
-                return Err(format!(
-                    "catalog retry proposal {proposal_id} disagrees with its durable outcome"
-                ));
-            }
-            operation.mutation
-        } else if let Some(rejection) = state.catalog.omitted_capacity_rejection() {
-            rejection
-        } else {
+        let Some(mutation) = state
+            .catalog
+            .durable_outcome(&command)
+            .map_err(|error| error.to_string())?
+        else {
             return Err(format!(
                 "catalog retry proposal {proposal_id} has no durable applied result"
             ));
@@ -796,10 +807,15 @@ fn apply_committed(
         ));
     }
     let command = CatalogCommand::decode(&committed.payload).map_err(|error| error.to_string())?;
-    let mutation = state
-        .catalog
-        .apply(command)
-        .map_err(|error| error.to_string())?;
+    let mutation = match state.catalog.apply(command) {
+        Ok(mutation) => mutation,
+        Err(error @ CatalogError::IdempotencyConflict) => CatalogMutation::Rejected {
+            code: CatalogRejectionCode::Conflict,
+            message: error.to_string(),
+            replayed: false,
+        },
+        Err(error) => return Err(error.to_string()),
+    };
     let receipt = CatalogTabletReceipt {
         proposal_id,
         term: committed.receipt.term.get(),
@@ -987,20 +1003,20 @@ mod tests {
             .encode_snapshot()
             .unwrap();
         assert!(catalog_bytes.len() <= epoch_catalog::MAX_CATALOG_SNAPSHOT_BYTES);
+        let first_rejected_command = CatalogCommand::decode(&first_rejected.payload).unwrap();
+        assert!(
+            service
+                .operation(first_rejected_command.request_token())
+                .unwrap()
+                .is_none()
+        );
         assert!(matches!(
             service
-                .operation(
-                    CatalogCommand::decode(&first_rejected.payload)
-                        .unwrap()
-                        .request_token()
-                )
+                .durable_replay_receipt(first_rejected)
                 .unwrap()
                 .unwrap()
                 .mutation,
-            CatalogMutation::Rejected {
-                replayed: false,
-                ..
-            }
+            CatalogMutation::Rejected { replayed: true, .. }
         ));
 
         let image = service
@@ -1045,12 +1061,161 @@ mod tests {
         restored
     }
 
+    fn apply_post_seal_rejection(
+        restored: &CatalogTabletService,
+        commit_index: u64,
+    ) -> (CatalogCommand, CommittedProposal) {
+        let post_seal_command = CatalogCommand::ApplyDesired(ApplyDesiredResources {
+            request_token: "post-seal-overflow".into(),
+            resources: vec![DesiredResourceWrite {
+                name: ResourceName::new(
+                    "acme",
+                    "payments",
+                    "production",
+                    "core",
+                    ResourceKind::Stream,
+                    "post-seal",
+                )
+                .unwrap(),
+                expected_generation: Some(0),
+                desired: json!({"padding": "small"}),
+            }],
+        });
+        let post_seal = committed(1_500, 2, commit_index + 1, &post_seal_command);
+        assert!(matches!(
+            restored.apply_one(&post_seal).unwrap().mutation,
+            CatalogMutation::Rejected {
+                code: CatalogRejectionCode::CapacityExceeded,
+                replayed: false,
+                ..
+            }
+        ));
+        (post_seal_command, post_seal)
+    }
+
+    fn assert_conflict_checkpoint_round_trip(
+        service: &CatalogTabletService,
+        committed_conflict: &CommittedProposal,
+    ) {
+        let checkpoint_index = committed_conflict.receipt.log_index;
+        let image = service
+            .capture_snapshot(checkpoint_index, std::slice::from_ref(committed_conflict))
+            .unwrap();
+        let restored = CatalogTabletService::new(CatalogTabletScope::new(9, 4).unwrap());
+        restored.install_snapshot(&image).unwrap();
+        restored
+            .restore_checkpoint_receipts(std::slice::from_ref(committed_conflict))
+            .unwrap();
+        assert!(matches!(
+            restored
+                .receipt(committed_conflict.receipt.proposal_id.get())
+                .unwrap()
+                .unwrap()
+                .mutation,
+            CatalogMutation::Rejected {
+                code: CatalogRejectionCode::Conflict,
+                replayed: false,
+                ..
+            }
+        ));
+        restored.ensure_healthy().unwrap();
+    }
+
+    fn verify_compacted_capacity_bindings(
+        recovered: &CatalogTabletService,
+        sealed_committed: &CommittedProposal,
+        post_seal: &CommittedProposal,
+        post_seal_command: CatalogCommand,
+        recovery_commit_index: u64,
+    ) {
+        assert!(matches!(
+            recovered
+                .durable_replay_receipt(sealed_committed)
+                .unwrap()
+                .unwrap()
+                .mutation,
+            CatalogMutation::Rejected {
+                code: CatalogRejectionCode::CapacityExceeded,
+                replayed: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            recovered
+                .durable_replay_receipt(post_seal)
+                .unwrap()
+                .unwrap()
+                .mutation,
+            CatalogMutation::Rejected {
+                code: CatalogRejectionCode::CapacityExceeded,
+                replayed: true,
+                ..
+            }
+        ));
+        let sealed_command = CatalogCommand::decode(&sealed_committed.payload).unwrap();
+        let retry_after_compaction = committed(
+            sealed_committed.receipt.proposal_id.get(),
+            3,
+            recovery_commit_index + 1,
+            &sealed_command,
+        );
+        assert!(matches!(
+            recovered
+                .apply_one(&retry_after_compaction)
+                .unwrap()
+                .mutation,
+            CatalogMutation::Rejected {
+                code: CatalogRejectionCode::CapacityExceeded,
+                replayed: true,
+                ..
+            }
+        ));
+
+        let mut conflicting_post_seal = post_seal_command;
+        let CatalogCommand::ApplyDesired(request) = &mut conflicting_post_seal else {
+            unreachable!();
+        };
+        request.resources[0].desired = json!({"padding": "different"});
+        assert!(matches!(
+            recovered.validate_request_binding(&conflicting_post_seal),
+            Err(CatalogTabletQueryError::Catalog(
+                CatalogError::IdempotencyConflict
+            ))
+        ));
+        let committed_conflict =
+            committed(1_500, 3, recovery_commit_index + 2, &conflicting_post_seal);
+        assert!(matches!(
+            recovered.apply_one(&committed_conflict).unwrap().mutation,
+            CatalogMutation::Rejected {
+                code: CatalogRejectionCode::Conflict,
+                replayed: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            recovered
+                .durable_replay_receipt(&committed_conflict)
+                .unwrap()
+                .unwrap()
+                .mutation,
+            CatalogMutation::Rejected {
+                code: CatalogRejectionCode::Conflict,
+                replayed: true,
+                ..
+            }
+        ));
+        assert_conflict_checkpoint_round_trip(recovered, &committed_conflict);
+        recovered.ensure_healthy().unwrap();
+    }
+
     fn recover_and_recheckpoint_catalog(
         restored: &CatalogTabletService,
         sealed_receipt: &CatalogTabletReceipt,
         sealed_committed: &CommittedProposal,
     ) {
-        let mut recovery_commit_index = sealed_receipt.commit_index;
+        let (post_seal_command, post_seal) =
+            apply_post_seal_rejection(restored, sealed_receipt.commit_index);
+        let mut recovery_commit_index = post_seal.receipt.log_index.get();
         let mut final_recovery = None;
         for index in 0..32_u64 {
             if !restored.state.read().unwrap().catalog.is_capacity_sealed() {
@@ -1083,7 +1248,10 @@ mod tests {
         }
         assert!(!restored.state.read().unwrap().catalog.is_capacity_sealed());
         let final_recovery = final_recovery.unwrap();
-        let retained = [sealed_committed.clone(), final_recovery];
+        // The later checkpoint retains only its newest retry. Both the
+        // seal-triggering rejection and the post-seal rejection are therefore
+        // compacted out of the consensus suffix and must resolve from Catalog.
+        let retained = [final_recovery];
         let image = restored
             .capture_snapshot(LogIndex::new(recovery_commit_index), &retained)
             .unwrap();
@@ -1091,19 +1259,13 @@ mod tests {
         recovered.install_snapshot(&image).unwrap();
         assert!(!recovered.state.read().unwrap().catalog.is_capacity_sealed());
         recovered.restore_checkpoint_receipts(&retained).unwrap();
-        assert!(matches!(
-            recovered
-                .durable_replay_receipt(sealed_committed)
-                .unwrap()
-                .unwrap()
-                .mutation,
-            CatalogMutation::Rejected {
-                code: CatalogRejectionCode::CapacityExceeded,
-                replayed: true,
-                ..
-            }
-        ));
-        recovered.ensure_healthy().unwrap();
+        verify_compacted_capacity_bindings(
+            &recovered,
+            sealed_committed,
+            &post_seal,
+            post_seal_command,
+            recovery_commit_index,
+        );
     }
 
     #[test]
