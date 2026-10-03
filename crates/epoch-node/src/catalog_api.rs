@@ -332,6 +332,11 @@ struct DeleteManagedResourceRequest {
         default,
         deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
     )]
+    requested_expected_generation: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_u64_from_number_or_decimal"
+    )]
     expected_catalog_generation: Option<u64>,
 }
 
@@ -1036,6 +1041,7 @@ async fn delete_managed_resource(
         lease: request.lease.into(),
         name: path.resource_name()?,
         expected_desired_generation: request.expected_desired_generation,
+        requested_expected_generation: request.requested_expected_generation,
         expected_catalog_generation: request.expected_catalog_generation,
     });
     let (receipt, request_replayed) = commit_command(&state, command).await?;
@@ -2446,6 +2452,23 @@ mod tests {
         assert_eq!(deleted["mutation"]["deleted"], true);
         assert_eq!(deleted["mutation"]["desired_generation"], "2");
         assert_eq!(deleted["mutation"]["catalog_generation"], "2");
+
+        let delete_operation = nodes[leader]
+            .app
+            .clone()
+            .oneshot(
+                Request::get(
+                    "/experimental/v1/regional/control/operations/managed-orders-delete-v1",
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete_operation.status(), StatusCode::OK);
+        let delete_operation = response_json(delete_operation).await;
+        assert_eq!(delete_operation["command_kind"], "delete_managed");
+        assert!(delete_operation.get("expected_generation").is_none());
 
         let changes = nodes[leader]
             .app

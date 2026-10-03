@@ -32,8 +32,9 @@ avoids base64 expansion, admission reserves its fixed header and one maximum
 rejection record, and growth that still cannot fit commits a durable,
 non-mutating capacity rejection. If repeated unique refusals exhaust that
 reserve, snapshot v8 compacts snapshot-capacity outcomes into exact request
-token plus canonical command-digest bindings and seals the Catalog against
-growth. Ordinary commands and no-op deletes add the same compact binding and
+token plus canonical command-digest bindings, together with bounded command
+kind, affected-resource, and delete-precondition metadata, and seals the
+Catalog against growth. Ordinary commands and no-op deletes add the same compact binding and
 receive the same non-mutating capacity result, while a real delete commits only
 when the complete encoded snapshot strictly shrinks. Incremental cleanup
 automatically resumes ordinary admission after restoring the rejection reserve;
@@ -41,13 +42,15 @@ recovered snapshot v9 retains the compact ledger so an exact retry still
 replays and different command bytes still conflict after checkpoint compaction.
 If even another compact binding cannot fit, snapshot v10 enters a terminal
 fail-closed seal in which no command, including cleanup, may mutate; operators
-must migrate or shard that Catalog. Token-only operation lookup is not
-guaranteed for compacted capacity outcomes because their affected-resource
-authorization context is intentionally not retained. Cursor zero fails stale
+must migrate or shard that Catalog. Compacted outcomes remain discoverable
+through exact affected-resource-authorized operation lookup; the unrecorded
+rejection that triggers a terminal seal cannot be reconstructed after an
+ambiguous disconnect and requires operator migration. Cursor zero fails stale
 after the history floor advances. Pre-seal public deletes and non-snapshot
 capacity rejections remain discoverable after replay. Delete operation records
-expose the original optional generation precondition independently of the
-returned tombstone generation. Managed delete derives the current native
+expose the original optional caller generation precondition independently of
+both the controller's mandatory desired-generation fence and the returned
+tombstone generation. Managed delete derives the current native
 generation inside the replicated command rather than trusting asynchronously
 published controller status, closing the materialization/status crash window
 while retaining legacy v6 command compatibility; new atomic managed deletes use

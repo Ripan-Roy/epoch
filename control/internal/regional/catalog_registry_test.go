@@ -819,7 +819,8 @@ func TestCatalogRegistryManagedDeleteIsLeaseFencedAndExactlyReplayable(t *testin
 			} else if body.RequestToken != deleteToken {
 				t.Errorf("managed delete token changed: %q != %q", body.RequestToken, deleteToken)
 			}
-			if body.Lease.Fence != "9" || body.ExpectedDesiredGeneration != "4" {
+			if body.Lease.Fence != "9" || body.ExpectedDesiredGeneration != "4" ||
+				body.RequestedExpectedGeneration == nil || *body.RequestedExpectedGeneration != "4" {
 				t.Errorf("unexpected managed delete body: %+v", body)
 			}
 			name := controlName(key)
@@ -985,6 +986,9 @@ func TestCatalogRegistryUsesTheActiveLeaseForStandbyDeletes(t *testing.T) {
 			deleteCalls++
 			if body.Lease.OwnerID != "epoch-control-0" || body.Lease.Fence != "4" {
 				t.Errorf("standby did not delegate through active lease: %+v", body.Lease)
+			}
+			if body.RequestedExpectedGeneration != nil {
+				t.Errorf("omitted public generation became present: %+v", body)
 			}
 			name := controlName(key)
 			writeJSON(t, writer, controlMutationReceiptDocument{Mutation: controlMutationDocument{

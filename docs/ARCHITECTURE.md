@@ -1071,7 +1071,8 @@ history remains to expire, further growth persists a token-bound capacity
 rejection without mutating business state or fail-stopping replicas. Repeated
 unique refusals eventually consume that finite reserve; snapshot format v7
 marks atomic managed-delete history, while snapshot format v8 compacts
-snapshot-capacity records into exact token/command-digest bindings and seals
+snapshot-capacity records into exact token/command-digest bindings plus bounded
+command kind, affected identities, and delete-precondition metadata, and seals
 growth. The sealed Catalog binds and rejects ordinary commands and no-op
 deletes, but applies an authorized delete only when it removes live state and
 strictly shrinks the complete encoded snapshot. It stays sealed across
@@ -1083,11 +1084,12 @@ another compact binding cannot fit, snapshot v10 terminally seals every
 mutation until migration or horizontal sharding. Every mutable v8/v9 sealed
 image reserves the extra serialized byte needed to change its one-digit marker
 to v10, so the terminal transition remains checkpointable at the exact ceiling.
-Token-only operation lookup
-for compacted outcomes is not retained because their full authorization context
-is absent.
+Exact affected-resource-authorized operation lookup reconstructs compacted
+rejections. The terminal-seal-triggering rejection is the sole unrecorded case
+once even the bounded compact record no longer fits.
 
-Managed delete carries the desired generation and lease fence but derives the
+Managed delete carries the mandatory internal desired generation, the original
+optional caller precondition, and the lease fence as distinct fields, but derives the
 native Catalog generation inside the same replicated transition. This avoids a
 race in which materialization commits and the controller crashes before its
 status update publishes the new native generation. New commands use format v7;

@@ -843,8 +843,9 @@ fn apply_committed(
 mod tests {
     use epoch_catalog::{
         AcquireControlLease, ApplyDesiredResources, ApplyResource, CatalogCommand, CatalogMutation,
-        CatalogRejectionCode, ControlLeaseGuard, DeleteDesiredResource, DesiredResourceWrite,
-        ReconcileManagedResources, ResourceName, ResourceSpec, UpdateManagedResourceStatus,
+        CatalogOperationKind, CatalogRejectionCode, ControlLeaseGuard, DeleteDesiredResource,
+        DesiredResourceWrite, ReconcileManagedResources, ResourceName, ResourceSpec,
+        UpdateManagedResourceStatus,
     };
     use epoch_consensus::{
         CommitReceipt, GroupEpoch, GroupId, LogIndex, MAX_APPLICATION_SNAPSHOT_BYTES, ProposalId,
@@ -1004,12 +1005,32 @@ mod tests {
             .unwrap();
         assert!(catalog_bytes.len() <= epoch_catalog::MAX_CATALOG_SNAPSHOT_BYTES);
         let first_rejected_command = CatalogCommand::decode(&first_rejected.payload).unwrap();
-        assert!(
-            service
-                .operation(first_rejected_command.request_token())
-                .unwrap()
-                .is_none()
+        let compacted_operation = service
+            .operation(first_rejected_command.request_token())
+            .unwrap()
+            .expect("sealed rejection must retain bounded operation metadata");
+        assert_eq!(
+            compacted_operation.command_kind,
+            CatalogOperationKind::ApplyDesired
         );
+        let CatalogCommand::ApplyDesired(first_rejected_request) = &first_rejected_command else {
+            panic!("capacity fixture must reject one desired-state command");
+        };
+        assert_eq!(
+            compacted_operation.resource_names,
+            first_rejected_request
+                .resources
+                .iter()
+                .map(|write| write.name.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(matches!(
+            compacted_operation.mutation,
+            CatalogMutation::Rejected {
+                code: CatalogRejectionCode::CapacityExceeded,
+                ..
+            }
+        ));
         assert!(matches!(
             service
                 .durable_replay_receipt(first_rejected)
@@ -1049,6 +1070,12 @@ mod tests {
                 }
             ));
         }
+        assert!(
+            restored
+                .operation(first_rejected_command.request_token())
+                .unwrap()
+                .is_some()
+        );
         restored
             .restore_checkpoint_receipts(std::slice::from_ref(sealed_committed))
             .unwrap();

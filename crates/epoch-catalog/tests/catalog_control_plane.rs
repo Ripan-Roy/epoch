@@ -721,6 +721,7 @@ fn managed_delete_removes_desired_and_native_state_under_one_lease_fence() {
             lease,
             name: name("orders"),
             expected_desired_generation: 1,
+            requested_expected_generation: Some(1),
             expected_catalog_generation: None,
         })
     };
@@ -758,6 +759,8 @@ fn managed_delete_removes_desired_and_native_state_under_one_lease_fence() {
     assert!(catalog.managed_resource(&name("orders")).is_err());
     assert!(catalog.resource(&name("orders")).is_err());
     assert_eq!(catalog.latest_change_cursor(), 2);
+    let operation = catalog.operation("delete-orders").unwrap();
+    assert_eq!(operation.expected_generation, Some(1));
     assert!(matches!(
         catalog.apply(accepted).unwrap(),
         CatalogMutation::ManagedDeleted { replayed: true, .. }
@@ -802,6 +805,7 @@ fn managed_delete_normalizes_a_standby_clock_to_the_replicated_clock() {
         lease: guard("control-a", 1, 1_001),
         name: name("orders"),
         expected_desired_generation: 1,
+        requested_expected_generation: None,
         expected_catalog_generation: Some(0),
     });
     let command_document: serde_json::Value =

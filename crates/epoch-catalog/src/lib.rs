@@ -477,6 +477,12 @@ pub struct DeleteManagedResource {
     pub lease: ControlLeaseGuard,
     pub name: ResourceName,
     pub expected_desired_generation: u64,
+    /// Original public optimistic-concurrency precondition. The managed
+    /// controller always supplies `expected_desired_generation` as its
+    /// internal atomic fence, so retain this separately to preserve whether
+    /// the caller omitted the optional precondition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_expected_generation: Option<u64>,
     /// Legacy callers may fence a sampled native generation. New callers omit
     /// it so the replicated command derives the current native generation and
     /// deletes desired plus materialized state in one atomic transition.
@@ -744,7 +750,7 @@ impl CatalogCommand {
     const fn delete_expected_generation(&self) -> Option<u64> {
         match self {
             Self::DeleteDesired(request) => request.expected_generation,
-            Self::DeleteManaged(request) => Some(request.expected_desired_generation),
+            Self::DeleteManaged(request) => request.requested_expected_generation,
             _ => None,
         }
     }
@@ -1037,6 +1043,20 @@ struct CompletedRequest {
     last_change_cursor: u64,
 }
 
+/// Bounded public metadata retained when a full capacity-rejection receipt is
+/// compacted. It is sufficient for exact retry/conflict checks and for an
+/// affected-resource-authorized operation lookup without retaining the
+/// potentially large command body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompactCapacityRejection {
+    command_digest: [u8; 32],
+    command_kind: CatalogOperationKind,
+    resource_names: Vec<ResourceName>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expected_generation: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceGeneration {
@@ -1054,7 +1074,7 @@ pub struct CatalogSnapshot {
     reserved_consensus_group_ids: Vec<u64>,
     completed_requests: BTreeMap<String, CompletedRequest>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    capacity_rejections: BTreeMap<String, [u8; 32]>,
+    capacity_rejections: BTreeMap<String, CompactCapacityRejection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     managed_resources: Vec<ManagedResourceRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1088,11 +1108,12 @@ pub struct Catalog {
     next_consensus_group_id: u64,
     reserved_consensus_group_ids: BTreeSet<u64>,
     completed_requests: BTreeMap<String, CompletedRequest>,
-    /// Exact request tokens paired with the canonical command digest for
-    /// commands rejected while capacity sealed. This is deliberately smaller
-    /// than a full operation record but still preserves replay and conflict
-    /// semantics after cleanup and consensus compaction.
-    capacity_rejections: BTreeMap<String, [u8; 32]>,
+    /// Exact request tokens paired with the canonical command digest and the
+    /// bounded authorization/operation metadata for commands rejected while
+    /// capacity sealed. This is deliberately smaller than a full operation
+    /// record while preserving retry, conflict, and lookup semantics after
+    /// cleanup and consensus compaction.
+    capacity_rejections: BTreeMap<String, CompactCapacityRejection>,
     managed_resources: BTreeMap<ResourceName, ManagedResourceRecord>,
     managed_last_generations: BTreeMap<ResourceName, u64>,
     control_lease: Option<ControlLease>,
@@ -1353,7 +1374,7 @@ impl Catalog {
         bound.capacity_rejection_history = true;
         bound.capacity_rejections.insert(
             command.request_token().to_owned(),
-            capacity_rejection_command_digest(command)?,
+            compact_capacity_rejection(command)?,
         );
         match bound.encode_snapshot() {
             Ok(encoded) if encoded.len() <= soft_seal_limit => {
@@ -1387,8 +1408,8 @@ impl Catalog {
             .iter()
             .filter(|(_, completed)| is_snapshot_capacity_rejection(&completed.mutation))
             .map(|(token, completed)| {
-                capacity_rejection_command_digest(&completed.command)
-                    .map(|digest| (token.clone(), digest))
+                compact_capacity_rejection(&completed.command)
+                    .map(|rejection| (token.clone(), rejection))
             })
             .collect::<CatalogResult<Vec<_>>>()?;
         for (token, digest) in compact {
@@ -1398,7 +1419,7 @@ impl Catalog {
         let token = command.request_token().to_owned();
         sealed
             .capacity_rejections
-            .insert(token.clone(), capacity_rejection_command_digest(command)?);
+            .insert(token.clone(), compact_capacity_rejection(command)?);
         match sealed.encode_snapshot() {
             Ok(encoded) if encoded.len() <= MAX_CATALOG_SOFT_SEALED_SNAPSHOT_BYTES => {}
             Ok(_) | Err(CatalogError::SnapshotTooLarge) => {
@@ -1532,6 +1553,19 @@ impl Catalog {
                 first_change_cursor: completed.first_change_cursor,
                 last_change_cursor: completed.last_change_cursor,
             })
+            .or_else(|| {
+                self.capacity_rejections
+                    .get(request_token)
+                    .map(|rejection| CatalogOperation {
+                        request_token: request_token.to_owned(),
+                        command_kind: rejection.command_kind,
+                        resource_names: rejection.resource_names.clone(),
+                        expected_generation: rejection.expected_generation,
+                        mutation: rejected_mutation(&CatalogError::SnapshotTooLarge),
+                        first_change_cursor: 0,
+                        last_change_cursor: 0,
+                    })
+            })
     }
 
     pub fn route(&self, name: &ResourceName, shard_index: u32) -> CatalogResult<&TabletDescriptor> {
@@ -1585,8 +1619,8 @@ impl Catalog {
         {
             return Err(CatalogError::IdempotencyConflict);
         }
-        if let Some(expected_digest) = self.capacity_rejections.get(command.request_token())
-            && *expected_digest != capacity_rejection_command_digest(command)?
+        if let Some(rejection) = self.capacity_rejections.get(command.request_token())
+            && rejection.command_digest != capacity_rejection_command_digest(command)?
         {
             return Err(CatalogError::IdempotencyConflict);
         }
@@ -1609,9 +1643,9 @@ impl Catalog {
                 rejected_mutation(&CatalogError::IdempotencyConflict)
             }));
         }
-        if let Some(expected_digest) = self.capacity_rejections.get(command.request_token()) {
+        if let Some(rejection) = self.capacity_rejections.get(command.request_token()) {
             return Ok(Some(
-                if *expected_digest == capacity_rejection_command_digest(command)? {
+                if rejection.command_digest == capacity_rejection_command_digest(command)? {
                     rejected_mutation(&CatalogError::SnapshotTooLarge)
                 } else {
                     rejected_mutation(&CatalogError::IdempotencyConflict)
@@ -2990,6 +3024,15 @@ fn capacity_rejection_command_digest(command: &CatalogCommand) -> CatalogResult<
     Ok(hasher.finalize().into())
 }
 
+fn compact_capacity_rejection(command: &CatalogCommand) -> CatalogResult<CompactCapacityRejection> {
+    Ok(CompactCapacityRejection {
+        command_digest: capacity_rejection_command_digest(command)?,
+        command_kind: command.operation_kind(),
+        resource_names: command.resource_names(),
+        expected_generation: command.delete_expected_generation(),
+    })
+}
+
 fn unchanged_resource_mutation(resource: ResourceRecord) -> CatalogMutation {
     CatalogMutation::Applied {
         resource,
@@ -3467,7 +3510,7 @@ fn validate_completed_requests(
 
 fn validate_capacity_rejections(
     completed_requests: &BTreeMap<String, CompletedRequest>,
-    capacity_rejections: &BTreeMap<String, [u8; 32]>,
+    capacity_rejections: &BTreeMap<String, CompactCapacityRejection>,
     capacity_rejection_history: bool,
 ) -> CatalogResult<()> {
     if !capacity_rejection_history && !capacity_rejections.is_empty() {
@@ -3481,11 +3524,33 @@ fn validate_capacity_rejections(
             "catalog capacity snapshot has no compact rejection binding".into(),
         ));
     }
-    for token in capacity_rejections.keys() {
+    for (token, rejection) in capacity_rejections {
         validate_request_token(token)?;
         if completed_requests.contains_key(token) {
             return Err(CatalogError::InvalidSpec(
                 "catalog snapshot request token has both complete and compact outcomes".into(),
+            ));
+        }
+        for name in &rejection.resource_names {
+            name.validate()?;
+        }
+        if !rejection
+            .resource_names
+            .windows(2)
+            .all(|names| names[0] < names[1])
+        {
+            return Err(CatalogError::InvalidSpec(
+                "catalog compact rejection resource identities are not canonical".into(),
+            ));
+        }
+        if rejection.expected_generation.is_some()
+            && !matches!(
+                rejection.command_kind,
+                CatalogOperationKind::DeleteDesired | CatalogOperationKind::DeleteManaged
+            )
+        {
+            return Err(CatalogError::InvalidSpec(
+                "catalog compact rejection has a precondition for a non-delete command".into(),
             ));
         }
     }
@@ -3900,17 +3965,16 @@ mod tests {
 
     fn round_trip_sealed_catalog(mut catalog: Catalog) -> Catalog {
         let unbound_digest = catalog.state_digest().unwrap();
+        let sealed_command = CatalogCommand::ApplyDesired(ApplyDesiredResources {
+            request_token: "small-command-after-seal".into(),
+            resources: vec![DesiredResourceWrite {
+                name: managed_test_name(8),
+                expected_generation: Some(0),
+                desired: json!({"padding": "small"}),
+            }],
+        });
         assert!(matches!(
-            catalog
-                .apply(CatalogCommand::ApplyDesired(ApplyDesiredResources {
-                    request_token: "small-command-after-seal".into(),
-                    resources: vec![DesiredResourceWrite {
-                        name: managed_test_name(8),
-                        expected_generation: Some(0),
-                        desired: json!({"padding": "small"}),
-                    }],
-                }))
-                .unwrap(),
+            catalog.apply(sealed_command.clone()).unwrap(),
             CatalogMutation::Rejected {
                 code: CatalogRejectionCode::CapacityExceeded,
                 replayed: false,
@@ -3929,6 +3993,13 @@ mod tests {
         let mut restored = Catalog::decode_snapshot(&encoded).unwrap();
         assert!(restored.is_capacity_sealed());
         assert_eq!(restored.state_digest().unwrap(), digest);
+        let operation = restored
+            .operation(sealed_command.request_token())
+            .expect("compacted rejection must remain operation-queryable");
+        assert_eq!(operation.command_kind, CatalogOperationKind::ApplyDesired);
+        assert_eq!(operation.resource_names, vec![managed_test_name(8)]);
+        assert_eq!(operation.expected_generation, None);
+        assert!(is_snapshot_capacity_rejection(&operation.mutation));
         assert!(matches!(
             restored
                 .apply(CatalogCommand::DeleteDesired(DeleteDesiredResource {
@@ -4028,11 +4099,16 @@ mod tests {
             envelope["format_version"],
             CATALOG_CAPACITY_RECOVERED_SNAPSHOT_FORMAT_VERSION
         );
+        let recovered_catalog = Catalog::decode_snapshot(&recovered).unwrap();
         assert!(
-            Catalog::decode_snapshot(&recovered)
-                .unwrap()
+            recovered_catalog
                 .durable_outcome(&sealed_command)
                 .unwrap()
+                .is_some()
+        );
+        assert!(
+            recovered_catalog
+                .operation(sealed_command.request_token())
                 .is_some()
         );
     }
@@ -4152,7 +4228,15 @@ mod tests {
                     "{prefix}{}",
                     "x".repeat(MAX_REQUEST_TOKEN_BYTES - prefix.len())
                 );
-                (token, [u8::try_from(index % 251).unwrap(); 32])
+                (
+                    token,
+                    CompactCapacityRejection {
+                        command_digest: [u8::try_from(index % 251).unwrap(); 32],
+                        command_kind: CatalogOperationKind::ApplyDesired,
+                        resource_names: vec![managed_test_name(8)],
+                        expected_generation: None,
+                    },
+                )
             })
             .collect::<Vec<_>>();
         let mut all = base.clone();

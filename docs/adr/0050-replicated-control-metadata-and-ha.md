@@ -88,7 +88,8 @@ into Go.
    command fit, persist a token-bound non-mutating capacity rejection rather
    than failing the post-consensus applier. If unique rejected commands consume
    the reserved rejection space, compact snapshot-capacity records into exact
-   request-token/canonical-command-digest bindings, persist snapshot format v8,
+   request-token/canonical-command-digest bindings plus bounded command kind,
+   affected-resource, and delete-precondition metadata, persist snapshot format v8,
    and seal Catalog growth. A sealed Catalog binds and rejects ordinary
    commands and no-op deletes, but applies a delete when it removes live state
    and strictly shrinks the complete encoded snapshot. Incremental cleanup
@@ -107,11 +108,12 @@ into Go.
    both sealed and recovered states, and compacted proposals remain exact after
    leaving the retry suffix. Check durable bindings before proposal and
    defensively materialize a deterministic conflict receipt if changed bytes
-   nevertheless reach applied replay. Token-only operation lookup for compacted
-   capacity outcomes is not retained; migrate or shard a terminally sealed
-   Catalog.
-10. Expose each durable operation's command kind and the original desired-delete
-    generation precondition. Replay compares that retained command value,
+   nevertheless reach applied replay. Exact affected-resource-authorized
+   operation lookup reconstructs compacted outcomes; migrate or shard a
+   terminally sealed Catalog when the triggering rejection itself cannot fit.
+10. Expose each durable operation's command kind and the original caller-supplied
+    desired-delete generation precondition separately from the managed
+    controller's mandatory internal fence. Replay compares that retained command value,
     including the distinction between no precondition and generation zero,
     rather than inferring it from a result generation that may be a retained
     tombstone high-water mark.

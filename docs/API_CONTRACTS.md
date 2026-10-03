@@ -311,8 +311,9 @@ set and pass read authorization for every name; a token alone is never an
 authorization capability. An uncommitted proposal has no durable identity set,
 so lookup returns not found until its committed success or rejection can be
 authorized exactly. A completed operation also exposes `command_kind`; desired
-and managed delete operations expose the retained, presence-aware
-`expected_generation` when the original command had one. The generated gRPC
+and managed delete operations expose the retained, presence-aware caller
+`expected_generation` when the public request had one; the controller's
+mandatory internal desired-generation fence is never exposed as that field. The generated gRPC
 field is an optional `uint64`; the internal authority JSON represents the same
 value as a decimal string. Delete replay compares this command precondition,
 not the mutation's result generation, because a
@@ -346,7 +347,8 @@ request-token retention window or replace a general long-running workflow API.
 Catalog admission reserves room for a maximum-size durable capacity rejection.
 If repeated unique rejections exhaust that finite reserve, the Catalog persists
 a capacity growth seal and compacts full snapshot-capacity outcomes into exact
-request-token/canonical-command-digest bindings. Reads remain available;
+request-token/canonical-command-digest bindings plus bounded command kind,
+affected-resource identities, and delete precondition metadata. Reads remain available;
 ordinary commands and no-op deletes persist the compact binding and receive
 non-mutating capacity rejections. A delete may commit only when it removes live
 state and strictly reduces the complete encoded snapshot, so authorized cleanup
@@ -356,9 +358,10 @@ the compact ledger after that transition, so exact retries replay and changed
 command bytes conflict even after the original proposal leaves the consensus
 retry suffix. Regional admission checks the durable binding before proposing;
 the tablet defensively commits a deterministic conflict receipt if a changed
-compacted retry nevertheless reaches applied replay. Token-only operation
-lookup is not guaranteed for compacted outcomes because their full
-affected-resource authorization context is absent.
+compacted retry nevertheless reaches applied replay. Compacted outcomes remain
+available to `GetOperation` after exact affected-resource authorization. The
+one rejection that triggers a terminal seal cannot be retained when the compact
+ledger is full and may require operator resolution after an ambiguous disconnect.
 If the compact ledger itself fills, snapshot v10 rejects every mutation,
 including cleanup, until operator-led migration or horizontal sharding.
 The one-time legacy import is one atomic command and currently accepts at most

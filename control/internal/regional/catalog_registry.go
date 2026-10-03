@@ -63,9 +63,10 @@ type controlDeleteDesiredBody struct {
 }
 
 type controlDeleteManagedBody struct {
-	RequestToken              string                    `json:"request_token"`
-	Lease                     controlLeaseGuardDocument `json:"lease"`
-	ExpectedDesiredGeneration string                    `json:"expected_desired_generation"`
+	RequestToken                string                    `json:"request_token"`
+	Lease                       controlLeaseGuardDocument `json:"lease"`
+	ExpectedDesiredGeneration   string                    `json:"expected_desired_generation"`
+	RequestedExpectedGeneration *string                   `json:"requested_expected_generation,omitempty"`
 }
 
 type controlImportResourceDocument struct {
@@ -947,7 +948,8 @@ func (registry *CatalogRegistry) DeleteManaged(
 			Fence:   strconv.FormatUint(uint64(lease.Fence), 10),
 			NowMS:   strconv.FormatUint(nowMS, 10),
 		},
-		ExpectedDesiredGeneration: strconv.FormatUint(desiredGeneration, 10),
+		ExpectedDesiredGeneration:   strconv.FormatUint(desiredGeneration, 10),
+		RequestedExpectedGeneration: decimalPointer(request.ExpectedGeneration),
 	}
 	encoded, err := json.Marshal(body)
 	if err != nil {

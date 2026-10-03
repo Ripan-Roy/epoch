@@ -73,8 +73,8 @@ notes explicitly list additional verified artifacts.
   replicas after consensus commit.
 - Repeated unique snapshot-capacity refusals can no longer consume the full
   rejection reserve and fail-stop a Catalog tablet. Snapshot format v8 compacts
-  them into exact request-token/canonical-command-digest bindings and seals
-  growth. Sealed Catalogs bind and reject unknown growth but admit only real
+  them into exact request-token/canonical-command-digest bindings plus bounded
+  authorization and operation metadata, and seals growth. Sealed Catalogs bind and reject unknown growth but admit only real
   deletes that strictly shrink the complete encoded snapshot; incremental
   cleanup resumes ordinary admission at the reserved-headroom boundary.
   Recovered snapshot v9 preserves replay and token-conflict identity after the
@@ -86,9 +86,11 @@ notes explicitly list additional verified artifacts.
   admission checks durable bindings before proposal; the tablet also
   reconstructs a deterministic conflict receipt if a changed compacted retry
   reaches committed replay. Horizontal Catalog sharding remains the long-term
-  capacity path.
+  capacity path. Exact affected-resource-authorized lookup reconstructs a
+  compacted rejection after consensus compaction.
 - Control operation results now expose their original command kind and retained
-  delete generation precondition. Missing-resource delete replay validates that
+  caller-supplied delete generation precondition, separately from the managed
+  controller's mandatory desired-generation fence. Missing-resource delete replay validates that
   command precondition instead of mistaking a later tombstone high-water mark
   for the caller's expected generation.
 - Change cursor zero is an initial-history cursor only while the retention

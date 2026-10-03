@@ -433,20 +433,21 @@ capacity bounds, canonical versioned command decoding, and identical snapshots
 after command replay. Capacity-bound regressions submit distinct maximum-size
 commands until the finite rejection reserve is exhausted, prove the Catalog
 compacts full snapshot-capacity outcomes into exact token/command-digest
-bindings, enters a snapshot-v8 growth seal without changing business state or
+bindings with bounded authorization/operation metadata, enters a snapshot-v8 growth seal without changing business state or
 fail-stopping its tablet, restores that snapshot, binds no-op cleanup
 rejections, and admits only deletes that strictly shrink the encoded
 checkpoint. The test deletes incrementally until normal headroom returns,
 checkpoints recovered snapshot v9 without the earlier proposals in the
-consensus retry suffix, replays both seal-triggering and post-seal tokens, and
-rejects changed command bytes before proposal. Defensive tablet coverage then
+consensus retry suffix, resolves their failed operation metadata, replays both
+seal-triggering and post-seal tokens, and rejects changed command bytes before proposal. Defensive tablet coverage then
 applies that changed compacted retry as a deterministic conflict rather than a
 fail-stop and rebuilds its receipt through another checkpoint. A separate
 exhaustion regression fills the compact ledger, proves snapshot v10 terminally
 rejects even cleanup, round-trips that fail-closed state, and exercises an
 artificial exact boundary where only the extra byte for the two-digit v10
 marker remains. Cross-language control tests also pin the original optional
-delete precondition independently of a retained tombstone generation and prove
+caller delete precondition independently of both the managed internal fence and
+a retained tombstone generation, and prove
 that generated `GetOperation` responses preserve both its presence and the
 Catalog command kind.
 The Go authority regression constructs a valid atomic batch response above the
