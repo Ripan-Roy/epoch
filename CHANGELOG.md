@@ -6,6 +6,8 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+## [0.2.0-beta.12] - 2026-10-04
+
 ### Added
 
 - Moved managed desired state, observed status, generation tombstones, request
@@ -22,6 +24,9 @@ notes explicitly list additional verified artifacts.
   control StatefulSet.
 - Added bounded keyset pagination for control inventory reads, including a
   stable Catalog cursor across pages and fail-closed ordering validation.
+- Release verification now checks published documentation tags, Kubernetes
+  image examples, and version-controlled notes alongside package versions;
+  mutation tests reject stale public references before publication.
 
 ### Security and recovery
 
@@ -74,7 +79,8 @@ notes explicitly list additional verified artifacts.
 - Repeated unique snapshot-capacity refusals can no longer consume the full
   rejection reserve and fail-stop a Catalog tablet. Snapshot format v8 compacts
   them into exact request-token/canonical-command-digest bindings plus bounded
-  authorization and operation metadata, and seals growth. Sealed Catalogs bind and reject unknown growth but admit only real
+  authorization and operation metadata, and seals growth. Sealed Catalogs bind
+  and reject unknown growth but admit only real
   deletes that strictly shrink the complete encoded snapshot; incremental
   cleanup resumes ordinary admission at the reserved-headroom boundary.
   Recovered snapshot v9 preserves replay and token-conflict identity after the
@@ -90,7 +96,8 @@ notes explicitly list additional verified artifacts.
   compacted rejection after consensus compaction.
 - Control operation results now expose their original command kind and retained
   caller-supplied delete generation precondition, separately from the managed
-  controller's mandatory desired-generation fence. Missing-resource delete replay validates that
+  controller's mandatory desired-generation fence. Missing-resource delete
+  replay validates that
   command precondition instead of mistaking a later tombstone high-water mark
   for the caller's expected generation.
 - Change cursor zero is an initial-history cursor only while the retention

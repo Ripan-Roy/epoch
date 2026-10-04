@@ -1,9 +1,9 @@
 # Epoch Delivery Checklist
 
-**Last reviewed:** 18 September 2026
+**Last reviewed:** 4 October 2026
 **Current published release:** `v0.2.0-beta.11`
 **Current release target:** `v0.2.0-beta.12`
-**Current core target:** replicated control metadata and multi-instance ownership
+**Current core target:** control-HA release verification and remaining production gates
 
 This is the operational checklist for turning PRD scope into verified,
 releasable increments. [PRD.md](PRD.md) owns product scope,
@@ -35,11 +35,11 @@ protected-branch evidence agree.
 | G3 | Consensus, catalog, and placement | 🟡 | Quorum safety, persistent catalog, multi-group supervision, membership, placement, repair, read barriers | Dedicated Catalog consensus, shared multi-group supervision, safe leader ReadIndex barriers, durable three/five-voter membership, learner catch-up, joint replacement, rack/exclusion-aware N-node placement, and serialized automatic policy/topology repair plus load rebalance pass protected beta.9. Transactional multi-plan reservation, split/merge, follower reads, and broader model/chaos evidence remain open. |
 | G4 | Native profile cores | 🟡 | Cache, Stream, Queue, and Bus P0 semantics with truthful public routing and fault evidence | All four typed tablet cores run simultaneously behind resource/shard routing and authenticated three-language clients. Cache, Stream, Queue, and the native Event Bus development surface shipped through alpha.9; production protocol/scale evidence remains open. |
 | G5 | Trust and observability | 🟡 | Identity, authorization, TLS/mTLS, encryption, audit, telemetry, quotas, explain | The protected beta.10 baseline includes shared fingerprint authorization, TLS/mTLS, strict Go/Rust EdDSA OIDC parity, bounded lifetime and emergency revocation, owner-only fsynced hash-chained journals, tenant-filtered export, sticky fail-closed integrity behavior, bounded telemetry, W3C propagation, OTLP, and measured diagnostics. Discovery/JWKS refresh, certificate issuance/revocation, replicated policy, external WORM retention, complete sensitive-event coverage, quotas, support bundles, and production security/SLO evidence remain open. |
-| G6 | Compatibility gateways | 🟡 | Named protocol/client matrix, differential tests, fuzzing, malformed frames, migration evidence | The current local candidate adds bounded Redis transactions/Pub/Sub/Streams, Kafka idempotent Produce, and durable AMQP topology/named-DLX/`x-death` to the protected beta.8 baseline. Both the exact-client fixture and production-image regional-v2 campaign are green: 21 checks survive gateway replacement, separate Cache/Stream/Queue leader failures, convergence, and all-voter same-volume reopen. Protected CI remains required. Differential/fuzz certification, Redis Lua/broader Streams, full static/cooperative/new-group Kafka protocols and transactions, arbitrary AMQP DLX/transactions/1.0, MQTT, and comparative performance remain open. |
+| G6 | Compatibility gateways | 🟡 | Named protocol/client matrix, differential tests, fuzzing, malformed frames, migration evidence | Published beta.11 adds bounded Redis transactions/Pub/Sub/Streams, Kafka idempotent Produce, and durable AMQP topology/named-DLX/`x-death` to the protected beta.8 baseline. Both the exact-client fixture and production-image regional-v2 campaign are green: 21 checks survive gateway replacement, separate Cache/Stream/Queue leader failures, convergence, and all-voter same-volume reopen. Published beta.11 passed protected main CI `34781777502`. Differential/fuzz certification, Redis Lua/broader Streams, full static/cooperative/new-group Kafka protocols and transactions, arbitrary AMQP DLX/transactions/1.0, MQTT, and comparative performance remain open. |
 | G7 | Data services and integrations | 🟡 | Schemas, pipes, connectors, target execution, checkpoints, transaction boundaries | Replicated schemas/validation, transforms/enrichment, MQTT state, catalogs/endpoints, connector checkpoints/replay, leader-owned signed/Epoch/API/function/managed-target execution, HTTP/CloudEvents polling, and bounded immutable-object/PostgreSQL/MySQL/Kafka readers are implemented. Their pinned S3-compatible/database/broker conformance passes exact-main CI `34401493735`; private egress, live Azure/GCS identity, load/soak, and broader crash certification remain open. |
 | G8 | Managed operations | 🟡 | Durable Go reconciliation, operator, autoscaling, backup, metering, billing, private networking | Managed desired/status/tombstone/operation state is now Rust-Catalog replicated behind linearizable reads and a lease-fenced active Go owner. The operator renders three anti-affined control replicas, staged legacy import/scale-up (including deterministic unqualified-key translation), and a two-instance PDB alongside 3–1,024 physical nodes, independent three/five-voter placements, backup/restore, guarded upgrade, learner-first replacement, automatic repair/rebalance, and durable audit journals. Protected multi-control chaos, Catalog capacity/sharding and public operation retention, Kubernetes topology attestation, cloud CSI, autoscaling, metering/billing, and private networking remain open. |
 | G9 | Geo | ⬜ | Replication, RPO/RTO, promotion, failback, residency, split-brain drills | Not implemented |
-| G10 | Release readiness | 🟡 | Synchronized versions, CI, Pages, notes, verified tag provenance, artifacts, security and compatibility statements | `v0.2.0-beta.11` is published from exact `main` commit `f2c5381`; CI `34781777502`, Pages `34781777485`, and tag verification `34788472020` passed with five OCI manifests and ten platform SBOMs. The next control-HA candidate has complete local lint, unit/race, audit, build, configuration, standalone/docs smoke, and regional Docker recovery evidence; protected PR/main evidence, a synchronized beta.12 version, notes, tag, and artifacts remain. Raw signed binaries, package-manager artifacts, clean-cluster digest-pull evidence, and GA operating evidence stay open. |
+| G10 | Release readiness | 🟡 | Synchronized versions, CI, Pages, notes, verified tag provenance, artifacts, security and compatibility statements | `v0.2.0-beta.11` is published from exact `main` commit `f2c5381`; CI `34781777502`, Pages `34781777485`, and tag verification `34788472020` passed with five OCI manifests and ten platform SBOMs. The control-HA milestone merged in PR #134 at `36dab1f`; all 11 main CI jobs `37143501331` and Pages `37143501271` passed, including live Kubernetes evidence. The synchronized beta.12 candidate includes curated notes and current deployment/docs tags; protected release-commit CI/Pages, tag verification, and artifacts remain. Raw signed binaries, package-manager artifacts, clean-cluster digest-pull evidence, and GA operating evidence stay open. |
 
 ## Milestone readiness
 
@@ -90,6 +90,14 @@ complete.
 
 ## Current control delivery: replicated metadata and multi-instance ownership
 
+PR #134 is merged at `36dab1f` with all 11 jobs passing in
+[main CI 37143501331](https://github.com/Ripan-Roy/epoch/actions/runs/37143501331),
+including uploaded live Kubernetes lifecycle evidence. The
+[main Pages deployment 37143501271](https://github.com/Ripan-Roy/epoch/actions/runs/37143501271)
+is also green. This verifies the bounded milestone below; it does not close
+the dedicated multi-control chaos, public retention, or horizontal-capacity
+production gates.
+
 | ID | Checklist item | Boundary | State | Evidence / acceptance |
 |---|---|---|---:|---|
 | HA-01 | Replicate desired state and generation high-water marks | Rust Catalog | 🟡 | Canonical command/snapshot v7 stores managed desired/status records, live and tombstoned generations, atomic managed-delete commands, and exact request outcomes while retaining v6 readability; lifecycle, rejection, replay, and snapshot tests pass locally. |
@@ -100,8 +108,8 @@ complete.
 | HA-06 | Stream resumable authorized resource changes | Protobuf + Go + Rust | 🟡 | ReadIndex-backed bounded pages reject stale/future cursors, including cursor zero after the retention floor advances; the authenticated gRPC stream filters per principal and reports retained high-water plus scanned `next_cursor` without skipping filtered or paged events. History is capped at 4,096 entries and prunes earlier against the complete checkpoint budget. Native checkpoint v2 stores raw Catalog bytes beneath the 4 MiB application envelope and reserves its fixed header. |
 | HA-07 | Migrate the single-owner registry safely | Go + Catalog | 🟡 | Ordered pod zero exports one consistent bbolt image and atomically imports up to 4,096 live/tombstoned generation records within the 512 KiB command and 4 MiB native-checkpoint envelope; the old database is retained, larger imports fail closed pending a migration tool, and the token-history limitation is explicit. |
 | HA-08 | Run a failure-tolerant control set | Kubernetes operator | 🟡 | A three-replica OrderedReady StatefulSet has stable pod owner IDs, required hostname anti-affinity, readiness at two replicas, and a minAvailable-two PDB with RBAC and controller tests. A legacy one-replica set updates and verifies ordinal zero before scaling to three. |
-| HA-09 | Prove local cross-language behavior | Go + Rust tests | 🟡 | Repository-wide lint and unit/race suites, patched dependency audit, all-language build, all rendered configs, standalone/docs smoke, and the full regional Docker ownership/failover/all-voter recovery campaign pass locally. Regressions cover the former 7.5 MiB controller checkpoint, raw bounded v2 checkpoints, v1 restore, compact capacity replay/conflict/operation lookup across v8/v9 checkpoint compaction, exact-boundary v10 marker reservation and fail-closed exhaustion, presence-aware generated operation metadata, tombstone-safe delete replay, cursor-zero compaction, standby clock races, refreshed membership capacity, byte-budgeted watch history, and valid batch responses between 1 MiB and the 5 MiB authority cap. Protected PR evidence and dedicated concurrent multi-control chaos remain. |
-| HA-10 | Publish decision, contracts, and non-claims | Docs + Pages | 🟡 | ADR-0050, architecture, API contracts, PRD traceability, and this checklist describe the shipped boundary and open operation-retention, Catalog capacity/sharding, and chaos gates. Main-only Pages evidence remains. |
+| HA-09 | Prove local cross-language behavior | Go + Rust tests | 🟡 | Repository-wide lint and unit/race suites, patched dependency audit, all-language build, all rendered configs, standalone/docs smoke, and the full regional Docker ownership/failover/all-voter recovery campaign pass locally. Regressions cover the former 7.5 MiB controller checkpoint, raw bounded v2 checkpoints, v1 restore, compact capacity replay/conflict/operation lookup across v8/v9 checkpoint compaction, exact-boundary v10 marker reservation and fail-closed exhaustion, presence-aware generated operation metadata, tombstone-safe delete replay, cursor-zero compaction, standby clock races, refreshed membership capacity, byte-budgeted watch history, and valid batch responses between 1 MiB and the 5 MiB authority cap. Protected PR/main CI and live Kubernetes evidence pass; dedicated concurrent multi-control chaos remains. |
+| HA-10 | Publish decision, contracts, and non-claims | Docs + Pages | 🟡 | ADR-0050, architecture, API contracts, PRD traceability, and this checklist describe the shipped boundary and open operation-retention, Catalog capacity/sharding, and chaos gates. The main-only Pages deployment `37143501271` passed and the public control-HA guide is live. |
 
 ## Current compatibility delivery: Redis, Kafka, and RabbitMQ
 
@@ -625,10 +633,10 @@ complete.
 
 | Order | Release action | Required evidence | State for next release |
 |---:|---|---|---:|
-| 1 | Select a completed, merged milestone boundary | The next boundary is replicated control metadata and multi-instance reconciliation; local acceptance is green, while merge and protected evidence remain | 🟡 |
-| 2 | Choose the next semantic prerelease version | `v0.2.0-beta.12` follows published beta.11; synchronize only after the feature merges | 🟡 |
-| 3 | Synchronize Rust, Go, Java, Python, TypeScript, SDK user agents, and lockfiles | Run the release preparation workflow at `0.2.0-beta.12` after merge | ⬜ |
-| 4 | Write curated, version-controlled release notes | Prepare beta.12 behavior, migration, verification, security update, and explicit limitations after merge | ⬜ |
+| 1 | Select a completed, merged milestone boundary | Replicated control metadata and multi-instance reconciliation merged in PR #134 at `36dab1f`; main CI `37143501331` and Pages `37143501271` passed | ✅ |
+| 2 | Choose the next semantic prerelease version | `v0.2.0-beta.12` follows published beta.11 | ✅ |
+| 3 | Synchronize Rust, Go, Java, Python, TypeScript, SDK user agents, and lockfiles | `make release-check` and public-reference mutation tests pass at `0.2.0-beta.12` | ✅ |
+| 4 | Write curated, version-controlled release notes | [beta.12 notes](releases/v0.2.0-beta.12.md) cover behavior, migration/downgrade limits, evidence, security, artifacts, and production non-claims | ✅ |
 | 5 | Pass protected `main` CI and main-only Pages | Both workflow runs green at the release commit | ⬜ |
 | 6 | Verify the live docs show beta.12 notes and the control-HA operating guide | Public Pages bundle assertions | ⬜ |
 | 7 | Create an annotated tag at the exact current `main` commit | Local and remote commit IDs match | ⬜ |
@@ -637,8 +645,10 @@ complete.
 | 10 | Verify downloads and package claims | Five OCI manifests and ten platform SBOM assets match the notes; package-manager publication remains deferred | ⬜ |
 | 11 | Start the next `Unreleased` section | Changelog prepared for continued delivery | ✅ |
 
-This table tracks the future `v0.2.0-beta.12` sequence. The completed beta.11
-evidence remains recorded in G10 and the versioned release notes.
+This table tracks the `v0.2.0-beta.12` release candidate. Publication rows remain
+open until verified at the synchronized release commit, independently of the
+already-green feature merge. Completed beta.11 evidence remains recorded in
+G10 and the versioned release notes.
 
 ## Feature delivery template
 

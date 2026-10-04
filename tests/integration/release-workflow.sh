@@ -100,4 +100,5 @@ grep -Fq -- "make test-release-manifest test-release-workflow" "$ci_workflow" ||
 grep -Fq -- "- run: pnpm run audit" "$ci_workflow" || \
   fail "CI does not reject npm dependency advisories"
 
+bash "${repository_root}/tests/integration/release-version.sh"
 printf 'release workflow contract passed\n'
