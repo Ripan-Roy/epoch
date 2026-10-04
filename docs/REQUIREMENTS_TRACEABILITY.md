@@ -4,6 +4,17 @@ This register turns the prioritized catalog in [PRD.md](./PRD.md) into a deliver
 
 Last synchronized with PRD version 0.3 on 21 August 2026.
 
+Current CTRL-001/CTRL-002 hardening candidate: the clean `671fde4` tree passed
+the dedicated owner-recovery subset with three and five concurrent Go
+controllers, ten invariants per count, and fourteen verified artifact receipts.
+Fully qualified HTTP item GET/DELETE now preserves tenant scope and managed
+deletion; its regression was observed red before implementation, and the Go
+race/vet/build checks pass locally. The clean `fed6b59` Rust candidate separately
+passed the rebuilt, signed eight-invariant regional recovery campaign. These
+local results do not close the full concurrent gRPC/batch/watch matrix, public
+operation-retention, Catalog scaling/migration, or protected-main gates. See
+[Control HA certification](CONTROL_HA_CERTIFICATION.md).
+
 ## How to use this register
 
 Status values are:

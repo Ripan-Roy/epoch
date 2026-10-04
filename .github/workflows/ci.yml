@@ -491,6 +491,23 @@ jobs:
       - name: Remove ephemeral evidence signing key
         if: always()
         run: rm -f -- "${RUNNER_TEMP}/epoch-soak-signing-key.pem"
+      - name: Prove three and five concurrent control owners recover safely
+        env:
+          EPOCH_REGIONAL_IMAGE: epoch/node:ci
+          EPOCH_REGIONAL_USE_EXISTING_IMAGE: "1"
+          EPOCH_CONTROL_HA_ARTIFACT_DIR: ${{ runner.temp }}/epoch-control-ha-owners
+        run: |
+          make test-control-ha-owner
+          python3 tests/integration/control_ha.py verify \
+            --manifest "${RUNNER_TEMP}/epoch-control-ha-owners/evidence.json"
+      - name: Upload concurrent control-owner recovery evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: control-ha-owner-evidence-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/epoch-control-ha-owners
+          if-no-files-found: ignore
+          retention-days: 30
       - name: Prove three-container consensus probe failover and catch-up
         env:
           EPOCH_PROBE_ARTIFACT_DIR: ${{ runner.temp }}/epoch-consensus-probe

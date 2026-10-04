@@ -36,8 +36,14 @@ three and five concurrent Go processes, authenticated HTTP writes/replays,
 canonical materialization, an overlapping same-label replacement, actual lease
 owner `SIGKILL`, owner `SIGSTOP`/takeover/resume, four stale-guard commands,
 Catalog majority loss, original-token resolution, and same-volume reopen with
-all four profile digests. Its eight fail-closed contract tests pass
-locally and are required in CI. Live execution is still pending.
+all four profile digests. Its eleven fail-closed contract tests pass
+locally and are required in CI. The clean `671fde4` candidate passed all ten
+owner-recovery checks with both three and five Go controllers. Independent
+verification checked all fourteen artifact receipts and exact before/after
+digests for Cache, Stream, Queue, and Event Bus. The node image came from
+`fed6b59`; the driver verified identical Rust production source and separately
+recorded the current Go binary digest. Protected exact-head/main execution is
+still required.
 
 The first live run also exposed a management HTTP gap: qualified create existed
 but item GET/DELETE only parsed the legacy three-segment key. The candidate
@@ -46,6 +52,13 @@ scope authorization/deletion coordination, and retains the legacy route.
 Regression tests reproduced the missing GET and tenant-authorization path
 before the fix; the owning package race suite passes. The fixture preserves
 Go's `event_bus` and native Rust's `event-bus` spellings at their boundaries.
+
+Receipt retention is not a fencing guarantee. Catalog intentionally retains
+only its newest eight recurring lease/status/materialization/membership
+receipts. The fixture verifies persistent user apply and managed-delete
+outcomes across reopen, then submits fresh attempts with the old guard to
+prove all four fences survived. It does not advertise indefinite internal
+operation lookup or expand the public request-token retention promise.
 
 The fixture deliberately uses `epoch.control-ha.owner-recovery/v1`, not a full
 certification schema. It does not close the gRPC batch/OCC, operation-lookup

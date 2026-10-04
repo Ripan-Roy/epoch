@@ -30,6 +30,26 @@ validates the Compose model. Long-running compatibility, fuzz, simulation,
 chaos, soak, and performance suites remain separate so the fast gate stays
 useful.
 
+Concurrent control-owner recovery has separate contract and live gates:
+
+```shell
+make test-control-ha-runner
+EPOCH_REGIONAL_IMAGE=epoch/node:ha-candidate \
+EPOCH_REGIONAL_USE_EXISTING_IMAGE=1 \
+EPOCH_CONTROL_HA_ARTIFACT_DIR=/absolute/empty/evidence-directory \
+make test-control-ha-owner
+python3 tests/integration/control_ha.py verify \
+  --manifest /absolute/empty/evidence-directory/evidence.json
+```
+
+The live fixture uses three and five real Go controllers, a dedicated
+three-voter Docker project, all four profiles, actual lease-owner failure,
+pause/takeover/resume, stale guards, majority loss, and same-volume reopen.
+It requires a clean frozen candidate and checksummed evidence. Its owner-only
+schema does not close the remaining gRPC batch/OCC, operation authorization,
+watch/stale-cursor, Catalog-leader unknown-outcome, or delete/recreate matrix.
+See [Control HA certification](CONTROL_HA_CERTIFICATION.md).
+
 Observability assets have a focused offline contract gate:
 
 ```shell
