@@ -36,8 +36,16 @@ three and five concurrent Go processes, authenticated HTTP writes/replays,
 canonical materialization, an overlapping same-label replacement, actual lease
 owner `SIGKILL`, owner `SIGSTOP`/takeover/resume, four stale-guard commands,
 Catalog majority loss, original-token resolution, and same-volume reopen with
-all four profile digests. Its seven initial fail-closed contract tests pass
+all four profile digests. Its eight fail-closed contract tests pass
 locally and are required in CI. Live execution is still pending.
+
+The first live run also exposed a management HTTP gap: qualified create existed
+but item GET/DELETE only parsed the legacy three-segment key. The candidate
+adds six-segment item parsing, requires all tenant segments, preserves exact
+scope authorization/deletion coordination, and retains the legacy route.
+Regression tests reproduced the missing GET and tenant-authorization path
+before the fix; the owning package race suite passes. The fixture preserves
+Go's `event_bus` and native Rust's `event-bus` spellings at their boundaries.
 
 The fixture deliberately uses `epoch.control-ha.owner-recovery/v1`, not a full
 certification schema. It does not close the gRPC batch/OCC, operation-lookup

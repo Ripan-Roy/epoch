@@ -8,6 +8,9 @@ notes explicitly list additional verified artifacts.
 
 ### Control-plane hardening
 
+- Add fully qualified HTTP resource GET/DELETE paths, preserving tenant
+  authorization, optimistic concurrency, exact keys, and the existing managed
+  delete coordinator. Legacy three-segment item paths remain supported.
 - Production control registries derive a fresh 128-bit process-incarnation
   owner from the stable instance label. A restarted or overlapping process
   cannot adopt its predecessor's unexpired reconciliation lease. Startup fails

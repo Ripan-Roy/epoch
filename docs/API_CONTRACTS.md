@@ -431,6 +431,22 @@ its observed generation as the compatible Catalog cursor.
 Go does not expose or synthesize data-path receipts and never reads Epoch data
 files.
 
+The provisional Go HTTP item API accepts the complete management identity:
+
+```text
+GET    /v1/resources/{organization}/{project}/{environment}/{namespace}/{kind}/{name}
+DELETE /v1/resources/{organization}/{project}/{environment}/{namespace}/{kind}/{name}
+```
+
+All three tenant segments are required. These routes authorize the same exact
+tenant scope as gRPC and preserve the full key when delegating managed deletion.
+DELETE supports `Idempotency-Key` and the presence-aware `If-Match` generation
+precondition; exact retries retain the original outcome. The existing
+`/v1/resources/{namespace}/{kind}/{name}` local/legacy route remains unchanged
+and does not select a fully qualified managed resource implicitly. Management
+HTTP uses kind `event_bus`; the corresponding native Rust route uses
+`event-bus`. No alias or durable identity is rewritten.
+
 The browser-facing alpha inventory is:
 
 ```text

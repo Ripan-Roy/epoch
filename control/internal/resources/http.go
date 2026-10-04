@@ -1075,8 +1075,8 @@ func scopeFromKey(key ResourceKey) controlauth.Scope {
 func keyFromPath(path string) (ResourceKey, error) {
 	remainder := strings.TrimPrefix(path, "/v1/resources/")
 	parts := strings.Split(remainder, "/")
-	if len(parts) != 3 {
-		return ResourceKey{}, invalid("resource path must be /v1/resources/{namespace}/{kind}/{name}")
+	if len(parts) != 3 && len(parts) != 6 {
+		return ResourceKey{}, invalid("resource path must contain namespace/kind/name or organization/project/environment/namespace/kind/name")
 	}
 	for index := range parts {
 		decoded, err := url.PathUnescape(parts[index])
@@ -1084,6 +1084,16 @@ func keyFromPath(path string) (ResourceKey, error) {
 			return ResourceKey{}, invalid("resource path contains invalid escaping")
 		}
 		parts[index] = decoded
+	}
+	if len(parts) == 6 {
+		// A qualified route must never fall back to the legacy unscoped key.
+		if strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(parts[2]) == "" {
+			return ResourceKey{}, invalid("fully qualified resource path requires every tenant segment")
+		}
+		return normalizeKey(ResourceKey{
+			Organization: parts[0], Project: parts[1], Environment: parts[2],
+			Namespace: parts[3], Kind: Kind(parts[4]), Name: parts[5],
+		})
 	}
 	return normalizeKey(ResourceKey{Namespace: parts[0], Kind: Kind(parts[1]), Name: parts[2]})
 }
