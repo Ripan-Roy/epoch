@@ -41,6 +41,16 @@ def evidence_fixture() -> dict:
 
 
 class OwnerEvidenceContractTest(unittest.TestCase):
+    def test_event_bus_uses_the_existing_control_kind_without_changing_native_identity(
+        self,
+    ) -> None:
+        resource = control_ha.regional.Resource("event-bus", "events")
+        self.assertEqual(
+            "/v1/resources/acme/shop/dev/core/event_bus/events",
+            control_ha.resource_path(resource),
+        )
+        self.assertEqual("event-bus", control_ha.resource_name(resource)["kind"])
+
     def test_complete_owner_matrix_is_accepted_without_claiming_full_certification(
         self,
     ) -> None:

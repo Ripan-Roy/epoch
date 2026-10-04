@@ -154,7 +154,18 @@ def resource_name(resource: Any) -> dict[str, str]:
 
 
 def resource_path(resource: Any) -> str:
-    return f"/v1/resources/acme/shop/dev/core/{resource.kind}/{resource.name}"
+    return f"/v1/resources/acme/shop/dev/core/{control_kind(resource)}/{resource.name}"
+
+
+def control_kind(resource: Any) -> str:
+    # Go's existing management spelling differs from the native Rust route.
+    return "event_bus" if resource.kind == "event-bus" else resource.kind
+
+
+def managed_request(resource: Any) -> dict[str, Any]:
+    body = regional.managed_resource_request(resource)
+    body["resource"]["kind"] = control_kind(resource)
+    return body
 
 
 class Controller:
@@ -416,7 +427,7 @@ class OwnerFleet:
             )
         assert all(response.status == 201 for response in responses), responses
         for resource in self.resources:
-            body = regional.managed_resource_request(resource)
+            body = managed_request(resource)
             if resource.kind == "cache":
                 body["resource"]["spec"]["configuration"] = {
                     "shard_count": 1,
@@ -448,7 +459,11 @@ class OwnerFleet:
         self.select_control()
         for resource in self.resources + self.http_resources:
             regional.wait_for_managed_placement(
-                self.cluster, resource, "ready", 3, expected_shards=1
+                self.cluster,
+                regional.Resource(control_kind(resource), resource.name),
+                "ready",
+                3,
+                expected_shards=1,
             )
             native = [
                 self.cluster.request(node, "GET", resource.catalog_path).document
