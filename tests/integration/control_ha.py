@@ -703,7 +703,19 @@ class OwnerFleet:
         self.mark("four_profile_digests_survive_reopen")
         for controller in self.controllers:
             controller.start()
-        assert self.all_desired() == desired
+
+        def recovered() -> dict[str, Any]:
+            observed = self.all_desired()
+            assert observed == desired, (desired, observed)
+            return observed
+
+        # Process health/local digest recovery does not establish a leader's
+        # ReadIndex barrier. Require the original strong state on every API.
+        regional.wait_until(
+            "all controllers to recover exact strong managed state",
+            recovered,
+            timeout_seconds=regional.RECOVERY_TIMEOUT_SECONDS,
+        )
         for resource in self.http_resources:
             body = regional.managed_resource_request(resource)
             for controller in self.controllers:

@@ -41,6 +41,42 @@ def evidence_fixture() -> dict:
 
 
 class OwnerEvidenceContractTest(unittest.TestCase):
+    def test_reopen_waits_for_strong_managed_reads_after_process_health(self) -> None:
+        fleet = control_ha.OwnerFleet.__new__(control_ha.OwnerFleet)
+        fleet.cluster = mock.Mock()
+        fleet.controllers = []
+        fleet.resources = [
+            control_ha.regional.Resource(profile, profile)
+            for profile in control_ha.PROFILES
+        ]
+        fleet.http_resources = []
+        fleet.result = {"observations": {"stale_guard_rejections": []}}
+        fleet.mark = mock.Mock()
+        fleet.stop_nodes = mock.Mock()
+        expected = {"cache": {"generation": 1}}
+        fleet.all_desired = mock.Mock(
+            side_effect=(expected, AssertionError("Catalog still electing"), expected)
+        )
+
+        def readiness(_description: str, check: object, **_kwargs: object) -> object:
+            try:
+                return check()  # type: ignore[operator]
+            except AssertionError:
+                return check()  # type: ignore[operator]
+
+        with (
+            mock.patch.object(control_ha.regional, "wait_for_nodes"),
+            mock.patch.object(
+                control_ha.regional, "wait_for_profile_recovery", return_value="a" * 64
+            ),
+            mock.patch.object(
+                control_ha.regional, "wait_until", side_effect=readiness
+            ) as wait,
+        ):
+            fleet.reopen()
+            wait.assert_called_once()
+            self.assertEqual(3, fleet.all_desired.call_count)
+
     def test_owner_fixture_discovers_the_catalog_authority_without_enabling_the_probe(
         self,
     ) -> None:
