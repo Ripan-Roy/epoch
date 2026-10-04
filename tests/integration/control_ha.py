@@ -50,6 +50,20 @@ OWNER_CHECKS = (
 CONTROL_ROOT = "/experimental/v1/regional/control"
 
 
+def guard_outcome_is_persistent(command_kind: str) -> bool:
+    # Catalog deliberately retains only its newest eight recurring internal
+    # receipts. User-facing managed deletion is not in that bounded suffix.
+    if command_kind == "delete_managed":
+        return True
+    if command_kind in {
+        "update_managed_status",
+        "reconcile_managed",
+        "plan_managed_membership",
+    }:
+        return False
+    raise ValueError("unknown guard command retention class")
+
+
 def validate_owner_evidence(evidence: dict[str, Any]) -> None:
     if evidence.get("schema") != OWNER_SCHEMA or evidence.get("status") != "passed":
         raise ValueError("wrong owner-recovery evidence schema or status")
@@ -530,7 +544,9 @@ class OwnerFleet:
         self.all_desired()
         self.mark("paused_owner_takeover_and_four_guard_rejections")
 
-    def reject_old_guard(self, old: dict[str, Any]) -> None:
+    def reject_old_guard(
+        self, old: dict[str, Any], *, phase: str = "before-reopen"
+    ) -> None:
         resource = self.resources[1]
         suffix = "/resources/acme/shop/dev/core/stream/" + resource.name
         desired = self.raw("GET", suffix).document
@@ -603,7 +619,7 @@ class OwnerFleet:
         )
         rejected = []
         for index, (method, path, body) in enumerate(requests):
-            token = f"ha-stale-{self.count}-{index}"
+            token = f"ha-stale-{self.count}-{phase}-{index}"
             response = self.raw(
                 method, path, {**body, "request_token": token, "lease": guard}
             )
@@ -628,7 +644,12 @@ class OwnerFleet:
             and not after["status"].get("ha_forbidden")
         ), after
         assert self.raw("GET", "/allocations").document == allocations
-        self.result["observations"]["stale_guard_rejections"] = rejected
+        key = (
+            "stale_guard_rejections"
+            if phase == "before-reopen"
+            else "stale_guard_rejections_after_reopen"
+        )
+        self.result["observations"][key] = rejected
 
     def quorum_loss(self) -> None:
         self.stop_nodes((1, 2))
@@ -724,12 +745,21 @@ class OwnerFleet:
                     response.status == 200 and response.document.get("replayed") is True
                 ), response
         for rejection in self.result["observations"]["stale_guard_rejections"]:
+            if not guard_outcome_is_persistent(rejection["command_kind"]):
+                continue
             response = self.raw("GET", "/operations/" + rejection["token"])
             assert (
                 response.status == 200
                 and response.document.get("state") == "failed"
                 and response.document["mutation"]["code"] == "fenced"
             ), response
+        transitions = self.result.get("lease_transitions", [])
+        if transitions:
+            old = transitions[-1]
+            self.reject_old_guard(
+                {"owner_id": old["old_owner"], "fence": str(old["old_fence"])},
+                phase="after-reopen",
+            )
         self.mark("managed_state_and_outcomes_survive_reopen")
 
     def capture(self) -> None:

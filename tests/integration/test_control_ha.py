@@ -41,6 +41,19 @@ def evidence_fixture() -> dict:
 
 
 class OwnerEvidenceContractTest(unittest.TestCase):
+    def test_guard_recovery_respects_bounded_internal_receipts_but_keeps_user_delete_outcomes(
+        self,
+    ) -> None:
+        for kind in (
+            "update_managed_status",
+            "reconcile_managed",
+            "plan_managed_membership",
+        ):
+            self.assertFalse(control_ha.guard_outcome_is_persistent(kind))
+        self.assertTrue(control_ha.guard_outcome_is_persistent("delete_managed"))
+        with self.assertRaises(ValueError):
+            control_ha.guard_outcome_is_persistent("unknown_command")
+
     def test_reopen_waits_for_strong_managed_reads_after_process_health(self) -> None:
         fleet = control_ha.OwnerFleet.__new__(control_ha.OwnerFleet)
         fleet.cluster = mock.Mock()
