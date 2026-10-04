@@ -254,6 +254,8 @@ func run(ctx context.Context, logger *slog.Logger) (runError error) {
 		registry.Mode(),
 		"instance_id",
 		config.instanceID,
+		"control_owner_id",
+		registry.ControlOwnerID(),
 		"auth_policy_id",
 		policy.ID(),
 		"data_path_owner",

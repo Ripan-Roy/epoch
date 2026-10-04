@@ -6,6 +6,14 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+### Control-plane hardening
+
+- Production control registries derive a fresh 128-bit process-incarnation
+  owner from the stable instance label. A restarted or overlapping process
+  cannot adopt its predecessor's unexpired reconciliation lease. Startup fails
+  closed when incarnation entropy is unavailable, and logs expose the exact
+  non-secret owner separately from the deployment label.
+
 ## [0.2.0-beta.12] - 2026-10-04
 
 ### Added

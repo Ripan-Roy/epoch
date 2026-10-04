@@ -84,6 +84,14 @@ distinct stable instance IDs and the same Rust endpoints; one replicated
 TTL/fence lease permits reconciliation while every replica can serve
 linearizable metadata reads and desired-state writes.
 
+`EPOCH_CONTROL_INSTANCE_ID` is a stable deployment label, not a reusable lease
+identity. Production startup appends a fresh random 128-bit process nonce and
+logs the exact value as `control_owner_id`. A restart never adopts its
+predecessor's unexpired lease, even when a pod name or hostname is reused.
+The replacement waits for expiry and acquires a higher fence; generation and
+request-token replay continue to come from the replicated Catalog. Entropy
+failure aborts startup instead of falling back to the stable label.
+
 Every regional node writes its authorization history to
 `/var/lib/epoch/audit.ndjson` in its independent Compose volume. The Go process
 writes the path above. Use `spec/auth/identity-policy-v2.example.json` after

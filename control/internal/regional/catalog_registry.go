@@ -2,6 +2,7 @@ package regional
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -247,8 +248,19 @@ type CatalogRegistry struct {
 
 var _ resources.Store = (*CatalogRegistry)(nil)
 
-func NewCatalogRegistry(authority *HTTPAuthority, ownerID string) (*CatalogRegistry, error) {
+// NewCatalogRegistry creates a process-incarnation owner from a stable instance
+// label. Reusing a hostname or pod name never reuses an earlier process's lease.
+func NewCatalogRegistry(authority *HTTPAuthority, instanceID string) (*CatalogRegistry, error) {
+	ownerID, err := processControlOwnerID(instanceID, rand.Reader)
+	if err != nil {
+		return nil, err
+	}
 	return newCatalogRegistry(authority, ownerID, time.Now)
+}
+
+// ControlOwnerID reports the exact non-secret incarnation used for fencing.
+func (registry *CatalogRegistry) ControlOwnerID() string {
+	return registry.ownerID
 }
 
 func newCatalogRegistry(

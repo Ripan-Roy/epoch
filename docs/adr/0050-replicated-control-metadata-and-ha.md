@@ -56,9 +56,16 @@ into Go.
    changes still advance the checkpoint. Stale and future cursors fail
    explicitly. Cursor zero is valid only while the retention floor is one; it
    becomes stale after prefix compaction and therefore cannot skip history.
-7. Run three `epoch-control` StatefulSet replicas with stable pod-derived owner
-   IDs, required host anti-affinity, ordered startup, and a two-instance
+7. Run three `epoch-control` StatefulSet replicas with stable pod-derived instance
+   labels and fresh process-incarnation owner IDs, required host anti-affinity, ordered startup, and a two-instance
    disruption budget. The replicas share no writable control database.
+   Production construction appends a cryptographically random 128-bit nonce to
+   the instance label. The nonce is generated once per registry, never persisted
+   or reused on restart, and entropy failure aborts startup. An ASCII label longer
+   than 95 bytes is truncated only in the derived owner so the complete owner
+   remains within the existing 128-byte protocol bound; the original label is
+   logged separately. A replacement with the same pod name or hostname must wait
+   for the predecessor's foreign lease to expire and acquire a newer fence.
 8. Migrate the previous bbolt registry exactly once. Ordered pod zero reads a
    consistent live-resource and generation/tombstone image, imports it into an
    empty Catalog atomically, then later replicas start. The old database remains
