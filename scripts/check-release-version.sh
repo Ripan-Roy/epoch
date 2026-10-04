@@ -46,6 +46,35 @@ expect_line sdk/go/epoch/transport.go \
 expect_line sdk/go/epoch/transport_test.go \
   "		if request.Header.Get(\"User-Agent\") != \"epoch-go/$release_version\" {"
 
+# The public docs and deployment examples are part of the release contract,
+# not independent package metadata that may drift to a stale or future tag.
+expect_line console/src/docs/content.ts \
+  "export const releaseVersion = \"$release_version\";"
+expect_line console/src/docs/content.ts \
+  "export EPOCH_RELEASE_TAG=v$release_version"
+expect_line console/src/docs/content.ts \
+  "  nodeImage: ghcr.io/ripan-roy/epoch-node:v$release_version"
+expect_line console/src/docs/pages.tsx \
+  "            title=\"v$release_version release notes\""
+# shellcheck disable=SC2016 # Match the literal TypeScript template variable.
+expect_line console/src/docs/pages.tsx \
+  '            href={`${repositoryDocsUrl}/releases/v'"$release_version"'.md`}'
+expect_line deploy/kubernetes/operator/deployment.yaml \
+  "          image: ghcr.io/ripan-roy/epoch-operator:v$release_version"
+expect_line deploy/kubernetes/operator/sample-cluster.yaml \
+  "  nodeImage: ghcr.io/ripan-roy/epoch-node:v$release_version"
+expect_line deploy/kubernetes/operator/sample-cluster.yaml \
+  "  controlImage: ghcr.io/ripan-roy/epoch-control:v$release_version"
+expect_line docs/RELEASE_ARTIFACTS.md "export EPOCH_RELEASE_TAG=v$release_version"
+expect_line docs/KUBERNETES_OPERATOR.md \
+  "  nodeImage: registry.example/epoch-node:v$release_version"
+release_notes="docs/releases/v$release_version.md"
+if [ ! -f "$release_notes" ]; then
+  printf 'version-controlled release notes are missing: %s\n' "$release_notes" >&2
+  exit 1
+fi
+expect_line "$release_notes" "# Epoch v$release_version"
+
 bad_lock_versions=$(
   awk -v expected="version = \"$release_version\"" '
     $0 == "[[package]]" {

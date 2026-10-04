@@ -44,8 +44,11 @@ checks.
    source archives, and public documentation link.
 
 `scripts/check-release-version.sh` is the executable source of truth for the
-cross-language metadata invariant. Passing an expected tag also verifies that
-the tag exactly matches `VERSION`.
+cross-language metadata invariant. It also checks the public docs, Kubernetes
+examples, and version-controlled notes, so an otherwise synchronized release
+cannot advertise a stale image. Passing an expected tag verifies that the tag
+exactly matches `VERSION`. `make test-release-workflow` includes mutation tests
+for this public-reference contract.
 
 Release notes must name:
 

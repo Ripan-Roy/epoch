@@ -45,12 +45,19 @@ topology repair/rebalance, strict OIDC workload identity, and durable
 authorization audit. The current `v0.2.0-beta.11` release boundary expands the
 bounded Redis, Kafka, and RabbitMQ gateways across native replicated state,
 released-client conformance, restart evidence, scanner, and public docs.
+PR #134 then merged the beta.12 control-HA milestone at `36dab1f`; all 11
+main CI jobs and main-only Pages passed. The synchronized beta.12 release
+candidate adds the corresponding versioned notes and repeats release gates
+before tagging and OCI publication.
 
 The published release train extends the authenticated regional
 multi-tablet M1/M2 boundary. Protected `main` evidence covers the
-consensus-backed catalog, while the current feature candidate adds replicated
-multi-instance hosted control, atomic managed lifecycle commands, and a
-resumable operation/change surface. Published evidence also covers topology
+consensus-backed catalog and merged replicated multi-instance hosted control,
+atomic managed lifecycle commands, and a resumable operation/change surface.
+The latter is verified by [CI 37143501331](https://github.com/Ripan-Roy/epoch/actions/runs/37143501331)
+and [Pages 37143501271](https://github.com/Ripan-Roy/epoch/actions/runs/37143501271).
+Dedicated concurrent multi-control chaos and public operation-retention
+guarantees remain open. Published evidence also covers topology
 admission, quorum-confirmed leader reads,
 all four regional profile SDKs, multi-shard Stream routing, atomic batches,
 retention, coordinated and session-fenced consumption, profile-native

@@ -2573,9 +2573,9 @@ export function ReferenceBody() {
           />
           <ReferenceCard
             eyebrow="Release"
-            title="v0.2.0-beta.11 release notes"
-            description="Redis transactions, Pub/Sub and Streams, Kafka idempotence, durable AMQP topology, recovery evidence, and explicit beta limits."
-            href={`${repositoryDocsUrl}/releases/v0.2.0-beta.11.md`}
+            title="v0.2.0-beta.12 release notes"
+            description="Replicated management metadata, lease-fenced control replicas, atomic managed lifecycle, durable operations, upgrade guidance, and explicit beta limits."
+            href={`${repositoryDocsUrl}/releases/v0.2.0-beta.12.md`}
           />
         </div>
       </Topic>
