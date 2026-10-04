@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import copy
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import control_ha_api
 from test_control_ha import evidence_fixture
@@ -25,6 +29,43 @@ def api_evidence_fixture() -> dict:
 
 
 class APIEvidenceContractTest(unittest.TestCase):
+    def test_failed_generated_client_retains_partial_proof_and_redacted_error(
+        self,
+    ) -> None:
+        fleet = control_ha_api.APIFleet.__new__(control_ha_api.APIFleet)
+        fleet.count = 3
+        fleet.helper = Path("/explicit/owned/controlgrpc")
+        controller = mock.Mock()
+        controller.process.poll.return_value = None
+        controller.paused = False
+        controller.grpc_port = 12345
+        fleet.controllers = [controller]
+        with tempfile.TemporaryDirectory() as temporary:
+            fleet.artifact_dir = Path(temporary)
+            partial = {
+                "schema": control_ha_api.GRPC_SCHEMA,
+                "checks": {"completed_case": True},
+            }
+            with (
+                mock.patch.object(
+                    control_ha_api.subprocess,
+                    "run",
+                    return_value=mock.Mock(
+                        returncode=1,
+                        stderr="failed with epoch-dev-reader-v1",
+                        stdout=json.dumps(partial),
+                    ),
+                ),
+                self.assertRaises(AssertionError),
+            ):
+                fleet.generated_clients("prepare")
+            failure = json.loads(
+                (fleet.artifact_dir / "api-prepare-failed.json").read_text()
+            )
+            self.assertEqual(partial, failure["partial_proof"])
+            self.assertEqual("failed", failure["status"])
+            self.assertNotIn("epoch-dev-reader-v1", failure["error"])
+
     def test_complete_api_subset_does_not_claim_catalog_leader_certification(
         self,
     ) -> None:

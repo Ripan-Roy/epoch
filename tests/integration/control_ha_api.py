@@ -172,6 +172,21 @@ class APIFleet(owner.OwnerFleet):
             message = output.stderr
             for token in (owner.regional.ADMIN_TOKEN, "epoch-dev-reader-v1"):
                 message = message.replace(token, "[redacted]")
+            try:
+                partial = json.loads(output.stdout)
+            except json.JSONDecodeError:
+                partial = None
+            owner.soak.atomic_write(
+                self.artifact_dir / f"api-{phase}-failed.json",
+                owner.soak.canonical_bytes(
+                    {
+                        "status": "failed",
+                        "phase": phase,
+                        "error": message,
+                        "partial_proof": partial,
+                    }
+                ),
+            )
             raise AssertionError(f"generated-client phase {phase} failed: {message}")
         proof = json.loads(output.stdout)
         checks = proof.get("checks", {})

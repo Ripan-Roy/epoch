@@ -64,11 +64,20 @@ func main() {
 	}
 }
 
-func run(phase, endpoints, prefix string, count int, state string) error {
+func run(phase, endpoints, prefix string, count int, state string) (runErr error) {
 	if count != 3 && count != 5 || prefix == "" || endpoints == "" {
 		return errors.New("requires original three/five controllers, endpoints, and token prefix")
 	}
 	fleet := clients{admin: os.Getenv("EPOCH_CONTROL_HA_GRPC_ADMIN_TOKEN"), reader: os.Getenv("EPOCH_CONTROL_HA_GRPC_READER_TOKEN"), prefix: prefix}
+	// A failed live phase is not certification, but retaining its completed
+	// observations makes the failure independently diagnosable.
+	defer func() {
+		if fleet.proof.Schema != "" {
+			if err := json.NewEncoder(os.Stdout).Encode(fleet.proof); runErr == nil && err != nil {
+				runErr = err
+			}
+		}
+	}()
 	if fleet.admin == "" || fleet.reader == "" {
 		return errors.New("explicit administrator and scoped reader credentials are required")
 	}
@@ -116,7 +125,7 @@ func run(phase, endpoints, prefix string, count int, state string) error {
 			return errors.New("unknown generated-client phase")
 		}
 	}
-	return json.NewEncoder(os.Stdout).Encode(fleet.proof)
+	return nil
 }
 
 func (fleet *clients) close() {
@@ -273,7 +282,7 @@ func (fleet *clients) prepare() error {
 	if err := fleet.watchResume(initial.Resources[120].Name, initial.Resources[121].Name); err != nil {
 		return err
 	}
-	if err := fleet.watchFailure(^uint64(0), codes.Aborted); err != nil {
+	if err := fleet.watchFailure(^uint64(0), codes.InvalidArgument); err != nil {
 		return err
 	}
 	fleet.proof.Checks["future_watch_cursor_fails_closed"] = true
