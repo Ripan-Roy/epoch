@@ -93,7 +93,7 @@ audit: ## Reject Rust and npm dependency advisories except the documented Raft e
 
 test: test-unit ## Run the default local test suite.
 
-test-unit: test-retry-command test-compose-crash-restart test-release-manifest test-release-workflow test-soak-runner test-kubernetes-runner test-regional-runtime-runner test-protocol-regional-runner ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
+test-unit: test-retry-command test-compose-crash-restart test-release-manifest test-release-workflow test-soak-runner test-kubernetes-runner test-regional-runtime-runner test-protocol-regional-runner test-control-ha-runner ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
 	@if [ -f Cargo.toml ]; then cargo test --locked --workspace --all-targets --all-features; fi
 	@if find control operator sdk/go -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then go test -race ./...; fi
 	@if [ -d sdk/python ]; then PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests -v; fi
@@ -128,6 +128,13 @@ test-kubernetes-runner: ## Prove the disposable Kubernetes campaign's fail-close
 
 test-regional-runtime-runner: ## Prove regional recovery deadlines and diagnostics.
 	@PYTHONPATH=tests/integration python3 -m unittest tests/integration/test_regional_runtime.py -v
+
+.PHONY: test-control-ha-runner test-control-ha-owner
+test-control-ha-runner: ## Reject incomplete concurrent-owner fault evidence and unsafe child cleanup.
+	@PYTHONPATH=tests/integration python3 -m unittest tests/integration/test_control_ha.py -v
+
+test-control-ha-owner: ## Prove the owner-recovery subset with three/five Go controllers and four profiles.
+	@python3 tests/integration/control_ha.py run --output "$${EPOCH_CONTROL_HA_ARTIFACT_DIR:?set an empty owner-recovery evidence directory}"
 
 .PHONY: test-protocol-regional test-protocol-regional-runner
 test-protocol-regional-runner: ## Reject incomplete real-client recovery evidence.

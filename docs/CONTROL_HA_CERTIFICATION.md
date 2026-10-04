@@ -29,6 +29,48 @@ live lease. The complete Go race suite, vet, and build pass locally.
 These unit results do not prove live multi-controller failover. The acceptance
 matrix below is still required before the feature PR is ready.
 
+### Owner-recovery fixture
+
+`tests/integration/control_ha.py` adds a dedicated first part of that matrix:
+three and five concurrent Go processes, authenticated HTTP writes/replays,
+canonical materialization, an overlapping same-label replacement, actual lease
+owner `SIGKILL`, owner `SIGSTOP`/takeover/resume, four stale-guard commands,
+Catalog majority loss, original-token resolution, and same-volume reopen with
+all four profile digests. Its seven initial fail-closed contract tests pass
+locally and are required in CI. Live execution is still pending.
+
+The fixture deliberately uses `epoch.control-ha.owner-recovery/v1`, not a full
+certification schema. It does not close the gRPC batch/OCC, operation-lookup
+authorization/precondition, watch/resume/stale-cursor, Catalog-leader unknown
+outcome, or delete/recreate rows. These must be added and verified before the
+dedicated CTRL-001/CTRL-002 chaos gate can close.
+
+Run from a clean candidate tree with a revision/version-labelled node image:
+
+```sh
+EPOCH_REGIONAL_IMAGE=epoch/node:ha-candidate \
+EPOCH_REGIONAL_USE_EXISTING_IMAGE=1 \
+EPOCH_CONTROL_HA_ARTIFACT_DIR=/absolute/empty/evidence-directory \
+make test-control-ha-owner
+python3 tests/integration/control_ha.py verify \
+  --manifest /absolute/empty/evidence-directory/evidence.json
+```
+
+The driver checks that the image revision has identical Rust production source,
+then records the separate current source revision and built Go binary digest.
+It rejects dirty/drifting source, captures credential-redacted logs, verifies
+artifact receipts, and always resumes a paused owned child before shutdown.
+
+### Recovery regression evidence
+
+The clean `fed6b59` candidate's rebuilt arm64 node image passed the existing
+accelerated regional campaign in 59,354 ms. Its independently verified signed
+bundle covered all eight regional invariants, all four profiles, control loss,
+five profile-leader losses, and all-voter same-volume reopen. This local result
+addresses the release-commit Stream catch-up failure; it is not protected-main
+proof and is not a concurrent-controller certification result. Beta.12 remains
+untagged until the fixed exact-main CI, Pages, and release gates pass.
+
 ## Required live matrix
 
 | Case | Fault or workload | Required invariant |

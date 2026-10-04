@@ -105,6 +105,8 @@ jobs:
         run: make test-observability-assets
       - name: Verify Compose crash and restart synchronization
         run: make test-compose-crash-restart
+      - name: Verify concurrent controller fault fixture contracts
+        run: make test-control-ha-runner
       - name: Verify synchronized release metadata
         run: ./scripts/check-release-version.sh
       - name: Check Go formatting
