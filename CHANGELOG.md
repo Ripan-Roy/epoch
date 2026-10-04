@@ -14,6 +14,19 @@ notes explicitly list additional verified artifacts.
   closed when incarnation entropy is unavailable, and logs expose the exact
   non-secret owner separately from the deployment label.
 
+### Consensus recovery hardening
+
+- Report bounded HTTP send exhaustion and local peer-queue drops to the Raft
+  actor, allowing an idle lagging voter to retry a lost latest snapshot without
+  another application write or checkpoint. Snapshot callbacks bind exact
+  process incarnation, scope, leader term, index, and attempt identity;
+  transport success is never a quorum acknowledgement.
+- Refresh a compacted baseline for a learner that is behind it even after a
+  transport callback clears pending-snapshot state. The refreshed image
+  includes committed learner membership, preserving safe replacement and
+  same-volume reopen. Weak worker feedback channels avoid an actor ownership
+  cycle during shutdown.
+
 ## [0.2.0-beta.12] - 2026-10-04
 
 ### Added

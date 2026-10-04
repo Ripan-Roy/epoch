@@ -19,7 +19,10 @@ use std::{
     fmt::{self, Display, Formatter},
     fs,
     path::{Path, PathBuf},
-    sync::RwLockWriteGuard,
+    sync::{
+        RwLockWriteGuard,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use prost::Message as ProstMessage;
@@ -58,6 +61,7 @@ const MAX_UNCOMMITTED_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_COMMITTED_BYTES_PER_READY: u64 = 8 * 1024 * 1024;
 const MAX_PENDING_READ_BARRIERS: usize = 1_024;
 const READ_BARRIER_CONTEXT_BYTES: usize = 8;
+static NEXT_ADAPTER_INSTANCE: AtomicU64 = AtomicU64::new(1);
 
 /// Maximum accepted size of a complete canonical Epoch peer-message frame.
 pub const MAX_PEER_MESSAGE_WIRE_BYTES: usize = 8 * 1024 * 1024;
@@ -431,6 +435,27 @@ pub struct PeerMessage {
     encoded: Vec<u8>,
 }
 
+/// Opaque, process-local correlation for one outbound transport attempt.
+/// It is not a Raft acknowledgement, a durable receipt, or part of the wire
+/// format. Only the adapter that prepared the frame may consume its result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerDelivery {
+    adapter_instance: u64,
+    group_id: GroupId,
+    group_epoch: GroupEpoch,
+    from: NodeId,
+    to: NodeId,
+    term: Term,
+    sequence: u64,
+    snapshot_index: Option<LogIndex>,
+}
+
+impl PeerDelivery {
+    pub const fn snapshot_index(self) -> Option<LogIndex> {
+        self.snapshot_index
+    }
+}
+
 impl PeerMessage {
     pub const fn group_id(&self) -> GroupId {
         self.group_id
@@ -456,6 +481,17 @@ impl PeerMessage {
     /// message.
     pub fn to_wire(&self) -> ConsensusResult<Vec<u8>> {
         validate_embedded_message(self)?;
+        self.encode_wire()
+    }
+
+    /// Returns the checkpoint index only for a validated snapshot frame.
+    pub fn snapshot_index(&self) -> ConsensusResult<Option<LogIndex>> {
+        let message = validate_embedded_message(self)?;
+        Ok((message.get_msg_type() == MessageType::MsgSnapshot)
+            .then(|| LogIndex::new(message.get_snapshot().get_metadata().index)))
+    }
+
+    fn encode_wire(&self) -> ConsensusResult<Vec<u8>> {
         let encoded_len = u32::try_from(self.encoded.len()).map_err(|_| {
             ConsensusError::InvalidMessage("peer-message payload exceeds the v1 frame limit".into())
         })?;
@@ -983,6 +1019,7 @@ struct CheckpointImage {
 /// A bounded odd-voter, in-memory adapter used only to establish the Epoch
 /// consensus boundary and exercise failure histories.
 pub struct InMemoryRaftAdapter {
+    adapter_instance: u64,
     node_id: NodeId,
     group_id: GroupId,
     group_epoch: GroupEpoch,
@@ -995,6 +1032,8 @@ pub struct InMemoryRaftAdapter {
     applied_command_count: u64,
     proposals: BTreeMap<ProposalId, TrackedProposal>,
     pending_read_barriers: BTreeMap<ReadBarrierId, PendingReadBarrier>,
+    delivery_sequence: u64,
+    pending_snapshot_deliveries: BTreeMap<NodeId, PeerDelivery>,
     stable_generation: u64,
     disk_store: Option<DiskStableStore>,
     poisoned: Option<String>,
@@ -1122,7 +1161,15 @@ impl InMemoryRaftAdapter {
         let logger = Logger::root(slog::Discard, o!());
         let raw_node = RawNode::new(&config, stable.storage, &logger)
             .map_err(|error| ConsensusError::Library(error.to_string()))?;
+        let adapter_instance = NEXT_ADAPTER_INSTANCE
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| {
+                ConsensusError::InvalidState("adapter instance sequence overflow".into())
+            })?;
         Ok(Self {
+            adapter_instance,
             node_id: stable.node_id,
             group_id: stable.group_id,
             group_epoch: stable.group_epoch,
@@ -1135,6 +1182,8 @@ impl InMemoryRaftAdapter {
             applied_command_count: validated.applied_command_count,
             proposals: validated.proposals,
             pending_read_barriers: BTreeMap::new(),
+            delivery_sequence: 0,
+            pending_snapshot_deliveries: BTreeMap::new(),
             stable_generation: stable.stable_generation,
             disk_store,
             poisoned: None,
@@ -1194,6 +1243,100 @@ impl InMemoryRaftAdapter {
         let state = self.current_conf_state()?;
         membership::validate_conf_state(&state, &self.voters)?;
         membership_from_conf_state(&state, &self.voters)
+    }
+
+    /// Encodes a frame and registers a bounded, process-local delivery token.
+    /// Snapshot attempts have distinct sequences even when their index and
+    /// term are identical, so a late callback cannot complete a newer retry.
+    pub fn prepare_peer_message(
+        &mut self,
+        message: &PeerMessage,
+    ) -> ConsensusResult<(Vec<u8>, PeerDelivery)> {
+        self.ensure_healthy()?;
+        if message.group_id != self.group_id
+            || message.group_epoch != self.group_epoch
+            || message.from != self.node_id
+        {
+            return Err(ConsensusError::InvalidMessage(
+                "outbound frame does not belong to this adapter".into(),
+            ));
+        }
+        validate_transport_membership(&self.voters, message.from, message.to)?;
+        let embedded = validate_embedded_message(message)?;
+        let wire = message.encode_wire()?;
+        self.delivery_sequence = self.delivery_sequence.checked_add(1).ok_or_else(|| {
+            ConsensusError::InvalidState("transport delivery sequence overflow".into())
+        })?;
+        let delivery = PeerDelivery {
+            adapter_instance: self.adapter_instance,
+            group_id: message.group_id,
+            group_epoch: message.group_epoch,
+            from: message.from,
+            to: message.to,
+            term: message.term,
+            sequence: self.delivery_sequence,
+            snapshot_index: (embedded.get_msg_type() == MessageType::MsgSnapshot)
+                .then(|| LogIndex::new(embedded.get_snapshot().get_metadata().index)),
+        };
+        if let Some(index) = delivery.snapshot_index
+            && self.raw_node.raft.state == StateRole::Leader
+            && self.raw_node.raft.term == delivery.term.get()
+            && self
+                .raw_node
+                .raft
+                .prs()
+                .get(delivery.to.get())
+                .is_some_and(|progress| progress.pending_snapshot == index.get())
+        {
+            self.pending_snapshot_deliveries
+                .insert(delivery.to, delivery);
+        }
+        Ok((wire, delivery))
+    }
+
+    /// Reports a transport outcome without acknowledging a replicated entry.
+    /// Only a current leader's exact pending snapshot attempt can be finished
+    /// or failed. Other failures merely put replication back into probe mode.
+    /// The next normal heartbeat drives retry; no new commit is required.
+    pub fn report_peer_delivery(
+        &mut self,
+        delivery: PeerDelivery,
+        delivered: bool,
+    ) -> ConsensusResult<bool> {
+        self.ensure_healthy()?;
+        if delivery.adapter_instance != self.adapter_instance
+            || delivery.group_id != self.group_id
+            || delivery.group_epoch != self.group_epoch
+            || delivery.from != self.node_id
+            || self.raw_node.raft.state != StateRole::Leader
+            || self.raw_node.raft.term != delivery.term.get()
+        {
+            return Ok(false);
+        }
+        let Some(progress) = self.raw_node.raft.prs().get(delivery.to.get()) else {
+            return Ok(false);
+        };
+        if let Some(index) = delivery.snapshot_index {
+            if progress.pending_snapshot != index.get()
+                || self.pending_snapshot_deliveries.get(&delivery.to) != Some(&delivery)
+            {
+                return Ok(false);
+            }
+            self.pending_snapshot_deliveries.remove(&delivery.to);
+            self.raw_node.report_snapshot(
+                delivery.to.get(),
+                if delivered {
+                    SnapshotStatus::Finish
+                } else {
+                    SnapshotStatus::Failure
+                },
+            );
+        } else if !delivered {
+            self.raw_node.report_unreachable(delivery.to.get());
+        } else {
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     /// Proposes a non-voting member only after the caller has provisioned its
@@ -2729,6 +2872,21 @@ impl PersistentRaftAdapter {
 
     pub const fn recovery(&self) -> PersistentRecovery {
         self.recovery
+    }
+
+    pub fn prepare_peer_message(
+        &mut self,
+        message: &PeerMessage,
+    ) -> ConsensusResult<(Vec<u8>, PeerDelivery)> {
+        self.inner.prepare_peer_message(message)
+    }
+
+    pub fn report_peer_delivery(
+        &mut self,
+        delivery: PeerDelivery,
+        delivered: bool,
+    ) -> ConsensusResult<bool> {
+        self.inner.report_peer_delivery(delivery, delivered)
     }
 
     pub const fn state_digest(&self) -> StateDigest {

@@ -1,6 +1,6 @@
 # Consensus Checkpoints and Snapshot Catch-up
 
-Epoch's fixed-three-voter replicated core can persist a canonical native-profile
+Epoch's three- and five-voter replicated core can persist a canonical native-profile
 checkpoint, compact the local Raft prefix, physically reclaim obsolete EPRS
 generations, send that checkpoint to a lagging voter, and reopen from the
 checkpoint plus a committed log tail. This is an internal alpha voter-recovery
@@ -108,6 +108,25 @@ foreign metadata, voter changes, digest disagreement, and noncontiguous tails
 fail closed. Only an incomplete final outer-WAL frame uses EPRS's existing
 crash-tail repair rule.
 
+## Lost snapshot and learner recovery
+
+An exhausted HTTP send, a full peer queue, or a closed peer worker reports a
+bounded delivery failure to the owning consensus actor. A pending snapshot can
+then be retried by normal Raft heartbeat/response processing even when the
+application is idle. Creating another command or checkpoint is not required to
+recover a lost latest image.
+
+Snapshot delivery results are bound to the exact adapter incarnation, group,
+epoch, leader term, destination, index, and attempt sequence. Late or duplicate
+results cannot finish a newer attempt. An HTTP success is a transport fact,
+not a replicated-log acknowledgement or a durability receipt.
+
+Learner-first replacement refreshes an older compacted baseline when the
+learner is behind it. The image must include the committed learner membership;
+Raft refuses an older snapshot that omits its destination. Refresh eligibility
+uses durable progress, not only a transient pending-snapshot flag. See
+[ADR-0051](adr/0051-correlated-consensus-transport-recovery.md).
+
 ## Reproduce the evidence
 
 ```shell
@@ -133,7 +152,10 @@ Event Bus across real three-voter reopen.
 - The at-most-6-MiB v2 image is transported in one bounded peer frame. Chunked or
   out-of-band snapshot transfer does not exist.
 - There is no dynamic membership, learner promotion, online tablet movement,
-  automated repair, restore orchestration, backup catalog, PITR, remote tier,
-  encryption, or authenticated peer transport.
+  or production repair certification provided by checkpoint creation alone.
+  The managed runtime separately implements learner-first replacement,
+  automatic repair, authenticated peer transport, and encrypted native backup
+  and restore; see [regional runtime](REGIONAL_RUNTIME.md) and
+  [backup/restore](REGIONAL_BACKUP_RESTORE.md) for those bounded guarantees.
 - A Stream consumer-group offset is an application checkpoint. It is unrelated
   to this consensus checkpoint and cannot restore a voter.

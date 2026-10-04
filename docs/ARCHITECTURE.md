@@ -238,6 +238,12 @@ reconstructs the same checkpoint-plus-tail state without replaying discarded
 commands. An opt-in node runtime
 wraps it in a dedicated actor, bounded ordered HTTP peer queues, and a static
 three-container topology. Its default probe mode carries opaque diagnostics.
+The recovery-hardening branch correlates transport outcomes with exact
+adapter/snapshot attempts. Full queues and exhausted sends report failure to
+Raft on the actor, so an idle follower can retry the latest checkpoint without
+a new write. HTTP success is never a log acknowledgement; stale callbacks are
+inert. Learner baseline refresh is based on durable progress rather than only
+an in-flight flag. See [ADR-0051](adr/0051-correlated-consensus-transport-recovery.md).
 Alternative experimental modes attach one single-partition Stream, Queue, or
 Event Bus tablet or one single-shard Cache tablet. Strict typed commands apply
 on the actor after consensus commit; startup installs a native checkpoint when
@@ -1389,3 +1395,4 @@ owns correctness and the Go hosted plane owns desired-state fleet management.
 - [ADR-0048: OIDC and Durable Authorization Audit](adr/0048-oidc-and-durable-authorization-audit.md)
 - [ADR-0049: Core Protocol Semantics](adr/0049-core-protocol-semantics.md)
 - [ADR-0050: Replicated Regional Control Metadata and Active-Owner Fencing](adr/0050-replicated-control-metadata-and-ha.md)
+- [ADR-0051: Correlated consensus transport recovery](adr/0051-correlated-consensus-transport-recovery.md)

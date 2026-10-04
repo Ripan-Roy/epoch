@@ -6,7 +6,7 @@ use std::{
 };
 
 use epoch_catalog::{FinalizeTabletMembership, TabletDescriptor};
-use epoch_consensus::{ConsensusMembership, ConsensusRole, ConsensusStatus};
+use epoch_consensus::{ConsensusMembership, ConsensusRole, ConsensusStatus, LogIndex};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -159,8 +159,16 @@ async fn reconcile_existing_learner(
         .iter()
         .find(|progress| progress.node_id.get() == added)
         .ok_or_else(|| format!("group {group_id} learner {added} has no leader progress"))?;
-    if progress.pending_snapshot_index.get() != 0 && status.checkpoint_index < status.applied_index
-    {
+    // A compacted baseline can predate AddLearner and therefore omit the
+    // destination from its ConfState. Raft correctly refuses that image.
+    // Refresh based on durable progress, not an in-flight transport flag:
+    // completion/failure callbacks may clear that flag before this pass.
+    if learner_checkpoint_needs_refresh(
+        status.checkpoint_index,
+        status.applied_index,
+        progress.matched_index,
+        progress.pending_snapshot_index,
+    ) {
         consensus
             .checkpoint()
             .await
@@ -303,6 +311,15 @@ fn finalization_token(descriptor: &TabletDescriptor) -> String {
     token
 }
 
+fn learner_checkpoint_needs_refresh(
+    checkpoint: LogIndex,
+    applied: LogIndex,
+    matched: LogIndex,
+    pending_snapshot: LogIndex,
+) -> bool {
+    checkpoint < applied && (pending_snapshot != LogIndex::ZERO || matched < checkpoint)
+}
+
 fn node_ids(nodes: &[epoch_consensus::NodeId]) -> Vec<u64> {
     nodes.iter().map(|node_id| node_id.get()).collect()
 }
@@ -331,6 +348,31 @@ mod tests {
             voter_node_ids: vec![1, 2, 3],
             bootstrap_voter_node_ids: vec![1, 2, 3],
             target_voter_node_ids: vec![1, 2, 4],
+        }
+    }
+
+    #[test]
+    fn learner_checkpoint_refresh_does_not_depend_on_a_pending_transport_attempt() {
+        for (checkpoint, applied, matched, pending, expected) in [
+            (2, 3, 0, 0, true),
+            (2, 3, 1, 0, true),
+            (2, 3, 2, 2, true),
+            (2, 3, 2, 0, false),
+            (2, 3, 3, 0, false),
+            (3, 3, 0, 3, false),
+            (3, 3, 0, 0, false),
+            (0, 3, 0, 0, false),
+        ] {
+            assert_eq!(
+                learner_checkpoint_needs_refresh(
+                    LogIndex::new(checkpoint),
+                    LogIndex::new(applied),
+                    LogIndex::new(matched),
+                    LogIndex::new(pending)
+                ),
+                expected,
+                "checkpoint={checkpoint}, applied={applied}, matched={matched}, pending={pending}"
+            );
         }
     }
 

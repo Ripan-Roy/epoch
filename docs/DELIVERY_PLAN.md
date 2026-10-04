@@ -50,6 +50,16 @@ main CI jobs and main-only Pages passed. The synchronized beta.12 release
 candidate adds the corresponding versioned notes and repeats release gates
 before tagging and OCI publication.
 
+PR #147 merged that synchronized candidate at `d81a0ff`. Exact-main CI
+`37189330373` passed ten of eleven jobs and Pages `37189330378` deployed, but
+the rebuilt regional campaign exposed a restarted Stream voter stuck behind
+its latest compacted snapshot. beta.12 is not tagged or published. The
+recovery-hardening branch has observed a reproducing regression red and then
+green, adds correlated bounded transport feedback and learner-baseline refresh,
+and requires rebuilt regional and protected exact-main evidence before release.
+Concurrent control-process owners also receive fresh incarnation nonces;
+the full concurrent-control certification matrix remains open.
+
 The published release train extends the authenticated regional
 multi-tablet M1/M2 boundary. Protected `main` evidence covers the
 consensus-backed catalog and merged replicated multi-instance hosted control,

@@ -96,6 +96,27 @@ voters. `make test-compose-crash-restart` models delayed exits and rejects
 missing containers, invalid state, exhausted polling, and Docker failures. It
 runs in both the default unit gate and CI without requiring a Docker daemon.
 
+Latest-snapshot transport recovery has a focused real-HTTP regression:
+
+```shell
+cargo test --locked -p epoch-node --lib \
+  lost_latest_snapshot_is_retried_without_another_commit_or_checkpoint
+cargo test --locked -p epoch-node --lib \
+  locally_dropped_snapshot_exits_pending_state_for_full_and_closed_queues
+cargo test --locked -p epoch-node --lib \
+  catalog_planned_voter_replacement_catches_up_finalizes_and_reopens
+```
+
+The first deliberately loses the latest compacted image, restores connectivity,
+and requires profile convergence without another write/checkpoint across three
+and five real actors (including a one-frame outbound queue). Adapter tests
+reject old-term, foreign, duplicate, superseded, and old-incarnation callbacks,
+and verify that transport success cannot advance matched/commit/applied indexes.
+Worker tests cover weak command-channel ownership and exact delivery feedback;
+the membership campaign compacts before adding a learner, verifies safe
+replacement, and reopens the same volumes. These complement, rather than
+replace, the rebuilt regional container and exact-main CI gates. See ADR-0051.
+
 ### 1. Unit and property tests
 
 Unit tests live beside the code they cover. They must be deterministic and must

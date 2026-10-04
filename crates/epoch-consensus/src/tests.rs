@@ -1009,6 +1009,180 @@ fn snapshot_transport_message_without_a_canonical_checkpoint_is_rejected() {
     ));
 }
 
+fn pending_snapshot_delivery_fixture(voter_count: u64) -> (TestCluster, PeerMessage) {
+    let voters = (1..=voter_count).map(node).collect::<Vec<_>>();
+    let mut cluster = TestCluster::with_voters(0x4445_4c49, &voters);
+    cluster.campaign(node(1));
+    cluster.propose(node(1), 91, b"delivery-correlation");
+    let adapter = cluster.nodes.get_mut(&node(1)).unwrap();
+    let checkpoint = adapter.checkpoint().unwrap();
+    let snapshot = adapter
+        .raw_node
+        .store()
+        .snapshot(checkpoint.index.get(), 3)
+        .unwrap();
+    let message = RaftWireMessage {
+        from: 1,
+        to: 3,
+        term: adapter.status().term.get(),
+        msg_type: MessageType::MsgSnapshot as i32,
+        snapshot: Some(snapshot),
+        ..RaftWireMessage::default()
+    };
+    adapter
+        .raw_node
+        .raft
+        .mut_prs()
+        .get_mut(3)
+        .unwrap()
+        .become_snapshot(checkpoint.index.get());
+    let wrapped = adapter
+        .wrap_messages(vec![message], None)
+        .unwrap()
+        .remove(0);
+    (cluster, wrapped)
+}
+
+#[test]
+fn snapshot_delivery_is_fenced_by_scope_term_instance_index_and_exact_attempt() {
+    for voter_count in [3, 5] {
+        let (mut cluster, message) = pending_snapshot_delivery_fixture(voter_count);
+        let adapter = cluster.nodes.get_mut(&node(1)).unwrap();
+        let (wire, first) = adapter.prepare_peer_message(&message).unwrap();
+        assert_eq!(
+            wire,
+            message.to_wire().unwrap(),
+            "delivery metadata must not change the wire format"
+        );
+        let (_, current) = adapter.prepare_peer_message(&message).unwrap();
+        assert_ne!(first, current, "same-index retries need distinct tokens");
+        let pending_index = current.snapshot_index.unwrap().get();
+        let before = adapter.status();
+        let mut stale = vec![first];
+        let mut foreign = current;
+        foreign.group_id = GroupId::new(8).unwrap();
+        stale.push(foreign);
+        foreign = current;
+        foreign.group_epoch = GroupEpoch::new(2).unwrap();
+        stale.push(foreign);
+        foreign = current;
+        foreign.from = node(2);
+        stale.push(foreign);
+        foreign = current;
+        foreign.to = node(99);
+        stale.push(foreign);
+        foreign = current;
+        foreign.term = Term::new(current.term.get() + 1);
+        stale.push(foreign);
+        foreign = current;
+        foreign.adapter_instance += 1;
+        stale.push(foreign);
+        foreign = current;
+        foreign.snapshot_index = Some(LogIndex::new(pending_index + 1));
+        stale.push(foreign);
+        for delivery in stale {
+            for delivered in [false, true] {
+                assert!(!adapter.report_peer_delivery(delivery, delivered).unwrap());
+                assert_eq!(
+                    adapter.raw_node.raft.prs().get(3).unwrap().pending_snapshot,
+                    pending_index
+                );
+                assert_eq!(adapter.status(), before);
+            }
+        }
+        assert!(adapter.report_peer_delivery(current, false).unwrap());
+        assert_eq!(
+            adapter.raw_node.raft.prs().get(3).unwrap().pending_snapshot,
+            0
+        );
+        assert!(
+            !adapter.report_peer_delivery(current, true).unwrap(),
+            "duplicate callback is inert"
+        );
+        assert_eq!(adapter.status().commit_index, before.commit_index);
+        assert_eq!(adapter.status().applied_index, before.applied_index);
+    }
+}
+
+#[test]
+fn snapshot_transport_success_does_not_acknowledge_or_commit_a_log_entry() {
+    let (mut cluster, message) = pending_snapshot_delivery_fixture(3);
+    let adapter = cluster.nodes.get_mut(&node(1)).unwrap();
+    let (_, delivery) = adapter.prepare_peer_message(&message).unwrap();
+    let before = adapter.status();
+    let matched = adapter.raw_node.raft.prs().get(3).unwrap().matched;
+    assert!(adapter.report_peer_delivery(delivery, true).unwrap());
+    let progress = adapter.raw_node.raft.prs().get(3).unwrap();
+    assert_eq!(progress.pending_snapshot, 0);
+    assert_eq!(progress.matched, matched);
+    assert_eq!(adapter.status().commit_index, before.commit_index);
+    assert_eq!(adapter.status().applied_index, before.applied_index);
+}
+
+#[test]
+fn reopened_adapter_rejects_a_previous_incarnations_delivery_result() {
+    let (mut cluster, message) = pending_snapshot_delivery_fixture(3);
+    let mut old = cluster.nodes.remove(&node(1)).unwrap();
+    let (_, old_delivery) = old.prepare_peer_message(&message).unwrap();
+    let mut replacement = InMemoryRaftAdapter::restart(old.into_stable_state().unwrap()).unwrap();
+    replacement.raw_node.raft.become_candidate();
+    replacement.raw_node.raft.become_leader();
+    assert!(
+        !replacement
+            .report_peer_delivery(old_delivery, false)
+            .unwrap()
+    );
+}
+
+#[test]
+fn same_term_same_index_same_sequence_callbacks_cannot_cross_adapter_instances() {
+    let (mut previous, message) = pending_snapshot_delivery_fixture(3);
+    let (_, old_delivery) = previous
+        .nodes
+        .get_mut(&node(1))
+        .unwrap()
+        .prepare_peer_message(&message)
+        .unwrap();
+    let (mut current, message) = pending_snapshot_delivery_fixture(3);
+    let adapter = current.nodes.get_mut(&node(1)).unwrap();
+    let (_, current_delivery) = adapter.prepare_peer_message(&message).unwrap();
+    assert_eq!(old_delivery.term, current_delivery.term);
+    assert_eq!(old_delivery.snapshot_index, current_delivery.snapshot_index);
+    assert_eq!(old_delivery.sequence, current_delivery.sequence);
+    assert_ne!(
+        old_delivery.adapter_instance,
+        current_delivery.adapter_instance
+    );
+    let before = adapter.status();
+    for delivered in [false, true] {
+        assert!(
+            !adapter
+                .report_peer_delivery(old_delivery, delivered)
+                .unwrap()
+        );
+        assert_eq!(adapter.status(), before);
+    }
+    assert!(
+        adapter
+            .report_peer_delivery(current_delivery, false)
+            .unwrap()
+    );
+}
+
+#[test]
+fn outbound_preparation_rejects_another_groups_frame_without_mutating_progress() {
+    let (mut cluster, mut message) = pending_snapshot_delivery_fixture(3);
+    let adapter = cluster.nodes.get_mut(&node(1)).unwrap();
+    let before = adapter.status();
+    message.group_epoch = GroupEpoch::new(2).unwrap();
+    assert!(matches!(
+        adapter.prepare_peer_message(&message),
+        Err(ConsensusError::InvalidMessage(_))
+    ));
+    assert_eq!(adapter.status(), before);
+    assert_eq!(adapter.delivery_sequence, 0);
+}
+
 #[test]
 fn checkpoint_codec_is_canonical_bounded_and_metadata_fenced() {
     let image = checkpoint_image_fixture();
