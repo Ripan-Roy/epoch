@@ -313,12 +313,16 @@ class OwnerFleet:
                     response = self.cluster.request(
                         node,
                         "GET",
-                        "/experimental/v1/consensus/status",
+                        CONTROL_ROOT + "/lease",
                         headers={"authorization": f"Bearer {regional.ADMIN_TOKEN}"},
                     )
                 except OSError:
                     continue
-                if response.status == 200 and response.document.get("role") == "leader":
+                # Regional mode does not enable the standalone consensus probe.
+                # The lease's leader-only ReadIndex barrier is the authority.
+                if response.status == 200 and isinstance(
+                    response.document.get("owner_id"), str
+                ):
                     return node
             return None
 

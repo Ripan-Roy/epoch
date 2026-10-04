@@ -41,6 +41,29 @@ def evidence_fixture() -> dict:
 
 
 class OwnerEvidenceContractTest(unittest.TestCase):
+    def test_owner_fixture_discovers_the_catalog_authority_without_enabling_the_probe(
+        self,
+    ) -> None:
+        fleet = control_ha.OwnerFleet.__new__(control_ha.OwnerFleet)
+        fleet.cluster = mock.Mock()
+
+        def request(node: int, method: str, path: str, **_kwargs: object) -> object:
+            if path != control_ha.CONTROL_ROOT + "/lease":
+                return control_ha.regional.HttpResponse(404, {}, {})
+            if node == 2:
+                return control_ha.regional.HttpResponse(
+                    200, {"owner_id": "owner", "fence": "1"}, {}
+                )
+            return control_ha.regional.HttpResponse(409, {"code": "not_leader"}, {})
+
+        fleet.cluster.request.side_effect = request
+        with mock.patch.object(
+            control_ha.regional,
+            "wait_until",
+            side_effect=lambda _description, check: check(),
+        ):
+            self.assertEqual(2, fleet.leader())
+
     def test_event_bus_uses_the_existing_control_kind_without_changing_native_identity(
         self,
     ) -> None:
