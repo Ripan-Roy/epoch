@@ -8,6 +8,14 @@ notes explicitly list additional verified artifacts.
 
 ### Control-plane hardening
 
+- Preserve the exact optional caller generation precondition when replaying
+  managed deletion: omitted, explicit zero, and explicit nonzero are distinct.
+  Resolve a completed token before testing a recreated resource's generation,
+  retaining the old outcome without removing the new incarnation.
+- Add a generated-client gRPC recovery campaign for simultaneous maximum-size
+  batches, conflicting OCC, operation authorization and delete-precondition
+  identity, old-token delete/recreate, filtered watch resume, and real history
+  staleness. Its live certification is separate from owner-only evidence.
 - Add fully qualified HTTP resource GET/DELETE paths, preserving tenant
   authorization, optimistic concurrency, exact keys, and the existing managed
   delete coordinator. Legacy three-segment item paths remain supported.

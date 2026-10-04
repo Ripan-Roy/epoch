@@ -658,22 +658,10 @@ func (reconciler *Reconciler) Delete(
 		// delete outcome exists for the token.
 		return reconciler.registry.Delete(request)
 	}
-	if request.ExpectedGeneration != nil &&
-		*request.ExpectedGeneration != resource.Generation {
-		return resources.DeleteResult{}, &reconcileError{
-			message:   "delete expected generation does not match desired state",
-			retryable: false,
-			cause:     conflictError("desired generation conflict"),
-		}
-	}
 	if managed, ok := reconciler.registry.(managedDeleteStore); ok {
-		if resource.Generation == math.MaxUint64 {
-			return resources.DeleteResult{}, &reconcileError{
-				message:   "resource generation is exhausted",
-				retryable: false,
-				cause:     conflictError("resource generation exhausted"),
-			}
-		}
+		// The Catalog store resolves the exact retained token before checking
+		// current generation or overflow. Recreated state is not a precondition
+		// for replaying a completed delete of an older incarnation.
 		deleted, deleteErr := managed.DeleteManaged(
 			ctx,
 			request,
@@ -689,6 +677,14 @@ func (reconciler *Reconciler) Delete(
 			}
 		}
 		return deleted, nil
+	}
+	if request.ExpectedGeneration != nil &&
+		*request.ExpectedGeneration != resource.Generation {
+		return resources.DeleteResult{}, &reconcileError{
+			message:   "delete expected generation does not match desired state",
+			retryable: false,
+			cause:     conflictError("desired generation conflict"),
+		}
 	}
 	if resource.Status.ObservedGeneration > 0 {
 		expectedCatalogGeneration := resource.Status.EffectiveCatalogGeneration()

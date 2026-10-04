@@ -16,7 +16,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 def load_fixture(name: str, path: Path) -> Any:
@@ -831,9 +831,13 @@ class OwnerFleet:
             self.close()
 
 
-def verify_bundle(path: Path) -> None:
+def verify_bundle(
+    path: Path,
+    *,
+    validator: Callable[[dict[str, Any]], None] = validate_owner_evidence,
+) -> None:
     evidence = soak.load_json(path)
-    validate_owner_evidence(evidence)
+    validator(evidence)
     if path.read_bytes() != soak.canonical_bytes(evidence):
         raise ValueError("owner evidence must be canonical JSON")
     source = evidence.get("identity", {}).get("source", {})
@@ -860,7 +864,13 @@ def verify_bundle(path: Path) -> None:
             raise ValueError("owner evidence artifact checksum mismatch")
 
 
-def run_campaign(output: Path) -> None:
+def run_campaign(
+    output: Path,
+    *,
+    fleet_type: type[OwnerFleet] = OwnerFleet,
+    schema: str = OWNER_SCHEMA,
+    validator: Callable[[dict[str, Any]], None] = validate_owner_evidence,
+) -> None:
     output = output.resolve()
     if output.exists() and any(output.iterdir()):
         raise ValueError("owner evidence destination must be empty")
@@ -897,7 +907,7 @@ def run_campaign(output: Path) -> None:
     )
     identity = {"source": source, "runtime": runtime, "node_source_matches_image": True}
     result: dict[str, Any] = {
-        "schema": OWNER_SCHEMA,
+        "schema": schema,
         "status": "running",
         "identity": identity,
         "fleets": [],
@@ -906,15 +916,15 @@ def run_campaign(output: Path) -> None:
     try:
         for count in (3, 5):
             result["fleets"].append(
-                OwnerFleet(count, output / f"controllers-{count}").run()
+                fleet_type(count, output / f"controllers-{count}").run()
             )
         if soak.source_identity() != source:
             raise ValueError("candidate changed during owner recovery")
         result["status"] = "passed"
         result["artifacts"] = soak.collect_artifacts(output, output)
-        validate_owner_evidence(result)
+        validator(result)
         soak.atomic_write(output / "evidence.json", soak.canonical_bytes(result))
-        verify_bundle(output / "evidence.json")
+        verify_bundle(output / "evidence.json", validator=validator)
     except BaseException:
         result["status"] = "failed"
         soak.atomic_write(output / "failure.json", soak.canonical_bytes(result))

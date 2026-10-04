@@ -318,6 +318,11 @@ field is an optional `uint64`; the internal authority JSON represents the same
 value as a decimal string. Delete replay compares this command precondition,
 not the mutation's result generation, because a
 missing-resource result can return a nonzero tombstone high-water mark.
+Omitted, explicit zero, and explicit nonzero preconditions are distinct token
+bindings for both desired and managed deletion. A completed exact token is
+resolved before a recreated resource's current-generation check; it returns
+the old result and cannot delete the new incarnation. Changing precondition
+presence or value under that token fails as a conflict.
 `WatchResourceChanges` reads bounded global Catalog pages
 and filters events by requested scope plus the authenticated principal.
 Each streamed response includes `earliest_cursor`, the current

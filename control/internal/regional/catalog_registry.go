@@ -1066,24 +1066,12 @@ func (registry *CatalogRegistry) ReplayManagedDelete(
 		)
 	}
 	switch document.CommandKind {
-	case "delete_desired":
+	case "delete_desired", "delete_managed":
+		// Presence is part of the original public command. A managed delete's
+		// internal generation fence is separate and must not substitute for it.
 		if (request.ExpectedGeneration == nil) != (document.ExpectedGeneration == nil) ||
 			(request.ExpectedGeneration != nil &&
 				*request.ExpectedGeneration != uint64(*document.ExpectedGeneration)) {
-			return resources.DeleteResult{}, true, deleteReplayGenerationConflict(
-				request.ExpectedGeneration,
-				document.ExpectedGeneration,
-			)
-		}
-	case "delete_managed":
-		if document.ExpectedGeneration == nil {
-			return resources.DeleteResult{}, true, storeUnavailable(
-				"decode managed delete outcome",
-				fmt.Errorf("catalog operation omitted its expected desired generation"),
-			)
-		}
-		if request.ExpectedGeneration != nil &&
-			*request.ExpectedGeneration != uint64(*document.ExpectedGeneration) {
 			return resources.DeleteResult{}, true, deleteReplayGenerationConflict(
 				request.ExpectedGeneration,
 				document.ExpectedGeneration,

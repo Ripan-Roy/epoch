@@ -82,6 +82,37 @@ then records the separate current source revision and built Go binary digest.
 It rejects dirty/drifting source, captures credential-redacted logs, verifies
 artifact receipts, and always resumes a paused owned child before shutdown.
 
+### Generated-client recovery fixture (candidate)
+
+`tests/integration/control_ha_api.py` extends the owner fixture through the
+generated Go gRPC bindings. It issues identical 128-resource batches through
+every controller concurrently, races distinct two-resource batches on one OCC
+generation, and checks every resulting resource for partial mutation. It keeps
+the exact original request and operation protobufs, including rejected batches,
+command kinds, affected identities, and optional delete precondition presence.
+The same records are checked through surviving controllers after owner loss,
+quorum recovery, and all-voter/controller reopen.
+
+The candidate also exercises scoped-reader operation lookup, partial and mixed
+affected-resource sets, missing credentials, completed/missing delete retries
+against recreated resources, and filtered two-item watches that disconnect and
+resume through a different controller's scanned cursor. Recurrent fenced
+status commands advance the actual retained history without claiming unlimited
+public-token retention; gRPC must explicitly reject cursor zero after the
+observed floor advances. This uses `epoch.control-ha.api-recovery/v1`; it still
+does not certify in-flight Catalog-leader unknown outcomes or production limits.
+Local Go race and fixture contract suites pass; the new live campaign has not
+yet passed and the matrix remains open.
+
+```sh
+EPOCH_REGIONAL_IMAGE=epoch/node:ha-candidate \
+EPOCH_REGIONAL_USE_EXISTING_IMAGE=1 \
+EPOCH_CONTROL_HA_ARTIFACT_DIR=/absolute/empty/api-evidence-directory \
+make test-control-ha-api
+python3 tests/integration/control_ha_api.py verify \
+  --manifest /absolute/empty/api-evidence-directory/evidence.json
+```
+
 ### Recovery regression evidence
 
 The clean `fed6b59` candidate's rebuilt arm64 node image passed the existing
