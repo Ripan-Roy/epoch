@@ -8,6 +8,11 @@ notes explicitly list additional verified artifacts.
 
 ### Control-plane hardening
 
+- Certify concurrent maximum-size batches from complete v2 response, operation,
+  and creation-history witnesses instead of counting replay disposition flags.
+  A fresh clean `0f3c8d5` full three/five-controller run exits zero and passes
+  independent verification of all 32 artifacts and 42 owner/API flags; protected
+  current-head/main execution and release publication remain required.
 - Prove concurrent maximum-size batches through identical durable operations,
   exact creation results, and complete ordered change history instead of
   treating reconstructed-response replay flags as a mutation count. Retain

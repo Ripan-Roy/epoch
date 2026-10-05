@@ -125,8 +125,8 @@ Five Go regression groups cover reconstructed and original receipts,
 partial/altered responses, disagreeing or malformed operations, missing or
 foreign events, and incomplete or invalid serialized witnesses. The 39 HA
 fixture contract tests pass locally. This does not turn the failed CI run into
-passing evidence: a fresh complete local and protected exact-head/main
-campaign is still required.
+passing evidence. A fresh complete local v2 run is now independently verified
+below; protected exact-head/main execution is still required.
 
 The focused preparation probe at
 `/private/tmp/epoch-ha-batch-probe.D4I8lw` passed against real three/five Go
@@ -136,8 +136,8 @@ two/four replayed replies, all resolving one proposal ID. This preliminary
 debug capture used the v1 schema with the new witnesses before the v2 schema
 freeze; it is neither a frozen full campaign nor a reproduction of CI's
 all-replayed interleaving. The source analysis and reconstructed-receipt
-regressions cover that allowed disposition; full v2 fault evidence remains
-required. The final local `make check build` gate passed after the v2 changes,
+regressions cover that allowed disposition; the full frozen v2 fault result is
+recorded below. The final local `make check build` gate passed after the v2 changes,
 with its log retained alongside the focused probe.
 
 GitHub `main` protection now additionally requires the GitHub Actions
@@ -205,14 +205,48 @@ most four times. Only a resolved, typed fencing rejection permits a separate
 attempt with a newly observed guard and token. This does not assert a two-second
 service SLO or widen the public operation-retention contract.
 
-All 35 HA fixture contract tests, the complete Go race suite, vet, and build
+All 39 HA fixture contract tests, the complete Go race suite, vet, and build
 pass locally. CI has a separately bounded 120-minute
 native-arm64 HA job that consumes the already inspected exact-source node image
 from the arm64 build job, verifies its archive checksum and OCI revision, and
 retains passing or failed evidence for 30 days. It neither rebuilds that Rust
 image nor publishes it to a registry.
 
-### Locally verified bounded matrix — 5 October 2026
+### Fresh frozen v2 bounded matrix — 5 October 2026
+
+The clean `0f3c8d50abb770aaf109a5cf730468b70c49264f` tree completed
+`make test-control-ha-full` with exit zero, then independently passed the full
+bundle verifier. Both fleets retained complete v2 initial-batch request,
+response, operation, and creation-history protobuf witnesses, with three/five
+initial responses and operation lookups respectively. These are exact durable
+effects, not a count inferred from replay disposition flags.
+
+| Observation | Three controllers | Five controllers |
+|---|---:|---:|
+| Owner/recovery checks | 10/10 | 10/10 |
+| API/recovery checks | 11/11 | 11/11 |
+| Pending callers when the real Catalog leader was stopped | 3 | 5 |
+| Exact retained operation witnesses | 20 | 24 |
+| Desired resources checked across recovery phases | 135 | 135 |
+| Observed history floor / latest cursor | 5 / 4,100 | 27 / 4,122 |
+| Exact profile digests before/after all-voter reopen | 4/4 | 4/4 |
+
+All 32 artifact receipts independently verify. The canonical manifest SHA-256
+is `df40266cbe904c551b080c27ebed8a6ab35190b5fed13561052ecfb00ea761e9`,
+retained locally at
+`/private/tmp/epoch-ha-replayfix.TQVpMI/evidence/evidence.json`.
+The image ID remains
+`sha256:1ee8ef6f46297f0071174e5661cc78ab49b8a7cf6798018d7cdc17dc74c94a64`
+from `fed6b59`; exact Rust source equivalence is verified separately from the
+clean controller/fixture revision. The full local `make check build` gate also
+passed after the v2 changes. The later documentation commit does not relabel
+this frozen capture. Protected current-head/main evidence and beta.12
+publication remain open; this proves no production SLO or full PRD completion.
+
+The fixture removed only its own containers and volumes. All fourteen unrelated
+application containers remained running after completion.
+
+### Historical reverified v1 capture — 5 October 2026
 
 The clean `19e02175bd5c4970236a84fedd7eeb818197b6b6` capture completed every
 runtime scenario for both controller counts, including actual history pruning
