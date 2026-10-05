@@ -8,6 +8,11 @@ NODE_LTS := $(if $(wildcard /opt/homebrew/opt/node@24/bin/node),/opt/homebrew/op
 PNPM_ENV := PATH="/opt/homebrew/opt/node@24/bin:$$PATH"
 JAVA_MVN := ./sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress
 
+# macOS's system LibreSSL cannot generate the Ed25519 evidence keys. Select
+# Homebrew OpenSSL only for these Make recipes, without changing the user's
+# global shell or affecting Linux's normal tool resolution.
+export PATH := $(if $(wildcard /opt/homebrew/opt/openssl@3/bin/openssl),/opt/homebrew/opt/openssl@3/bin:$(PATH),$(PATH))
+
 .PHONY: help bootstrap-check generate generate-check release-check format format-check lint audit test test-unit test-retry-command test-compose-crash-restart test-release-manifest test-release-workflow test-soak-runner test-kubernetes-runner test-consensus-process test-consensus-probe test-stream-tablet test-queue-tablet test-cache-tablet test-bus-tablet test-regional-runtime test-kubernetes-live test-integration build check ci kubernetes-config compose-config compose-up compose-down compose-probe-config compose-probe-up compose-probe-down compose-regional-config compose-regional-up compose-regional-down clean
 
 help: ## Show available commands.
@@ -25,6 +30,8 @@ bootstrap-check: ## Print and validate the required local toolchain.
 	@cargo clippy --version
 	@python3 --version
 	@python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else "expected Python 3.11 or newer")'
+	@openssl version
+	@openssl version | grep -q '^OpenSSL 3\.' || { echo "expected OpenSSL 3 for Ed25519 evidence keys" >&2; exit 1; }
 	@command -v java >/dev/null || { echo "missing Java 25 or newer" >&2; exit 1; }
 	@java -version
 	@javac -version

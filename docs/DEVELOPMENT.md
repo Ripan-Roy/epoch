@@ -56,7 +56,7 @@ brew upgrade node@24
 Homebrew is the lowest-risk path for the current workstation:
 
 ```shell
-brew install go rust protobuf buf pkgconf openjdk@25 node@24 pnpm actionlint shellcheck kind kubectl
+brew install go rust protobuf buf pkgconf openssl@3 openjdk@25 node@24 pnpm actionlint shellcheck kind kubectl
 python3 -m pip install ruff==0.15.19 mypy==2.1.0
 ```
 
@@ -68,14 +68,25 @@ environment; ordinary HTTP SDK consumers still need no runtime dependencies:
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install 'sdk/python[management,management-dev]' ruff==0.15.19 mypy==2.1.0
+mkdir -p .cache
+python3 scripts/generate-java-management.py --install-plugin "$PWD/.cache/grpc-java-1.84.0"
 ```
 
 `grpcio`/`grpcio-tools` 1.84.0 and Protobuf 7.35.1 produce the management
 bindings; `grpc-stubs` 1.53.0.6 and `types-protobuf` 7.35.1.20260906 support
 strict typing. `make generate` generates Go, Java, and Python, and
 `make generate-check` rejects stale bindings in all three languages. Java uses
-Buf 1.72.0, the remote Java Protobuf 35.1 / gRPC 1.84.0 plugins, and matching
-runtime libraries. Its generated directory is compiled but excluded from
+Buf 1.72.0, local Protobuf 35.1 / gRPC 1.84.0 compilers, and matching
+runtime libraries. The installer supports Linux x86-64/arm64 and macOS
+x86-64/arm64, checks the Maven Central artifact's pinned SHA-256 before
+installation, and refuses existing destinations. Every Java generation
+rechecks that checksum and the exact `protoc` version before invoking either
+compiler; `--check` never installs tools or changes generated sources. Set
+`EPOCH_GRPC_JAVA_PLUGIN` to an explicitly installed compiler's absolute path
+if using a different directory. This uses Buf's [local plugin support](https://buf.build/docs/configuration/v2/buf-gen-yaml/#type-of-plugin),
+not remote generation or a cached copy of expected generated sources.
+All 61 Java generated files are byte-identical to the previous remote output.
+Its generated directory is compiled but excluded from
 application formatting/Checkstyle, not edited or suppressed by hand. Python
 generation namespaces imports/module identities beneath `epoch_sdk._generated`
 and fills bare constructor `Mapping` parameters without changing wire
@@ -106,6 +117,12 @@ toolchain selection, Miri, nightly-only fuzzing, or cross-compilation targets.
 Avoid unintentionally mixing Homebrew Rust and rustup proxies: if rustup is
 installed, ensure the intended toolchain appears first on `PATH`, confirm it
 with `command -v rustc`, and keep the version at 1.97.1 for normal builds.
+
+Evidence signing requires OpenSSL 3's Ed25519 support. Make automatically
+prefers an installed Apple Silicon Homebrew `openssl@3` keg; macOS's system
+LibreSSL 3.3.6 cannot generate these keys. For direct fixture commands, use
+`export PATH="/opt/homebrew/opt/openssl@3/bin:$PATH"` (or your Intel Homebrew
+installation's equivalent). `make bootstrap-check` verifies this dependency.
 
 Install the dependency auditor at the repository-pinned version:
 
@@ -675,9 +692,16 @@ Do not change socket permissions broadly. Fix the Desktop/context state.
 
 ### Buf cannot generate
 
-Confirm `buf --version`, network access to `buf.build`, and that at least one
-contract exists under `spec/proto`. `make generate` safely skips an empty
-contract tree during the initial scaffold.
+Confirm `buf --version` and that at least one contract exists under
+`spec/proto`. Go currently uses pinned remote plugins and needs access to
+`buf.build`. Java generation runs locally and needs exact Protobuf 35.1 plus
+the checksum-pinned gRPC-Java 1.84.0 compiler installed above; Python uses its
+pinned `grpcio-tools` extra. Remote Buf generation has a [shared anonymous
+rate limit](https://buf.build/docs/bsr/rate-limits/) and may return
+`resource_exhausted`; this is not evidence of a code or test failure. Do not
+skip freshness checks or repeatedly retry them. Java's local generation
+removes that quota dependency for its checks. `make generate` safely skips
+an empty contract tree during the initial scaffold.
 
 ## Related documents
 

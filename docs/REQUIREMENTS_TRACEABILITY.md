@@ -114,8 +114,11 @@ acknowledged manually flow-controlled watches. Seventeen new local regression
 tests and the complete Java Maven lint/test/package gate pass. A required Java
 CI probe executes all seven calls against Go over TLS 1.3/mTLS, denies wrong
 bearer/missing identity/foreign CA and TLS-1.2-only servers, and proves remote
-watch close. Pinned Buf Java generation has four non-mutating freshness/inventory
-tests; generated source alone is excluded from application formatting/lint.
+watch close. Pinned local Java generation has nine compiler-integrity,
+safe-installation, non-mutating freshness/inventory, and required-CI tests;
+all 61 generated files are byte-identical to the former remote output, without
+using the remote Buf code-generation quota. Generated source alone is excluded
+from application formatting/lint.
 The exact displayed Java example compiles with `-Xlint:all -Werror`.
 These are client contracts, not actual Catalog fault or protected-delivery proof.
 

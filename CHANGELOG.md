@@ -8,6 +8,12 @@ notes explicitly list additional verified artifacts.
 
 ### SDK contract and management candidate
 
+- Generate Java management bindings locally with exact Protobuf 35.1 and
+  checksum-pinned gRPC-Java 1.84.0 compilers. The 61 generated sources remain
+  byte-identical; CI installs both compilers and retains non-mutating freshness,
+  stale/missing-source, and foreign-inventory rejection. Nine generation
+  contracts now cover compiler integrity, unsupported platforms, safe
+  installation, and the removal of Java's remote Buf quota dependency.
 - Add public Go/Java/Python Catalog-fault probes with byte-bound workload plans,
   fsynced application checkpoints before watch ACK, and a private exact-command
   lost-response relay. All three probes preserve original token/zero-OCC bytes

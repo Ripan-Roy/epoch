@@ -10,9 +10,12 @@ managed:
       value: true
 
 plugins:
-  - remote: buf.build/protocolbuffers/java:v35.1
+  - protoc_builtin: java
+    protoc_path: protoc
     out: .
-  - remote: buf.build/grpc/java:v1.84.0
+    strategy: all
+  - local: protoc-gen-grpc-java
     out: .
+    strategy: all
     opt:
       - '@generated=omit'

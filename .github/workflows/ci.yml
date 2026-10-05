@@ -197,6 +197,15 @@ jobs:
           cache-dependency-path: go.sum
       - name: Install pinned Buf CLI for Java contracts
         run: go install github.com/bufbuild/buf/cmd/buf@v1.72.0
+      - name: Install checksum-pinned local Java contract compilers
+        env:
+          EPOCH_GRPC_JAVA_PLUGIN: ${{ github.workspace }}/.cache/grpc-java-1.84.0/bin/protoc-gen-grpc-java
+        run: |
+          protoc_root="${RUNNER_TEMP}/java-protoc-35.1"
+          ./scripts/install-protoc.sh "$protoc_root"
+          echo "${protoc_root}/bin" >> "$GITHUB_PATH"
+          mkdir -p .cache
+          python3 scripts/generate-java-management.py --install-plugin "${GITHUB_WORKSPACE}/.cache/grpc-java-1.84.0"
       - name: Reject stale Java management bindings and verify generation gates
         run: python3 -m unittest discover -s tests/integration -p test_java_management_generation.py -v
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
