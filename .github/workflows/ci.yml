@@ -146,10 +146,10 @@ jobs:
       - run: >-
           ruff check sdk/python tests/soak tests/integration/*.py
           console/src/quickstarts/quickstart.py
-      - name: Compile and type-check displayed Python quickstart
+      - name: Compile and type-check Python SDK and displayed quickstart
         run: |
           python -m py_compile console/src/quickstarts/quickstart.py
-          PYTHONPATH=sdk/python/src mypy --strict console/src/quickstarts/quickstart.py
+          PYTHONPATH=sdk/python/src mypy --strict sdk/python/src console/src/quickstarts/quickstart.py
       - name: Run Python SDK tests
         run: PYTHONPATH=sdk/python/src python -m unittest discover -s sdk/python/tests -v
       - name: Run resumable soak evidence tests

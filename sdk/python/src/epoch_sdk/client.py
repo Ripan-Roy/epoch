@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
+from typing import Any, TypeVar
 from urllib.parse import quote
 
+from ._responses import (
+    boolean_fields_response,
+    empty_response,
+    integer_fields_response,
+    object_list_response,
+    object_response,
+)
 from .models import DurabilityProfile, EventEnvelope, Subscription
 from .transport import TLSConfig, Transport, UrllibTransport
+
+_T = TypeVar("_T")
 
 
 class EpochClient:
@@ -27,10 +37,10 @@ class EpochClient:
         self._transport = transport or UrllibTransport(base_url, timeout=timeout, tls=tls)
 
     def health(self) -> dict[str, Any]:
-        return self._transport.request("GET", "/healthz")
+        return self._request(object_response, "GET", "/healthz")
 
     def resources(self) -> list[dict[str, Any]]:
-        return self._transport.request("GET", "/v1/resources")
+        return self._request(object_list_response, "GET", "/v1/resources")
 
     def create_cache(
         self,
@@ -116,7 +126,8 @@ class EpochClient:
         only_if_absent: bool = False,
         only_if_present: bool = False,
     ) -> dict[str, Any]:
-        return self._transport.request(
+        return self._request(
+            object_response,
             "PUT",
             f"/v1/caches/{_segment(cache)}/keys/{_segment(key)}",
             body={
@@ -129,15 +140,18 @@ class EpochClient:
         )
 
     def cache_get(self, cache: str, key: str) -> dict[str, Any]:
-        return self._transport.request("GET", f"/v1/caches/{_segment(cache)}/keys/{_segment(key)}")
+        return self._request(
+            object_response, "GET", f"/v1/caches/{_segment(cache)}/keys/{_segment(key)}"
+        )
 
     def cache_delete(self, cache: str, key: str) -> None:
-        return self._transport.request(
-            "DELETE", f"/v1/caches/{_segment(cache)}/keys/{_segment(key)}"
+        return self._request(
+            empty_response, "DELETE", f"/v1/caches/{_segment(cache)}/keys/{_segment(key)}"
         )
 
     def cache_increment(self, cache: str, key: str, *, delta: int = 1) -> dict[str, int]:
-        return self._transport.request(
+        return self._request(
+            integer_fields_response,
             "POST",
             f"/v1/caches/{_segment(cache)}/keys/{_segment(key)}/increment",
             body={"delta": delta},
@@ -150,7 +164,8 @@ class EpochClient:
         *,
         partition: int | None = None,
     ) -> dict[str, Any]:
-        return self._transport.request(
+        return self._request(
+            object_response,
             "POST",
             f"/v1/streams/{_segment(stream)}/records",
             body={"envelope": event.to_dict(), "partition": partition},
@@ -164,7 +179,8 @@ class EpochClient:
         offset: int = 0,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        return self._transport.request(
+        return self._request(
+            object_list_response,
             "GET",
             f"/v1/streams/{_segment(stream)}/records",
             query={"partition": partition, "offset": offset, "limit": limit},
@@ -179,22 +195,24 @@ class EpochClient:
         next_offset: int,
         reset: bool = False,
     ) -> None:
-        return self._transport.request(
+        return self._request(
+            empty_response,
             "PUT",
             f"/v1/streams/{_segment(stream)}/groups/{_segment(group)}/offsets",
             body={"partition": partition, "next_offset": next_offset, "reset": reset},
         )
 
     def stream_lag(self, stream: str, group: str, *, partition: int = 0) -> dict[str, Any]:
-        return self._transport.request(
+        return self._request(
+            object_response,
             "GET",
             f"/v1/streams/{_segment(stream)}/groups/{_segment(group)}/lag",
             query={"partition": partition},
         )
 
     def send(self, queue: str, event: EventEnvelope) -> dict[str, Any]:
-        return self._transport.request(
-            "POST", f"/v1/queues/{_segment(queue)}/messages", body=event.to_dict()
+        return self._request(
+            object_response, "POST", f"/v1/queues/{_segment(queue)}/messages", body=event.to_dict()
         )
 
     def receive(
@@ -205,7 +223,8 @@ class EpochClient:
         max_messages: int = 1,
         visibility_timeout_ms: int | None = None,
     ) -> list[dict[str, Any]]:
-        return self._transport.request(
+        return self._request(
+            object_list_response,
             "POST",
             f"/v1/queues/{_segment(queue)}/acquire",
             body={
@@ -237,44 +256,48 @@ class EpochClient:
         )
 
     def reject(self, queue: str, lease_token: str, *, reason: str) -> dict[str, bool]:
-        return self._settle(
-            queue,
-            {"action": "reject", "token": lease_token, "reason": reason},
+        return boolean_fields_response(
+            self._settle(queue, {"action": "reject", "token": lease_token, "reason": reason})
         )
 
     def extend_lease(self, queue: str, lease_token: str, *, extension_ms: int) -> dict[str, int]:
-        return self._settle(
-            queue,
-            {
-                "action": "extend",
-                "token": lease_token,
-                "extension_ms": extension_ms,
-            },
+        return integer_fields_response(
+            self._settle(
+                queue,
+                {
+                    "action": "extend",
+                    "token": lease_token,
+                    "extension_ms": extension_ms,
+                },
+            )
         )
 
     def queue_counts(self, queue: str) -> dict[str, int]:
-        return self._transport.request("GET", f"/v1/queues/{_segment(queue)}/counts")
+        return self._request(integer_fields_response, "GET", f"/v1/queues/{_segment(queue)}/counts")
 
     def redrive(self, queue: str, message_id: str) -> None:
-        return self._transport.request(
+        return self._request(
+            empty_response,
             "POST",
             f"/v1/queues/{_segment(queue)}/dead-letters/{_segment(message_id)}/redrive",
         )
 
     def publish(self, bus: str, event: EventEnvelope) -> dict[str, Any]:
-        return self._transport.request(
-            "POST", f"/v1/buses/{_segment(bus)}/events", body=event.to_dict()
+        return self._request(
+            object_response, "POST", f"/v1/buses/{_segment(bus)}/events", body=event.to_dict()
         )
 
     def upsert_subscription(self, bus: str, subscription: Subscription) -> dict[str, int]:
-        return self._transport.request(
+        return self._request(
+            integer_fields_response,
             "PUT",
             f"/v1/buses/{_segment(bus)}/subscriptions/{_segment(subscription.name)}",
             body=subscription.to_dict(),
         )
 
     def remove_subscription(self, bus: str, subscription: str) -> None:
-        return self._transport.request(
+        return self._request(
+            empty_response,
             "DELETE",
             f"/v1/buses/{_segment(bus)}/subscriptions/{_segment(subscription)}",
         )
@@ -288,7 +311,8 @@ class EpochClient:
         limit: int = 100,
         event_type: str | None = None,
     ) -> list[dict[str, Any]]:
-        return self._transport.request(
+        return self._request(
+            object_list_response,
             "GET",
             f"/v1/buses/{_segment(bus)}/replay",
             query={
@@ -300,10 +324,25 @@ class EpochClient:
         )
 
     def _create(self, collection: str, name: str, config: dict[str, Any]) -> dict[str, Any]:
-        return self._transport.request("POST", f"/v1/{collection}/{_segment(name)}", body=config)
+        return self._request(
+            object_response, "POST", f"/v1/{collection}/{_segment(name)}", body=config
+        )
 
     def _settle(self, queue: str, body: dict[str, Any]) -> dict[str, Any]:
-        return self._transport.request("POST", f"/v1/queues/{_segment(queue)}/settle", body=body)
+        return self._request(
+            object_response, "POST", f"/v1/queues/{_segment(queue)}/settle", body=body
+        )
+
+    def _request(
+        self,
+        decode: Callable[[object], _T],
+        method: str,
+        path: str,
+        *,
+        body: Any = None,
+        query: dict[str, Any] | None = None,
+    ) -> _T:
+        return decode(self._transport.request(method, path, body=body, query=query))
 
 
 def _segment(value: str) -> str:

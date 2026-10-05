@@ -32,6 +32,7 @@ bootstrap-check: ## Print and validate the required local toolchain.
 	@$(JAVA_MVN) --version | grep -q '^Apache Maven 3\.9\.16 ' || { echo "expected Maven wrapper 3.9.16" >&2; exit 1; }
 	@ruff --version
 	@ruff --version | grep -q '^ruff 0\.15\.19$$' || { echo "expected Ruff 0.15.19" >&2; exit 1; }
+	@mypy --version | grep -q '^mypy 2\.1\.0 ' || { echo "expected mypy 2.1.0" >&2; exit 1; }
 	@actionlint --version
 	@actionlint --version | grep -q '^1\.7\.12$$' || { echo "expected actionlint 1.7.12" >&2; exit 1; }
 	@shellcheck --version | grep -q '^version: 0\.11\.0$$' || { echo "expected ShellCheck 0.11.0" >&2; exit 1; }
@@ -77,6 +78,7 @@ lint: ## Run static checks for every language and contract.
 	@if [ -f Cargo.toml ]; then RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --all-features --no-deps; fi
 	@if find control operator sdk/go -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then go vet ./...; fi
 	@if [ -d sdk/python ]; then ruff check sdk/python tests/soak tests/integration/*.py; fi
+	@if [ -d sdk/python ]; then PYTHONPATH=sdk/python/src mypy --strict sdk/python/src console/src/quickstarts/quickstart.py; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) -DskipTests verify; fi
 	@if [ -d .github/workflows ]; then actionlint; fi
 	@if [ -d tests/integration ]; then shellcheck scripts/*.sh tests/integration/*.sh; fi

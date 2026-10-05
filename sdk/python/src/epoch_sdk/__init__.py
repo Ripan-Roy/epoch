@@ -1,7 +1,7 @@
 """Official Python client for the Epoch real-time data platform."""
 
 from .client import EpochClient
-from .errors import EpochAPIError
+from .errors import EpochAPIError, EpochProtocolError
 from .models import (
     DeliveryPolicy,
     DeliveryRateLimit,
@@ -61,6 +61,7 @@ __all__ = [
     "DurabilityProfile",
     "EpochAPIError",
     "EpochClient",
+    "EpochProtocolError",
     "EventEnvelope",
     "EventFilter",
     "EventTransform",

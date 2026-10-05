@@ -44,6 +44,17 @@ only and still passes; all 48 Python SDK unit tests pass. Full-package strict
 typing and generated response types therefore remain open DX-001 work, not a
 verified guarantee inferred from the quickstart check.
 
+The separate SDK response-contract candidate follows that audit with real
+response-shape validation rather than type suppressions: objects, object
+arrays, empty replies, integer/boolean maps, and regional object results are
+checked for both HTTP and custom transports. Duplicate-key, malformed JSON,
+and non-finite-number responses fail without exposing payloads or silently
+retrying uncertain mutations. All 57 Python tests and strict whole-package
+typing across 13 source files pass locally. CI and local lint now select the
+whole SDK. Live restart/regional and protected delivery evidence remain open;
+generated per-field response models, management clients, and the rest of
+DX-001 are not claimed complete by this shape-validation foundation.
+
 ## How to use this register
 
 Status values are:

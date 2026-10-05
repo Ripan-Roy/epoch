@@ -57,7 +57,7 @@ Homebrew is the lowest-risk path for the current workstation:
 
 ```shell
 brew install go rust protobuf buf pkgconf openjdk@25 node@24 pnpm actionlint shellcheck kind kubectl
-python3 -m pip install ruff==0.15.19
+python3 -m pip install ruff==0.15.19 mypy==2.1.0
 ```
 
 Xcode and its command-line tools supply Clang and the linker:

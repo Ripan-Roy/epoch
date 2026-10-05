@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import ssl
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from .errors import EpochAPIError
+from .errors import EpochAPIError, EpochProtocolError
 
 
 @dataclass(frozen=True)
@@ -34,7 +35,7 @@ class Transport(Protocol):
         body: Any = None,
         query: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
-    ) -> Any:
+    ) -> object:
         """Send one request and return its decoded response."""
 
 
@@ -67,7 +68,7 @@ class UrllibTransport:
         body: Any = None,
         query: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
-    ) -> Any:
+    ) -> object:
         url = f"{self._base_url}/{path.lstrip('/')}"
         if query:
             filtered = {key: value for key, value in query.items() if value is not None}
@@ -91,7 +92,18 @@ class UrllibTransport:
                 context=self._ssl_context,
             ) as response:
                 payload = response.read()
-                return None if not payload else json.loads(payload)
+                if not payload:
+                    return None
+                try:
+                    document: object = json.loads(
+                        payload,
+                        object_pairs_hook=_unique_response_keys,
+                        parse_constant=_reject_response_constant,
+                        parse_float=_finite_response_float,
+                    )
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    raise EpochProtocolError("Epoch response is not valid JSON") from None
+                return document
         except HTTPError as error:
             raw = error.read()
             decoded = _decode_error_body(raw)
@@ -99,6 +111,26 @@ class UrllibTransport:
             raise EpochAPIError(error.code, code, detail, decoded) from error
         except URLError as error:
             raise EpochAPIError(0, "transport_error", str(error.reason)) from error
+
+
+def _unique_response_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise EpochProtocolError("Epoch response contains duplicate object keys")
+        result[key] = value
+    return result
+
+
+def _reject_response_constant(_value: str) -> object:
+    raise EpochProtocolError("Epoch response contains a non-finite number")
+
+
+def _finite_response_float(value: str) -> float:
+    result = float(value)
+    if not math.isfinite(result):
+        raise EpochProtocolError("Epoch response contains a non-finite number")
+    return result
 
 
 def _tls_context(config: TLSConfig) -> ssl.SSLContext:
