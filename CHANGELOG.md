@@ -34,6 +34,9 @@ notes explicitly list additional verified artifacts.
 - Embed the exact typed Python seven-method example alongside Go in candidate
   docs, and require the cross-language TLS/mTLS probe in Python CI. Java parity,
   real public-SDK Catalog faults, native streaming, and protected delivery remain open.
+- Refuse unsupported encrypted client keys without an OpenSSL stdin password
+  prompt in the shared Python HTTP/management trust loader; identity validation
+  remains fail-closed before channel creation.
 
 ### Control-plane hardening
 

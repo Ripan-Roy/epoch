@@ -26,7 +26,12 @@ class TransportSecurityTests(unittest.TestCase):
 
         create_default_context.assert_called_once_with(cafile="ca.pem")
         self.assertEqual(context.minimum_version, ssl.TLSVersion.TLSv1_3)
-        context.load_cert_chain.assert_called_once_with("client.pem", "client.key")
+        args = context.load_cert_chain.call_args
+        self.assertEqual(args.args, ("client.pem", "client.key"))
+        reject_password = args.kwargs.get("password")
+        self.assertTrue(callable(reject_password), "TLS loading must not prompt on stdin")
+        with self.assertRaisesRegex(ValueError, "encrypted client private keys"):
+            reject_password()
 
     def test_tls_configuration_fails_closed_for_plaintext_or_partial_identity(self) -> None:
         with self.assertRaisesRegex(ValueError, "https"):

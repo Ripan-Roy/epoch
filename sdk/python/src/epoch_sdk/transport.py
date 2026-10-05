@@ -143,8 +143,16 @@ def _tls_context(config: TLSConfig) -> ssl.SSLContext:
     context = ssl.create_default_context(cafile=str(config.root_ca))
     context.minimum_version = ssl.TLSVersion.TLSv1_3
     if certificate_set:
-        context.load_cert_chain(str(config.certificate), str(config.private_key))
+        context.load_cert_chain(
+            str(config.certificate), str(config.private_key), password=_reject_key_password
+        )
     return context
+
+
+def _reject_key_password() -> str:
+    # With no explicit callback OpenSSL may interactively prompt on stdin.
+    # TLSConfig/gRPC accept provisioned unencrypted PEM keys, not passwords.
+    raise ValueError("encrypted client private keys are not supported")
 
 
 def _decode_error_body(raw: bytes) -> Any:

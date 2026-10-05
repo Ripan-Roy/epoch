@@ -143,6 +143,9 @@ the frozen token/payload/OCC. Metadata keeps caller traces/binary values and
 replaces authorization with exactly one SDK credential. Remote plaintext,
 resolvers/URLs, malformed metadata, duplicate endpoints, nonfinite timeouts,
 unconfigured trust, and mismatched client identity files are rejected.
+Provision an unencrypted PEM client key through protected deployment files;
+encrypted keys are unsupported and refused without an interactive password
+prompt. The shared Python HTTP trust loader uses the same non-interactive policy.
 
 `watch_resource_changes(request, context=...)` returns a lazy single-consumer
 context-managed handle. Use `page = watch.recv()`, durably process and store
