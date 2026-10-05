@@ -68,9 +68,14 @@ committed responses. Its fail-closed verifier binds exact original command
 hashes, fully qualified lookup plans, and operation protobufs across every
 fault phase. The required CI job reuses the exact-source native-arm64 node
 image from its producer job, verifies its checksum and OCI revision, and keeps
-failure as well as passing evidence for 30 days. The full local campaign and
-protected-head/main gates remain open until a complete run passes; this is not
-a production SLO or full-PRD certification.
+failure as well as passing evidence for 30 days. Both local runtime fleets now
+completed, and the original capture is independently verified after the
+request-array reader correction; its original failed CLI exit and unchanged
+source identity are documented in the certification guide. Complete bundle
+verification is part of campaign failure handling: an invalid final artifact
+produces failed evidence rather than leaving a passed manifest. Protected
+exact-head/main execution remains open; this is not a production SLO or
+full-PRD certification.
 
 Observability assets have a focused offline contract gate:
 

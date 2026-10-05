@@ -396,7 +396,9 @@ jobs:
   control-ha:
     name: Concurrent control-plane failure matrix
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 90
+    # Both fleets must cross real retained-history pruning; leave bounded
+    # shared-runner headroom instead of substituting an artificial floor.
+    timeout-minutes: 120
     needs: [container-arm64]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

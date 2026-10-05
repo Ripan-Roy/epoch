@@ -11,8 +11,8 @@ Fully qualified HTTP item GET/DELETE now preserves tenant scope and managed
 deletion; its regression was observed red before implementation, and the Go
 race/vet/build checks pass locally. The clean `fed6b59` Rust candidate separately
 passed the rebuilt, signed eight-invariant regional recovery campaign. These
-local results do not close the full concurrent gRPC/batch/watch matrix, public
-operation-retention, Catalog scaling/migration, or protected-main gates. See
+local results alone do not close the full concurrent gRPC/batch/watch matrix,
+public operation-retention, Catalog scaling/migration, or protected-main gates. See
 [Control HA certification](CONTROL_HA_CERTIFICATION.md).
 
 The clean `0f585ed` generated-client run also passed its eight API checks through
@@ -22,8 +22,18 @@ It failed near real history compaction on a fixture HTTP timeout, before the
 stale-cursor or five-controller phases. The full candidate adds original-token
 lookup binding after real Catalog-leader loss with pending caller responses,
 exact bounded ambiguous-send retries, and a separate native-image CI gate.
-Twenty-nine HA fixture contract tests pass locally; neither this candidate nor
-the partial live run closes CTRL-001/CTRL-002 or any production gate.
+The subsequent clean `19e0217` capture completed the full three/five-controller
+runtime matrix: 42 owner/API check flags, both real Catalog-leader lost-ack
+cases, 20/24 exact operation witnesses, 135 desired resources per fleet, four
+matching profile digests per fleet, and real stale-watch rejection after the
+history floor reached 29. Its original CLI exited on an object-versus-array
+evidence-reader error. The regression-tested `e2e46e6` verifier correction now
+independently validates that unchanged capture and all 32 artifact receipts;
+the original source identity is preserved, not relabelled as a rerun.
+Thirty-five HA contract tests and eight soak/evidence tests pass locally.
+Protected exact-head/main execution remains open, as do the other CTRL-001/
+CTRL-002 retention, scaling, migration, and SDK requirements. See the linked
+certification document for provenance and non-claims.
 
 An additional Python SDK audit on 5 October 2026 ran
 `PYTHONPATH=sdk/python/src mypy --strict sdk/python/src console/src/quickstarts/quickstart.py`.

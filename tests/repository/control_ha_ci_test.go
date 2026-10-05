@@ -55,7 +55,7 @@ func requireHAStep(t *testing.T, job haWorkflowJob, name string) haWorkflowStep 
 func TestControlHACIRunsTheFullMatrixOnTheReusedNativeImage(t *testing.T) {
 	jobs := readHAWorkflow(t)
 	job := jobs["control-ha"]
-	if job.Runner != "ubuntu-24.04-arm" || !slices.Equal(job.Needs, []string{"container-arm64"}) || job.Timeout < 60 {
+	if job.Runner != "ubuntu-24.04-arm" || !slices.Equal(job.Needs, []string{"container-arm64"}) || job.Timeout < 90 || job.Timeout > 120 {
 		t.Fatal("full control-HA gate must reuse the native arm64 image in a separately bounded job")
 	}
 	load := requireHAStep(t, job, "Verify and load exact-source HA image")

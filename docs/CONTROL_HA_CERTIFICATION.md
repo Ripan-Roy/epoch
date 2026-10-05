@@ -1,6 +1,7 @@
 # Concurrent control-plane failure certification
 
-Status: implementation in progress on the control-HA hardening branch.
+Status: bounded runtime matrix locally verified; protected exact-head/main
+execution and beta.12 publication remain open.
 The existing regional and Kubernetes campaigns do not close this gate: their
 control restart evidence is not a concurrent-controller chaos campaign.
 
@@ -26,8 +27,9 @@ label length, canonical bounded ownership, exact nonce bytes, insufficient
 entropy, invalid labels, and refusal to adopt or challenge the predecessor's
 live lease. The complete Go race suite, vet, and build pass locally.
 
-These unit results do not prove live multi-controller failover. The acceptance
-matrix below is still required before the feature PR is ready.
+Unit results alone do not prove live multi-controller failover. The captured
+live matrix and its independently verified artifacts are described below;
+protected exact-head/main evidence is still required before promotion.
 
 ### Owner-recovery fixture
 
@@ -36,7 +38,7 @@ three and five concurrent Go processes, authenticated HTTP writes/replays,
 canonical materialization, an overlapping same-label replacement, actual lease
 owner `SIGKILL`, owner `SIGSTOP`/takeover/resume, four stale-guard commands,
 Catalog majority loss, original-token resolution, and same-volume reopen with
-all four profile digests. Its eleven fail-closed contract tests pass
+all four profile digests. Its twelve fail-closed contract tests pass
 locally and are required in CI. The clean `671fde4` candidate passed all ten
 owner-recovery checks with both three and five Go controllers. Independent
 verification checked all fourteen artifact receipts and exact before/after
@@ -101,8 +103,10 @@ status commands advance the actual retained history without claiming unlimited
 public-token retention; gRPC must explicitly reject cursor zero after the
 observed floor advances. This uses `epoch.control-ha.api-recovery/v1`; it still
 does not certify in-flight Catalog-leader unknown outcomes or production limits.
-Local Go race and fixture contract suites pass; the new live campaign has not
-yet passed and the matrix remains open.
+Local Go race and fixture contract suites pass. These generated-client cases
+are now locally verified within the complete matrix below; the standalone
+API-only runner and its schema still do not certify Catalog-leader unknown
+outcomes or production limits.
 
 The clean `0f585ed` API run passed all eight generated-client checks with
 three controllers at preparation, after owner failure, after quorum recovery,
@@ -152,12 +156,52 @@ most four times. Only a resolved, typed fencing rejection permits a separate
 attempt with a newly observed guard and token. This does not assert a two-second
 service SLO or widen the public operation-retention contract.
 
-All 29 HA fixture contract tests, the complete Go race suite, vet, and build
-pass locally. The complete live matrix has not yet passed. CI has a separate
+All 35 HA fixture contract tests, the complete Go race suite, vet, and build
+pass locally. CI has a separately bounded 120-minute
 native-arm64 HA job that consumes the already inspected exact-source node image
 from the arm64 build job, verifies its archive checksum and OCI revision, and
 retains passing or failed evidence for 30 days. It neither rebuilds that Rust
 image nor publishes it to a registry.
+
+### Locally verified bounded matrix — 5 October 2026
+
+The clean `19e02175bd5c4970236a84fedd7eeb818197b6b6` capture completed every
+runtime scenario for both controller counts, including actual history pruning
+and generated gRPC stale-cursor rejection. The original CLI then exited with
+an evidence-reader error: the request artifact is an array, but the reader
+required an object. It must not be represented as a successful original run.
+
+The regression was reproduced before correction in `e2e46e6`. That correction
+adds a distinct array reader without weakening object-only manifest readers,
+retains nested duplicate-key rejection, and moves complete verification inside
+the campaign's failure handling. Future verification failures rewrite both
+the manifest and failure record as failed instead of leaving a passed manifest.
+It does not change the captured Go/Rust production code or generated client.
+
+Independent verification with the corrected reader now passes against the
+unchanged captured manifest and all 32 checksum-bound artifacts. The original
+source identity and bytes are preserved; this is a reverified capture, not a
+claim that the runtime was rerun at the verifier-fix revision.
+
+| Observation | Three controllers | Five controllers |
+|---|---:|---:|
+| Owner/recovery checks | 10/10 | 10/10 |
+| API/recovery checks | 11/11 | 11/11 |
+| Pending callers when the real Catalog leader was stopped | 3 | 5 |
+| Exact retained operation witnesses | 20 | 24 |
+| Desired resources checked across recovery phases | 135 | 135 |
+| Observed history floor / latest cursor | 29 / 4,124 | 29 / 4,124 |
+| Exact profile digests before/after all-voter reopen | 4/4 | 4/4 |
+
+The canonical manifest SHA-256 is
+`0e4d3ffcfebd283002fbabe691430fc3b93187c80a2f47390a7ed8aa4e2d8e0d`.
+The node image revision is `fed6b59`, with image ID
+`sha256:1ee8ef6f46297f0071174e5661cc78ab49b8a7cf6798018d7cdc17dc74c94a64`;
+the campaign checked that its Rust production source matched the capture.
+Separate receipts identify the controller and generated-client binaries.
+The fresh protected CI campaign must still run and independently verify the
+current exact source. No public retention, clock-skew, mixed-version, scale,
+long-soak, or production-SLO gate is inherited from this bounded local proof.
 
 ```sh
 EPOCH_REGIONAL_IMAGE=epoch/node:ha-candidate \

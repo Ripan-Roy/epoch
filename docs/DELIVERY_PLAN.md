@@ -58,7 +58,10 @@ recovery-hardening branch has observed a reproducing regression red and then
 green, adds correlated bounded transport feedback and learner-baseline refresh,
 and requires rebuilt regional and protected exact-main evidence before release.
 Concurrent control-process owners also receive fresh incarnation nonces;
-the full concurrent-control certification matrix remains open.
+the complete bounded concurrent-control runtime matrix is locally verified
+from clean `19e0217` evidence, independently reverified after the `e2e46e6`
+request-array reader correction. Protected exact-head/main certification
+remains open. See [provenance](CONTROL_HA_CERTIFICATION.md).
 
 The published release train extends the authenticated regional
 multi-tablet M1/M2 boundary. Protected `main` evidence covers the
@@ -66,7 +69,7 @@ consensus-backed catalog and merged replicated multi-instance hosted control,
 atomic managed lifecycle commands, and a resumable operation/change surface.
 The latter is verified by [CI 37143501331](https://github.com/Ripan-Roy/epoch/actions/runs/37143501331)
 and [Pages 37143501271](https://github.com/Ripan-Roy/epoch/actions/runs/37143501271).
-Dedicated concurrent multi-control chaos and public operation-retention
+Protected dedicated concurrent multi-control chaos and public operation-retention
 guarantees remain open. Published evidence also covers topology
 admission, quorum-confirmed leader reads,
 all four regional profile SDKs, multi-shard Stream routing, atomic batches,

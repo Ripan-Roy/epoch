@@ -22,7 +22,13 @@ notes explicitly list additional verified artifacts.
   reject changed scope, missing protobuf witnesses, or incomplete phases.
   Ambiguous retention sends retry identical bytes under bounded native HTTP
   deadlines. A separate CI job verifies and reuses its exact-source native
-  arm64 image rather than rebuilding it; full live certification remains open.
+  arm64 image rather than rebuilding it. Both local runtime fleets completed;
+  protected exact-head/main certification remains open.
+- Correct the full HA evidence reader to accept checksum-bound request arrays
+  while keeping manifests object-only and rejecting duplicate keys. Complete
+  verification now runs inside failure handling so invalid artifacts cannot
+  leave a passed manifest. The unchanged three/five-controller capture was
+  independently reverified; the original failed CLI exit is documented.
 - Add fully qualified HTTP resource GET/DELETE paths, preserving tenant
   authorization, optimistic concurrency, exact keys, and the existing managed
   delete coordinator. Legacy three-segment item paths remain supported.
