@@ -130,8 +130,10 @@ class EpochClientTests(unittest.TestCase):
             "active",
             only_if_absent=True,
         )
-        self.client.cache_increment("sessions", "visits", delta=2)
-        self.client.cache_delete("sessions", "user-42")
+        self.transport.response = {"value": 2}
+        self.assertEqual({"value": 2}, self.client.cache_increment("sessions", "visits", delta=2))
+        self.transport.response = None
+        self.assertIsNone(self.client.cache_delete("sessions", "user-42"))
 
         set_request, increment_request, delete_request = self.transport.requests
         self.assertTrue(set_request[2]["only_if_absent"])
@@ -159,7 +161,9 @@ class EpochClientTests(unittest.TestCase):
         self.assertFalse(EpochAPIError(400, "invalid_argument", "invalid").retryable)
 
     def test_stream_group_operations_map_to_native_routes(self) -> None:
+        self.transport.response = None
         self.client.commit_stream_offset("orders", "billing", partition=2, next_offset=7)
+        self.transport.response = {"next_offset": 7, "lag": 0}
         self.client.stream_lag("orders", "billing", partition=2)
 
         self.assertEqual(
@@ -181,10 +185,19 @@ class EpochClientTests(unittest.TestCase):
         )
 
     def test_queue_lifecycle_operations_map_to_native_routes(self) -> None:
-        self.client.queue_counts("jobs")
-        self.client.extend_lease("jobs", "lease-1", extension_ms=5_000)
-        self.client.reject("jobs", "lease-2", reason="invalid")
-        self.client.redrive("jobs", "message-1")
+        self.transport.response = {"ready": 2}
+        self.assertEqual({"ready": 2}, self.client.queue_counts("jobs"))
+        self.transport.response = {"lease_deadline_ms": 5_000}
+        self.assertEqual(
+            {"lease_deadline_ms": 5_000},
+            self.client.extend_lease("jobs", "lease-1", extension_ms=5_000),
+        )
+        self.transport.response = {"dead_lettered": True}
+        self.assertEqual(
+            {"dead_lettered": True}, self.client.reject("jobs", "lease-2", reason="invalid")
+        )
+        self.transport.response = None
+        self.assertIsNone(self.client.redrive("jobs", "message-1"))
 
         self.assertEqual(self.transport.requests[0][1], "/v1/queues/jobs/counts")
         self.assertEqual(
@@ -213,9 +226,14 @@ class EpochClientTests(unittest.TestCase):
             transform=EventTransform(add_headers={"routed-by": "epoch"}),
         )
 
-        self.client.upsert_subscription("events", subscription)
-        self.client.replay_bus("events", from_ms=100, to_ms=200, event_type="order.*")
-        self.client.remove_subscription("events", "priority-orders")
+        self.transport.response = {"version": 1}
+        self.assertEqual({"version": 1}, self.client.upsert_subscription("events", subscription))
+        self.transport.response = []
+        self.assertEqual(
+            [], self.client.replay_bus("events", from_ms=100, to_ms=200, event_type="order.*")
+        )
+        self.transport.response = None
+        self.assertIsNone(self.client.remove_subscription("events", "priority-orders"))
 
         method, path, body, query = self.transport.requests[0]
         self.assertEqual(

@@ -6,6 +6,14 @@ from dataclasses import dataclass
 from typing import Any
 
 
+class EpochProtocolError(ValueError):
+    """An invalid server response; mutation outcomes must not be inferred.
+
+    This is not an automatic retry signal. A caller must retain the original
+    idempotency token and resolve an uncertain mutation before retrying it.
+    """
+
+
 @dataclass(slots=True)
 class EpochAPIError(Exception):
     """An HTTP or typed Epoch API failure."""

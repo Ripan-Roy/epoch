@@ -6,6 +6,79 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+### SDK contract and management candidate
+
+- Require immutable image IDs, canonical frozen source/image revisions, and
+  identical cross-fleet SDK runtime builds in direct independent verification
+  as well as CI aggregation. Five red-to-green groups preserve historical
+  capture identity; the unchanged complete `dc8e44f` proof still verifies.
+- Add the owned public Go/Java/Python real-Catalog failure campaign and its
+  independent verifier, composing complete native HA evidence with original
+  batch/OCC bytes, pending-call lost acknowledgements, every live controller's
+  durable operation outcome, owner-watch reconnect, quorum/reopen recovery,
+  and actual expiration of durable SDK checkpoints. Passing live campaign
+  artifacts now pass locally at clean `dc8e44f`, with all 516 receipts and both
+  fleets independently verified. Protected delivery remains required; this is
+  bounded SDK/Catalog evidence, not production certification.
+- Compose public SDK Catalog certification into the existing parallel
+  three/five-controller native-image CI workers, without a duplicate cluster
+  campaign. Require all three runtimes and receipt-safe independent aggregation;
+  incompatible, skipped, failed, or missing fleet proofs fail the protected gate.
+  Correct the new stale-checkpoint harness to expect Catalog's documented
+  `ABORTED`, preserving original cursors and forbidding ACK/reset. The failed
+  `8fde109` live artifact remains failed; the fresh `dc8e44f` full campaign passes
+  both fleets without changing retention, timeouts, or ACK invariants.
+- Generate Java management bindings locally with exact Protobuf 35.1 and
+  checksum-pinned gRPC-Java 1.84.0 compilers. The 61 generated sources remain
+  byte-identical; CI installs both compilers and retains non-mutating freshness,
+  stale/missing-source, and foreign-inventory rejection. Nine generation
+  contracts now cover compiler integrity, unsupported platforms, safe
+  installation, and the removal of Java's remote Buf quota dependency.
+- Add public Go/Java/Python Catalog-fault probes with byte-bound workload plans,
+  fsynced application checkpoints before watch ACK, and a private exact-command
+  lost-response relay. All three probes preserve original token/zero-OCC bytes
+  and unknown outcomes after real socket loss in the mandatory cross-language
+  fixture. The separate real Rust Catalog campaign now passes locally; its
+  exact-source protected delivery remains open.
+- Validate Python standalone/regional response shapes and strict JSON without
+  exposing response payloads or retrying uncertain mutations. Whole-package
+  strict typing now runs locally and in CI, not only on the displayed quickstart.
+- Add the Go management client for all seven generated RegionalAdmin methods
+  with explicit trust, bounded endpoint failover, original deadlines/tokens/OCC
+  presence, conservative unknown-outcome information, and typed receipt checks.
+- Add explicitly acknowledged scanned-cursor watches that preserve filters,
+  reject stale/malformed history, stop on cancellation, and never reset their
+  endpoint budget. List receipts enforce every requested governance filter.
+- Add real generated TLS 1.3/mTLS wire tests and a compiled seven-method example.
+  Public-SDK Catalog fault certification,
+  protected delivery, and native data streaming remain open; this candidate
+  does not claim complete SDK delivery or production readiness.
+- Add pinned, namespaced Python management messages and typed gRPC stubs,
+  exact generation checks, optional dependencies, and shared Go/Python wire
+  vectors for omitted/zero/maximum uint64 generation presence. This is a
+  generated-contract foundation; separate live client tests cover RPC behavior.
+- Add the public Python seven-method management client with a single original
+  deadline, frozen token/OCC-preserving bounded failover, redacted status/cause
+  errors, exact receipt/governance checks, cancellation, and acknowledged
+  scanned-cursor watches. Twenty-one real-gRPC regression groups and all seven
+  calls against a TLS-1.3-only Go server pass locally. Python gRPC relies on
+  the controller's enforced TLS minimum; it does not independently enforce 1.3.
+- Embed the exact typed Python seven-method example alongside Go in candidate
+  docs, and require the cross-language TLS/mTLS probe in Python CI.
+  real public-SDK Catalog faults, native streaming, and protected delivery remain open.
+- Refuse unsupported encrypted client keys without an OpenSSL stdin password
+  prompt in the shared Python HTTP/management trust loader; identity validation
+  remains fail-closed before channel creation.
+- Add the Java seven-method management client, pinned generated messages,
+  immutable receipts, unsigned cursor/OCC checks, one-deadline failover,
+  caller cancellation, defensive binary metadata, and fixed-print errors.
+  Watches request one inbound page at a time and require explicit scanned ACK.
+  Seventeen regressions plus all seven Go TLS 1.3/mTLS calls pass locally;
+  wrong/missing/foreign identity and TLS-1.2-only server refusal are verified.
+  CI checks generated-source freshness/inventory and compiles the exact Java
+  example displayed alongside Go/Python. Real Catalog faults, protected delivery,
+  full native SDK parity, and package publication remain open.
+
 ### Control-plane hardening
 
 - Run the complete three/five-controller HA fleets on separate CI runners and

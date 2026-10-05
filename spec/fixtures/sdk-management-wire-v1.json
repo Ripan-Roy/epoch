@@ -1,0 +1,29 @@
+{
+  "schema": "epoch.sdk.management-wire/v1",
+  "request_token": "t",
+  "name": {
+    "organization": "a",
+    "project": "p",
+    "environment": "e",
+    "namespace": "n",
+    "kind": 1,
+    "name": "x"
+  },
+  "vectors": [
+    {
+      "expected_generation": null,
+      "expected_presence": false,
+      "protobuf_hex": "0a017412110a01611201701a016522016e2801320178"
+    },
+    {
+      "expected_generation": 0,
+      "expected_presence": true,
+      "protobuf_hex": "0a017412110a01611201701a016522016e28013201781800"
+    },
+    {
+      "expected_generation": 18446744073709551615,
+      "expected_presence": true,
+      "protobuf_hex": "0a017412110a01611201701a016522016e280132017818ffffffffffffffffff01"
+    }
+  ]
+}

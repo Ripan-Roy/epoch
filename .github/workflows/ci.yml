@@ -139,19 +139,37 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
-      - run: python -m pip install mypy==2.1.0 ruff==0.15.19
+      - run: python -m pip install 'sdk/python[management,management-dev]' mypy==2.1.0 ruff==0.15.19
+      - name: Reject stale Python management bindings
+        run: python scripts/generate-python-management.py --check
       - run: >-
           ruff format --check sdk/python tests/soak tests/integration/*.py
           console/src/quickstarts/quickstart.py
+          scripts/generate-python-management.py
+          scripts/generate-java-management.py
       - run: >-
           ruff check sdk/python tests/soak tests/integration/*.py
           console/src/quickstarts/quickstart.py
-      - name: Compile and type-check displayed Python quickstart
+      - run: >-
+          ruff check --config sdk/python/pyproject.toml
+          scripts/generate-python-management.py scripts/generate-java-management.py
+      - name: Compile and type-check Python SDK and displayed quickstart
         run: |
           python -m py_compile console/src/quickstarts/quickstart.py
-          PYTHONPATH=sdk/python/src mypy --strict console/src/quickstarts/quickstart.py
+          python -m py_compile sdk/python/examples/management.py
+          PYTHONPATH=sdk/python/src mypy --strict sdk/python/src sdk/python/examples/management.py console/src/quickstarts/quickstart.py
       - name: Run Python SDK tests
         run: PYTHONPATH=sdk/python/src python -m unittest discover -s sdk/python/tests -v
+      - name: Test public Python fault-probe and durable checkpoints
+        run: make test-management-sdk-runner
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: go.sum
+      - name: Prove Python management on a TLS-1.3-only Go server
+        env:
+          EPOCH_PYTHON_MANAGEMENT_PROBE: python
+        run: go test -race ./sdk/go/epoch -run '^TestManagementPythonTLS13GeneratedWire$' -count=1
       - name: Run resumable soak evidence tests
         run: python -m unittest discover -s tests/soak -p 'test_*.py' -v
       - name: Run Kubernetes campaign contract tests
@@ -173,6 +191,23 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: go.sum
+      - name: Install pinned Buf CLI for Java contracts
+        run: go install github.com/bufbuild/buf/cmd/buf@v1.72.0
+      - name: Install checksum-pinned local Java contract compilers
+        env:
+          EPOCH_GRPC_JAVA_PLUGIN: ${{ github.workspace }}/.cache/grpc-java-1.84.0/bin/protoc-gen-grpc-java
+        run: |
+          protoc_root="${RUNNER_TEMP}/java-protoc-35.1"
+          ./scripts/install-protoc.sh "$protoc_root"
+          echo "${protoc_root}/bin" >> "$GITHUB_PATH"
+          mkdir -p .cache
+          python3 scripts/generate-java-management.py --install-plugin "${GITHUB_WORKSPACE}/.cache/grpc-java-1.84.0"
+      - name: Reject stale Java management bindings and verify generation gates
+        run: python3 -m unittest discover -s tests/integration -p test_java_management_generation.py -v
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           distribution: temurin
@@ -180,6 +215,13 @@ jobs:
           cache: maven
           cache-dependency-path: sdk/java/pom.xml
       - run: sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress verify
+      - name: Prove Java management TLS 1.3 and mTLS against Go
+        run: |
+          sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress \
+            dependency:build-classpath -Dmdep.outputFile=target/runtime-classpath.txt
+          EPOCH_JAVA_MANAGEMENT_PROBE=java \
+          EPOCH_JAVA_MANAGEMENT_CLASSPATH="$(pwd)/sdk/java/target/classes:$(pwd)/sdk/java/target/test-classes:$(cat sdk/java/target/runtime-classpath.txt)" \
+            go test -race ./sdk/go/epoch -run '^TestManagementJavaTLS13GeneratedWire$' -count=1
       - name: Compile displayed Java quickstart
         run: |
           sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress \
@@ -188,7 +230,8 @@ jobs:
           javac --release 25 -Xlint:all -Werror \
             -cp "sdk/java/target/classes:$(cat sdk/java/target/runtime-classpath.txt)" \
             -d sdk/java/target/docs-quickstart \
-            console/src/quickstarts/Quickstart.java
+            console/src/quickstarts/Quickstart.java \
+            sdk/java/examples/ManagementExample.java
 
   web:
     name: Console format, lint, typecheck, build
@@ -238,6 +281,23 @@ jobs:
           cache: maven
           cache-dependency-path: sdk/java/pom.xml
       - run: bash tests/integration/smoke.sh
+      - name: Prove all public SDK probes retain real transport-loss outcomes
+        env:
+          EPOCH_MANAGEMENT_PROBE_MATRIX: "1"
+          EPOCH_MANAGEMENT_GO_PROBE: ${{ runner.temp }}/management-sdk-go
+          EPOCH_MANAGEMENT_PYTHON_EXECUTABLE: python
+          EPOCH_MANAGEMENT_JAVA_EXECUTABLE: java
+        run: |
+          python -m pip install 'sdk/python[management,management-dev]'
+          sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress \
+            -DskipTests test-compile dependency:build-classpath \
+            -Dmdep.outputFile="${RUNNER_TEMP}/management-sdk-java-classpath.txt"
+          test -f sdk/java/target/test-classes/io/epoch/sdk/ManagementCatalogProbe.class
+          go build -o "${EPOCH_MANAGEMENT_GO_PROBE}" ./tests/integration/managementsdkgo
+          EPOCH_MANAGEMENT_JAVA_CLASSPATH="${GITHUB_WORKSPACE}/sdk/java/target/classes:${GITHUB_WORKSPACE}/sdk/java/target/test-classes:$(cat "${RUNNER_TEMP}/management-sdk-java-classpath.txt")"
+          export EPOCH_MANAGEMENT_JAVA_CLASSPATH
+          go test -race ./tests/integration/managementsdkproxy \
+            -run '^TestPublicProbeMatrixKeepsTransportLossUnknown$' -count=1 -v
       - name: Execute the exact displayed SDK quickstarts
         run: bash tests/integration/docs-quickstarts.sh
 
@@ -411,6 +471,20 @@ jobs:
         with:
           go-version: 1.26.5
           cache-dependency-path: go.sum
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+          cache-dependency-path: sdk/java/pom.xml
+      - name: Install public SDK Catalog campaign dependencies
+        run: |
+          python -m pip install 'sdk/python[management]'
+          PYTHONPATH=sdk/python/src:tests/integration python -m unittest \
+            test_management_sdk_catalog -v
       - name: Download the exact-source native image
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
@@ -433,11 +507,12 @@ jobs:
           EPOCH_REGIONAL_USE_EXISTING_IMAGE: "1"
           EPOCH_CONTROL_HA_CONTROLLERS: ${{ matrix.controllers }}
           EPOCH_CONTROL_HA_ARTIFACT_DIR: ${{ runner.temp }}/epoch-control-ha-fleet
+          PYTHONPATH: sdk/python/src
         run: |
-          python3 tests/integration/control_ha_full.py run-fleet \
+          python3 tests/integration/management_sdk_catalog.py run \
             --controllers "${EPOCH_CONTROL_HA_CONTROLLERS}" \
             --output "${EPOCH_CONTROL_HA_ARTIFACT_DIR}"
-          python3 tests/integration/control_ha_full.py verify-fleet \
+          python3 tests/integration/management_sdk_catalog.py verify \
             --controllers "${EPOCH_CONTROL_HA_CONTROLLERS}" \
             --manifest "${EPOCH_CONTROL_HA_ARTIFACT_DIR}/evidence.json"
       - name: Upload this fleet's passing or failed evidence
@@ -463,6 +538,11 @@ jobs:
         env:
           FLEET_RESULT: ${{ needs.control-ha-fleet.result }}
         run: test "${FLEET_RESULT}" = success
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Install independent public SDK evidence verifier
+        run: python -m pip install 'sdk/python[management]'
       - name: Download verified 3-controller proof
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
@@ -474,12 +554,14 @@ jobs:
           name: control-ha-fleet-5-${{ github.run_attempt }}
           path: ${{ runner.temp }}/epoch-control-ha-input/5
       - name: Seal and independently verify the complete failure matrix
+        env:
+          PYTHONPATH: sdk/python/src
         run: |
-          python3 tests/integration/control_ha_full.py combine \
+          python3 tests/integration/management_sdk_catalog.py combine \
             --three "${RUNNER_TEMP}/epoch-control-ha-input/3/evidence.json" \
             --five "${RUNNER_TEMP}/epoch-control-ha-input/5/evidence.json" \
             --output "${RUNNER_TEMP}/epoch-control-ha-full"
-          python3 tests/integration/control_ha_full.py verify \
+          python3 tests/integration/management_sdk_catalog.py verify \
             --manifest "${RUNNER_TEMP}/epoch-control-ha-full/evidence.json"
       - name: Upload complete control-HA evidence
         if: always()

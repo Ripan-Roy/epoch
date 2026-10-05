@@ -10,7 +10,6 @@ import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
 import java.util.Collection;
 import java.util.Objects;
-import javax.net.ssl.KeyManager;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManagerFactory;
@@ -37,6 +36,20 @@ public record TlsConfig(Path rootCa, Path clientKeyStore, char[] clientKeyStoreP
 
   SSLContext sslContext() throws IOException {
     try {
+      KeyManagerFactory identity = keyManagerFactory();
+      SSLContext context = SSLContext.getInstance("TLSv1.3");
+      context.init(
+          identity == null ? null : identity.getKeyManagers(),
+          trustManagerFactory().getTrustManagers(),
+          null);
+      return context;
+    } catch (GeneralSecurityException error) {
+      throw new IOException("could not build Epoch TLS context", error);
+    }
+  }
+
+  TrustManagerFactory trustManagerFactory() throws IOException {
+    try {
       KeyStore trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
       trustStore.load(null);
       Collection<? extends Certificate> certificates;
@@ -53,23 +66,27 @@ public record TlsConfig(Path rootCa, Path clientKeyStore, char[] clientKeyStoreP
       TrustManagerFactory trustManagers =
           TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
       trustManagers.init(trustStore);
-
-      KeyManager[] keyManagers = null;
-      if (clientKeyStore != null) {
-        KeyStore identity = KeyStore.getInstance("PKCS12");
-        try (InputStream input = Files.newInputStream(clientKeyStore)) {
-          identity.load(input, clientKeyStorePassword);
-        }
-        KeyManagerFactory factory =
-            KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
-        factory.init(identity, clientKeyStorePassword);
-        keyManagers = factory.getKeyManagers();
-      }
-      SSLContext context = SSLContext.getInstance("TLSv1.3");
-      context.init(keyManagers, trustManagers.getTrustManagers(), null);
-      return context;
+      return trustManagers;
     } catch (GeneralSecurityException error) {
-      throw new IOException("could not build Epoch TLS context", error);
+      throw new IOException("could not build Epoch TLS trust", error);
+    }
+  }
+
+  KeyManagerFactory keyManagerFactory() throws IOException {
+    if (clientKeyStore == null) {
+      return null;
+    }
+    try {
+      KeyStore identity = KeyStore.getInstance("PKCS12");
+      try (InputStream input = Files.newInputStream(clientKeyStore)) {
+        identity.load(input, clientKeyStorePassword);
+      }
+      KeyManagerFactory factory =
+          KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+      factory.init(identity, clientKeyStorePassword);
+      return factory;
+    } catch (GeneralSecurityException error) {
+      throw new IOException("could not build Epoch TLS identity", error);
     }
   }
 }
