@@ -8,6 +8,11 @@ notes explicitly list additional verified artifacts.
 
 ### Control-plane hardening
 
+- Prove concurrent maximum-size batches through identical durable operations,
+  exact creation results, and complete ordered change history instead of
+  treating reconstructed-response replay flags as a mutation count. Retain
+  every controller's initial protobuf witnesses across recovery and reject
+  altered or incomplete evidence. Protected HA certification remains open.
 - Preserve the exact optional caller generation precondition when replaying
   managed deletion: omitted, explicit zero, and explicit nonzero are distinct.
   Resolve a completed token before testing a recreated resource's generation,

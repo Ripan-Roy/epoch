@@ -92,6 +92,12 @@ def full_bundle_fixture(root: Path) -> Path:
                 "lookup_bindings": references,
                 "watch_checkpoint": 100,
                 "watch_matching_cursors": [1, 2],
+                "initial_batch": {
+                    "request_proto": "CgFh",
+                    "response_proto": ["CgFi"] * fleet["controller_count"],
+                    "operation_proto": ["CgFj"] * fleet["controller_count"],
+                    "changes_proto": "CgFk",
+                },
             }
             soak.atomic_write(
                 directory / f"api-{phase}.json", soak.canonical_bytes(proof)
@@ -103,6 +109,39 @@ def full_bundle_fixture(root: Path) -> Path:
 
 
 class FullEvidenceTest(unittest.TestCase):
+    def test_v2_bundle_requires_initial_witnesses_even_when_all_receipts_match(
+        self,
+    ) -> None:
+        self._rewrite_initial_witnesses(legacy=False)
+
+    def test_legacy_bundle_remains_readable_with_its_original_contract(self) -> None:
+        self._rewrite_initial_witnesses(legacy=True)
+
+    def _rewrite_initial_witnesses(self, *, legacy: bool) -> None:
+        soak = control_ha_full.owner.soak
+        with tempfile.TemporaryDirectory(prefix="epoch-full-bundle-test-") as folder:
+            root = Path(folder)
+            manifest = full_bundle_fixture(root)
+            for count in (3, 5):
+                for phase in control_ha_full.api.API_PHASES:
+                    path = root / f"controllers-{count}/api-{phase}.json"
+                    proof = soak.load_json(path)
+                    proof.pop("initial_batch")
+                    if legacy:
+                        proof["schema"] = control_ha_full.api.LEGACY_GRPC_SCHEMA
+                    soak.atomic_write(path, soak.canonical_bytes(proof))
+            evidence = soak.load_json(manifest)
+            evidence["artifacts"] = [
+                soak.file_receipt(root / receipt["path"], root)
+                for receipt in evidence["artifacts"]
+            ]
+            soak.atomic_write(manifest, soak.canonical_bytes(evidence))
+            if legacy:
+                control_ha_full.verify_full_bundle(manifest)
+            else:
+                with self.assertRaises(ValueError):
+                    control_ha_full.verify_full_bundle(manifest)
+
     def test_full_bundle_reads_checksum_bound_original_request_arrays(self) -> None:
         with tempfile.TemporaryDirectory(prefix="epoch-full-bundle-test-") as folder:
             control_ha_full.verify_full_bundle(full_bundle_fixture(Path(folder)))
@@ -151,6 +190,40 @@ class FullEvidenceTest(unittest.TestCase):
             soak.atomic_write(path, path.read_bytes() + b"\n")
             with self.assertRaisesRegex(ValueError, "artifact checksum mismatch"):
                 control_ha_full.verify_full_bundle(manifest)
+
+    def test_initial_batch_witnesses_cannot_change_or_disappear_after_recovery(
+        self,
+    ) -> None:
+        soak = control_ha_full.owner.soak
+        for field in (
+            "request_proto",
+            "response_proto",
+            "operation_proto",
+            "changes_proto",
+            None,
+        ):
+            with (
+                self.subTest(field=field),
+                tempfile.TemporaryDirectory(prefix="epoch-full-bundle-test-") as folder,
+            ):
+                root = Path(folder)
+                manifest = full_bundle_fixture(root)
+                path = root / "controllers-5/api-after-owner.json"
+                proof = soak.load_json(path)
+                if field is None:
+                    proof.pop("initial_batch")
+                else:
+                    proof["initial_batch"][field] = "altered"
+                soak.atomic_write(path, soak.canonical_bytes(proof))
+                document = soak.load_json(manifest)
+                replacement = soak.file_receipt(path, root)
+                document["artifacts"] = [
+                    replacement if original["path"] == replacement["path"] else original
+                    for original in document["artifacts"]
+                ]
+                soak.atomic_write(manifest, soak.canonical_bytes(document))
+                with self.assertRaises(ValueError):
+                    control_ha_full.verify_full_bundle(manifest)
 
     def test_full_cli_runs_final_verification_inside_campaign(self) -> None:
         with (

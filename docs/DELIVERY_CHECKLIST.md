@@ -114,6 +114,14 @@ production gates.
 | HA-12 | Certify concurrent controller owner recovery | Go processes + Rust Catalog + test infrastructure | 🟡 | Clean `671fde4` passed ten owner-recovery checks with both three and five controllers, independently verifying fourteen artifact receipts and exact four-profile digests. Twelve owner-fixture contract tests now pass, including final-verifier failure handling. The complete local matrix in HA-13 additionally covers gRPC batches/OCC, authorization/preconditions, watch resume/staleness, Catalog-leader unknown outcomes, and delete/recreate. Protected exact-head/main execution remains; owner-only evidence does not close CTRL-001/CTRL-002. See [certification](CONTROL_HA_CERTIFICATION.md). |
 | HA-13 | Prove the complete bounded concurrent-control matrix | Generated gRPC + actual Go/Rust processes + evidence verifier | 🟡 | Clean `19e0217` completed all runtime scenarios with three/five controllers: 42 owner/API flags, both real Catalog-leader lost-ack cases, 20/24 exact operation witnesses, 135 desired resources per fleet, four matching profile digests per fleet, and stale gRPC rejection at real history floor 29. The original CLI failed on the request-array reader; regression-tested `e2e46e6` independently verifies the unchanged capture and all 32 receipts, without changing its source identity or claiming a rerun. All 35 HA contract tests and eight soak/evidence tests pass. Future verification failure produces failed manifests. Protected exact-head/main execution and publication remain required; beta.12 is still untagged. See [certification](CONTROL_HA_CERTIFICATION.md). |
 
+The current HA promotion gate is not green: PR #149 CI `37295153226` passed
+its three-controller fleet but failed the five-controller initial-batch
+replay-flag assertion. The repair replaces response-flag counting with exact
+cross-controller durable-operation, resource, and 128-event history proof.
+Its local Go regressions and 39 harness tests pass; fresh complete local and
+protected exact-head/main evidence remains required. See the replay-receipt
+finding in [control-HA certification](CONTROL_HA_CERTIFICATION.md).
+
 ## Current compatibility delivery: Redis, Kafka, and RabbitMQ
 
 | ID | Checklist item | Boundary | State | Evidence / acceptance |

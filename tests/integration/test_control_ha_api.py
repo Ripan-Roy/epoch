@@ -29,6 +29,41 @@ def api_evidence_fixture() -> dict:
 
 
 class APIEvidenceContractTest(unittest.TestCase):
+    def test_v2_initial_batch_requires_all_canonical_protobuf_witnesses(self) -> None:
+        proof = {
+            "schema": control_ha_api.GRPC_SCHEMA,
+            "initial_batch": {
+                "request_proto": "CgFh",
+                "response_proto": ["CgFi"] * 5,
+                "operation_proto": ["CgFj"] * 5,
+                "changes_proto": "CgFk",
+            },
+        }
+        control_ha_api.validate_initial_batch_witness(proof, 5)
+        for mutate in (
+            lambda value: value.pop("initial_batch"),
+            lambda value: value.update(initial_batch=None),
+            lambda value: value["initial_batch"].update(request_proto=""),
+            lambda value: value["initial_batch"].update(changes_proto="not-base64"),
+            lambda value: value["initial_batch"].update(response_proto=["CgFi"] * 4),
+            lambda value: value["initial_batch"].update(operation_proto=["CgFj"] * 6),
+            lambda value: value["initial_batch"].update(operation_proto="CgFj"),
+            lambda value: value["initial_batch"]["operation_proto"].__setitem__(
+                4, True
+            ),
+            lambda value: value["initial_batch"]["response_proto"].__setitem__(
+                4, "CgFh="
+            ),
+        ):
+            broken = copy.deepcopy(proof)
+            mutate(broken)
+            with self.assertRaises(ValueError):
+                control_ha_api.validate_initial_batch_witness(broken, 5)
+        # Historical v1 captures retain their original, narrower meaning.
+        control_ha_api.validate_initial_batch_witness(
+            {"schema": control_ha_api.LEGACY_GRPC_SCHEMA}, 5
+        )
+
     def test_api_cli_runs_final_verification_inside_campaign(self) -> None:
         with (
             mock.patch("sys.argv", ["control_ha_api.py", "run", "--output", "/proof"]),

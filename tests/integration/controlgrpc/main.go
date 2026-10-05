@@ -25,7 +25,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
-const proofSchema = "epoch.control-ha.grpc-api/v1"
+const proofSchema = "epoch.control-ha.grpc-api/v2"
 
 type operationWitness struct {
 	Kind      string     `json:"kind"`
@@ -43,6 +43,7 @@ type apiProof struct {
 	WatchCheckpoint uint64             `json:"watch_checkpoint"`
 	WatchCursors    []uint64           `json:"watch_matching_cursors"`
 	LookupBindings  []json.RawMessage  `json:"lookup_bindings,omitempty"`
+	InitialBatch    *maximumBatchProof `json:"initial_batch,omitempty"`
 }
 
 type clients struct {
@@ -113,6 +114,9 @@ func run(phase, endpoints, prefix string, count int, state, lookupPlan string) (
 		}
 		if fleet.proof.Schema != proofSchema || fleet.proof.ControllerCount != count || len(fleet.proof.Operations) == 0 || len(fleet.proof.Desired) < 128 {
 			return errors.New("missing or incompatible generated-client prepare evidence")
+		}
+		if err := validateMaximumBatchProof(fleet.proof.InitialBatch, count); err != nil {
+			return err
 		}
 		switch phase {
 		case "bind-operations":
@@ -245,25 +249,15 @@ func (fleet *clients) prepare() error {
 		initial.Resources = append(initial.Resources, batchItem(scopedName(fmt.Sprintf("ha-grpc-item-%03d", index)), "initial", 0))
 	}
 	results, failures := concurrently(len(fleet.connections), func(index int) (*epochv1.BatchApplyResourcesResponse, error) { return fleet.apply(index, initial) })
-	newOutcomes := 0
+	fleet.proof.InitialBatch = &maximumBatchProof{Request: marshal(initial)}
 	for index, response := range results {
 		if failures[index] != nil {
 			return fmt.Errorf("maximum batch at controller %d: %w", index, failures[index])
 		}
-		if len(response.GetResults()) != 128 {
-			return errors.New("maximum batch returned a partial result")
-		}
-		if !response.GetReplayed() {
-			newOutcomes++
-		}
-		for _, result := range response.GetResults() {
-			if result.GetResource().GetGeneration() != 1 || !result.GetCreated() || !result.GetChanged() {
-				return errors.New("maximum batch altered its retained creation outcome")
-			}
-		}
+		fleet.proof.InitialBatch.Responses = append(fleet.proof.InitialBatch.Responses, marshal(response))
 	}
-	if newOutcomes != 1 {
-		return fmt.Errorf("identical concurrent tokens created %d independent outcomes", newOutcomes)
+	if err := fleet.proveMaximumBatch(initial, results); err != nil {
+		return err
 	}
 	if err := fleet.captureBatch(initial, codes.OK); err != nil {
 		return err

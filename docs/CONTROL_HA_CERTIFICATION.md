@@ -95,6 +95,55 @@ command kinds, affected identities, and optional delete precondition presence.
 The same records are checked through surviving controllers after owner loss,
 quorum recovery, and all-voter/controller reopen.
 
+#### Concurrent replay receipt finding (5 October 2026)
+
+PR #149 CI `37295153226` completed the three-controller fleet but failed the
+five-controller preparation assertion that exactly one response must have
+`replayed=false`. That assertion counted response disposition flags, not
+durable effects. In `catalog_api::commit_command_with_mode`, the application
+receipt can be absent at the first read and commit before the subsequent
+consensus lookup; `durable_replay_receipt` then reconstructs the same original
+outcome with its replay flag set. No contract promises that one concurrent
+caller must observe the non-reconstructed receipt.
+
+The replacement check requires all controllers to return exactly the 128
+requested generation-one resources with their original specs and creation
+flags, resolve the identical successful proposal/token/command and complete
+affected-resource set, and expose exactly 128 contiguous desired-creation
+events matching that operation's cursor interval. Per-item and batch replay
+flags must still agree. It does not infer a durable mutation count from those
+flags. Actual response, operation, and change protobufs are retained in the
+`initial_batch` witness; generated recovery phases revalidate their complete
+typed contents, and the bundle verifier rejects changed or dropped witnesses
+across phases even when artifact checksums are recomputed. Fresh generated
+proofs use `epoch.control-ha.grpc-api/v2`, which requires complete canonical
+protobuf witnesses from every controller. Historical v1 captures remain
+readable under their original narrower guarantees; a fault phase cannot
+downgrade its schema or drop an existing witness.
+
+Five Go regression groups cover reconstructed and original receipts,
+partial/altered responses, disagreeing or malformed operations, missing or
+foreign events, and incomplete or invalid serialized witnesses. The 39 HA
+fixture contract tests pass locally. This does not turn the failed CI run into
+passing evidence: a fresh complete local and protected exact-head/main
+campaign is still required.
+
+The focused preparation probe at
+`/private/tmp/epoch-ha-batch-probe.D4I8lw` passed against real three/five Go
+controllers and native voters: 17/19 retained operations and 135 desired
+resources per fleet. Generated decoding observed one original reply and
+two/four replayed replies, all resolving one proposal ID. This preliminary
+debug capture used the v1 schema with the new witnesses before the v2 schema
+freeze; it is neither a frozen full campaign nor a reproduction of CI's
+all-replayed interleaving. The source analysis and reconstructed-receipt
+regressions cover that allowed disposition; full v2 fault evidence remains
+required. The final local `make check build` gate passed after the v2 changes,
+with its log retained alongside the focused probe.
+
+GitHub `main` protection now additionally requires the GitHub Actions
+`Concurrent control-plane failure matrix` check. All nine previous checks,
+strict up-to-date enforcement, and administrator enforcement remain intact.
+
 The candidate also exercises scoped-reader operation lookup, partial and mixed
 affected-resource sets, missing credentials, completed/missing delete retries
 against recreated resources, and filtered two-item watches that disconnect and
