@@ -285,6 +285,42 @@ def validate_operation(request: Any, operation: Any) -> None:
         )
 
 
+def validate_batch_receipt(request: Any, result: Any) -> None:
+    # A reconstructed first receipt may be replay-marked. Operation identity
+    # and the exact committed creation page, not flags, prove durable effects.
+    if len(result.results) != len(request.resources) or any(
+        not item.created
+        or not item.changed
+        or item.resource.generation != 1
+        or item.resource.name != original.name
+        or item.resource.spec != original.spec
+        for item, original in zip(result.results, request.resources, strict=True)
+    ):
+        raise ValueError(
+            "Catalog did not acknowledge complete original SDK batch creations"
+        )
+
+
+def validate_creation_page(request: Any, operation: Any, page: Any) -> None:
+    validate_operation(request, operation)
+    if (
+        len(page.changes) != len(request.resources)
+        or page.next_cursor != operation.last_change_cursor
+    ):
+        raise ValueError("missing exact atomic SDK batch creation history")
+    for index, original in enumerate(request.resources):
+        change = page.changes[index]
+        if (
+            change.cursor != operation.first_change_cursor + index
+            or change.kind != messages.RESOURCE_CHANGE_KIND_DESIRED_APPLIED
+            or change.name != original.name
+            or change.generation != 1
+        ):
+            raise ValueError(
+                "SDK batch history repeated, skipped, or changed an original creation"
+            )
+
+
 def validate_catalog_fault(fault: dict[str, Any], batches: dict[str, Any]) -> None:
     if (
         type(fault.get("old_catalog_leader")) is not int
@@ -321,24 +357,7 @@ def validate_catalog_fault(fault: dict[str, Any], batches: dict[str, Any]) -> No
         result = decoded(
             receipt.get("response_proto"), messages.BatchApplyResourcesResponse
         )
-        if (
-            result.replayed
-            or len(result.results) != len(request.resources)
-            or any(
-                not item.created
-                or not item.changed
-                or item.replayed
-                or item.resource.generation != 1
-                or item.resource.name != original.name
-                or item.resource.spec != original.spec
-                for item, original in zip(
-                    result.results, request.resources, strict=True
-                )
-            )
-        ):
-            raise ValueError(
-                "Catalog did not acknowledge complete original SDK batch creations"
-            )
+        validate_batch_receipt(request, result)
 
 
 def validate_evidence(
@@ -727,6 +746,10 @@ class SDKFleet(full.FullFleet):
                 held,
                 timeout_seconds=60,
             )
+            owner.soak.atomic_write(
+                self.artifact_dir / "sdk-held-upstream.json",
+                owner.soak.canonical_bytes(observation),
+            )
             by_token = {
                 receipt["request_token"]: receipt for receipt in observation["receipts"]
             }
@@ -737,24 +760,7 @@ class SDKFleet(full.FullFleet):
                 result = decoded(
                     receipt["response_proto"], messages.BatchApplyResourcesResponse
                 )
-                if (
-                    result.replayed
-                    or len(result.results) != len(request.resources)
-                    or any(
-                        not item.created
-                        or not item.changed
-                        or item.replayed
-                        or item.resource.generation != 1
-                        or item.resource.name != original.name
-                        or item.resource.spec != original.spec
-                        for item, original in zip(
-                            result.results, request.resources, strict=True
-                        )
-                    )
-                ):
-                    raise ValueError(
-                        "real Catalog did not acknowledge complete original creations"
-                    )
+                validate_batch_receipt(request, result)
             old = self.leader()
             container = self.cluster.compose(
                 "ps", "--all", "--quiet", self.cluster.service(old)
@@ -835,6 +841,33 @@ class SDKFleet(full.FullFleet):
                 )
             self.operations[language] = witness
             self.checkpoints[language] = int(proof["actions"][-1]["checkpoint"])
+        if phase == "resolved":
+            histories = {}
+            for language in LANGUAGES:
+                operation = decoded(
+                    self.operations[language], messages.GetOperationResponse
+                )
+                request = self.watch_request(after=operation.first_change_cursor - 1)
+                request.batch_size = 2
+                histories[language] = [
+                    action(
+                        "WatchResourceChanges",
+                        request,
+                        checkpoint_path=str(
+                            self.checkpoint_path(language, "resolved-creation")
+                        ),
+                    )
+                ]
+            creation_proofs = self.execute("resolved-creation", histories)
+            for language, proof in creation_proofs.items():
+                validate_creation_page(
+                    self.original[language],
+                    decoded(self.operations[language], messages.GetOperationResponse),
+                    decoded(
+                        proof["actions"][0]["pages_proto"][0],
+                        messages.WatchResourceChangesResponse,
+                    ),
+                )
         # A failover list is not proof every endpoint returned the receipt.
         # Run each original token through a single-controller public SDK call.
         for index, endpoint in enumerate(endpoints):

@@ -329,6 +329,11 @@ the actual controller owner's SIGKILL. Real individually committed status churn
 must expire previously durable checkpoints before all three clients reject
 them; it never lowers retention or substitutes cursor zero.
 
+Replay flags are recorded, not counted as independent durable effects: a first
+caller may receive a reconstructed receipt after an internal commit-result race.
+The batch witness therefore requires the exact original operation and its two
+contiguous generation-one creation events, alongside complete real receipts.
+
 The independent verifier composes the complete native HA verifier with SDK
 request/response, fault, per-controller, and durable-checkpoint checks. Separate
 single-fleet schemas cannot claim both three/five-controller certification.

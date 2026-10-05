@@ -58,6 +58,8 @@ def validate_evidence(
         count = fleet["controller_count"]
         for phase in campaign.PHASES:
             expected_phases.append(phase)
+            if phase == "resolved":
+                expected_phases.append("resolved-creation")
             if phase in ("resolved", "after-owner", "after-quorum", "after-reopen"):
                 live = count - 1 if phase in ("after-owner", "after-quorum") else count
                 expected_phases.extend(
@@ -103,6 +105,10 @@ class FleetVerifier:
         if fault != self.sdk["faults"].get("catalog_leader"):
             raise ValueError("SDK Catalog fault artifact differs from its manifest")
         campaign.validate_catalog_fault(fault, batches)
+        if self.load("sdk-held-upstream.json") != fault["held"]:
+            raise ValueError(
+                "original upstream receipts changed across fault injection"
+            )
         proxy = self.load("sdk-proxy-plan.json")
         bindings = {
             binding["request_proto"]: binding["upstream_authority"]
@@ -321,6 +327,40 @@ class FleetVerifier:
                 retained = self.recovery(language, batch, workload, proof, retained)
                 endpoint_sets[phase] = set(workload["endpoints"])
                 endpoint_witnesses[phase] = set()
+            if phase == "resolved-creation":
+                operation = campaign.decoded(retained, messages.GetOperationResponse)
+                request = campaign.watch_request(
+                    after=operation.first_change_cursor - 1
+                )
+                request.batch_size = 2
+                actions = workload["actions"]
+                if (
+                    len(actions) != 1
+                    or actions[0]["method"] != "WatchResourceChanges"
+                    or actions[0]["request_proto"] != campaign.encoded(request)
+                ):
+                    raise ValueError(
+                        "SDK initial creation witness changed the exact batch cursor"
+                    )
+                observed = proof["actions"][0]
+                campaign.validate_creation_page(
+                    batch,
+                    operation,
+                    campaign.decoded(
+                        observed["pages_proto"][0],
+                        messages.WatchResourceChangesResponse,
+                    ),
+                )
+                saved = self.load(Path(actions[0]["checkpoint_path"]).name)
+                if saved != {
+                    "schema": "epoch.sdk.management.checkpoint/v1",
+                    "language": language,
+                    "next_cursor": observed["checkpoint"],
+                }:
+                    raise ValueError(
+                        "initial SDK creation history was not durably acknowledged"
+                    )
+                continue
             if "-controller-" in phase:
                 parent = phase.split("-controller-", 1)[0]
                 if (

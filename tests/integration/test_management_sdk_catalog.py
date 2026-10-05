@@ -10,6 +10,46 @@ from epoch_sdk._generated.epoch.v1 import regional_admin_pb2 as messages
 
 
 class CatalogSDKWitnessTest(unittest.TestCase):
+    def test_reconstructed_first_receipt_still_requires_exact_committed_creation_history(
+        self,
+    ):
+        request = catalog.original_batch(3, "go")
+        receipt = messages.BatchApplyResourcesResponse(replayed=True)
+        for item in request.resources:
+            receipt.results.add(
+                created=True,
+                changed=True,
+                replayed=True,
+                resource={"name": item.name, "spec": item.spec, "generation": 1},
+            )
+        catalog.validate_batch_receipt(request, receipt)
+        operation = messages.GetOperationResponse(
+            request_token=request.request_token,
+            proposal_id=41,
+            state=messages.OPERATION_STATE_SUCCEEDED,
+            affected_resources=[item.name for item in request.resources],
+            first_change_cursor=30,
+            last_change_cursor=31,
+            command_kind="apply_desired",
+        )
+        page = messages.WatchResourceChangesResponse(
+            earliest_cursor=1, latest_cursor=40, next_cursor=31
+        )
+        for index, item in enumerate(request.resources):
+            page.changes.add(
+                cursor=30 + index,
+                kind=messages.RESOURCE_CHANGE_KIND_DESIRED_APPLIED,
+                name=item.name,
+                generation=1,
+            )
+        catalog.validate_creation_page(request, operation, page)
+        page.changes[1].generation = 2
+        with self.assertRaises(ValueError):
+            catalog.validate_creation_page(request, operation, page)
+        receipt.results[0].created = False
+        with self.assertRaises(ValueError):
+            catalog.validate_batch_receipt(request, receipt)
+
     def test_successful_unary_requires_an_actual_response_witness(self):
         workload = catalog.plan(
             "read",

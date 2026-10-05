@@ -133,7 +133,7 @@ actual Rust Catalog fault certification; original-token resolution and retained
 outcome/checkpoint comparison through Catalog/owner/quorum/reopen remain open.
 
 The next SDK increment implements the owned actual-Catalog campaign plus an
-independent verifier. Eight regression groups reject altered original bytes,
+independent verifier. Nine regression groups reject altered original bytes,
 missing upstream acknowledgements, incomplete SDK phases, absent response
 witnesses, non-monotonic/foreign watch pages, and omitted final verification.
 The runner composes the complete native HA matrix with all three public clients,
@@ -141,6 +141,17 @@ exact original-token resolution at every live controller, owner watch reconnect,
 quorum/all-voter recovery, and real expiration of saved application checkpoints.
 This is implementation/contract evidence only until its frozen live campaign and
 protected CI artifacts pass; CTRL-001/CTRL-002 and DX-001 remain open.
+
+The first frozen SDK campaign (`ed23cd7`) passed all three public clients'
+live preparation, then failed its first-receipt replay-flag assertion before
+the SDK leader fault. Its manifest remains failed and owned fixtures cleaned
+up. Actual receipts preserve the exact requested spec and generation, but can
+carry `replayed=true` after the internal application-result read races commit,
+as in the native maximum-batch contract. The next candidate retains those
+receipts and instead requires the full durable original-token operation plus
+the exact two contiguous generation-one creation events for every SDK batch.
+Its new regression accepts reconstructed flags only alongside those exact
+effect witnesses; it still rejects missing/altered creations.
 
 ## How to use this register
 
