@@ -1566,33 +1566,47 @@ external. A dispatcher acknowledgement is not proof
 of an arbitrary external business side effect. See
 [Experimental Replicated Event Bus Tablet](BUS_TABLET.md).
 
-Neither the earlier single-profile modes nor the regional multi-group mode is
-the final tablet service. The core's consensus checkpoint/logical-prefix
-compaction path is not profile-native snapshotting or physical EPRS reclamation.
-Retention deletion, dynamic
-membership, dynamic constraint-aware placement, follower read routing,
-TLS/mTLS transport, and production identity remain absent. Regional Stream,
-Queue, Cache, and Event Bus v1 routes and repository-local Go/Java/Python
-clients are versioned application slices; Stream includes bounded atomic batch
-frames and Cache includes the complete non-deferred lifecycle, while stable
-native data gRPC, coordinated
-streaming, automatic batching, generated response types, and package releases
-remain absent. The standalone engine journal
-remains a separate single-node source of truth and is never used by a
-replicated tablet.
+The earlier isolated profile prototypes are not the final tablet service, but
+their original missing-feature list no longer describes the current regional
+runtime. Regional groups now have profile-native snapshots and physical EPRS
+reclamation, replicated retention, learner-first membership replacement,
+topology-aware placement and serialized repair/rebalance. Configured TLS/mTLS,
+bootstrap authorization, and offline pinned Ed25519 OIDC verification are
+implemented; discovery/JWKS refresh, certificate lifecycle, replicated policy,
+and production security certification remain open. See
+[regional runtime](REGIONAL_RUNTIME.md) and [security](SECURITY.md) for the
+current boundaries and evidence.
 
-Initial `epoch.v1` Protobuf source defines common resource/envelope types and a
-small `RegionalAdminService`; Buf generation is configured for Go. It is an
-early boundary scaffold, not the complete package split or native data API in
-this document. `epoch-control` serves the current four-method RegionalAdmin
-subset on gRPC port 8081 and the health/registry/browser BFF on HTTP port 8080.
-Rust port 7600 remains reserved for the future native data gRPC service.
+Regional Stream, Queue, Cache, and Event Bus v1 routes and repository-local
+Go/Java/Python clients remain versioned application slices. Stream includes
+bounded atomic batch frames and coordinated session/claim primitives; Cache
+includes the complete non-deferred lifecycle. Stable native data gRPC,
+persistent/cooperative SDK streaming, automatic client batching, generated
+per-field response models, and package releases remain open. Python's separate
+response-shape and whole-package typing candidate does not close those gaps.
+The standalone engine journal remains a separate single-node source of truth
+and is never used by a replicated tablet.
 
-OIDC authentication metadata, typed `google.rpc.Status` details,
-public native mutation-status lookup, native bidirectional streaming and
+The `epoch.v1` Protobuf source defines common resource/envelope types and the
+versioned `RegionalAdminService`; Buf generation is configured for Go. With
+the replicated Catalog registry, `epoch-control` implements all seven methods:
+`ApplyResource`, `GetResource`, `ListResources`, `DeleteResource`,
+`BatchApplyResources`, `GetOperation`, and `WatchResourceChanges` on gRPC port
+8081. Its health/registry/browser BFF uses HTTP port 8080. The local legacy
+registry supports the original CRUD subset and explicitly rejects the three
+replicated-only operations; it does not simulate their durability or watch
+contracts. Management acceptance and readiness, exact token/OCC presence,
+operation authorization, and scanned watch cursors are specified in section 6
+and [control-HA certification](CONTROL_HA_CERTIFICATION.md). This is not the
+full native data gRPC API. Rust port 7600 remains reserved for that future
+service.
+
+OIDC discovery/JWKS refresh, typed `google.rpc.Status` details,
+general native data-path mutation-status lookup, native bidirectional streaming and
 connection-scoped credit, a stable Rust gRPC regional administration
 implementation, long-running operations,
-full Go/Java/Python generated SDK parity, and native compatibility negotiation
+first-party management SDK clients, full Go/Java/Python generated SDK parity,
+and native compatibility negotiation
 remain unimplemented. A separate Rust compatibility gateway exposes the exact
 RESP2/RESP3, Kafka, and AMQP 0-9-1 subsets in the public compatibility matrix
 through authenticated, fenced regional Cache, Stream, and Queue operations. Its
