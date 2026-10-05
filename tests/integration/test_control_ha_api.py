@@ -29,6 +29,16 @@ def api_evidence_fixture() -> dict:
 
 
 class APIEvidenceContractTest(unittest.TestCase):
+    def test_api_cli_runs_final_verification_inside_campaign(self) -> None:
+        with (
+            mock.patch("sys.argv", ["control_ha_api.py", "run", "--output", "/proof"]),
+            mock.patch.object(control_ha_api.owner, "run_campaign") as campaign,
+            mock.patch.object(control_ha_api, "verify_api_bundle") as verifier,
+        ):
+            control_ha_api.main()
+        self.assertIs(verifier, campaign.call_args.kwargs["bundle_verifier"])
+        verifier.assert_not_called()
+
     def test_unknown_status_send_retries_exact_bytes_without_new_guard_or_token(
         self,
     ) -> None:

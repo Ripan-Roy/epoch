@@ -355,8 +355,8 @@ def main() -> None:
             fleet_type=APIFleet,
             schema=API_SCHEMA,
             validator=validate_api_evidence,
+            bundle_verifier=verify_api_bundle,
         )
-        verify_api_bundle(options.output / "evidence.json")
     else:
         verify_api_bundle(options.manifest)
         print(f"verified generated-client recovery: {options.manifest}")

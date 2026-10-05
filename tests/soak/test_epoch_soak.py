@@ -11,6 +11,38 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import epoch_soak  # noqa: E402
 
 
+class JSONArtifactTest(unittest.TestCase):
+    def test_object_and_array_readers_keep_distinct_contracts(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="epoch-json-reader-") as folder:
+            path = Path(folder) / "artifact.json"
+            for value in ([{"request_token": "original"}], []):
+                epoch_soak.atomic_write(path, epoch_soak.canonical_bytes(value))
+                self.assertEqual(value, epoch_soak.load_json_array(path))
+                with self.assertRaisesRegex(epoch_soak.EvidenceError, "JSON object"):
+                    epoch_soak.load_json(path)
+            for value in ({}, None, True, 1, "not-an-array"):
+                epoch_soak.atomic_write(path, epoch_soak.canonical_bytes(value))
+                with self.assertRaisesRegex(epoch_soak.EvidenceError, "JSON array"):
+                    epoch_soak.load_json_array(path)
+
+    def test_array_reader_rejects_duplicate_nested_keys_and_invalid_json(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="epoch-json-reader-") as folder:
+            path = Path(folder) / "artifact.json"
+            for raw, message in (
+                (
+                    b'[{"request_token":"first","request_token":"other"}]',
+                    "duplicate JSON key",
+                ),
+                (b"[", "invalid JSON"),
+                (b"\xff", "invalid JSON"),
+            ):
+                epoch_soak.atomic_write(path, raw)
+                with self.assertRaisesRegex(epoch_soak.EvidenceError, message):
+                    epoch_soak.load_json_array(path)
+            with self.assertRaisesRegex(epoch_soak.EvidenceError, "cannot read"):
+                epoch_soak.load_json_array(Path(folder) / "missing.json")
+
+
 class CampaignTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="epoch-soak-test-")

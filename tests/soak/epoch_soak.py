@@ -80,17 +80,28 @@ def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return document
 
 
-def load_json(path: Path) -> dict[str, Any]:
+def _load_json_document(path: Path) -> object:
     try:
         raw = path.read_bytes()
     except OSError as error:
         raise EvidenceError(f"cannot read {path}: {error}") from error
     try:
-        document = json.loads(raw, object_pairs_hook=reject_duplicate_keys)
+        return json.loads(raw, object_pairs_hook=reject_duplicate_keys)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise EvidenceError(f"invalid JSON in {path}: {error}") from error
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    document = _load_json_document(path)
     if not isinstance(document, dict):
         raise EvidenceError(f"{path} must contain one JSON object")
+    return document
+
+
+def load_json_array(path: Path) -> list[Any]:
+    document = _load_json_document(path)
+    if not isinstance(document, list):
+        raise EvidenceError(f"{path} must contain one JSON array")
     return document
 
 

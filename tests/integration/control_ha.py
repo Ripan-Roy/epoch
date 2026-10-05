@@ -870,6 +870,7 @@ def run_campaign(
     fleet_type: type[OwnerFleet] = OwnerFleet,
     schema: str = OWNER_SCHEMA,
     validator: Callable[[dict[str, Any]], None] = validate_owner_evidence,
+    bundle_verifier: Callable[[Path], None] | None = None,
 ) -> None:
     output = output.resolve()
     if output.exists() and any(output.iterdir()):
@@ -925,8 +926,12 @@ def run_campaign(
         validator(result)
         soak.atomic_write(output / "evidence.json", soak.canonical_bytes(result))
         verify_bundle(output / "evidence.json", validator=validator)
+        if bundle_verifier is not None:
+            bundle_verifier(output / "evidence.json")
     except BaseException:
         result["status"] = "failed"
+        if (output / "evidence.json").exists():
+            soak.atomic_write(output / "evidence.json", soak.canonical_bytes(result))
         soak.atomic_write(output / "failure.json", soak.canonical_bytes(result))
         raise
     print(f"verified owner-recovery evidence: {output / 'evidence.json'}")

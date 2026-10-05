@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import control_ha_full
 from test_control_ha_api import api_evidence_fixture
@@ -21,7 +25,143 @@ def full_fixture() -> dict:
     return evidence
 
 
+def full_bundle_fixture(root: Path) -> Path:
+    """Write the real artifact shapes; do not mock the bundle readers."""
+    soak = control_ha_full.owner.soak
+    evidence = full_fixture()
+    evidence["identity"] = {
+        "source": {"worktree_clean": True, "git_revision": "a" * 40},
+        "node_source_matches_image": True,
+    }
+    for fleet in evidence["fleets"]:
+        directory = root / f"controllers-{fleet['controller_count']}"
+        directory.mkdir()
+        bodies, references, lookups = [], [], []
+        for request in fleet["catalog_leader_unknown"]["requests"]:
+            resource = {
+                "organization": "acme",
+                "project": "shop",
+                "environment": "dev",
+                "namespace": "core",
+                "kind": "cache",
+                "name": request["request_token"],
+            }
+            body = {"request_token": request["request_token"], "resource": resource}
+            bodies.append(body)
+            request["command_sha256"] = (
+                "sha256:"
+                + hashlib.sha256(soak.canonical_bytes(body).rstrip(b"\n")).hexdigest()
+            )
+            references.append(
+                {
+                    "request_token": request["request_token"],
+                    "affected_resources": [{**resource, "kind": "RESOURCE_KIND_CACHE"}],
+                }
+            )
+            lookups.append(
+                {
+                    "kind": "lookup",
+                    "grpc_code": 0,
+                    "request_proto": "CgFh",
+                    "operation_proto": "CgFi",
+                }
+            )
+        plan = {"schema": control_ha_full.LOOKUP_SCHEMA, "requests": references}
+        for name, document in (
+            ("leader-requests.json", bodies),
+            ("leader-lookups.json", plan),
+            ("leader-unknown.json", fleet["catalog_leader_unknown"]),
+        ):
+            soak.atomic_write(directory / name, soak.canonical_bytes(document))
+        for phase in control_ha_full.api.API_PHASES:
+            checks = {check: True for check in control_ha_full.api.GRPC_CHECKS}
+            if phase == "stale":
+                checks["stale_watch_cursor_fails_closed"] = True
+            proof = {
+                "schema": control_ha_full.api.GRPC_SCHEMA,
+                "controller_count": fleet["controller_count"],
+                "checks": checks,
+                "operations": [
+                    *lookups,
+                    *[
+                        {"kind": "batch"}
+                        for _ in range(fleet["api"]["operation_count"] - len(lookups))
+                    ],
+                ],
+                "desired_proto": ["CgFh"] * fleet["api"]["desired_count"],
+                "lookup_bindings": references,
+                "watch_checkpoint": 100,
+                "watch_matching_cursors": [1, 2],
+            }
+            soak.atomic_write(
+                directory / f"api-{phase}.json", soak.canonical_bytes(proof)
+            )
+    evidence["artifacts"] = soak.collect_artifacts(root, root)
+    manifest = root / "evidence.json"
+    soak.atomic_write(manifest, soak.canonical_bytes(evidence))
+    return manifest
+
+
 class FullEvidenceTest(unittest.TestCase):
+    def test_full_bundle_reads_checksum_bound_original_request_arrays(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="epoch-full-bundle-test-") as folder:
+            control_ha_full.verify_full_bundle(full_bundle_fixture(Path(folder)))
+
+    def test_full_bundle_rejects_bad_request_arrays_with_valid_receipts(self) -> None:
+        soak = control_ha_full.owner.soak
+        for invalid in ("object", "empty", "scalar", "duplicate", "scope", "count"):
+            with (
+                self.subTest(invalid=invalid),
+                tempfile.TemporaryDirectory(prefix="epoch-full-bundle-test-") as folder,
+            ):
+                root = Path(folder)
+                manifest = full_bundle_fixture(root)
+                path = root / "controllers-3/leader-requests.json"
+                bodies = soak.load_json_array(path)
+                if invalid == "object":
+                    changed = {"requests": bodies}
+                elif invalid == "empty":
+                    changed = []
+                elif invalid == "scalar":
+                    changed = [None, *bodies[1:]]
+                elif invalid == "duplicate":
+                    changed = [bodies[0], bodies[0], bodies[2]]
+                elif invalid == "count":
+                    changed = bodies[:2]
+                else:
+                    bodies[0]["resource"]["organization"] = "otherco"
+                    changed = bodies
+                soak.atomic_write(path, soak.canonical_bytes(changed))
+                document = soak.load_json(manifest)
+                receipt = soak.file_receipt(path, root)
+                document["artifacts"] = [
+                    receipt if original["path"] == receipt["path"] else original
+                    for original in document["artifacts"]
+                ]
+                soak.atomic_write(manifest, soak.canonical_bytes(document))
+                with self.assertRaises((ValueError, soak.EvidenceError)):
+                    control_ha_full.verify_full_bundle(manifest)
+
+    def test_full_bundle_rejects_original_request_artifact_tampering(self) -> None:
+        soak = control_ha_full.owner.soak
+        with tempfile.TemporaryDirectory(prefix="epoch-full-bundle-test-") as folder:
+            root = Path(folder)
+            manifest = full_bundle_fixture(root)
+            path = root / "controllers-3/leader-requests.json"
+            soak.atomic_write(path, path.read_bytes() + b"\n")
+            with self.assertRaisesRegex(ValueError, "artifact checksum mismatch"):
+                control_ha_full.verify_full_bundle(manifest)
+
+    def test_full_cli_runs_final_verification_inside_campaign(self) -> None:
+        with (
+            mock.patch("sys.argv", ["control_ha_full.py", "run", "--output", "/proof"]),
+            mock.patch.object(control_ha_full.owner, "run_campaign") as campaign,
+            mock.patch.object(control_ha_full, "verify_full_bundle") as verifier,
+        ):
+            control_ha_full.main()
+        self.assertIs(verifier, campaign.call_args.kwargs["bundle_verifier"])
+        verifier.assert_not_called()
+
     def test_lookup_plan_binds_original_tokens_and_exact_qualified_names(self) -> None:
         body = {
             "request_token": "original",

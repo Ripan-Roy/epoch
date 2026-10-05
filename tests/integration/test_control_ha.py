@@ -5,7 +5,9 @@ from __future__ import annotations
 import copy
 import signal
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import control_ha
@@ -41,6 +43,68 @@ def evidence_fixture() -> dict:
 
 
 class OwnerEvidenceContractTest(unittest.TestCase):
+    def test_final_bundle_verification_controls_success_and_failure_manifests(
+        self,
+    ) -> None:
+        source = {
+            "worktree_clean": True,
+            "git_revision": "a" * 40,
+            "version": "0.2.0-beta.12",
+        }
+        runtime = {"image_revision": "b" * 40, "image_version": source["version"]}
+        fleets = evidence_fixture()["fleets"]
+
+        def fleet(count: int, directory: Path) -> object:
+            directory.mkdir()
+            control_ha.soak.atomic_write(
+                directory / "workload.json", control_ha.soak.canonical_bytes(count)
+            )
+            result = next(item for item in fleets if item["controller_count"] == count)
+            return mock.Mock(run=mock.Mock(return_value=copy.deepcopy(result)))
+
+        for fails in (False, True):
+            with (
+                self.subTest(fails=fails),
+                tempfile.TemporaryDirectory(
+                    prefix="epoch-campaign-verifier-"
+                ) as folder,
+                mock.patch.object(
+                    control_ha.soak, "source_identity", return_value=source
+                ),
+                mock.patch.object(
+                    control_ha.soak, "runtime_identity", return_value=runtime
+                ),
+                mock.patch.object(control_ha.subprocess, "run"),
+                mock.patch("builtins.print") as printed,
+            ):
+                output = (Path(folder) / "evidence").resolve()
+                verifier = mock.Mock(
+                    side_effect=ValueError("invalid final artifact") if fails else None
+                )
+                if fails:
+                    with self.assertRaisesRegex(ValueError, "invalid final artifact"):
+                        control_ha.run_campaign(
+                            output, fleet_type=fleet, bundle_verifier=verifier
+                        )
+                    printed.assert_not_called()
+                    self.assertEqual(
+                        "failed",
+                        control_ha.soak.load_json(output / "failure.json")["status"],
+                    )
+                    with self.assertRaises(ValueError):
+                        control_ha.verify_bundle(output / "evidence.json")
+                else:
+                    control_ha.run_campaign(
+                        output, fleet_type=fleet, bundle_verifier=verifier
+                    )
+                    printed.assert_called_once()
+                    self.assertFalse((output / "failure.json").exists())
+                verifier.assert_called_once_with(output / "evidence.json")
+                self.assertEqual(
+                    "failed" if fails else "passed",
+                    control_ha.soak.load_json(output / "evidence.json")["status"],
+                )
+
     def test_guard_recovery_respects_bounded_internal_receipts_but_keeps_user_delete_outcomes(
         self,
     ) -> None:

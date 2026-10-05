@@ -120,7 +120,9 @@ def verify_full_bundle(path: Path) -> None:
             != fleet["catalog_leader_unknown"]
         ):
             raise ValueError("leader-loss artifact does not match manifest")
-        bodies = owner.soak.load_json(path.parent / (prefix + "leader-requests.json"))
+        bodies = owner.soak.load_json_array(
+            path.parent / (prefix + "leader-requests.json")
+        )
         if not isinstance(bodies, list) or len(bodies) != fleet["controller_count"]:
             raise ValueError("missing exact concurrent request bytes")
         plan = owner.soak.load_json(path.parent / (prefix + "leader-lookups.json"))
@@ -309,8 +311,8 @@ def main() -> None:
             fleet_type=FullFleet,
             schema=FULL_SCHEMA,
             validator=validate_full_evidence,
+            bundle_verifier=verify_full_bundle,
         )
-        verify_full_bundle(options.output / "evidence.json")
     else:
         verify_full_bundle(options.manifest)
         print(f"verified complete bounded control-HA matrix: {options.manifest}")
