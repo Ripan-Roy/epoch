@@ -109,8 +109,12 @@ def validate_full_evidence(
             )
 
 
-def verify_full_bundle(path: Path) -> None:
-    _verify_full_bundle(path, validate_full_evidence)
+def verify_full_bundle(
+    path: Path,
+    *,
+    validator: Callable[[dict[str, Any]], None] = validate_full_evidence,
+) -> None:
+    _verify_full_bundle(path, validator)
 
 
 def validate_fleet_evidence(evidence: dict[str, Any], count: int) -> None:

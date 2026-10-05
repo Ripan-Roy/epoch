@@ -135,6 +135,7 @@ test-java-management-generation: ## Prove pinned Java generation and fail-closed
 .PHONY: test-management-sdk-runner
 test-management-sdk-runner: ## Prove public Python probe wire identity and durable checkpoint contracts.
 	@PYTHONPATH=sdk/python/src:tests/integration python3 -m unittest test_management_sdk_python -v
+	@PYTHONPATH=sdk/python/src:tests/integration python3 -m unittest test_management_sdk_catalog -v
 
 .PHONY: test-dependabot
 test-dependabot: ## Verify dependency coverage, grouped-update limits, and security policy.

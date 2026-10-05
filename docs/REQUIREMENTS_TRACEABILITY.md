@@ -132,6 +132,16 @@ the matrix. These acknowledged fixture-service tests are instrumentation, not
 actual Rust Catalog fault certification; original-token resolution and retained
 outcome/checkpoint comparison through Catalog/owner/quorum/reopen remain open.
 
+The next SDK increment implements the owned actual-Catalog campaign plus an
+independent verifier. Eight regression groups reject altered original bytes,
+missing upstream acknowledgements, incomplete SDK phases, absent response
+witnesses, non-monotonic/foreign watch pages, and omitted final verification.
+The runner composes the complete native HA matrix with all three public clients,
+exact original-token resolution at every live controller, owner watch reconnect,
+quorum/all-voter recovery, and real expiration of saved application checkpoints.
+This is implementation/contract evidence only until its frozen live campaign and
+protected CI artifacts pass; CTRL-001/CTRL-002 and DX-001 remain open.
+
 ## How to use this register
 
 Status values are:

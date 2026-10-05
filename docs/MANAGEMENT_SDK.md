@@ -245,9 +245,11 @@ resolution, OCC, bounded inventory, mandatory process/checkpoint callback, and
 dedicated-resource cleanup. It is compile-only, **not a live Catalog quickstart**.
 
 Seventeen client/safety regressions pass locally alongside the full Maven
-format/lint/test/package gate. Four Java generator tests verify pinned output,
+format/lint/test/package gate. Nine Java generator tests verify exact local
+Protobuf 35.1/gRPC-Java 1.84.0 output, compiler checksums, safe installation,
 stale/missing refusal without rewriting, unknown inventory preservation, and
-Make's pre-rewrite check ordering. Generated code is externally owned; only its
+Make's pre-rewrite check ordering. This avoids the remote Buf generation quota;
+see [tool installation](DEVELOPMENT.md). Generated code is externally owned; only its
 directory is excluded from application formatting/Checkstyle, and it still
 compiles with warnings treated as errors. Java CI separately runs the Go TLS
 fixture using an explicit compiled classpath:
@@ -316,10 +318,23 @@ data, bounded plans, uint64 checkpoint preservation, atomic replacement, and
 owned transport shutdown. Cross-language CI explicitly enables and requires all
 three runtimes; missing executables or classpaths fail instead of skipping.
 
-These tests use an acknowledged fixture service, **not Rust Catalog**. Connecting
-the probes to actual Catalog leader/owner/quorum/reopen faults, resolving original
-tokens, comparing retained operation outcomes, and testing expired durable
-checkpoints remain open. No public SDK Catalog certification is claimed yet.
+These tests use an acknowledged fixture service, **not Rust Catalog**. A separate
+owned `management_sdk_catalog.py` campaign now connects the probes to actual
+Rust Catalog and Go controller fleets. It holds three real upstream batch
+receipts with SDK callers pending, SIGKILLs the actual Catalog leader and then
+the relay, resolves and replays the original tokens through every live
+controller, compares full durable outcomes after owner/quorum/all-voter recovery,
+and reconnects all three watches from application-fsynced checkpoints after
+the actual controller owner's SIGKILL. Real individually committed status churn
+must expire previously durable checkpoints before all three clients reject
+them; it never lowers retention or substitutes cursor zero.
+
+The independent verifier composes the complete native HA verifier with SDK
+request/response, fault, per-controller, and durable-checkpoint checks. Separate
+single-fleet schemas cannot claim both three/five-controller certification.
+The implementation and its regression tests are a **candidate**: complete
+passing live artifacts and protected CI delivery are still required. No public
+SDK Catalog certification is claimed yet.
 
 ```sh
 make test-management-sdk-runner
@@ -331,3 +346,22 @@ The ordinary Go-only test run skips the optional three-language subprocess test.
 The protected cross-language workflow sets `EPOCH_MANAGEMENT_PROBE_MATRIX=1`,
 supplies all four executable/classpath settings, builds the exact-source probes,
 and executes `TestPublicProbeMatrixKeepsTransportLossUnknown` without cache.
+
+With the pinned development tools/extras installed, a clean committed checkout,
+and an exact-production-source node image, run the real campaign separately:
+
+```sh
+export EPOCH_REGIONAL_IMAGE=epoch/node:ha-submit-race-bf517da
+export EPOCH_REGIONAL_USE_EXISTING_IMAGE=1
+PYTHONPATH=sdk/python/src python3 tests/integration/management_sdk_catalog.py run \
+  --output /absolute/new/sdk-catalog-evidence
+PYTHONPATH=sdk/python/src python3 tests/integration/management_sdk_catalog.py verify \
+  --manifest /absolute/new/sdk-catalog-evidence/evidence.json
+```
+
+The default command requires **both** controller fleets. `--controllers 3` or
+`--controllers 5` runs/verifies only an explicitly isolated fleet. The campaign
+builds all three public probes from the frozen checkout, records executable,
+Java class/dependency, source, and image identities, uses only its own loopback
+processes/Compose project, and cleans those up even on failure. It does not
+change unrelated Docker services or publish packages.

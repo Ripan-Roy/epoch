@@ -8,6 +8,13 @@ notes explicitly list additional verified artifacts.
 
 ### SDK contract and management candidate
 
+- Add the owned public Go/Java/Python real-Catalog failure campaign and its
+  independent verifier, composing complete native HA evidence with original
+  batch/OCC bytes, pending-call lost acknowledgements, every live controller's
+  durable operation outcome, owner-watch reconnect, quorum/reopen recovery,
+  and actual expiration of durable SDK checkpoints. Passing live campaign
+  artifacts and protected delivery remain required; this is not yet a
+  certification claim.
 - Generate Java management bindings locally with exact Protobuf 35.1 and
   checksum-pinned gRPC-Java 1.84.0 compilers. The 61 generated sources remain
   byte-identical; CI installs both compilers and retains non-mutating freshness,
