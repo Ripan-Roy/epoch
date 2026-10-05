@@ -160,6 +160,8 @@ jobs:
           PYTHONPATH=sdk/python/src mypy --strict sdk/python/src sdk/python/examples/management.py console/src/quickstarts/quickstart.py
       - name: Run Python SDK tests
         run: PYTHONPATH=sdk/python/src python -m unittest discover -s sdk/python/tests -v
+      - name: Test public Python fault-probe and durable checkpoints
+        run: make test-management-sdk-runner
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: 1.26.5
@@ -270,6 +272,23 @@ jobs:
           cache: maven
           cache-dependency-path: sdk/java/pom.xml
       - run: bash tests/integration/smoke.sh
+      - name: Prove all public SDK probes retain real transport-loss outcomes
+        env:
+          EPOCH_MANAGEMENT_PROBE_MATRIX: "1"
+          EPOCH_MANAGEMENT_GO_PROBE: ${{ runner.temp }}/management-sdk-go
+          EPOCH_MANAGEMENT_PYTHON_EXECUTABLE: python
+          EPOCH_MANAGEMENT_JAVA_EXECUTABLE: java
+        run: |
+          python -m pip install 'sdk/python[management,management-dev]'
+          sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress \
+            -DskipTests test-compile dependency:build-classpath \
+            -Dmdep.outputFile="${RUNNER_TEMP}/management-sdk-java-classpath.txt"
+          test -f sdk/java/target/test-classes/io/epoch/sdk/ManagementCatalogProbe.class
+          go build -o "${EPOCH_MANAGEMENT_GO_PROBE}" ./tests/integration/managementsdkgo
+          EPOCH_MANAGEMENT_JAVA_CLASSPATH="${GITHUB_WORKSPACE}/sdk/java/target/classes:${GITHUB_WORKSPACE}/sdk/java/target/test-classes:$(cat "${RUNNER_TEMP}/management-sdk-java-classpath.txt")"
+          export EPOCH_MANAGEMENT_JAVA_CLASSPATH
+          go test -race ./tests/integration/managementsdkproxy \
+            -run '^TestPublicProbeMatrixKeepsTransportLossUnknown$' -count=1 -v
       - name: Execute the exact displayed SDK quickstarts
         run: bash tests/integration/docs-quickstarts.sh
 

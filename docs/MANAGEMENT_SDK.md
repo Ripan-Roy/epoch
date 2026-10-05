@@ -295,3 +295,39 @@ transport/contract checks, not Rust Catalog durability or production/SLO evidenc
 Native data gRPC, cooperative data consumers, background batching, identity
 refresh/rotation, package publication, and the
 full SDK/version matrix remain outside this candidate's verified boundary.
+
+## Catalog fault-probe instrumentation (candidate)
+
+Private test probes now invoke the actual public Go, Java, and Python management
+clients from identical protobuf-byte plans. They support all six unaries plus
+watching, persist a file-and-directory-fsynced scanned checkpoint before ACK,
+and can keep a watch alive while an owned fault driver stops its controller.
+The loopback-only `tests/integration/managementsdkproxy` forwards only exact,
+bounded planned batches to their assigned upstream controllers, holds actual
+upstream responses without returning a receipt, and exposes those byte
+witnesses to the fault driver. Killing the owned proxy can then create real
+socket loss; it cannot manufacture a successful commit.
+
+Three-language relay tests pass over actual gRPC sockets: the public clients
+retain their exact original token and explicit-zero OCC presence, report one
+attempt and an unknown outcome after transport loss, and do not invent a new
+command. Probe regressions also cover foreign commands/identity, malformed wire
+data, bounded plans, uint64 checkpoint preservation, atomic replacement, and
+owned transport shutdown. Cross-language CI explicitly enables and requires all
+three runtimes; missing executables or classpaths fail instead of skipping.
+
+These tests use an acknowledged fixture service, **not Rust Catalog**. Connecting
+the probes to actual Catalog leader/owner/quorum/reopen faults, resolving original
+tokens, comparing retained operation outcomes, and testing expired durable
+checkpoints remain open. No public SDK Catalog certification is claimed yet.
+
+```sh
+make test-management-sdk-runner
+go test -race ./tests/integration/managementsdkgo ./tests/integration/managementsdkproxy
+sdk/java/mvnw -f sdk/java/pom.xml -Dtest=ManagementCatalogProbeTest test
+```
+
+The ordinary Go-only test run skips the optional three-language subprocess test.
+The protected cross-language workflow sets `EPOCH_MANAGEMENT_PROBE_MATRIX=1`,
+supplies all four executable/classpath settings, builds the exact-source probes,
+and executes `TestPublicProbeMatrixKeepsTransportLossUnknown` without cache.

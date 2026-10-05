@@ -102,7 +102,7 @@ audit: ## Reject Rust and npm dependency advisories except the documented Raft e
 
 test: test-unit ## Run the default local test suite.
 
-test-unit: test-retry-command test-compose-crash-restart test-release-manifest test-release-workflow test-soak-runner test-kubernetes-runner test-regional-runtime-runner test-protocol-regional-runner test-control-ha-runner test-java-management-generation ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
+test-unit: test-retry-command test-compose-crash-restart test-release-manifest test-release-workflow test-soak-runner test-kubernetes-runner test-regional-runtime-runner test-protocol-regional-runner test-control-ha-runner test-java-management-generation test-management-sdk-runner ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
 	@if [ -f Cargo.toml ]; then cargo test --locked --workspace --all-targets --all-features; fi
 	@if find control operator sdk/go -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then go test -race ./...; fi
 	@if [ -d sdk/python ]; then PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests -v; fi
@@ -124,6 +124,10 @@ test-release-workflow: ## Prove native multi-platform release and supply-chain i
 .PHONY: test-java-management-generation
 test-java-management-generation: ## Prove pinned Java generation and fail-closed freshness/inventory checks.
 	@python3 -m unittest discover -s tests/integration -p test_java_management_generation.py -v
+
+.PHONY: test-management-sdk-runner
+test-management-sdk-runner: ## Prove public Python probe wire identity and durable checkpoint contracts.
+	@PYTHONPATH=sdk/python/src:tests/integration python3 -m unittest test_management_sdk_python -v
 
 .PHONY: test-dependabot
 test-dependabot: ## Verify dependency coverage, grouped-update limits, and security policy.

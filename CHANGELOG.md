@@ -8,6 +8,11 @@ notes explicitly list additional verified artifacts.
 
 ### SDK contract and management candidate
 
+- Add public Go/Java/Python Catalog-fault probes with byte-bound workload plans,
+  fsynced application checkpoints before watch ACK, and a private exact-command
+  lost-response relay. All three probes preserve original token/zero-OCC bytes
+  and unknown outcomes after real socket loss in the mandatory cross-language
+  fixture. Real Rust Catalog fault certification remains open.
 - Validate Python standalone/regional response shapes and strict JSON without
   exposing response payloads or retrying uncertain mutations. Whole-package
   strict typing now runs locally and in CI, not only on the displayed quickstart.

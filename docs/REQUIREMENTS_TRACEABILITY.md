@@ -111,6 +111,16 @@ tests; generated source alone is excluded from application formatting/lint.
 The exact displayed Java example compiles with `-Xlint:all -Werror`.
 These are client contracts, not actual Catalog fault or protected-delivery proof.
 
+The candidate now also contains private public-client fault probes for all three
+languages and a loopback exact-command relay. A real-socket three-language matrix
+passes with unchanged original token/explicit-zero OCC bytes and unknown outcomes
+after transport loss. Probe tests cover durable file/directory-fsynced watch
+checkpoints, atomic replacement, bounded plans, malformed requests, and shutdown.
+The cross-language check explicitly requires all runtimes and never silently skips
+the matrix. These acknowledged fixture-service tests are instrumentation, not
+actual Rust Catalog fault certification; original-token resolution and retained
+outcome/checkpoint comparison through Catalog/owner/quorum/reopen remain open.
+
 ## How to use this register
 
 Status values are:
