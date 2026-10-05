@@ -515,12 +515,10 @@ func (fleet *clients) watch(index int, after, target uint64) (uint64, []uint64, 
 		if target == 0 {
 			target = page.GetLatestCursor()
 		}
-		lastVisible := cursor
 		for _, change := range page.GetChanges() {
-			lastVisible = change.GetCursor()
 			seen = append(seen, change.GetCursor())
 		}
-		if next > lastVisible {
+		if watchPageFiltered(cursor, page) {
 			scannedFiltered = true
 		}
 		cursor = next
@@ -692,4 +690,10 @@ func observeWatch(after uint64, page *epochv1.WatchResourceChangesResponse, scop
 		previous = change.GetCursor()
 	}
 	return page.GetNextCursor(), nil
+}
+
+func watchPageFiltered(after uint64, page *epochv1.WatchResourceChangesResponse) bool {
+	// Global changes are contiguous before authorization filtering. A hidden
+	// change can be in the middle, not only after the last visible change.
+	return page.GetNextCursor() >= after && page.GetNextCursor()-after > uint64(len(page.GetChanges()))
 }

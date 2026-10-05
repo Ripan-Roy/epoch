@@ -84,6 +84,23 @@ func TestDesiredWitnessIgnoresOnlyObservedStatus(t *testing.T) {
 	}
 }
 
+func TestWatchDetectsFilteredChangesInsideRatherThanOnlyAfterVisiblePage(t *testing.T) {
+	page := &epochv1.WatchResourceChangesResponse{LatestCursor: 20, NextCursor: 13,
+		Changes: []*epochv1.ResourceChange{{Cursor: 11}, {Cursor: 13}},
+	}
+	if !watchPageFiltered(10, page) {
+		t.Fatal("hidden cursor 12 inside page was not recorded as scanned")
+	}
+	page.Changes = []*epochv1.ResourceChange{{Cursor: 11}, {Cursor: 12}, {Cursor: 13}}
+	if watchPageFiltered(10, page) {
+		t.Fatal("unfiltered page was marked filtered")
+	}
+	page.Changes = nil
+	if !watchPageFiltered(10, page) {
+		t.Fatal("empty authorized page lost its scanned checkpoint")
+	}
+}
+
 func testName() *epochv1.ResourceName {
 	return &epochv1.ResourceName{Organization: "acme", Project: "payments", Environment: "production", Namespace: "orders", Kind: epochv1.ResourceKind_RESOURCE_KIND_CACHE, Name: "fixture"}
 }
