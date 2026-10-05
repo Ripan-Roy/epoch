@@ -444,13 +444,18 @@ jobs:
           compression-level: 0
           retention-days: 1
 
-  control-ha:
-    name: Concurrent control-plane failure matrix
+  control-ha-fleet:
+    name: Control-plane HA (${{ matrix.controllers }} controllers)
     runs-on: ubuntu-24.04-arm
-    # Both fleets must cross real retained-history pruning; leave bounded
-    # shared-runner headroom instead of substituting an artificial floor.
+    # Each fleet gets its own CPUs and volumes. Both still cross real retained
+    # history pruning; no reduced inventory or artificial floor.
     timeout-minutes: 120
     needs: [container-arm64]
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        controllers: [3, 5]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -473,13 +478,58 @@ jobs:
           "${GITHUB_WORKSPACE}/scripts/inspect-oci-image.sh" \
             epoch/node:ci-arm64 "$version" "${GITHUB_SHA}" \
             /usr/local/bin/epoch-node "Epoch node"
-      - name: Prove the complete three/five-controller failure matrix
+      - name: Prove and independently verify this complete fleet
         env:
           EPOCH_REGIONAL_IMAGE: epoch/node:ci-arm64
           EPOCH_REGIONAL_USE_EXISTING_IMAGE: "1"
-          EPOCH_CONTROL_HA_ARTIFACT_DIR: ${{ runner.temp }}/epoch-control-ha-full
+          EPOCH_CONTROL_HA_CONTROLLERS: ${{ matrix.controllers }}
+          EPOCH_CONTROL_HA_ARTIFACT_DIR: ${{ runner.temp }}/epoch-control-ha-fleet
         run: |
-          make test-control-ha-full
+          python3 tests/integration/control_ha_full.py run-fleet \
+            --controllers "${EPOCH_CONTROL_HA_CONTROLLERS}" \
+            --output "${EPOCH_CONTROL_HA_ARTIFACT_DIR}"
+          python3 tests/integration/control_ha_full.py verify-fleet \
+            --controllers "${EPOCH_CONTROL_HA_CONTROLLERS}" \
+            --manifest "${EPOCH_CONTROL_HA_ARTIFACT_DIR}/evidence.json"
+      - name: Upload this fleet's passing or failed evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: control-ha-fleet-${{ matrix.controllers }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/epoch-control-ha-fleet
+          if-no-files-found: ignore
+          retention-days: 30
+
+  control-ha:
+    # Keep the branch-protected check stable. A successful individual fleet is
+    # not full certification; missing, failed, or skipped workers fail here.
+    name: Concurrent control-plane failure matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [control-ha-fleet]
+    if: always()
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require both fleet workers to have succeeded
+        env:
+          FLEET_RESULT: ${{ needs.control-ha-fleet.result }}
+        run: test "${FLEET_RESULT}" = success
+      - name: Download verified 3-controller proof
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: control-ha-fleet-3-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/epoch-control-ha-input/3
+      - name: Download verified 5-controller proof
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: control-ha-fleet-5-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/epoch-control-ha-input/5
+      - name: Seal and independently verify the complete failure matrix
+        run: |
+          python3 tests/integration/control_ha_full.py combine \
+            --three "${RUNNER_TEMP}/epoch-control-ha-input/3/evidence.json" \
+            --five "${RUNNER_TEMP}/epoch-control-ha-input/5/evidence.json" \
+            --output "${RUNNER_TEMP}/epoch-control-ha-full"
           python3 tests/integration/control_ha_full.py verify \
             --manifest "${RUNNER_TEMP}/epoch-control-ha-full/evidence.json"
       - name: Upload complete control-HA evidence
@@ -488,7 +538,7 @@ jobs:
         with:
           name: control-ha-full-evidence-${{ github.run_attempt }}
           path: ${{ runner.temp }}/epoch-control-ha-full
-          if-no-files-found: ignore
+          if-no-files-found: error
           retention-days: 30
 
   container:

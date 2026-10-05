@@ -30,7 +30,15 @@ history floor reached 29. Its original CLI exited on an object-versus-array
 evidence-reader error. The regression-tested `e2e46e6` verifier correction now
 independently validates that unchanged capture and all 32 artifact receipts;
 the original source identity is preserved, not relabelled as a rerun.
-Thirty-five HA contract tests and eight soak/evidence tests pass locally.
+The fresh clean `0f3c8d5` campaign now also exited zero and independently
+verified all 32 receipts, 42 owner/API flags, both real Catalog-leader lost-ack
+cases, 20/24 operation witnesses, 135 desired resources per fleet, and all four
+profile digests per fleet. Full v2 initial-batch witnesses require exact
+cross-controller responses/operations plus the 128-event creation history,
+not a count of `replayed=false` replies. Real retained floors/latest cursors
+were 5/4,100 and 27/4,122. Its canonical manifest SHA-256 is
+`df40266cbe904c551b080c27ebed8a6ab35190b5fed13561052ecfb00ea761e9`.
+Thirty-nine HA contract tests and eight soak/evidence tests pass locally.
 Protected exact-head/main execution remains open, as do the other CTRL-001/
 CTRL-002 retention, scaling, migration, and SDK requirements. See the linked
 certification document for provenance and non-claims.

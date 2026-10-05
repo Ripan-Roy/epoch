@@ -95,6 +95,79 @@ command kinds, affected identities, and optional delete precondition presence.
 The same records are checked through surviving controllers after owner loss,
 quorum recovery, and all-voter/controller reopen.
 
+#### Lookup/submission race finding (5 October 2026)
+
+PR #149 CI `37316380698` completed the full three-controller fleet, then
+failed five-controller preparation with a real `ABORTED` response: an identical
+maximum batch was reported as `proposal_conflict` / "already pending or
+committed". This is not the earlier replay-flag assertion issue. Catalog's
+local HTTP serialization lock cannot prevent a peer's replication from arriving
+between an unknown consensus lookup and the subsequent proposal submission.
+
+The candidate handles only `DuplicateProposal` at that boundary by looking up
+the original proposal again and comparing its complete payload bytes. A matching
+pending/committed binding joins the original outcome; the usual applied-receipt
+wait still decides completion. It neither submits a new command nor changes the
+token. Changed payloads, unknown bindings, nonleader new writes, and other
+consensus failures remain errors. Deterministic real-consensus regressions
+stage the stale lookup/winning submission for both leader-only and forwarded
+paths and preserve conflicting-payload/nonleader rejection. The positive
+regression failed before the change and passes afterward; node Clippy passes.
+
+The frozen `0f3c8d5` local capture below remains historical evidence for that
+source, not certification of this new Rust fix. A newly labelled node image,
+fresh complete local matrix, and protected exact-head/main execution are
+required before beta.12 promotion. The failed CI run is not relabelled passing.
+
+#### Concurrent replay receipt finding (5 October 2026)
+
+PR #149 CI `37295153226` completed the three-controller fleet but failed the
+five-controller preparation assertion that exactly one response must have
+`replayed=false`. That assertion counted response disposition flags, not
+durable effects. In `catalog_api::commit_command_with_mode`, the application
+receipt can be absent at the first read and commit before the subsequent
+consensus lookup; `durable_replay_receipt` then reconstructs the same original
+outcome with its replay flag set. No contract promises that one concurrent
+caller must observe the non-reconstructed receipt.
+
+The replacement check requires all controllers to return exactly the 128
+requested generation-one resources with their original specs and creation
+flags, resolve the identical successful proposal/token/command and complete
+affected-resource set, and expose exactly 128 contiguous desired-creation
+events matching that operation's cursor interval. Per-item and batch replay
+flags must still agree. It does not infer a durable mutation count from those
+flags. Actual response, operation, and change protobufs are retained in the
+`initial_batch` witness; generated recovery phases revalidate their complete
+typed contents, and the bundle verifier rejects changed or dropped witnesses
+across phases even when artifact checksums are recomputed. Fresh generated
+proofs use `epoch.control-ha.grpc-api/v2`, which requires complete canonical
+protobuf witnesses from every controller. Historical v1 captures remain
+readable under their original narrower guarantees; a fault phase cannot
+downgrade its schema or drop an existing witness.
+
+Five Go regression groups cover reconstructed and original receipts,
+partial/altered responses, disagreeing or malformed operations, missing or
+foreign events, and incomplete or invalid serialized witnesses. The 39 HA
+fixture contract tests pass locally. This does not turn the failed CI run into
+passing evidence. A fresh complete local v2 run is now independently verified
+below; protected exact-head/main execution is still required.
+
+The focused preparation probe at
+`/private/tmp/epoch-ha-batch-probe.D4I8lw` passed against real three/five Go
+controllers and native voters: 17/19 retained operations and 135 desired
+resources per fleet. Generated decoding observed one original reply and
+two/four replayed replies, all resolving one proposal ID. This preliminary
+debug capture used the v1 schema with the new witnesses before the v2 schema
+freeze; it is neither a frozen full campaign nor a reproduction of CI's
+all-replayed interleaving. The source analysis and reconstructed-receipt
+regressions cover that allowed disposition; the full frozen v2 fault result is
+recorded below. The final local `make check build` gate passed after the v2 changes,
+with its log retained alongside the focused probe.
+
+GitHub `main` protection now additionally requires the GitHub Actions
+`Concurrent control-plane failure matrix` check. All nine previous checks,
+strict up-to-date enforcement, and administrator enforcement remain intact.
+
 The candidate also exercises scoped-reader operation lookup, partial and mixed
 affected-resource sets, missing credentials, completed/missing delete retries
 against recreated resources, and filtered two-item watches that disconnect and
@@ -156,14 +229,91 @@ most four times. Only a resolved, typed fencing rejection permits a separate
 attempt with a newly observed guard and token. This does not assert a two-second
 service SLO or widen the public operation-retention contract.
 
-All 35 HA fixture contract tests, the complete Go race suite, vet, and build
-pass locally. CI has a separately bounded 120-minute
-native-arm64 HA job that consumes the already inspected exact-source node image
-from the arm64 build job, verifies its archive checksum and OCI revision, and
-retains passing or failed evidence for 30 days. It neither rebuilds that Rust
-image nor publishes it to a registry.
+CI runs the three- and five-controller fleets on separate native-arm64 runners,
+with `fail-fast: false` and at most two workers. Each consumes the same inspected
+exact-source image and verifies its archive checksum and OCI revision. The
+branch-protected **Concurrent control-plane failure matrix** check remains the
+aggregate: it fails if either worker failed, was skipped, or was cancelled.
+It independently verifies both checksum-bound bundles, requires identical
+source and image identities matching its checkout, and seals and re-verifies
+the complete original full-matrix schema. A single fleet uses a different
+schema and cannot pass as complete certification. Worker budgets remain bounded
+at 120 minutes; the lightweight aggregate has ten minutes. Passing and failed
+worker artifacts and the sealed full evidence are retained for 30 days. No
+worker rebuilds or publishes the Rust image.
 
-### Locally verified bounded matrix — 5 October 2026
+The generated helper still checks all 135 desired resources against every
+controller, using at most sixteen simultaneous strong reads. Retained operation
+lookups and exact replays run independently across controllers. Maximum batch
+and OCC concurrency, every receipt comparison, tenant authorization, and every
+fault phase remain unchanged. Real status churn uses four workers and joins
+each 32-command chunk before inspecting the actual history floor. Each command
+still has its own token, fresh guard, and individually committed receipt;
+there is no artificial retention floor or reduced history. Unknown sends retry
+the same bytes and only resolved fencing can start a new token. Phase durations
+are printed, and a generated-helper timeout now preserves redacted stage
+diagnostics in its failed artifact rather than losing them.
+
+The earlier CI attempt `37326140250` spent about 35 minutes advancing the
+three-controller history, then exceeded the unchanged 300-second generated
+helper budget during five-controller preparation. Parallel fleet runners remove
+the sequential sum of fleet runtimes; bounded RPC/churn fan-out reduces repeated
+round-trip waits. Actual CI speedup must be measured on a new run, not inferred
+from a local pass or a raised timeout.
+
+### Catalog submission-race fix — frozen local proof
+
+The clean `bf517daa020bc7f480c3474427fccc9de98243d0` tree passed the complete
+serial live campaign and its independent verifier before CI fixture
+optimization. It fixes the race in which an exact unknown-token retry can meet
+its already replicated Catalog proposal. Both fleets passed all ten owner and
+eleven API checks, retained 135 desired witnesses and 20/24 operation witnesses,
+and preserved all four profile digests through all-voter reopen. The observed
+floor/latest cursors were 22/4,117 and 20/4,115 respectively.
+
+Its manifest SHA-256 is
+`6d0ef02ec53924c3410ba8438a8e8a7b7ad56d872083c5f268cb2d60824fba14`,
+at `/private/tmp/epoch-ha-ci-37316380698.pAvZqX/fresh-evidence/evidence.json`.
+The tested image ID was
+`sha256:05d4ec7fb4ab1a5d85600cf4327f0f17cf6d4d9a3057e417158d1c84f12c57fb`,
+labeled with that exact revision. This capture is not relabeled as evidence
+for the later optimized fixture or a successful GitHub run.
+
+### Fresh frozen v2 bounded matrix — 5 October 2026
+
+The clean `0f3c8d50abb770aaf109a5cf730468b70c49264f` tree completed
+`make test-control-ha-full` with exit zero, then independently passed the full
+bundle verifier. Both fleets retained complete v2 initial-batch request,
+response, operation, and creation-history protobuf witnesses, with three/five
+initial responses and operation lookups respectively. These are exact durable
+effects, not a count inferred from replay disposition flags.
+
+| Observation | Three controllers | Five controllers |
+|---|---:|---:|
+| Owner/recovery checks | 10/10 | 10/10 |
+| API/recovery checks | 11/11 | 11/11 |
+| Pending callers when the real Catalog leader was stopped | 3 | 5 |
+| Exact retained operation witnesses | 20 | 24 |
+| Desired resources checked across recovery phases | 135 | 135 |
+| Observed history floor / latest cursor | 5 / 4,100 | 27 / 4,122 |
+| Exact profile digests before/after all-voter reopen | 4/4 | 4/4 |
+
+All 32 artifact receipts independently verify. The canonical manifest SHA-256
+is `df40266cbe904c551b080c27ebed8a6ab35190b5fed13561052ecfb00ea761e9`,
+retained locally at
+`/private/tmp/epoch-ha-replayfix.TQVpMI/evidence/evidence.json`.
+The image ID remains
+`sha256:1ee8ef6f46297f0071174e5661cc78ab49b8a7cf6798018d7cdc17dc74c94a64`
+from `fed6b59`; exact Rust source equivalence is verified separately from the
+clean controller/fixture revision. The full local `make check build` gate also
+passed after the v2 changes. The later documentation commit does not relabel
+this frozen capture. Protected current-head/main evidence and beta.12
+publication remain open; this proves no production SLO or full PRD completion.
+
+The fixture removed only its own containers and volumes. All fourteen unrelated
+application containers remained running after completion.
+
+### Historical reverified v1 capture — 5 October 2026
 
 The clean `19e02175bd5c4970236a84fedd7eeb818197b6b6` capture completed every
 runtime scenario for both controller counts, including actual history pruning

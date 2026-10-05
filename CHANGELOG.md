@@ -54,6 +54,26 @@ notes explicitly list additional verified artifacts.
 
 ### Control-plane hardening
 
+- Run the complete three/five-controller HA fleets on separate CI runners and
+  seal both exact-source/image proofs in the unchanged protected aggregate
+  check. Bound strong-read verification to sixteen RPCs and real retention
+  churn to four commands; retain every scenario, resource, receipt, and actual
+  pruning check. Preserve redacted generated-helper timeout diagnostics.
+- Join a byte-identical Catalog proposal when peer replication wins the
+  lookup/submission race; still await the original applied receipt and reject
+  conflicting payloads or nonleader new writes. The complete three-controller
+  CI fleet exposed this race during five-controller maximum-batch preparation;
+  fresh fault and protected-branch evidence remain required.
+- Certify concurrent maximum-size batches from complete v2 response, operation,
+  and creation-history witnesses instead of counting replay disposition flags.
+  A fresh clean `0f3c8d5` full three/five-controller run exits zero and passes
+  independent verification of all 32 artifacts and 42 owner/API flags; protected
+  current-head/main execution and release publication remain required.
+- Prove concurrent maximum-size batches through identical durable operations,
+  exact creation results, and complete ordered change history instead of
+  treating reconstructed-response replay flags as a mutation count. Retain
+  every controller's initial protobuf witnesses across recovery and reject
+  altered or incomplete evidence. Protected HA certification remains open.
 - Preserve the exact optional caller generation precondition when replaying
   managed deletion: omitted, explicit zero, and explicit nonzero are distinct.
   Resolve a completed token before testing a recreated resource's generation,
