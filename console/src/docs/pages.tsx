@@ -11,6 +11,7 @@ import {
   governanceInventory,
   goManagementExample,
   pythonManagementExample,
+  javaManagementExample,
   guardedUpgradeSpec,
   guardedUpgradeStatus,
   identityPolicy,
@@ -2014,12 +2015,12 @@ export function SdkReferenceBody() {
 
       <Topic id="management-sdk" title="Management SDK candidate">
         <p>
-          The Go and Python <code>ManagementClient</code> implementations use generated resource messages over
-          controller gRPC, normally port 8081. Configure an explicit endpoint allowlist and CA trust; TLS 1.3
-          supports optional client certificates. Plaintext is an explicit loopback-only development choice.
-          The Java management client remains open; native profile clients are separate. Python requires
-          server-enforced TLS 1.3: its pinned gRPC API exposes CA and client-certificate trust, not a
-          client-side minimum-version selector.
+          The Go, Java, and Python <code>ManagementClient</code> implementations use generated resource
+          messages over controller gRPC, normally port 8081. Configure an explicit endpoint allowlist and CA
+          trust; TLS 1.3 supports optional client certificates. Plaintext is an explicit loopback-only
+          development choice. Native profile clients are separate. Catalog fault certification remains open.
+          Python requires server-enforced TLS 1.3: its pinned gRPC API exposes CA and client-certificate
+          trust, not a client-side minimum-version selector.
         </p>
         <p>
           Unary failover retains one deadline, the original token, and omitted/zero/nonzero generation
@@ -2035,13 +2036,14 @@ export function SdkReferenceBody() {
           paging.
         </p>
         <Note title="Not a live Catalog quickstart">
-          These exact seven-method examples compile in Go SDK tests and pass strict Python typing. Their
+          These exact seven-method examples compile in Go/Java and pass strict Python typing. Their
           generated-wire fixtures run over TLS 1.3/mTLS, including all Python calls against a TLS-1.3-only Go
           server, but the public SDK still needs real Catalog fault and protected delivery evidence. Do not
           run the example against a production resource.
         </Note>
         <CodeBlock label="Go · management_example_test.go" value={goManagementExample} />
         <CodeBlock label="Python · management.py (compile-only)" value={pythonManagementExample} />
+        <CodeBlock label="Java · ManagementExample.java (compile-only)" value={javaManagementExample} />
         <CodeBlock
           label="Terminal · verify the client contracts"
           value={

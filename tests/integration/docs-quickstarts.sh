@@ -117,7 +117,8 @@ javac --release 25 -Xlint:all -Werror \
   console/src/quickstarts/regional/RegionalQuickstart.java \
   console/src/quickstarts/regional_queue/RegionalQueueQuickstart.java \
   console/src/quickstarts/regional_cache/RegionalCacheQuickstart.java \
-  console/src/quickstarts/regional_bus/RegionalBusQuickstart.java
+  console/src/quickstarts/regional_bus/RegionalBusQuickstart.java \
+  sdk/java/examples/ManagementExample.java
 
 go test ./console/src/quickstarts/regional
 go test ./console/src/quickstarts/regional_queue
@@ -139,4 +140,4 @@ for epoch_language in go java python; do
   stop_node
 done
 
-printf 'All displayed standalone SDK quickstarts survived forced restart; regional Stream, Queue, Cache, and Event Bus sources compile.\n'
+printf 'All displayed standalone SDK quickstarts survived forced restart; regional profile and Java management sources compile.\n'

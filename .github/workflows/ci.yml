@@ -146,10 +146,13 @@ jobs:
           ruff format --check sdk/python tests/soak tests/integration/*.py
           console/src/quickstarts/quickstart.py
           scripts/generate-python-management.py
+          scripts/generate-java-management.py
       - run: >-
           ruff check sdk/python tests/soak tests/integration/*.py
           console/src/quickstarts/quickstart.py
-      - run: ruff check --config sdk/python/pyproject.toml scripts/generate-python-management.py
+      - run: >-
+          ruff check --config sdk/python/pyproject.toml
+          scripts/generate-python-management.py scripts/generate-java-management.py
       - name: Compile and type-check Python SDK and displayed quickstart
         run: |
           python -m py_compile console/src/quickstarts/quickstart.py
@@ -186,6 +189,14 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: go.sum
+      - name: Install pinned Buf CLI for Java contracts
+        run: go install github.com/bufbuild/buf/cmd/buf@v1.72.0
+      - name: Reject stale Java management bindings and verify generation gates
+        run: python3 -m unittest discover -s tests/integration -p test_java_management_generation.py -v
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           distribution: temurin
@@ -193,6 +204,13 @@ jobs:
           cache: maven
           cache-dependency-path: sdk/java/pom.xml
       - run: sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress verify
+      - name: Prove Java management TLS 1.3 and mTLS against Go
+        run: |
+          sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress \
+            dependency:build-classpath -Dmdep.outputFile=target/runtime-classpath.txt
+          EPOCH_JAVA_MANAGEMENT_PROBE=java \
+          EPOCH_JAVA_MANAGEMENT_CLASSPATH="$(pwd)/sdk/java/target/classes:$(pwd)/sdk/java/target/test-classes:$(cat sdk/java/target/runtime-classpath.txt)" \
+            go test -race ./sdk/go/epoch -run '^TestManagementJavaTLS13GeneratedWire$' -count=1
       - name: Compile displayed Java quickstart
         run: |
           sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress \
@@ -201,7 +219,8 @@ jobs:
           javac --release 25 -Xlint:all -Werror \
             -cp "sdk/java/target/classes:$(cat sdk/java/target/runtime-classpath.txt)" \
             -d sdk/java/target/docs-quickstart \
-            console/src/quickstarts/Quickstart.java
+            console/src/quickstarts/Quickstart.java \
+            sdk/java/examples/ManagementExample.java
 
   web:
     name: Console format, lint, typecheck, build

@@ -1,9 +1,9 @@
 # Management SDK candidate
 
-Status: Go/Python implementations and local generated-wire tests; **not yet protected
-delivery or complete Go/Java/Python parity**. The Java management client,
-real Catalog fault evidence for the public SDK, and a displayed multi-language
-Pages quickstart remain open. Existing data-profile SDKs are separate.
+Status: Go/Java/Python implementations and local generated-wire tests;
+**not yet protected delivery or complete native SDK parity**. Real Catalog
+fault evidence for the public SDK and protected Pages publication remain open.
+Existing data-profile SDKs are separate.
 
 `epoch.ManagementClient` covers the Go control service, not Rust's still-future
 native data gRPC port. Use the configured controller gRPC authorities, normally
@@ -107,7 +107,7 @@ failures. Strict whole-package typing checks the generated
 suppression. Ruff excludes external generated output, not application source.
 These tests do not run a Python management RPC or implement its failover/watch
 state machine on their own. The public Python client below supplies those
-contracts; Java management parity and protected Catalog evidence remain open.
+contracts; protected Catalog evidence remains open.
 
 ### Python management client
 
@@ -189,6 +189,83 @@ EPOCH_PYTHON_MANAGEMENT_PROBE=python \
 The Go-only suite may skip that interpreter-dependent probe; Python CI must not.
 These fixtures prove SDK transport contracts, not durable Rust Catalog outcomes.
 
+### Java management client
+
+`io.epoch.sdk.ManagementClient` uses the committed generated messages under
+`io.epoch.sdk.gen.epoch.v1`. Its six camel-case unary methods return
+`ManagementResult<Response>` with `response()` and `info()`. Requests and
+responses are immutable. `ManagementContext` holds the caller's standard gRPC
+`Context` and a defensive outgoing metadata snapshot; use a cancellable context
+or one with an absolute deadline. Caller traces and binary metadata are frozen,
+and the SDK replaces authorization with exactly one credential.
+
+```java
+var config = new ManagementConfig(
+    List.of("localhost:8081"), bearerToken, Duration.ofSeconds(5),
+    new TlsConfig(caPath, clientPkcs12Path, password), false);
+try (var client = new ManagementClient(config)) {
+    var result = client.getResource(ManagementContext.current(),
+        GetResourceRequest.newBuilder().setName(resourceName).build());
+    System.out.println(Long.toUnsignedString(result.response().getResource().getGeneration()));
+}
+```
+
+Java's Protobuf `uint64` values occupy the complete `long` bit pattern:
+`-1L` means unsigned 18446744073709551615. Use `Long.toUnsignedString` and
+unsigned comparisons, not signed nonnegative checks. `hasExpectedGeneration()`
+distinguishes omission from explicit zero. The SDK preserves both across failover.
+Only `UNAVAILABLE` advances once per allowlisted controller within one original
+caller/configuration deadline; gRPC service-policy retry, hedging, service-config
+lookup, and proxies are disabled. The JDK TLS transport permits **only TLS 1.3**,
+with explicit CA and optional PKCS#12 identity loaded before channel creation.
+The same existing `TlsConfig` also configures HTTPS clients.
+
+`ManagementRPCException.info()` exposes attempts/budget/conservative unknown
+mutation outcome. Printed exceptions and stack traces omit backend text.
+`status()`, `trailers()`, and `rpcCause()` deliberately expose raw status/details;
+`getCause()` is unset to avoid accidental chained logging. Exception serialization
+is refused. A semantic mutation error can follow acceptance: resolve its original
+token and exact resource set, never a freshly invented mutation identity.
+
+`watchResourceChanges(context, request)` returns a lazy `AutoCloseable` single-
+consumer handle. `receive()` validates one immutable page, and `acknowledge`
+must match its exact `getNextCursor()` after durable application processing.
+`checkpoint()` is only the last acknowledged scanned cursor. Empty filtered
+pages also require ACK. Manual inbound flow control requests one page per receive,
+with no prefetch before ACK. `close()` may unblock a receive from another thread
+and cancels only its child context, not the caller's shared context. Caller
+deadline/cancellation bounds the persistent stream; the unary timeout does not.
+EOF/`UNAVAILABLE` advances through the fixed lifetime endpoint budget, preserving
+all filters and the last acknowledged cursor. Stale/malformed pages fail closed.
+
+[The exact Java example](../sdk/java/examples/ManagementExample.java) is embedded
+verbatim in candidate Pages and compiled with `--release 25 -Xlint:all -Werror`.
+It demonstrates all seven calls, a stable caller token, exact-scope operation
+resolution, OCC, bounded inventory, mandatory process/checkpoint callback, and
+dedicated-resource cleanup. It is compile-only, **not a live Catalog quickstart**.
+
+Seventeen client/safety regressions pass locally alongside the full Maven
+format/lint/test/package gate. Four Java generator tests verify pinned output,
+stale/missing refusal without rewriting, unknown inventory preservation, and
+Make's pre-rewrite check ordering. Generated code is externally owned; only its
+directory is excluded from application formatting/Checkstyle, and it still
+compiles with warnings treated as errors. Java CI separately runs the Go TLS
+fixture using an explicit compiled classpath:
+
+```sh
+sdk/java/mvnw --file sdk/java/pom.xml --batch-mode --no-transfer-progress \
+  verify dependency:build-classpath -Dmdep.outputFile=target/runtime-classpath.txt
+EPOCH_JAVA_MANAGEMENT_PROBE=java \
+EPOCH_JAVA_MANAGEMENT_CLASSPATH="$(pwd)/sdk/java/target/classes:$(pwd)/sdk/java/target/test-classes:$(cat sdk/java/target/runtime-classpath.txt)" \
+  go test -race ./sdk/go/epoch -run '^TestManagementJavaTLS13GeneratedWire$' -count=1
+```
+
+This executes all seven calls over real TLS 1.3/mTLS, denies wrong bearer,
+anonymous client and foreign CA trust, rejects a TLS-1.2-only server before
+application dispatch, and proves remote watch cancellation. Go-only SDK tests
+may skip the JDK-dependent probe; Java CI must not. These are wire/identity
+contracts, not Rust Catalog durability or production certification.
+
 ### Go client example
 
 [The full Go example](../sdk/go/epoch/management_example_test.go) compiles in
@@ -216,5 +293,5 @@ refusal, and protocol failure without unsafe mutation retry. These are client
 transport/contract checks, not Rust Catalog durability or production/SLO evidence.
 
 Native data gRPC, cooperative data consumers, background batching, identity
-refresh/rotation, Java management parity, package publication, and the
+refresh/rotation, package publication, and the
 full SDK/version matrix remain outside this candidate's verified boundary.

@@ -18,7 +18,7 @@ notes explicitly list additional verified artifacts.
   reject stale/malformed history, stop on cancellation, and never reset their
   endpoint budget. List receipts enforce every requested governance filter.
 - Add real generated TLS 1.3/mTLS wire tests and a compiled seven-method example.
-  Java management parity, public-SDK Catalog fault certification,
+  Public-SDK Catalog fault certification,
   protected delivery, and native data streaming remain open; this candidate
   does not claim complete SDK delivery or production readiness.
 - Add pinned, namespaced Python management messages and typed gRPC stubs,
@@ -32,11 +32,20 @@ notes explicitly list additional verified artifacts.
   calls against a TLS-1.3-only Go server pass locally. Python gRPC relies on
   the controller's enforced TLS minimum; it does not independently enforce 1.3.
 - Embed the exact typed Python seven-method example alongside Go in candidate
-  docs, and require the cross-language TLS/mTLS probe in Python CI. Java parity,
+  docs, and require the cross-language TLS/mTLS probe in Python CI.
   real public-SDK Catalog faults, native streaming, and protected delivery remain open.
 - Refuse unsupported encrypted client keys without an OpenSSL stdin password
   prompt in the shared Python HTTP/management trust loader; identity validation
   remains fail-closed before channel creation.
+- Add the Java seven-method management client, pinned generated messages,
+  immutable receipts, unsigned cursor/OCC checks, one-deadline failover,
+  caller cancellation, defensive binary metadata, and fixed-print errors.
+  Watches request one inbound page at a time and require explicit scanned ACK.
+  Seventeen regressions plus all seven Go TLS 1.3/mTLS calls pass locally;
+  wrong/missing/foreign identity and TLS-1.2-only server refusal are verified.
+  CI checks generated-source freshness/inventory and compiles the exact Java
+  example displayed alongside Go/Python. Real Catalog faults, protected delivery,
+  full native SDK parity, and package publication remain open.
 
 ### Control-plane hardening
 

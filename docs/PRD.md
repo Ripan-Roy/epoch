@@ -132,13 +132,13 @@ complete external integration plane. See ADR-0027.
 
 **SDK candidate note (5 October 2026):** The separate SDK contract branch adds
 strict whole-package Python typing and fail-closed standalone/regional response
-shape validation, plus Go/Python clients for all seven generated management methods.
-Both preserve caller tokens and optional OCC presence, bound failover
-by one deadline and explicit endpoint allowlist, validates response identities
+shape validation, plus Go/Java/Python clients for all seven generated management methods.
+All three preserve caller tokens and optional OCC presence, bound failover
+by one deadline and explicit endpoint allowlist, validate response identities
 and governance filters, and acknowledges only scanned management-watch cursors.
 Local generated TLS 1.3/mTLS tests and compiled examples are client-contract
-evidence, not protected delivery or Catalog fault certification. Java
-management parity in Java, generated native response models, persistent/cooperative
+evidence, not protected delivery or Catalog fault certification. Generated
+native response models, persistent/cooperative
 data streaming, the full version matrix, and deferred package publication remain
 DX-001 work. See [the management SDK candidate](MANAGEMENT_SDK.md).
 
@@ -149,7 +149,11 @@ TLS-1.3-only Go server validate bounded calls, identity/governance receipts,
 cancellation, and acknowledged watches without adding dependencies to ordinary
 HTTP SDK imports. Python gRPC trusts the explicit CA/client identity but does
 not independently enforce a TLS 1.3 minimum; Epoch controllers must retain
-their server policy. Java parity, public-SDK Catalog fault certification, and
+their server policy. Java's generated client additionally passes 17 local
+contract/safety tests and all seven calls against Go with TLS 1.3/mTLS,
+wrong/anonymous/foreign identity denial, and client-side TLS 1.2 refusal.
+The exact Java example compiles in CI and is embedded alongside Go/Python.
+Public-SDK Catalog fault certification and
 protected delivery remain open; generated-wire tests are not durability evidence.
 
 **Cache implementation note (21 August 2026):** The fixed-three-voter,

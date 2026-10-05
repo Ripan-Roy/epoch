@@ -70,8 +70,8 @@ pass local client/contract tests. Every generated method additionally runs over
 real TLS 1.3/mTLS loopback sockets, with wrong-bearer and missing-client-identity
 denial, uint64 extrema, and remote watch cancellation. The full API example
 compiles but is not executed against Catalog. This closes neither CTRL-001 nor
-DX-001: Java management client, public-SDK Catalog recovery evidence,
-protected delivery, the displayed multi-language management guide, and the
+DX-001: public-SDK Catalog recovery evidence,
+protected delivery and the
 broader native contract/streaming/type matrix remain open. See
 [management SDK candidate](MANAGEMENT_SDK.md).
 
@@ -93,10 +93,23 @@ retry, exhaustion, stale refusal, and remote close. All seven calls also pass
 against a Go TLS-1.3-only/mTLS fixture with bearer/anonymous denial and protocol
 validation; Python CI explicitly enables this interpreter-dependent probe.
 Python gRPC cannot independently select a TLS minimum, so the documented server
-policy remains required. Both exact Go/Python examples are embedded in candidate
-Pages, with the Python example included in whole-package strict typing. Java
-parity, public-SDK Catalog recovery, protected delivery, native streaming, and
+policy remains required. Exact Go/Java/Python examples are embedded in candidate
+Pages, with the Python example included in whole-package strict typing.
+Public-SDK Catalog recovery, protected delivery, native streaming, and
 the full SDK/version matrix remain open; DX-001 is not closed.
+
+The Java management candidate now also implements all seven calls, immutable
+generated requests/receipts, full unsigned-64-bit cursor/OCC semantics, exact
+governance/outcome validation, one-deadline bounded failover, caller cancellation,
+defensive binary metadata snapshots, fixed-print exceptions, and explicitly
+acknowledged manually flow-controlled watches. Seventeen new local regression
+tests and the complete Java Maven lint/test/package gate pass. A required Java
+CI probe executes all seven calls against Go over TLS 1.3/mTLS, denies wrong
+bearer/missing identity/foreign CA and TLS-1.2-only servers, and proves remote
+watch close. Pinned Buf Java generation has four non-mutating freshness/inventory
+tests; generated source alone is excluded from application formatting/lint.
+The exact displayed Java example compiles with `-Xlint:all -Werror`.
+These are client contracts, not actual Catalog fault or protected-delivery proof.
 
 ## How to use this register
 

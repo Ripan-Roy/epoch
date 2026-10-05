@@ -72,8 +72,11 @@ python -m pip install 'sdk/python[management,management-dev]' ruff==0.15.19 mypy
 
 `grpcio`/`grpcio-tools` 1.84.0 and Protobuf 7.35.1 produce the management
 bindings; `grpc-stubs` 1.53.0.6 and `types-protobuf` 7.35.1.20260906 support
-strict typing. `make generate` generates Go and Python, and
-`make generate-check` rejects stale bindings in either language. Python
+strict typing. `make generate` generates Go, Java, and Python, and
+`make generate-check` rejects stale bindings in all three languages. Java uses
+Buf 1.72.0, the remote Java Protobuf 35.1 / gRPC 1.84.0 plugins, and matching
+runtime libraries. Its generated directory is compiled but excluded from
+application formatting/Checkstyle, not edited or suppressed by hand. Python
 generation namespaces imports/module identities beneath `epoch_sdk._generated`
 and fills bare constructor `Mapping` parameters without changing wire
 descriptors. The public `epoch_sdk.management` client now adds all seven calls,
@@ -82,7 +85,10 @@ watches. `mypy --strict` covers its application modules and displayed example.
 Python CI also executes its seven calls against the Go TLS-1.3-only/mTLS fixture;
 set `EPOCH_PYTHON_MANAGEMENT_PROBE=python` locally to enable that Go test. Python
 gRPC relies on the controller's minimum-version policy, not a nonexistent
-client-side selector. Java bindings/parity and public-SDK Catalog evidence remain open.
+client-side selector. Java CI explicitly compiles and enables
+`TestManagementJavaTLS13GeneratedWire` with `EPOCH_JAVA_MANAGEMENT_PROBE=java`
+and `EPOCH_JAVA_MANAGEMENT_CLASSPATH`; it verifies TLS 1.3/mTLS and refusal of
+a TLS-1.2-only server. Public-SDK Catalog evidence remains open.
 
 Xcode and its command-line tools supply Clang and the linker:
 

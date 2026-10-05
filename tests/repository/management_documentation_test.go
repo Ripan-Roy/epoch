@@ -64,11 +64,16 @@ func TestManagementSDKDocsDisplayTheCompiledExampleWithExplicitLimits(t *testing
 	if !strings.Contains(content, `../../../sdk/python/examples/management.py?raw`) || !strings.Contains(content, "export const pythonManagementExample") {
 		t.Error("management docs must use the exact strictly typed Python example")
 	}
-	for _, marker := range []string{`id="management-sdk"`, "value={goManagementExample}", "value={pythonManagementExample}", "MANAGEMENT_SDK.md", "Not a live Catalog quickstart", "Java management client remains open", "server-enforced TLS 1.3"} {
+	if !strings.Contains(content, `../../../sdk/java/examples/ManagementExample.java?raw`) || !strings.Contains(content, "export const javaManagementExample") {
+		t.Error("management docs must use the exact compiled Java example")
+	}
+	for _, marker := range []string{`id="management-sdk"`, "value={goManagementExample}", "value={pythonManagementExample}", "value={javaManagementExample}", "MANAGEMENT_SDK.md", "Not a live Catalog quickstart", "Catalog fault certification remains open", "server-enforced TLS 1.3"} {
 		if !strings.Contains(page, marker) {
 			t.Errorf("management SDK page lacks %q", marker)
 		}
 	}
+	java := read("sdk/java/src/main/java/io/epoch/sdk/ManagementClient.java")
+	javaExample := read("sdk/java/examples/ManagementExample.java")
 	if !strings.Contains(registry, `{ id: "management-sdk", label: "Management SDK" }`) {
 		t.Error("management SDK topic is missing from the page navigation")
 	}
@@ -81,11 +86,21 @@ func TestManagementSDKDocsDisplayTheCompiledExampleWithExplicitLimits(t *testing
 		if !strings.Contains(python, "def "+name+"(") || !strings.Contains(example, "client."+name+"(") {
 			t.Errorf("Python client/displayed example omits generated method %s", name)
 		}
+		javaName := strings.ToLower(method[1][:1]) + method[1][1:]
+		javaCall := regexp.MustCompile(`\bclient\s*\.\s*` + javaName + `\s*\(`)
+		if !strings.Contains(java, " "+javaName+"(") || !javaCall.MatchString(javaExample) {
+			t.Errorf("Java client/displayed example omits generated method %s", javaName)
+		}
 	}
 	workflow := read(".github/workflows/ci.yml")
 	for _, marker := range []string{"EPOCH_PYTHON_MANAGEMENT_PROBE: python", "TestManagementPythonTLS13GeneratedWire", "mypy --strict sdk/python/src sdk/python/examples/management.py"} {
 		if !strings.Contains(workflow, marker) {
 			t.Errorf("Python management contract is not enforced in CI: %s", marker)
+		}
+	}
+	for _, marker := range []string{"TestManagementJavaTLS13GeneratedWire", "EPOCH_JAVA_MANAGEMENT_PROBE=java", "sdk/java/examples/ManagementExample.java", "test_java_management_generation.py"} {
+		if !strings.Contains(workflow, marker) {
+			t.Errorf("Java management contract is not enforced in CI: %s", marker)
 		}
 	}
 }

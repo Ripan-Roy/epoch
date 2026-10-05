@@ -144,6 +144,9 @@ class ManagementBindingTest(unittest.TestCase):
                 "    sys.exit(0 if state.read_text() == 'current' else 7)\n"
                 "state.write_text('current')\n"
             )
+            (fixture / "scripts/generate-java-management.py").write_text(
+                "# Java fixture is current\n"
+            )
             tools = fixture / "bin"
             tools.mkdir()
             buf = tools / "buf"

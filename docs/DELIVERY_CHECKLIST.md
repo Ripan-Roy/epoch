@@ -642,8 +642,10 @@ and whole-package typing checks also pass locally. Python's seven-method client
 adds bounded calls, typed receipts, cancellation, and acknowledged watches;
 21 real-gRPC regression groups plus the TLS-1.3-only Go fixture pass locally.
 Python gRPC relies on the enforced server TLS minimum. Candidate Pages embeds
-both exact compiled/strictly typed examples. Java management parity, actual
-public-SDK Catalog fault evidence, and protected delivery remain open; these results close
+all three exact compiled/strictly typed examples. Java adds pinned generated
+contracts, 17 client/safety tests, immutable receipts, unsigned cursor validation,
+manual watch flow control, and seven real Go TLS 1.3/mTLS calls with client-side
+TLS 1.2 refusal. Actual public-SDK Catalog fault evidence and protected delivery remain open; these results close
 neither CTRL-001 nor DX-001. See [MANAGEMENT_SDK.md](MANAGEMENT_SDK.md).
 
 | Order | Release action | Required evidence | State for next release |
