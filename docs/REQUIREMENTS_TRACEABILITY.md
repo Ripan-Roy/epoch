@@ -25,6 +25,15 @@ exact bounded ambiguous-send retries, and a separate native-image CI gate.
 Twenty-nine HA fixture contract tests pass locally; neither this candidate nor
 the partial live run closes CTRL-001/CTRL-002 or any production gate.
 
+An additional Python SDK audit on 5 October 2026 ran
+`PYTHONPATH=sdk/python/src mypy --strict sdk/python/src console/src/quickstarts/quickstart.py`.
+It found 53 typing errors in six SDK modules, principally raw `Any` response
+returns, plus route-constructor inference and a Cache factory annotation that
+shadows a builtin type. The existing CI command checks the displayed quickstart
+only and still passes; all 48 Python SDK unit tests pass. Full-package strict
+typing and generated response types therefore remain open DX-001 work, not a
+verified guarantee inferred from the quickstart check.
+
 ## How to use this register
 
 Status values are:
