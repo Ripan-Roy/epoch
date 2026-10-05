@@ -15,6 +15,16 @@ local results do not close the full concurrent gRPC/batch/watch matrix, public
 operation-retention, Catalog scaling/migration, or protected-main gates. See
 [Control HA certification](CONTROL_HA_CERTIFICATION.md).
 
+The clean `0f585ed` generated-client run also passed its eight API checks through
+three-controller owner failure, quorum recovery, and all-voter/controller
+reopen, retaining seventeen exact operation protobufs and 135 desired resources.
+It failed near real history compaction on a fixture HTTP timeout, before the
+stale-cursor or five-controller phases. The full candidate adds original-token
+lookup binding after real Catalog-leader loss with pending caller responses,
+exact bounded ambiguous-send retries, and a separate native-image CI gate.
+Twenty-nine HA fixture contract tests pass locally; neither this candidate nor
+the partial live run closes CTRL-001/CTRL-002 or any production gate.
+
 ## How to use this register
 
 Status values are:

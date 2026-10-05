@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"testing"
 
 	epochv1 "epoch.local/epoch/sdk/go/gen/epoch/v1"
@@ -103,4 +104,41 @@ func TestWatchDetectsFilteredChangesInsideRatherThanOnlyAfterVisiblePage(t *test
 
 func testName() *epochv1.ResourceName {
 	return &epochv1.ResourceName{Organization: "acme", Project: "payments", Environment: "production", Namespace: "orders", Kind: epochv1.ResourceKind_RESOURCE_KIND_CACHE, Name: "fixture"}
+}
+
+func TestLookupBindingRetainsOnlyExactCommittedApplyOutcomes(t *testing.T) {
+	request := &epochv1.GetOperationRequest{RequestToken: "unknown-caller", AffectedResources: []*epochv1.ResourceName{testName()}}
+	response := &epochv1.GetOperationResponse{RequestToken: request.RequestToken, ProposalId: 7,
+		State: epochv1.OperationState_OPERATION_STATE_SUCCEEDED, CommandKind: "apply_desired",
+		AffectedResources: request.AffectedResources, FirstChangeCursor: 10, LastChangeCursor: 10,
+	}
+	lookup := func(*epochv1.GetOperationRequest) (*epochv1.GetOperationResponse, error) { return response, nil }
+	bound, err := bindLookups([]*epochv1.GetOperationRequest{request}, nil, lookup)
+	if err != nil || len(bound) != 1 || bound[0].Kind != "lookup" {
+		t.Fatalf("bound lookup = %v, %v", bound, err)
+	}
+	original := proto.Clone(response).(*epochv1.GetOperationResponse)
+	for _, mutate := range []func(*epochv1.GetOperationResponse){
+		func(value *epochv1.GetOperationResponse) { value.RequestToken = "wrong-token" },
+		func(value *epochv1.GetOperationResponse) {
+			value.State = epochv1.OperationState_OPERATION_STATE_PENDING
+		},
+		func(value *epochv1.GetOperationResponse) { value.CommandKind = "delete_managed" },
+		func(value *epochv1.GetOperationResponse) { value.AffectedResources[0].Organization = "wrong-tenant" },
+	} {
+		response = proto.Clone(original).(*epochv1.GetOperationResponse)
+		mutate(response)
+		if _, err := bindLookups([]*epochv1.GetOperationRequest{request}, nil, lookup); err == nil {
+			t.Fatal("accepted non-exact committed lookup")
+		}
+	}
+	response = proto.Clone(original).(*epochv1.GetOperationResponse)
+	if _, err := bindLookups([]*epochv1.GetOperationRequest{request, request}, nil, lookup); err == nil {
+		t.Fatal("accepted duplicate bindings")
+	}
+	if _, err := bindLookups([]*epochv1.GetOperationRequest{request}, nil, func(*epochv1.GetOperationRequest) (*epochv1.GetOperationResponse, error) {
+		return nil, errors.New("no durable outcome")
+	}); err == nil {
+		t.Fatal("accepted missing outcome")
+	}
 }

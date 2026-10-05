@@ -104,6 +104,14 @@ does not certify in-flight Catalog-leader unknown outcomes or production limits.
 Local Go race and fixture contract suites pass; the new live campaign has not
 yet passed and the matrix remains open.
 
+The clean `0f585ed` API run passed all eight generated-client checks with
+three controllers at preparation, after owner failure, after quorum recovery,
+and after all-voter/controller reopen. Seventeen exact operation protobufs and
+135 desired resources were retained across those phases. The campaign then
+failed on its two-second fixture HTTP deadline near the 4,096-entry history
+boundary; it did not reach the stale-cursor assertion or the five-controller
+case. These partial results are not a passing API campaign.
+
 ```sh
 EPOCH_REGIONAL_IMAGE=epoch/node:ha-candidate \
 EPOCH_REGIONAL_USE_EXISTING_IMAGE=1 \
@@ -111,6 +119,53 @@ EPOCH_CONTROL_HA_ARTIFACT_DIR=/absolute/empty/api-evidence-directory \
 make test-control-ha-api
 python3 tests/integration/control_ha_api.py verify \
   --manifest /absolute/empty/api-evidence-directory/evidence.json
+```
+
+### Complete bounded matrix fixture (candidate)
+
+`tests/integration/control_ha_full.py` combines the owner and generated-client
+cases with real Catalog-leader loss while three or five caller requests remain
+pending. A private, loopback-only test proxy forwards each original command to
+its assigned real Go controller, observes successful upstream commits, and
+holds every caller response without sending headers. The driver identifies and
+stops the real Catalog leader, verifies its container is stopped while all
+callers are still pending, and closes only those owned response sockets.
+Callers observe an unknown network outcome, never a fabricated HTTP status.
+Every exact original token is then replayed through every controller and bound
+to its fully qualified generated-client `GetOperation` request and durable
+outcome. Those exact protobuf witnesses survive the subsequent owner, quorum,
+and reopen faults.
+
+This fault is the committed/lost-ack branch of an unknown outcome. It does not
+claim to interrupt every Raft proposal position; majority-loss refusal remains
+a separate case. An unchanged token is never rebound to a changed command.
+The independent verifier checks the original command hashes, exact scope and
+token lookup plan, all generated lookup witnesses, and every recovery phase.
+Its schema is `epoch.control-ha.full-certification/v1`, which means only the
+bounded matrix below—not production certification or PRD completion.
+
+The retention fixture now uses a twelve-second native HTTP deadline and a
+cached leader hint; every response still passes through the authority's strong
+read or commit path. Typed `not_leader` responses invalidate that hint.
+Ambiguous sends retry the identical command, lease, clock value, and token at
+most four times. Only a resolved, typed fencing rejection permits a separate
+attempt with a newly observed guard and token. This does not assert a two-second
+service SLO or widen the public operation-retention contract.
+
+All 29 HA fixture contract tests, the complete Go race suite, vet, and build
+pass locally. The complete live matrix has not yet passed. CI has a separate
+native-arm64 HA job that consumes the already inspected exact-source node image
+from the arm64 build job, verifies its archive checksum and OCI revision, and
+retains passing or failed evidence for 30 days. It neither rebuilds that Rust
+image nor publishes it to a registry.
+
+```sh
+EPOCH_REGIONAL_IMAGE=epoch/node:ha-candidate \
+EPOCH_REGIONAL_USE_EXISTING_IMAGE=1 \
+EPOCH_CONTROL_HA_ARTIFACT_DIR=/absolute/empty/full-evidence-directory \
+make test-control-ha-full
+python3 tests/integration/control_ha_full.py verify \
+  --manifest /absolute/empty/full-evidence-directory/evidence.json
 ```
 
 ### Recovery regression evidence

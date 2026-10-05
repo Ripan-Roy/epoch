@@ -50,6 +50,28 @@ schema does not close the remaining gRPC batch/OCC, operation authorization,
 watch/stale-cursor, Catalog-leader unknown-outcome, or delete/recreate matrix.
 See [Control HA certification](CONTROL_HA_CERTIFICATION.md).
 
+The full concurrent-control matrix has its own live entry point:
+
+```shell
+EPOCH_REGIONAL_IMAGE=epoch/node:ha-candidate \
+EPOCH_REGIONAL_USE_EXISTING_IMAGE=1 \
+EPOCH_CONTROL_HA_ARTIFACT_DIR=/absolute/empty/full-evidence-directory \
+make test-control-ha-full
+python3 tests/integration/control_ha_full.py verify \
+  --manifest /absolute/empty/full-evidence-directory/evidence.json
+```
+
+It combines the owner subset with generated gRPC maximum batches, conflicting
+OCC, scoped operation lookup, delete/recreate, filtered watch resume, actual
+history retention, and Catalog-leader loss with pending callers and lost
+committed responses. Its fail-closed verifier binds exact original command
+hashes, fully qualified lookup plans, and operation protobufs across every
+fault phase. The required CI job reuses the exact-source native-arm64 node
+image from its producer job, verifies its checksum and OCI revision, and keeps
+failure as well as passing evidence for 30 days. The full local campaign and
+protected-head/main gates remain open until a complete run passes; this is not
+a production SLO or full-PRD certification.
+
 Observability assets have a focused offline contract gate:
 
 ```shell

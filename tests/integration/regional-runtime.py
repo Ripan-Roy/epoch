@@ -413,6 +413,8 @@ class RegionalCluster:
         path: str,
         body: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        *,
+        timeout_seconds: float = 2,
     ) -> HttpResponse:
         request_headers = dict(headers or {})
         if path.startswith("/experimental/v1/regional/"):
@@ -428,7 +430,7 @@ class RegionalCluster:
             method=method,
         )
         try:
-            response = urllib.request.urlopen(request, timeout=2)
+            response = urllib.request.urlopen(request, timeout=timeout_seconds)
         except urllib.error.HTTPError as error:
             raw = error.read()
             return HttpResponse(

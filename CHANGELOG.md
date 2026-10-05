@@ -16,6 +16,13 @@ notes explicitly list additional verified artifacts.
   batches, conflicting OCC, operation authorization and delete-precondition
   identity, old-token delete/recreate, filtered watch resume, and real history
   staleness. Its live certification is separate from owner-only evidence.
+- Add the complete bounded control-HA driver with Catalog-leader loss while
+  committed caller responses remain pending, exact original-token replay and
+  generated operation binding across later faults. Fail-closed evidence checks
+  reject changed scope, missing protobuf witnesses, or incomplete phases.
+  Ambiguous retention sends retry identical bytes under bounded native HTTP
+  deadlines. A separate CI job verifies and reuses its exact-source native
+  arm64 image rather than rebuilding it; full live certification remains open.
 - Add fully qualified HTTP resource GET/DELETE paths, preserving tenant
   authorization, optimistic concurrency, exact keys, and the existing managed
   delete coordinator. Legacy three-segment item paths remain supported.

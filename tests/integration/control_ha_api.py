@@ -10,7 +10,7 @@ import re
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import control_ha as owner
 
@@ -74,8 +74,12 @@ def validate_api_evidence(evidence: dict[str, Any]) -> None:
             )
 
 
-def verify_api_bundle(path: Path) -> None:
-    owner.verify_bundle(path, validator=validate_api_evidence)
+def verify_api_bundle(
+    path: Path,
+    *,
+    validator: Callable[[dict[str, Any]], None] = validate_api_evidence,
+) -> None:
+    owner.verify_bundle(path, validator=validator)
     evidence = owner.soak.load_json(path)
     artifacts = {receipt["path"] for receipt in evidence["artifacts"]}
     for fleet in evidence["fleets"]:
@@ -109,6 +113,7 @@ def verify_api_bundle(path: Path) -> None:
                     "desired_proto",
                     "watch_checkpoint",
                     "watch_matching_cursors",
+                    "lookup_bindings",
                 )
             }
             if baseline is None:
@@ -124,15 +129,34 @@ class APIFleet(owner.OwnerFleet):
         self.proofs: dict[str, dict[str, Any]] = {}
         self.result["api"] = {"checks": {}, "phases": []}
 
+    def raw(self, method: str, suffix: str, body: dict | None = None) -> Any:
+        # A hint reduces redundant ReadIndex discovery, not the authority's
+        # strong read barrier. Every response still comes from the real node.
+        for _attempt in range(3):
+            node = getattr(self, "_catalog_hint", None)
+            if node is None:
+                node = self.leader()
+                self._catalog_hint = node
+            try:
+                response = self.cluster.request(
+                    node,
+                    method,
+                    owner.CONTROL_ROOT + suffix,
+                    body,
+                    timeout_seconds=12,
+                )
+            except OSError:
+                self._catalog_hint = None
+                raise
+            if response.status == 409 and response.document.get("code") == "not_leader":
+                self._catalog_hint = None
+                continue
+            return response
+        raise AssertionError("Catalog leader hint repeatedly failed")
+
     def generated_clients(self, phase: str) -> dict[str, Any]:
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
-        mode = (
-            "prepare"
-            if phase == "prepare"
-            else "stale"
-            if phase == "stale"
-            else "verify"
-        )
+        mode = phase if phase in {"prepare", "stale", "bind-operations"} else "verify"
         endpoints = [
             f"127.0.0.1:{controller.grpc_port}"
             for controller in self.controllers
@@ -160,6 +184,8 @@ class APIFleet(owner.OwnerFleet):
                 f"ha-grpc-{self.count}",
                 "--state",
                 str(self.artifact_dir / "api-prepare.json"),
+                "--lookup-plan",
+                str(self.artifact_dir / "leader-lookups.json"),
             ],
             cwd=owner.regional.REPO_ROOT,
             env=environment,
@@ -275,20 +301,17 @@ class APIFleet(owner.OwnerFleet):
         for attempt in range(4):
             lease = self.lease()
             token = f"ha-retention-{self.count}-{sequence}-{attempt}"
-            response = self.raw(
-                "PUT",
-                suffix,
-                {
-                    "request_token": token,
-                    "expected_generation": generation,
-                    "status": {"ha_retention_sequence": sequence},
-                    "lease": {
-                        "owner_id": lease["owner_id"],
-                        "fence": lease["fence"],
-                        "now_ms": str(time.time_ns() // 1000000),
-                    },
+            frame = {
+                "request_token": token,
+                "expected_generation": generation,
+                "status": {"ha_retention_sequence": sequence},
+                "lease": {
+                    "owner_id": lease["owner_id"],
+                    "fence": lease["fence"],
+                    "now_ms": str(time.time_ns() // 1000000),
                 },
-            )
+            }
+            response = self.send_status_frame(suffix, frame)
             if response.status == 200:
                 return attempt
             assert response.status == 409, response
@@ -301,6 +324,21 @@ class APIFleet(owner.OwnerFleet):
             # Never change the bytes of an already rejected token. A fresh
             # observation and token define a separate, bounded attempt.
         raise AssertionError("status churn repeatedly lost a fresh control guard")
+
+    def send_status_frame(self, suffix: str, frame: dict[str, Any]) -> Any:
+        for _send in range(4):
+            try:
+                response = self.raw("PUT", suffix, frame)
+            except OSError:
+                continue
+            if response.status in (502, 503, 504):
+                continue
+            return response
+        # The outcome remains unknown; never invent a successful status or
+        # swap a lease/time/token under an ambiguously delivered command.
+        raise AssertionError(
+            "status command remained unknown after exact bounded retries"
+        )
 
 
 def main() -> None:

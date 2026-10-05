@@ -129,16 +129,20 @@ test-kubernetes-runner: ## Prove the disposable Kubernetes campaign's fail-close
 test-regional-runtime-runner: ## Prove regional recovery deadlines and diagnostics.
 	@PYTHONPATH=tests/integration python3 -m unittest tests/integration/test_regional_runtime.py -v
 
-.PHONY: test-control-ha-runner test-control-ha-owner test-control-ha-api
+.PHONY: test-control-ha-runner test-control-ha-owner test-control-ha-api test-control-ha-full
 test-control-ha-runner: ## Reject incomplete concurrent-owner fault evidence and unsafe child cleanup.
 	@PYTHONPATH=tests/integration python3 -m unittest tests/integration/test_control_ha.py -v
 	@PYTHONPATH=tests/integration python3 -m unittest tests/integration/test_control_ha_api.py -v
+	@PYTHONPATH=tests/integration python3 -m unittest tests/integration/test_control_ha_faults.py tests/integration/test_control_ha_full.py -v
 
 test-control-ha-owner: ## Prove the owner-recovery subset with three/five Go controllers and four profiles.
 	@python3 tests/integration/control_ha.py run --output "$${EPOCH_CONTROL_HA_ARTIFACT_DIR:?set an empty owner-recovery evidence directory}"
 
 test-control-ha-api: ## Prove generated gRPC batches, operations, deletes, watches, and real owner/voter recovery.
 	@python3 tests/integration/control_ha_api.py run --output "$${EPOCH_CONTROL_HA_ARTIFACT_DIR:?set an empty API-recovery evidence directory}"
+
+test-control-ha-full: ## Prove the complete concurrent-control matrix including Catalog-leader lost responses.
+	@python3 tests/integration/control_ha_full.py run --output "$${EPOCH_CONTROL_HA_ARTIFACT_DIR:?set an empty full HA evidence directory}"
 
 .PHONY: test-protocol-regional test-protocol-regional-runner
 test-protocol-regional-runner: ## Reject incomplete real-client recovery evidence.

@@ -29,6 +29,53 @@ def api_evidence_fixture() -> dict:
 
 
 class APIEvidenceContractTest(unittest.TestCase):
+    def test_unknown_status_send_retries_exact_bytes_without_new_guard_or_token(
+        self,
+    ) -> None:
+        for failure in (
+            TimeoutError("unknown caller outcome"),
+            control_ha_api.owner.regional.HttpResponse(
+                504, {"code": "catalog_commit_timeout"}, {}
+            ),
+        ):
+            fleet = control_ha_api.APIFleet.__new__(control_ha_api.APIFleet)
+            fleet.count = 3
+            fleet.lease = mock.Mock(return_value={"owner_id": "owner", "fence": "1"})
+            fleet.raw = mock.Mock(
+                side_effect=(
+                    failure,
+                    control_ha_api.owner.regional.HttpResponse(200, {}, {}),
+                )
+            )
+            self.assertEqual(0, fleet.commit_retention_status("/owned/status", "1", 7))
+            self.assertEqual(fleet.raw.call_args_list[0], fleet.raw.call_args_list[1])
+            fleet.lease.assert_called_once()
+
+    def test_cached_catalog_hint_is_discarded_only_on_typed_leader_loss(self) -> None:
+        fleet = control_ha_api.APIFleet.__new__(control_ha_api.APIFleet)
+        fleet.leader = mock.Mock(side_effect=(1, 2))
+        fleet.cluster = mock.Mock()
+        response = control_ha_api.owner.regional.HttpResponse
+        fleet.cluster.request.side_effect = (
+            response(409, {"code": "not_leader"}, {}),
+            response(200, {}, {}),
+            response(409, {"code": "catalog_conflict"}, {}),
+        )
+        self.assertEqual(200, fleet.raw("GET", "/lease").status)
+        self.assertEqual(
+            409, fleet.raw("PUT", "/resources", {"request_token": "exact"}).status
+        )
+        self.assertEqual(2, fleet.leader.call_count)
+        self.assertEqual(
+            [1, 2, 2], [call.args[0] for call in fleet.cluster.request.call_args_list]
+        )
+        self.assertTrue(
+            all(
+                call.kwargs["timeout_seconds"] == 12
+                for call in fleet.cluster.request.call_args_list
+            )
+        )
+
     def test_retention_churn_resolves_fencing_and_uses_fresh_guard_and_token(
         self,
     ) -> None:

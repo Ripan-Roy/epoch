@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -41,6 +42,7 @@ type apiProof struct {
 	Desired         [][]byte           `json:"desired_proto"`
 	WatchCheckpoint uint64             `json:"watch_checkpoint"`
 	WatchCursors    []uint64           `json:"watch_matching_cursors"`
+	LookupBindings  []json.RawMessage  `json:"lookup_bindings,omitempty"`
 }
 
 type clients struct {
@@ -52,19 +54,20 @@ type clients struct {
 }
 
 func main() {
-	phase := flag.String("phase", "", "prepare, verify, or stale")
+	phase := flag.String("phase", "", "prepare, bind-operations, verify, or stale")
 	endpoints := flag.String("endpoints", "", "comma-separated loopback gRPC endpoints")
 	prefix := flag.String("prefix", "", "unique request-token prefix")
 	count := flag.Int("controllers", 0, "original concurrent controller count")
 	state := flag.String("state", "", "saved prepare proof for recovery verification")
+	lookupPlan := flag.String("lookup-plan", "", "exact resource-scoped operations to bind")
 	flag.Parse()
-	if err := run(*phase, *endpoints, *prefix, *count, *state); err != nil {
+	if err := run(*phase, *endpoints, *prefix, *count, *state, *lookupPlan); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func run(phase, endpoints, prefix string, count int, state string) (runErr error) {
+func run(phase, endpoints, prefix string, count int, state, lookupPlan string) (runErr error) {
 	if count != 3 && count != 5 || prefix == "" || endpoints == "" {
 		return errors.New("requires original three/five controllers, endpoints, and token prefix")
 	}
@@ -112,6 +115,43 @@ func run(phase, endpoints, prefix string, count int, state string) (runErr error
 			return errors.New("missing or incompatible generated-client prepare evidence")
 		}
 		switch phase {
+		case "bind-operations":
+			if len(fleet.connections) != count {
+				return errors.New("binding requires all original controllers")
+			}
+			data, err := os.ReadFile(lookupPlan)
+			if err != nil {
+				return err
+			}
+			var plan struct {
+				Schema   string            `json:"schema"`
+				Requests []json.RawMessage `json:"requests"`
+			}
+			if err := json.Unmarshal(data, &plan); err != nil {
+				return err
+			}
+			if plan.Schema != "epoch.control-ha.operation-bindings/v1" || len(plan.Requests) != count {
+				return errors.New("missing concurrent original-token lookup plan")
+			}
+			requests := make([]*epochv1.GetOperationRequest, 0, count)
+			for _, raw := range plan.Requests {
+				request := &epochv1.GetOperationRequest{}
+				if err := protojson.Unmarshal(raw, request); err != nil {
+					return err
+				}
+				requests = append(requests, request)
+			}
+			bound, err := bindLookups(requests, fleet.proof.Operations, func(request *epochv1.GetOperationRequest) (*epochv1.GetOperationResponse, error) {
+				return fleet.operation(0, fleet.admin, request.GetRequestToken(), request.GetAffectedResources())
+			})
+			if err != nil {
+				return err
+			}
+			fleet.proof.Operations = append(fleet.proof.Operations, bound...)
+			fleet.proof.LookupBindings = plan.Requests
+			if err := fleet.verify(); err != nil {
+				return err
+			}
 		case "verify":
 			if err := fleet.verify(); err != nil {
 				return err
@@ -624,6 +664,9 @@ func (fleet *clients) verify() error {
 				return err
 			}
 			switch witness.Kind {
+			case "lookup":
+				// HTTP caller retries are driven by the fault fixture. The
+				// generated client checks their same exact retained operations.
 			case "batch":
 				request := &epochv1.BatchApplyResourcesRequest{}
 				if err := proto.Unmarshal(witness.Request, request); err != nil {
@@ -666,6 +709,36 @@ func compareOperation(expected, actual *epochv1.GetOperationResponse) error {
 		return errors.New("durable operation identity/outcome differs from its original receipt")
 	}
 	return nil
+}
+
+func bindLookups(requests []*epochv1.GetOperationRequest, existing []operationWitness, fetch func(*epochv1.GetOperationRequest) (*epochv1.GetOperationResponse, error)) ([]operationWitness, error) {
+	if len(requests) == 0 || len(requests) > 128 {
+		return nil, errors.New("operation binding requires a bounded nonempty plan")
+	}
+	tokens := map[string]bool{}
+	for _, witness := range existing {
+		operation := &epochv1.GetOperationResponse{}
+		if err := proto.Unmarshal(witness.Operation, operation); err != nil {
+			return nil, err
+		}
+		tokens[operation.GetRequestToken()] = true
+	}
+	bound := make([]operationWitness, 0, len(requests))
+	for _, request := range requests {
+		if request == nil || request.GetRequestToken() == "" || tokens[request.GetRequestToken()] || len(request.GetAffectedResources()) != 1 || request.AffectedResources[0] == nil {
+			return nil, errors.New("missing or duplicate exact original operation binding")
+		}
+		tokens[request.GetRequestToken()] = true
+		operation, err := fetch(request)
+		if err != nil {
+			return nil, err
+		}
+		if operation == nil || operation.GetRequestToken() != request.GetRequestToken() || operation.GetProposalId() == 0 || operation.GetState() != epochv1.OperationState_OPERATION_STATE_SUCCEEDED || operation.GetCommandKind() != "apply_desired" || operation.ExpectedGeneration != nil || len(operation.GetAffectedResources()) != 1 || !proto.Equal(operation.AffectedResources[0], request.AffectedResources[0]) || operation.GetFirstChangeCursor() == 0 || operation.GetLastChangeCursor() < operation.GetFirstChangeCursor() || operation.GetFailureCode() != "" || operation.GetFailureMessage() != "" {
+			return nil, errors.New("original token did not resolve an exact committed apply operation")
+		}
+		bound = append(bound, operationWitness{Kind: "lookup", Request: marshal(request), Code: codes.OK, Operation: marshal(operation)})
+	}
+	return bound, nil
 }
 
 func desiredWitness(resource *epochv1.Resource) (*epochv1.Resource, error) {
