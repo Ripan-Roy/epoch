@@ -30,6 +30,56 @@ validates the Compose model. Long-running compatibility, fuzz, simulation,
 chaos, soak, and performance suites remain separate so the fast gate stays
 useful.
 
+Concurrent control-owner recovery has separate contract and live gates:
+
+```shell
+make test-control-ha-runner
+EPOCH_REGIONAL_IMAGE=epoch/node:ha-candidate \
+EPOCH_REGIONAL_USE_EXISTING_IMAGE=1 \
+EPOCH_CONTROL_HA_ARTIFACT_DIR=/absolute/empty/evidence-directory \
+make test-control-ha-owner
+python3 tests/integration/control_ha.py verify \
+  --manifest /absolute/empty/evidence-directory/evidence.json
+```
+
+The live fixture uses three and five real Go controllers, a dedicated
+three-voter Docker project, all four profiles, actual lease-owner failure,
+pause/takeover/resume, stale guards, majority loss, and same-volume reopen.
+It requires a clean frozen candidate and checksummed evidence. Its owner-only
+schema does not close the remaining gRPC batch/OCC, operation authorization,
+watch/stale-cursor, Catalog-leader unknown-outcome, or delete/recreate matrix.
+See [Control HA certification](CONTROL_HA_CERTIFICATION.md).
+
+The full concurrent-control matrix has its own live entry point:
+
+```shell
+EPOCH_REGIONAL_IMAGE=epoch/node:ha-candidate \
+EPOCH_REGIONAL_USE_EXISTING_IMAGE=1 \
+EPOCH_CONTROL_HA_ARTIFACT_DIR=/absolute/empty/full-evidence-directory \
+make test-control-ha-full
+python3 tests/integration/control_ha_full.py verify \
+  --manifest /absolute/empty/full-evidence-directory/evidence.json
+```
+
+It combines the owner subset with generated gRPC maximum batches, conflicting
+OCC, scoped operation lookup, delete/recreate, filtered watch resume, actual
+history retention, and Catalog-leader loss with pending callers and lost
+committed responses. Its fail-closed verifier binds exact original command
+hashes, fully qualified lookup plans, and operation protobufs across every
+fault phase. The required CI job reuses the exact-source native-arm64 node
+image from its producer job, verifies its checksum and OCI revision, and keeps
+failure as well as passing evidence for 30 days. The fresh clean `0f3c8d5`
+campaign completed both fleets with exit zero and independent verification of
+all 32 receipts. Its v2 initial-batch witnesses prove exact durable effects
+without counting replay flags; every fleet passed ten owner and eleven API
+checks, real lost acknowledgements, and stale-watch rejection. The historical
+v1 capture's failed CLI and later re-verification remain separately documented
+in the certification guide. Complete bundle
+verification is part of campaign failure handling: an invalid final artifact
+produces failed evidence rather than leaving a passed manifest. Protected
+exact-head/main execution remains open; this is not a production SLO or
+full-PRD certification.
+
 Observability assets have a focused offline contract gate:
 
 ```shell
@@ -95,6 +145,27 @@ every named container to finish exiting after SIGKILL before starting the
 voters. `make test-compose-crash-restart` models delayed exits and rejects
 missing containers, invalid state, exhausted polling, and Docker failures. It
 runs in both the default unit gate and CI without requiring a Docker daemon.
+
+Latest-snapshot transport recovery has a focused real-HTTP regression:
+
+```shell
+cargo test --locked -p epoch-node --lib \
+  lost_latest_snapshot_is_retried_without_another_commit_or_checkpoint
+cargo test --locked -p epoch-node --lib \
+  locally_dropped_snapshot_exits_pending_state_for_full_and_closed_queues
+cargo test --locked -p epoch-node --lib \
+  catalog_planned_voter_replacement_catches_up_finalizes_and_reopens
+```
+
+The first deliberately loses the latest compacted image, restores connectivity,
+and requires profile convergence without another write/checkpoint across three
+and five real actors (including a one-frame outbound queue). Adapter tests
+reject old-term, foreign, duplicate, superseded, and old-incarnation callbacks,
+and verify that transport success cannot advance matched/commit/applied indexes.
+Worker tests cover weak command-channel ownership and exact delivery feedback;
+the membership campaign compacts before adding a learner, verifies safe
+replacement, and reopens the same volumes. These complement, rather than
+replace, the rebuilt regional container and exact-main CI gates. See ADR-0051.
 
 ### 1. Unit and property tests
 

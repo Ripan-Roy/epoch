@@ -4,6 +4,54 @@ This register turns the prioritized catalog in [PRD.md](./PRD.md) into a deliver
 
 Last synchronized with PRD version 0.3 on 21 August 2026.
 
+Current CTRL-001/CTRL-002 hardening candidate: the clean `671fde4` tree passed
+the dedicated owner-recovery subset with three and five concurrent Go
+controllers, ten invariants per count, and fourteen verified artifact receipts.
+Fully qualified HTTP item GET/DELETE now preserves tenant scope and managed
+deletion; its regression was observed red before implementation, and the Go
+race/vet/build checks pass locally. The clean `fed6b59` Rust candidate separately
+passed the rebuilt, signed eight-invariant regional recovery campaign. These
+local results alone do not close the full concurrent gRPC/batch/watch matrix,
+public operation-retention, Catalog scaling/migration, or protected-main gates. See
+[Control HA certification](CONTROL_HA_CERTIFICATION.md).
+
+The clean `0f585ed` generated-client run also passed its eight API checks through
+three-controller owner failure, quorum recovery, and all-voter/controller
+reopen, retaining seventeen exact operation protobufs and 135 desired resources.
+It failed near real history compaction on a fixture HTTP timeout, before the
+stale-cursor or five-controller phases. The full candidate adds original-token
+lookup binding after real Catalog-leader loss with pending caller responses,
+exact bounded ambiguous-send retries, and a separate native-image CI gate.
+The subsequent clean `19e0217` capture completed the full three/five-controller
+runtime matrix: 42 owner/API check flags, both real Catalog-leader lost-ack
+cases, 20/24 exact operation witnesses, 135 desired resources per fleet, four
+matching profile digests per fleet, and real stale-watch rejection after the
+history floor reached 29. Its original CLI exited on an object-versus-array
+evidence-reader error. The regression-tested `e2e46e6` verifier correction now
+independently validates that unchanged capture and all 32 artifact receipts;
+the original source identity is preserved, not relabelled as a rerun.
+The fresh clean `0f3c8d5` campaign now also exited zero and independently
+verified all 32 receipts, 42 owner/API flags, both real Catalog-leader lost-ack
+cases, 20/24 operation witnesses, 135 desired resources per fleet, and all four
+profile digests per fleet. Full v2 initial-batch witnesses require exact
+cross-controller responses/operations plus the 128-event creation history,
+not a count of `replayed=false` replies. Real retained floors/latest cursors
+were 5/4,100 and 27/4,122. Its canonical manifest SHA-256 is
+`df40266cbe904c551b080c27ebed8a6ab35190b5fed13561052ecfb00ea761e9`.
+Thirty-nine HA contract tests and eight soak/evidence tests pass locally.
+Protected exact-head/main execution remains open, as do the other CTRL-001/
+CTRL-002 retention, scaling, migration, and SDK requirements. See the linked
+certification document for provenance and non-claims.
+
+An additional Python SDK audit on 5 October 2026 ran
+`PYTHONPATH=sdk/python/src mypy --strict sdk/python/src console/src/quickstarts/quickstart.py`.
+It found 53 typing errors in six SDK modules, principally raw `Any` response
+returns, plus route-constructor inference and a Cache factory annotation that
+shadows a builtin type. The existing CI command checks the displayed quickstart
+only and still passes; all 48 Python SDK unit tests pass. Full-package strict
+typing and generated response types therefore remain open DX-001 work, not a
+verified guarantee inferred from the quickstart check.
+
 ## How to use this register
 
 Status values are:

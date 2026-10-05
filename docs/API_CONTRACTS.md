@@ -318,6 +318,11 @@ field is an optional `uint64`; the internal authority JSON represents the same
 value as a decimal string. Delete replay compares this command precondition,
 not the mutation's result generation, because a
 missing-resource result can return a nonzero tombstone high-water mark.
+Omitted, explicit zero, and explicit nonzero preconditions are distinct token
+bindings for both desired and managed deletion. A completed exact token is
+resolved before a recreated resource's current-generation check; it returns
+the old result and cannot delete the new incarnation. Changing precondition
+presence or value under that token fails as a conflict.
 `WatchResourceChanges` reads bounded global Catalog pages
 and filters events by requested scope plus the authenticated principal.
 Each streamed response includes `earliest_cursor`, the current
@@ -430,6 +435,22 @@ its observed generation as the compatible Catalog cursor.
 
 Go does not expose or synthesize data-path receipts and never reads Epoch data
 files.
+
+The provisional Go HTTP item API accepts the complete management identity:
+
+```text
+GET    /v1/resources/{organization}/{project}/{environment}/{namespace}/{kind}/{name}
+DELETE /v1/resources/{organization}/{project}/{environment}/{namespace}/{kind}/{name}
+```
+
+All three tenant segments are required. These routes authorize the same exact
+tenant scope as gRPC and preserve the full key when delegating managed deletion.
+DELETE supports `Idempotency-Key` and the presence-aware `If-Match` generation
+precondition; exact retries retain the original outcome. The existing
+`/v1/resources/{namespace}/{kind}/{name}` local/legacy route remains unchanged
+and does not select a fully qualified managed resource implicitly. Management
+HTTP uses kind `event_bus`; the corresponding native Rust route uses
+`event-bus`. No alias or durable identity is rewritten.
 
 The browser-facing alpha inventory is:
 

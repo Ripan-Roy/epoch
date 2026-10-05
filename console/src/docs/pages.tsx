@@ -656,8 +656,9 @@ WatchResourceChangesResponse {
           status records plus every live or tombstoned generation. The old file remains mounted as rollback
           evidence before pods one and two start. Historical request tokens are not reconstructed because the
           old record does not contain the new canonical Catalog command. The atomic import currently accepts
-          at most 128 live-or-tombstoned generation records; larger legacy registries fail startup and require
-          an explicit migration tool before upgrade.
+          at most 4,096 live-or-tombstoned generation records within the 512 KiB command and 4 MiB native
+          checkpoint bounds; larger legacy registries fail startup and require an explicit migration tool
+          before upgrade.
         </p>
       </Topic>
 
@@ -665,12 +666,22 @@ WatchResourceChangesResponse {
         <p>
           Local unit suites and real three-node tests cover ownership fencing, exact replay, batch conflicts,
           capacity refusal, operation lookup, change resume, managed delete, snapshot recovery, and legacy
-          import. Protected multi-control chaos, a public request-token retention window, Catalog metadata
-          backup/restore, horizontal metadata sharding, and long-duration clock-fault evidence remain open.
+          import. A clean three/five-controller capture additionally completed owner kill/pause/takeover,
+          maximum gRPC batches, conflicting OCC, scoped operation lookup, delete/recreate, Catalog-leader lost
+          acknowledgements, majority loss, all-voter reopen, and actual stale-watch rejection. It retained
+          20/24 exact operations, 135 desired resources per fleet, and matching digests for all four profiles.
+        </p>
+        <p>
+          The original campaign exited on a JSON artifact reader mismatch. A regression-tested correction
+          independently verifies the unchanged capture and all 32 artifact receipts; it preserves the original
+          source identity and does not claim a runtime rerun. Protected exact-head/main execution, a public
+          request-token retention window, Catalog metadata backup/restore, horizontal metadata sharding, and
+          long-duration clock-fault evidence remain open.
         </p>
         <p>
           Read the full decision in{" "}
-          <a href={`${repositoryDocsUrl}/adr/0050-replicated-control-metadata-and-ha.md`}>ADR-0050</a>.
+          <a href={`${repositoryDocsUrl}/adr/0050-replicated-control-metadata-and-ha.md`}>ADR-0050</a> and the{" "}
+          <a href={`${repositoryDocsUrl}/CONTROL_HA_CERTIFICATION.md`}>HA evidence and promotion boundary</a>.
         </p>
       </Topic>
     </>
@@ -681,7 +692,7 @@ export function DeploymentBody() {
   return (
     <>
       <Note title="Private-beta installation boundary">
-        The operator installs N physical nodes with three- or five-voter groups, mandatory TLS/mTLS, one three
+        The operator installs N physical nodes with three- or five-voter groups, mandatory TLS/mTLS, three
         lease-fenced control replicas, scheduled encrypted semantic backups, guarded data-node upgrades, and
         explicit learner-first voter replacement. Go can automatically repair an excluded voter; Kubernetes
         rack attestation remains open. A clean local lifecycle passes with the same binary under two tags;
@@ -727,15 +738,15 @@ export function DeploymentBody() {
 
       <Topic id="release-artifacts" title="Verify release artifacts">
         <p>
-          A release publishes separate node, control, operator, and CLI manifests for Linux amd64 and arm64.
-          Epoch never publishes <code>latest</code>. Resolve an exact tag, verify its immutable manifest
-          digest against the tag-only workflow identity and GitHub attestations, review the platform-specific
-          SPDX SBOM, and deploy by digest.
+          A release publishes separate node, control, operator, CLI, and compatibility manifests for Linux
+          amd64 and arm64. Epoch never publishes <code>latest</code>. Resolve an exact tag, verify its
+          immutable manifest digest against the tag-only workflow identity and GitHub attestations, review the
+          platform-specific SPDX SBOM, and deploy by digest.
         </p>
         <CodeBlock label="shell" value={releaseArtifactVerification} />
         <div className="evidence-grid">
           <EvidenceCard label="Pull request" claim="Candidate artifacts cannot be published.">
-            CI builds and inspects all four non-root images and retains structurally validated SPDX evidence
+            CI builds and inspects all five non-root images and retains structurally validated SPDX evidence
             without logging in to a registry.
           </EvidenceCard>
           <EvidenceCard label="Release tag" claim="The immutable manifest is bound to exact main source.">

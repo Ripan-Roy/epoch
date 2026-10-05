@@ -1428,7 +1428,7 @@ mod tests {
     }
 
     async fn wait_for_replacement_finalization(runtimes: &[RegionalNodeRuntime], tablet_id: u64) {
-        tokio::time::timeout(Duration::from_secs(20), async {
+        let result = tokio::time::timeout(Duration::from_secs(20), async {
             loop {
                 let mut converged = true;
                 for (index, runtime) in runtimes.iter().enumerate() {
@@ -1475,8 +1475,23 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
         })
-        .await
-        .expect("learner-first replacement should finalize on every physical node");
+        .await;
+        if let Err(error) = result {
+            for (index, runtime) in runtimes.iter().enumerate() {
+                let directory = runtime.materializer.lock().await.directory();
+                if let Some(route) = directory.route(tablet_id).unwrap() {
+                    eprintln!(
+                        "node {} profile status={:?} membership={:?}",
+                        index + 1,
+                        route.consensus().status().await,
+                        route.consensus().membership().await
+                    );
+                } else {
+                    eprintln!("node {} has no local profile", index + 1);
+                }
+            }
+            panic!("learner-first replacement should finalize on every physical node: {error}");
+        }
     }
 
     async fn assert_stream_record_visible(runtime: &RegionalNodeRuntime, generation: u64) {

@@ -60,14 +60,14 @@ release-check: ## Verify synchronized cross-language release metadata.
 
 format: ## Format Rust, Go, Java, Python, and JavaScript/TypeScript sources.
 	@if [ -f Cargo.toml ]; then cargo fmt --all; fi
-	@files="$$(find control operator sdk/go console/src/quickstarts tests/repository -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then gofmt -w $$files; fi
+	@files="$$(find control operator sdk/go console/src/quickstarts tests/repository tests/integration -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then gofmt -w $$files; fi
 	@if [ -d sdk/python ]; then ruff format sdk/python tests/soak tests/integration/*.py; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) spotless:apply; fi
 	@$(PNPM_ENV) pnpm run format
 
 format-check: ## Check formatting without changing files.
 	@if [ -f Cargo.toml ]; then cargo fmt --all --check; fi
-	@files="$$(find control operator sdk/go console/src/quickstarts tests/repository -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then unformatted="$$(gofmt -l $$files)"; test -z "$$unformatted" || { printf '%s\n' "$$unformatted"; exit 1; }; fi
+	@files="$$(find control operator sdk/go console/src/quickstarts tests/repository tests/integration -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then unformatted="$$(gofmt -l $$files)"; test -z "$$unformatted" || { printf '%s\n' "$$unformatted"; exit 1; }; fi
 	@if [ -d sdk/python ]; then ruff format --check sdk/python tests/soak tests/integration/*.py; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) spotless:check; fi
 	@$(PNPM_ENV) pnpm run format:check
@@ -93,7 +93,7 @@ audit: ## Reject Rust and npm dependency advisories except the documented Raft e
 
 test: test-unit ## Run the default local test suite.
 
-test-unit: test-retry-command test-compose-crash-restart test-release-manifest test-release-workflow test-soak-runner test-kubernetes-runner test-regional-runtime-runner test-protocol-regional-runner ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
+test-unit: test-retry-command test-compose-crash-restart test-release-manifest test-release-workflow test-soak-runner test-kubernetes-runner test-regional-runtime-runner test-protocol-regional-runner test-control-ha-runner ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
 	@if [ -f Cargo.toml ]; then cargo test --locked --workspace --all-targets --all-features; fi
 	@if find control operator sdk/go -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then go test -race ./...; fi
 	@if [ -d sdk/python ]; then PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests -v; fi
@@ -128,6 +128,21 @@ test-kubernetes-runner: ## Prove the disposable Kubernetes campaign's fail-close
 
 test-regional-runtime-runner: ## Prove regional recovery deadlines and diagnostics.
 	@PYTHONPATH=tests/integration python3 -m unittest tests/integration/test_regional_runtime.py -v
+
+.PHONY: test-control-ha-runner test-control-ha-owner test-control-ha-api test-control-ha-full
+test-control-ha-runner: ## Reject incomplete concurrent-owner fault evidence and unsafe child cleanup.
+	@PYTHONPATH=tests/integration python3 -m unittest tests/integration/test_control_ha.py -v
+	@PYTHONPATH=tests/integration python3 -m unittest tests/integration/test_control_ha_api.py -v
+	@PYTHONPATH=tests/integration python3 -m unittest tests/integration/test_control_ha_faults.py tests/integration/test_control_ha_full.py -v
+
+test-control-ha-owner: ## Prove the owner-recovery subset with three/five Go controllers and four profiles.
+	@python3 tests/integration/control_ha.py run --output "$${EPOCH_CONTROL_HA_ARTIFACT_DIR:?set an empty owner-recovery evidence directory}"
+
+test-control-ha-api: ## Prove generated gRPC batches, operations, deletes, watches, and real owner/voter recovery.
+	@python3 tests/integration/control_ha_api.py run --output "$${EPOCH_CONTROL_HA_ARTIFACT_DIR:?set an empty API-recovery evidence directory}"
+
+test-control-ha-full: ## Prove the complete concurrent-control matrix including Catalog-leader lost responses.
+	@python3 tests/integration/control_ha_full.py run --output "$${EPOCH_CONTROL_HA_ARTIFACT_DIR:?set an empty full HA evidence directory}"
 
 .PHONY: test-protocol-regional test-protocol-regional-runner
 test-protocol-regional-runner: ## Reject incomplete real-client recovery evidence.

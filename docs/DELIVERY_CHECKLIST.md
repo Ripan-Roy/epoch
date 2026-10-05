@@ -1,6 +1,6 @@
 # Epoch Delivery Checklist
 
-**Last reviewed:** 4 October 2026
+**Last reviewed:** 5 October 2026
 **Current published release:** `v0.2.0-beta.11`
 **Current release target:** `v0.2.0-beta.12`
 **Current core target:** control-HA release verification and remaining production gates
@@ -110,6 +110,28 @@ production gates.
 | HA-08 | Run a failure-tolerant control set | Kubernetes operator | 🟡 | A three-replica OrderedReady StatefulSet has stable pod owner IDs, required hostname anti-affinity, readiness at two replicas, and a minAvailable-two PDB with RBAC and controller tests. A legacy one-replica set updates and verifies ordinal zero before scaling to three. |
 | HA-09 | Prove local cross-language behavior | Go + Rust tests | 🟡 | Repository-wide lint and unit/race suites, patched dependency audit, all-language build, all rendered configs, standalone/docs smoke, and the full regional Docker ownership/failover/all-voter recovery campaign pass locally. Regressions cover the former 7.5 MiB controller checkpoint, raw bounded v2 checkpoints, v1 restore, compact capacity replay/conflict/operation lookup across v8/v9 checkpoint compaction, exact-boundary v10 marker reservation and fail-closed exhaustion, presence-aware generated operation metadata, tombstone-safe delete replay, cursor-zero compaction, standby clock races, refreshed membership capacity, byte-budgeted watch history, and valid batch responses between 1 MiB and the 5 MiB authority cap. Protected PR/main CI and live Kubernetes evidence pass; dedicated concurrent multi-control chaos remains. |
 | HA-10 | Publish decision, contracts, and non-claims | Docs + Pages | 🟡 | ADR-0050, architecture, API contracts, PRD traceability, and this checklist describe the shipped boundary and open operation-retention, Catalog capacity/sharding, and chaos gates. The main-only Pages deployment `37143501271` passed and the public control-HA guide is live. |
+| HA-11 | Recover an idle voter after its latest snapshot is lost | Consensus + transport + membership | 🟡 | Exact-main beta.12 CI `37189330373` exposed a Stream follower at one applied command while its peers reached eleven. The hardening branch observed a real-HTTP regression red, then green with three/five voters and bounded queues. Correlated snapshot outcomes, local queue-drop reporting, stale-callback fencing, no transport-as-quorum acknowledgement, weak actor feedback ownership, and refreshed learner baselines pass local Rust tests/lint. The clean `fed6b59` rebuilt image passed all eight regional invariants in a signed, independently verified 59,354 ms accelerated round. Protected fixed-main evidence remains; beta.12 stays untagged. See ADR-0051. |
+| HA-12 | Certify concurrent controller owner recovery | Go processes + Rust Catalog + test infrastructure | 🟡 | Clean `671fde4` passed ten owner-recovery checks with both three and five controllers, independently verifying fourteen artifact receipts and exact four-profile digests. Twelve owner-fixture contract tests now pass, including final-verifier failure handling. The complete local matrix in HA-13 additionally covers gRPC batches/OCC, authorization/preconditions, watch resume/staleness, Catalog-leader unknown outcomes, and delete/recreate. Protected exact-head/main execution remains; owner-only evidence does not close CTRL-001/CTRL-002. See [certification](CONTROL_HA_CERTIFICATION.md). |
+| HA-13 | Prove the complete bounded concurrent-control matrix | Generated gRPC + actual Go/Rust processes + evidence verifier | 🟡 | Fresh clean `0f3c8d5` completed both fleets with exit zero and independently verified all 32 receipts: 42 owner/API flags, both real Catalog-leader lost-ack cases, 20/24 exact operations, 135 desired resources per fleet, four matching profile digests per fleet, and stale gRPC rejection at actual floors 5/27. V2 initial-batch witnesses bind every controller's responses/operations and the exact 128-event creation history without counting replay flags. The historical `19e0217` capture and reader correction remain separately recorded. All 39 HA contract tests and eight soak/evidence tests pass. Protected exact-head/main execution and publication remain required; beta.12 is still untagged. See [certification](CONTROL_HA_CERTIFICATION.md). |
+
+The current HA promotion gate is not green: PR #149 CI `37295153226` passed
+its three-controller fleet but failed the five-controller initial-batch
+replay-flag assertion. The repair replaces response-flag counting with exact
+cross-controller durable-operation, resource, and 128-event history proof.
+Its local Go regressions and 39 harness tests pass; fresh complete clean
+`0f3c8d5` local evidence now verifies with exit zero. Fresh protected
+exact-head/main evidence remains required. See the replay-receipt
+finding in [control-HA certification](CONTROL_HA_CERTIFICATION.md).
+
+The subsequent exact-head CI `37316380698` completed the full three-controller
+matrix, then exposed a real five-controller lookup/submission race: an identical
+batch returned `ABORTED` / duplicate proposal after peer replication won the
+race. The new Rust Catalog fix joins only an independently verified identical
+payload and still waits for its original applied receipt. Its deterministic
+real-consensus regression was red before the fix and is now green, including
+conflicting-payload and nonleader-write rejection. The previous clean local
+capture is not proof of this changed Rust source: fresh-image local/protected
+matrix evidence and beta.12 publication remain open.
 
 ## Current compatibility delivery: Redis, Kafka, and RabbitMQ
 

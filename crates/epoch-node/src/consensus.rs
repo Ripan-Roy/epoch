@@ -31,9 +31,9 @@ use epoch_consensus::{
     ConsensusCheckpoint, ConsensusError, ConsensusMembership, ConsensusOutput,
     ConsensusPeerProgress, ConsensusRestoreSnapshot, ConsensusRole, ConsensusStatus, GroupEpoch,
     GroupId, LogIndex, MAX_PEER_MESSAGE_WIRE_BYTES, MAX_PROPOSAL_PAYLOAD_BYTES,
-    MAX_PROVISIONED_MEMBERS, NodeId, PeerMessage, PersistentOpenResult, PersistentRaftAdapter,
-    PersistentRecovery, Proposal, ProposalId, ProposalLookup, ReadBarrierId, ReadBarrierRequest,
-    Term,
+    MAX_PROVISIONED_MEMBERS, NodeId, PeerDelivery, PeerMessage, PersistentOpenResult,
+    PersistentRaftAdapter, PersistentRecovery, Proposal, ProposalId, ProposalLookup, ReadBarrierId,
+    ReadBarrierRequest, Term,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -425,8 +425,14 @@ fn validate_peer_url(url: &Url) -> ConsensusProbeResult<()> {
 
 #[derive(Debug, Clone)]
 struct OutboundPeer {
-    sender: mpsc::Sender<Vec<u8>>,
+    sender: mpsc::Sender<OutboundFrame>,
     health: Arc<OutboundPeerHealth>,
+}
+
+#[derive(Debug)]
+struct OutboundFrame {
+    wire: Vec<u8>,
+    delivery: PeerDelivery,
 }
 
 #[derive(Debug)]
@@ -566,6 +572,10 @@ enum ActorCommand {
     Receive {
         message: PeerMessage,
         reply: ActorReply<ConsensusStatus>,
+    },
+    PeerDelivery {
+        delivery: PeerDelivery,
+        delivered: bool,
     },
     Lookup {
         proposal_id: ProposalId,
@@ -1040,9 +1050,9 @@ impl ConsensusProbeRuntime {
     ) -> ConsensusProbeResult<Self> {
         let stable_path = stable_path.as_ref().to_path_buf();
         let client = config.outbound_client.clone();
-        let (outbound, outbound_health, mut outbound_workers) =
-            spawn_outbound_workers(&config, &client)?;
         let (commands, command_receiver) = mpsc::channel(config.command_queue_capacity);
+        let (outbound, outbound_health, mut outbound_workers) =
+            spawn_outbound_workers(&config, &client, &commands)?;
         let (commits, _) = broadcast::channel(COMMIT_NOTIFICATION_CAPACITY);
         let (read_barriers, _) = broadcast::channel(READ_BARRIER_NOTIFICATION_CAPACITY);
         let (actor_failure, actor_failure_receiver) = watch::channel(None);
@@ -1302,6 +1312,7 @@ fn run_persistent_actor(
         channels.commits,
         channels.read_barriers,
         None,
+        &mut adapter,
     ) {
         let _ = initialized.send(Err(error.clone()));
         return Err(error);
@@ -1356,7 +1367,7 @@ fn handle_actor_command(
                 .add_learner(learner)
                 .map_err(Into::into)
                 .and_then(|output| {
-                    publish_output(output, outbound, commits, read_barriers, applier)
+                    publish_output(output, outbound, commits, read_barriers, applier, adapter)
                 })
                 .and_then(|_| adapter.membership().map_err(Into::into));
             deliver_actor_result(adapter, reply, result)?;
@@ -1366,7 +1377,7 @@ fn handle_actor_command(
                 .reconfigure_voters(voters)
                 .map_err(Into::into)
                 .and_then(|output| {
-                    publish_output(output, outbound, commits, read_barriers, applier)
+                    publish_output(output, outbound, commits, read_barriers, applier, adapter)
                 })
                 .and_then(|_| adapter.membership().map_err(Into::into));
             deliver_actor_result(adapter, reply, result)?;
@@ -1390,19 +1401,19 @@ fn handle_actor_command(
                 })
                 .and_then(|()| adapter.transfer_leadership(target).map_err(Into::into))
                 .and_then(|output| {
-                    publish_output(output, outbound, commits, read_barriers, applier)
+                    publish_output(output, outbound, commits, read_barriers, applier, adapter)
                 });
             deliver_actor_result(adapter, reply, result)?;
         }
         ActorCommand::Campaign { reply } => {
             let result = adapter.campaign().map_err(Into::into).and_then(|output| {
-                publish_output(output, outbound, commits, read_barriers, applier)
+                publish_output(output, outbound, commits, read_barriers, applier, adapter)
             });
             deliver_actor_result(adapter, reply, result)?;
         }
         ActorCommand::Tick { reply } => {
             let result = adapter.tick().map_err(Into::into).and_then(|output| {
-                publish_output(output, outbound, commits, read_barriers, applier)
+                publish_output(output, outbound, commits, read_barriers, applier, adapter)
             });
             deliver_actor_result(adapter, reply, result)?;
         }
@@ -1412,7 +1423,7 @@ fn handle_actor_command(
                 .propose(proposal)
                 .map_err(Into::into)
                 .and_then(|output| {
-                    publish_output(output, outbound, commits, read_barriers, applier)
+                    publish_output(output, outbound, commits, read_barriers, applier, adapter)
                 })
                 .map(|_| adapter.lookup_proposal(proposal_id));
             deliver_actor_result(adapter, reply, result)?;
@@ -1423,7 +1434,7 @@ fn handle_actor_command(
                 .forward_proposal(proposal)
                 .map_err(Into::into)
                 .and_then(|output| {
-                    publish_output(output, outbound, commits, read_barriers, applier)
+                    publish_output(output, outbound, commits, read_barriers, applier, adapter)
                 })
                 .map(|_| adapter.lookup_proposal(proposal_id));
             deliver_actor_result(adapter, reply, result)?;
@@ -1433,7 +1444,7 @@ fn handle_actor_command(
                 .read_barrier(request)
                 .map_err(Into::into)
                 .and_then(|output| {
-                    publish_output(output, outbound, commits, read_barriers, applier)
+                    publish_output(output, outbound, commits, read_barriers, applier, adapter)
                 });
             deliver_actor_result(adapter, reply, result)?;
         }
@@ -1445,9 +1456,15 @@ fn handle_actor_command(
                 .receive(message)
                 .map_err(Into::into)
                 .and_then(|output| {
-                    publish_output(output, outbound, commits, read_barriers, applier)
+                    publish_output(output, outbound, commits, read_barriers, applier, adapter)
                 });
             deliver_actor_result(adapter, reply, result)?;
+        }
+        ActorCommand::PeerDelivery {
+            delivery,
+            delivered,
+        } => {
+            adapter.report_peer_delivery(delivery, delivered)?;
         }
         ActorCommand::Lookup { proposal_id, reply } => {
             let _ = reply.send(Ok(adapter.lookup_proposal(proposal_id)));
@@ -1564,6 +1581,7 @@ fn publish_output(
     commits: &broadcast::Sender<CommittedProposal>,
     read_barriers: &broadcast::Sender<CompletedReadBarrier>,
     applier: Option<&dyn CommittedProposalApplier>,
+    adapter: &mut PersistentRaftAdapter,
 ) -> ConsensusProbeResult<ConsensusStatus> {
     let ConsensusOutput {
         messages,
@@ -1574,7 +1592,8 @@ fn publish_output(
     } = output;
     for message in messages {
         let destination = message.to();
-        let frame = message.to_wire()?;
+        let (wire, delivery) = adapter.prepare_peer_message(&message)?;
+        let frame = OutboundFrame { wire, delivery };
         let peer = outbound
             .get(&destination)
             .ok_or(ConsensusProbeError::OutboundUnavailable(destination))?;
@@ -1586,6 +1605,9 @@ fn publish_output(
                 permit.send(frame);
             }
             Err(mpsc::error::TrySendError::Full(())) => {
+                // Never send into this actor's own bounded command queue.
+                // Local drops update replication progress synchronously.
+                adapter.report_peer_delivery(delivery, false)?;
                 let dropped_frames = peer.health.record_queue_full_drop();
                 if dropped_frames.is_power_of_two() {
                     tracing::warn!(
@@ -1596,6 +1618,7 @@ fn publish_output(
                 }
             }
             Err(mpsc::error::TrySendError::Closed(())) => {
+                adapter.report_peer_delivery(delivery, false)?;
                 let dropped_frames = peer.health.record_worker_closed_drop();
                 if dropped_frames.is_power_of_two() {
                     tracing::error!(
@@ -1668,6 +1691,7 @@ fn fatal_actor_failure<T>(
 fn spawn_outbound_workers(
     config: &ConsensusProbeConfig,
     client: &reqwest::Client,
+    commands: &mpsc::Sender<ActorCommand>,
 ) -> ConsensusProbeResult<(OutboundSenders, OutboundHealthRegistry, OutboundWorkers)> {
     let mut senders = BTreeMap::new();
     let mut health_registry = BTreeMap::new();
@@ -1690,11 +1714,21 @@ fn spawn_outbound_workers(
         ));
         let worker_client = client.clone();
         let worker_health = Arc::clone(&health);
+        // Workers must not keep their owning actor's command channel alive:
+        // the actor already owns each worker's frame sender.
+        let worker_commands = commands.downgrade();
         workers.push((
             peer_id,
             tokio::spawn(async move {
-                run_outbound_worker(peer_id, endpoint, receiver, worker_client, worker_health)
-                    .await;
+                run_outbound_worker(
+                    peer_id,
+                    endpoint,
+                    receiver,
+                    worker_client,
+                    worker_health,
+                    worker_commands,
+                )
+                .await;
             }),
         ));
         health_registry.insert(peer_id, Arc::clone(&health));
@@ -1706,9 +1740,10 @@ fn spawn_outbound_workers(
 async fn run_outbound_worker(
     peer_id: NodeId,
     endpoint: Url,
-    mut frames: mpsc::Receiver<Vec<u8>>,
+    mut frames: mpsc::Receiver<OutboundFrame>,
     client: reqwest::Client,
     health: Arc<OutboundPeerHealth>,
+    commands: mpsc::WeakSender<ActorCommand>,
 ) {
     while let Some(frame) = frames.recv().await {
         health.record_dequeue();
@@ -1717,7 +1752,7 @@ async fn run_outbound_worker(
             let result = client
                 .post(endpoint.clone())
                 .header(CONTENT_TYPE, "application/octet-stream")
-                .body(frame.clone())
+                .body(frame.wire.clone())
                 .send()
                 .await;
             match result {
@@ -1756,6 +1791,24 @@ async fn run_outbound_worker(
                 %endpoint,
                 "consensus frame was not delivered after bounded retries; Raft must retransmit"
             );
+        }
+        // A successful ordinary HTTP response is not a replicated-log ack.
+        // Snapshot completion and all failures are transport facts needed by
+        // Raft to leave Snapshot/Replicate state and retry on normal ticks.
+        if !delivered || frame.delivery.snapshot_index().is_some() {
+            let Some(commands) = commands.upgrade() else {
+                return;
+            };
+            if commands
+                .send(ActorCommand::PeerDelivery {
+                    delivery: frame.delivery,
+                    delivered,
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
         }
     }
 }
@@ -2461,19 +2514,22 @@ mod tests {
             NodeId::new(2).expect("valid node"),
             NodeId::new(3).expect("valid node"),
         ];
-        let mut adapter = InMemoryRaftAdapter::new(
+        let directory = TempDir::new().unwrap();
+        let mut adapter = PersistentRaftAdapter::open(
+            directory.path().join("raft.wal"),
             voters[0],
             GroupId::new(7).expect("valid group"),
             GroupEpoch::new(3).expect("valid epoch"),
             voters,
         )
-        .expect("adapter should open");
+        .expect("adapter should open")
+        .adapter;
         let output = adapter.campaign().expect("campaign should produce output");
         assert_eq!(output.messages.len(), 2);
-        let (node_2_tx, mut node_2_rx) = mpsc::channel::<Vec<u8>>(1);
-        let (node_3_tx, mut node_3_rx) = mpsc::channel::<Vec<u8>>(1);
+        let (node_2_tx, mut node_2_rx) = mpsc::channel::<OutboundFrame>(1);
+        let (node_3_tx, mut node_3_rx) = mpsc::channel::<OutboundFrame>(1);
         node_2_tx
-            .try_send(vec![0])
+            .try_send(test_outbound_frame(vec![0]))
             .expect("failed peer queue should be saturated");
         let node_2_health = Arc::new(OutboundPeerHealth::new(voters[1], 1));
         let node_3_health = Arc::new(OutboundPeerHealth::new(voters[2], 1));
@@ -2496,14 +2552,22 @@ mod tests {
         let (commits, _) = broadcast::channel(1);
         let (read_barriers, _) = broadcast::channel(1);
 
-        let status = publish_output(output, &outbound, &commits, &read_barriers, None)
-            .expect("initial output should be dispatched before initialization");
+        let status = publish_output(
+            output,
+            &outbound,
+            &commits,
+            &read_barriers,
+            None,
+            &mut adapter,
+        )
+        .expect("initial output should be dispatched before initialization");
 
         assert_eq!(status.node_id, voters[0]);
         assert_eq!(
             node_2_rx
                 .try_recv()
-                .expect("failed peer queue should retain its original frame"),
+                .expect("failed peer queue should retain its original frame")
+                .wire,
             vec![0]
         );
         assert!(node_2_rx.try_recv().is_err());
@@ -2511,7 +2575,7 @@ mod tests {
             .try_recv()
             .expect("healthy peer should receive its frame");
         assert_eq!(
-            PeerMessage::from_wire(&node_3_frame, voters[2])
+            PeerMessage::from_wire(&node_3_frame.wire, voters[2])
                 .expect("healthy peer frame should decode")
                 .to(),
             voters[2]
@@ -2806,6 +2870,221 @@ mod tests {
             .expect("runtime should stop cleanly");
     }
 
+    // Worker-only HTTP fixtures deliberately use small probe bodies. Their
+    // opaque non-snapshot delivery context still comes from a real adapter.
+    fn test_outbound_frame(wire: Vec<u8>) -> OutboundFrame {
+        let mut adapter = InMemoryRaftAdapter::new(
+            NodeId::new(1).unwrap(),
+            GroupId::new(7).unwrap(),
+            GroupEpoch::new(3).unwrap(),
+            (1..=3)
+                .map(|id| NodeId::new(id).unwrap())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let output = adapter.campaign().unwrap();
+        let (_, delivery) = adapter.prepare_peer_message(&output.messages[0]).unwrap();
+        OutboundFrame { wire, delivery }
+    }
+
+    fn pending_snapshot_output() -> (Vec<TempDir>, Vec<PersistentRaftAdapter>, ConsensusOutput) {
+        use std::collections::VecDeque;
+
+        let directories = (0..3).map(|_| TempDir::new().unwrap()).collect::<Vec<_>>();
+        let voters = (1..=3)
+            .map(|id| NodeId::new(id).unwrap())
+            .collect::<Vec<_>>();
+        let mut adapters = directories
+            .iter()
+            .enumerate()
+            .map(|(index, directory)| {
+                PersistentRaftAdapter::open(
+                    directory.path().join("raft.wal"),
+                    voters[index],
+                    GroupId::new(7).unwrap(),
+                    GroupEpoch::new(3).unwrap(),
+                    voters.clone(),
+                )
+                .unwrap()
+                .adapter
+            })
+            .collect::<Vec<_>>();
+        let mut messages = VecDeque::from(adapters[0].campaign().unwrap().messages);
+        while let Some(message) = messages.pop_front() {
+            let index = usize::try_from(message.to().get() - 1).unwrap();
+            messages.extend(adapters[index].receive(message).unwrap().messages);
+        }
+        let term = adapters[0].status().term;
+        let proposal = Proposal::new(
+            GroupId::new(7).unwrap(),
+            GroupEpoch::new(3).unwrap(),
+            term,
+            ProposalId::new(99).unwrap(),
+            b"queue-loss-checkpoint",
+        );
+        messages.extend(adapters[0].propose(proposal).unwrap().messages);
+        while let Some(message) = messages.pop_front() {
+            if message.to().get() == 3 {
+                continue;
+            }
+            let index = usize::try_from(message.to().get() - 1).unwrap();
+            messages.extend(adapters[index].receive(message).unwrap().messages);
+        }
+        let checkpoint = adapters[0].checkpoint().unwrap();
+        for _ in 0..20 {
+            messages.extend(adapters[0].tick().unwrap().messages);
+            for _ in 0..100 {
+                let Some(message) = messages.pop_front() else {
+                    break;
+                };
+                let index = usize::try_from(message.to().get() - 1).unwrap();
+                let output = adapters[index].receive(message).unwrap();
+                if output
+                    .messages
+                    .iter()
+                    .any(|message| message.snapshot_index().unwrap() == Some(checkpoint.index))
+                {
+                    return (directories, adapters, output);
+                }
+                messages.extend(output.messages);
+            }
+        }
+        panic!("fixture must produce a pending compacted snapshot");
+    }
+
+    #[test]
+    fn locally_dropped_snapshot_exits_pending_state_for_full_and_closed_queues() {
+        for closed in [false, true] {
+            let (_directories, mut adapters, output) = pending_snapshot_output();
+            let adapter = &mut adapters[0];
+            let before = adapter.status();
+            assert!(
+                before
+                    .replication_progress
+                    .iter()
+                    .any(|peer| peer.pending_snapshot_index != LogIndex::ZERO)
+            );
+            let (sender, receiver) = mpsc::channel(1);
+            if closed {
+                drop(receiver);
+            } else {
+                sender.try_send(test_outbound_frame(vec![0])).unwrap();
+                // Keep the saturated receiver alive until publication finishes.
+            }
+            let health = Arc::new(OutboundPeerHealth::new(NodeId::new(3).unwrap(), 1));
+            let (healthy_sender, _healthy_receiver) = mpsc::channel(1);
+            let outbound = BTreeMap::from([
+                (
+                    NodeId::new(2).unwrap(),
+                    OutboundPeer {
+                        sender: healthy_sender,
+                        health: Arc::new(OutboundPeerHealth::new(NodeId::new(2).unwrap(), 1)),
+                    },
+                ),
+                (
+                    NodeId::new(3).unwrap(),
+                    OutboundPeer {
+                        sender,
+                        health: Arc::clone(&health),
+                    },
+                ),
+            ]);
+            let (commits, _) = broadcast::channel(1);
+            let (reads, _) = broadcast::channel(1);
+            publish_output(output, &outbound, &commits, &reads, None, adapter).unwrap();
+            assert!(
+                adapter
+                    .status()
+                    .replication_progress
+                    .iter()
+                    .all(|peer| peer.pending_snapshot_index == LogIndex::ZERO)
+            );
+            assert_eq!(adapter.status().commit_index, before.commit_index);
+            let status = health.snapshot();
+            if closed {
+                assert_eq!(status.dropped_worker_closed_frames, 1);
+            } else {
+                assert_eq!(status.dropped_queue_full_frames, 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn outbound_workers_do_not_keep_their_owning_actors_inbox_alive() {
+        let (commands, mut receiver) = mpsc::channel(1);
+        let (outbound, _health, mut workers) =
+            spawn_outbound_workers(&config(), &build_outbound_client().unwrap(), &commands)
+                .unwrap();
+        drop(commands);
+        let closed = tokio::time::timeout(Duration::from_millis(100), receiver.recv()).await;
+        drop(outbound);
+        abort_workers(&mut workers).await;
+        assert!(
+            matches!(closed, Ok(None)),
+            "worker feedback must not create an actor/channel ownership cycle"
+        );
+    }
+
+    #[tokio::test]
+    async fn outbound_snapshot_success_reports_one_correlated_transport_result() {
+        let (_directories, mut adapters, output) = pending_snapshot_output();
+        let adapter = &mut adapters[0];
+        let snapshot = output
+            .messages
+            .iter()
+            .find(|message| message.snapshot_index().unwrap().is_some())
+            .unwrap();
+        let (wire, delivery) = adapter.prepare_peer_message(snapshot).unwrap();
+        let before = adapter.status();
+        let router = Router::new().route(
+            INTERNAL_PEER_MESSAGE_PATH,
+            post(|| async { StatusCode::NO_CONTENT }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let (frames, receiver) = mpsc::channel(1);
+        let (commands, mut results) = mpsc::channel(1);
+        let health = Arc::new(OutboundPeerHealth::new(NodeId::new(3).unwrap(), 1));
+        let worker = tokio::spawn(run_outbound_worker(
+            NodeId::new(3).unwrap(),
+            Url::parse(&format!("http://{address}{INTERNAL_PEER_MESSAGE_PATH}")).unwrap(),
+            receiver,
+            build_outbound_client().unwrap(),
+            Arc::clone(&health),
+            commands.downgrade(),
+        ));
+        health.record_enqueue();
+        frames.send(OutboundFrame { wire, delivery }).await.unwrap();
+        drop(frames);
+        worker.await.unwrap();
+        drop(commands);
+        let result = results.recv().await.unwrap();
+        let ActorCommand::PeerDelivery {
+            delivery: observed,
+            delivered,
+        } = result
+        else {
+            panic!("worker must report a typed delivery result");
+        };
+        assert!(delivered);
+        assert_eq!(observed, delivery);
+        assert!(results.recv().await.is_none());
+        assert_eq!(
+            adapter.status(),
+            before,
+            "HTTP success alone does not mutate consensus"
+        );
+        assert!(adapter.report_peer_delivery(observed, delivered).unwrap());
+        assert_eq!(adapter.status().commit_index, before.commit_index);
+        assert_eq!(adapter.status().applied_index, before.applied_index);
+        assert_eq!(health.delivered_frames.load(Ordering::Relaxed), 1);
+        server.abort();
+        let _ = server.await;
+    }
+
     #[tokio::test]
     async fn outbound_worker_preserves_per_peer_order() {
         let (observed_tx, mut observed_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -2831,6 +3110,7 @@ mod tests {
                 .expect("test server should run");
         });
         let (frames_tx, frames_rx) = mpsc::channel(2);
+        let (commands, mut results) = mpsc::channel(2);
         let health = Arc::new(OutboundPeerHealth::new(
             NodeId::new(2).expect("valid node"),
             2,
@@ -2842,15 +3122,16 @@ mod tests {
             frames_rx,
             build_outbound_client().expect("internal client should build"),
             Arc::clone(&health),
+            commands.downgrade(),
         ));
         health.record_enqueue();
         frames_tx
-            .send(vec![1])
+            .send(test_outbound_frame(vec![1]))
             .await
             .expect("first send should work");
         health.record_enqueue();
         frames_tx
-            .send(vec![2])
+            .send(test_outbound_frame(vec![2]))
             .await
             .expect("second send should work");
         drop(frames_tx);
@@ -2858,6 +3139,11 @@ mod tests {
         assert_eq!(observed_rx.recv().await, Some(vec![1]));
         assert_eq!(observed_rx.recv().await, Some(vec![2]));
         worker.await.expect("worker should stop");
+        drop(commands);
+        assert!(
+            results.recv().await.is_none(),
+            "ordinary HTTP success must not acknowledge a Raft entry"
+        );
         assert_eq!(health.delivered_frames.load(Ordering::Relaxed), 2);
         server.abort();
         let _ = server.await;
@@ -2916,6 +3202,7 @@ mod tests {
         });
 
         let (frames_tx, frames_rx) = mpsc::channel(1);
+        let (commands, mut results) = mpsc::channel(1);
         let peer_id = NodeId::new(2).expect("valid node");
         let health = Arc::new(OutboundPeerHealth::new(peer_id, 1));
         let worker = tokio::spawn(run_outbound_worker(
@@ -2927,15 +3214,28 @@ mod tests {
             frames_rx,
             build_outbound_client().expect("internal client should build"),
             Arc::clone(&health),
+            commands.downgrade(),
         ));
         health.record_enqueue();
         frames_tx
-            .send(vec![1, 2, 3])
+            .send(test_outbound_frame(vec![1, 2, 3]))
             .await
             .expect("outbound frame should queue");
         drop(frames_tx);
 
         worker.await.expect("worker should stop");
+        drop(commands);
+        assert!(matches!(
+            results.recv().await,
+            Some(ActorCommand::PeerDelivery {
+                delivered: false,
+                ..
+            })
+        ));
+        assert!(
+            results.recv().await.is_none(),
+            "exhausted retries must report exactly one outcome"
+        );
         assert_eq!(redirect_hits.load(Ordering::Relaxed), OUTBOUND_ATTEMPTS);
         assert_eq!(target_hits.load(Ordering::Relaxed), 0);
         assert_eq!(health.delivered_frames.load(Ordering::Relaxed), 0);
@@ -3139,6 +3439,42 @@ mod tests {
                         .expect("blackhole peer should accept connections");
                     connections.push(connection);
                 }
+            }));
+        }
+
+        async fn start_peer_listener_rejecting_snapshots(
+            &mut self,
+            index: usize,
+            rejected: Arc<AtomicU64>,
+        ) {
+            assert!(self.servers[index].is_none());
+            let address = self.peers[index].1.socket_addrs(|| None).unwrap()[0];
+            let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+            let handle = self.runtimes[index].handle();
+            let router = Router::new()
+                .route(
+                    INTERNAL_PEER_MESSAGE_PATH,
+                    post(move |body: Bytes| {
+                        let handle = handle.clone();
+                        let rejected = Arc::clone(&rejected);
+                        async move {
+                            let message = PeerMessage::from_wire(&body, handle.node_id());
+                            if message.as_ref().is_ok_and(|message| {
+                                message.snapshot_index().is_ok_and(|index| index.is_some())
+                            }) {
+                                rejected.fetch_add(1, Ordering::Relaxed);
+                                StatusCode::SERVICE_UNAVAILABLE
+                            } else if handle.receive_wire(&body).await.is_ok() {
+                                StatusCode::NO_CONTENT
+                            } else {
+                                StatusCode::BAD_REQUEST
+                            }
+                        }
+                    }),
+                )
+                .layer(DefaultBodyLimit::max(MAX_PEER_MESSAGE_WIRE_BYTES));
+            self.servers[index] = Some(tokio::spawn(async move {
+                axum::serve(listener, router).await.unwrap();
             }));
         }
 
@@ -3913,6 +4249,97 @@ mod tests {
         assert_eq!(continued[0].tablet_count, 5);
         assert_eq!(continued[0].applied_command_count, 3);
         cluster.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn lost_latest_snapshot_is_retried_without_another_commit_or_checkpoint() {
+        for (voter_count, queue_capacity) in [(3, DEFAULT_OUTBOUND_QUEUE_CAPACITY), (5, 1)] {
+            prove_lost_latest_snapshot_recovery(voter_count, queue_capacity).await;
+        }
+    }
+
+    async fn prove_lost_latest_snapshot_recovery(voter_count: usize, queue_capacity: usize) {
+        let scope = CatalogTabletScope::new(77, 1).unwrap();
+        let services = (0..voter_count)
+            .map(|_| CatalogTabletService::new(scope))
+            .collect::<Vec<_>>();
+        let appliers = services
+            .iter()
+            .map(|service| Some(Arc::clone(service) as Arc<dyn CommittedProposalApplier>))
+            .collect();
+        let voters = (1..=voter_count)
+            .map(|id| u64::try_from(id).unwrap())
+            .collect();
+        let mut cluster =
+            TestProbeCluster::start_with_members(queue_capacity, voters, appliers).await;
+        let handles = cluster.handles();
+        let (leader_index, _) = wait_for_leader(&handles).await;
+        let lagging_index = (0..voter_count)
+            .find(|index| *index != leader_index)
+            .unwrap();
+        let healthy = (0..voter_count)
+            .filter(|index| *index != lagging_index)
+            .collect::<Vec<_>>();
+        cluster.stop_peer_listener(lagging_index).await;
+        for (proposal_id, name) in [(811, "lost-snapshot-orders"), (812, "lost-snapshot-audit")] {
+            let _ = propose_through_current_leader(
+                &handles,
+                proposal_id,
+                catalog_command(name, name, 1).encode().unwrap(),
+            )
+            .await;
+            wait_for_commit_on(&handles, &healthy, proposal_id).await;
+        }
+        let checkpoint = handles[leader_index].checkpoint().await.unwrap();
+        // Exhaust already-queued append retries before restoring heartbeats;
+        // otherwise their retained bodies can repair the follower directly.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let rejected = Arc::new(AtomicU64::new(0));
+        cluster
+            .start_peer_listener_rejecting_snapshots(lagging_index, Arc::clone(&rejected))
+            .await;
+        let lost = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let failed =
+                    rejected.load(Ordering::Relaxed) >= u64::try_from(OUTBOUND_ATTEMPTS).unwrap();
+                if failed {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        if lost.is_err() {
+            eprintln!(
+                "checkpoint={checkpoint:?}, rejected={}, status={:?}, transport={:?}",
+                rejected.load(Ordering::Relaxed),
+                handles[leader_index].status().await.unwrap(),
+                handles[leader_index].outbound_transport_status()
+            );
+            cluster.shutdown().await;
+            panic!("fixture did not lose the latest compacted snapshot");
+        }
+        cluster.stop_peer_listener(lagging_index).await;
+        cluster.start_peer_listener(lagging_index).await;
+        // No additional writes or checkpoint creation may rescue transport.
+        let recovered = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if services
+                    .iter()
+                    .all(|service| service.snapshot().unwrap().applied_command_count == 2)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        cluster.shutdown().await;
+        assert!(
+            recovered.is_ok(),
+            "lost latest snapshot left an idle follower permanently behind"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

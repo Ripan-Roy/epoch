@@ -50,13 +50,26 @@ main CI jobs and main-only Pages passed. The synchronized beta.12 release
 candidate adds the corresponding versioned notes and repeats release gates
 before tagging and OCI publication.
 
+PR #147 merged that synchronized candidate at `d81a0ff`. Exact-main CI
+`37189330373` passed ten of eleven jobs and Pages `37189330378` deployed, but
+the rebuilt regional campaign exposed a restarted Stream voter stuck behind
+its latest compacted snapshot. beta.12 is not tagged or published. The
+recovery-hardening branch has observed a reproducing regression red and then
+green, adds correlated bounded transport feedback and learner-baseline refresh,
+and requires rebuilt regional and protected exact-main evidence before release.
+Concurrent control-process owners also receive fresh incarnation nonces;
+the complete bounded concurrent-control runtime matrix is locally verified
+from clean `19e0217` evidence, independently reverified after the `e2e46e6`
+request-array reader correction. Protected exact-head/main certification
+remains open. See [provenance](CONTROL_HA_CERTIFICATION.md).
+
 The published release train extends the authenticated regional
 multi-tablet M1/M2 boundary. Protected `main` evidence covers the
 consensus-backed catalog and merged replicated multi-instance hosted control,
 atomic managed lifecycle commands, and a resumable operation/change surface.
 The latter is verified by [CI 37143501331](https://github.com/Ripan-Roy/epoch/actions/runs/37143501331)
 and [Pages 37143501271](https://github.com/Ripan-Roy/epoch/actions/runs/37143501271).
-Dedicated concurrent multi-control chaos and public operation-retention
+Protected dedicated concurrent multi-control chaos and public operation-retention
 guarantees remain open. Published evidence also covers topology
 admission, quorum-confirmed leader reads,
 all four regional profile SDKs, multi-shard Stream routing, atomic batches,

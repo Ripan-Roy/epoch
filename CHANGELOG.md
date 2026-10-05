@@ -6,6 +6,71 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+### Control-plane hardening
+
+- Run the complete three/five-controller HA fleets on separate CI runners and
+  seal both exact-source/image proofs in the unchanged protected aggregate
+  check. Bound strong-read verification to sixteen RPCs and real retention
+  churn to four commands; retain every scenario, resource, receipt, and actual
+  pruning check. Preserve redacted generated-helper timeout diagnostics.
+- Join a byte-identical Catalog proposal when peer replication wins the
+  lookup/submission race; still await the original applied receipt and reject
+  conflicting payloads or nonleader new writes. The complete three-controller
+  CI fleet exposed this race during five-controller maximum-batch preparation;
+  fresh fault and protected-branch evidence remain required.
+- Certify concurrent maximum-size batches from complete v2 response, operation,
+  and creation-history witnesses instead of counting replay disposition flags.
+  A fresh clean `0f3c8d5` full three/five-controller run exits zero and passes
+  independent verification of all 32 artifacts and 42 owner/API flags; protected
+  current-head/main execution and release publication remain required.
+- Prove concurrent maximum-size batches through identical durable operations,
+  exact creation results, and complete ordered change history instead of
+  treating reconstructed-response replay flags as a mutation count. Retain
+  every controller's initial protobuf witnesses across recovery and reject
+  altered or incomplete evidence. Protected HA certification remains open.
+- Preserve the exact optional caller generation precondition when replaying
+  managed deletion: omitted, explicit zero, and explicit nonzero are distinct.
+  Resolve a completed token before testing a recreated resource's generation,
+  retaining the old outcome without removing the new incarnation.
+- Add a generated-client gRPC recovery campaign for simultaneous maximum-size
+  batches, conflicting OCC, operation authorization and delete-precondition
+  identity, old-token delete/recreate, filtered watch resume, and real history
+  staleness. Its live certification is separate from owner-only evidence.
+- Add the complete bounded control-HA driver with Catalog-leader loss while
+  committed caller responses remain pending, exact original-token replay and
+  generated operation binding across later faults. Fail-closed evidence checks
+  reject changed scope, missing protobuf witnesses, or incomplete phases.
+  Ambiguous retention sends retry identical bytes under bounded native HTTP
+  deadlines. A separate CI job verifies and reuses its exact-source native
+  arm64 image rather than rebuilding it. Both local runtime fleets completed;
+  protected exact-head/main certification remains open.
+- Correct the full HA evidence reader to accept checksum-bound request arrays
+  while keeping manifests object-only and rejecting duplicate keys. Complete
+  verification now runs inside failure handling so invalid artifacts cannot
+  leave a passed manifest. The unchanged three/five-controller capture was
+  independently reverified; the original failed CLI exit is documented.
+- Add fully qualified HTTP resource GET/DELETE paths, preserving tenant
+  authorization, optimistic concurrency, exact keys, and the existing managed
+  delete coordinator. Legacy three-segment item paths remain supported.
+- Production control registries derive a fresh 128-bit process-incarnation
+  owner from the stable instance label. A restarted or overlapping process
+  cannot adopt its predecessor's unexpired reconciliation lease. Startup fails
+  closed when incarnation entropy is unavailable, and logs expose the exact
+  non-secret owner separately from the deployment label.
+
+### Consensus recovery hardening
+
+- Report bounded HTTP send exhaustion and local peer-queue drops to the Raft
+  actor, allowing an idle lagging voter to retry a lost latest snapshot without
+  another application write or checkpoint. Snapshot callbacks bind exact
+  process incarnation, scope, leader term, index, and attempt identity;
+  transport success is never a quorum acknowledgement.
+- Refresh a compacted baseline for a learner that is behind it even after a
+  transport callback clears pending-snapshot state. The refreshed image
+  includes committed learner membership, preserving safe replacement and
+  same-volume reopen. Weak worker feedback channels avoid an actor ownership
+  cycle during shutdown.
+
 ## [0.2.0-beta.12] - 2026-10-04
 
 ### Added
