@@ -246,7 +246,7 @@ class APIFleet(owner.OwnerFleet):
         suffix = f"/resources/acme/shop/dev/core/stream/{resource.name}/status"
         desired = self.raw("GET", suffix.removesuffix("/status")).document
         cursor = self.proofs["prepare"]["watch_checkpoint"]
-        lease: dict[str, Any] = {}
+        self.result["api"]["retention_fenced_attempts"] = 0
         for sequence in range(8192):
             if sequence % 32 == 0:
                 page = self.raw("GET", f"/changes?after={cursor}&limit=1")
@@ -259,18 +259,28 @@ class APIFleet(owner.OwnerFleet):
                         "latest_cursor": cursor,
                     }
                     return
-                lease = self.lease()
                 if sequence % 512 == 0:
                     print(
                         f"{self.count} controllers: advancing real watch retention ({sequence} status changes)",
                         flush=True,
                     )
+            self.result["api"]["retention_fenced_attempts"] += (
+                self.commit_retention_status(suffix, desired["generation"], sequence)
+            )
+        raise AssertionError("real history did not advance its retention floor")
+
+    def commit_retention_status(
+        self, suffix: str, generation: str, sequence: int
+    ) -> int:
+        for attempt in range(4):
+            lease = self.lease()
+            token = f"ha-retention-{self.count}-{sequence}-{attempt}"
             response = self.raw(
                 "PUT",
                 suffix,
                 {
-                    "request_token": f"ha-retention-{self.count}-{sequence}",
-                    "expected_generation": desired["generation"],
+                    "request_token": token,
+                    "expected_generation": generation,
                     "status": {"ha_retention_sequence": sequence},
                     "lease": {
                         "owner_id": lease["owner_id"],
@@ -279,8 +289,18 @@ class APIFleet(owner.OwnerFleet):
                     },
                 },
             )
-            assert response.status == 200, response
-        raise AssertionError("real history did not advance its retention floor")
+            if response.status == 200:
+                return attempt
+            assert response.status == 409, response
+            outcome = self.raw("GET", "/operations/" + token)
+            assert (
+                outcome.status == 200
+                and outcome.document.get("state") == "failed"
+                and outcome.document.get("mutation", {}).get("code") == "fenced"
+            ), outcome
+            # Never change the bytes of an already rejected token. A fresh
+            # observation and token define a separate, bounded attempt.
+        raise AssertionError("status churn repeatedly lost a fresh control guard")
 
 
 def main() -> None:

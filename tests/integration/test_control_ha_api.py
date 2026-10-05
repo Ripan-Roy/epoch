@@ -29,6 +29,52 @@ def api_evidence_fixture() -> dict:
 
 
 class APIEvidenceContractTest(unittest.TestCase):
+    def test_retention_churn_resolves_fencing_and_uses_fresh_guard_and_token(
+        self,
+    ) -> None:
+        fleet = control_ha_api.APIFleet.__new__(control_ha_api.APIFleet)
+        fleet.count = 3
+        fleet.lease = mock.Mock(
+            side_effect=(
+                {"owner_id": "old", "fence": "1"},
+                {"owner_id": "new", "fence": "2"},
+            )
+        )
+        response = control_ha_api.owner.regional.HttpResponse
+        fleet.raw = mock.Mock(
+            side_effect=(
+                response(409, {"code": "catalog_conflict"}, {}),
+                response(200, {"state": "failed", "mutation": {"code": "fenced"}}, {}),
+                response(200, {}, {}),
+            )
+        )
+        self.assertEqual(1, fleet.commit_retention_status("/owned/status", "1", 7))
+        first, lookup, second = fleet.raw.call_args_list
+        self.assertNotEqual(
+            first.args[2]["request_token"], second.args[2]["request_token"]
+        )
+        self.assertEqual("old", first.args[2]["lease"]["owner_id"])
+        self.assertEqual("new", second.args[2]["lease"]["owner_id"])
+        self.assertEqual("GET", lookup.args[0])
+        self.assertTrue(lookup.args[1].endswith(first.args[2]["request_token"]))
+
+    def test_retention_churn_does_not_retry_other_definitive_rejections(self) -> None:
+        fleet = control_ha_api.APIFleet.__new__(control_ha_api.APIFleet)
+        fleet.count = 3
+        fleet.lease = mock.Mock(return_value={"owner_id": "owner", "fence": "1"})
+        response = control_ha_api.owner.regional.HttpResponse
+        fleet.raw = mock.Mock(
+            side_effect=(
+                response(409, {"message": "fenced (untrusted text)"}, {}),
+                response(
+                    200, {"state": "failed", "mutation": {"code": "capacity"}}, {}
+                ),
+            )
+        )
+        with self.assertRaises(AssertionError):
+            fleet.commit_retention_status("/owned/status", "1", 7)
+        fleet.lease.assert_called_once()
+
     def test_failed_generated_client_retains_partial_proof_and_redacted_error(
         self,
     ) -> None:
