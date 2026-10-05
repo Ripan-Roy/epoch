@@ -62,8 +62,12 @@ resolvable when valid Catalog state exceeds the former 1 MiB transport cap.
 The bounded native three/five-controller chaos matrix passed protected PR #149
 and exact-main CI `37353098801` at `d8adf75`, with independently verified full
 artifacts; see [Control HA certification](CONTROL_HA_CERTIFICATION.md).
-Public-SDK Catalog certification, Catalog capacity/sharding, legacy token
-migration, and a public token-retention window remain open. See
+The separate clean `dc8e44f` public Go/Java/Python SDK campaign also passed both
+controller fleets locally, including actual Catalog-leader lost responses,
+owner-watch reconnect, quorum/reopen recovery, and rejection of expired durable
+checkpoints. Its full independent verifier passed; protected SDK delivery is
+still required. Catalog capacity/sharding, legacy token migration, and a public
+token-retention window remain open. See
 [ADR-0050](adr/0050-replicated-control-metadata-and-ha.md).
 
 **Automatic placement implementation note (11 September 2026):** The beta.9

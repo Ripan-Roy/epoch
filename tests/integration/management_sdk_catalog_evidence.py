@@ -30,9 +30,14 @@ def verify_fleet_bundle(path: Path, count: int) -> None:
 
 
 def _validate_matching_runtimes(candidates: list[dict[str, Any]]) -> None:
-    if (
-        candidates[0]["fleets"][0]["sdk"]["runtime"]
-        != candidates[1]["fleets"][0]["sdk"]["runtime"]
+    _validate_matching_sdk_runtimes(
+        [candidate["fleets"][0] for candidate in candidates]
+    )
+
+
+def _validate_matching_sdk_runtimes(fleets: list[dict[str, Any]]) -> None:
+    if any(
+        fleet["sdk"]["runtime"] != fleets[0]["sdk"]["runtime"] for fleet in fleets[1:]
     ):
         raise ValueError("fleet public SDK runtime identities differ")
 
@@ -60,6 +65,24 @@ def validate_evidence(
     full.validate_full_evidence(
         {**evidence, "schema": full.FULL_SCHEMA}, controller_counts=counts
     )
+    identity = evidence.get("identity")
+    if not isinstance(identity, dict):
+        raise ValueError("SDK certification requires immutable image identity")
+    source, image = identity.get("source"), identity.get("runtime")
+    if not isinstance(source, dict) or not isinstance(image, dict):
+        raise ValueError("SDK certification requires frozen source/image revisions")
+    image_id = image.get("image_id")
+    if (
+        not isinstance(image_id, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None
+    ):
+        raise ValueError("SDK certification requires immutable image identity")
+    for revision in (source.get("git_revision"), image.get("image_revision")):
+        if (
+            not isinstance(revision, str)
+            or re.fullmatch(r"[0-9a-f]{40}", revision) is None
+        ):
+            raise ValueError("SDK certification requires frozen source/image revisions")
     for fleet in evidence["fleets"]:
         sdk = fleet.get("sdk")
         if (
@@ -107,6 +130,7 @@ def validate_evidence(
             raise ValueError(
                 "SDK certification omitted a live-controller original-token receipt"
             )
+    _validate_matching_sdk_runtimes(evidence["fleets"])
 
 
 class FleetVerifier:

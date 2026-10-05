@@ -8,20 +8,26 @@ notes explicitly list additional verified artifacts.
 
 ### SDK contract and management candidate
 
+- Require immutable image IDs, canonical frozen source/image revisions, and
+  identical cross-fleet SDK runtime builds in direct independent verification
+  as well as CI aggregation. Five red-to-green groups preserve historical
+  capture identity; the unchanged complete `dc8e44f` proof still verifies.
 - Add the owned public Go/Java/Python real-Catalog failure campaign and its
   independent verifier, composing complete native HA evidence with original
   batch/OCC bytes, pending-call lost acknowledgements, every live controller's
   durable operation outcome, owner-watch reconnect, quorum/reopen recovery,
   and actual expiration of durable SDK checkpoints. Passing live campaign
-  artifacts and protected delivery remain required; this is not yet a
-  certification claim.
+  artifacts now pass locally at clean `dc8e44f`, with all 516 receipts and both
+  fleets independently verified. Protected delivery remains required; this is
+  bounded SDK/Catalog evidence, not production certification.
 - Compose public SDK Catalog certification into the existing parallel
   three/five-controller native-image CI workers, without a duplicate cluster
   campaign. Require all three runtimes and receipt-safe independent aggregation;
   incompatible, skipped, failed, or missing fleet proofs fail the protected gate.
   Correct the new stale-checkpoint harness to expect Catalog's documented
   `ABORTED`, preserving original cursors and forbidding ACK/reset. The failed
-  `8fde109` live artifact remains failed; fresh full certification is required.
+  `8fde109` live artifact remains failed; the fresh `dc8e44f` full campaign passes
+  both fleets without changing retention, timeouts, or ACK invariants.
 - Generate Java management bindings locally with exact Protobuf 35.1 and
   checksum-pinned gRPC-Java 1.84.0 compilers. The 61 generated sources remain
   byte-identical; CI installs both compilers and retains non-mutating freshness,
@@ -32,7 +38,8 @@ notes explicitly list additional verified artifacts.
   fsynced application checkpoints before watch ACK, and a private exact-command
   lost-response relay. All three probes preserve original token/zero-OCC bytes
   and unknown outcomes after real socket loss in the mandatory cross-language
-  fixture. Real Rust Catalog fault certification remains open.
+  fixture. The separate real Rust Catalog campaign now passes locally; its
+  exact-source protected delivery remains open.
 - Validate Python standalone/regional response shapes and strict JSON without
   exposing response payloads or retrying uncertain mutations. Whole-package
   strict typing now runs locally and in CI, not only on the displayed quickstart.

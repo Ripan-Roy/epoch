@@ -88,6 +88,26 @@ complete.
 | MT-13 | Real-process and container fault campaign | Test infrastructure | MT-06–MT-12 | 🟡 | Three policy-protected regional containers cover simultaneous four-profile tablets, authenticated control recovery, leader losses, catch-up, all-node `SIGKILL`, and same-volume reopen. The beta branch additionally passes one signed accelerated fault round and one clean local four-node Kubernetes backup/replacement/upgrade/restore lifecycle; broader crash/I/O/auth abuse, protected Kubernetes, and the elapsed 30-day gate remain open. |
 | MT-14 | Documentation, traceability, changelog, and release notes | Cross-cutting | MT-13 | 🟡 | ADRs, executable SDK guides, release notes, and main-only Pages are published through `v0.1.0-alpha.9`. ADR-0038 plus source, CLI, and operator runbooks are the alpha.10 candidate; protected publication remains open. |
 
+## Current SDK delivery: management contracts and Catalog recovery
+
+The clean `dc8e44f` whole-feature candidate passes `make check build`, fresh
+seven-method Java/Python TLS/mTLS probes, the required three-language real-socket
+unknown-outcome matrix, and the complete local three/five-controller Catalog
+campaign. The latter exited zero and independently verifies all 516 receipts;
+manifest SHA-256 is
+`b2d91b5b489d851544fb7a14e3a8eb77a9b1a7e7a51bd355c594dc9f40a4d228`.
+Rows remain candidate delivery until exact-source protected CI and main-only
+Pages pass. This does not close native persistent data RPCs or the whole PRD.
+
+| ID | Checklist item | Boundary | State | Evidence / acceptance |
+|---|---|---|---:|---|
+| SDK-01 | Implement all seven management methods | Public Go + Java + Python | 🟡 | Generated messages, typed receipts, explicit trust/deadlines, full unsigned cursors, original token/OCC-preserving bounded failover, and all three TLS/mTLS wire suites pass locally. |
+| SDK-02 | Expose safe manually acknowledged watches | Public SDKs + application checkpoint | 🟡 | Fsynced scanned checkpoints precede ACK; actual owner loss reconnects without reset, and real expired nonzero checkpoints return `ABORTED` with no page/ACK/rewrite in both fleets. |
+| SDK-03 | Prove original outcomes through real faults | Go controllers + Rust Catalog | 🟡 | All three clients pass actual Catalog-leader lost responses, exact token/creation witnesses at every live endpoint, quorum loss/recovery, and full same-volume reopen; all native matrix checks remain. See [proof](MANAGEMENT_SDK.md#complete-local-catalog-evidence--5-october-2026). |
+| SDK-04 | Enforce generated and response boundaries | SDK + compiler tooling | 🟡 | Strict Python response/JSON validation, 86 tests and whole-package typing; checksum-pinned local Java generation, exact freshness, 69 Java tests, and all-language quality/build pass. |
+| SDK-05 | Require both complete fleets in protected CI | GitHub Actions + independent verifier | 🟡 | The candidate adds SDK probes to the existing parallel native workers, requires all runtimes, and rejects altered, foreign, failed, skipped or missing proofs; exact-source protected execution remains. |
+| SDK-06 | Publish exact examples and explicit limits | Documentation + Pages | 🟡 | Compiled/strictly typed Go/Java/Python sources are embedded in docs; full local docs build passes. Main-only publication and visual/browser QA remain unverified. Examples are compile-only, not the actual Catalog probes. |
+
 ## Current control delivery: replicated metadata and multi-instance ownership
 
 PR #134 is merged at `36dab1f` with all 11 jobs passing in

@@ -14,7 +14,124 @@ import management_sdk_catalog_evidence as evidence
 from epoch_sdk._generated.epoch.v1 import regional_admin_pb2 as messages
 
 
+def sdk_evidence_fixture(document=None, counts=(3, 5)):
+    from test_control_ha_full import full_fixture
+
+    document = copy.deepcopy(document if document is not None else full_fixture())
+    document["schema"] = catalog.SCHEMA if counts == (3, 5) else catalog.FLEET_SCHEMA
+    document["identity"] = {
+        "source": {"worktree_clean": True, "git_revision": "a" * 40},
+        "runtime": {
+            "image_id": "sha256:" + "b" * 64,
+            "image_revision": "c" * 40,
+        },
+        "node_source_matches_image": True,
+    }
+    document["fleets"] = [
+        fleet for fleet in document["fleets"] if fleet["controller_count"] in counts
+    ]
+    for fleet in document["fleets"]:
+        phases = []
+        count = fleet["controller_count"]
+        for phase in catalog.PHASES:
+            phases.append(phase)
+            if phase == "resolved":
+                phases.append("resolved-creation")
+            if phase in ("resolved", "after-owner", "after-quorum", "after-reopen"):
+                live = count - 1 if phase in ("after-owner", "after-quorum") else count
+                phases.extend(f"{phase}-controller-{index}" for index in range(live))
+        fleet["sdk"] = {
+            "languages": list(catalog.LANGUAGES),
+            "phases": phases,
+            "faults": {},
+            "runtime": {
+                **{
+                    field: "sha256:" + "d" * 64
+                    for field in ("sdk-go", "sdk-proxy", "java_classes", "java_probe")
+                },
+                "java_dependencies": [
+                    {"file": "runtime.jar", "sha256": "sha256:" + "e" * 64}
+                ],
+            },
+        }
+    return document
+
+
 class CatalogSDKWitnessTest(unittest.TestCase):
+    def test_full_and_isolated_validation_requires_immutable_image_identity(self):
+        for counts in ((3,), (5,), (3, 5)):
+            document = sdk_evidence_fixture(counts=counts)
+            evidence.validate_evidence(document, counts)
+            for image_id in (None, True, "mutable-image-tag", "sha256:" + "b" * 63):
+                changed = copy.deepcopy(document)
+                changed["identity"]["runtime"]["image_id"] = image_id
+                with (
+                    self.subTest(counts=counts, image_id=image_id),
+                    self.assertRaisesRegex(ValueError, "immutable image identity"),
+                ):
+                    evidence.validate_evidence(changed, counts)
+
+    def test_full_and_isolated_validation_requires_frozen_revision_syntax(self):
+        for counts in ((3,), (5,), (3, 5)):
+            document = sdk_evidence_fixture(counts=counts)
+            for section, field in (
+                ("source", "git_revision"),
+                ("runtime", "image_revision"),
+            ):
+                for revision in (None, True, "main", "a" * 39, "A" * 40):
+                    changed = copy.deepcopy(document)
+                    changed["identity"][section][field] = revision
+                    with (
+                        self.subTest(counts=counts, field=field, revision=revision),
+                        self.assertRaisesRegex(
+                            ValueError, "frozen source/image revision"
+                        ),
+                    ):
+                        evidence.validate_evidence(changed, counts)
+
+    def test_full_matrix_validation_rejects_divergent_public_sdk_runtimes(self):
+        document = sdk_evidence_fixture()
+        evidence.validate_evidence(document)
+        runtime = document["fleets"][1]["sdk"]["runtime"]
+        for field in runtime:
+            changed = copy.deepcopy(document)
+            changed_runtime = changed["fleets"][1]["sdk"]["runtime"]
+            if field == "java_dependencies":
+                changed_runtime[field][0]["sha256"] = "sha256:" + "f" * 64
+            else:
+                changed_runtime[field] = "sha256:" + "f" * 64
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(ValueError, "SDK runtime identities differ"),
+            ):
+                evidence.validate_evidence(changed)
+
+    def test_historical_identity_does_not_require_current_checkout_or_same_revision(
+        self,
+    ):
+        for counts in ((3,), (5,), (3, 5)):
+            document = sdk_evidence_fixture(counts=counts)
+            with mock.patch.object(
+                catalog.owner.soak,
+                "source_identity",
+                side_effect=AssertionError(
+                    "historical verification inspected current checkout"
+                ),
+            ):
+                evidence.validate_evidence(document, counts)
+
+    def test_bundle_verifier_checks_immutable_identity_before_sdk_artifacts(self):
+        from test_control_ha_full import full_bundle_fixture
+
+        soak = catalog.owner.soak
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = full_bundle_fixture(Path(temporary))
+            document = sdk_evidence_fixture(soak.load_json(manifest))
+            document["identity"]["runtime"]["image_id"] = "mutable-image-tag"
+            soak.atomic_write(manifest, soak.canonical_bytes(document))
+            with self.assertRaisesRegex(ValueError, "immutable image identity"):
+                evidence.verify_bundle(manifest)
+
     def test_expired_application_checkpoint_requires_the_catalog_aborted_status(self):
         with tempfile.TemporaryDirectory() as temporary:
             fleet = object.__new__(catalog.SDKFleet)

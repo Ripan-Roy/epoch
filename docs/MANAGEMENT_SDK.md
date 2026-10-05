@@ -1,8 +1,9 @@
 # Management SDK candidate
 
-Status: Go/Java/Python implementations and local generated-wire tests;
-**not yet protected delivery or complete native SDK parity**. Real Catalog
-fault evidence for the public SDK and protected Pages publication remain open.
+Status: Go/Java/Python implementations, generated-wire tests, and an independently
+verified local real-Catalog three/five-controller fault matrix;
+**not yet protected delivery or complete native SDK parity**. Exact-source SDK
+CI and protected Pages publication remain open.
 Existing data-profile SDKs are separate.
 
 `epoch.ManagementClient` covers the Go control service, not Rust's still-future
@@ -343,9 +344,9 @@ image. Go, Java 25, and Python 3.11 are mandatory. The protected aggregate check
 the current-attempt artifacts, identical source/image and public-probe runtime
 identities, every receipt after copying, and the full independent verifier.
 Failed, cancelled, skipped, missing, or incompatible fleets cannot seal a pass.
-The implementation and its regression tests are a **candidate**: complete
-passing live artifacts and protected CI delivery are still required. No public
-SDK Catalog certification is claimed yet.
+The implementation remains a **candidate**: the complete local live artifacts
+below pass independent verification, but protected CI delivery is still
+required. This is bounded SDK/Catalog evidence, not production certification.
 
 ```sh
 make test-management-sdk-runner
@@ -397,4 +398,47 @@ returned `ABORTED` without a page or checkpoint write; the real floor was 397
 and their saved checkpoints were 373/376/374. That failed manifest is retained,
 not converted into a pass. Regression tests correct both the planned status and
 the independent verifier while preserving exact saved cursors and no ACK/reset.
-A fresh complete campaign and protected delivery are still required.
+The fresh complete local campaign below supersedes that local limitation;
+protected delivery remains required.
+
+### Complete local Catalog evidence — 5 October 2026
+
+Clean source `dc8e44f1340df7941817012a8561b69010ee40a3` completed both real
+three/five-controller fleets. The campaign exited zero, and a separate
+`management_sdk_catalog.py verify --manifest` invocation passed all 516
+checksum-bound artifacts. Its canonical manifest SHA-256 is
+`b2d91b5b489d851544fb7a14e3a8eb77a9b1a7e7a51bd355c594dc9f40a4d228`.
+The tested image ID is
+`sha256:05d4ec7fb4ab1a5d85600cf4327f0f17cf6d4d9a3057e417158d1c84f12c57fb`,
+revision `bf517daa020bc7f480c3474427fccc9de98243d0`; the campaign verifies that
+the image's Rust production source matches the SDK checkout, and separately
+records identical public-client/probe runtime identities across fleets.
+The final verifier was subsequently tightened with five red-to-green regression
+groups to reject mutable/malformed image identities, malformed frozen revisions,
+and differing public-client builds in both isolated and complete paths. All 33
+combined SDK/native-full contracts pass; the stronger verifier accepts this
+unchanged original capture without relabelling its source or checksum.
+
+| Witness | Three controllers | Five controllers |
+|---|---|---|
+| Native owner/API check flags | 10/11 passed | 10/11 passed |
+| Desired resources / exact native operations | 135 / 20 | 135 / 24 |
+| Public SDK leader-loss, owner-watch, quorum, reopen and every-live-controller phases | Go, Java, Python passed | Go, Java, Python passed |
+| Expired saved Go/Java/Python checkpoints | 385 / 388 / 386 | 347 / 347 / 347 |
+| Real SDK history floor / latest cursor | 392 / 4,487 | 352 / 4,447 |
+| Stale response without page, ACK or checkpoint rewrite | `ABORTED` in all SDKs | `ABORTED` in all SDKs |
+| Profile digests unchanged after reopen | 4 / 4 | 4 / 4 |
+
+Artifacts are preserved locally at
+`/private/tmp/epoch-sdk-catalog-awake.1aG7Bt/evidence/evidence.json`.
+The earlier same-source attempt remains failed: macOS entered low-power
+hibernation at 1% battery for 52m29s during history churn. The fresh run used
+confirmed AC power and utility-scoped sleep prevention, without changing source,
+timeouts, retention, or invariants. Earlier replay-flag/stale-code failed
+attempts also remain failed; none is relabelled as this new campaign.
+
+Exact-source protected SDK CI/main/Pages and release gates remain separate.
+Compiled documentation examples are still compile-only; the campaign uses
+dedicated private fault probes, not those examples. Browser visual QA is
+unverified because no browser was connected; format, type, displayed-source,
+navigation and docs-bundle checks are automated evidence only.

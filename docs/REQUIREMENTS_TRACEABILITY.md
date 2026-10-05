@@ -13,8 +13,24 @@ aggregate. Its downloaded full artifact independently verifies with SHA-256
 Both fleets retain 135 desired resources, 20/24 exact operation witnesses,
 real stale-watch rejection, and matching four-profile digests after reopen.
 [Main Pages](https://github.com/Ripan-Roy/epoch/actions/runs/37353099031) also
-passed. This closes only the bounded **native** dedicated-chaos gate; public SDK
-Catalog certification, retention/scaling/migration, and production gates remain.
+passed. This closes only the bounded **native** dedicated-chaos gate; protected
+public-SDK delivery, retention/scaling/migration, and production gates remain.
+
+Current bounded public-SDK local evidence: clean
+`dc8e44f1340df7941817012a8561b69010ee40a3` completed both three/five-controller
+fleets with Go, Java, and Python. The CLI exited zero and the independent full
+SDK verifier passed all 516 checksum-bound artifacts. Manifest SHA-256:
+`b2d91b5b489d851544fb7a14e3a8eb77a9b1a7e7a51bd355c594dc9f40a4d228`.
+Each fleet retains all ten native owner and eleven generated-API checks plus
+real SDK Catalog-leader lost acknowledgements, exact original-token outcomes
+through every live controller, owner-watch reconnect, quorum/reopen recovery,
+and stale `ABORTED` without ACK/reset. The saved Go/Java/Python checkpoints
+385/388/386 expired below floor 392 in the three-controller fleet; 347/347/347
+expired below floor 352 in the five-controller fleet. All three runtimes match
+across fleets. `make check build` and fresh TLS/mTLS/three-language transport-loss
+probes also pass at that source. This is local bounded evidence, not protected
+SDK CI/Pages, complete CTRL-001/CTRL-002 or DX-001, native persistent data RPCs,
+production readiness, or beta.12 publication. See [management SDK](MANAGEMENT_SDK.md).
 
 Historical local progression: the clean `671fde4` tree passed
 the dedicated owner-recovery subset with three and five concurrent Go
@@ -146,7 +162,7 @@ actual Rust Catalog fault certification; original-token resolution and retained
 outcome/checkpoint comparison through Catalog/owner/quorum/reopen remain open.
 
 The next SDK increment implements the owned actual-Catalog campaign plus an
-independent verifier. Fourteen regression groups reject altered original bytes,
+independent verifier. Nineteen regression groups reject altered original bytes,
 missing upstream acknowledgements, incomplete SDK phases, absent response
 witnesses, non-monotonic/foreign watch pages, and omitted final verification.
 The runner composes the complete native HA matrix with all three public clients,
@@ -178,7 +194,16 @@ New red-to-green regressions align both plan and verifier with `ABORTED` while
 requiring the original expired cursor and no ACK. The CI candidate composes the
 public SDK campaign into the existing parallel native fleet workers, requires
 all runtimes, and independently seals both same-source/image/runtime artifacts.
-Fresh complete local and protected proofs remain required before SDK promotion.
+That failed capture remains historical. The current complete local proof above
+supersedes its local limitation; protected SDK delivery remains required.
+
+Final independent-verifier review added five red-to-green regression groups:
+full and isolated proofs must carry immutable image IDs and canonical frozen
+source/image revisions; the complete proof also requires matching public SDK
+runtime builds across fleets. Historical valid source/image revisions may
+differ, and verification never relabels a capture as the current checkout.
+All 33 combined SDK/native-full contract tests pass, and the stronger verifier
+accepts the unchanged `dc8e44f` live manifest with the same checksum above.
 
 ## How to use this register
 
@@ -492,8 +517,8 @@ durability.
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
-| CTRL-001 | P0 | Idempotent declarative resource API | M1 → M2 | Slice | G0, G1, G3 | Generated RegionalAdmin gRPC Apply/Get/List/Delete plus atomic 1–128 resource BatchApply, exact affected-resource-authorized GetOperation, and resumable tenant-filtered WatchResourceChanges now sit on replicated Rust Catalog outcomes. Operations expose command kind and a presence-aware caller delete precondition through the generated contract, independently of managed internal fencing, so a missing-resource replay compares the original OCC input instead of its tombstone result. Compacted capacity outcomes retain bounded authorization metadata for lookup. The Go authority client accepts valid large results up to the 5 MiB Catalog-plus-envelope bound and rejects anything larger. Exact replay, token rebinding, committed semantic rejection, disconnect/reconnect, public HTTP delete coordination, and real three-node failover tests pass main CI `37143501331` at `36dab1f`. Pending: advertised unknown-outcome/token-retention window, soft delete/purge, dedicated concurrent multi-control chaos, and SDK management clients. See ADR-0050. |
-| CTRL-002 | P0 | Strong versioned metadata and OCC | M1 prototype → M2 | Slice | G0, G2, G3 | Managed desired/status/tombstones/outcomes are Catalog-consensus replicated; reads use ReadIndex, one TTL/fence lease owns reconciliation, capacity plus initial materialization and managed delete are atomic, and managed delete derives native generation inside the replicated transition instead of trusting crash-stale status. Stale owners fail, recurring internal outcomes are bounded, inventory is keyset-paged, and a one-time bbolt import preserves up to 4,096 live and tombstoned generations within byte limits. Repeated unique snapshot-capacity refusals compact into exact token/command-digest bindings and enter a durable v8 growth seal; only strictly shrinking real deletes commit until reserved headroom is restored, recovered v9 resumes admission without losing replay/conflict identity after consensus compaction, and compact-ledger exhaustion enters terminal fail-closed v10 after reserving its extra serialized marker byte. Three anti-affined control replicas, staged legacy scale-up, and a two-instance PDB are rendered. Focused Go/Rust and real three-node tests pass main CI `37143501331` at `36dab1f`. Pending: dedicated concurrent multi-control chaos, horizontal Catalog capacity/sharding and seal migration, legacy token migration policy, and a public operation-retention report. See ADR-0050. |
+| CTRL-001 | P0 | Idempotent declarative resource API | M1 → M2 | Slice | G0, G1, G3 | Generated RegionalAdmin Apply/Get/List/Delete, atomic 1–128-resource batches, exact affected-resource-authorized operation lookup, and resumable tenant-filtered watches use replicated Catalog outcomes. Operations preserve kind and caller delete-precondition presence independently of internal fencing; compacted capacity outcomes retain lookup authorization. Authority responses are bounded at 5 MiB. Exact replay, rebinding rejection, semantic failures, managed delete/recreate, maximum batches and real stale history pass the complete native three/five-controller matrix on main `d8adf75`. All seven Go/Java/Python management methods and their actual Catalog-fault matrix additionally pass locally at `dc8e44f`. Pending: protected SDK delivery, public list pagination, advertised unknown-outcome/token-retention window, and soft delete/purge. See ADR-0050 and MANAGEMENT_SDK.md. |
+| CTRL-002 | P0 | Strong versioned metadata and OCC | M1 prototype → M2 | Slice | G0, G2, G3 | Desired/status/tombstone/outcome state is consensus replicated; ReadIndex, a TTL/fence reconciler lease, atomic capacity/materialization and managed deletion reject stale owners and preserve exact native generations. Internal receipts are bounded; internal inventory is keyset-paged. Ordered legacy import preserves up to 4,096 generation records within byte limits. Snapshot v8/v9 compact capacity bindings preserve exact replay/conflict/lookup, allow only shrinking cleanup while sealed, and resume admission after headroom returns; v10 terminally fails closed when its reserved compact ledger fills. Three anti-affined control replicas, staged scale-up and two-instance PDB are rendered. The complete bounded native three/five-controller chaos gate passes main `d8adf75`; the three-language SDK matrix passes locally at `dc8e44f`. Pending: protected SDK delivery, horizontal Catalog capacity/sharding and seal migration, legacy token migration policy, and public operation retention. See ADR-0050. |
 | CTRL-003 | P0 | Placement/residency/tenancy constraints | M2 | Slice | G0, G3, G5 | `ResourceSpec` supports allowed regions, minimum zones, minimum racks, required node class, and excluded node IDs; Go validates fresh authenticated topology before mutation, selects deterministic compliant voters, and publishes exact requested/achieved domain evidence. Policy changes can automatically repair ineligible assignments one voter at a time. Pending: dedicated tenancy, residency export enforcement, policy inheritance, Kubernetes/cloud topology attestation, and global transactional solving. |
 | CTRL-004 | P0 | Safe topology and repair operations | M1 prototype → M2 | Slice | G2, G3, G5 | Term-fenced leader transfer plus a v5 Catalog-planned, durable, idempotent single-voter transition enforce add-learner, leader-observed catch-up, joint consensus, finalize, stop, and reopen ordering. Go now deterministically plans serialized policy repair, zone/rack repair, and load rebalance from fresh inventory; a replicated TTL/fence lease rejects stale controllers. Risk-specific reachability gates, stable plan tokens, current/bootstrap/target/committed/reachable status, and unchanged customer generations pass locally. The Kubernetes runner requests repair through managed exclusion. Pending: split/merge, transactional multi-plan reservation, protected evidence, and broader chaos. |
 | CTRL-005 | P0 | Safe admission and limiting-resource reason | M2 | Slice | G3, G5, G8 | Rust reports maximum/used/available group slots; Go charges only additional shards and returns the stable limiting-node reason. Managed initial batches and learner transitions now carry a complete capacity observation into the lease-fenced Catalog command, which validates and reserves the whole transaction without partial mutation under concurrent controllers. Pending: multidimensional CPU/memory/disk/network sizing, fleet-wide multi-plan solving, protected saturation/chaos evidence, and hysteresis. |
@@ -519,7 +544,7 @@ durability.
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
-| DX-001 | P0 | Official Go, Java, and Python SDKs | M1 one SDK → M2 | Slice | G0, G1, G4, G10 | Go/Java/Python standalone tests and exact-source restart quickstarts remain green. All three share regional Stream, Queue, Event Bus, and the complete non-deferred Cache lifecycle: ordinary/advanced state, atomic batch, independent multiplex, locks/TTL, changes, backup/PITR, typed query, lossy Pub/Sub, cold status, discovery/auth/fence/retry/read-barrier contracts. Stream additionally exposes keyed routing, batches, sessions, and claim/fenced fetch. The real Python campaign executes all four profiles after leader loss. Pending: generated response types, persistent native streaming/cooperative revoke, package publication, and the complete native contract/version matrix |
+| DX-001 | P0 | Official Go, Java, and Python SDKs | M1 one SDK → M2 | Slice | G0, G1, G4, G10 | Standalone tests and exact-source restart quickstarts remain green. All three share regional Stream, Queue, Event Bus and non-deferred Cache APIs: advanced state, atomic batch, independent multiplex, locks/TTL, changes, backup/PITR, query, lossy Pub/Sub, cold status, discovery/auth/fence/retry/read barriers; Stream adds keyed routing, batches, sessions and claim/fenced fetch. The Python recovery campaign executes all four profiles. All three additionally implement seven generated management methods; their complete actual Catalog-fault matrix, TLS/mTLS, manual ACK, original token/OCC and unknown-outcome contracts pass locally at `dc8e44f`. Python response-shape validation and strict whole-package typing pass. Pending: protected management-SDK delivery, generated native-profile response types, persistent native streaming/cooperative revoke, deferred package publication and the full contract/version matrix. |
 | DX-002 | P0 | Generated guarantee-aware API docs | M1 → M2 | Slice | G0, G1, G10 | Hand-authored guarantee/error guidance, exact executable standalone quickstarts, and exact compilable regional Stream/Queue/Cache/Event Bus Go/Java/Python sources are built into the docs-only Pages artifact. Compatibility exposes its bounded Redis/Kafka/AMQP matrices and standard-client examples. The beta.10 candidate adds a dedicated identity/audit page with v2 policy, persistent startup, OIDC call, tenant-filtered export, tamper recovery, and exact non-claims; local format/lint/type/build passes and Pages asserts the markers. Pending: protected publication, generated API reference, and full doc lint. |
 | DX-003 | P0 | Deterministic single-binary emulator | M1 → M2 | Slice | G1, G2, G4, G10 | Seeded scheduler, virtual clocks/fault plan/transport, golden EPTR history, fixed-voter consensus, real-process EPRS/SIGKILL, and typed Stream/Queue/Cache/Bus runtimes; pending: executable replay bundle and runnable emulator controls |
 | DX-004 | P0 | Test containers and ephemeral namespaces | M1 → M2 | Slice | G1, G5, G10 | A unique three-node Compose project uses independent volumes, dynamic loopback ports, mounted policy, Go recovery, simultaneous four-profile failover/catch-up/all-node recovery, and post-failover Python lifecycles. The beta.10 campaign additionally recomputes every Go/Rust audit link and compares complete journal prefixes across control and all-node restart; it passes locally. The resumable alpha-exit and digest-pinned Kind campaigns retain typed evidence for mTLS install, all-profile traffic, backup, compacted-log voter replacement, guarded rollout, fresh restore, and post-restore writes. Pending: protected evidence for the updated audit campaign, elapsed 30-day operation, parallel campaigns, Go/Java live regional execution, and injected disk/network matrices. |

@@ -1,7 +1,8 @@
 # Concurrent control-plane failure certification
 
 Status: bounded native runtime matrix verified locally and in protected PR/main
-CI. Public-SDK Catalog certification and beta.12 publication remain open.
+CI. The separate public-SDK Catalog matrix now verifies locally; protected SDK
+delivery and beta.12 publication remain open.
 The existing regional and Kubernetes campaigns do not close this gate: their
 control restart evidence is not a concurrent-controller chaos campaign.
 
@@ -51,6 +52,23 @@ This closes only the bounded **native** concurrent-control gate. It does not
 certify public SDKs, arbitrary node counts, mixed-version upgrades, advertised
 retention windows, terminal-seal migration, production SLOs, or beta.12 release
 artifacts. Historical local progression below retains its original provenance.
+
+## Separate public-SDK local proof (5 October 2026)
+
+The complete clean `dc8e44f` SDK campaign now composes the unchanged native
+matrix with actual public Go, Java, and Python clients in both controller
+fleets. Its CLI exits zero, and the independent SDK verifier passes all 516
+artifact receipts. Manifest SHA-256 is
+`b2d91b5b489d851544fb7a14e3a8eb77a9b1a7e7a51bd355c594dc9f40a4d228`.
+Both fleets pass real Catalog-leader lost-response resolution, exact original
+operation/creation witnesses through every live controller, owner-watch
+reconnect, quorum recovery, and same-volume reopen. Real history floors 392/352
+expire the saved nonzero checkpoints; all three clients return `ABORTED`
+without a page, ACK, reset, or checkpoint rewrite. Native owner/API flags,
+135-resource inventories, 20/24 exact operations, and four-profile reopen
+digests remain part of this proof. This does not inherit protected delivery
+from PR #149: current SDK PR/main/Pages must run separately. See
+[SDK provenance and commands](MANAGEMENT_SDK.md#complete-local-catalog-evidence--5-october-2026).
 
 ## Historical local verification
 
