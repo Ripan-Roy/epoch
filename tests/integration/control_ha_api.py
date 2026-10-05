@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
@@ -68,10 +69,14 @@ def validate_initial_batch_witness(proof: dict[str, Any], count: int) -> None:
             raise ValueError("initial batch protobuf encoding is not canonical")
 
 
-def validate_api_evidence(evidence: dict[str, Any]) -> None:
+def validate_api_evidence(
+    evidence: dict[str, Any], *, controller_counts: tuple[int, ...] = (3, 5)
+) -> None:
     if evidence.get("schema") != API_SCHEMA:
         raise ValueError("wrong generated-client recovery evidence schema")
-    owner.validate_owner_evidence({**evidence, "schema": owner.OWNER_SCHEMA})
+    owner.validate_owner_evidence(
+        {**evidence, "schema": owner.OWNER_SCHEMA}, controller_counts=controller_counts
+    )
     for fleet in evidence["fleets"]:
         api = fleet.get("api")
         if not isinstance(api, dict):
@@ -207,29 +212,46 @@ class APIFleet(owner.OwnerFleet):
                 "EPOCH_CONTROL_HA_GRPC_READER_TOKEN": "epoch-dev-reader-v1",
             }
         )
-        output = subprocess.run(
-            [
-                str(self.helper),
-                "--phase",
-                mode,
-                "--endpoints",
-                ",".join(endpoints),
-                "--controllers",
-                str(self.count),
-                "--prefix",
-                f"ha-grpc-{self.count}",
-                "--state",
-                str(self.artifact_dir / "api-prepare.json"),
-                "--lookup-plan",
-                str(self.artifact_dir / "leader-lookups.json"),
-            ],
-            cwd=owner.regional.REPO_ROOT,
-            env=environment,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+        started = time.monotonic()
+        print(f"{self.count} controllers: generated gRPC {phase} starting", flush=True)
+        timed_out = False
+        try:
+            output = subprocess.run(
+                [
+                    str(self.helper),
+                    "--phase",
+                    mode,
+                    "--endpoints",
+                    ",".join(endpoints),
+                    "--controllers",
+                    str(self.count),
+                    "--prefix",
+                    f"ha-grpc-{self.count}",
+                    "--state",
+                    str(self.artifact_dir / "api-prepare.json"),
+                    "--lookup-plan",
+                    str(self.artifact_dir / "leader-lookups.json"),
+                ],
+                cwd=owner.regional.REPO_ROOT,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired as error:
+            timed_out = True
+
+            def decoded(value: str | bytes | None) -> str:
+                return (
+                    value.decode("utf-8", errors="replace")
+                    if isinstance(value, bytes)
+                    else value or ""
+                )
+
+            output = subprocess.CompletedProcess(
+                error.cmd, 124, decoded(error.stdout), decoded(error.stderr)
+            )
         if output.returncode:
             message = output.stderr
             for token in (owner.regional.ADMIN_TOKEN, "epoch-dev-reader-v1"):
@@ -245,6 +267,8 @@ class APIFleet(owner.OwnerFleet):
                         "status": "failed",
                         "phase": phase,
                         "error": message,
+                        "timed_out": timed_out,
+                        "duration_seconds": time.monotonic() - started,
                         "partial_proof": partial,
                     }
                 ),
@@ -266,7 +290,10 @@ class APIFleet(owner.OwnerFleet):
         )
         self.result["api"]["checks"].update(checks)
         self.result["api"]["phases"] = [key for key in API_PHASES if key in self.proofs]
-        print(f"{self.count} controllers: generated gRPC {phase} passed", flush=True)
+        print(
+            f"{self.count} controllers: generated gRPC {phase} passed ({time.monotonic() - started:.1f}s)",
+            flush=True,
+        )
         return proof
 
     def create_and_replay(self) -> None:
@@ -311,8 +338,11 @@ class APIFleet(owner.OwnerFleet):
         desired = self.raw("GET", suffix.removesuffix("/status")).document
         cursor = self.proofs["prepare"]["watch_checkpoint"]
         self.result["api"]["retention_fenced_attempts"] = 0
-        for sequence in range(8192):
-            if sequence % 32 == 0:
+        # Each status is still a real individually committed fenced command.
+        # These independent churn labels have no ordering semantics. Bound the
+        # concurrency and join each chunk before observing the actual floor.
+        with ThreadPoolExecutor(max_workers=4) as workers:
+            for sequence in range(0, 8192, 32):
                 page = self.raw("GET", f"/changes?after={cursor}&limit=1")
                 assert page.status == 200, page
                 floor = int(page.document["earliest_cursor"])
@@ -328,9 +358,13 @@ class APIFleet(owner.OwnerFleet):
                         f"{self.count} controllers: advancing real watch retention ({sequence} status changes)",
                         flush=True,
                     )
-            self.result["api"]["retention_fenced_attempts"] += (
-                self.commit_retention_status(suffix, desired["generation"], sequence)
-            )
+                attempts = workers.map(
+                    lambda item: self.commit_retention_status(
+                        suffix, desired["generation"], item
+                    ),
+                    range(sequence, sequence + 32),
+                )
+                self.result["api"]["retention_fenced_attempts"] += sum(attempts)
         raise AssertionError("real history did not advance its retention floor")
 
     def commit_retention_status(

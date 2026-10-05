@@ -8,15 +8,18 @@ import base64
 import binascii
 import hashlib
 import json
+import re
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import control_ha_api as api
 import control_ha_faults as faults
 
 owner = api.owner
 FULL_SCHEMA = "epoch.control-ha.full-certification/v1"
+FLEET_SCHEMA = "epoch.control-ha.fleet-certification/v1"
 LOOKUP_SCHEMA = "epoch.control-ha.operation-bindings/v1"
 
 
@@ -84,10 +87,14 @@ def validate_lookup_proof(proof: dict[str, Any], plan: dict[str, Any]) -> None:
                 raise ValueError("malformed lookup protobuf encoding") from error
 
 
-def validate_full_evidence(evidence: dict[str, Any]) -> None:
+def validate_full_evidence(
+    evidence: dict[str, Any], *, controller_counts: tuple[int, ...] = (3, 5)
+) -> None:
     if evidence.get("schema") != FULL_SCHEMA:
         raise ValueError("wrong complete concurrent-control matrix schema")
-    api.validate_api_evidence({**evidence, "schema": api.API_SCHEMA})
+    api.validate_api_evidence(
+        {**evidence, "schema": api.API_SCHEMA}, controller_counts=controller_counts
+    )
     for fleet in evidence["fleets"]:
         leader = fleet.get("catalog_leader_unknown")
         if not isinstance(leader, dict):
@@ -103,7 +110,42 @@ def validate_full_evidence(evidence: dict[str, Any]) -> None:
 
 
 def verify_full_bundle(path: Path) -> None:
-    api.verify_api_bundle(path, validator=validate_full_evidence)
+    _verify_full_bundle(path, validate_full_evidence)
+
+
+def validate_fleet_evidence(evidence: dict[str, Any], count: int) -> None:
+    if (
+        type(count) is not int
+        or count not in (3, 5)
+        or evidence.get("schema") != FLEET_SCHEMA
+    ):
+        raise ValueError("wrong isolated controller-fleet schema or count")
+    validate_full_evidence(
+        {**evidence, "schema": FULL_SCHEMA}, controller_counts=(count,)
+    )
+
+
+def verify_fleet_bundle(path: Path, count: int) -> None:
+    _verify_full_bundle(path, lambda evidence: validate_fleet_evidence(evidence, count))
+    evidence = owner.soak.load_json(path)
+    runtime = evidence["identity"].get("runtime", {})
+    image_id = runtime.get("image_id", "")
+    if (
+        not isinstance(image_id, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None
+    ):
+        raise ValueError("fleet proof requires the tested immutable image identity")
+    if any(
+        not receipt["path"].startswith(f"controllers-{count}/")
+        for receipt in evidence["artifacts"]
+    ):
+        raise ValueError("fleet artifact inventory contains another campaign")
+
+
+def _verify_full_bundle(
+    path: Path, validator: Callable[[dict[str, Any]], None]
+) -> None:
+    api.verify_api_bundle(path, validator=validator)
     evidence = owner.soak.load_json(path)
     artifacts = {receipt["path"] for receipt in evidence["artifacts"]}
     for fleet in evidence["fleets"]:
@@ -144,6 +186,60 @@ def verify_full_bundle(path: Path) -> None:
                 != request["command_sha256"]
             ):
                 raise ValueError("leader-loss original command checksum differs")
+
+
+def combine_fleet_bundles(manifests: list[Path], output: Path) -> None:
+    """Seal both independently verified fleets without weakening the full gate."""
+    if len(manifests) != 2:
+        raise ValueError("combining requires ordered three/five-controller proofs")
+    candidates = []
+    for count, path in zip((3, 5), manifests, strict=True):
+        verify_fleet_bundle(path, count)
+        candidates.append(owner.soak.load_json(path))
+    identity = candidates[0]["identity"]
+    if candidates[1]["identity"] != identity:
+        raise ValueError("fleet candidate/image identity differs")
+    if owner.soak.source_identity() != identity["source"]:
+        raise ValueError("fleet source identity differs from the aggregate checkout")
+    output = output.resolve()
+    if output.exists() and any(output.iterdir()):
+        raise ValueError("combined evidence destination must be empty")
+    if any(
+        path.parent.resolve() == output or output in path.resolve().parents
+        for path in manifests
+    ):
+        raise ValueError("aggregate destination must be separate from its inputs")
+    output.mkdir(parents=True, exist_ok=True)
+    result = {
+        "schema": FULL_SCHEMA,
+        "status": "passed",
+        "identity": identity,
+        "fleets": [candidate["fleets"][0] for candidate in candidates],
+    }
+    try:
+        for path, candidate in zip(manifests, candidates, strict=True):
+            for receipt in candidate["artifacts"]:
+                target = output / receipt["path"]
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path.parent / receipt["path"], target)
+                if owner.soak.file_receipt(target, output) != receipt:
+                    raise ValueError("fleet artifact changed while combining")
+        result["artifacts"] = owner.soak.collect_artifacts(output, output)
+        owner.soak.atomic_write(
+            output / "evidence.json", owner.soak.canonical_bytes(result)
+        )
+        verify_full_bundle(output / "evidence.json")
+    except BaseException:
+        result["status"] = "failed"
+        owner.soak.atomic_write(
+            output / "failure.json", owner.soak.canonical_bytes(result)
+        )
+        if (output / "evidence.json").exists():
+            owner.soak.atomic_write(
+                output / "evidence.json", owner.soak.canonical_bytes(result)
+            )
+        raise
+    print(f"verified complete parallel control-HA matrix: {output / 'evidence.json'}")
 
 
 class FullFleet(api.APIFleet):
@@ -302,6 +398,16 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run")
     run.add_argument("--output", type=Path, required=True)
+    fleet = commands.add_parser("run-fleet")
+    fleet.add_argument("--controllers", type=int, choices=(3, 5), required=True)
+    fleet.add_argument("--output", type=Path, required=True)
+    verify_fleet = commands.add_parser("verify-fleet")
+    verify_fleet.add_argument("--controllers", type=int, choices=(3, 5), required=True)
+    verify_fleet.add_argument("--manifest", type=Path, required=True)
+    combine = commands.add_parser("combine")
+    combine.add_argument("--three", type=Path, required=True)
+    combine.add_argument("--five", type=Path, required=True)
+    combine.add_argument("--output", type=Path, required=True)
     verify = commands.add_parser("verify")
     verify.add_argument("--manifest", type=Path, required=True)
     options = parser.parse_args()
@@ -313,6 +419,22 @@ def main() -> None:
             validator=validate_full_evidence,
             bundle_verifier=verify_full_bundle,
         )
+    elif options.command == "run-fleet":
+        owner.run_campaign(
+            options.output,
+            fleet_type=FullFleet,
+            schema=FLEET_SCHEMA,
+            validator=lambda evidence: validate_fleet_evidence(
+                evidence, options.controllers
+            ),
+            bundle_verifier=lambda path: verify_fleet_bundle(path, options.controllers),
+            controller_counts=(options.controllers,),
+        )
+    elif options.command == "verify-fleet":
+        verify_fleet_bundle(options.manifest, options.controllers)
+        print(f"verified isolated control-HA fleet: {options.manifest}")
+    elif options.command == "combine":
+        combine_fleet_bundles([options.three, options.five], options.output)
     else:
         verify_full_bundle(options.manifest)
         print(f"verified complete bounded control-HA matrix: {options.manifest}")

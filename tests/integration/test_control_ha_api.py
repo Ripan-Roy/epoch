@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import copy
 import json
+import subprocess
+import threading
+import time
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,6 +32,77 @@ def api_evidence_fixture() -> dict:
 
 
 class APIEvidenceContractTest(unittest.TestCase):
+    def test_retention_advances_real_commits_with_bounded_parallelism(self) -> None:
+        fleet = control_ha_api.APIFleet.__new__(control_ha_api.APIFleet)
+        fleet.count = 5
+        fleet.resources = [mock.Mock(), mock.Mock(name="stream")]
+        fleet.proofs = {"prepare": {"watch_checkpoint": 100}}
+        fleet.result = {"api": {}}
+        active, maximum, sequences = 0, 0, []
+        lock = threading.Lock()
+        response = control_ha_api.owner.regional.HttpResponse
+
+        def raw(method, suffix):
+            if "/changes?" not in suffix:
+                return response(200, {"generation": "1"}, {})
+            return response(
+                200,
+                {
+                    "earliest_cursor": 2 if len(sequences) >= 64 else 1,
+                    "latest_cursor": 4200,
+                },
+                {},
+            )
+
+        def commit(suffix, generation, sequence):
+            nonlocal active, maximum
+            self.assertEqual("1", generation)
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+            time.sleep(0.001)
+            with lock:
+                sequences.append(sequence)
+                active -= 1
+            return sequence % 2
+
+        fleet.raw, fleet.commit_retention_status = raw, commit
+        with mock.patch("builtins.print"):
+            fleet.advance_watch_retention()
+        self.assertEqual(list(range(64)), sorted(sequences))
+        self.assertGreater(maximum, 1)
+        self.assertLessEqual(maximum, 4)
+        self.assertEqual(32, fleet.result["api"]["retention_fenced_attempts"])
+        self.assertEqual(2, fleet.result["api"]["retention"]["earliest_cursor"])
+
+    def test_generated_timeout_retains_redacted_failure_artifact(self) -> None:
+        fleet = control_ha_api.APIFleet.__new__(control_ha_api.APIFleet)
+        fleet.count = 3
+        fleet.helper = Path("/owned/controlgrpc")
+        controller = mock.Mock(grpc_port=12345, paused=False)
+        controller.process.poll.return_value = None
+        fleet.controllers = [controller]
+        with tempfile.TemporaryDirectory() as temporary:
+            fleet.artifact_dir = Path(temporary)
+            timeout = subprocess.TimeoutExpired(
+                "controlgrpc",
+                300,
+                output=b"{}",
+                stderr=b"stage=desired epoch-dev-reader-v1",
+            )
+            with mock.patch.object(
+                control_ha_api.subprocess, "run", side_effect=timeout
+            ):
+                with self.assertRaises(AssertionError):
+                    fleet.generated_clients("prepare")
+            failure = json.loads(
+                (fleet.artifact_dir / "api-prepare-failed.json").read_text()
+            )
+            self.assertEqual("failed", failure["status"])
+            self.assertTrue(failure["timed_out"])
+            self.assertIn("stage=desired", failure["error"])
+            self.assertNotIn("epoch-dev-reader-v1", failure["error"])
+
     def test_v2_initial_batch_requires_all_canonical_protobuf_witnesses(self) -> None:
         proof = {
             "schema": control_ha_api.GRPC_SCHEMA,

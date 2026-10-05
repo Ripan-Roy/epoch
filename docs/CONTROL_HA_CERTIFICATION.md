@@ -229,12 +229,55 @@ most four times. Only a resolved, typed fencing rejection permits a separate
 attempt with a newly observed guard and token. This does not assert a two-second
 service SLO or widen the public operation-retention contract.
 
-All 39 HA fixture contract tests, the complete Go race suite, vet, and build
-pass locally. CI has a separately bounded 120-minute
-native-arm64 HA job that consumes the already inspected exact-source node image
-from the arm64 build job, verifies its archive checksum and OCI revision, and
-retains passing or failed evidence for 30 days. It neither rebuilds that Rust
-image nor publishes it to a registry.
+CI runs the three- and five-controller fleets on separate native-arm64 runners,
+with `fail-fast: false` and at most two workers. Each consumes the same inspected
+exact-source image and verifies its archive checksum and OCI revision. The
+branch-protected **Concurrent control-plane failure matrix** check remains the
+aggregate: it fails if either worker failed, was skipped, or was cancelled.
+It independently verifies both checksum-bound bundles, requires identical
+source and image identities matching its checkout, and seals and re-verifies
+the complete original full-matrix schema. A single fleet uses a different
+schema and cannot pass as complete certification. Worker budgets remain bounded
+at 120 minutes; the lightweight aggregate has ten minutes. Passing and failed
+worker artifacts and the sealed full evidence are retained for 30 days. No
+worker rebuilds or publishes the Rust image.
+
+The generated helper still checks all 135 desired resources against every
+controller, using at most sixteen simultaneous strong reads. Retained operation
+lookups and exact replays run independently across controllers. Maximum batch
+and OCC concurrency, every receipt comparison, tenant authorization, and every
+fault phase remain unchanged. Real status churn uses four workers and joins
+each 32-command chunk before inspecting the actual history floor. Each command
+still has its own token, fresh guard, and individually committed receipt;
+there is no artificial retention floor or reduced history. Unknown sends retry
+the same bytes and only resolved fencing can start a new token. Phase durations
+are printed, and a generated-helper timeout now preserves redacted stage
+diagnostics in its failed artifact rather than losing them.
+
+The earlier CI attempt `37326140250` spent about 35 minutes advancing the
+three-controller history, then exceeded the unchanged 300-second generated
+helper budget during five-controller preparation. Parallel fleet runners remove
+the sequential sum of fleet runtimes; bounded RPC/churn fan-out reduces repeated
+round-trip waits. Actual CI speedup must be measured on a new run, not inferred
+from a local pass or a raised timeout.
+
+### Catalog submission-race fix — frozen local proof
+
+The clean `bf517daa020bc7f480c3474427fccc9de98243d0` tree passed the complete
+serial live campaign and its independent verifier before CI fixture
+optimization. It fixes the race in which an exact unknown-token retry can meet
+its already replicated Catalog proposal. Both fleets passed all ten owner and
+eleven API checks, retained 135 desired witnesses and 20/24 operation witnesses,
+and preserved all four profile digests through all-voter reopen. The observed
+floor/latest cursors were 22/4,117 and 20/4,115 respectively.
+
+Its manifest SHA-256 is
+`6d0ef02ec53924c3410ba8438a8e8a7b7ad56d872083c5f268cb2d60824fba14`,
+at `/private/tmp/epoch-ha-ci-37316380698.pAvZqX/fresh-evidence/evidence.json`.
+The tested image ID was
+`sha256:05d4ec7fb4ab1a5d85600cf4327f0f17cf6d4d9a3057e417158d1c84f12c57fb`,
+labeled with that exact revision. This capture is not relabeled as evidence
+for the later optimized fixture or a successful GitHub run.
 
 ### Fresh frozen v2 bounded matrix — 5 October 2026
 

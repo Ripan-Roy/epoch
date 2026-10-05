@@ -3,11 +3,71 @@ package main
 import (
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	epochv1 "epoch.local/epoch/sdk/go/gen/epoch/v1"
 	"google.golang.org/protobuf/proto"
 )
+
+func TestBoundedReadsVisitEveryResourceAtEveryController(t *testing.T) {
+	resources := make([]*epochv1.Resource, 135)
+	for index := range resources {
+		resources[index] = &epochv1.Resource{Name: scopedName(fmt.Sprintf("resource-%d", index)), Generation: 1, Spec: cacheSpec("expected")}
+	}
+	var active, maximum atomic.Int32
+	var lock sync.Mutex
+	visits := make(map[string]int)
+	err := verifyDesiredAtEveryController(5, resources, func(controller int, name *epochv1.ResourceName) (*epochv1.Resource, error) {
+		current := active.Add(1)
+		defer active.Add(-1)
+		for old := maximum.Load(); current > old && !maximum.CompareAndSwap(old, current); old = maximum.Load() {
+		}
+		time.Sleep(time.Millisecond)
+		lock.Lock()
+		visits[fmt.Sprintf("%d/%s", controller, name.Name)]++
+		lock.Unlock()
+		for _, resource := range resources {
+			if proto.Equal(resource.Name, name) {
+				return proto.Clone(resource).(*epochv1.Resource), nil
+			}
+		}
+		return nil, errors.New("unknown resource")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(visits) != 5*135 || maximum.Load() < 2 || maximum.Load() > 16 {
+		t.Fatalf("visits=%d maximum=%d", len(visits), maximum.Load())
+	}
+	for key, count := range visits {
+		if count != 1 {
+			t.Fatalf("%s visited %d times", key, count)
+		}
+	}
+}
+
+func TestBoundedReadsRejectAnyLostGenerationSpecOrRPCFailure(t *testing.T) {
+	expected := &epochv1.Resource{Name: scopedName("required"), Generation: 2, Spec: cacheSpec("exact")}
+	for _, change := range []func(*epochv1.Resource) error{
+		func(resource *epochv1.Resource) error { resource.Generation--; return nil },
+		func(resource *epochv1.Resource) error { resource.Spec.Labels["ha_revision"] = "changed"; return nil },
+		func(*epochv1.Resource) error { return errors.New("RPC failed") },
+	} {
+		err := verifyDesiredAtEveryController(5, []*epochv1.Resource{expected}, func(controller int, _ *epochv1.ResourceName) (*epochv1.Resource, error) {
+			resource := proto.Clone(expected).(*epochv1.Resource)
+			if controller == 4 {
+				return resource, change(resource)
+			}
+			return resource, nil
+		})
+		if err == nil {
+			t.Fatal("last controller's changed state or failure was hidden")
+		}
+	}
+}
 
 func maximumBatchFixture() (*epochv1.BatchApplyResourcesRequest, []*epochv1.BatchApplyResourcesResponse, []*epochv1.GetOperationResponse, *epochv1.WatchResourceChangesResponse) {
 	request := &epochv1.BatchApplyResourcesRequest{RequestToken: "maximum-token"}

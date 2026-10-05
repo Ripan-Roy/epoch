@@ -64,15 +64,19 @@ def guard_outcome_is_persistent(command_kind: str) -> bool:
     raise ValueError("unknown guard command retention class")
 
 
-def validate_owner_evidence(evidence: dict[str, Any]) -> None:
+def validate_owner_evidence(
+    evidence: dict[str, Any], *, controller_counts: tuple[int, ...] = (3, 5)
+) -> None:
     if evidence.get("schema") != OWNER_SCHEMA or evidence.get("status") != "passed":
         raise ValueError("wrong owner-recovery evidence schema or status")
     fleets = evidence.get("fleets")
     if (
         not isinstance(fleets, list)
-        or len(fleets) != 2
+        or controller_counts not in ((3, 5), (3,), (5,))
+        or len(fleets) != len(controller_counts)
         or any(not isinstance(fleet, dict) for fleet in fleets)
-        or [fleet.get("controller_count") for fleet in fleets] != [3, 5]
+        or [fleet.get("controller_count") for fleet in fleets]
+        != list(controller_counts)
     ):
         raise ValueError(
             "owner recovery requires ordered three/five-controller campaigns"
@@ -871,6 +875,7 @@ def run_campaign(
     schema: str = OWNER_SCHEMA,
     validator: Callable[[dict[str, Any]], None] = validate_owner_evidence,
     bundle_verifier: Callable[[Path], None] | None = None,
+    controller_counts: tuple[int, ...] = (3, 5),
 ) -> None:
     output = output.resolve()
     if output.exists() and any(output.iterdir()):
@@ -915,7 +920,7 @@ def run_campaign(
     }
     output.mkdir(parents=True, exist_ok=True)
     try:
-        for count in (3, 5):
+        for count in controller_counts:
             result["fleets"].append(
                 fleet_type(count, output / f"controllers-{count}").run()
             )

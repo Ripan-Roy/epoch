@@ -237,6 +237,50 @@ func concurrently[T any](count int, call func(int) (T, error)) ([]T, []error) {
 	return results, failures
 }
 
+// Verification keeps the complete Cartesian inventory, but bounds in-flight
+// strong reads instead of serializing hundreds of independent RPC round trips.
+func boundedConcurrent[T any](count, limit int, call func(int) (T, error)) ([]T, []error) {
+	results, failures := make([]T, count), make([]error, count)
+	workers := min(count, limit)
+	var done sync.WaitGroup
+	done.Add(workers)
+	for worker := range workers {
+		go func() {
+			defer done.Done()
+			for index := worker; index < count; index += workers {
+				results[index], failures[index] = call(index)
+			}
+		}()
+	}
+	done.Wait()
+	return results, failures
+}
+
+func verifyDesiredAtEveryController(count int, resources []*epochv1.Resource, fetch func(int, *epochv1.ResourceName) (*epochv1.Resource, error)) error {
+	if count < 1 || len(resources) < 1 {
+		return errors.New("desired verification requires every controller and a nonempty inventory")
+	}
+	_, failures := boundedConcurrent(count*len(resources), 16, func(task int) (struct{}, error) {
+		controller, expected := task/len(resources), resources[task%len(resources)]
+		if expected == nil || expected.Name == nil {
+			return struct{}{}, errors.New("missing desired resource witness")
+		}
+		observed, err := fetch(controller, expected.Name)
+		if err != nil || !proto.Equal(expected, observed) {
+			return struct{}{}, fmt.Errorf("desired state differs at controller %d for %s: %v", controller, expected.Name.Name, err)
+		}
+		return struct{}{}, nil
+	})
+	for _, err := range failures {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func traceStage(stage string) { fmt.Fprintf(os.Stderr, "controlgrpc stage=%s\n", stage) }
+
 func (fleet *clients) apply(index int, request *epochv1.BatchApplyResourcesRequest) (*epochv1.BatchApplyResourcesResponse, error) {
 	ctx, cancel := callContext(fleet.admin)
 	defer cancel()
@@ -244,6 +288,7 @@ func (fleet *clients) apply(index int, request *epochv1.BatchApplyResourcesReque
 }
 
 func (fleet *clients) prepare() error {
+	traceStage("maximum-batch")
 	initial := &epochv1.BatchApplyResourcesRequest{RequestToken: fleet.prefix + "-maximum"}
 	for index := range 128 {
 		initial.Resources = append(initial.Resources, batchItem(scopedName(fmt.Sprintf("ha-grpc-item-%03d", index)), "initial", 0))
@@ -269,6 +314,7 @@ func (fleet *clients) prepare() error {
 	}
 	fleet.proof.Checks["concurrent_maximum_batch_exact_replay"] = true
 
+	traceStage("occ-batches")
 	contenders := make([]*epochv1.BatchApplyResourcesRequest, len(fleet.connections))
 	for index := range contenders {
 		contenders[index] = &epochv1.BatchApplyResourcesRequest{RequestToken: fmt.Sprintf("%s-occ-%d", fleet.prefix, index), Resources: []*epochv1.BatchApplyResource{
@@ -297,22 +343,28 @@ func (fleet *clients) prepare() error {
 	if winner == -1 {
 		return errors.New("no OCC batch succeeded")
 	}
+	desired := make([]*epochv1.Resource, 0, len(initial.Resources))
 	for index, item := range initial.Resources {
 		generation, revision := uint64(1), "initial"
 		if index == 0 || index == winner+1 {
 			generation, revision = 2, fmt.Sprintf("winner-%d", winner)
 		}
-		if err := fleet.captureDesired(item.Name, generation, cacheSpec(revision)); err != nil {
-			return err
-		}
+		desired = append(desired, &epochv1.Resource{Name: item.Name, Generation: generation, Spec: cacheSpec(revision)})
+	}
+	traceStage("initial-desired-all-controllers")
+	if err := fleet.captureDesiredResources(desired); err != nil {
+		return err
 	}
 	fleet.proof.Checks["concurrent_occ_batches_atomic"] = true
+	traceStage("operation-authorization")
 	if err := fleet.authorizeOperations(); err != nil {
 		return err
 	}
+	traceStage("delete-recreate")
 	if err := fleet.deleteRecreate(); err != nil {
 		return err
 	}
+	traceStage("watch-resume")
 	if err := fleet.watchResume(initial.Resources[120].Name, initial.Resources[121].Name); err != nil {
 		return err
 	}
@@ -360,26 +412,32 @@ func (fleet *clients) get(index int, name *epochv1.ResourceName) (*epochv1.Resou
 }
 
 func (fleet *clients) captureDesired(name *epochv1.ResourceName, generation uint64, spec *epochv1.ResourceSpec) error {
-	expected := &epochv1.Resource{Name: name, Generation: generation, Spec: spec}
-	for index := range fleet.connections {
-		observed, err := fleet.get(index, name)
-		if err != nil || !proto.Equal(observed, expected) {
-			return fmt.Errorf("desired state differs at controller %d for %s: %v", index, name.GetName(), err)
-		}
+	return fleet.captureDesiredResources([]*epochv1.Resource{{Name: name, Generation: generation, Spec: spec}})
+}
+
+func (fleet *clients) captureDesiredResources(resources []*epochv1.Resource) error {
+	if err := verifyDesiredAtEveryController(len(fleet.connections), resources, fleet.get); err != nil {
+		return err
 	}
 	// Later updates replace this witness rather than comparing stale desired
-	// generations. Historical outcomes remain separately retained above.
-	for index, data := range fleet.proof.Desired {
-		old := &epochv1.Resource{}
-		if err := proto.Unmarshal(data, old); err != nil {
-			return err
+	// generations. Only this owning goroutine updates proof after all reads pass.
+	for _, expected := range resources {
+		replaced := false
+		for index, data := range fleet.proof.Desired {
+			old := &epochv1.Resource{}
+			if err := proto.Unmarshal(data, old); err != nil {
+				return err
+			}
+			if proto.Equal(old.Name, expected.Name) {
+				fleet.proof.Desired[index] = marshal(expected)
+				replaced = true
+				break
+			}
 		}
-		if proto.Equal(old.Name, name) {
-			fleet.proof.Desired[index] = marshal(expected)
-			return nil
+		if !replaced {
+			fleet.proof.Desired = append(fleet.proof.Desired, marshal(expected))
 		}
 	}
-	fleet.proof.Desired = append(fleet.proof.Desired, marshal(expected))
 	return nil
 }
 
@@ -644,57 +702,70 @@ func (fleet *clients) watchFailure(after uint64, code codes.Code) error {
 }
 
 func (fleet *clients) verify() error {
-	for index := range fleet.connections {
-		for _, witness := range fleet.proof.Operations {
-			expected := &epochv1.GetOperationResponse{}
-			if err := proto.Unmarshal(witness.Operation, expected); err != nil {
-				return err
-			}
-			observed, err := fleet.operation(index, fleet.admin, expected.RequestToken, expected.AffectedResources)
-			if err != nil {
-				return err
-			}
-			if err := compareOperation(expected, observed); err != nil {
-				return err
-			}
-			switch witness.Kind {
-			case "lookup":
-				// HTTP caller retries are driven by the fault fixture. The
-				// generated client checks their same exact retained operations.
-			case "batch":
-				request := &epochv1.BatchApplyResourcesRequest{}
-				if err := proto.Unmarshal(witness.Request, request); err != nil {
-					return err
-				}
-				result, err := fleet.apply(index, request)
-				if status.Code(err) != witness.Code || err == nil && !result.GetReplayed() {
-					return fmt.Errorf("batch retained outcome changed at controller %d", index)
-				}
-			case "delete":
-				request := &epochv1.DeleteResourceRequest{}
-				if err := proto.Unmarshal(witness.Request, request); err != nil {
-					return err
-				}
-				result, err := fleet.delete(index, request)
-				if err != nil || !result.GetReplayed() {
-					return fmt.Errorf("delete retained outcome changed at controller %d: %v", index, err)
-				}
-			default:
-				return errors.New("unknown retained request kind")
-			}
-		}
-		for _, data := range fleet.proof.Desired {
-			expected := &epochv1.Resource{}
-			if err := proto.Unmarshal(data, expected); err != nil {
-				return err
-			}
-			observed, err := fleet.get(index, expected.Name)
-			if err != nil || !proto.Equal(expected, observed) {
-				return fmt.Errorf("desired state lost or partially changed at controller %d for %s: %v", index, expected.GetName().GetName(), err)
-			}
+	traceStage("verify-retained-operations-all-controllers")
+	_, failures := concurrently(len(fleet.connections), func(index int) (struct{}, error) {
+		return struct{}{}, fleet.verifyOperations(index)
+	})
+	for _, err := range failures {
+		if err != nil {
+			return err
 		}
 	}
+	resources := make([]*epochv1.Resource, 0, len(fleet.proof.Desired))
+	for _, data := range fleet.proof.Desired {
+		expected := &epochv1.Resource{}
+		if err := proto.Unmarshal(data, expected); err != nil {
+			return err
+		}
+		resources = append(resources, expected)
+	}
+	traceStage("verify-desired-all-controllers")
+	if err := verifyDesiredAtEveryController(len(fleet.connections), resources, fleet.get); err != nil {
+		return err
+	}
 	fleet.proof.Checks["durable_operations_and_desired_verified"] = true
+	return nil
+}
+
+func (fleet *clients) verifyOperations(index int) error {
+	for _, witness := range fleet.proof.Operations {
+		expected := &epochv1.GetOperationResponse{}
+		if err := proto.Unmarshal(witness.Operation, expected); err != nil {
+			return err
+		}
+		observed, err := fleet.operation(index, fleet.admin, expected.RequestToken, expected.AffectedResources)
+		if err != nil {
+			return err
+		}
+		if err := compareOperation(expected, observed); err != nil {
+			return err
+		}
+		switch witness.Kind {
+		case "lookup":
+			// HTTP caller retries are driven by the fault fixture. The
+			// generated client checks their same exact retained operations.
+		case "batch":
+			request := &epochv1.BatchApplyResourcesRequest{}
+			if err := proto.Unmarshal(witness.Request, request); err != nil {
+				return err
+			}
+			result, err := fleet.apply(index, request)
+			if status.Code(err) != witness.Code || err == nil && !result.GetReplayed() {
+				return fmt.Errorf("batch retained outcome changed at controller %d", index)
+			}
+		case "delete":
+			request := &epochv1.DeleteResourceRequest{}
+			if err := proto.Unmarshal(witness.Request, request); err != nil {
+				return err
+			}
+			result, err := fleet.delete(index, request)
+			if err != nil || !result.GetReplayed() {
+				return fmt.Errorf("delete retained outcome changed at controller %d: %v", index, err)
+			}
+		default:
+			return errors.New("unknown retained request kind")
+		}
+	}
 	return nil
 }
 

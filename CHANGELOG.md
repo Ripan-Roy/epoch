@@ -8,6 +8,11 @@ notes explicitly list additional verified artifacts.
 
 ### Control-plane hardening
 
+- Run the complete three/five-controller HA fleets on separate CI runners and
+  seal both exact-source/image proofs in the unchanged protected aggregate
+  check. Bound strong-read verification to sixteen RPCs and real retention
+  churn to four commands; retain every scenario, resource, receipt, and actual
+  pruning check. Preserve redacted generated-helper timeout diagnostics.
 - Join a byte-identical Catalog proposal when peer replication wins the
   lookup/submission race; still await the original applied receipt and reject
   conflicting payloads or nonleader new writes. The complete three-controller

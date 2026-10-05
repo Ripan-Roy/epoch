@@ -31,6 +31,7 @@ def full_bundle_fixture(root: Path) -> Path:
     evidence = full_fixture()
     evidence["identity"] = {
         "source": {"worktree_clean": True, "git_revision": "a" * 40},
+        "runtime": {"image_id": "sha256:" + "b" * 64},
         "node_source_matches_image": True,
     }
     for fleet in evidence["fleets"]:
@@ -109,6 +110,104 @@ def full_bundle_fixture(root: Path) -> Path:
 
 
 class FullEvidenceTest(unittest.TestCase):
+    def test_fleet_shard_cannot_masquerade_as_complete_certification(self) -> None:
+        evidence = full_fixture()
+        evidence["fleets"] = evidence["fleets"][:1]
+        evidence["schema"] = control_ha_full.FLEET_SCHEMA
+        control_ha_full.validate_fleet_evidence(evidence, 3)
+        for count in (5, 4, True):
+            with self.assertRaises(ValueError):
+                control_ha_full.validate_fleet_evidence(evidence, count)
+        with self.assertRaises(ValueError):
+            control_ha_full.validate_full_evidence(evidence)
+
+    def test_parallel_shards_combine_only_verified_identical_candidates(self) -> None:
+        soak = control_ha_full.owner.soak
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = {"worktree_clean": True, "git_revision": "a" * 40}
+            paths = []
+            for count in (3, 5):
+                directory = root / str(count)
+                directory.mkdir()
+                path = full_bundle_fixture(directory)
+                evidence = soak.load_json(path)
+                evidence["schema"] = control_ha_full.FLEET_SCHEMA
+                evidence["fleets"] = [
+                    fleet
+                    for fleet in evidence["fleets"]
+                    if fleet["controller_count"] == count
+                ]
+                evidence["artifacts"] = [
+                    receipt
+                    for receipt in evidence["artifacts"]
+                    if receipt["path"].startswith(f"controllers-{count}/")
+                ]
+                soak.atomic_write(path, soak.canonical_bytes(evidence))
+                paths.append(path)
+            with mock.patch.object(soak, "source_identity", return_value=source):
+                control_ha_full.combine_fleet_bundles(paths, root / "combined")
+                control_ha_full.verify_full_bundle(root / "combined/evidence.json")
+                for inputs in (paths[:1], paths[::-1], [paths[0], paths[0]]):
+                    with self.assertRaises(ValueError):
+                        control_ha_full.combine_fleet_bundles(inputs, root / "invalid")
+                second = soak.load_json(paths[1])
+                second["identity"]["source"]["git_revision"] = "b" * 40
+                soak.atomic_write(paths[1], soak.canonical_bytes(second))
+                with self.assertRaisesRegex(ValueError, "identity"):
+                    control_ha_full.combine_fleet_bundles(
+                        paths, root / "different-source"
+                    )
+
+    def test_parallel_shards_reject_failed_checks_or_tampered_artifacts(self) -> None:
+        soak = control_ha_full.owner.soak
+        for mutation in ("check", "artifact", "image"):
+            with (
+                self.subTest(mutation=mutation),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                paths = []
+                for count in (3, 5):
+                    directory = root / str(count)
+                    directory.mkdir()
+                    path = full_bundle_fixture(directory)
+                    evidence = soak.load_json(path)
+                    evidence["schema"] = control_ha_full.FLEET_SCHEMA
+                    evidence["fleets"] = [
+                        fleet
+                        for fleet in evidence["fleets"]
+                        if fleet["controller_count"] == count
+                    ]
+                    evidence["artifacts"] = [
+                        receipt
+                        for receipt in evidence["artifacts"]
+                        if receipt["path"].startswith(f"controllers-{count}/")
+                    ]
+                    if count == 5:
+                        if mutation == "check":
+                            evidence["fleets"][0]["checks"][
+                                control_ha_full.owner.OWNER_CHECKS[0]
+                            ] = False
+                        elif mutation == "artifact":
+                            (directory / "controllers-5/api-stale.json").write_bytes(
+                                b"{}"
+                            )
+                        else:
+                            evidence["identity"]["runtime"] = {
+                                "image_id": "different-image"
+                            }
+                    soak.atomic_write(path, soak.canonical_bytes(evidence))
+                    paths.append(path)
+                with mock.patch.object(
+                    soak,
+                    "source_identity",
+                    return_value={"worktree_clean": True, "git_revision": "a" * 40},
+                ):
+                    with self.assertRaises(ValueError):
+                        control_ha_full.combine_fleet_bundles(paths, root / "combined")
+                self.assertFalse((root / "combined/evidence.json").exists())
+
     def test_v2_bundle_requires_initial_witnesses_even_when_all_receipts_match(
         self,
     ) -> None:

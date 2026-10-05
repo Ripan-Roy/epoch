@@ -20,10 +20,19 @@ type haWorkflowStep struct {
 }
 
 type haWorkflowJob struct {
-	Runner  string           `json:"runs-on"`
-	Timeout int              `json:"timeout-minutes"`
-	Needs   []string         `json:"needs"`
-	Steps   []haWorkflowStep `json:"steps"`
+	Name     string           `json:"name"`
+	If       string           `json:"if"`
+	Runner   string           `json:"runs-on"`
+	Timeout  int              `json:"timeout-minutes"`
+	Needs    []string         `json:"needs"`
+	Steps    []haWorkflowStep `json:"steps"`
+	Strategy struct {
+		FailFast    *bool `json:"fail-fast"`
+		MaxParallel int   `json:"max-parallel"`
+		Matrix      struct {
+			Controllers []int `json:"controllers"`
+		} `json:"matrix"`
+	} `json:"strategy"`
 }
 
 func readHAWorkflow(t *testing.T) map[string]haWorkflowJob {
@@ -54,9 +63,12 @@ func requireHAStep(t *testing.T, job haWorkflowJob, name string) haWorkflowStep 
 
 func TestControlHACIRunsTheFullMatrixOnTheReusedNativeImage(t *testing.T) {
 	jobs := readHAWorkflow(t)
-	job := jobs["control-ha"]
+	job := jobs["control-ha-fleet"]
 	if job.Runner != "ubuntu-24.04-arm" || !slices.Equal(job.Needs, []string{"container-arm64"}) || job.Timeout < 90 || job.Timeout > 120 {
 		t.Fatal("full control-HA gate must reuse the native arm64 image in a separately bounded job")
+	}
+	if job.Strategy.FailFast == nil || *job.Strategy.FailFast || job.Strategy.MaxParallel != 2 || !slices.Equal(job.Strategy.Matrix.Controllers, []int{3, 5}) {
+		t.Fatal("both complete fleets must run on separate parallel runners without cancelling the other proof")
 	}
 	load := requireHAStep(t, job, "Verify and load exact-source HA image")
 	for _, required := range []string{"sha256sum --check --strict", "docker load", "aarch64", "scripts/inspect-oci-image.sh", "epoch/node:ci-arm64", "${GITHUB_SHA}"} {
@@ -64,12 +76,12 @@ func TestControlHACIRunsTheFullMatrixOnTheReusedNativeImage(t *testing.T) {
 			t.Errorf("image verification omitted %q", required)
 		}
 	}
-	run := requireHAStep(t, job, "Prove the complete three/five-controller failure matrix")
-	if run.If != "" || !strings.Contains(run.Run, "make test-control-ha-full") || !strings.Contains(run.Run, "tests/integration/control_ha_full.py verify") || run.Env["EPOCH_REGIONAL_IMAGE"] != "epoch/node:ci-arm64" || run.Env["EPOCH_REGIONAL_USE_EXISTING_IMAGE"] != "1" {
-		t.Error("the required HA job must run and independently verify the complete live matrix")
+	run := requireHAStep(t, job, "Prove and independently verify this complete fleet")
+	if run.If != "" || !strings.Contains(run.Run, "control_ha_full.py run-fleet") || !strings.Contains(run.Run, "control_ha_full.py verify-fleet") || run.Env["EPOCH_CONTROL_HA_CONTROLLERS"] != "${{ matrix.controllers }}" || run.Env["EPOCH_REGIONAL_IMAGE"] != "epoch/node:ci-arm64" || run.Env["EPOCH_REGIONAL_USE_EXISTING_IMAGE"] != "1" {
+		t.Error("each worker must run and independently verify its complete live fault matrix")
 	}
-	upload := requireHAStep(t, job, "Upload complete control-HA evidence")
-	if upload.If != "always()" || !strings.HasPrefix(upload.Uses, "actions/upload-artifact@") || upload.With["retention-days"] != float64(30) || upload.With["path"] != "${{ runner.temp }}/epoch-control-ha-full" {
+	upload := requireHAStep(t, job, "Upload this fleet's passing or failed evidence")
+	if upload.If != "always()" || !strings.HasPrefix(upload.Uses, "actions/upload-artifact@") || upload.With["retention-days"] != float64(30) || upload.With["name"] != "control-ha-fleet-${{ matrix.controllers }}-${{ github.run_attempt }}" || upload.With["path"] != "${{ runner.temp }}/epoch-control-ha-fleet" {
 		t.Error("failed or passing HA attempts must retain their complete evidence for 30 days")
 	}
 
@@ -87,5 +99,35 @@ func TestControlHACIRunsTheFullMatrixOnTheReusedNativeImage(t *testing.T) {
 		if strings.Contains(step.Run, "docker build") || strings.Contains(step.Run, "docker push") {
 			t.Error("the HA gate must not rebuild or publish the tested node image")
 		}
+	}
+}
+
+func TestControlHAProtectedGateRequiresBothCurrentAttemptFleetProofs(t *testing.T) {
+	job := readHAWorkflow(t)["control-ha"]
+	if job.Name != "Concurrent control-plane failure matrix" || job.If != "always()" || !slices.Equal(job.Needs, []string{"control-ha-fleet"}) || job.Timeout < 5 || job.Timeout > 15 {
+		t.Fatal("aggregate protected check must run even when a fleet failed or was skipped")
+	}
+	result := requireHAStep(t, job, "Require both fleet workers to have succeeded")
+	if result.If != "" || result.Env["FLEET_RESULT"] != "${{ needs.control-ha-fleet.result }}" || !strings.Contains(result.Run, `test "${FLEET_RESULT}" = success`) {
+		t.Error("failed, cancelled, missing, or skipped workers must fail the protected gate")
+	}
+	for _, count := range []string{"3", "5"} {
+		download := requireHAStep(t, job, "Download verified "+count+"-controller proof")
+		if download.With["name"] != "control-ha-fleet-"+count+"-${{ github.run_attempt }}" || download.With["path"] != "${{ runner.temp }}/epoch-control-ha-input/"+count || !strings.HasPrefix(download.Uses, "actions/download-artifact@") {
+			t.Error("aggregate must consume both exact current-attempt fleet artifacts")
+		}
+	}
+	seal := requireHAStep(t, job, "Seal and independently verify the complete failure matrix")
+	for _, required := range []string{"control_ha_full.py combine", "--three", "--five", "control_ha_full.py verify", "epoch-control-ha-full/evidence.json"} {
+		if !strings.Contains(seal.Run, required) {
+			t.Errorf("aggregate seal omitted %q", required)
+		}
+	}
+	if seal.If != "" {
+		t.Error("full verification must not be conditional")
+	}
+	upload := requireHAStep(t, job, "Upload complete control-HA evidence")
+	if upload.If != "always()" || upload.With["retention-days"] != float64(30) || upload.With["if-no-files-found"] != "error" {
+		t.Error("complete proof must be retained and missing evidence must fail closed")
 	}
 }
