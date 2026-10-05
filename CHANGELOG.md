@@ -8,6 +8,11 @@ notes explicitly list additional verified artifacts.
 
 ### Control-plane hardening
 
+- Join a byte-identical Catalog proposal when peer replication wins the
+  lookup/submission race; still await the original applied receipt and reject
+  conflicting payloads or nonleader new writes. The complete three-controller
+  CI fleet exposed this race during five-controller maximum-batch preparation;
+  fresh fault and protected-branch evidence remain required.
 - Certify concurrent maximum-size batches from complete v2 response, operation,
   and creation-history witnesses instead of counting replay disposition flags.
   A fresh clean `0f3c8d5` full three/five-controller run exits zero and passes

@@ -1675,24 +1675,10 @@ async fn commit_command_with_mode(
     let _write_guard = state.write_serial.lock().await;
     validate_catalog_request_binding(state, &command)?;
     let initial = state.consensus.lookup(proposal_id).await?;
-    let request_replayed = !matches!(initial, ProposalLookup::Unknown);
+    let mut request_replayed = !matches!(initial, ProposalLookup::Unknown);
     match initial {
         ProposalLookup::Unknown => {
-            let status = state.consensus.status().await?;
-            match mode {
-                CatalogSubmissionMode::LeaderOnly => {
-                    state
-                        .consensus
-                        .propose(proposal_id, status.term.get(), payload.clone())
-                        .await?;
-                }
-                CatalogSubmissionMode::Forwarded => {
-                    state
-                        .consensus
-                        .forward_propose(proposal_id, status.term.get(), payload.clone())
-                        .await?;
-                }
-            }
+            request_replayed = submit_catalog_proposal(state, proposal_id, &payload, mode).await?;
         }
         ProposalLookup::Pending {
             payload: ref tracked,
@@ -1756,6 +1742,48 @@ async fn commit_command_with_mode(
         wait: state.commit_wait,
     })??;
     Ok((receipt, request_replayed))
+}
+
+async fn submit_catalog_proposal(
+    state: &RegionalCatalogState,
+    proposal_id: u64,
+    payload: &[u8],
+    mode: CatalogSubmissionMode,
+) -> Result<bool, RegionalCatalogApiError> {
+    let status = state.consensus.status().await?;
+    let submitted = match mode {
+        CatalogSubmissionMode::LeaderOnly => {
+            state
+                .consensus
+                .propose(proposal_id, status.term.get(), payload.to_vec())
+                .await
+        }
+        CatalogSubmissionMode::Forwarded => {
+            state
+                .consensus
+                .forward_propose(proposal_id, status.term.get(), payload.to_vec())
+                .await
+        }
+    };
+    match submitted {
+        Ok(_) => Ok(false),
+        Err(error @ ConsensusProbeError::Consensus(ConsensusError::DuplicateProposal(_))) => {
+            // The local HTTP lock cannot serialize a peer's replicated entry.
+            // Join only an independently looked-up, byte-identical original
+            // proposal. This is not a new submission, retry, or commit receipt;
+            // commit_command still waits for the authoritative applied outcome.
+            match state.consensus.lookup(proposal_id).await? {
+                ProposalLookup::Pending { payload: tracked }
+                | ProposalLookup::Committed(CommittedProposal {
+                    payload: tracked, ..
+                }) if tracked == payload => Ok(true),
+                // A missing or inconsistent binding must not be turned into
+                // success merely because a duplicate error was observed.
+                _ => Err(error.into()),
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[derive(Debug, Error)]
@@ -2028,6 +2056,118 @@ mod tests {
                 .to_bytes(),
         )
         .expect("response should contain JSON")
+    }
+
+    #[tokio::test]
+    async fn catalog_submission_joins_identical_proposal_after_stale_unknown_lookup() {
+        let root = TempDir::new().unwrap();
+        let nodes = start_cluster(&root).await;
+        let leader = leader_index(&nodes).await;
+        let state = &nodes[leader].state;
+        for (index, mode) in [
+            CatalogSubmissionMode::LeaderOnly,
+            CatalogSubmissionMode::Forwarded,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let command = CatalogCommand::AcquireControlLease(AcquireControlLease {
+                request_token: format!("lookup-submit-race-{index}"),
+                owner_id: "race-owner".into(),
+                now_ms: 1_000,
+                ttl_ms: 10_000,
+            });
+            let proposal_id = catalog_proposal_id_for(
+                state.catalog.scope().group_id(),
+                state.catalog.scope().group_epoch(),
+                command.request_token(),
+            )
+            .unwrap();
+            let payload = command.encode().unwrap();
+            assert!(matches!(
+                state.consensus.lookup(proposal_id).await.unwrap(),
+                ProposalLookup::Unknown
+            ));
+            // Deterministically insert the winning peer/API submission after
+            // the caller's lookup and before its own submission. No sleeps or
+            // probabilistic scheduler race is required for this regression.
+            let status = state.consensus.status().await.unwrap();
+            state
+                .consensus
+                .propose(proposal_id, status.term.get(), payload.clone())
+                .await
+                .unwrap();
+            assert!(
+                submit_catalog_proposal(state, proposal_id, &payload, mode)
+                    .await
+                    .expect("an identical raced proposal must join the original outcome")
+            );
+            let (receipt, replayed) = commit_command(state, command).await.unwrap();
+            assert!(replayed);
+            assert_eq!(receipt.proposal_id, proposal_id);
+            ensure_mutation_accepted(&receipt).unwrap();
+        }
+        for node in nodes {
+            node.peer_server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_submission_does_not_join_changed_payload_or_nonleader_new_write() {
+        let root = TempDir::new().unwrap();
+        let nodes = start_cluster(&root).await;
+        let leader = leader_index(&nodes).await;
+        let state = &nodes[leader].state;
+        let original = CatalogCommand::AcquireControlLease(AcquireControlLease {
+            request_token: "race-conflicting-payload".into(),
+            owner_id: "original-owner".into(),
+            now_ms: 1_000,
+            ttl_ms: 10_000,
+        });
+        let proposal_id = catalog_proposal_id_for(
+            state.catalog.scope().group_id(),
+            state.catalog.scope().group_epoch(),
+            original.request_token(),
+        )
+        .unwrap();
+        commit_command(state, original.clone()).await.unwrap();
+        let mut changed = original;
+        let CatalogCommand::AcquireControlLease(ref mut lease) = changed else {
+            unreachable!();
+        };
+        lease.owner_id = "different-owner".into();
+        let error = submit_catalog_proposal(
+            state,
+            proposal_id,
+            &changed.encode().unwrap(),
+            CatalogSubmissionMode::LeaderOnly,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            RegionalCatalogApiError::Consensus(ConsensusProbeError::Consensus(
+                ConsensusError::ConflictingProposal(_)
+            ))
+        ));
+        let follower = &nodes[(leader + 1) % nodes.len()].state;
+        let error = submit_catalog_proposal(
+            follower,
+            proposal_id + 1,
+            &changed.encode().unwrap(),
+            CatalogSubmissionMode::LeaderOnly,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            RegionalCatalogApiError::Consensus(ConsensusProbeError::Consensus(
+                ConsensusError::NotLeader { .. }
+            ))
+        ));
+        for node in nodes {
+            node.peer_server.abort();
+        }
     }
 
     async fn assert_missing_delete_operation_precondition(app: &Router) {

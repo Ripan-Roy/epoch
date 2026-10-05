@@ -95,6 +95,30 @@ command kinds, affected identities, and optional delete precondition presence.
 The same records are checked through surviving controllers after owner loss,
 quorum recovery, and all-voter/controller reopen.
 
+#### Lookup/submission race finding (5 October 2026)
+
+PR #149 CI `37316380698` completed the full three-controller fleet, then
+failed five-controller preparation with a real `ABORTED` response: an identical
+maximum batch was reported as `proposal_conflict` / "already pending or
+committed". This is not the earlier replay-flag assertion issue. Catalog's
+local HTTP serialization lock cannot prevent a peer's replication from arriving
+between an unknown consensus lookup and the subsequent proposal submission.
+
+The candidate handles only `DuplicateProposal` at that boundary by looking up
+the original proposal again and comparing its complete payload bytes. A matching
+pending/committed binding joins the original outcome; the usual applied-receipt
+wait still decides completion. It neither submits a new command nor changes the
+token. Changed payloads, unknown bindings, nonleader new writes, and other
+consensus failures remain errors. Deterministic real-consensus regressions
+stage the stale lookup/winning submission for both leader-only and forwarded
+paths and preserve conflicting-payload/nonleader rejection. The positive
+regression failed before the change and passes afterward; node Clippy passes.
+
+The frozen `0f3c8d5` local capture below remains historical evidence for that
+source, not certification of this new Rust fix. A newly labelled node image,
+fresh complete local matrix, and protected exact-head/main execution are
+required before beta.12 promotion. The failed CI run is not relabelled passing.
+
 #### Concurrent replay receipt finding (5 October 2026)
 
 PR #149 CI `37295153226` completed the three-controller fleet but failed the

@@ -123,6 +123,16 @@ Its local Go regressions and 39 harness tests pass; fresh complete clean
 exact-head/main evidence remains required. See the replay-receipt
 finding in [control-HA certification](CONTROL_HA_CERTIFICATION.md).
 
+The subsequent exact-head CI `37316380698` completed the full three-controller
+matrix, then exposed a real five-controller lookup/submission race: an identical
+batch returned `ABORTED` / duplicate proposal after peer replication won the
+race. The new Rust Catalog fix joins only an independently verified identical
+payload and still waits for its original applied receipt. Its deterministic
+real-consensus regression was red before the fix and is now green, including
+conflicting-payload and nonleader-write rejection. The previous clean local
+capture is not proof of this changed Rust source: fresh-image local/protected
+matrix evidence and beta.12 publication remain open.
+
 ## Current compatibility delivery: Redis, Kafka, and RabbitMQ
 
 | ID | Checklist item | Boundary | State | Evidence / acceptance |
