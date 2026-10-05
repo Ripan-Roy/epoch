@@ -3,13 +3,147 @@
 from __future__ import annotations
 
 import copy
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import management_sdk_catalog as catalog
+import management_sdk_catalog_evidence as evidence
 from epoch_sdk._generated.epoch.v1 import regional_admin_pb2 as messages
 
 
 class CatalogSDKWitnessTest(unittest.TestCase):
+    def test_expired_application_checkpoint_requires_the_catalog_aborted_status(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fleet = object.__new__(catalog.SDKFleet)
+            fleet.artifact_dir = Path(temporary)
+            fleet.count = 3
+            fleet.checkpoints = dict(
+                zip(catalog.LANGUAGES, (373, 376, 374), strict=True)
+            )
+            saved = dict(fleet.checkpoints)
+            fleet.resources = [None, SimpleNamespace(name="events")]
+            fleet.result = {"sdk": {}}
+            fleet.raw = mock.Mock(
+                side_effect=[
+                    SimpleNamespace(document={"generation": 1}),
+                    SimpleNamespace(
+                        status=200,
+                        document={"earliest_cursor": 397, "latest_cursor": 4492},
+                    ),
+                ]
+            )
+            fleet.recover, fleet.execute = mock.Mock(), mock.Mock()
+            with mock.patch.object(catalog.full.FullFleet, "reopen"):
+                fleet.reopen()
+            phase, actions = fleet.execute.call_args.args
+            self.assertEqual(phase, "stale")
+            for language in catalog.LANGUAGES:
+                self.assertEqual(actions[language][0]["expected_code"], 10)
+                request = catalog.decoded(
+                    actions[language][0]["request_proto"],
+                    messages.WatchResourceChangesRequest,
+                )
+                self.assertEqual(request.after_cursor, saved[language])
+                self.assertFalse(Path(actions[language][0]["checkpoint_path"]).exists())
+
+    def test_independent_expired_watch_verifier_accepts_only_aborted_without_ack(self):
+        language, old_cursor = "go", 373
+        request = catalog.watch_request(after=old_cursor)
+        item = catalog.action(
+            "WatchResourceChanges",
+            request,
+            code=10,
+            checkpoint_path="/owned/stale.json",
+        )
+        workload = catalog.plan("stale", ["127.0.0.1:9000"], [item])
+        proof = {"actions": [{"grpc_code": 10, "pages_proto": []}]}
+        verifier = evidence.FleetVerifier(
+            Path("/owned"),
+            {
+                "controller_count": 3,
+                "sdk": {"retention": {"expired_checkpoints": {language: old_cursor}}},
+            },
+            set(),
+        )
+        self.assertEqual(verifier.watch(language, "stale", workload, proof, 4400), 4400)
+        item["expected_code"] = 9
+        with self.assertRaises(ValueError):
+            verifier.watch(language, "stale", workload, proof, 4400)
+        item["expected_code"] = 10
+        verifier.artifacts.add("controllers-3/stale.json")
+        with self.assertRaises(ValueError):
+            verifier.watch(language, "stale", workload, proof, 4400)
+
+    def test_parallel_sdk_combiner_requires_all_independent_verifiers(self):
+        inputs = [Path("/owned/three/evidence.json"), Path("/owned/five/evidence.json")]
+        with mock.patch.object(catalog.full, "combine_fleet_bundles") as combine:
+            evidence.combine_fleet_bundles(inputs, Path("/owned/output"))
+        args, options = combine.call_args
+        self.assertEqual(args, (inputs, Path("/owned/output")))
+        self.assertEqual(options["schema"], catalog.SCHEMA)
+        self.assertIs(options["fleet_verifier"], evidence.verify_fleet_bundle)
+        self.assertIs(options["bundle_verifier"], evidence.verify_bundle)
+        candidates = [
+            {"fleets": [{"sdk": {"runtime": {"sdk-go": "sha256:" + "a" * 64}}}]},
+            {"fleets": [{"sdk": {"runtime": {"sdk-go": "sha256:" + "a" * 64}}}]},
+        ]
+        options["candidates_validator"](candidates)
+        candidates[1]["fleets"][0]["sdk"]["runtime"]["sdk-go"] = "sha256:" + "b" * 64
+        with self.assertRaisesRegex(ValueError, "SDK runtime"):
+            options["candidates_validator"](candidates)
+
+    def test_isolated_sdk_verifier_rejects_foreign_inventory_or_missing_image(self):
+        # This only isolates the additional shard boundary. Semantic protobuf
+        # and fault verification remains mandatory in the separately tested
+        # bundle verifier and the live Catalog campaign.
+        soak = catalog.owner.soak
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = Path(temporary) / "evidence.json"
+            document = {
+                "identity": {"runtime": {"image_id": "sha256:" + "a" * 64}},
+                "artifacts": [{"path": "controllers-3/sdk-workload.json"}],
+            }
+            soak.atomic_write(manifest, soak.canonical_bytes(document))
+            with mock.patch.object(evidence, "verify_bundle") as verify:
+                evidence.verify_fleet_bundle(manifest, 3)
+                verify.assert_called_once_with(manifest, (3,))
+                for field, value in (
+                    ("artifacts", [{"path": "controllers-5/sdk-workload.json"}]),
+                    ("identity", {"runtime": {"image_id": "mutable-image-tag"}}),
+                ):
+                    invalid = copy.deepcopy(document)
+                    invalid[field] = value
+                    soak.atomic_write(manifest, soak.canonical_bytes(invalid))
+                    with self.assertRaises(ValueError):
+                        evidence.verify_fleet_bundle(manifest, 3)
+
+    def test_combine_cli_dispatches_the_ordered_full_sdk_matrix(self):
+        with (
+            mock.patch.object(catalog, "combine_fleet_bundles") as combine,
+            mock.patch.object(
+                catalog.sys,
+                "argv",
+                [
+                    "management_sdk_catalog.py",
+                    "combine",
+                    "--three",
+                    "/owned/3/evidence.json",
+                    "--five",
+                    "/owned/5/evidence.json",
+                    "--output",
+                    "/owned/full",
+                ],
+            ),
+        ):
+            catalog.main()
+        combine.assert_called_once_with(
+            [Path("/owned/3/evidence.json"), Path("/owned/5/evidence.json")],
+            Path("/owned/full"),
+        )
+
     def test_reconstructed_first_receipt_still_requires_exact_committed_creation_history(
         self,
     ):

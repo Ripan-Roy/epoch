@@ -1,7 +1,7 @@
 # Concurrent control-plane failure certification
 
-Status: bounded runtime matrix locally verified; protected exact-head/main
-execution and beta.12 publication remain open.
+Status: bounded native runtime matrix verified locally and in protected PR/main
+CI. Public-SDK Catalog certification and beta.12 publication remain open.
 The existing regional and Kubernetes campaigns do not close this gate: their
 control restart evidence is not a concurrent-controller chaos campaign.
 
@@ -19,7 +19,40 @@ foreign lease before acquiring a new fence. This uses existing command and
 snapshot formats; it neither rewrites durable tokens nor creates a new
 metadata authority.
 
-## Current verification
+## Protected delivery (5 October 2026)
+
+[PR #149](https://github.com/Ripan-Roy/epoch/pull/149) merged at
+`d8adf756568e8e27912d480a66185b45bb937ecf` after protected PR CI
+`37346716674` passed all 14 jobs. Its downloaded, independently verified complete
+native proof has SHA-256
+`4486c56e12519766eba36ab53a1da683f90c6cab0b11c58e4b57e975b5860ca7`.
+
+The exact merged
+[main CI](https://github.com/Ripan-Roy/epoch/actions/runs/37353098801) also
+passed all 14 jobs. The downloaded full manifest independently verifies with
+SHA-256 `8943c2c49aeff50b14528afa03df9bcee926f833afa7611846cf9a91ca33dffa`
+and native node image identity
+`sha256:b98a4384e0513ea44889714a2347fb0a8c58633fdbfd1612165e23867699456f`.
+Both fleets pass ten owner and eleven API checks, retain 135 desired resources,
+20/24 exact operations, and four matching profile digests. The three-controller
+history floor/latest cursor is 22/4,117; the five-controller result is 18/4,113.
+[Main Pages](https://github.com/Ripan-Roy/epoch/actions/runs/37353099031) passed.
+
+CI runs the complete fleets on separate native arm64 runners, reusing the exact
+image built and inspected by the same attempt. The aggregate's protected name
+stays unchanged. Both current-attempt proofs must pass independent verification;
+no retained history, maximum batch, inventory, fault phase, or timeout was
+reduced. Measured worker times on this main run were 26m01s and 43m04s; total CI
+wall time was about 51 minutes, including image preparation. The local serial
+full matrix fell from about 73m15s to 32m28s with bounded read/churn concurrency;
+that local percentage is not a claim about CI speedup.
+
+This closes only the bounded **native** concurrent-control gate. It does not
+certify public SDKs, arbitrary node counts, mixed-version upgrades, advertised
+retention windows, terminal-seal migration, production SLOs, or beta.12 release
+artifacts. Historical local progression below retains its original provenance.
+
+## Historical local verification
 
 The new regression first reproduced identical owners for two production
 registries with the same instance label. It now passes with tests for maximum

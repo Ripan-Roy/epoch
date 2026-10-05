@@ -192,14 +192,24 @@ def _verify_full_bundle(
                 raise ValueError("leader-loss original command checksum differs")
 
 
-def combine_fleet_bundles(manifests: list[Path], output: Path) -> None:
+def combine_fleet_bundles(
+    manifests: list[Path],
+    output: Path,
+    *,
+    schema: str = FULL_SCHEMA,
+    fleet_verifier: Callable[[Path, int], None] | None = None,
+    bundle_verifier: Callable[[Path], None] | None = None,
+    candidates_validator: Callable[[list[dict[str, Any]]], None] | None = None,
+) -> None:
     """Seal both independently verified fleets without weakening the full gate."""
     if len(manifests) != 2:
         raise ValueError("combining requires ordered three/five-controller proofs")
     candidates = []
     for count, path in zip((3, 5), manifests, strict=True):
-        verify_fleet_bundle(path, count)
+        (fleet_verifier or verify_fleet_bundle)(path, count)
         candidates.append(owner.soak.load_json(path))
+    if candidates_validator is not None:
+        candidates_validator(candidates)
     identity = candidates[0]["identity"]
     if candidates[1]["identity"] != identity:
         raise ValueError("fleet candidate/image identity differs")
@@ -209,13 +219,15 @@ def combine_fleet_bundles(manifests: list[Path], output: Path) -> None:
     if output.exists() and any(output.iterdir()):
         raise ValueError("combined evidence destination must be empty")
     if any(
-        path.parent.resolve() == output or output in path.resolve().parents
+        path.parent.resolve() == output
+        or output in path.resolve().parents
+        or path.parent.resolve() in output.parents
         for path in manifests
     ):
         raise ValueError("aggregate destination must be separate from its inputs")
     output.mkdir(parents=True, exist_ok=True)
     result = {
-        "schema": FULL_SCHEMA,
+        "schema": schema,
         "status": "passed",
         "identity": identity,
         "fleets": [candidate["fleets"][0] for candidate in candidates],
@@ -232,7 +244,7 @@ def combine_fleet_bundles(manifests: list[Path], output: Path) -> None:
         owner.soak.atomic_write(
             output / "evidence.json", owner.soak.canonical_bytes(result)
         )
-        verify_full_bundle(output / "evidence.json")
+        (bundle_verifier or verify_full_bundle)(output / "evidence.json")
     except BaseException:
         result["status"] = "failed"
         owner.soak.atomic_write(

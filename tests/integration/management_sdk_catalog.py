@@ -34,6 +34,8 @@ SCHEMA = "epoch.sdk.management.catalog-certification/v1"
 FLEET_SCHEMA = "epoch.sdk.management.catalog-fleet/v1"
 PROBE_SCHEMA = "epoch.sdk.management.probe/v1"
 PLAN_SCHEMA = "epoch.sdk.management.plan/v1"
+# Catalog maps expired retained history (CodeConflict) to gRPC ABORTED.
+STALE_WATCH_CODE = 10
 PHASES = (
     "prepare",
     "lost-ack",
@@ -374,6 +376,12 @@ def verify_bundle(path: Path, counts: tuple[int, ...] = (3, 5)) -> None:
     verify(path, counts)
 
 
+def combine_fleet_bundles(manifests: list[Path], output: Path) -> None:
+    from management_sdk_catalog_evidence import combine_fleet_bundles as combine
+
+    combine(manifests, output)
+
+
 class Probe:
     """One owned CLI process with bounded receipts and deterministic cleanup."""
 
@@ -480,6 +488,7 @@ class SDKFleet(full.FullFleet):
                 [
                     "go",
                     "build",
+                    "-trimpath",
                     "-o",
                     str(temporary / name),
                     f"./tests/integration/{package}",
@@ -964,6 +973,10 @@ class SDKFleet(full.FullFleet):
         super().reopen()
         self.recover("after-reopen")
         target = max(saved.values())
+        print(
+            f"{self.count} controllers: expiring durable SDK checkpoints through {target}",
+            flush=True,
+        )
         resource = self.resources[1]
         suffix = f"/resources/acme/shop/dev/core/stream/{resource.name}/status"
         desired = self.raw("GET", suffix.removesuffix("/status")).document
@@ -992,6 +1005,12 @@ class SDKFleet(full.FullFleet):
                         range(sequence, sequence + 32),
                     )
                 )
+                if (sequence - 8192 + 32) % 512 == 0:
+                    print(
+                        f"{self.count} controllers: advancing SDK watch retention "
+                        f"({sequence - 8192 + 32} additional status changes)",
+                        flush=True,
+                    )
             else:
                 raise ValueError(
                     "real retention did not expire all durable SDK checkpoints"
@@ -1008,7 +1027,7 @@ class SDKFleet(full.FullFleet):
                     action(
                         "WatchResourceChanges",
                         self.watch_request(after=saved[language]),
-                        code=9,
+                        code=STALE_WATCH_CODE,
                         checkpoint_path=str(self.checkpoint_path(language, "stale")),
                     )
                 ]
@@ -1036,7 +1055,14 @@ def main() -> None:
     verify = commands.add_parser("verify")
     verify.add_argument("--manifest", type=Path, required=True)
     verify.add_argument("--controllers", type=int, choices=(3, 5))
+    combine = commands.add_parser("combine")
+    combine.add_argument("--three", type=Path, required=True)
+    combine.add_argument("--five", type=Path, required=True)
+    combine.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.command == "combine":
+        combine_fleet_bundles([args.three, args.five], args.output)
+        return
     counts = (args.controllers,) if args.controllers else (3, 5)
     if args.command == "verify":
         verify_bundle(args.manifest, counts)

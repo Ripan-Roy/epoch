@@ -337,6 +337,12 @@ contiguous generation-one creation events, alongside complete real receipts.
 The independent verifier composes the complete native HA verifier with SDK
 request/response, fault, per-controller, and durable-checkpoint checks. Separate
 single-fleet schemas cannot claim both three/five-controller certification.
+The required HA workflow runs both complete SDK/native fleets in parallel on
+separate native arm64 runners, reusing this CI attempt's checksum-verified node
+image. Go, Java 25, and Python 3.11 are mandatory. The protected aggregate checks
+the current-attempt artifacts, identical source/image and public-probe runtime
+identities, every receipt after copying, and the full independent verifier.
+Failed, cancelled, skipped, missing, or incompatible fleets cannot seal a pass.
 The implementation and its regression tests are a **candidate**: complete
 passing live artifacts and protected CI delivery are still required. No public
 SDK Catalog certification is claimed yet.
@@ -370,3 +376,25 @@ builds all three public probes from the frozen checkout, records executable,
 Java class/dependency, source, and image identities, uses only its own loopback
 processes/Compose project, and cleans those up even on failure. It does not
 change unrelated Docker services or publish packages.
+
+To aggregate independently captured isolated fleets from the **same clean
+revision and identical runtime builds**, use a new, disjoint output directory:
+
+```sh
+PYTHONPATH=sdk/python/src python3 tests/integration/management_sdk_catalog.py combine \
+  --three /absolute/sdk-three/evidence.json \
+  --five /absolute/sdk-five/evidence.json \
+  --output /absolute/new/sdk-complete
+PYTHONPATH=sdk/python/src python3 tests/integration/management_sdk_catalog.py verify \
+  --manifest /absolute/new/sdk-complete/evidence.json
+```
+
+Expired Catalog history reports gRPC `ABORTED`, not `FAILED_PRECONDITION`.
+The frozen `8fde109` campaign reached real three-controller leader/owner/quorum
+and full-reopen recovery through all three public clients, then failed because
+the new stale-plan harness expected the latter code. All three actual clients
+returned `ABORTED` without a page or checkpoint write; the real floor was 397
+and their saved checkpoints were 373/376/374. That failed manifest is retained,
+not converted into a pass. Regression tests correct both the planned status and
+the independent verifier while preserving exact saved cursors and no ACK/reset.
+A fresh complete campaign and protected delivery are still required.

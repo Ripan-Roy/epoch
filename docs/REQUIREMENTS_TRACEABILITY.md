@@ -4,7 +4,19 @@ This register turns the prioritized catalog in [PRD.md](./PRD.md) into a deliver
 
 Last synchronized with PRD version 0.3 on 21 August 2026.
 
-Current CTRL-001/CTRL-002 hardening candidate: the clean `671fde4` tree passed
+Current bounded native CTRL-001/CTRL-002 chaos evidence: PR #149 merged at
+`d8adf756568e8e27912d480a66185b45bb937ecf` and
+[main CI](https://github.com/Ripan-Roy/epoch/actions/runs/37353098801) passed all
+14 jobs, including both parallel three/five-controller fleets and the protected
+aggregate. Its downloaded full artifact independently verifies with SHA-256
+`8943c2c49aeff50b14528afa03df9bcee926f833afa7611846cf9a91ca33dffa`.
+Both fleets retain 135 desired resources, 20/24 exact operation witnesses,
+real stale-watch rejection, and matching four-profile digests after reopen.
+[Main Pages](https://github.com/Ripan-Roy/epoch/actions/runs/37353099031) also
+passed. This closes only the bounded **native** dedicated-chaos gate; public SDK
+Catalog certification, retention/scaling/migration, and production gates remain.
+
+Historical local progression: the clean `671fde4` tree passed
 the dedicated owner-recovery subset with three and five concurrent Go
 controllers, ten invariants per count, and fourteen verified artifact receipts.
 Fully qualified HTTP item GET/DELETE now preserves tenant scope and managed
@@ -39,7 +51,8 @@ not a count of `replayed=false` replies. Real retained floors/latest cursors
 were 5/4,100 and 27/4,122. Its canonical manifest SHA-256 is
 `df40266cbe904c551b080c27ebed8a6ab35190b5fed13561052ecfb00ea761e9`.
 Thirty-nine HA contract tests and eight soak/evidence tests pass locally.
-Protected exact-head/main execution remains open, as do the other CTRL-001/
+At that capture, protected exact-head/main execution remained open; the current
+native proof above now supersedes that limitation, not the other CTRL-001/
 CTRL-002 retention, scaling, migration, and SDK requirements. See the linked
 certification document for provenance and non-claims.
 
@@ -133,7 +146,7 @@ actual Rust Catalog fault certification; original-token resolution and retained
 outcome/checkpoint comparison through Catalog/owner/quorum/reopen remain open.
 
 The next SDK increment implements the owned actual-Catalog campaign plus an
-independent verifier. Nine regression groups reject altered original bytes,
+independent verifier. Fourteen regression groups reject altered original bytes,
 missing upstream acknowledgements, incomplete SDK phases, absent response
 witnesses, non-monotonic/foreign watch pages, and omitted final verification.
 The runner composes the complete native HA matrix with all three public clients,
@@ -152,6 +165,20 @@ receipts and instead requires the full durable original-token operation plus
 the exact two contiguous generation-one creation events for every SDK batch.
 Its new regression accepts reconstructed flags only alongside those exact
 effect witnesses; it still rejects missing/altered creations.
+
+The second frozen campaign (`8fde109`) passed all three public clients'
+actual leader-loss original-token resolution, exact creation history,
+owner-watch reconnect, quorum recovery, and full-reopen reads through every live
+controller. It failed the stale-plan harness's incorrect expected code 9: Go,
+Java, and Python all returned the documented Catalog `ABORTED` (10), with no
+pages or checkpoint rewrite. The real retained floor was 397 and the saved
+Go/Java/Python checkpoints were 373/376/374. Its failed artifact is preserved;
+neither the five-controller SDK fleet nor final full certification passed.
+New red-to-green regressions align both plan and verifier with `ABORTED` while
+requiring the original expired cursor and no ACK. The CI candidate composes the
+public SDK campaign into the existing parallel native fleet workers, requires
+all runtimes, and independently seals both same-source/image/runtime artifacts.
+Fresh complete local and protected proofs remain required before SDK promotion.
 
 ## How to use this register
 

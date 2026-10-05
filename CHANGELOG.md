@@ -15,6 +15,13 @@ notes explicitly list additional verified artifacts.
   and actual expiration of durable SDK checkpoints. Passing live campaign
   artifacts and protected delivery remain required; this is not yet a
   certification claim.
+- Compose public SDK Catalog certification into the existing parallel
+  three/five-controller native-image CI workers, without a duplicate cluster
+  campaign. Require all three runtimes and receipt-safe independent aggregation;
+  incompatible, skipped, failed, or missing fleet proofs fail the protected gate.
+  Correct the new stale-checkpoint harness to expect Catalog's documented
+  `ABORTED`, preserving original cursors and forbidding ACK/reset. The failed
+  `8fde109` live artifact remains failed; fresh full certification is required.
 - Generate Java management bindings locally with exact Protobuf 35.1 and
   checksum-pinned gRPC-Java 1.84.0 compilers. The 61 generated sources remain
   byte-identical; CI installs both compilers and retains non-mutating freshness,

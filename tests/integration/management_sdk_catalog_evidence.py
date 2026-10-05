@@ -11,6 +11,44 @@ import management_sdk_catalog as campaign
 owner, full, messages = campaign.owner, campaign.full, campaign.messages
 
 
+def verify_fleet_bundle(path: Path, count: int) -> None:
+    if type(count) is not int or count not in (3, 5):
+        raise ValueError("explicit three/five-controller SDK fleet required")
+    verify_bundle(path, (count,))
+    evidence = owner.soak.load_json(path)
+    image_id = evidence.get("identity", {}).get("runtime", {}).get("image_id", "")
+    if (
+        not isinstance(image_id, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None
+    ):
+        raise ValueError("SDK fleet requires the tested immutable image identity")
+    if any(
+        not receipt["path"].startswith(f"controllers-{count}/")
+        for receipt in evidence["artifacts"]
+    ):
+        raise ValueError("SDK fleet inventory contains another campaign")
+
+
+def _validate_matching_runtimes(candidates: list[dict[str, Any]]) -> None:
+    if (
+        candidates[0]["fleets"][0]["sdk"]["runtime"]
+        != candidates[1]["fleets"][0]["sdk"]["runtime"]
+    ):
+        raise ValueError("fleet public SDK runtime identities differ")
+
+
+def combine_fleet_bundles(manifests: list[Path], output: Path) -> None:
+    """Reuse receipt-safe sealing while requiring SDK and native fault proofs."""
+    full.combine_fleet_bundles(
+        manifests,
+        output,
+        schema=campaign.SCHEMA,
+        fleet_verifier=verify_fleet_bundle,
+        bundle_verifier=verify_bundle,
+        candidates_validator=_validate_matching_runtimes,
+    )
+
+
 def validate_evidence(
     evidence: dict[str, Any], counts: tuple[int, ...] = (3, 5)
 ) -> None:
@@ -249,7 +287,8 @@ class FleetVerifier:
                 )
             if phase == "stale":
                 if (
-                    expected["expected_code"] != 9
+                    expected["expected_code"] != campaign.STALE_WATCH_CODE
+                    or observed.get("grpc_code") != campaign.STALE_WATCH_CODE
                     or observed.get("pages_proto")
                     or Path(expected["checkpoint_path"]).name
                     in {Path(artifact).name for artifact in self.artifacts}
