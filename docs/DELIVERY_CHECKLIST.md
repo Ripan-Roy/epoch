@@ -634,6 +634,15 @@ production gates.
 
 ## Release checklist
 
+The separate SDK contract branch is not part of the frozen control-HA release
+candidate. Its Go seven-method management client, typed receipts, trust,
+failover/cancellation, governance filters, acknowledged watches, real mTLS wire
+fixture, and compiled example pass local client tests. Python response-shape
+and whole-package typing checks also pass locally. Python/Java management
+parity, actual public-SDK Catalog fault evidence, protected delivery, and the
+displayed multi-language management guide remain open; these results close
+neither CTRL-001 nor DX-001. See [MANAGEMENT_SDK.md](MANAGEMENT_SDK.md).
+
 | Order | Release action | Required evidence | State for next release |
 |---:|---|---|---:|
 | 1 | Select a completed, merged milestone boundary | Replicated control metadata and multi-instance reconciliation merged in PR #134 at `36dab1f`; main CI `37143501331` and Pages `37143501271` passed | ✅ |

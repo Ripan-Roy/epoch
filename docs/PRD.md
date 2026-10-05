@@ -130,6 +130,18 @@ alpha; it does not claim a real-time deadline SLA, dynamic or cross-region
 ownership, coordinated backups/PITR, production performance evidence, or a
 complete external integration plane. See ADR-0027.
 
+**SDK candidate note (5 October 2026):** The separate SDK contract branch adds
+strict whole-package Python typing and fail-closed standalone/regional response
+shape validation, plus a Go client for all seven generated management methods.
+The Go client preserves caller tokens and optional OCC presence, bounds failover
+by one deadline and explicit endpoint allowlist, validates response identities
+and governance filters, and acknowledges only scanned management-watch cursors.
+Local generated TLS 1.3/mTLS tests and compiled examples are client-contract
+evidence, not protected delivery or Catalog fault certification. Python/Java
+management parity, generated native response models, persistent/cooperative
+data streaming, the full version matrix, and deferred package publication remain
+DX-001 work. See [the management SDK candidate](MANAGEMENT_SDK.md).
+
 **Cache implementation note (21 August 2026):** The fixed-three-voter,
 single-shard regional Cache now implements the alpha contract for every
 non-deferred Cache row. Deterministic entry and memory/cold byte admission,

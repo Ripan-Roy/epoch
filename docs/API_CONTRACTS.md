@@ -1601,11 +1601,19 @@ and [control-HA certification](CONTROL_HA_CERTIFICATION.md). This is not the
 full native data gRPC API. Rust port 7600 remains reserved for that future
 service.
 
+The separate Go `ManagementClient` candidate covers all seven generated
+methods with explicit TLS/mTLS trust, exact presence-aware failover, typed
+response validation, and acknowledged scanned-cursor watches. Local tests run
+the actual generated wire methods over mutual TLS. Python/Java management
+parity, public-SDK Catalog fault evidence, protected delivery, and displayed
+multi-language management quickstarts remain open; see the
+[management candidate guide](MANAGEMENT_SDK.md).
+
 OIDC discovery/JWKS refresh, typed `google.rpc.Status` details,
 general native data-path mutation-status lookup, native bidirectional streaming and
 connection-scoped credit, a stable Rust gRPC regional administration
 implementation, long-running operations,
-first-party management SDK clients, full Go/Java/Python generated SDK parity,
+complete first-party management SDK parity, full Go/Java/Python generated SDK parity,
 and native compatibility negotiation
 remain unimplemented. A separate Rust compatibility gateway exposes the exact
 RESP2/RESP3, Kafka, and AMQP 0-9-1 subsets in the public compatibility matrix

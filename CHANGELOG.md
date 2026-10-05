@@ -6,6 +6,22 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+### SDK contract and management candidate
+
+- Validate Python standalone/regional response shapes and strict JSON without
+  exposing response payloads or retrying uncertain mutations. Whole-package
+  strict typing now runs locally and in CI, not only on the displayed quickstart.
+- Add the Go management client for all seven generated RegionalAdmin methods
+  with explicit trust, bounded endpoint failover, original deadlines/tokens/OCC
+  presence, conservative unknown-outcome information, and typed receipt checks.
+- Add explicitly acknowledged scanned-cursor watches that preserve filters,
+  reject stale/malformed history, stop on cancellation, and never reset their
+  endpoint budget. List receipts enforce every requested governance filter.
+- Add real generated TLS 1.3/mTLS wire tests and a compiled seven-method example.
+  Python/Java management parity, public-SDK Catalog fault certification,
+  protected delivery, and native data streaming remain open; this candidate
+  does not claim complete SDK delivery or production readiness.
+
 ### Control-plane hardening
 
 - Preserve the exact optional caller generation precondition when replaying

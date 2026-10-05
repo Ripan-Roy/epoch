@@ -61,6 +61,20 @@ management clients, and the rest of DX-001 are not claimed complete by this
 shape-validation foundation. This separate SDK branch does not modify the
 frozen control-HA PR or inherit its CI.
 
+The same separate SDK candidate now includes a Go `ManagementClient` for all
+seven generated RegionalAdmin methods. Its bounded allowlist, explicit
+TLS/mTLS/loopback trust, original-deadline and token-preserving failover,
+presence-aware requests, typed identity/outcome validation, conservative
+unknown-outcome information, and explicitly acknowledged scanned-cursor watch
+pass local client/contract tests. Every generated method additionally runs over
+real TLS 1.3/mTLS loopback sockets, with wrong-bearer and missing-client-identity
+denial, uint64 extrema, and remote watch cancellation. The full API example
+compiles but is not executed against Catalog. This closes neither CTRL-001 nor
+DX-001: Python/Java management clients, public-SDK Catalog recovery evidence,
+protected delivery, the displayed multi-language management guide, and the
+broader native contract/streaming/type matrix remain open. See
+[management SDK candidate](MANAGEMENT_SDK.md).
+
 ## How to use this register
 
 Status values are:

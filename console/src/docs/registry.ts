@@ -339,6 +339,7 @@ export const docsPages: ReadonlyArray<DocsPageMeta> = [
       "The same operation, native to each ecosystem. Every implemented standalone operation has a Go, Java, and Python entry point.",
     headings: [
       { id: "surface", label: "Implemented operations" },
+      { id: "management-sdk", label: "Management SDK" },
       { id: "conventions", label: "Conventions" },
     ],
     Body: SdkReferenceBody,
