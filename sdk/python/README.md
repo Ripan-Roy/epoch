@@ -4,12 +4,14 @@ This is the initial typed Python client for Epoch's provisional native HTTP
 surface. It covers health and resource discovery plus every Cache, Stream,
 Queue, and Event Bus route currently exposed by the standalone node.
 
-The separate management candidate now includes pinned generated messages and
-typed gRPC bindings. Install `'sdk/python[management,management-dev]'` for
-repository generation and contract tests. The HTTP SDK's ordinary installation
-remains dependency-free. A public Python management client with Go-equivalent
-deadlines, failover, receipt validation, and acknowledged watch consumption is
-still open; generated bindings alone do not close SDK parity. See the
+The separate management candidate includes a public `epoch_sdk.management`
+client for all seven generated RPCs, original-deadline/token/OCC-preserving
+failover, typed receipts, cancellation, and acknowledged scanned-cursor watches.
+Install `'sdk/python[management]'` for runtime use and add `management-dev` for
+generation/tests. Ordinary HTTP imports remain dependency-free. Python gRPC
+does not independently enforce a TLS 1.3 minimum; retain Epoch's TLS-1.3-only
+controller policy. Java parity and live Catalog/protected delivery evidence
+remain open. See the
 [management candidate guide](../../docs/MANAGEMENT_SDK.md).
 
 ```python

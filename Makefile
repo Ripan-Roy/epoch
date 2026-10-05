@@ -82,7 +82,7 @@ lint: ## Run static checks for every language and contract.
 	@if find control operator sdk/go -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then go vet ./...; fi
 	@if [ -d sdk/python ]; then ruff check sdk/python tests/soak tests/integration/*.py; fi
 	@if [ -d sdk/python ]; then ruff check --config sdk/python/pyproject.toml scripts/generate-python-management.py; fi
-	@if [ -d sdk/python ]; then PYTHONPATH=sdk/python/src mypy --strict sdk/python/src console/src/quickstarts/quickstart.py; fi
+	@if [ -d sdk/python ]; then PYTHONPATH=sdk/python/src mypy --strict sdk/python/src sdk/python/examples/management.py console/src/quickstarts/quickstart.py; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) -DskipTests verify; fi
 	@if [ -d .github/workflows ]; then actionlint; fi
 	@if [ -d tests/integration ]; then shellcheck scripts/*.sh tests/integration/*.sh; fi

@@ -1601,12 +1601,15 @@ and [control-HA certification](CONTROL_HA_CERTIFICATION.md). This is not the
 full native data gRPC API. Rust port 7600 remains reserved for that future
 service.
 
-The separate Go `ManagementClient` candidate covers all seven generated
+The separate Go/Python `ManagementClient` candidate covers all seven generated
 methods with explicit TLS/mTLS trust, exact presence-aware failover, typed
 response validation, and acknowledged scanned-cursor watches. Local tests run
-the actual generated wire methods over mutual TLS. Python/Java management
-parity, public-SDK Catalog fault evidence, protected delivery, and displayed
-multi-language management quickstarts remain open; see the
+the actual generated wire methods over mutual TLS; all Python calls also run
+against a Go TLS-1.3-only server. Python gRPC pins explicit CA/client trust but
+does not independently enforce a TLS minimum, so Epoch's server policy remains
+required. Exact Go/Python compiled/typed examples are embedded in candidate
+Pages. Java management parity, public-SDK Catalog fault evidence, and protected
+delivery remain open; see the
 [management candidate guide](MANAGEMENT_SDK.md).
 
 OIDC discovery/JWKS refresh, typed `google.rpc.Status` details,

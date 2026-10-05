@@ -1,4 +1,4 @@
-"""Pinned generated management messages, not a public Python client yet."""
+"""Pinned generated contracts; public-client behavior has separate wire tests."""
 
 import json
 import os

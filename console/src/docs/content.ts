@@ -14,8 +14,10 @@ import regionalBusGoSource from "../quickstarts/regional_bus/quickstart.go?raw";
 import regionalBusJavaSource from "../quickstarts/regional_bus/RegionalBusQuickstart.java?raw";
 import regionalBusPythonSource from "../quickstarts/regional_bus/quickstart.py?raw";
 import goManagementSource from "../../../sdk/go/epoch/management_example_test.go?raw";
+import pythonManagementSource from "../../../sdk/python/examples/management.py?raw";
 
 export const goManagementExample = goManagementSource;
+export const pythonManagementExample = pythonManagementSource;
 
 export const repositoryUrl = "https://github.com/Ripan-Roy/epoch";
 export const repositoryDocsUrl = `${repositoryUrl}/blob/main/docs`;
@@ -959,10 +961,11 @@ export const sdkSurface = [
     python: "EpochClient(…)",
   },
   {
-    area: "Management (Go candidate)",
+    area: "Management (Go/Python candidate)",
     go: "ManagementClient · ApplyResource · GetResource · ListResources · DeleteResource · BatchApplyResources · GetOperation · WatchResourceChanges",
     java: "Not implemented",
-    python: "Not implemented",
+    python:
+      "ManagementClient · apply_resource · get_resource · list_resources · delete_resource · batch_apply_resources · get_operation · watch_resource_changes",
   },
   {
     area: "Node",

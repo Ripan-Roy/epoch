@@ -132,22 +132,25 @@ complete external integration plane. See ADR-0027.
 
 **SDK candidate note (5 October 2026):** The separate SDK contract branch adds
 strict whole-package Python typing and fail-closed standalone/regional response
-shape validation, plus a Go client for all seven generated management methods.
-The Go client preserves caller tokens and optional OCC presence, bounds failover
+shape validation, plus Go/Python clients for all seven generated management methods.
+Both preserve caller tokens and optional OCC presence, bound failover
 by one deadline and explicit endpoint allowlist, validates response identities
 and governance filters, and acknowledges only scanned management-watch cursors.
 Local generated TLS 1.3/mTLS tests and compiled examples are client-contract
-evidence, not protected delivery or Catalog fault certification. Python/Java
-management parity, generated native response models, persistent/cooperative
+evidence, not protected delivery or Catalog fault certification. Java
+management parity in Java, generated native response models, persistent/cooperative
 data streaming, the full version matrix, and deferred package publication remain
 DX-001 work. See [the management SDK candidate](MANAGEMENT_SDK.md).
 
-The Python management foundation adds namespaced protobuf messages and typed
-gRPC stubs with pinned optional dependencies, exact regeneration, and shared
-Go/Python wire vectors. It preserves uint64 extrema and omitted/explicit-zero
-presence without adding dependencies to ordinary HTTP SDK imports. A public
-Python management client and Java management parity remain open; message
-generation is not live RPC or durability evidence.
+The Python client builds on namespaced protobuf messages and typed gRPC stubs,
+pinned optional dependencies, exact regeneration, and shared Go/Python wire
+vectors. Twenty-one real-gRPC regression groups and all seven calls against a
+TLS-1.3-only Go server validate bounded calls, identity/governance receipts,
+cancellation, and acknowledged watches without adding dependencies to ordinary
+HTTP SDK imports. Python gRPC trusts the explicit CA/client identity but does
+not independently enforce a TLS 1.3 minimum; Epoch controllers must retain
+their server policy. Java parity, public-SDK Catalog fault certification, and
+protected delivery remain open; generated-wire tests are not durability evidence.
 
 **Cache implementation note (21 August 2026):** The fixed-three-voter,
 single-shard regional Cache now implements the alpha contract for every

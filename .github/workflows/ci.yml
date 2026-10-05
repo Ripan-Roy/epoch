@@ -153,9 +153,18 @@ jobs:
       - name: Compile and type-check Python SDK and displayed quickstart
         run: |
           python -m py_compile console/src/quickstarts/quickstart.py
-          PYTHONPATH=sdk/python/src mypy --strict sdk/python/src console/src/quickstarts/quickstart.py
+          python -m py_compile sdk/python/examples/management.py
+          PYTHONPATH=sdk/python/src mypy --strict sdk/python/src sdk/python/examples/management.py console/src/quickstarts/quickstart.py
       - name: Run Python SDK tests
         run: PYTHONPATH=sdk/python/src python -m unittest discover -s sdk/python/tests -v
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: go.sum
+      - name: Prove Python management on a TLS-1.3-only Go server
+        env:
+          EPOCH_PYTHON_MANAGEMENT_PROBE: python
+        run: go test -race ./sdk/go/epoch -run '^TestManagementPythonTLS13GeneratedWire$' -count=1
       - name: Run resumable soak evidence tests
         run: python -m unittest discover -s tests/soak -p 'test_*.py' -v
       - name: Run Kubernetes campaign contract tests

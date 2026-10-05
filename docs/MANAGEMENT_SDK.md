@@ -1,14 +1,14 @@
 # Management SDK candidate
 
-Status: Go implementation and local generated-wire tests; **not yet protected
-delivery or complete Go/Java/Python parity**. Python and Java management clients,
+Status: Go/Python implementations and local generated-wire tests; **not yet protected
+delivery or complete Go/Java/Python parity**. The Java management client,
 real Catalog fault evidence for the public SDK, and a displayed multi-language
 Pages quickstart remain open. Existing data-profile SDKs are separate.
 
 `epoch.ManagementClient` covers the Go control service, not Rust's still-future
 native data gRPC port. Use the configured controller gRPC authorities, normally
 port 8081. Authorities are explicit `host:port` values, not URLs or resolver
-targets. Non-loopback connections require a pinned CA and TLS 1.3; optional
+targets. Non-loopback Go connections require a pinned CA and TLS 1.3; optional
 client certificates use the same existing `TLSConfig` as the HTTP SDK. The
 explicit `AllowInsecureLoopback` development mode cannot select remote hosts or
 coexist with TLS configuration. Proxies and resolver service policies are not
@@ -106,7 +106,85 @@ failures. Strict whole-package typing checks the generated
 `.pyi` contracts, with explicit constructor mapping parameters rather than
 suppression. Ruff excludes external generated output, not application source.
 These tests do not run a Python management RPC or implement its failover/watch
-state machine. Public Python/Java management parity remains open.
+state machine on their own. The public Python client below supplies those
+contracts; Java management parity and protected Catalog evidence remain open.
+
+### Python management client
+
+Import the optional API explicitly; ordinary `epoch_sdk` imports do not load
+gRPC or Protobuf:
+
+```python
+from epoch_sdk.management import ManagementClient, ManagementConfig, ManagementContext
+from epoch_sdk.management import ManagementRPCError, common, messages
+from epoch_sdk.transport import TLSConfig
+
+with ManagementClient(ManagementConfig(
+    endpoints=("localhost:8081",), bearer_token=token, timeout=5,
+    tls=TLSConfig(root_ca=ca_path, certificate=certificate_path, private_key=key_path),
+)) as client:
+    result = client.get_resource(messages.GetResourceRequest(name=resource_name),
+                                 context=ManagementContext(timeout=3))
+    print(result.response.resource.generation, result.info.attempts)
+```
+
+The six unary methods are `apply_resource`, `get_resource`, `list_resources`,
+`delete_resource`, `batch_apply_resources`, and `get_operation`; each returns
+`ManagementResult[generatedResponse]`. `ManagementRPCError.info` retains the
+attempt count, configured budget, and conservative mutation uncertainty;
+`code()` returns the status and `cause` deliberately exposes the original
+gRPC error/details. Printable errors omit backend text. Predispatch validation,
+cancellation, or an already-expired deadline does not claim an unknown write.
+
+`ManagementContext(timeout=...)` supplies one monotonic caller deadline and
+thread-safe `cancel()`. The SDK also caps every unary sequence with the configured
+timeout. Only `UNAVAILABLE` advances once per explicit controller while preserving
+the frozen token/payload/OCC. Metadata keeps caller traces/binary values and
+replaces authorization with exactly one SDK credential. Remote plaintext,
+resolvers/URLs, malformed metadata, duplicate endpoints, nonfinite timeouts,
+unconfigured trust, and mismatched client identity files are rejected.
+
+`watch_resource_changes(request, context=...)` returns a lazy single-consumer
+context-managed handle. Use `page = watch.recv()`, durably process and store
+`page.next_cursor`, then `watch.acknowledge(page.next_cursor)`. Its `checkpoint`
+property is only the last acknowledged scanned cursor; `info` counts cumulative
+stream attempts. A returned page may be mutated without changing the internal
+acknowledgement value. `close()` cancels a blocked receive and the remote stream
+without cancelling the shared caller context. Unary timeout does not expire
+the persistent stream. `UNAVAILABLE`/EOF advances through a fixed endpoint budget;
+stale `ABORTED` or malformed pages do not reset/reconnect/advance history.
+
+TLS boundary: Python pins the explicit CA and optional client certificate/key,
+but its [public gRPC credential API](https://grpc.github.io/grpc/python/grpc.html#grpc.ssl_channel_credentials)
+has no client-side minimum-version selector. Unlike the Go client and Python
+HTTP transport, this client does **not** independently enforce a TLS 1.3 minimum.
+Use Epoch's TLS-1.3-only controller policy; do not replace it with a TLS-1.2-only
+terminator and assume client-side refusal. The cross-language fixture sets both
+server TLS minimum and maximum to 1.3, verifies negotiated protocol and client
+identity server-side, and executes all seven Python methods. No unsupported
+channel option, preflight handshake, or silent claim substitutes for this boundary.
+
+[The complete Python example](../sdk/python/examples/management.py) is embedded
+verbatim in the candidate docs page and checked by whole-package strict typing.
+It covers all seven calls, a caller-owned stable token, original-scope operation
+resolution, explicit OCC, bounded inventory, acknowledged watch processing, and
+dedicated-resource cleanup. Its callback must process and durably checkpoint
+the scanned cursor before returning. It is compile-only evidence, not a live
+Catalog quickstart; do not run it against a production resource.
+
+Twenty-one real-gRPC regression groups exercise receipt/governance validation,
+bounded deadline/failover/exhaustion, original presence/tokens/metadata,
+pre/post-dispatch cancellation, uint64 extrema, exact ACK/resume, filtered/empty
+pages, stale/malformed history, and remote close. The separately required Python
+CI step runs the Go TLS-1.3-only fixture with an explicitly configured interpreter:
+
+```sh
+EPOCH_PYTHON_MANAGEMENT_PROBE=python \
+  go test -race ./sdk/go/epoch -run '^TestManagementPythonTLS13GeneratedWire$' -count=1
+```
+
+The Go-only suite may skip that interpreter-dependent probe; Python CI must not.
+These fixtures prove SDK transport contracts, not durable Rust Catalog outcomes.
 
 ### Go client example
 
@@ -135,5 +213,5 @@ refusal, and protocol failure without unsafe mutation retry. These are client
 transport/contract checks, not Rust Catalog durability or production/SLO evidence.
 
 Native data gRPC, cooperative data consumers, background batching, identity
-refresh/rotation, Python/Java management parity, package publication, and the
+refresh/rotation, Java management parity, package publication, and the
 full SDK/version matrix remain outside this candidate's verified boundary.

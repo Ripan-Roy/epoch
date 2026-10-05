@@ -10,6 +10,7 @@ import {
   epochTargetLanguageGuides,
   governanceInventory,
   goManagementExample,
+  pythonManagementExample,
   guardedUpgradeSpec,
   guardedUpgradeStatus,
   identityPolicy,
@@ -2013,10 +2014,12 @@ export function SdkReferenceBody() {
 
       <Topic id="management-sdk" title="Management SDK candidate">
         <p>
-          The Go <code>ManagementClient</code> uses generated resource messages over controller gRPC, normally
-          port 8081. Configure an explicit endpoint allowlist and CA trust; TLS 1.3 supports optional client
-          certificates. Plaintext is an explicit loopback-only development choice. Python and Java management
-          clients remain open; native profile clients are separate.
+          The Go and Python <code>ManagementClient</code> implementations use generated resource messages over
+          controller gRPC, normally port 8081. Configure an explicit endpoint allowlist and CA trust; TLS 1.3
+          supports optional client certificates. Plaintext is an explicit loopback-only development choice.
+          The Java management client remains open; native profile clients are separate. Python requires
+          server-enforced TLS 1.3: its pinned gRPC API exposes CA and client-certificate trust, not a
+          client-side minimum-version selector.
         </p>
         <p>
           Unary failover retains one deadline, the original token, and omitted/zero/nonzero generation
@@ -2032,14 +2035,18 @@ export function SdkReferenceBody() {
           paging.
         </p>
         <Note title="Not a live Catalog quickstart">
-          This exact seven-method example compiles in Go SDK tests. The generated-wire fixture runs over TLS
-          1.3/mTLS, but the public SDK still needs real Catalog fault and protected delivery evidence. Do not
+          These exact seven-method examples compile in Go SDK tests and pass strict Python typing. Their
+          generated-wire fixtures run over TLS 1.3/mTLS, including all Python calls against a TLS-1.3-only Go
+          server, but the public SDK still needs real Catalog fault and protected delivery evidence. Do not
           run the example against a production resource.
         </Note>
         <CodeBlock label="Go · management_example_test.go" value={goManagementExample} />
+        <CodeBlock label="Python · management.py (compile-only)" value={pythonManagementExample} />
         <CodeBlock
           label="Terminal · verify the client contracts"
-          value={"go test -race ./sdk/go/epoch -run TestManagement -count=1\ngo vet ./sdk/go/epoch"}
+          value={
+            "python -m pip install 'sdk/python[management,management-dev]'\nPYTHONPATH=sdk/python/src python -m unittest discover -s sdk/python/tests -v\nEPOCH_PYTHON_MANAGEMENT_PROBE=python go test -race ./sdk/go/epoch -run TestManagement -count=1\ngo vet ./sdk/go/epoch"
+          }
         />
         <p>
           Read the <a href={`${repositoryDocsUrl}/MANAGEMENT_SDK.md`}>full management SDK guide</a> for trust

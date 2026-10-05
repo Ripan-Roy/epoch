@@ -18,13 +18,22 @@ notes explicitly list additional verified artifacts.
   reject stale/malformed history, stop on cancellation, and never reset their
   endpoint budget. List receipts enforce every requested governance filter.
 - Add real generated TLS 1.3/mTLS wire tests and a compiled seven-method example.
-  Python/Java management parity, public-SDK Catalog fault certification,
+  Java management parity, public-SDK Catalog fault certification,
   protected delivery, and native data streaming remain open; this candidate
   does not claim complete SDK delivery or production readiness.
 - Add pinned, namespaced Python management messages and typed gRPC stubs,
   exact generation checks, optional dependencies, and shared Go/Python wire
   vectors for omitted/zero/maximum uint64 generation presence. This is a
-  generated-contract foundation, not a public Python management client.
+  generated-contract foundation; separate live client tests cover RPC behavior.
+- Add the public Python seven-method management client with a single original
+  deadline, frozen token/OCC-preserving bounded failover, redacted status/cause
+  errors, exact receipt/governance checks, cancellation, and acknowledged
+  scanned-cursor watches. Twenty-one real-gRPC regression groups and all seven
+  calls against a TLS-1.3-only Go server pass locally. Python gRPC relies on
+  the controller's enforced TLS minimum; it does not independently enforce 1.3.
+- Embed the exact typed Python seven-method example alongside Go in candidate
+  docs, and require the cross-language TLS/mTLS probe in Python CI. Java parity,
+  real public-SDK Catalog faults, native streaming, and protected delivery remain open.
 
 ### Control-plane hardening
 

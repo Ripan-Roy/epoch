@@ -61,12 +61,31 @@ func TestManagementSDKDocsDisplayTheCompiledExampleWithExplicitLimits(t *testing
 	if !strings.Contains(content, `../../../sdk/go/epoch/management_example_test.go?raw`) || !strings.Contains(content, "export const goManagementExample") {
 		t.Error("management docs must use the exact example compiled by Go tests")
 	}
-	for _, marker := range []string{`id="management-sdk"`, "value={goManagementExample}", "MANAGEMENT_SDK.md", "Not a live Catalog quickstart", "Python and Java management clients remain open"} {
+	if !strings.Contains(content, `../../../sdk/python/examples/management.py?raw`) || !strings.Contains(content, "export const pythonManagementExample") {
+		t.Error("management docs must use the exact strictly typed Python example")
+	}
+	for _, marker := range []string{`id="management-sdk"`, "value={goManagementExample}", "value={pythonManagementExample}", "MANAGEMENT_SDK.md", "Not a live Catalog quickstart", "Java management client remains open", "server-enforced TLS 1.3"} {
 		if !strings.Contains(page, marker) {
 			t.Errorf("management SDK page lacks %q", marker)
 		}
 	}
 	if !strings.Contains(registry, `{ id: "management-sdk", label: "Management SDK" }`) {
 		t.Error("management SDK topic is missing from the page navigation")
+	}
+	python := read("sdk/python/src/epoch_sdk/management.py")
+	example := read("sdk/python/examples/management.py")
+	contract := read("spec/proto/epoch/v1/regional_admin.proto")
+	wordBoundary := regexp.MustCompile(`([a-z])([A-Z])`)
+	for _, method := range regexp.MustCompile(`(?m)^\s*rpc\s+(\w+)\(`).FindAllStringSubmatch(contract, -1) {
+		name := strings.ToLower(wordBoundary.ReplaceAllString(method[1], "${1}_${2}"))
+		if !strings.Contains(python, "def "+name+"(") || !strings.Contains(example, "client."+name+"(") {
+			t.Errorf("Python client/displayed example omits generated method %s", name)
+		}
+	}
+	workflow := read(".github/workflows/ci.yml")
+	for _, marker := range []string{"EPOCH_PYTHON_MANAGEMENT_PROBE: python", "TestManagementPythonTLS13GeneratedWire", "mypy --strict sdk/python/src sdk/python/examples/management.py"} {
+		if !strings.Contains(workflow, marker) {
+			t.Errorf("Python management contract is not enforced in CI: %s", marker)
+		}
 	}
 }

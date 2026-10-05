@@ -638,9 +638,12 @@ The separate SDK contract branch is not part of the frozen control-HA release
 candidate. Its Go seven-method management client, typed receipts, trust,
 failover/cancellation, governance filters, acknowledged watches, real mTLS wire
 fixture, and compiled example pass local client tests. Python response-shape
-and whole-package typing checks also pass locally. Python/Java management
-parity, actual public-SDK Catalog fault evidence, protected delivery, and the
-displayed multi-language management guide remain open; these results close
+and whole-package typing checks also pass locally. Python's seven-method client
+adds bounded calls, typed receipts, cancellation, and acknowledged watches;
+21 real-gRPC regression groups plus the TLS-1.3-only Go fixture pass locally.
+Python gRPC relies on the enforced server TLS minimum. Candidate Pages embeds
+both exact compiled/strictly typed examples. Java management parity, actual
+public-SDK Catalog fault evidence, and protected delivery remain open; these results close
 neither CTRL-001 nor DX-001. See [MANAGEMENT_SDK.md](MANAGEMENT_SDK.md).
 
 | Order | Release action | Required evidence | State for next release |

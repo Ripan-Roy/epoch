@@ -70,7 +70,7 @@ pass local client/contract tests. Every generated method additionally runs over
 real TLS 1.3/mTLS loopback sockets, with wrong-bearer and missing-client-identity
 denial, uint64 extrema, and remote watch cancellation. The full API example
 compiles but is not executed against Catalog. This closes neither CTRL-001 nor
-DX-001: Python/Java management clients, public-SDK Catalog recovery evidence,
+DX-001: Java management client, public-SDK Catalog recovery evidence,
 protected delivery, the displayed multi-language management guide, and the
 broader native contract/streaming/type matrix remain open. See
 [management SDK candidate](MANAGEMENT_SDK.md).
@@ -80,8 +80,23 @@ namespaced protobuf messages, typed gRPC stubs, optional runtime/dev extras,
 exact regeneration checks, and shared Go/Python wire vectors for omitted/zero/
 maximum uint64 delete preconditions. Eight binding regressions, all 65 Python
 tests, and strict whole-package typing across 19 source files pass locally.
-These are message/typing checks, not a public Python management client or
-live RPC/failover/watch evidence. CTRL-001 and DX-001 remain open.
+That clean binding-foundation result precedes the public client and is not
+live RPC/failover/watch evidence by itself. CTRL-001 and DX-001 remain open.
+
+The Python candidate now implements all seven public management calls with
+frozen original tokens/OCC, a single bounded unary deadline, explicit endpoint
+and trust validation, typed scope/governance/outcome receipts, conservative
+mutation uncertainty, shared cancellation, and lazy explicitly acknowledged
+scanned-cursor watches. Twenty-one real-gRPC regression groups pass locally,
+including empty/filtered and uint64-extreme pages, semantic failures without
+retry, exhaustion, stale refusal, and remote close. All seven calls also pass
+against a Go TLS-1.3-only/mTLS fixture with bearer/anonymous denial and protocol
+validation; Python CI explicitly enables this interpreter-dependent probe.
+Python gRPC cannot independently select a TLS minimum, so the documented server
+policy remains required. Both exact Go/Python examples are embedded in candidate
+Pages, with the Python example included in whole-package strict typing. Java
+parity, public-SDK Catalog recovery, protected delivery, native streaming, and
+the full SDK/version matrix remain open; DX-001 is not closed.
 
 ## How to use this register
 

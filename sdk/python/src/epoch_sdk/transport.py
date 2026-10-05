@@ -14,6 +14,8 @@ from urllib.request import Request, urlopen
 
 from .errors import EpochAPIError, EpochProtocolError
 
+_USER_AGENT = "epoch-python/0.2.0b12"
+
 
 @dataclass(frozen=True)
 class TLSConfig:
@@ -75,7 +77,7 @@ class UrllibTransport:
             if filtered:
                 url = f"{url}?{urlencode(filtered)}"
         data = None if body is None else json.dumps(body, separators=(",", ":")).encode()
-        request_headers = {"accept": "application/json", "user-agent": "epoch-python/0.2.0b12"}
+        request_headers = {"accept": "application/json", "user-agent": _USER_AGENT}
         if data is not None:
             request_headers["content-type"] = "application/json"
         for name, value in (headers or {}).items():

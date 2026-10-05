@@ -76,8 +76,13 @@ strict typing. `make generate` generates Go and Python, and
 `make generate-check` rejects stale bindings in either language. Python
 generation namespaces imports/module identities beneath `epoch_sdk._generated`
 and fills bare constructor `Mapping` parameters without changing wire
-descriptors. Generated messages/stubs are a foundation, not a completed Python
-management client. Java management bindings/parity remain open.
+descriptors. The public `epoch_sdk.management` client now adds all seven calls,
+bounded failover/deadlines/cancellation, typed receipt checks, and acknowledged
+watches. `mypy --strict` covers its application modules and displayed example.
+Python CI also executes its seven calls against the Go TLS-1.3-only/mTLS fixture;
+set `EPOCH_PYTHON_MANAGEMENT_PROBE=python` locally to enable that Go test. Python
+gRPC relies on the controller's minimum-version policy, not a nonexistent
+client-side selector. Java bindings/parity and public-SDK Catalog evidence remain open.
 
 Xcode and its command-line tools supply Clang and the linker:
 
