@@ -104,5 +104,14 @@ resolution contract; do not retry a standalone non-idempotent write blindly.
 These are response-shape and full-package typing guarantees, not generated
 per-field response models, exhaustive native contract coverage, or a claim
 that `dict[str, Any]` payload fields are statically typed. Those remain separate
-DX-001 requirements. Live standalone/restart and regional fault evidence must
-also pass before this candidate is delivered.
+DX-001 requirements.
+
+Clean candidate `fb8d15b` passed all 57 Python tests and whole-package strict
+typing. Its standalone cross-language smoke passed against real Rust/Go
+processes, including the live Java smoke without skipping. Its accelerated
+regional campaign passed all eight invariants across all four profiles, owner
+loss, profile-leader losses, and same-volume full restart in 55,779 ms; the
+signed manifest and artifact receipts independently verified. The unchanged
+Rust source was checked against the retained node image before reuse.
+This is one bounded accelerated campaign, not a long soak or performance/SLO
+claim. Protected delivery evidence remains required.

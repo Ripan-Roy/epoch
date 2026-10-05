@@ -51,9 +51,15 @@ checked for both HTTP and custom transports. Duplicate-key, malformed JSON,
 and non-finite-number responses fail without exposing payloads or silently
 retrying uncertain mutations. All 57 Python tests and strict whole-package
 typing across 13 source files pass locally. CI and local lint now select the
-whole SDK. Live restart/regional and protected delivery evidence remain open;
-generated per-field response models, management clients, and the rest of
-DX-001 are not claimed complete by this shape-validation foundation.
+whole SDK. Clean `fb8d15b` additionally passed real standalone cross-language
+smoke, including the live Java smoke, and an independently verified signed
+eight-invariant regional campaign through all four profiles, profile-leader
+losses, and same-volume reopen in 55,779 ms. Its canonical manifest SHA-256 is
+`ac4ee00e14fcd9901aecea0cabe1ce19530f5e57282e2ddfa5b635ed8fef6cc1`.
+Protected delivery evidence remains open; generated per-field response models,
+management clients, and the rest of DX-001 are not claimed complete by this
+shape-validation foundation. This separate SDK branch does not modify the
+frozen control-HA PR or inherit its CI.
 
 ## How to use this register
 
