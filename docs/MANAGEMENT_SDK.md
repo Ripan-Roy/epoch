@@ -83,6 +83,33 @@ exactly-once business processing from a management watch.
 
 ## Example and verification
 
+### Python generated-contract foundation
+
+The separate branch now also generates namespaced Python messages and typed
+gRPC stubs from the same committed seven-method contract. Optional
+`management` dependencies pin `grpcio==1.84.0` and `protobuf==7.35.1`;
+`management-dev` additionally pins the compiler and typing packages. Ordinary
+HTTP SDK imports retain their standard-library-only runtime.
+
+```sh
+python -m pip install 'sdk/python[management,management-dev]'
+python scripts/generate-python-management.py --check
+PYTHONPATH=sdk/python/src python -m unittest discover -s sdk/python/tests -v
+```
+
+Eight focused binding tests cover the seven-method source/descriptor boundary,
+lazy stub construction, shared Go/Python delete-wire vectors for omitted/zero/
+maximum uint64 presence, operation/watch uint64 extrema, namespaced pickling,
+exact pinned regeneration, unexpected-source refusal, and executable Make
+checks that reject stale Python before rewriting and preserve Go generator
+failures. Strict whole-package typing checks the generated
+`.pyi` contracts, with explicit constructor mapping parameters rather than
+suppression. Ruff excludes external generated output, not application source.
+These tests do not run a Python management RPC or implement its failover/watch
+state machine. Public Python/Java management parity remains open.
+
+### Go client example
+
 [The full Go example](../sdk/go/epoch/management_example_test.go) compiles in
 the ordinary SDK test suite. The candidate docs page embeds this exact source
 under SDK reference → Management SDK, with protected bundle assertions and an

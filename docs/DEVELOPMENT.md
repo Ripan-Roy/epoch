@@ -60,6 +60,25 @@ brew install go rust protobuf buf pkgconf openjdk@25 node@24 pnpm actionlint she
 python3 -m pip install ruff==0.15.19 mypy==2.1.0
 ```
 
+The SDK contract candidate additionally requires its pinned Python generation
+and typing extras for repository development. Keep these in a project virtual
+environment; ordinary HTTP SDK consumers still need no runtime dependencies:
+
+```shell
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install 'sdk/python[management,management-dev]' ruff==0.15.19 mypy==2.1.0
+```
+
+`grpcio`/`grpcio-tools` 1.84.0 and Protobuf 7.35.1 produce the management
+bindings; `grpc-stubs` 1.53.0.6 and `types-protobuf` 7.35.1.20260906 support
+strict typing. `make generate` generates Go and Python, and
+`make generate-check` rejects stale bindings in either language. Python
+generation namespaces imports/module identities beneath `epoch_sdk._generated`
+and fills bare constructor `Mapping` parameters without changing wire
+descriptors. Generated messages/stubs are a foundation, not a completed Python
+management client. Java management bindings/parity remain open.
+
 Xcode and its command-line tools supply Clang and the linker:
 
 ```shell

@@ -21,6 +21,10 @@ notes explicitly list additional verified artifacts.
   Python/Java management parity, public-SDK Catalog fault certification,
   protected delivery, and native data streaming remain open; this candidate
   does not claim complete SDK delivery or production readiness.
+- Add pinned, namespaced Python management messages and typed gRPC stubs,
+  exact generation checks, optional dependencies, and shared Go/Python wire
+  vectors for omitted/zero/maximum uint64 generation presence. This is a
+  generated-contract foundation, not a public Python management client.
 
 ### Control-plane hardening
 

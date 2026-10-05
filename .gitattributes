@@ -1,1 +1,3 @@
 *.cmd text eol=crlf
+sdk/go/gen/** linguist-generated=true
+sdk/python/src/epoch_sdk/_generated/** linguist-generated=true

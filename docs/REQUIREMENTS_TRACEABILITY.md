@@ -75,6 +75,14 @@ protected delivery, the displayed multi-language management guide, and the
 broader native contract/streaming/type matrix remain open. See
 [management SDK candidate](MANAGEMENT_SDK.md).
 
+Python management parity now has a pinned generated-contract foundation:
+namespaced protobuf messages, typed gRPC stubs, optional runtime/dev extras,
+exact regeneration checks, and shared Go/Python wire vectors for omitted/zero/
+maximum uint64 delete preconditions. Eight binding regressions, all 65 Python
+tests, and strict whole-package typing across 19 source files pass locally.
+These are message/typing checks, not a public Python management client or
+live RPC/failover/watch evidence. CTRL-001 and DX-001 remain open.
+
 ## How to use this register
 
 Status values are:

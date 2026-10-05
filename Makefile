@@ -48,13 +48,16 @@ bootstrap-check: ## Print and validate the required local toolchain.
 
 generate: ## Generate language bindings from Protobuf contracts.
 	@if find spec/proto -type f -name '*.proto' -print -quit 2>/dev/null | grep -q .; then buf generate; else echo "no Protobuf contracts found; skipping generation"; fi
+	@python3 scripts/generate-python-management.py
 
 generate-check: ## Fail when generated bindings are stale.
+	@python3 scripts/generate-python-management.py --check
 	@epoch_generate_snapshot="$$(mktemp -d "$${TMPDIR:-/tmp}/epoch-generate.XXXXXX")"; \
 	trap 'rm -rf -- "$$epoch_generate_snapshot"' EXIT INT TERM; \
 	if [ -d sdk/go/gen ]; then cp -R sdk/go/gen "$$epoch_generate_snapshot/generated"; else mkdir "$$epoch_generate_snapshot/generated"; fi; \
-	$(MAKE) generate; \
+	$(MAKE) generate || exit $$?; \
 	diff -ru "$$epoch_generate_snapshot/generated" sdk/go/gen
+	@python3 scripts/generate-python-management.py --check
 
 release-check: ## Verify synchronized cross-language release metadata.
 	@./scripts/check-release-version.sh
@@ -62,14 +65,14 @@ release-check: ## Verify synchronized cross-language release metadata.
 format: ## Format Rust, Go, Java, Python, and JavaScript/TypeScript sources.
 	@if [ -f Cargo.toml ]; then cargo fmt --all; fi
 	@files="$$(find control operator sdk/go console/src/quickstarts tests/repository tests/integration -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then gofmt -w $$files; fi
-	@if [ -d sdk/python ]; then ruff format sdk/python tests/soak tests/integration/*.py; fi
+	@if [ -d sdk/python ]; then ruff format sdk/python tests/soak tests/integration/*.py scripts/generate-python-management.py; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) spotless:apply; fi
 	@$(PNPM_ENV) pnpm run format
 
 format-check: ## Check formatting without changing files.
 	@if [ -f Cargo.toml ]; then cargo fmt --all --check; fi
 	@files="$$(find control operator sdk/go console/src/quickstarts tests/repository tests/integration -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then unformatted="$$(gofmt -l $$files)"; test -z "$$unformatted" || { printf '%s\n' "$$unformatted"; exit 1; }; fi
-	@if [ -d sdk/python ]; then ruff format --check sdk/python tests/soak tests/integration/*.py; fi
+	@if [ -d sdk/python ]; then ruff format --check sdk/python tests/soak tests/integration/*.py scripts/generate-python-management.py; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) spotless:check; fi
 	@$(PNPM_ENV) pnpm run format:check
 
@@ -78,6 +81,7 @@ lint: ## Run static checks for every language and contract.
 	@if [ -f Cargo.toml ]; then RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --all-features --no-deps; fi
 	@if find control operator sdk/go -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then go vet ./...; fi
 	@if [ -d sdk/python ]; then ruff check sdk/python tests/soak tests/integration/*.py; fi
+	@if [ -d sdk/python ]; then ruff check --config sdk/python/pyproject.toml scripts/generate-python-management.py; fi
 	@if [ -d sdk/python ]; then PYTHONPATH=sdk/python/src mypy --strict sdk/python/src console/src/quickstarts/quickstart.py; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) -DskipTests verify; fi
 	@if [ -d .github/workflows ]; then actionlint; fi

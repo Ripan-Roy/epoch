@@ -139,13 +139,17 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
-      - run: python -m pip install mypy==2.1.0 ruff==0.15.19
+      - run: python -m pip install 'sdk/python[management,management-dev]' mypy==2.1.0 ruff==0.15.19
+      - name: Reject stale Python management bindings
+        run: python scripts/generate-python-management.py --check
       - run: >-
           ruff format --check sdk/python tests/soak tests/integration/*.py
           console/src/quickstarts/quickstart.py
+          scripts/generate-python-management.py
       - run: >-
           ruff check sdk/python tests/soak tests/integration/*.py
           console/src/quickstarts/quickstart.py
+      - run: ruff check --config sdk/python/pyproject.toml scripts/generate-python-management.py
       - name: Compile and type-check Python SDK and displayed quickstart
         run: |
           python -m py_compile console/src/quickstarts/quickstart.py

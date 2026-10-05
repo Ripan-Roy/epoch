@@ -142,6 +142,13 @@ management parity, generated native response models, persistent/cooperative
 data streaming, the full version matrix, and deferred package publication remain
 DX-001 work. See [the management SDK candidate](MANAGEMENT_SDK.md).
 
+The Python management foundation adds namespaced protobuf messages and typed
+gRPC stubs with pinned optional dependencies, exact regeneration, and shared
+Go/Python wire vectors. It preserves uint64 extrema and omitted/explicit-zero
+presence without adding dependencies to ordinary HTTP SDK imports. A public
+Python management client and Java management parity remain open; message
+generation is not live RPC or durability evidence.
+
 **Cache implementation note (21 August 2026):** The fixed-three-voter,
 single-shard regional Cache now implements the alpha contract for every
 non-deferred Cache row. Deterministic entry and memory/cold byte admission,
