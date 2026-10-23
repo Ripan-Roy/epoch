@@ -79,8 +79,27 @@ notes explicitly list additional verified artifacts.
   example displayed alongside Go/Python. Real Catalog faults, protected delivery,
   full native SDK parity, and package publication remain open.
 
+### CI and dependency hardening
+
+- Start self-contained Rust integration jobs independently, reuse isolated
+  Cargo and native OCI compilation caches, and retain every quality, SBOM,
+  runtime, and full three/five-controller verification stage. PR images remain
+  non-publishing. Fresh CI measurements are required before claiming a speedup.
+- Raise the console's Vite minimum to 7.3.7 and lock source-map-js 1.2.2 to
+  resolve six dependency advisories without a Vite major-version upgrade or
+  unrelated lockfile refresh.
+- Patch Rustls, WebPKI/root stores, and quinn-proto to resolve ten reported
+  TLS, certificate-trust, and denial-of-service advisories. Preserve unrelated
+  dependency versions and the existing documented Raft/fxhash exception.
+
 ### Control-plane hardening
 
+- Keep strong Catalog lease reads linearizable while avoiding full inventory
+  copies and retained-history digest generation for a lease-only response.
+  Preserve health failures, quorum loss, lease identity, TTL, and fencing.
+- Wait for strong initial Catalog inventory through every live controller
+  before the HA fixture's first concurrent writes. Retry only read-only
+  readiness; keep original write outcomes and failure evidence strict.
 - Run the complete three/five-controller HA fleets on separate CI runners and
   seal both exact-source/image proofs in the unchanged protected aggregate
   check. Bound strong-read verification to sixteen RPCs and real retention

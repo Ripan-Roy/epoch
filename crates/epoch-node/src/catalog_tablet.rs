@@ -169,6 +169,8 @@ pub struct CatalogTabletService {
     scope: CatalogTabletScope,
     state: RwLock<CatalogTabletState>,
     failure: RwLock<Option<String>>,
+    #[cfg(test)]
+    full_snapshot_reads: std::sync::atomic::AtomicU64,
 }
 
 impl CatalogTabletService {
@@ -179,6 +181,8 @@ impl CatalogTabletService {
             scope,
             state: RwLock::new(state),
             failure: RwLock::new(None),
+            #[cfg(test)]
+            full_snapshot_reads: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -209,6 +213,17 @@ impl CatalogTabletService {
                     .get(&proposal_id)
                     .map(|applied| applied.receipt.clone())
             })
+    }
+
+    /// Returns only the locally applied lease, without cloning or hashing the
+    /// complete Catalog. Callers requiring a linearizable result must complete
+    /// the consensus read barrier before reading this state.
+    pub fn control_lease(&self) -> Result<Option<ControlLease>, String> {
+        self.ensure_healthy()?;
+        self.state
+            .read()
+            .map_err(|_| "catalog state read lock was poisoned".to_owned())
+            .map(|state| state.catalog.control_lease().cloned())
     }
 
     /// Rebuilds a response for a deterministic proposal retained by consensus
@@ -254,6 +269,9 @@ impl CatalogTabletService {
 
     pub fn snapshot(&self) -> Result<CatalogTabletSnapshot, String> {
         self.ensure_healthy()?;
+        #[cfg(test)]
+        self.full_snapshot_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let state = self
             .state
             .read()
@@ -289,6 +307,12 @@ impl CatalogTabletService {
                 .map_err(|error| error.to_string())?,
             control_lease: state.catalog.control_lease().cloned(),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn full_snapshot_read_count(&self) -> u64 {
+        self.full_snapshot_reads
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn operation(&self, request_token: &str) -> Result<Option<CatalogOperation>, String> {
@@ -902,6 +926,96 @@ mod tests {
         service.snapshot().unwrap().managed_resources[0].status["sequence"]
             .as_u64()
             .unwrap()
+    }
+
+    #[test]
+    fn control_lease_read_is_owned_and_tracks_committed_state_without_snapshots() {
+        let service = CatalogTabletService::new(CatalogTabletScope::new(9, 4).unwrap());
+        assert_eq!(service.control_lease().unwrap(), None);
+        let acquire = CatalogCommand::AcquireControlLease(AcquireControlLease {
+            request_token: "lease-first".into(),
+            owner_id: "controller-a".into(),
+            now_ms: 1_000,
+            ttl_ms: 10_000,
+        });
+        service.apply(&committed(31, 2, 1, &acquire)).unwrap();
+        let before = service.snapshot().unwrap();
+        let snapshot_reads = service.full_snapshot_read_count();
+        let mut detached = service.control_lease().unwrap().unwrap();
+        assert_eq!(Some(detached.clone()), before.control_lease);
+        assert_eq!(detached.fence, 1);
+        assert_eq!(detached.valid_until_ms, 11_000);
+        detached.owner_id = "not-the-durable-owner".into();
+        detached.fence = 999;
+        detached.valid_until_ms = 0;
+        assert_eq!(service.control_lease().unwrap(), before.control_lease);
+        assert_eq!(service.full_snapshot_read_count(), snapshot_reads);
+        assert_eq!(service.snapshot().unwrap(), before);
+
+        let renewal = CatalogCommand::AcquireControlLease(AcquireControlLease {
+            request_token: "lease-renew".into(),
+            owner_id: "controller-a".into(),
+            now_ms: 2_000,
+            ttl_ms: 10_000,
+        });
+        service.apply(&committed(32, 2, 2, &renewal)).unwrap();
+        assert_eq!(
+            service.control_lease().unwrap(),
+            Some(ControlLease {
+                owner_id: "controller-a".into(),
+                fence: 1,
+                valid_until_ms: 12_000,
+            })
+        );
+        let takeover = CatalogCommand::AcquireControlLease(AcquireControlLease {
+            request_token: "lease-takeover".into(),
+            owner_id: "controller-b".into(),
+            now_ms: 12_000,
+            ttl_ms: 10_000,
+        });
+        service.apply(&committed(33, 3, 3, &takeover)).unwrap();
+        assert_eq!(
+            service.control_lease().unwrap(),
+            Some(ControlLease {
+                owner_id: "controller-b".into(),
+                fence: 2,
+                valid_until_ms: 22_000,
+            })
+        );
+    }
+
+    #[test]
+    fn control_lease_read_refuses_a_failed_catalog() {
+        let service = CatalogTabletService::new(CatalogTabletScope::new(9, 4).unwrap());
+        let acquire = CatalogCommand::AcquireControlLease(AcquireControlLease {
+            request_token: "lease-before-applier-failure".into(),
+            owner_id: "controller-a".into(),
+            now_ms: 1_000,
+            ttl_ms: 10_000,
+        });
+        service.apply(&committed(31, 2, 1, &acquire)).unwrap();
+        assert!(service.control_lease().unwrap().is_some());
+        service.fail("catalog applier failed");
+        assert_eq!(
+            service.control_lease().unwrap_err(),
+            "catalog applier failed"
+        );
+        assert_eq!(service.full_snapshot_read_count(), 0);
+    }
+
+    #[test]
+    fn control_lease_read_refuses_a_poisoned_catalog_lock() {
+        let service = CatalogTabletService::new(CatalogTabletScope::new(9, 4).unwrap());
+        let poison = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = service.state.write().unwrap();
+            panic!("poison this owned test state");
+        }));
+        assert!(poison.is_err());
+        assert_eq!(
+            service.control_lease().unwrap_err(),
+            "catalog state read lock was poisoned"
+        );
+        assert_eq!(service.full_snapshot_read_count(), 0);
     }
 
     fn fill_catalog_until_capacity_rejection(

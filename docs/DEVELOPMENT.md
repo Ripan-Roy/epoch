@@ -247,6 +247,7 @@ make kubernetes-config # render and strictly type-check the operator Kustomize t
 make test-kubernetes-runner # unit-test live-campaign contracts without Docker
 make test-kubernetes-live # exact-source disposable four-node managed lifecycle
 make test-observability-assets # validate collector, dashboard, alerts, and metric policy
+make test-ci-optimization # verify cache isolation, independent jobs, and unchanged runtime coverage
 ```
 
 `make check` includes `make audit`; it therefore requires the pinned
@@ -307,6 +308,44 @@ not commit generated SBOMs, image archives, credentials, or runtime volumes.
 Only the exact-main tag workflow can authenticate to GHCR. All workflow actions
 are pinned by full commit SHA, and a version comment records the reviewed tag.
 See [ADR-0041](adr/0041-tag-only-oci-supply-chain.md).
+
+## CI performance and trust boundaries
+
+Rust quality, standalone/docs integration, connector conformance, and protocol
+conformance start independently. Each job installs its own tools and still
+builds and tests the checked-out source; none consumes an earlier job's test
+result as a substitute. The protected Rust and integration checks remain
+required independently.
+
+Cargo dependency caches are isolated by operating system, architecture, hosted
+runner image, pinned Rust version, and lockfile. Compiler caches additionally
+use job-specific namespaces, build/Protobuf configuration, and source revision.
+A compatible fallback may warm compilation, but never skips Cargo validation,
+tests, Clippy, or live probes. Incremental and documentation artifacts are not
+retained in the compiler cache.
+
+Native arm64 and the five amd64 OCI builds use the same pinned Buildx actions as
+releases, with separate CI cache scopes per component and architecture. Builds
+load locally and explicitly do not push. Cache export is bounded and optional;
+build, exact-revision/non-root inspection, SBOM generation, and real runtime
+proof remain mandatory. A cache is not evidence of a passing test.
+
+The three/five-controller matrix still requires both complete fleets and
+independent receipt verification. Startup waits for a real strong Catalog read
+through every live controller, not merely a healthy HTTP listener. Only this
+read-only preflight retries; the initial concurrent writes retain their strict
+first-response and replay assertions. Lease reads retain the existing consensus
+ReadIndex barrier; the lease-only snapshot avoids copying unrelated inventory
+and hashing retained change history.
+
+The baseline SDK [CI run](https://github.com/Ripan-Roy/epoch/actions/runs/37380683463)
+spent 53m16s in the successful five-controller proof step. About 38m09s advanced
+the first real history floor, followed by about 5m57s expiring saved SDK
+checkpoints. That run failed overall because the three-controller worker wrote
+before Catalog election completed. These are baseline measurements, not a
+claimed speedup: fresh exact-source CI must establish the optimized runtime.
+No history size, fixture inventory, failure phase, checkpoint rule, lease TTL,
+or recovery timeout is reduced to make CI faster.
 
 ## Runtime configuration and local ports
 

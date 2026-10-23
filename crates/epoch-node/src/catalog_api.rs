@@ -1131,12 +1131,10 @@ async fn control_lease(
     State(state): State<RegionalCatalogState>,
 ) -> Result<Json<ControlLeaseResponse>, RegionalCatalogApiError> {
     control_read_barrier(&state).await?;
-    let snapshot = state
+    state
         .catalog
-        .snapshot()
-        .map_err(RegionalCatalogApiError::CatalogState)?;
-    snapshot
-        .control_lease
+        .control_lease()
+        .map_err(RegionalCatalogApiError::CatalogState)?
         .as_ref()
         .map(ControlLeaseResponse::from)
         .map(Json)
@@ -2058,6 +2056,86 @@ mod tests {
         .expect("response should contain JSON")
     }
 
+    async fn get_control_lease(node: &RegionalTestNode) -> Response {
+        node.app
+            .clone()
+            .oneshot(
+                Request::get(REGIONAL_CONTROL_LEASE_PATH)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn control_lease_read_requires_quorum_without_building_full_snapshots() {
+        let root = TempDir::new().unwrap();
+        let mut nodes = start_cluster(&root).await;
+        let leader = leader_index(&nodes).await;
+        let snapshot_reads = nodes[leader].state.catalog.full_snapshot_read_count();
+        let absent = get_control_lease(&nodes[leader]).await;
+        assert_eq!(absent.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response_json(absent).await["code"], "catalog_not_found");
+        let command = CatalogCommand::AcquireControlLease(AcquireControlLease {
+            request_token: "lease-read-quorum".into(),
+            owner_id: "quorum-owner".into(),
+            now_ms: 1_000,
+            ttl_ms: 10_000,
+        });
+        let (receipt, _) = commit_command(&nodes[leader].state, command).await.unwrap();
+        ensure_mutation_accepted(&receipt).unwrap();
+        let available = get_control_lease(&nodes[leader]).await;
+        assert_eq!(available.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(available).await,
+            json!({"owner_id": "quorum-owner", "fence": "1", "valid_until_ms": "11000"})
+        );
+        let follower = (leader + 1) % nodes.len();
+        let follower_snapshot_reads = nodes[follower].state.catalog.full_snapshot_read_count();
+        let not_leader = get_control_lease(&nodes[follower]).await;
+        assert_eq!(not_leader.status(), StatusCode::CONFLICT);
+        assert_eq!(response_json(not_leader).await["code"], "not_leader");
+        assert_eq!(
+            nodes[follower].state.catalog.full_snapshot_read_count(),
+            follower_snapshot_reads
+        );
+
+        for (index, node) in nodes.iter_mut().enumerate() {
+            if index != leader {
+                node.materializer.lock().await.shutdown().await.unwrap();
+                node.peer_server.abort();
+                let _ = (&mut node.peer_server).await;
+            }
+        }
+        // A committed local lease remains present, but cannot be exposed as an
+        // authoritative result after the other two real voters have stopped.
+        let durable_lease = nodes[leader].state.catalog.control_lease().unwrap();
+        assert_eq!(durable_lease.unwrap().owner_id, "quorum-owner");
+        let unavailable = get_control_lease(&nodes[leader]).await;
+        assert!(matches!(
+            unavailable.status(),
+            StatusCode::SERVICE_UNAVAILABLE | StatusCode::CONFLICT
+        ));
+        assert!(matches!(
+            response_json(unavailable).await["code"].as_str(),
+            Some("read_barrier_unavailable" | "not_leader" | "proposal_conflict")
+        ));
+        assert_eq!(
+            nodes[leader].state.catalog.full_snapshot_read_count(),
+            snapshot_reads
+        );
+        nodes[leader]
+            .materializer
+            .lock()
+            .await
+            .shutdown()
+            .await
+            .unwrap();
+        nodes[leader].peer_server.abort();
+        let _ = (&mut nodes[leader].peer_server).await;
+    }
+
     #[tokio::test]
     async fn catalog_submission_joins_identical_proposal_after_stale_unknown_lookup() {
         let root = TempDir::new().unwrap();
@@ -2404,6 +2482,7 @@ mod tests {
         let lease = response_json(lease).await;
         assert_eq!(lease["mutation"]["lease"]["fence"], "1");
 
+        let full_snapshot_reads = nodes[leader].state.catalog.full_snapshot_read_count();
         let current_lease = nodes[leader]
             .app
             .clone()
@@ -2416,6 +2495,11 @@ mod tests {
             .unwrap();
         assert_eq!(current_lease.status(), StatusCode::OK);
         assert_eq!(response_json(current_lease).await["owner_id"], "control-a");
+        assert_eq!(
+            nodes[leader].state.catalog.full_snapshot_read_count(),
+            full_snapshot_reads,
+            "lease reads must not clone or hash the complete Catalog snapshot"
+        );
 
         let rejected_lease = nodes[leader]
             .app

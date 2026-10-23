@@ -70,6 +70,35 @@ digests remain part of this proof. This does not inherit protected delivery
 from PR #149: current SDK PR/main/Pages must run separately. See
 [SDK provenance and commands](MANAGEMENT_SDK.md#complete-local-catalog-evidence--5-october-2026).
 
+## CI performance follow-up (23 October 2026)
+
+SDK [run 37380683463](https://github.com/Ripan-Roy/epoch/actions/runs/37380683463)
+failed overall: its three-controller worker submitted initial concurrent
+writes before Catalog election completed. The five-controller worker passed;
+its downloaded isolated bundle also passes the independent SDK verifier.
+This is not a passing complete three/five-controller certification.
+
+The successful worker's proof step took 53m16s. About 38m09s advanced the first
+real history floor and another 5m57s expired saved SDK checkpoints. Profiling
+identified a lease-read hot path that copied the full Catalog inventory and
+hashed retained history after every strong read. The candidate reads only the
+applied lease after the unchanged consensus barrier, with tests for quorum
+loss, follower refusal, missing leases, poisoned locks, and fail-stop state.
+
+The fixture now waits for strong read-only Catalog inventory through the exact
+expected live controller fleet before any initial write. Its original
+concurrent mutation outcomes remain strict; fatal responses, missing members,
+and failed mutations cannot become a passing readiness retry.
+
+CI also reuses isolated Cargo/OCI compilation caches and starts self-contained
+integration jobs independently. Every fault phase, full inventory, real history
+floor, durable application checkpoint, SDK witness, and independent aggregate
+check remains required. This candidate changes Rust production code, so the
+historical captures above cannot certify it: fresh exact-source complete
+three/five-controller CI evidence is still required. No optimized wall-time
+improvement is claimed until that run completes. See
+[CI performance boundaries](DEVELOPMENT.md#ci-performance-and-trust-boundaries).
+
 ## Historical local verification
 
 The new regression first reproduced identical owners for two production

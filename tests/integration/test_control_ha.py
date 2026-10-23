@@ -43,6 +43,240 @@ def evidence_fixture() -> dict:
 
 
 class OwnerEvidenceContractTest(unittest.TestCase):
+    def initial_fleet(self, responses: list[list[object]]) -> object:
+        fleet = control_ha.OwnerFleet.__new__(control_ha.OwnerFleet)
+        fleet.cluster = mock.Mock()
+        fleet.cluster.temporary_directory.name = "/owned/initial-catalog"
+        fleet.count = len(responses)
+        fleet.controllers = []
+        for index, sequence in enumerate(responses):
+            controller = mock.Mock(
+                label=f"controller-{index}", owner_id=f"owner-{index}", paused=False
+            )
+            controller.process.poll.return_value = None
+            controller.request.side_effect = sequence
+            fleet.controllers.append(controller)
+        fleet.result = {"observations": {}}
+        for method in (
+            "create_and_replay",
+            "profiles_write",
+            "same_label_replacement",
+            "owner_failures",
+            "quorum_loss",
+            "reopen",
+            "close",
+        ):
+            setattr(fleet, method, mock.Mock())
+        return fleet
+
+    @staticmethod
+    def initial_readiness(_description: str, check: object, **_kwargs: object) -> bool:
+        for _ in range(2):
+            if check():  # type: ignore[operator]
+                return True
+        raise AssertionError("Catalog never became ready")
+
+    def test_initial_mutation_waits_for_strong_catalog_on_every_controller(
+        self,
+    ) -> None:
+        response = control_ha.regional.HttpResponse
+        ready = response(200, {"resources": [], "count": 0}, {})
+        transient = response(503, {"error": "access replicated Catalog failed"}, {})
+        fleet = self.initial_fleet([[ready, ready], [transient, ready], [ready, ready]])
+
+        def first_mutation() -> None:
+            for controller in fleet.controllers:
+                self.assertEqual(
+                    [mock.call("GET", "/v1/resources")] * 2,
+                    controller.request.call_args_list,
+                )
+
+        fleet.create_and_replay.side_effect = first_mutation
+        with (
+            mock.patch.object(control_ha.regional, "wait_for_nodes"),
+            mock.patch.object(control_ha.subprocess, "run"),
+            mock.patch.object(
+                control_ha.soak, "file_receipt", return_value={"sha256": "a" * 64}
+            ),
+            mock.patch.object(
+                control_ha.regional, "wait_until", side_effect=self.initial_readiness
+            ) as wait,
+        ):
+            fleet.run()
+        wait.assert_called_once()
+        self.assertEqual(
+            control_ha.regional.RECOVERY_TIMEOUT_SECONDS,
+            wait.call_args.kwargs["timeout_seconds"],
+        )
+        fleet.create_and_replay.assert_called_once_with()
+        fleet.close.assert_called_once_with()
+
+    def test_initial_catalog_unavailability_never_retries_a_mutation(self) -> None:
+        response = control_ha.regional.HttpResponse
+        transient = response(503, {"error": "access replicated Catalog failed"}, {})
+        fleet = self.initial_fleet([[transient, transient]])
+        with (
+            mock.patch.object(control_ha.regional, "wait_for_nodes"),
+            mock.patch.object(control_ha.subprocess, "run"),
+            mock.patch.object(
+                control_ha.soak, "file_receipt", return_value={"sha256": "a" * 64}
+            ),
+            mock.patch.object(
+                control_ha.regional, "wait_until", side_effect=self.initial_readiness
+            ),
+            self.assertRaisesRegex(AssertionError, "Catalog never became ready"),
+        ):
+            fleet.run()
+        fleet.create_and_replay.assert_not_called()
+        self.assertEqual(
+            [mock.call("GET", "/v1/resources")] * 2,
+            fleet.controllers[0].request.call_args_list,
+        )
+        fleet.close.assert_called_once_with()
+
+    def test_first_concurrent_put_failure_is_not_hidden_by_a_mutation_retry(
+        self,
+    ) -> None:
+        response = control_ha.regional.HttpResponse
+        ready = response(200, {"resources": [], "count": 0}, {})
+        unavailable = response(503, {"error": "access replicated Catalog failed"}, {})
+        fleet = self.initial_fleet([[ready, unavailable] for _ in range(3)])
+        fleet.http_resources = [
+            control_ha.regional.Resource("cache", f"writer-{index}")
+            for index in range(3)
+        ]
+        fleet.resources = []
+        fleet.create_and_replay = control_ha.OwnerFleet.create_and_replay.__get__(fleet)
+        with (
+            mock.patch.object(control_ha.regional, "wait_for_nodes"),
+            mock.patch.object(control_ha.subprocess, "run"),
+            mock.patch.object(
+                control_ha.soak, "file_receipt", return_value={"sha256": "a" * 64}
+            ),
+            mock.patch.object(
+                control_ha.regional, "wait_until", side_effect=self.initial_readiness
+            ),
+            self.assertRaises(AssertionError),
+        ):
+            fleet.run()
+        for controller in fleet.controllers:
+            self.assertEqual(
+                ["GET", "PUT"],
+                [call.args[0] for call in controller.request.call_args_list],
+            )
+        fleet.close.assert_called_once_with()
+
+    def test_initial_catalog_requires_a_live_controller(self) -> None:
+        fleet = self.initial_fleet([[]])
+        fleet.controllers[0].process.poll.return_value = 1
+        with (
+            mock.patch.object(
+                control_ha.regional, "wait_until", side_effect=self.initial_readiness
+            ),
+            self.assertRaisesRegex(RuntimeError, "no live controllers"),
+        ):
+            fleet.wait_for_initial_catalog()
+        fleet.controllers[0].request.assert_not_called()
+
+    def test_initial_catalog_rejects_a_dead_or_paused_member_not_a_healthy_subset(
+        self,
+    ) -> None:
+        ready = control_ha.regional.HttpResponse(200, {"resources": [], "count": 0}, {})
+        for state in ("dead", "paused", "missing_process"):
+            with self.subTest(state=state):
+                fleet = self.initial_fleet([[ready] for _ in range(3)])
+                if state == "dead":
+                    fleet.controllers[1].process.poll.return_value = 1
+                elif state == "paused":
+                    fleet.controllers[1].paused = True
+                else:
+                    fleet.controllers[1].process = None
+                with (
+                    mock.patch.object(control_ha.regional, "wait_for_nodes"),
+                    mock.patch.object(control_ha.subprocess, "run"),
+                    mock.patch.object(
+                        control_ha.soak,
+                        "file_receipt",
+                        return_value={"sha256": "a" * 64},
+                    ),
+                    mock.patch.object(
+                        control_ha.regional,
+                        "wait_until",
+                        side_effect=self.initial_readiness,
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeError, "complete initial controller fleet"
+                    ),
+                ):
+                    fleet.run()
+                fleet.create_and_replay.assert_not_called()
+                for controller in fleet.controllers:
+                    controller.request.assert_not_called()
+                fleet.close.assert_called_once_with()
+
+    def test_initial_catalog_rejects_a_missing_or_invalid_expected_member_count(
+        self,
+    ) -> None:
+        ready = control_ha.regional.HttpResponse(200, {"resources": [], "count": 0}, {})
+        for count in (2, 4, True, 0, -1, 3.0):
+            with self.subTest(count=count):
+                fleet = self.initial_fleet([[ready] for _ in range(3)])
+                fleet.count = count
+                with (
+                    mock.patch.object(
+                        control_ha.regional,
+                        "wait_until",
+                        side_effect=self.initial_readiness,
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeError, "complete initial controller fleet"
+                    ),
+                ):
+                    fleet.wait_for_initial_catalog()
+                for controller in fleet.controllers:
+                    controller.request.assert_not_called()
+
+    def test_initial_catalog_fatal_responses_fail_without_mutating(self) -> None:
+        response = control_ha.regional.HttpResponse
+        malformed = (
+            [],
+            {},
+            {"resources": None, "count": 0},
+            {"resources": {}, "count": 0},
+            {"resources": [None], "count": 1},
+            {"resources": [], "count": True},
+            {"resources": [], "count": -1},
+            {"resources": [], "count": 1},
+            {"resources": []},
+        )
+        failures = [response(status, {}, {}) for status in (401, 403, 404, 500)]
+        failures.extend(response(200, document, {}) for document in malformed)
+        failures.append(ValueError("invalid JSON"))
+        for failure in failures:
+            with self.subTest(response=failure):
+                fleet = self.initial_fleet([[failure]])
+                with (
+                    mock.patch.object(control_ha.regional, "wait_for_nodes"),
+                    mock.patch.object(control_ha.subprocess, "run"),
+                    mock.patch.object(
+                        control_ha.soak,
+                        "file_receipt",
+                        return_value={"sha256": "a" * 64},
+                    ),
+                    mock.patch.object(
+                        control_ha.regional,
+                        "wait_until",
+                        side_effect=self.initial_readiness,
+                    ),
+                    self.assertRaises(RuntimeError),
+                ):
+                    fleet.run()
+                fleet.create_and_replay.assert_not_called()
+                fleet.controllers[0].request.assert_called_once_with(
+                    "GET", "/v1/resources"
+                )
+                fleet.close.assert_called_once_with()
+
     def test_final_bundle_verification_controls_success_and_failure_manifests(
         self,
     ) -> None:

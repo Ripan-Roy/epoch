@@ -15,6 +15,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   rust:
@@ -23,6 +24,30 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Identify the hosted runner image
+        id: runner-image
+        run: echo "version=${ImageOS:?}-${ImageVersion:?}" >> "$GITHUB_OUTPUT"
+      - name: Restore Cargo registry and Git dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+          key: cargo-registry-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.version }}-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.version }}-rust-1.97.1-
+      - name: Restore job-specific Rust compiler artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/debug
+            !target/debug/incremental
+          key: cargo-target-v1-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.version }}-rust-1.97.1-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml', '**/build.rs', '.cargo/config*', '**/.cargo/config*', 'spec/proto/**', 'buf*.yaml', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-target-v1-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.version }}-rust-1.97.1-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml', '**/build.rs', '.cargo/config*', '**/.cargo/config*', 'spec/proto/**', 'buf*.yaml', '.github/workflows/ci.yml') }}-
       - name: Install pinned Rust toolchain
         run: >-
           rustup toolchain install 1.97.1
@@ -107,6 +132,8 @@ jobs:
         run: make test-compose-crash-restart
       - name: Verify concurrent controller fault fixture contracts
         run: make test-control-ha-runner
+      - name: Verify CI reuse preserves every required check
+        run: make test-ci-optimization
       - name: Verify synchronized release metadata
         run: ./scripts/check-release-version.sh
       - name: Check Go formatting
@@ -258,9 +285,32 @@ jobs:
     name: Cross-language standalone and docs smoke
     runs-on: ubuntu-latest
     timeout-minutes: 35
-    needs: [rust, go-contracts, python, java]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Identify the hosted runner image
+        id: runner-image
+        run: echo "version=${ImageOS:?}-${ImageVersion:?}" >> "$GITHUB_OUTPUT"
+      - name: Restore Cargo registry and Git dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+          key: cargo-registry-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.version }}-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.version }}-rust-1.97.1-
+      - name: Restore job-specific Rust compiler artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/debug
+            !target/debug/incremental
+          key: cargo-target-v1-integration-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.version }}-rust-1.97.1-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml', '**/build.rs', '.cargo/config*', '**/.cargo/config*', 'spec/proto/**', 'buf*.yaml', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-target-v1-integration-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.version }}-rust-1.97.1-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml', '**/build.rs', '.cargo/config*', '**/.cargo/config*', 'spec/proto/**', 'buf*.yaml', '.github/workflows/ci.yml') }}-
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
       - name: Install native Rust build dependencies
@@ -305,9 +355,32 @@ jobs:
     name: Source connector conformance
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: [rust]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Identify the hosted runner image
+        id: runner-image
+        run: echo "version=${ImageOS:?}-${ImageVersion:?}" >> "$GITHUB_OUTPUT"
+      - name: Restore Cargo registry and Git dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+          key: cargo-registry-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.version }}-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.version }}-rust-1.97.1-
+      - name: Restore job-specific Rust compiler artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/debug
+            !target/debug/incremental
+          key: cargo-target-v1-connector-conformance-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.version }}-rust-1.97.1-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml', '**/build.rs', '.cargo/config*', '**/.cargo/config*', 'spec/proto/**', 'buf*.yaml', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-target-v1-connector-conformance-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.version }}-rust-1.97.1-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml', '**/build.rs', '.cargo/config*', '**/.cargo/config*', 'spec/proto/**', 'buf*.yaml', '.github/workflows/ci.yml') }}-
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
       - name: Install native Rust build dependencies
@@ -347,9 +420,32 @@ jobs:
     name: Redis, Kafka, and RabbitMQ client conformance
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    needs: [rust]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Identify the hosted runner image
+        id: runner-image
+        run: echo "version=${ImageOS:?}-${ImageVersion:?}" >> "$GITHUB_OUTPUT"
+      - name: Restore Cargo registry and Git dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+          key: cargo-registry-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.version }}-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.version }}-rust-1.97.1-
+      - name: Restore job-specific Rust compiler artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/debug
+            !target/debug/incremental
+          key: cargo-target-v1-protocol-conformance-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.version }}-rust-1.97.1-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml', '**/build.rs', '.cargo/config*', '**/.cargo/config*', 'spec/proto/**', 'buf*.yaml', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-target-v1-protocol-conformance-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.version }}-rust-1.97.1-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml', '**/build.rs', '.cargo/config*', '**/.cargo/config*', 'spec/proto/**', 'buf*.yaml', '.github/workflows/ci.yml') }}-
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
       - name: Install native Rust build dependencies
@@ -415,19 +511,31 @@ jobs:
     name: Native arm64 node image
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: "false"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Require a native arm64 runner
         run: test "$(uname -m)" = aarch64
+      - name: Set up cached native image builds
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Resolve exact-source image version
+        id: image-version
+        run: echo "value=$(cat VERSION)" >> "$GITHUB_OUTPUT"
       - name: Build the release node image natively
-        run: |
-          version="$(cat VERSION)"
-          docker build \
-            --platform linux/arm64 \
-            --file deploy/docker/Dockerfile.node \
-            --build-arg "EPOCH_VERSION=${version}" \
-            --build-arg "VCS_REF=${GITHUB_SHA}" \
-            --tag epoch/node:ci-arm64 .
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.node
+          platforms: linux/arm64
+          load: true
+          push: false
+          tags: epoch/node:ci-arm64
+          build-args: |
+            EPOCH_VERSION=${{ steps.image-version.outputs.value }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha,version=2,scope=ci-node-arm64
+          cache-to: type=gha,version=2,scope=ci-node-arm64,mode=max,timeout=2m,ignore-error=true
       - name: Inspect arm64 runtime and OCI metadata
         run: |
           test "$(docker image inspect epoch/node:ci-arm64 --format '{{.Architecture}}')" = arm64
@@ -576,6 +684,8 @@ jobs:
     name: Container and Compose
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: "false"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -586,16 +696,83 @@ jobs:
       - run: docker compose -f deploy/compose/docker-compose.consensus-probe.yml config --quiet
       - run: docker compose -f deploy/compose/docker-compose.regional.yml config --quiet
       - run: docker compose -f deploy/compose/docker-compose.connectors.yml config --quiet
-      - name: Build the exact non-publishing OCI image set
-        run: |
-          version="$(cat VERSION)"
-          for component in node control operator cli compat; do
-            docker build \
-              --file "deploy/docker/Dockerfile.${component}" \
-              --build-arg "EPOCH_VERSION=${version}" \
-              --build-arg "VCS_REF=${GITHUB_SHA}" \
-              --tag "epoch/${component}:ci" .
-          done
+      - name: Set up cached native image builds
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Resolve exact-source image version
+        id: image-version
+        run: echo "value=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+      # Cache only compilation layers, not inspection results or runtime proof.
+      # Separate scopes prevent the five images from evicting each other.
+      - name: Build the exact non-publishing node image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.node
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: epoch/node:ci
+          build-args: |
+            EPOCH_VERSION=${{ steps.image-version.outputs.value }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha,version=2,scope=ci-node-amd64
+          cache-to: type=gha,version=2,scope=ci-node-amd64,mode=max,timeout=2m,ignore-error=true
+      - name: Build the exact non-publishing control image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.control
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: epoch/control:ci
+          build-args: |
+            EPOCH_VERSION=${{ steps.image-version.outputs.value }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha,version=2,scope=ci-control-amd64
+          cache-to: type=gha,version=2,scope=ci-control-amd64,mode=max,timeout=2m,ignore-error=true
+      - name: Build the exact non-publishing operator image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.operator
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: epoch/operator:ci
+          build-args: |
+            EPOCH_VERSION=${{ steps.image-version.outputs.value }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha,version=2,scope=ci-operator-amd64
+          cache-to: type=gha,version=2,scope=ci-operator-amd64,mode=max,timeout=2m,ignore-error=true
+      - name: Build the exact non-publishing CLI image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.cli
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: epoch/cli:ci
+          build-args: |
+            EPOCH_VERSION=${{ steps.image-version.outputs.value }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha,version=2,scope=ci-cli-amd64
+          cache-to: type=gha,version=2,scope=ci-cli-amd64,mode=max,timeout=2m,ignore-error=true
+      - name: Build the exact non-publishing compatibility image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.compat
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: epoch/compat:ci
+          build-args: |
+            EPOCH_VERSION=${{ steps.image-version.outputs.value }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha,version=2,scope=ci-compat-amd64
+          cache-to: type=gha,version=2,scope=ci-compat-amd64,mode=max,timeout=2m,ignore-error=true
       - name: Inspect non-root runtime and OCI metadata
         run: |
           version="$(cat VERSION)"

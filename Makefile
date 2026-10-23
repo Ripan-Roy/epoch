@@ -109,7 +109,7 @@ audit: ## Reject Rust and npm dependency advisories except the documented Raft e
 
 test: test-unit ## Run the default local test suite.
 
-test-unit: test-retry-command test-compose-crash-restart test-release-manifest test-release-workflow test-soak-runner test-kubernetes-runner test-regional-runtime-runner test-protocol-regional-runner test-control-ha-runner test-java-management-generation test-management-sdk-runner ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
+test-unit: test-retry-command test-compose-crash-restart test-release-manifest test-release-workflow test-ci-optimization test-soak-runner test-kubernetes-runner test-regional-runtime-runner test-protocol-regional-runner test-control-ha-runner test-java-management-generation test-management-sdk-runner ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
 	@if [ -f Cargo.toml ]; then cargo test --locked --workspace --all-targets --all-features; fi
 	@if find control operator sdk/go -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then go test -race ./...; fi
 	@if [ -d sdk/python ]; then PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests -v; fi
@@ -127,6 +127,10 @@ test-release-manifest: ## Prove release digest validation and manifest assembly 
 
 test-release-workflow: ## Prove native multi-platform release and supply-chain invariants.
 	@bash tests/integration/release-workflow.sh
+
+.PHONY: test-ci-optimization
+test-ci-optimization: ## Preserve CI coverage and cache isolation while allowing independent jobs to start immediately.
+	@python3 -m unittest discover -s tests/integration -p 'test_ci_*.py' -v
 
 .PHONY: test-java-management-generation
 test-java-management-generation: ## Prove pinned Java generation and fail-closed freshness/inventory checks.
