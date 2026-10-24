@@ -136,14 +136,23 @@ alpha; it does not claim a real-time deadline SLA, dynamic or cross-region
 ownership, coordinated backups/PITR, production performance evidence, or a
 complete external integration plane. See ADR-0027.
 
-**SDK candidate note (5 October 2026):** The separate SDK contract branch adds
+**SDK implementation note (24 October 2026):** PR #152 merged at `3f18779` with
+all 14 protected PR CI jobs and Pages verification passing. Its complete
+three/five-controller SDK bundle independently verifies all 516 receipts;
+manifest SHA-256 is
+`9dc49e92455c8e83df9f56e79d3cb3c0cfca1bc9e731e3dc8c2f7148cacdc50f`.
+Exact merged-main delivery remains separately gated: its initial dependency
+audits reported newly reviewed Zod, ctutils, and Tokio advisories. The follow-up
+patches those dependencies without an audit exclusion. This does not invalidate
+the PR's recorded runtime proof or authorize publication before current-main
+checks pass. The implementation adds
 strict whole-package Python typing and fail-closed standalone/regional response
 shape validation, plus Go/Java/Python clients for all seven generated management methods.
 All three preserve caller tokens and optional OCC presence, bound failover
 by one deadline and explicit endpoint allowlist, validate response identities
-and governance filters, and acknowledges only scanned management-watch cursors.
-Local generated TLS 1.3/mTLS tests and compiled examples are client-contract
-evidence, not protected delivery or Catalog fault certification. Generated
+and governance filters, and acknowledge only scanned management-watch cursors.
+Generated TLS 1.3/mTLS tests and compiled examples remain separate from the
+actual protected Catalog fault certification. Generated
 native response models, persistent/cooperative
 data streaming, the full version matrix, and deferred package publication remain
 DX-001 work. See [the management SDK candidate](MANAGEMENT_SDK.md).

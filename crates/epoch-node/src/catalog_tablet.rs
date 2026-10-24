@@ -13,7 +13,7 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use epoch_catalog::{
     Catalog, CatalogChangePage, CatalogCommand, CatalogError, CatalogMutation, CatalogOperation,
-    CatalogRejectionCode, ControlLease, ManagedResourceRecord, ResourceRecord,
+    CatalogRejectionCode, ControlLease, ManagedResourceRecord, ResourceName, ResourceRecord,
 };
 use epoch_consensus::{ApplicationSnapshot, CommittedProposal, LogIndex};
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,7 @@ const LEGACY_CATALOG_APPLICATION_SNAPSHOT_VERSION: u16 = 1;
 const CATALOG_APPLICATION_SNAPSHOT_VERSION: u16 = 2;
 const CATALOG_APPLICATION_SNAPSHOT_MAGIC: [u8; 4] = *b"ECAT";
 const CATALOG_APPLICATION_SNAPSHOT_HEADER_BYTES: usize = 4 + 2 + (4 * 8) + 4;
+pub const MAX_MANAGED_RESOURCE_PAGE_SIZE: usize = 128;
 const _: () = assert!(
     epoch_catalog::MAX_CATALOG_SNAPSHOT_BYTES + CATALOG_APPLICATION_SNAPSHOT_HEADER_BYTES
         <= epoch_consensus::MAX_APPLICATION_SNAPSHOT_BYTES
@@ -113,6 +114,14 @@ pub struct CatalogTabletSnapshot {
     pub node_allocations: BTreeMap<u64, u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub control_lease: Option<ControlLease>,
+}
+
+/// One bounded inventory observation from a single applied Catalog state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogManagedResourcePage {
+    pub latest_change_cursor: u64,
+    pub resources: Vec<ManagedResourceRecord>,
+    pub has_more: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +233,71 @@ impl CatalogTabletService {
             .read()
             .map_err(|_| "catalog state read lock was poisoned".to_owned())
             .map(|state| state.catalog.control_lease().cloned())
+    }
+
+    /// Returns one owned native resource without copying unrelated state.
+    /// This local read does not establish a consensus read barrier.
+    pub fn resource(&self, name: &ResourceName) -> Result<ResourceRecord, CatalogTabletQueryError> {
+        self.query_catalog(|catalog| catalog.resource(name).cloned())
+    }
+
+    /// Returns one owned managed resource after the caller's read barrier.
+    pub fn managed_resource(
+        &self,
+        name: &ResourceName,
+    ) -> Result<ManagedResourceRecord, CatalogTabletQueryError> {
+        self.query_catalog(|catalog| catalog.managed_resource(name).cloned())
+    }
+
+    /// Captures the cursor, bounded inventory, and continuation flag together.
+    /// As with other local reads, callers establish any required read barrier.
+    pub fn managed_resource_page(
+        &self,
+        after: Option<&ResourceName>,
+        limit: usize,
+    ) -> Result<CatalogManagedResourcePage, CatalogTabletQueryError> {
+        if limit == 0 || limit > MAX_MANAGED_RESOURCE_PAGE_SIZE {
+            return Err(CatalogTabletQueryError::Catalog(CatalogError::InvalidSpec(
+                format!(
+                    "control resource page size must be between 1 and {MAX_MANAGED_RESOURCE_PAGE_SIZE}"
+                ),
+            )));
+        }
+        if let Some(after) = after {
+            after.validate().map_err(CatalogTabletQueryError::Catalog)?;
+        }
+        self.query_catalog(|catalog| {
+            let mut candidates = catalog
+                .managed_resources()
+                .filter(|resource| after.is_none_or(|after| resource.name > *after));
+            let resources = candidates.by_ref().take(limit).cloned().collect();
+            Ok(CatalogManagedResourcePage {
+                latest_change_cursor: catalog.latest_change_cursor(),
+                resources,
+                has_more: candidates.next().is_some(),
+            })
+        })
+    }
+
+    /// Computes allocation counts without copying inventory or change history.
+    pub fn node_allocations(&self) -> Result<BTreeMap<u64, u32>, String> {
+        self.query_catalog(Catalog::node_allocations)
+            .map_err(|error| match error {
+                CatalogTabletQueryError::Unavailable(error) => error,
+                CatalogTabletQueryError::Catalog(error) => error.to_string(),
+            })
+    }
+
+    fn query_catalog<T>(
+        &self,
+        query: impl FnOnce(&Catalog) -> Result<T, CatalogError>,
+    ) -> Result<T, CatalogTabletQueryError> {
+        self.ensure_healthy()
+            .map_err(CatalogTabletQueryError::Unavailable)?;
+        let state = self.state.read().map_err(|_| {
+            CatalogTabletQueryError::Unavailable("catalog state read lock was poisoned".to_owned())
+        })?;
+        query(&state.catalog).map_err(CatalogTabletQueryError::Catalog)
     }
 
     /// Rebuilds a response for a deterministic proposal retained by consensus
@@ -926,6 +1000,242 @@ mod tests {
         service.snapshot().unwrap().managed_resources[0].status["sequence"]
             .as_u64()
             .unwrap()
+    }
+
+    fn query_name(name: &str) -> ResourceName {
+        ResourceName::new(
+            "acme",
+            "payments",
+            "production",
+            "core",
+            ResourceKind::Stream,
+            name,
+        )
+        .unwrap()
+    }
+
+    fn query_service() -> Arc<CatalogTabletService> {
+        let service = CatalogTabletService::new(CatalogTabletScope::new(9, 4).unwrap());
+        let mut native = command("query-native", "native", 1);
+        if let CatalogCommand::Apply(request) = &mut native {
+            request.tablet_placements = vec![epoch_catalog::TabletPlacement {
+                shard_index: 0,
+                voter_node_ids: vec![1, 2, 3],
+            }];
+        }
+        service.apply(&committed(1, 2, 1, &native)).unwrap();
+        let managed = CatalogCommand::ApplyDesired(ApplyDesiredResources {
+            request_token: "query-managed".into(),
+            resources: ["alpha", "bravo", "charlie"]
+                .into_iter()
+                .map(|name| DesiredResourceWrite {
+                    name: query_name(name),
+                    expected_generation: Some(0),
+                    desired: json!({"name": name}),
+                })
+                .collect(),
+        });
+        service.apply(&committed(2, 2, 2, &managed)).unwrap();
+        service
+    }
+
+    #[test]
+    fn narrow_catalog_reads_match_snapshot_and_return_detached_current_values() {
+        let service = query_service();
+        let snapshot = service.snapshot().unwrap();
+        let full_reads = service.full_snapshot_read_count();
+        let native = service.resource(&query_name("native")).unwrap();
+        assert_eq!(snapshot.resources, vec![native]);
+        assert_eq!(
+            service.node_allocations().unwrap(),
+            snapshot.node_allocations
+        );
+        assert_eq!(snapshot.node_allocations.len(), 3);
+        for expected in &snapshot.managed_resources {
+            assert_eq!(service.managed_resource(&expected.name).unwrap(), *expected);
+        }
+        let mut detached = service.managed_resource(&query_name("alpha")).unwrap();
+        detached.generation = 99;
+        detached.desired = json!({"changed": true});
+        assert_eq!(
+            service.managed_resource(&query_name("alpha")).unwrap(),
+            snapshot.managed_resources[0]
+        );
+        for missing in [
+            service.resource(&query_name("missing")).map(|_| ()),
+            service.managed_resource(&query_name("missing")).map(|_| ()),
+        ] {
+            assert!(matches!(
+                missing,
+                Err(CatalogTabletQueryError::Catalog(CatalogError::NotFound(_)))
+            ));
+        }
+        let old_page = service.managed_resource_page(None, 2).unwrap();
+        let update = CatalogCommand::ApplyDesired(ApplyDesiredResources {
+            request_token: "query-managed-update".into(),
+            resources: vec![DesiredResourceWrite {
+                name: query_name("alpha"),
+                expected_generation: Some(1),
+                desired: json!({"name": "alpha", "changed": true}),
+            }],
+        });
+        service.apply(&committed(3, 2, 3, &update)).unwrap();
+        let updated = service.managed_resource(&query_name("alpha")).unwrap();
+        assert_eq!(updated.generation, 2);
+        assert_eq!(updated.desired["changed"], true);
+        assert_eq!(snapshot.managed_resources[0].generation, 1);
+        let current_page = service.managed_resource_page(None, 2).unwrap();
+        assert_eq!(
+            current_page.latest_change_cursor,
+            old_page.latest_change_cursor + 1
+        );
+        assert_eq!(old_page.resources[0].generation, 1);
+        assert_eq!(current_page.resources[0].generation, 2);
+        assert_eq!(service.full_snapshot_read_count(), full_reads);
+    }
+
+    #[test]
+    fn narrow_catalog_pages_keep_cursor_and_records_coherent_during_writes() {
+        let service = query_service();
+        let writer = Arc::clone(&service);
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let writer_start = Arc::clone(&start);
+        let task = std::thread::spawn(move || {
+            writer_start.wait();
+            for round in 0..32 {
+                let command = CatalogCommand::ApplyDesired(ApplyDesiredResources {
+                    request_token: format!("concurrent-page-{round}"),
+                    resources: ["alpha", "bravo", "charlie"]
+                        .into_iter()
+                        .map(|name| DesiredResourceWrite {
+                            name: query_name(name),
+                            expected_generation: None,
+                            desired: json!({"name": name, "round": round}),
+                        })
+                        .collect(),
+                });
+                writer
+                    .apply(&committed(3 + round, 2, 3 + round, &command))
+                    .unwrap();
+            }
+        });
+        start.wait();
+        for _ in 0..256 {
+            let page = service.managed_resource_page(None, 3).unwrap();
+            assert_eq!(page.resources.len(), 3);
+            assert!(!page.has_more);
+            let generation = page.resources[0].generation;
+            assert!(
+                page.resources
+                    .iter()
+                    .all(|resource| resource.generation == generation)
+            );
+            assert_eq!(page.latest_change_cursor, 3 * generation);
+        }
+        task.join().unwrap();
+        assert_eq!(service.full_snapshot_read_count(), 0);
+    }
+
+    #[test]
+    fn narrow_catalog_pages_capture_exact_cursor_order_bounds_and_continuation() {
+        let empty = CatalogTabletService::new(CatalogTabletScope::new(9, 4).unwrap());
+        assert_eq!(
+            empty.managed_resource_page(None, 1).unwrap(),
+            CatalogManagedResourcePage {
+                latest_change_cursor: 0,
+                resources: Vec::new(),
+                has_more: false,
+            }
+        );
+        let service = query_service();
+        let snapshot = service.snapshot().unwrap();
+        let full_reads = service.full_snapshot_read_count();
+        let first = service.managed_resource_page(None, 2).unwrap();
+        assert_eq!(first.latest_change_cursor, snapshot.latest_change_cursor);
+        assert_eq!(first.resources, snapshot.managed_resources[..2]);
+        assert!(first.has_more);
+        let middle = service
+            .managed_resource_page(Some(&query_name("alpha")), 1)
+            .unwrap();
+        assert_eq!(middle.resources, snapshot.managed_resources[1..2]);
+        assert!(middle.has_more);
+        let last = service
+            .managed_resource_page(Some(&query_name("bravo")), 1)
+            .unwrap();
+        assert_eq!(last.resources, snapshot.managed_resources[2..]);
+        assert!(!last.has_more);
+        let beyond = service
+            .managed_resource_page(Some(&query_name("charlie")), 1)
+            .unwrap();
+        assert!(beyond.resources.is_empty());
+        assert!(!beyond.has_more);
+        assert_eq!(beyond.latest_change_cursor, first.latest_change_cursor);
+        let gap = service
+            .managed_resource_page(Some(&query_name("alpine")), 1)
+            .unwrap();
+        assert_eq!(gap.resources, middle.resources);
+        let complete = service
+            .managed_resource_page(None, MAX_MANAGED_RESOURCE_PAGE_SIZE)
+            .unwrap();
+        assert_eq!(complete.resources, snapshot.managed_resources);
+        assert!(!complete.has_more);
+        for limit in [0, MAX_MANAGED_RESOURCE_PAGE_SIZE + 1, usize::MAX] {
+            assert!(matches!(
+                service.managed_resource_page(None, limit),
+                Err(CatalogTabletQueryError::Catalog(CatalogError::InvalidSpec(
+                    _
+                )))
+            ));
+        }
+        let mut invalid = query_name("alpha");
+        invalid.organization.clear();
+        assert!(matches!(
+            service.managed_resource_page(Some(&invalid), 1),
+            Err(CatalogTabletQueryError::Catalog(CatalogError::InvalidName(
+                _
+            )))
+        ));
+        assert_eq!(service.full_snapshot_read_count(), full_reads);
+    }
+
+    fn assert_narrow_reads_unavailable(service: &CatalogTabletService, expected: &str) {
+        for result in [
+            service.resource(&query_name("native")).map(|_| ()),
+            service.managed_resource(&query_name("alpha")).map(|_| ()),
+            service.managed_resource_page(None, 1).map(|_| ()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(CatalogTabletQueryError::Unavailable(error)) if error == expected
+            ));
+        }
+        assert_eq!(service.node_allocations().unwrap_err(), expected);
+        assert_eq!(service.full_snapshot_read_count(), 0);
+    }
+
+    #[test]
+    fn narrow_catalog_reads_refuse_failed_or_poisoned_authority() {
+        let failed = query_service();
+        failed.fail("catalog apply failed");
+        assert_narrow_reads_unavailable(&failed, "catalog apply failed");
+        let poisoned_state = query_service();
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = poisoned_state.state.write().unwrap();
+                panic!("poison this owned Catalog state");
+            }))
+            .is_err()
+        );
+        assert_narrow_reads_unavailable(&poisoned_state, "catalog state read lock was poisoned");
+        let poisoned_failure = query_service();
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = poisoned_failure.failure.write().unwrap();
+                panic!("poison this owned Catalog failure state");
+            }))
+            .is_err()
+        );
+        assert_narrow_reads_unavailable(&poisoned_failure, "catalog failure lock was poisoned");
     }
 
     #[test]

@@ -1,9 +1,12 @@
 # Management SDK candidate
 
-Status: Go/Java/Python implementations, generated-wire tests, and an independently
-verified local real-Catalog three/five-controller fault matrix;
-**not yet protected delivery or complete native SDK parity**. Exact-source SDK
-CI and protected Pages publication remain open.
+Status: Go/Java/Python implementations and the complete three/five-controller
+Catalog matrix passed protected PR CI and independent receipt verification.
+PR #152 merged at `3f18779`. **Exact merged-main delivery remains gated;
+complete native SDK parity remains open development work**. The first merged-main
+audits reported new Zod, ctutils, and Tokio advisories; the follow-up patches
+them without an audit exception. Release still requires green exact-main checks
+and its artifacts.
 Existing data-profile SDKs are separate.
 
 `epoch.ManagementClient` covers the Go control service, not Rust's still-future
@@ -108,7 +111,7 @@ failures. Strict whole-package typing checks the generated
 suppression. Ruff excludes external generated output, not application source.
 These tests do not run a Python management RPC or implement its failover/watch
 state machine on their own. The public Python client below supplies those
-contracts; protected Catalog evidence remains open.
+contracts; the protected Catalog proof below separately verifies real faults.
 
 ### Python management client
 
@@ -344,9 +347,9 @@ image. Go, Java 25, and Python 3.11 are mandatory. The protected aggregate check
 the current-attempt artifacts, identical source/image and public-probe runtime
 identities, every receipt after copying, and the full independent verifier.
 Failed, cancelled, skipped, missing, or incompatible fleets cannot seal a pass.
-The implementation remains a **candidate**: the complete local live artifacts
-below pass independent verification, but protected CI delivery is still
-required. This is bounded SDK/Catalog evidence, not production certification.
+The complete matrix now also passes protected PR CI; exact merged-main delivery
+and release gates remain required. This is bounded SDK/Catalog evidence, not
+production certification or complete native data-streaming parity.
 
 ```sh
 make test-management-sdk-runner
@@ -401,6 +404,26 @@ the independent verifier while preserving exact saved cursors and no ACK/reset.
 The fresh complete local campaign below supersedes that local limitation;
 protected delivery remains required.
 
+### Protected PR Catalog evidence — 24 October 2026
+
+[PR #152](https://github.com/Ripan-Roy/epoch/pull/152) merged at `3f18779`
+after all 14 [CI jobs](https://github.com/Ripan-Roy/epoch/actions/runs/39912713868)
+and [Pages checks](https://github.com/Ripan-Roy/epoch/actions/runs/39912713760)
+passed. The downloaded complete bundle independently verifies all 516 artifact
+receipts. Its manifest SHA-256 is
+`9dc49e92455c8e83df9f56e79d3cb3c0cfca1bc9e731e3dc8c2f7148cacdc50f`.
+The source/image revision is the actual checked-out merge candidate
+`0abaf14ec252cbce3aa01a54c60d39f130433ef2`, whose parents are the exact base
+and tested feature head, not a relabelled branch SHA. Both fleets retain all
+native checks, 135 desired resources, 20/24 operation witnesses, and four
+matching profile digests. Real history floors 358/413 expire the saved nonzero
+application checkpoints with `ABORTED` and no page, ACK, reset, or rewrite.
+
+The exact-main CI is separate. Its first run reported dependency-audit
+failures; the follow-up patch does not treat the protected PR proof as a
+substitute for current-main verification. The historical complete local proof
+below retains its own identity and limitations.
+
 ### Complete local Catalog evidence — 5 October 2026
 
 Clean source `dc8e44f1340df7941817012a8561b69010ee40a3` completed both real
@@ -429,7 +452,7 @@ unchanged original capture without relabelling its source or checksum.
 | Stale response without page, ACK or checkpoint rewrite | `ABORTED` in all SDKs | `ABORTED` in all SDKs |
 | Profile digests unchanged after reopen | 4 / 4 | 4 / 4 |
 
-Artifacts are preserved locally at
+The original ephemeral artifact path was
 `/private/tmp/epoch-sdk-catalog-awake.1aG7Bt/evidence/evidence.json`.
 The earlier same-source attempt remains failed: macOS entered low-power
 hibernation at 1% battery for 52m29s during history churn. The fresh run used

@@ -1,8 +1,9 @@
 # Concurrent control-plane failure certification
 
 Status: bounded native runtime matrix verified locally and in protected PR/main
-CI. The separate public-SDK Catalog matrix now verifies locally; protected SDK
-delivery and beta.12 publication remain open.
+CI. The separate public-SDK Catalog matrix also passes protected PR CI and
+independent complete-bundle verification. Exact merged-main delivery and
+beta.12 publication remain open.
 The existing regional and Kubernetes campaigns do not close this gate: their
 control restart evidence is not a concurrent-controller chaos campaign.
 
@@ -98,6 +99,32 @@ historical captures above cannot certify it: fresh exact-source complete
 three/five-controller CI evidence is still required. No optimized wall-time
 improvement is claimed until that run completes. See
 [CI performance boundaries](DEVELOPMENT.md#ci-performance-and-trust-boundaries).
+
+## Protected SDK PR delivery (24 October 2026)
+
+[PR #152](https://github.com/Ripan-Roy/epoch/pull/152) merged at `3f18779`
+after all 14 [CI jobs](https://github.com/Ripan-Roy/epoch/actions/runs/39912713868)
+and [Pages checks](https://github.com/Ripan-Roy/epoch/actions/runs/39912713760)
+passed. The complete SDK manifest independently verifies all 516 artifact
+receipts; SHA-256 is
+`9dc49e92455c8e83df9f56e79d3cb3c0cfca1bc9e731e3dc8c2f7148cacdc50f`.
+Source/image revision `0abaf14ec252cbce3aa01a54c60d39f130433ef2` is the actual
+GitHub merge checkout, with the exact base and feature head as parents.
+Both fleets retain the complete native matrix plus every real public-SDK
+fault, 135 desired resources, 20/24 operations, and four matching profile
+digests. Floors 358/413 expire the saved SDK checkpoints without ACK/reset.
+
+The independent integration jobs finished 13–14 minutes earlier, but total CI
+was about 64m36s and the five-controller worker took 55m14s. This run does not
+demonstrate an overall speedup; real retained-history churn remains the critical
+path. The full proof and its checkpoint/retention settings are not reduced to
+improve that number.
+
+The initial exact merged-main run is separate and reported newly reviewed
+Zod, ctutils, and Tokio advisories. The follow-up patches those dependencies
+without adding an audit exclusion. The current-main gate, current-image evidence, Pages, and release
+artifacts must all pass before promotion; PR evidence is not relabelled as
+main evidence.
 
 ## Historical local verification
 

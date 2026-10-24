@@ -1,9 +1,9 @@
 # Epoch Delivery Checklist
 
-**Last reviewed:** 5 October 2026
+**Last reviewed:** 24 October 2026
 **Current published release:** `v0.2.0-beta.11`
 **Current release target:** `v0.2.0-beta.12`
-**Current core target:** control-HA release verification and remaining production gates
+**Current core target:** exact-main SDK/release verification, Catalog read-path efficiency, and native persistent Stream APIs
 
 This is the operational checklist for turning PRD scope into verified,
 releasable increments. [PRD.md](PRD.md) owns product scope,
@@ -96,8 +96,16 @@ unknown-outcome matrix, and the complete local three/five-controller Catalog
 campaign. The latter exited zero and independently verifies all 516 receipts;
 manifest SHA-256 is
 `b2d91b5b489d851544fb7a14e3a8eb77a9b1a7e7a51bd355c594dc9f40a4d228`.
-Rows remain candidate delivery until exact-source protected CI and main-only
-Pages pass. This does not close native persistent data RPCs or the whole PRD.
+PR #152 subsequently merged at `3f18779` after all 14 protected
+[PR CI jobs](https://github.com/Ripan-Roy/epoch/actions/runs/39912713868)
+and [Pages checks](https://github.com/Ripan-Roy/epoch/actions/runs/39912713760)
+passed. Its complete downloaded SDK bundle independently verifies all 516
+receipts, with manifest SHA-256
+`9dc49e92455c8e83df9f56e79d3cb3c0cfca1bc9e731e3dc8c2f7148cacdc50f`.
+The first merged-main audits then reported Zod, ctutils, and Tokio advisories;
+the follow-up patches them without weakening those gates. Rows remain candidate
+delivery until fresh exact-main CI and main-only Pages pass. This does not
+close native persistent data RPCs, the full SDK version matrix, or the PRD.
 
 | ID | Checklist item | Boundary | State | Evidence / acceptance |
 |---|---|---|---:|---|
@@ -105,7 +113,7 @@ Pages pass. This does not close native persistent data RPCs or the whole PRD.
 | SDK-02 | Expose safe manually acknowledged watches | Public SDKs + application checkpoint | 🟡 | Fsynced scanned checkpoints precede ACK; actual owner loss reconnects without reset, and real expired nonzero checkpoints return `ABORTED` with no page/ACK/rewrite in both fleets. |
 | SDK-03 | Prove original outcomes through real faults | Go controllers + Rust Catalog | 🟡 | All three clients pass actual Catalog-leader lost responses, exact token/creation witnesses at every live endpoint, quorum loss/recovery, and full same-volume reopen; all native matrix checks remain. See [proof](MANAGEMENT_SDK.md#complete-local-catalog-evidence--5-october-2026). |
 | SDK-04 | Enforce generated and response boundaries | SDK + compiler tooling | 🟡 | Strict Python response/JSON validation, 86 tests and whole-package typing; checksum-pinned local Java generation, exact freshness, 69 Java tests, and all-language quality/build pass. |
-| SDK-05 | Require both complete fleets in protected CI | GitHub Actions + independent verifier | 🟡 | The candidate adds SDK probes to the existing parallel native workers, requires all runtimes, and rejects altered, foreign, failed, skipped or missing proofs; exact-source protected execution remains. |
+| SDK-05 | Require both complete fleets in protected CI | GitHub Actions + independent verifier | 🟡 | PR #152 passes both complete fleets and the protected aggregate; the downloaded 516-receipt bundle independently verifies. Every native/SDK fault and real stale checkpoint remains required. Fresh merged-main delivery is separate and must pass after the dependency-audit fix. |
 | SDK-06 | Publish exact examples and explicit limits | Documentation + Pages | 🟡 | Compiled/strictly typed Go/Java/Python sources are embedded in docs; full local docs build passes. Main-only publication and visual/browser QA remain unverified. Examples are compile-only, not the actual Catalog probes. |
 
 ## Current control delivery: replicated metadata and multi-instance ownership

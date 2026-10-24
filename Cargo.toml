@@ -71,7 +71,7 @@ slog = "=2.8.2"
 snap = "1.1"
 tempfile = "3.23"
 thiserror = "2.0"
-tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
+tokio = { version = "1.53.3", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 tokio-postgres = "0.7"
 tower-http = { version = "0.7", features = ["cors", "request-id", "trace"] }

@@ -6,6 +6,25 @@ notes explicitly list additional verified artifacts.
 
 ## Unreleased
 
+### Catalog and release verification follow-up
+
+- Read managed/native resource points, bounded coherent inventory pages, and
+  allocation counts without cloning and hashing the complete Catalog. Keep the
+  existing consistency, health, authorization, error, ordering, and byte-limit
+  boundaries; test parity and real quorum/follower refusal before promotion.
+- Merge the complete management-SDK feature in PR #152 after all 14 protected
+  PR CI jobs and Pages checks pass. Independently verify all 516 complete SDK
+  evidence receipts; exact merged-main and release gates remain separate.
+- Pin lint-tooling Zod to 4.6.6 for GHSA-mrhx-c7xc-m3w5, reported by the current
+  main audit after the PR's earlier passing run. No audit gate is relaxed and
+  unrelated dependency versions are unchanged.
+- Patch ctutils to 0.4.4 and Tokio to 1.53.3 for RUSTSEC-2026-0385/0386,
+  preserving unrelated dependency edges and the sole existing Raft/fxhash
+  exception. The Tokio workspace minimum excludes the affected release.
+- Record measured CI results honestly: independent jobs finish earlier, but the
+  complete pipeline still takes about 65 minutes. Real retained-history churn
+  remains the optimization target; no proof coverage or checkpoint is removed.
+
 ### SDK contract and management candidate
 
 - Require immutable image IDs, canonical frozen source/image revisions, and
