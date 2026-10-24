@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Self, TypeVar
 from urllib.parse import quote
 
+from ._responses import object_response
 from .errors import EpochAPIError
 from .transport import Transport, UrllibTransport
 
@@ -108,7 +109,7 @@ class RegionalClient:
         resource: str,
         shard: int,
         request_for: RequestFactory,
-    ) -> Any:
+    ) -> dict[str, Any]:
         return self.call_at_generation(
             collection,
             resource_label,
@@ -126,7 +127,7 @@ class RegionalClient:
         shard: int,
         expected_generation: str | None,
         request_for: RequestFactory,
-    ) -> Any:
+    ) -> dict[str, Any]:
         base_path = self._resource_path(collection, resource_label, resource, shard)
         last_error: Exception | None = None
         for _attempt in range(2):
@@ -142,12 +143,14 @@ class RegionalClient:
                         "operation; no request was attempted"
                     )
                 method, suffix, body, query, headers = request_for(route)
-                return transport.request(
-                    method,
-                    f"{base_path}{suffix}",
-                    body=body,
-                    query=query,
-                    headers=self._headers(route, headers),
+                return object_response(
+                    transport.request(
+                        method,
+                        f"{base_path}{suffix}",
+                        body=body,
+                        query=query,
+                        headers=self._headers(route, headers),
+                    )
                 )
             except EpochAPIError as error:
                 last_error = error
@@ -190,7 +193,7 @@ class RegionalClient:
                     "GET", path, headers={"authorization": f"Bearer {self._token}"}
                 )
                 route = _parse_route(document)
-                if document.get("accepts_writes") is True:
+                if isinstance(document, dict) and document.get("accepts_writes") is True:
                     return transport, route
             except EpochAPIError as error:
                 if not _rediscover(error):
@@ -220,7 +223,7 @@ class RegionalClient:
         )
 
 
-def _parse_route(document: Any) -> Route:
+def _parse_route(document: object) -> Route:
     if not isinstance(document, dict):
         raise ValueError("regional route response must be an object")
     values = []
@@ -247,7 +250,7 @@ def _parse_route(document: Any) -> Route:
             missing_key_fallback=partitioning_document.get("missing_key_fallback", ""),
             shard_count=shard_count,
         )
-    return Route(*values, stream_partitioning=partitioning)
+    return Route(values[0], values[1], values[2], stream_partitioning=partitioning)
 
 
 def _rediscover(error: EpochAPIError) -> bool:

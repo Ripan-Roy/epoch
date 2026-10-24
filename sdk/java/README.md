@@ -1,8 +1,18 @@
 # Epoch Java SDK
 
-This pre-alpha Java 25 client covers every native HTTP route currently exposed
+This repository-local prerelease Java 25 client covers the native HTTP routes currently exposed
 by the standalone Epoch node. Requests use immutable, typed models; responses
 remain Jackson `JsonNode` values until the public wire contract stabilizes.
+
+The separate `ManagementClient` candidate adds typed generated messages for all
+seven controller gRPC methods (normally port 8081). It uses explicit CA trust,
+optional PKCS#12 client identity, TLS 1.3-only channels, or explicitly enabled
+loopback plaintext development. Unary failover keeps one original deadline and
+token/OCC presence; watches require durable scanned-cursor checkpointing before
+acknowledgement. See [the full guide](../../docs/MANAGEMENT_SDK.md) and
+[the compiled seven-method example](examples/ManagementExample.java).
+This candidate is not yet protected delivery or real Catalog fault certification;
+native data gRPC and package publication remain open.
 
 ```java
 import io.epoch.sdk.DurabilityProfile;

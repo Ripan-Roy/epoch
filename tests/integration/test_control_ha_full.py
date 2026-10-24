@@ -148,6 +148,23 @@ class FullEvidenceTest(unittest.TestCase):
             with mock.patch.object(soak, "source_identity", return_value=source):
                 control_ha_full.combine_fleet_bundles(paths, root / "combined")
                 control_ha_full.verify_full_bundle(root / "combined/evidence.json")
+                for destination in (root / "combined", paths[0].parent / "nested"):
+                    with self.assertRaisesRegex(ValueError, "empty|separate"):
+                        control_ha_full.combine_fleet_bundles(paths, destination)
+                with mock.patch.object(
+                    control_ha_full,
+                    "verify_full_bundle",
+                    side_effect=ValueError("independent final proof rejected"),
+                ):
+                    with self.assertRaisesRegex(ValueError, "final proof rejected"):
+                        control_ha_full.combine_fleet_bundles(
+                            paths, root / "failed-seal"
+                        )
+                for name in ("evidence.json", "failure.json"):
+                    self.assertEqual(
+                        soak.load_json(root / "failed-seal" / name)["status"],
+                        "failed",
+                    )
                 for inputs in (paths[:1], paths[::-1], [paths[0], paths[0]]):
                     with self.assertRaises(ValueError):
                         control_ha_full.combine_fleet_bundles(inputs, root / "invalid")

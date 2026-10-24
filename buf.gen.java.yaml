@@ -1,0 +1,21 @@
+version: v2
+clean: true
+
+managed:
+  enabled: true
+  override:
+    - file_option: java_package_prefix
+      value: io.epoch.sdk.gen
+    - file_option: java_multiple_files
+      value: true
+
+plugins:
+  - protoc_builtin: java
+    protoc_path: protoc
+    out: .
+    strategy: all
+  - local: protoc-gen-grpc-java
+    out: .
+    strategy: all
+    opt:
+      - '@generated=omit'

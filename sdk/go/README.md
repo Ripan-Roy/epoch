@@ -1,8 +1,13 @@
 # Epoch Go SDK
 
-This pre-alpha Go 1.26 client covers every native HTTP route currently exposed
+This source-prerelease Go 1.26 client covers every native HTTP route currently exposed
 by the standalone Epoch node. Requests use typed models and `context.Context`;
 responses remain decoded JSON documents until the public wire contract freezes.
+
+The separate management-client candidate uses generated Protobuf response
+models for all seven `RegionalAdmin` methods. See the
+[management guide](../../docs/MANAGEMENT_SDK.md) and the
+[compiled complete API example](epoch/management_example_test.go).
 
 ```go
 package main

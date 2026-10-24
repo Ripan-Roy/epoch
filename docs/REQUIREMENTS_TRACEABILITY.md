@@ -4,7 +4,35 @@ This register turns the prioritized catalog in [PRD.md](./PRD.md) into a deliver
 
 Last synchronized with PRD version 0.3 on 21 August 2026.
 
-Current CTRL-001/CTRL-002 hardening candidate: the clean `671fde4` tree passed
+Current bounded native CTRL-001/CTRL-002 chaos evidence: PR #149 merged at
+`d8adf756568e8e27912d480a66185b45bb937ecf` and
+[main CI](https://github.com/Ripan-Roy/epoch/actions/runs/37353098801) passed all
+14 jobs, including both parallel three/five-controller fleets and the protected
+aggregate. Its downloaded full artifact independently verifies with SHA-256
+`8943c2c49aeff50b14528afa03df9bcee926f833afa7611846cf9a91ca33dffa`.
+Both fleets retain 135 desired resources, 20/24 exact operation witnesses,
+real stale-watch rejection, and matching four-profile digests after reopen.
+[Main Pages](https://github.com/Ripan-Roy/epoch/actions/runs/37353099031) also
+passed. This closes only the bounded **native** dedicated-chaos gate; protected
+public-SDK delivery, retention/scaling/migration, and production gates remain.
+
+Current bounded public-SDK local evidence: clean
+`dc8e44f1340df7941817012a8561b69010ee40a3` completed both three/five-controller
+fleets with Go, Java, and Python. The CLI exited zero and the independent full
+SDK verifier passed all 516 checksum-bound artifacts. Manifest SHA-256:
+`b2d91b5b489d851544fb7a14e3a8eb77a9b1a7e7a51bd355c594dc9f40a4d228`.
+Each fleet retains all ten native owner and eleven generated-API checks plus
+real SDK Catalog-leader lost acknowledgements, exact original-token outcomes
+through every live controller, owner-watch reconnect, quorum/reopen recovery,
+and stale `ABORTED` without ACK/reset. The saved Go/Java/Python checkpoints
+385/388/386 expired below floor 392 in the three-controller fleet; 347/347/347
+expired below floor 352 in the five-controller fleet. All three runtimes match
+across fleets. `make check build` and fresh TLS/mTLS/three-language transport-loss
+probes also pass at that source. This is local bounded evidence, not protected
+SDK CI/Pages, complete CTRL-001/CTRL-002 or DX-001, native persistent data RPCs,
+production readiness, or beta.12 publication. See [management SDK](MANAGEMENT_SDK.md).
+
+Historical local progression: the clean `671fde4` tree passed
 the dedicated owner-recovery subset with three and five concurrent Go
 controllers, ten invariants per count, and fourteen verified artifact receipts.
 Fully qualified HTTP item GET/DELETE now preserves tenant scope and managed
@@ -39,7 +67,8 @@ not a count of `replayed=false` replies. Real retained floors/latest cursors
 were 5/4,100 and 27/4,122. Its canonical manifest SHA-256 is
 `df40266cbe904c551b080c27ebed8a6ab35190b5fed13561052ecfb00ea761e9`.
 Thirty-nine HA contract tests and eight soak/evidence tests pass locally.
-Protected exact-head/main execution remains open, as do the other CTRL-001/
+At that capture, protected exact-head/main execution remained open; the current
+native proof above now supersedes that limitation, not the other CTRL-001/
 CTRL-002 retention, scaling, migration, and SDK requirements. See the linked
 certification document for provenance and non-claims.
 
@@ -51,6 +80,130 @@ shadows a builtin type. The existing CI command checks the displayed quickstart
 only and still passes; all 48 Python SDK unit tests pass. Full-package strict
 typing and generated response types therefore remain open DX-001 work, not a
 verified guarantee inferred from the quickstart check.
+
+The separate SDK response-contract candidate follows that audit with real
+response-shape validation rather than type suppressions: objects, object
+arrays, empty replies, integer/boolean maps, and regional object results are
+checked for both HTTP and custom transports. Duplicate-key, malformed JSON,
+and non-finite-number responses fail without exposing payloads or silently
+retrying uncertain mutations. All 57 Python tests and strict whole-package
+typing across 13 source files pass locally. CI and local lint now select the
+whole SDK. Clean `fb8d15b` additionally passed real standalone cross-language
+smoke, including the live Java smoke, and an independently verified signed
+eight-invariant regional campaign through all four profiles, profile-leader
+losses, and same-volume reopen in 55,779 ms. Its canonical manifest SHA-256 is
+`ac4ee00e14fcd9901aecea0cabe1ce19530f5e57282e2ddfa5b635ed8fef6cc1`.
+Protected delivery evidence remains open; generated per-field response models,
+management clients, and the rest of DX-001 are not claimed complete by this
+shape-validation foundation. This separate SDK branch does not modify the
+frozen control-HA PR or inherit its CI.
+
+The same separate SDK candidate now includes a Go `ManagementClient` for all
+seven generated RegionalAdmin methods. Its bounded allowlist, explicit
+TLS/mTLS/loopback trust, original-deadline and token-preserving failover,
+presence-aware requests, typed identity/outcome validation, conservative
+unknown-outcome information, and explicitly acknowledged scanned-cursor watch
+pass local client/contract tests. Every generated method additionally runs over
+real TLS 1.3/mTLS loopback sockets, with wrong-bearer and missing-client-identity
+denial, uint64 extrema, and remote watch cancellation. The full API example
+compiles but is not executed against Catalog. This closes neither CTRL-001 nor
+DX-001: public-SDK Catalog recovery evidence,
+protected delivery and the
+broader native contract/streaming/type matrix remain open. See
+[management SDK candidate](MANAGEMENT_SDK.md).
+
+Python management parity now has a pinned generated-contract foundation:
+namespaced protobuf messages, typed gRPC stubs, optional runtime/dev extras,
+exact regeneration checks, and shared Go/Python wire vectors for omitted/zero/
+maximum uint64 delete preconditions. Eight binding regressions, all 65 Python
+tests, and strict whole-package typing across 19 source files pass locally.
+That clean binding-foundation result precedes the public client and is not
+live RPC/failover/watch evidence by itself. CTRL-001 and DX-001 remain open.
+
+The Python candidate now implements all seven public management calls with
+frozen original tokens/OCC, a single bounded unary deadline, explicit endpoint
+and trust validation, typed scope/governance/outcome receipts, conservative
+mutation uncertainty, shared cancellation, and lazy explicitly acknowledged
+scanned-cursor watches. Twenty-one real-gRPC regression groups pass locally,
+including empty/filtered and uint64-extreme pages, semantic failures without
+retry, exhaustion, stale refusal, and remote close. All seven calls also pass
+against a Go TLS-1.3-only/mTLS fixture with bearer/anonymous denial and protocol
+validation; Python CI explicitly enables this interpreter-dependent probe.
+Python gRPC cannot independently select a TLS minimum, so the documented server
+policy remains required. Exact Go/Java/Python examples are embedded in candidate
+Pages, with the Python example included in whole-package strict typing.
+Public-SDK Catalog recovery, protected delivery, native streaming, and
+the full SDK/version matrix remain open; DX-001 is not closed.
+
+The Java management candidate now also implements all seven calls, immutable
+generated requests/receipts, full unsigned-64-bit cursor/OCC semantics, exact
+governance/outcome validation, one-deadline bounded failover, caller cancellation,
+defensive binary metadata snapshots, fixed-print exceptions, and explicitly
+acknowledged manually flow-controlled watches. Seventeen new local regression
+tests and the complete Java Maven lint/test/package gate pass. A required Java
+CI probe executes all seven calls against Go over TLS 1.3/mTLS, denies wrong
+bearer/missing identity/foreign CA and TLS-1.2-only servers, and proves remote
+watch close. Pinned local Java generation has nine compiler-integrity,
+safe-installation, non-mutating freshness/inventory, and required-CI tests;
+all 61 generated files are byte-identical to the former remote output, without
+using the remote Buf code-generation quota. Generated source alone is excluded
+from application formatting/lint.
+The exact displayed Java example compiles with `-Xlint:all -Werror`.
+These are client contracts, not actual Catalog fault or protected-delivery proof.
+
+The candidate now also contains private public-client fault probes for all three
+languages and a loopback exact-command relay. A real-socket three-language matrix
+passes with unchanged original token/explicit-zero OCC bytes and unknown outcomes
+after transport loss. Probe tests cover durable file/directory-fsynced watch
+checkpoints, atomic replacement, bounded plans, malformed requests, and shutdown.
+The cross-language check explicitly requires all runtimes and never silently skips
+the matrix. These acknowledged fixture-service tests are instrumentation, not
+actual Rust Catalog fault certification; original-token resolution and retained
+outcome/checkpoint comparison through Catalog/owner/quorum/reopen remain open.
+
+The next SDK increment implements the owned actual-Catalog campaign plus an
+independent verifier. Nineteen regression groups reject altered original bytes,
+missing upstream acknowledgements, incomplete SDK phases, absent response
+witnesses, non-monotonic/foreign watch pages, and omitted final verification.
+The runner composes the complete native HA matrix with all three public clients,
+exact original-token resolution at every live controller, owner watch reconnect,
+quorum/all-voter recovery, and real expiration of saved application checkpoints.
+This is implementation/contract evidence only until its frozen live campaign and
+protected CI artifacts pass; CTRL-001/CTRL-002 and DX-001 remain open.
+
+The first frozen SDK campaign (`ed23cd7`) passed all three public clients'
+live preparation, then failed its first-receipt replay-flag assertion before
+the SDK leader fault. Its manifest remains failed and owned fixtures cleaned
+up. Actual receipts preserve the exact requested spec and generation, but can
+carry `replayed=true` after the internal application-result read races commit,
+as in the native maximum-batch contract. The next candidate retains those
+receipts and instead requires the full durable original-token operation plus
+the exact two contiguous generation-one creation events for every SDK batch.
+Its new regression accepts reconstructed flags only alongside those exact
+effect witnesses; it still rejects missing/altered creations.
+
+The second frozen campaign (`8fde109`) passed all three public clients'
+actual leader-loss original-token resolution, exact creation history,
+owner-watch reconnect, quorum recovery, and full-reopen reads through every live
+controller. It failed the stale-plan harness's incorrect expected code 9: Go,
+Java, and Python all returned the documented Catalog `ABORTED` (10), with no
+pages or checkpoint rewrite. The real retained floor was 397 and the saved
+Go/Java/Python checkpoints were 373/376/374. Its failed artifact is preserved;
+neither the five-controller SDK fleet nor final full certification passed.
+New red-to-green regressions align both plan and verifier with `ABORTED` while
+requiring the original expired cursor and no ACK. The CI candidate composes the
+public SDK campaign into the existing parallel native fleet workers, requires
+all runtimes, and independently seals both same-source/image/runtime artifacts.
+That failed capture remains historical. The current complete local proof above
+supersedes its local limitation; protected SDK delivery remains required.
+
+Final independent-verifier review added five red-to-green regression groups:
+full and isolated proofs must carry immutable image IDs and canonical frozen
+source/image revisions; the complete proof also requires matching public SDK
+runtime builds across fleets. Historical valid source/image revisions may
+differ, and verification never relabels a capture as the current checkout.
+All 33 combined SDK/native-full contract tests pass, and the stronger verifier
+accepts the unchanged `dc8e44f` live manifest with the same checksum above.
 
 ## How to use this register
 
@@ -364,8 +517,8 @@ durability.
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
-| CTRL-001 | P0 | Idempotent declarative resource API | M1 → M2 | Slice | G0, G1, G3 | Generated RegionalAdmin gRPC Apply/Get/List/Delete plus atomic 1–128 resource BatchApply, exact affected-resource-authorized GetOperation, and resumable tenant-filtered WatchResourceChanges now sit on replicated Rust Catalog outcomes. Operations expose command kind and a presence-aware caller delete precondition through the generated contract, independently of managed internal fencing, so a missing-resource replay compares the original OCC input instead of its tombstone result. Compacted capacity outcomes retain bounded authorization metadata for lookup. The Go authority client accepts valid large results up to the 5 MiB Catalog-plus-envelope bound and rejects anything larger. Exact replay, token rebinding, committed semantic rejection, disconnect/reconnect, public HTTP delete coordination, and real three-node failover tests pass main CI `37143501331` at `36dab1f`. Pending: advertised unknown-outcome/token-retention window, soft delete/purge, dedicated concurrent multi-control chaos, and SDK management clients. See ADR-0050. |
-| CTRL-002 | P0 | Strong versioned metadata and OCC | M1 prototype → M2 | Slice | G0, G2, G3 | Managed desired/status/tombstones/outcomes are Catalog-consensus replicated; reads use ReadIndex, one TTL/fence lease owns reconciliation, capacity plus initial materialization and managed delete are atomic, and managed delete derives native generation inside the replicated transition instead of trusting crash-stale status. Stale owners fail, recurring internal outcomes are bounded, inventory is keyset-paged, and a one-time bbolt import preserves up to 4,096 live and tombstoned generations within byte limits. Repeated unique snapshot-capacity refusals compact into exact token/command-digest bindings and enter a durable v8 growth seal; only strictly shrinking real deletes commit until reserved headroom is restored, recovered v9 resumes admission without losing replay/conflict identity after consensus compaction, and compact-ledger exhaustion enters terminal fail-closed v10 after reserving its extra serialized marker byte. Three anti-affined control replicas, staged legacy scale-up, and a two-instance PDB are rendered. Focused Go/Rust and real three-node tests pass main CI `37143501331` at `36dab1f`. Pending: dedicated concurrent multi-control chaos, horizontal Catalog capacity/sharding and seal migration, legacy token migration policy, and a public operation-retention report. See ADR-0050. |
+| CTRL-001 | P0 | Idempotent declarative resource API | M1 → M2 | Slice | G0, G1, G3 | Generated RegionalAdmin Apply/Get/List/Delete, atomic 1–128-resource batches, exact affected-resource-authorized operation lookup, and resumable tenant-filtered watches use replicated Catalog outcomes. Operations preserve kind and caller delete-precondition presence independently of internal fencing; compacted capacity outcomes retain lookup authorization. Authority responses are bounded at 5 MiB. Exact replay, rebinding rejection, semantic failures, managed delete/recreate, maximum batches and real stale history pass the complete native three/five-controller matrix on main `d8adf75`. All seven Go/Java/Python management methods and their actual Catalog-fault matrix additionally pass locally at `dc8e44f`. Pending: protected SDK delivery, public list pagination, advertised unknown-outcome/token-retention window, and soft delete/purge. See ADR-0050 and MANAGEMENT_SDK.md. |
+| CTRL-002 | P0 | Strong versioned metadata and OCC | M1 prototype → M2 | Slice | G0, G2, G3 | Desired/status/tombstone/outcome state is consensus replicated; ReadIndex, a TTL/fence reconciler lease, atomic capacity/materialization and managed deletion reject stale owners and preserve exact native generations. Internal receipts are bounded; internal inventory is keyset-paged. Ordered legacy import preserves up to 4,096 generation records within byte limits. Snapshot v8/v9 compact capacity bindings preserve exact replay/conflict/lookup, allow only shrinking cleanup while sealed, and resume admission after headroom returns; v10 terminally fails closed when its reserved compact ledger fills. Three anti-affined control replicas, staged scale-up and two-instance PDB are rendered. The complete bounded native three/five-controller chaos gate passes main `d8adf75`; the three-language SDK matrix passes locally at `dc8e44f`. Pending: protected SDK delivery, horizontal Catalog capacity/sharding and seal migration, legacy token migration policy, and public operation retention. See ADR-0050. |
 | CTRL-003 | P0 | Placement/residency/tenancy constraints | M2 | Slice | G0, G3, G5 | `ResourceSpec` supports allowed regions, minimum zones, minimum racks, required node class, and excluded node IDs; Go validates fresh authenticated topology before mutation, selects deterministic compliant voters, and publishes exact requested/achieved domain evidence. Policy changes can automatically repair ineligible assignments one voter at a time. Pending: dedicated tenancy, residency export enforcement, policy inheritance, Kubernetes/cloud topology attestation, and global transactional solving. |
 | CTRL-004 | P0 | Safe topology and repair operations | M1 prototype → M2 | Slice | G2, G3, G5 | Term-fenced leader transfer plus a v5 Catalog-planned, durable, idempotent single-voter transition enforce add-learner, leader-observed catch-up, joint consensus, finalize, stop, and reopen ordering. Go now deterministically plans serialized policy repair, zone/rack repair, and load rebalance from fresh inventory; a replicated TTL/fence lease rejects stale controllers. Risk-specific reachability gates, stable plan tokens, current/bootstrap/target/committed/reachable status, and unchanged customer generations pass locally. The Kubernetes runner requests repair through managed exclusion. Pending: split/merge, transactional multi-plan reservation, protected evidence, and broader chaos. |
 | CTRL-005 | P0 | Safe admission and limiting-resource reason | M2 | Slice | G3, G5, G8 | Rust reports maximum/used/available group slots; Go charges only additional shards and returns the stable limiting-node reason. Managed initial batches and learner transitions now carry a complete capacity observation into the lease-fenced Catalog command, which validates and reserves the whole transaction without partial mutation under concurrent controllers. Pending: multidimensional CPU/memory/disk/network sizing, fleet-wide multi-plan solving, protected saturation/chaos evidence, and hysteresis. |
@@ -391,7 +544,7 @@ durability.
 
 | ID | Pri | Capability shorthand | Milestone | Status | Dependency gates | Verification evidence placeholder |
 |---|---:|---|---|---|---|---|
-| DX-001 | P0 | Official Go, Java, and Python SDKs | M1 one SDK → M2 | Slice | G0, G1, G4, G10 | Go/Java/Python standalone tests and exact-source restart quickstarts remain green. All three share regional Stream, Queue, Event Bus, and the complete non-deferred Cache lifecycle: ordinary/advanced state, atomic batch, independent multiplex, locks/TTL, changes, backup/PITR, typed query, lossy Pub/Sub, cold status, discovery/auth/fence/retry/read-barrier contracts. Stream additionally exposes keyed routing, batches, sessions, and claim/fenced fetch. The real Python campaign executes all four profiles after leader loss. Pending: generated response types, persistent native streaming/cooperative revoke, package publication, and the complete native contract/version matrix |
+| DX-001 | P0 | Official Go, Java, and Python SDKs | M1 one SDK → M2 | Slice | G0, G1, G4, G10 | Standalone tests and exact-source restart quickstarts remain green. All three share regional Stream, Queue, Event Bus and non-deferred Cache APIs: advanced state, atomic batch, independent multiplex, locks/TTL, changes, backup/PITR, query, lossy Pub/Sub, cold status, discovery/auth/fence/retry/read barriers; Stream adds keyed routing, batches, sessions and claim/fenced fetch. The Python recovery campaign executes all four profiles. All three additionally implement seven generated management methods; their complete actual Catalog-fault matrix, TLS/mTLS, manual ACK, original token/OCC and unknown-outcome contracts pass locally at `dc8e44f`. Python response-shape validation and strict whole-package typing pass. Pending: protected management-SDK delivery, generated native-profile response types, persistent native streaming/cooperative revoke, deferred package publication and the full contract/version matrix. |
 | DX-002 | P0 | Generated guarantee-aware API docs | M1 → M2 | Slice | G0, G1, G10 | Hand-authored guarantee/error guidance, exact executable standalone quickstarts, and exact compilable regional Stream/Queue/Cache/Event Bus Go/Java/Python sources are built into the docs-only Pages artifact. Compatibility exposes its bounded Redis/Kafka/AMQP matrices and standard-client examples. The beta.10 candidate adds a dedicated identity/audit page with v2 policy, persistent startup, OIDC call, tenant-filtered export, tamper recovery, and exact non-claims; local format/lint/type/build passes and Pages asserts the markers. Pending: protected publication, generated API reference, and full doc lint. |
 | DX-003 | P0 | Deterministic single-binary emulator | M1 → M2 | Slice | G1, G2, G4, G10 | Seeded scheduler, virtual clocks/fault plan/transport, golden EPTR history, fixed-voter consensus, real-process EPRS/SIGKILL, and typed Stream/Queue/Cache/Bus runtimes; pending: executable replay bundle and runnable emulator controls |
 | DX-004 | P0 | Test containers and ephemeral namespaces | M1 → M2 | Slice | G1, G5, G10 | A unique three-node Compose project uses independent volumes, dynamic loopback ports, mounted policy, Go recovery, simultaneous four-profile failover/catch-up/all-node recovery, and post-failover Python lifecycles. The beta.10 campaign additionally recomputes every Go/Rust audit link and compares complete journal prefixes across control and all-node restart; it passes locally. The resumable alpha-exit and digest-pinned Kind campaigns retain typed evidence for mTLS install, all-profile traffic, backup, compacted-log voter replacement, guarded rollout, fresh restore, and post-restore writes. Pending: protected evidence for the updated audit campaign, elapsed 30-day operation, parallel campaigns, Go/Java live regional execution, and injected disk/network matrices. |

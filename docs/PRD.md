@@ -59,9 +59,15 @@ The Go-to-Rust authority client accepts at most 5 MiB per response, derived
 from the 4 MiB Catalog checkpoint ceiling plus a bounded 1 MiB response
 envelope. Atomic batch results and later operation lookup therefore remain
 resolvable when valid Catalog state exceeds the former 1 MiB transport cap.
-Protected
-multi-control chaos, Catalog capacity/sharding, legacy token migration, and a
-public token-retention window remain open. See
+The bounded native three/five-controller chaos matrix passed protected PR #149
+and exact-main CI `37353098801` at `d8adf75`, with independently verified full
+artifacts; see [Control HA certification](CONTROL_HA_CERTIFICATION.md).
+The separate clean `dc8e44f` public Go/Java/Python SDK campaign also passed both
+controller fleets locally, including actual Catalog-leader lost responses,
+owner-watch reconnect, quorum/reopen recovery, and rejection of expired durable
+checkpoints. Its full independent verifier passed; protected SDK delivery is
+still required. Catalog capacity/sharding, legacy token migration, and a public
+token-retention window remain open. See
 [ADR-0050](adr/0050-replicated-control-metadata-and-ha.md).
 
 **Automatic placement implementation note (11 September 2026):** The beta.9
@@ -129,6 +135,32 @@ scheduler counters. This closes the client-triggered timer gap for the regional
 alpha; it does not claim a real-time deadline SLA, dynamic or cross-region
 ownership, coordinated backups/PITR, production performance evidence, or a
 complete external integration plane. See ADR-0027.
+
+**SDK candidate note (5 October 2026):** The separate SDK contract branch adds
+strict whole-package Python typing and fail-closed standalone/regional response
+shape validation, plus Go/Java/Python clients for all seven generated management methods.
+All three preserve caller tokens and optional OCC presence, bound failover
+by one deadline and explicit endpoint allowlist, validate response identities
+and governance filters, and acknowledges only scanned management-watch cursors.
+Local generated TLS 1.3/mTLS tests and compiled examples are client-contract
+evidence, not protected delivery or Catalog fault certification. Generated
+native response models, persistent/cooperative
+data streaming, the full version matrix, and deferred package publication remain
+DX-001 work. See [the management SDK candidate](MANAGEMENT_SDK.md).
+
+The Python client builds on namespaced protobuf messages and typed gRPC stubs,
+pinned optional dependencies, exact regeneration, and shared Go/Python wire
+vectors. Twenty-one real-gRPC regression groups and all seven calls against a
+TLS-1.3-only Go server validate bounded calls, identity/governance receipts,
+cancellation, and acknowledged watches without adding dependencies to ordinary
+HTTP SDK imports. Python gRPC trusts the explicit CA/client identity but does
+not independently enforce a TLS 1.3 minimum; Epoch controllers must retain
+their server policy. Java's generated client additionally passes 17 local
+contract/safety tests and all seven calls against Go with TLS 1.3/mTLS,
+wrong/anonymous/foreign identity denial, and client-side TLS 1.2 refusal.
+The exact Java example compiles in CI and is embedded alongside Go/Python.
+Public-SDK Catalog fault certification and
+protected delivery remain open; generated-wire tests are not durability evidence.
 
 **Cache implementation note (21 August 2026):** The fixed-three-voter,
 single-shard regional Cache now implements the alpha contract for every

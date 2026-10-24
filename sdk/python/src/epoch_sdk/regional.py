@@ -11,6 +11,7 @@ from typing import Any, Literal
 from ._regional import (
     RegionalClient,
     RegionalScope,
+    RequestFactory,
     Route,
     _non_negative,
     _positive,
@@ -1264,7 +1265,7 @@ class RegionalStreamClient(RegionalClient):
             ),
         )
 
-    def _stream_call(self, stream: str, shard: int, request_for: Any) -> Any:
+    def _stream_call(self, stream: str, shard: int, request_for: RequestFactory) -> dict[str, Any]:
         return self.call("streams", "Stream", stream, shard, request_for)
 
     def _mutate_state(

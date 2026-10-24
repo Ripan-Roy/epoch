@@ -9,6 +9,9 @@ import {
   consensusCheckpoint,
   epochTargetLanguageGuides,
   governanceInventory,
+  goManagementExample,
+  pythonManagementExample,
+  javaManagementExample,
   guardedUpgradeSpec,
   guardedUpgradeStatus,
   identityPolicy,
@@ -2008,6 +2011,50 @@ export function SdkReferenceBody() {
             </tbody>
           </table>
         </div>
+      </Topic>
+
+      <Topic id="management-sdk" title="Management SDK candidate">
+        <p>
+          The Go, Java, and Python <code>ManagementClient</code> implementations use generated resource
+          messages over controller gRPC, normally port 8081. Configure an explicit endpoint allowlist and CA
+          trust; TLS 1.3 supports optional client certificates. Plaintext is an explicit loopback-only
+          development choice. Native profile clients are separate. Catalog fault certification remains open.
+          Python requires server-enforced TLS 1.3: its pinned gRPC API exposes CA and client-certificate
+          trust, not a client-side minimum-version selector.
+        </p>
+        <p>
+          Unary failover retains one deadline, the original token, and omitted/zero/nonzero generation
+          presence. Only <code>UNAVAILABLE</code> advances to another configured controller. An error without
+          a validated mutation receipt can leave the outcome unknown: resolve the original token and exact
+          resource set before choosing another write. Desired acceptance is not readiness.
+        </p>
+        <p>
+          Watch pages require processing and durable application checkpointing before acknowledging the exact{" "}
+          <code>NextCursor</code>. Empty filtered pages also advance the scanned checkpoint. A watch preserves
+          filters, has a fixed endpoint budget, returns stale cursors for reconciliation, and never silently
+          resets to zero. Public inventory currently returns at most 100 resources without continuation
+          paging.
+        </p>
+        <Note title="Not a live Catalog quickstart">
+          These exact seven-method examples compile in Go/Java and pass strict Python typing. Their
+          generated-wire fixtures run over TLS 1.3/mTLS, including all Python calls against a TLS-1.3-only Go
+          server, but the public SDK still needs real Catalog fault and protected delivery evidence. Do not
+          run the example against a production resource.
+        </Note>
+        <CodeBlock label="Go · management_example_test.go" value={goManagementExample} />
+        <CodeBlock label="Python · management.py (compile-only)" value={pythonManagementExample} />
+        <CodeBlock label="Java · ManagementExample.java (compile-only)" value={javaManagementExample} />
+        <CodeBlock
+          label="Terminal · verify the client contracts"
+          value={
+            "python -m pip install 'sdk/python[management,management-dev]'\nPYTHONPATH=sdk/python/src python -m unittest discover -s sdk/python/tests -v\nEPOCH_PYTHON_MANAGEMENT_PROBE=python go test -race ./sdk/go/epoch -run TestManagement -count=1\ngo vet ./sdk/go/epoch"
+          }
+        />
+        <p>
+          Read the <a href={`${repositoryDocsUrl}/MANAGEMENT_SDK.md`}>full management SDK guide</a> for trust
+          configuration, unknown-outcome handling, generated result models, watch acknowledgement, and the
+          remaining delivery boundaries.
+        </p>
       </Topic>
 
       <Topic id="conventions" title="Conventions">

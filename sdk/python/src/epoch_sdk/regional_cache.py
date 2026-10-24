@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import math
 from dataclasses import dataclass
 from typing import Any, ClassVar
@@ -54,7 +55,7 @@ class RegionalCacheValue:
 
     @classmethod
     def set(
-        cls, value: list[str] | tuple[str, ...] | set[str] | frozenset[str]
+        cls, value: builtins.list[str] | tuple[str, ...] | set[str] | frozenset[str]
     ) -> RegionalCacheValue:
         return cls("set", value)
 

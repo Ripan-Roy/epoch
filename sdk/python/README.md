@@ -4,6 +4,16 @@ This is the initial typed Python client for Epoch's provisional native HTTP
 surface. It covers health and resource discovery plus every Cache, Stream,
 Queue, and Event Bus route currently exposed by the standalone node.
 
+The separate management candidate includes a public `epoch_sdk.management`
+client for all seven generated RPCs, original-deadline/token/OCC-preserving
+failover, typed receipts, cancellation, and acknowledged scanned-cursor watches.
+Install `'sdk/python[management]'` for runtime use and add `management-dev` for
+generation/tests. Ordinary HTTP imports remain dependency-free. Python gRPC
+does not independently enforce a TLS 1.3 minimum; retain Epoch's TLS-1.3-only
+controller policy. Java parity and live Catalog/protected delivery evidence
+remain open. See the
+[management candidate guide](../../docs/MANAGEMENT_SDK.md).
+
 ```python
 from epoch_sdk import EpochClient, EventEnvelope
 
@@ -76,3 +86,42 @@ and [Event Bus contract guide](../../docs/REGIONAL_EVENT_BUS_SDK.md).
 Native gRPC streaming, background/cooperative consumer sessions, atomic
 assignment-plus-offset handoff, generated response models, and package
 publication remain future work.
+
+## Response and typing boundary
+
+Local lint and CI strictly type-check the entire SDK plus the displayed
+quickstart, not just the example:
+
+```sh
+PYTHONPATH=sdk/python/src mypy --strict sdk/python/src console/src/quickstarts/quickstart.py
+```
+
+The HTTP transport returns an unknown decoded object; each client validates
+the declared response shape before returning it. Standalone object/list/empty
+and integer/boolean-map results are distinct; booleans are never accepted as
+integers and strings are never silently coerced. Regional results must be
+objects. Both standard HTTP and injected transports pass through these checks.
+JSON decoding rejects duplicate keys, malformed encoding, and non-finite
+numbers, including floating-point overflow. Decimal 64-bit identities remain
+strings and arbitrary valid payload fields remain available.
+
+Invalid responses raise exported `EpochProtocolError`, a `ValueError` subtype,
+with a fixed diagnostic that does not include payloads or credentials. This is
+not an automatic retry signal or proof that a mutation failed to commit.
+Preserve the original mutation identity and use the documented exact retry or
+resolution contract; do not retry a standalone non-idempotent write blindly.
+
+These are response-shape and full-package typing guarantees, not generated
+per-field response models, exhaustive native contract coverage, or a claim
+that `dict[str, Any]` payload fields are statically typed. Those remain separate
+DX-001 requirements.
+
+Clean candidate `fb8d15b` passed all 57 Python tests and whole-package strict
+typing. Its standalone cross-language smoke passed against real Rust/Go
+processes, including the live Java smoke without skipping. Its accelerated
+regional campaign passed all eight invariants across all four profiles, owner
+loss, profile-leader losses, and same-volume full restart in 55,779 ms; the
+signed manifest and artifact receipts independently verified. The unchanged
+Rust source was checked against the retained node image before reuse.
+This is one bounded accelerated campaign, not a long soak or performance/SLO
+claim. Protected delivery evidence remains required.

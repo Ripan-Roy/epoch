@@ -37,10 +37,12 @@ expect_line console/package.json "  \"version\": \"$release_version\","
 expect_line console/src/App.tsx "const releaseVersion = \"$release_version\";"
 expect_line sdk/java/pom.xml "  <version>$release_version</version>"
 expect_line sdk/java/src/main/java/io/epoch/sdk/HttpTransport.java \
-  "  private static final String USER_AGENT = \"epoch-java/$release_version\";"
+  "  static final String USER_AGENT = \"epoch-java/$release_version\";"
 expect_line sdk/python/pyproject.toml "version = \"$python_version\""
 expect_line sdk/python/src/epoch_sdk/transport.py \
-  "        request_headers = {\"accept\": \"application/json\", \"user-agent\": \"epoch-python/$python_version\"}"
+  "_USER_AGENT = \"epoch-python/$python_version\""
+expect_line sdk/python/src/epoch_sdk/transport.py \
+  '        request_headers = {"accept": "application/json", "user-agent": _USER_AGENT}'
 expect_line sdk/go/epoch/transport.go \
   "	userAgent        = \"epoch-go/$release_version\""
 expect_line sdk/go/epoch/transport_test.go \

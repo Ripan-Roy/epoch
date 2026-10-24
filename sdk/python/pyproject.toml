@@ -19,15 +19,26 @@ classifiers = [
   "Typing :: Typed",
 ]
 
+[project.optional-dependencies]
+management = ["grpcio==1.84.0", "protobuf==7.35.1"]
+management-dev = [
+  "grpcio==1.84.0",
+  "protobuf==7.35.1",
+  "grpcio-tools==1.84.0",
+  "grpc-stubs==1.53.0.6",
+  "types-protobuf==7.35.1.20260906",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-epoch_sdk = ["py.typed"]
+epoch_sdk = ["py.typed", "**/*.pyi"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+extend-exclude = ["src/epoch_sdk/_generated"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]

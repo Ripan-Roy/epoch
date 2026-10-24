@@ -77,7 +77,7 @@ func TestControlHACIRunsTheFullMatrixOnTheReusedNativeImage(t *testing.T) {
 		}
 	}
 	run := requireHAStep(t, job, "Prove and independently verify this complete fleet")
-	if run.If != "" || !strings.Contains(run.Run, "control_ha_full.py run-fleet") || !strings.Contains(run.Run, "control_ha_full.py verify-fleet") || run.Env["EPOCH_CONTROL_HA_CONTROLLERS"] != "${{ matrix.controllers }}" || run.Env["EPOCH_REGIONAL_IMAGE"] != "epoch/node:ci-arm64" || run.Env["EPOCH_REGIONAL_USE_EXISTING_IMAGE"] != "1" {
+	if run.If != "" || !strings.Contains(run.Run, "management_sdk_catalog.py run") || !strings.Contains(run.Run, "management_sdk_catalog.py verify") || run.Env["EPOCH_CONTROL_HA_CONTROLLERS"] != "${{ matrix.controllers }}" || run.Env["EPOCH_REGIONAL_IMAGE"] != "epoch/node:ci-arm64" || run.Env["EPOCH_REGIONAL_USE_EXISTING_IMAGE"] != "1" || run.Env["PYTHONPATH"] != "sdk/python/src" {
 		t.Error("each worker must run and independently verify its complete live fault matrix")
 	}
 	upload := requireHAStep(t, job, "Upload this fleet's passing or failed evidence")
@@ -118,7 +118,7 @@ func TestControlHAProtectedGateRequiresBothCurrentAttemptFleetProofs(t *testing.
 		}
 	}
 	seal := requireHAStep(t, job, "Seal and independently verify the complete failure matrix")
-	for _, required := range []string{"control_ha_full.py combine", "--three", "--five", "control_ha_full.py verify", "epoch-control-ha-full/evidence.json"} {
+	for _, required := range []string{"management_sdk_catalog.py combine", "--three", "--five", "management_sdk_catalog.py verify", "epoch-control-ha-full/evidence.json"} {
 		if !strings.Contains(seal.Run, required) {
 			t.Errorf("aggregate seal omitted %q", required)
 		}
@@ -129,5 +129,41 @@ func TestControlHAProtectedGateRequiresBothCurrentAttemptFleetProofs(t *testing.
 	upload := requireHAStep(t, job, "Upload complete control-HA evidence")
 	if upload.If != "always()" || upload.With["retention-days"] != float64(30) || upload.With["if-no-files-found"] != "error" {
 		t.Error("complete proof must be retained and missing evidence must fail closed")
+	}
+}
+
+func TestControlHACertifiesAllPublicSDKsWithoutReplacingNativeFaults(t *testing.T) {
+	jobs := readHAWorkflow(t)
+	fleet := jobs["control-ha-fleet"]
+	python, java := false, false
+	for _, step := range fleet.Steps {
+		if strings.HasPrefix(step.Uses, "actions/setup-python@") && step.With["python-version"] == "3.11" && step.If == "" {
+			python = true
+		}
+		if strings.HasPrefix(step.Uses, "actions/setup-java@") && step.With["java-version"] == "25" && step.If == "" {
+			java = true
+		}
+	}
+	if !python || !java {
+		t.Error("each live fleet must require Python and Java as well as Go, without optional runtime skips")
+	}
+	install := requireHAStep(t, fleet, "Install public SDK Catalog campaign dependencies")
+	if install.If != "" || !strings.Contains(install.Run, "sdk/python[management]") || !strings.Contains(install.Run, "test_management_sdk_catalog") {
+		t.Error("public SDK runtime and evidence contracts must be installed/executed before faults")
+	}
+	aggregate := requireHAStep(t, jobs["control-ha"], "Install independent public SDK evidence verifier")
+	if aggregate.If != "" || !strings.Contains(aggregate.Run, "sdk/python[management]") {
+		t.Error("complete aggregate must independently parse SDK protobuf witnesses")
+	}
+	for _, marker := range []struct{ path, required string }{
+		{"management_sdk_catalog.py", "class SDKFleet(full.FullFleet)"},
+		{"management_sdk_catalog.py", "bundle_verifier=lambda manifest: verify_bundle(manifest, counts)"},
+		{"management_sdk_catalog_evidence.py", "full.verify_full_bundle("},
+		{"management_sdk_catalog_evidence.py", "full.validate_full_evidence("},
+	} {
+		data, err := os.ReadFile(filepath.Join("..", "integration", marker.path))
+		if err != nil || !strings.Contains(string(data), marker.required) {
+			t.Errorf("SDK gate must compose rather than replace the native full fault gate: %s", marker.path)
+		}
 	}
 }

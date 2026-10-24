@@ -435,6 +435,67 @@ class OwnerFleet:
             regional.write_profile(self.cluster, resource, sequence)
             regional.wait_for_profile_apply(self.cluster, resource, sequence)
 
+    def wait_for_initial_catalog(self) -> None:
+        def readable_everywhere() -> bool:
+            live = [
+                controller
+                for controller in self.controllers
+                if controller.process is not None
+                and controller.process.poll() is None
+                and not controller.paused
+            ]
+            if not live:
+                raise RuntimeError("no live controllers for initial Catalog readiness")
+            if (
+                type(self.count) is not int
+                or self.count <= 0
+                or len(live) != self.count
+                or len(self.controllers) != self.count
+            ):
+                raise RuntimeError(
+                    "complete initial controller fleet is required for Catalog readiness"
+                )
+            ready = True
+            for controller in live:
+                try:
+                    response = controller.request("GET", "/v1/resources")
+                except ValueError as error:
+                    raise RuntimeError(
+                        f"controller {controller.label} returned invalid Catalog JSON"
+                    ) from error
+                if response.status == 503:
+                    ready = False
+                    continue
+                if response.status != 200:
+                    raise RuntimeError(
+                        f"controller {controller.label} Catalog readiness returned "
+                        f"HTTP {response.status}"
+                    )
+                document = response.document
+                if (
+                    not isinstance(document, dict)
+                    or not isinstance(document.get("resources"), list)
+                    or any(
+                        not isinstance(resource, dict)
+                        for resource in document["resources"]
+                    )
+                    or type(document.get("count")) is not int
+                    or document["count"] != len(document["resources"])
+                ):
+                    raise RuntimeError(
+                        f"controller {controller.label} returned invalid Catalog inventory"
+                    )
+            return ready
+
+        # A listening API does not establish the Catalog leader's ReadIndex
+        # barrier. Retry only read-only readiness, never the first concurrent
+        # mutations: their original success/replay assertions must remain strict.
+        regional.wait_until(
+            "all controllers to serve initial strong Catalog inventory",
+            readable_everywhere,
+            timeout_seconds=regional.RECOVERY_TIMEOUT_SECONDS,
+        )
+
     def create_and_replay(self) -> None:
         bodies = [
             regional.managed_resource_request(resource)
@@ -824,6 +885,7 @@ class OwnerFleet:
                 controller.owner_id for controller in self.controllers
             ]
             assert len(set(self.result["owners"])) == self.count
+            self.wait_for_initial_catalog()
             self.create_and_replay()
             self.profiles_write(1)
             self.same_label_replacement()
