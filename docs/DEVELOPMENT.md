@@ -1,8 +1,8 @@
 # Development
 
 This guide describes the reproducible local environment and the commands used
-to build Epoch. The product is in its initial scaffold, so some commands skip a
-language area until that area contains source files.
+to build Epoch. Rust, Go, Java, Python, and TypeScript components have executable
+checks; Docker-backed integration campaigns additionally require a live daemon.
 
 Behavioral work follows the mandatory TDD, SOLID, and clean-code policy in
 [ENGINEERING_STANDARDS.md](ENGINEERING_STANDARDS.md).
@@ -228,6 +228,14 @@ When a maintainer folds bot updates into an active feature PR, preserve the
 manifest/lockfile changes, identify the superseded PRs in its description, and
 verify the combined graph. Close superseded bot PRs only after those updates
 land on `main`. Security fixes should not wait for an unrelated feature release.
+
+The current Zstandard migration includes transitive Kafka and MySQL binlog
+dependencies. Its immutable upstream pin, narrowly patched MySQL source,
+offline integrity contracts, and removal conditions are documented in
+[DEPENDENCY_SECURITY.md](DEPENDENCY_SECURITY.md). `make test-dependency-security`
+runs locally, in the unit/audit gates, and in CI; source provenance is also
+checked before Rust and Docker compilation. Do not edit vendored source to fix
+an application build or suppress its integrity checks.
 
 ## Common commands
 

@@ -21,6 +21,14 @@ notes explicitly list additional verified artifacts.
 - Patch ctutils to 0.4.4 and Tokio to 1.53.3 for RUSTSEC-2026-0385/0386,
   preserving unrelated dependency edges and the sole existing Raft/fxhash
   exception. The Tokio workspace minimum excludes the affected release.
+- Migrate the complete Zstandard graph to 0.14.3 / safe 8.2.0 / sys 2.1.2,
+  including pinned upstream Kafka and a source-verified, manifest-only MySQL
+  patch. Preserve every codec/binlog feature, add offline provenance and
+  whole-graph security contracts to CI, and retain pre-upgrade Stream replay,
+  Kafka record, and MySQL decoder vectors. No new audit exception is added.
+- Upgrade RabbitMQ Java conformance to 5.37.0, synchronize exact version checks,
+  banners and evidence metadata, and reject captures from the previous client.
+  Fresh fixture and real-regional recovery gates remain required.
 - Record measured CI results honestly: independent jobs finish earlier, but the
   complete pipeline still takes about 65 minutes. Real retained-history churn
   remains the optimization target; no proof coverage or checkpoint is removed.

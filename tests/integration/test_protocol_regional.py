@@ -17,7 +17,7 @@ class ProtocolRegionalContractTest(unittest.TestCase):
             ["cache", "stream", "queue"],
         )
 
-    def test_reported_java_client_versions_match_manifest(self) -> None:
+    def java_client_versions(self) -> dict[str, str]:
         manifest = Path(__file__).parents[1] / "compatibility/java/pom.xml"
         namespace = {"m": "http://maven.apache.org/POM/4.0.0"}
         dependencies = {
@@ -29,17 +29,55 @@ class ProtocolRegionalContractTest(unittest.TestCase):
                 "m:dependencies/m:dependency", namespace
             )
         }
-        for client, coordinate in (
-            ("kafka", ("org.apache.kafka", "kafka-clients")),
-            ("rabbitmq", ("com.rabbitmq", "amqp-client")),
-        ):
+        return {
+            "kafka": dependencies[("org.apache.kafka", "kafka-clients")],
+            "rabbitmq": dependencies[("com.rabbitmq", "amqp-client")],
+        }
+
+    def test_reported_java_client_versions_match_manifest(self) -> None:
+        for client, version in self.java_client_versions().items():
             with self.subTest(client=client):
                 self.assertEqual(
                     campaign.CLIENTS[client],
-                    dependencies[coordinate],
+                    version,
                     "Client updates must refresh the evidence metadata and rerun "
                     "conformance; do not report results for the previous version.",
                 )
+
+    def test_exact_java_client_assertions_match_manifest(self) -> None:
+        source = (
+            Path(__file__).parents[1] / "compatibility/java/ProtocolConformance.java"
+        ).read_text()
+        version_calls = {
+            "kafka": "AppInfoParser.getVersion()",
+            "rabbitmq": "ConnectionFactory.class.getPackage().getImplementationVersion()",
+        }
+        for client, version in self.java_client_versions().items():
+            with self.subTest(client=client):
+                self.assertTrue(
+                    f'{version_calls[client]}.equals("{version}")' in source,
+                    f"Conformance must require the exact {client} version {version}.",
+                )
+
+    def test_completion_banners_match_manifest(self) -> None:
+        versions = self.java_client_versions()
+        clients = f"Kafka {versions['kafka']} and RabbitMQ Java {versions['rabbitmq']}"
+        fixture = Path(__file__).parents[1]
+        java = (fixture / "compatibility/java/ProtocolConformance.java").read_text()
+        shell = (fixture / "integration/protocol-compatibility.sh").read_text()
+        self.assertTrue(
+            f'System.out.println("{clients} conformance passed");' in java,
+            "The Java completion banner must name the exact Maven client versions.",
+        )
+        self.assertTrue(
+            (
+                f"printf 'Redis CLI {campaign.CLIENTS['redis']}, "
+                f"Kafka Java {versions['kafka']}, and RabbitMQ Java {versions['rabbitmq']} "
+                "conformance passed.\\n'"
+            )
+            in shell,
+            "The fixture completion banner must name the exact current clients.",
+        )
 
     def evidence(self) -> dict:
         return {
@@ -65,6 +103,12 @@ class ProtocolRegionalContractTest(unittest.TestCase):
 
     def test_accepts_complete_fault_and_client_evidence(self) -> None:
         campaign.validate_evidence(self.evidence())
+
+    def test_rejects_previous_rabbitmq_client_evidence(self) -> None:
+        evidence = self.evidence()
+        evidence["clients"]["rabbitmq"] = "5.35.0"
+        with self.assertRaisesRegex(ValueError, "released client versions"):
+            campaign.validate_evidence(evidence)
 
     def test_process_failure_diagnostics_accept_text_bytes_and_missing_output(
         self,

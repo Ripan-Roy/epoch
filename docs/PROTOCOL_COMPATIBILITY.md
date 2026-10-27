@@ -20,7 +20,7 @@ in [ADR-0049](adr/0049-core-protocol-semantics.md).
 |---|---|---|---|
 | Redis | RESP2 and RESP3 negotiation | Redis 8.8.2 `redis-cli` | Partial; bounded transactions, Pub/Sub, Streams, strings, TTL, and structures |
 | Kafka | Kafka broker protocol | Apache Kafka Java client 4.3.1 | Partial; idempotent producer, manual/classic consumer, offsets, and bounded static identities |
-| RabbitMQ | AMQP 0-9-1 | RabbitMQ Java client 5.35.0 | Partial; durable topology, four exchange kinds, Queue lifecycle, named DLX, and `x-death` |
+| RabbitMQ | AMQP 0-9-1 | RabbitMQ Java client 5.37.0 | Partial; durable topology, four exchange kinds, Queue lifecycle, named DLX, and `x-death` |
 
 The versions above are pinned and executed by CI, not a promise that every
 operation in those releases is implemented. In addition to fast wire fixtures
@@ -29,6 +29,10 @@ the production gateway image and authenticated, replicated Cache/Stream/Queue
 tablets. It checks gateway replacement, each profile's leader loss, and all
 voters reopening their existing volumes after SIGKILL. See
 [ADR-0043](adr/0043-lossless-protocol-recovery-contract.md).
+
+RabbitMQ Java 5.37.0 is the current security-update target. Earlier fixture and
+regional captures for 5.35.0 do not certify this upgraded client; fresh fixture
+and production-image real-regional conformance remain required before promotion.
 
 ## Architecture and trust boundary
 
@@ -391,11 +395,11 @@ native named-DLX forwarding with `x-death`, capacity rejection, nack/requeue,
 disconnected-lease redelivery, and acknowledged messages staying absent after
 restart.
 
-The current production-image regional-v2 candidate passes all 21 local checks
-with Redis CLI 8.8.2, Kafka Java 4.3.1, and RabbitMQ Java 5.35.0. This includes
+The production-image regional-v2 campaign requires all 21 checks with Redis CLI
+8.8.2, Kafka Java 4.3.1, and RabbitMQ Java 5.37.0. These include
 gateway replacement, separate Cache/Stream/Queue leader and term changes,
-replica convergence, and all-voter SIGKILL/same-volume reopen. Protected CI is
-still required for promotion.
+replica convergence, and all-voter SIGKILL/same-volume reopen. Fresh evidence for
+the upgraded RabbitMQ client and protected CI are still required for promotion.
 
 Performance parity with Redis, Kafka, or RabbitMQ is not claimed by this beta
 slice. Comparative throughput and p99 gates in the PRD remain separate work.

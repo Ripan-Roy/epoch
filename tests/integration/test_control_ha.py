@@ -308,7 +308,7 @@ class OwnerEvidenceContractTest(unittest.TestCase):
                 mock.patch.object(
                     control_ha.soak, "runtime_identity", return_value=runtime
                 ),
-                mock.patch.object(control_ha.subprocess, "run"),
+                mock.patch.object(control_ha.subprocess, "run") as compared_source,
                 mock.patch("builtins.print") as printed,
             ):
                 output = (Path(folder) / "evidence").resolve()
@@ -334,6 +334,10 @@ class OwnerEvidenceContractTest(unittest.TestCase):
                     printed.assert_called_once()
                     self.assertFalse((output / "failure.json").exists())
                 verifier.assert_called_once_with(output / "evidence.json")
+                compared_source.assert_called_once()
+                image_inputs = compared_source.call_args.args[0]
+                self.assertIn("third_party", image_inputs)
+                self.assertIn("scripts/verify-vendored-dependencies.py", image_inputs)
                 self.assertEqual(
                     "failed" if fails else "passed",
                     control_ha.soak.load_json(output / "evidence.json")["status"],

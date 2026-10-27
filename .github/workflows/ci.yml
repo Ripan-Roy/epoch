@@ -65,6 +65,8 @@ jobs:
           echo "${protoc_root}/bin" >> "$GITHUB_PATH"
       - name: Verify pinned protoc
         run: test "$(protoc --version)" = "libprotoc 35.1"
+      - name: Verify authenticated vendored dependencies before compilation
+        run: python3 scripts/verify-vendored-dependencies.py
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --locked --workspace --all-targets --all-features
@@ -126,6 +128,8 @@ jobs:
         run: make test-release-manifest test-release-workflow
       - name: Verify Dependabot coverage and update policy
         run: make test-dependabot
+      - name: Verify compression dependency security and source provenance
+        run: make test-dependency-security
       - name: Verify observability templates and low-cardinality policy
         run: make test-observability-assets
       - name: Verify Compose crash and restart synchronization
@@ -174,12 +178,14 @@ jobs:
           console/src/quickstarts/quickstart.py
           scripts/generate-python-management.py
           scripts/generate-java-management.py
+          scripts/verify-vendored-dependencies.py
       - run: >-
           ruff check sdk/python tests/soak tests/integration/*.py
           console/src/quickstarts/quickstart.py
       - run: >-
           ruff check --config sdk/python/pyproject.toml
           scripts/generate-python-management.py scripts/generate-java-management.py
+          scripts/verify-vendored-dependencies.py
       - name: Compile and type-check Python SDK and displayed quickstart
         run: |
           python -m py_compile console/src/quickstarts/quickstart.py

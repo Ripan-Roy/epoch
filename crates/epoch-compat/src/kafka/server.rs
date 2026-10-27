@@ -1613,6 +1613,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pre_upgrade_zstd_record_batch_preserves_key_value_headers_and_offset() {
+        // Produced by kafka-protocol 0.18.0 / zstd 0.13.3 before the security
+        // migration, including its independently captured CRC32C header.
+        const LEGACY_BATCH: &[u8] = &[
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 97, 0, 0, 0, 0, 2, 180, 235, 157, 133, 0, 4, 0, 0, 0,
+            0, 0, 0, 1, 139, 207, 229, 104, 3, 0, 0, 1, 139, 207, 229, 104, 3, 255, 255, 255, 255,
+            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 1, 40, 181, 47, 253, 0, 88,
+            57, 1, 0, 76, 0, 0, 0, 10, 107, 101, 121, 45, 51, 14, 118, 97, 108, 117, 101, 45, 51,
+            2, 22, 116, 114, 97, 99, 101, 112, 97, 114, 101, 110, 116, 14, 48, 48, 45, 116, 101,
+            115, 116,
+        ];
+        let backend = MemoryBackend::with_resources("sessions", "events", 2, "jobs");
+        assert_eq!(
+            produce_partition(
+                &backend,
+                "events",
+                1,
+                Some(Bytes::from_static(LEGACY_BATCH))
+            )
+            .await
+            .unwrap(),
+            0
+        );
+        let (high_watermark, mut fetched) =
+            fetch_partition(&backend, "events", 1, 0).await.unwrap();
+        assert_eq!(high_watermark, 1);
+        let batches = RecordBatchDecoder::decode_all(&mut fetched).unwrap();
+        assert!(!fetched.has_remaining());
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].records.len(), 1);
+        let record = &batches[0].records[0];
+        assert_eq!(record.offset, 0);
+        assert_eq!(record.timestamp, 1_700_000_000_003);
+        assert_eq!(record.key.as_deref(), Some(b"key-3".as_slice()));
+        assert_eq!(record.value.as_deref(), Some(b"value-3".as_slice()));
+        assert_eq!(
+            record
+                .headers
+                .get(&StrBytes::from_static_str("traceparent")),
+            Some(&Some(Bytes::from_static(b"00-test")))
+        );
+    }
+
+    #[tokio::test]
     async fn rejects_compressed_record_data_that_expands_past_the_hard_limit() {
         let backend = MemoryBackend::with_resources("sessions", "events", 2, "jobs");
         let record = test_record(Bytes::from(vec![b'x'; MAX_MESSAGE_BYTES + 1]), 0);

@@ -4,6 +4,15 @@ This register turns the prioritized catalog in [PRD.md](./PRD.md) into a deliver
 
 Last synchronized with PRD version 0.3 on 21 August 2026.
 
+Current security follow-up: the fresh October 26 audit requires patched
+Zstandard throughout the Stream/Kafka/MySQL graph, not only the workspace's
+direct dependency. The candidate preserves codecs/binlog, adds offline source
+provenance and whole-graph contracts to local/CI/Docker gates, and synchronizes
+RabbitMQ Java 5.37.0 conformance metadata. Legacy compressed vectors and focused
+checks pass locally; fresh combined runtime and exact-main evidence remain
+required. See [dependency security](DEPENDENCY_SECURITY.md). No PRD capability
+or production gate is closed by this dependency migration.
+
 Current bounded native CTRL-001/CTRL-002 chaos evidence: PR #149 merged at
 `d8adf756568e8e27912d480a66185b45bb937ecf` and
 [main CI](https://github.com/Ripan-Roy/epoch/actions/runs/37353098801) passed all
@@ -268,19 +277,21 @@ node-local Pub/Sub, durable Streams, Kafka idempotent producer/manual/classic-
 group consumer APIs with bounded static identity reuse, and AMQP 0-9-1 durable
 topology plus direct/fanout/topic/headers Queue publish/return/confirm/consume/
 settlement into the fenced native regional ports.
-Redis CLI 8.8.2, Kafka Java 4.3.1, and RabbitMQ Java 5.35.0 execute the
+Redis CLI 8.8.2, Kafka Java 4.3.1, and RabbitMQ Java 5.37.0 target the
 real wire listeners; native adapter contracts separately prove bearer identity,
 generation/tablet/term fences, routes, payloads, and responses. Parser/semantic
 tests, all four Kafka compression paths, state-command-v8 idempotent batches,
 the DX-007 versioned migration scanner,
 the public matrix, Pages UI, and a fifth signed non-root OCI component are local.
-The current regional-v2 candidate passes combined real-regional conformance locally:
-production node and gateway images preserve binary Cache state plus atomic conditional
+Fresh fixture and combined real-regional evidence is required for the upgraded
+RabbitMQ client; previous-version captures do not certify it. The regional-v2
+campaign requires production behavior across these boundaries:
+production node and gateway images must preserve binary Cache state plus atomic conditional
 set/previous-value, atomic multi-set, structures, Redis transactions and durable
 Streams-group state; Kafka CreateTime, ordered duplicate headers, replicated group
 sessions/static identities/claims/checkpoints, and idempotent producer state; and
 AMQP topic/headers routing, TTL, durable topology, named-DLX forwarding, `x-death`,
-mandatory returns, confirms/leases/acks. All 21 checks survive gateway replacement,
+mandatory returns, confirms/leases/acks. All 21 checks must survive gateway replacement,
 separate Cache/Stream/Queue leader and term changes, converged replicas, and all-voter
 SIGKILL/same-volume reopen. A full Queue's committed rejection is never confirmed.
 Protected execution remains required. Differential and fuzz
