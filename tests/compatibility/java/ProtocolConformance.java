@@ -31,11 +31,11 @@ public final class ProtocolConformance {
     var amqpPort = Integer.parseInt(arguments[2]);
     require(AppInfoParser.getVersion().equals("4.3.1"), "Kafka client version");
     require(
-        ConnectionFactory.class.getPackage().getImplementationVersion().equals("5.35.0"),
+        ConnectionFactory.class.getPackage().getImplementationVersion().equals("5.37.0"),
         "RabbitMQ client version");
     verifyKafka(host, kafkaPort);
     verifyAmqp(host, amqpPort);
-    System.out.println("Kafka 4.3.1 and RabbitMQ Java 5.35.0 conformance passed");
+    System.out.println("Kafka 4.3.1 and RabbitMQ Java 5.37.0 conformance passed");
   }
 
   private static void verifyKafka(String host, int port) throws Exception {

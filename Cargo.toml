@@ -17,6 +17,7 @@ members = [
   "crates/epoch-compat",
   "crates/epoch-observability",
 ]
+exclude = ["third_party/mysql_common-0.37.3"]
 resolver = "3"
 
 [workspace.package]
@@ -43,7 +44,8 @@ hmac = "=0.13.0"
 http = "1.3"
 http-body-util = "0.1"
 jsonschema = { version = "=0.49.9", default-features = false }
-kafka-protocol = { version = "=0.18.0", default-features = false, features = ["broker", "client", "gzip", "zstd", "snappy", "lz4", "messages_enums"] }
+# Upstream's Zstandard security migration is not yet in a published release.
+kafka-protocol = { git = "https://github.com/kafka-protocol-rs/kafka-protocol-rs.git", rev = "7faf833aeb152d3b92f9bd50074a764c674f17b5", version = "=0.18.0", default-features = false, features = ["broker", "client", "gzip", "zstd", "snappy", "lz4", "messages_enums"] }
 lz4 = "1.28"
 lz4_flex = "0.14"
 parking_lot = "0.12"
@@ -71,7 +73,7 @@ slog = "=2.8.2"
 snap = "1.1"
 tempfile = "3.23"
 thiserror = "2.0"
-tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
+tokio = { version = "1.53.3", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 tokio-postgres = "0.7"
 tower-http = { version = "0.7", features = ["cors", "request-id", "trace"] }
@@ -81,7 +83,12 @@ tracing-opentelemetry = { version = "0.33", default-features = false }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 url = "2.5"
 uuid = { version = "1.18", features = ["serde", "v7"] }
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.14.3", default-features = false }
+
+[patch.crates-io]
+# Official 0.37.3 source with only its normalized Zstandard requirement patched.
+# scripts/verify-vendored-dependencies.py authenticates the complete source tree.
+mysql_common = { path = "third_party/mysql_common-0.37.3" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

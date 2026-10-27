@@ -132,6 +132,21 @@ versions are pinned through root workspace overrides when an owning direct
 dependency has not yet refreshed its own lock resolution. No npm advisory is
 silenced or accepted without a documented, bounded exception.
 
+`make test-dependency-security` additionally rejects old or parallel Zstandard
+versions anywhere in `Cargo.lock`, removed Kafka compression/MySQL binlog
+features, and unauthorized changes to the narrowly patched MySQL dependency.
+It verifies all retained upstream files offline, including licenses, and tests
+tampered source/inventory, manifest rollback, symlinks, and missing/extra files.
+Fixed pre-upgrade Stream, Kafka, and MySQL Zstandard vectors protect persisted
+command/replay and decoder compatibility. See
+[dependency security](DEPENDENCY_SECURITY.md) for source provenance and the
+temporary patch's removal gates. Real-server conformance remains separate.
+The source-connector fixture now enables MySQL transaction compression and its
+live ignored test requires the actual compressed event, decoded rows/XID,
+physical checkpoint, fresh-adapter EOF, next transaction and exact replay.
+The source-conformance CI job executes it; default unit-test skipping is not
+recorded as a passing live test.
+
 The Rust CI job also tests and builds the complete workspace with
 `--all-features`, and builds workspace documentation with
 `RUSTDOCFLAGS="-D warnings"`. It installs `protoc` 35.1 through the repository's
@@ -817,7 +832,7 @@ durable topology reload, malformed persisted metadata, bounds, and reserved-key
 protection.
 
 `make test-protocol-regional` runs Redis CLI 8.8.2, Kafka Java 4.3.1, and
-RabbitMQ Java 5.35.0 through the production gateway image and three authenticated
+RabbitMQ Java 5.37.0 through the production gateway image and three authenticated
 regional nodes. Prepare the two images, then run:
 
 ```bash
@@ -834,7 +849,9 @@ run; cleanup removes only that campaign's containers and disposable test data.
 Java 17+ and Docker are required. CI reuses its five-image build's node/gateway
 candidates, so this gate does not add a second Rust image build.
 
-The current local candidate passes this complete campaign with all 21 checks.
+The complete campaign requires all 21 checks. Previous captures using RabbitMQ
+Java 5.35.0 do not certify the upgraded 5.37.0 client; both the exact-client fixture
+and this production-image campaign must be rerun before promotion.
 The `epoch.protocol-regional.evidence/v2` result records exact client versions,
 source revision/dirty state, local image identities, old/new leaders and terms,
 and completed checks. Client logs, gateway logs, and node diagnostics accompany

@@ -1,8 +1,8 @@
 # Development
 
 This guide describes the reproducible local environment and the commands used
-to build Epoch. The product is in its initial scaffold, so some commands skip a
-language area until that area contains source files.
+to build Epoch. Rust, Go, Java, Python, and TypeScript components have executable
+checks; Docker-backed integration campaigns additionally require a live daemon.
 
 Behavioral work follows the mandatory TDD, SOLID, and clean-code policy in
 [ENGINEERING_STANDARDS.md](ENGINEERING_STANDARDS.md).
@@ -229,6 +229,14 @@ manifest/lockfile changes, identify the superseded PRs in its description, and
 verify the combined graph. Close superseded bot PRs only after those updates
 land on `main`. Security fixes should not wait for an unrelated feature release.
 
+The current Zstandard migration includes transitive Kafka and MySQL binlog
+dependencies. Its immutable upstream pin, narrowly patched MySQL source,
+offline integrity contracts, and removal conditions are documented in
+[DEPENDENCY_SECURITY.md](DEPENDENCY_SECURITY.md). `make test-dependency-security`
+runs locally, in the unit/audit gates, and in CI; source provenance is also
+checked before Rust and Docker compilation. Do not edit vendored source to fix
+an application build or suppress its integrity checks.
+
 ## Common commands
 
 ```shell
@@ -329,6 +337,17 @@ releases, with separate CI cache scopes per component and architecture. Builds
 load locally and explicitly do not push. Cache export is bounded and optional;
 build, exact-revision/non-root inspection, SBOM generation, and real runtime
 proof remain mandatory. A cache is not evidence of a passing test.
+
+Catalog management point reads and inventory pages use narrow owned views
+rather than full diagnostic snapshots. A page captures its high-water cursor,
+bounded records, and continuation flag under one state read lock, then applies
+the unchanged HTTP byte bound. Existing strong-read routes retain their
+ReadIndex barrier, health and authorization checks; diagnostic local-read
+routes do not silently acquire a different consistency contract. Unit and
+real-voter tests check wire parity, continuation after byte truncation, stale
+local-state refusal, and zero full-snapshot reads on these paths. This reduces
+unnecessary work; wall-time improvement still requires the unchanged live
+three/five-controller campaign.
 
 The three/five-controller matrix still requires both complete fleets and
 independent receipt verification. Startup waits for a real strong Catalog read

@@ -75,14 +75,14 @@ release-check: ## Verify synchronized cross-language release metadata.
 format: ## Format Rust, Go, Java, Python, and JavaScript/TypeScript sources.
 	@if [ -f Cargo.toml ]; then cargo fmt --all; fi
 	@files="$$(find control operator sdk/go console/src/quickstarts tests/repository tests/integration -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then gofmt -w $$files; fi
-	@if [ -d sdk/python ]; then ruff format sdk/python tests/soak tests/integration/*.py scripts/generate-python-management.py scripts/generate-java-management.py; fi
+	@if [ -d sdk/python ]; then ruff format sdk/python tests/soak tests/integration/*.py scripts/generate-python-management.py scripts/generate-java-management.py scripts/verify-vendored-dependencies.py; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) spotless:apply; fi
 	@$(PNPM_ENV) pnpm run format
 
 format-check: ## Check formatting without changing files.
 	@if [ -f Cargo.toml ]; then cargo fmt --all --check; fi
 	@files="$$(find control operator sdk/go console/src/quickstarts tests/repository tests/integration -type f -name '*.go' 2>/dev/null)"; if [ -n "$$files" ]; then unformatted="$$(gofmt -l $$files)"; test -z "$$unformatted" || { printf '%s\n' "$$unformatted"; exit 1; }; fi
-	@if [ -d sdk/python ]; then ruff format --check sdk/python tests/soak tests/integration/*.py scripts/generate-python-management.py scripts/generate-java-management.py; fi
+	@if [ -d sdk/python ]; then ruff format --check sdk/python tests/soak tests/integration/*.py scripts/generate-python-management.py scripts/generate-java-management.py scripts/verify-vendored-dependencies.py; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) spotless:check; fi
 	@$(PNPM_ENV) pnpm run format:check
 
@@ -91,7 +91,7 @@ lint: ## Run static checks for every language and contract.
 	@if [ -f Cargo.toml ]; then RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --all-features --no-deps; fi
 	@if find control operator sdk/go -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then go vet ./...; fi
 	@if [ -d sdk/python ]; then ruff check sdk/python tests/soak tests/integration/*.py; fi
-	@if [ -d sdk/python ]; then ruff check --config sdk/python/pyproject.toml scripts/generate-python-management.py scripts/generate-java-management.py; fi
+	@if [ -d sdk/python ]; then ruff check --config sdk/python/pyproject.toml scripts/generate-python-management.py scripts/generate-java-management.py scripts/verify-vendored-dependencies.py; fi
 	@if [ -d sdk/python ]; then PYTHONPATH=sdk/python/src mypy --strict sdk/python/src sdk/python/examples/management.py console/src/quickstarts/quickstart.py; fi
 	@if [ -f sdk/java/pom.xml ]; then $(JAVA_MVN) -DskipTests verify; fi
 	@if [ -d .github/workflows ]; then actionlint; fi
@@ -100,7 +100,7 @@ lint: ## Run static checks for every language and contract.
 	@$(PNPM_ENV) pnpm run typecheck
 	@if find spec/proto -type f -name '*.proto' -print -quit 2>/dev/null | grep -q .; then buf lint; else echo "no Protobuf contracts found; skipping Buf lint"; fi
 
-audit: ## Reject Rust and npm dependency advisories except the documented Raft exception.
+audit: test-dependency-security ## Reject Rust and npm dependency advisories except the documented Raft exception.
 	@cargo audit --version 2>/dev/null | grep -Eq '^cargo-audit(-audit)? 0\.22\.2$$' || { echo "missing cargo-audit 0.22.2; see docs/DEVELOPMENT.md" >&2; exit 1; }
 	# The only temporary exception is Raft's unmaintained fxhash dependency;
 	# ADR-0003 stays Proposed until the dependency decision is accepted.
@@ -109,7 +109,7 @@ audit: ## Reject Rust and npm dependency advisories except the documented Raft e
 
 test: test-unit ## Run the default local test suite.
 
-test-unit: test-retry-command test-compose-crash-restart test-release-manifest test-release-workflow test-ci-optimization test-soak-runner test-kubernetes-runner test-regional-runtime-runner test-protocol-regional-runner test-control-ha-runner test-java-management-generation test-management-sdk-runner ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
+test-unit: test-retry-command test-compose-crash-restart test-release-manifest test-release-workflow test-ci-optimization test-soak-runner test-kubernetes-runner test-regional-runtime-runner test-protocol-regional-runner test-control-ha-runner test-java-management-generation test-management-sdk-runner test-dependency-security ## Run unit tests for Rust, Go, Java, Python, and workspace packages.
 	@if [ -f Cargo.toml ]; then cargo test --locked --workspace --all-targets --all-features; fi
 	@if find control operator sdk/go -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then go test -race ./...; fi
 	@if [ -d sdk/python ]; then PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests -v; fi
@@ -144,6 +144,11 @@ test-management-sdk-runner: ## Prove public Python probe wire identity and durab
 .PHONY: test-dependabot
 test-dependabot: ## Verify dependency coverage, grouped-update limits, and security policy.
 	@go test ./tests/repository -run TestDependabot -count=1
+
+.PHONY: test-dependency-security
+test-dependency-security: ## Reject unsafe compression graphs and unauthorized third-party source changes.
+	@python3 scripts/verify-vendored-dependencies.py
+	@python3 -m unittest discover -s tests/integration -p test_dependency_security.py -v
 
 .PHONY: test-observability-assets
 test-observability-assets: ## Verify collector, dashboard, and alert contracts.

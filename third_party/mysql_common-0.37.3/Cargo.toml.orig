@@ -1,0 +1,124 @@
+[workspace]
+members = ["derive"]
+
+[package]
+authors = ["blackbeam <aikorsky@gmail.com>"]
+name = "mysql_common"
+description = "MySql protocol primitives"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/blackbeam/rust_mysql_common"
+documentation = "https://docs.rs/mysql_common"
+repository = "https://github.com/blackbeam/rust_mysql_common"
+keywords = ["mysql", "database"]
+categories = ["database"]
+
+# * Invoke `cargo readme > README.md` if relevant!
+version = "0.37.3"
+
+edition = "2024"
+exclude = [
+    "/lib",
+    "/proptest-regressions",
+    "/test-data",
+    "/wrapper.cc",
+    "/wrapper.hh",
+    "README.tpl",
+    ".github",
+]
+
+[badges]
+travis-ci = { repository = "blackbeam/rust_mysql_common" }
+
+[dependencies]
+base64 = "0.22"
+bigdecimal = { version = ">=0.3, <0.5", optional = true }
+bitflags = "2.3"
+bitvec = { version = "1.0", optional = true }
+byteorder = "1"
+bytes = "1.0"
+chrono = { version = "0.4.20", default-features = false, features = [
+    "clock",
+    "serde",
+], optional = true }
+crc32fast = "1.2"
+curve25519-dalek = { version = "4.1.3", optional = true }
+ed25519-dalek = { version = "2.1", features = ["rand_core"], optional = true }
+flate2 = { version = "1.0", default-features = false }
+frunk = { version = "0.4", optional = true }
+getrandom = { version = "0.3", features = ["std"] }
+num-bigint = { version = "0.4" }
+num-traits = { version = "0.2", features = ["i128"] }
+pbkdf2 = { version = "0.12", default-features = false, features = [
+    "hmac",
+    "sha2",
+], optional = true }
+rand = { version = "0.9.2", optional = true }
+regex = "1.5"
+rust_decimal = { version = "1.0", optional = true }
+sha1 = "0.10"
+sha2 = "0.10"
+thiserror = "2"
+time = { version = "0.3", default-features = false, features = [
+    "parsing",
+    "macros",
+], optional = true }
+uuid = { version = "1" }
+saturating = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+mysql-common-derive = { path = "derive", version = "0.32.0", optional = true }
+btoi = "0.5"
+zstd = { version = "0.13", optional = true }
+
+[dev-dependencies]
+time = { version = "0.3", features = ["macros"] }
+proptest = "1.0"
+unic-langid = { version = "0.9.4" }
+
+[build-dependencies]
+bindgen = { version = "0.72", default-features = false, features = [
+    "runtime",
+], optional = true }
+cc = { version = "1.0", optional = true }
+cmake = { version = "0.1", optional = true }
+subprocess = { version = "0.2", optional = true }
+
+[profile.bench]
+debug = true
+
+[profile.features-subsets]
+inherits = "test"
+debug = false
+strip = "debuginfo"
+incremental = false
+
+[features]
+default = ["flate2/zlib", "derive"]
+test = ["derive", "time", "bindgen", "dep:cc", "dep:cmake", "dep:subprocess"]
+derive = ["mysql-common-derive"]
+binlog = ["bitvec", "dep:zstd"]
+nightly = ["test"]
+
+bigdecimal = ['dep:bigdecimal']
+bitvec = ['dep:bitvec']
+chrono = ['dep:chrono']
+frunk = ['dep:frunk']
+rust_decimal = ['dep:rust_decimal']
+time = ['dep:time']
+client_ed25519 = ['dep:curve25519-dalek']
+client_parsec = ['dep:ed25519-dalek', 'dep:pbkdf2', 'dep:rand']
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]
+no-default-features = true
+features = [
+    "flate2/zlib",
+    "time",
+    "rust_decimal",
+    "chrono",
+    "bigdecimal",
+    "derive",
+    "binlog",
+    "frunk",
+]
