@@ -74,7 +74,7 @@ jobs:
         run: make test-consensus-process
       - name: Upload consensus process failure evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: consensus-process-failure-${{ github.run_attempt }}
           path: ${{ runner.temp }}/epoch-consensus-process
@@ -163,7 +163,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.11'
       - run: python -m pip install 'sdk/python[management,management-dev]' mypy==2.1.0 ruff==0.15.19
@@ -266,7 +266,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
           package-manager-cache: false
@@ -321,7 +321,7 @@ jobs:
         with:
           go-version: 1.26.5
           cache-dependency-path: go.sum
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.11'
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
@@ -404,7 +404,7 @@ jobs:
           logs --no-color > /tmp/connector-conformance.log
       - name: Upload connector failure evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: connector-conformance
           path: /tmp/connector-conformance.log
@@ -464,7 +464,7 @@ jobs:
         run: bash tests/integration/protocol-compatibility.sh
       - name: Upload protocol failure evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: protocol-compatibility
           path: /tmp/epoch-protocol-compatibility.log
@@ -500,7 +500,7 @@ jobs:
           --evidence-dir "${RUNNER_TEMP}/epoch-kubernetes-alpha-exit-evidence"
       - name: Upload Kubernetes lifecycle evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: kubernetes-alpha-exit-evidence-${{ github.run_attempt }}
           path: ${{ runner.temp }}/epoch-kubernetes-alpha-exit-evidence
@@ -518,12 +518,12 @@ jobs:
       - name: Require a native arm64 runner
         run: test "$(uname -m)" = aarch64
       - name: Set up cached native image builds
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Resolve exact-source image version
         id: image-version
         run: echo "value=$(cat VERSION)" >> "$GITHUB_OUTPUT"
       - name: Build the release node image natively
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: deploy/docker/Dockerfile.node
@@ -553,7 +553,7 @@ jobs:
           docker save --output "${image_dir}/node.tar" epoch/node:ci-arm64
           (cd "$image_dir" && sha256sum node.tar > node.tar.sha256)
       - name: Share the native image with the HA gate
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: control-ha-node-arm64-${{ github.run_attempt }}
           path: ${{ runner.temp }}/epoch-control-ha-image
@@ -579,7 +579,7 @@ jobs:
         with:
           go-version: 1.26.5
           cache-dependency-path: go.sum
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.11'
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
@@ -625,7 +625,7 @@ jobs:
             --manifest "${EPOCH_CONTROL_HA_ARTIFACT_DIR}/evidence.json"
       - name: Upload this fleet's passing or failed evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: control-ha-fleet-${{ matrix.controllers }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/epoch-control-ha-fleet
@@ -646,7 +646,7 @@ jobs:
         env:
           FLEET_RESULT: ${{ needs.control-ha-fleet.result }}
         run: test "${FLEET_RESULT}" = success
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.11'
       - name: Install independent public SDK evidence verifier
@@ -673,7 +673,7 @@ jobs:
             --manifest "${RUNNER_TEMP}/epoch-control-ha-full/evidence.json"
       - name: Upload complete control-HA evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: control-ha-full-evidence-${{ github.run_attempt }}
           path: ${{ runner.temp }}/epoch-control-ha-full
@@ -697,14 +697,14 @@ jobs:
       - run: docker compose -f deploy/compose/docker-compose.regional.yml config --quiet
       - run: docker compose -f deploy/compose/docker-compose.connectors.yml config --quiet
       - name: Set up cached native image builds
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Resolve exact-source image version
         id: image-version
         run: echo "value=$(cat VERSION)" >> "$GITHUB_OUTPUT"
       # Cache only compilation layers, not inspection results or runtime proof.
       # Separate scopes prevent the five images from evicting each other.
       - name: Build the exact non-publishing node image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: deploy/docker/Dockerfile.node
@@ -718,7 +718,7 @@ jobs:
           cache-from: type=gha,version=2,scope=ci-node-amd64
           cache-to: type=gha,version=2,scope=ci-node-amd64,mode=max,timeout=2m,ignore-error=true
       - name: Build the exact non-publishing control image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: deploy/docker/Dockerfile.control
@@ -732,7 +732,7 @@ jobs:
           cache-from: type=gha,version=2,scope=ci-control-amd64
           cache-to: type=gha,version=2,scope=ci-control-amd64,mode=max,timeout=2m,ignore-error=true
       - name: Build the exact non-publishing operator image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: deploy/docker/Dockerfile.operator
@@ -746,7 +746,7 @@ jobs:
           cache-from: type=gha,version=2,scope=ci-operator-amd64
           cache-to: type=gha,version=2,scope=ci-operator-amd64,mode=max,timeout=2m,ignore-error=true
       - name: Build the exact non-publishing CLI image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: deploy/docker/Dockerfile.cli
@@ -760,7 +760,7 @@ jobs:
           cache-from: type=gha,version=2,scope=ci-cli-amd64
           cache-to: type=gha,version=2,scope=ci-cli-amd64,mode=max,timeout=2m,ignore-error=true
       - name: Build the exact non-publishing compatibility image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: deploy/docker/Dockerfile.compat
@@ -784,7 +784,7 @@ jobs:
       - name: Prove OCI inspection fails closed
         run: tests/integration/oci-image-inspection.sh
       - name: Generate node SPDX SBOM
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: epoch/node:ci
           format: spdx-json
@@ -792,7 +792,7 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
       - name: Generate control SPDX SBOM
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: epoch/control:ci
           format: spdx-json
@@ -800,7 +800,7 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
       - name: Generate operator SPDX SBOM
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: epoch/operator:ci
           format: spdx-json
@@ -808,7 +808,7 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
       - name: Generate CLI SPDX SBOM
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: epoch/cli:ci
           format: spdx-json
@@ -816,7 +816,7 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
       - name: Generate compatibility gateway SPDX SBOM
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: epoch/compat:ci
           format: spdx-json
@@ -830,7 +830,7 @@ jobs:
             jq -e '.packages | length > 0' "$sbom" >/dev/null
           done
       - name: Upload OCI inspection evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: oci-sboms-${{ github.run_attempt }}
           path: /tmp/epoch-*.spdx.json
@@ -852,7 +852,7 @@ jobs:
             --public-key "${RUNNER_TEMP}/epoch-soak-evidence/evidence-public.pem"
       - name: Upload accelerated fault evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: accelerated-soak-evidence-${{ github.run_attempt }}
           path: ${{ runner.temp }}/epoch-soak-evidence
@@ -907,7 +907,7 @@ jobs:
         run: make test-protocol-regional
       - name: Upload real regional protocol evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: protocol-regional-evidence-${{ github.run_attempt }}
           path: ${{ runner.temp }}/epoch-protocol-regional
@@ -990,7 +990,7 @@ jobs:
           docker volume rm epoch-node-ci-data || true
       - name: Upload consensus probe failure evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: consensus-probe-failure-${{ github.run_attempt }}
           path: |
