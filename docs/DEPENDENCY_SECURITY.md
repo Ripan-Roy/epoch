@@ -5,6 +5,46 @@ from an older green run. `make audit` retains the sole documented Raft/fxhash
 exception (`RUSTSEC-2025-0057`); this change adds no exceptions and disables no
 compression codec or MySQL binlog feature.
 
+## Console lint dependency and reproducible HA verification
+
+The November 6 revalidation found the subsequently published
+[minimatch globparts-amplification advisory](https://github.com/advisories/GHSA-g3hv-75wg-m249).
+The previous `10.2.6` copy is affected; the patched release is `11.0.1`.
+The existing Zod `4.6.6` override remains effective and unchanged. An older
+green CI run is not evidence against a newer advisory database.
+
+As reviewed on November 6, even ESLint `10.14.0`, config-array `0.23.5`, and
+typescript-estree `8.72.1` still request minimatch 10.x. No patched 10.x
+release or published compatible dependency chain is available. The workspace
+therefore temporarily pins `11.0.1` only for the three reviewed consumers:
+`eslint>minimatch`, `@eslint/config-array>minimatch`, and
+`@typescript-eslint/typescript-estree>minimatch`. This is not a global override
+or an audit suppression; unrelated dependencies remain locked to their
+previous versions. Remove these scoped overrides once supported upstream
+requirements resolve the patched dependency and pass the same tests.
+
+Minimatch 11 changes the matcher implementation and removes APIs including
+`makeRe` and `matchOne`. The current consumers use the retained `Minimatch`
+constructor, `pattern`, `match` (including partial directory traversal), and
+`minimatch` function. Consumer-resolved tests exercise those APIs, braces,
+extglobs, negation and `flipNegate`, dotfiles, and the fixed bounded expansion.
+A real ESLint discovery test compares every TypeScript/TSX source file against
+the filesystem and checks build/dependency ignores, so a silently skipped
+subtree cannot make lint appear green. Full console lint, typecheck, tests,
+build, formatting and the unsuppressed audit remain required. These checks
+verify Epoch's current lint usage, not every possible minimatch 10/11 behavior.
+The protected console CI job now runs the complete console test command before
+building; a repository contract rejects removing or conditionally skipping it.
+
+Concurrent HA fleet workers and their aggregate now use exact Python
+`3.11.18`, available for the hosted Linux x64 and arm64 runners. A real run
+selected `3.11.17` and `3.11.18` from the floating `3.11` requirement in its
+two workers, then correctly rejected their different checksum-bound runtime
+identities. Pinning the patch makes the environment reproducible without
+relaxing source/image/runtime identity comparisons or reusing old proof as a
+new runtime run. Other jobs that do not combine this runtime identity retain
+their existing Python requirement. Fresh exact-candidate CI remains required.
+
 ## Zstandard migration
 
 The October 26 audit found four vulnerabilities and ten denied unsoundness

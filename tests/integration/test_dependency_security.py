@@ -88,6 +88,51 @@ def verify_security_graph(manifest: dict, lockfile: dict) -> None:
             )
 
 
+def verify_minimatch_security(lockfile: str) -> None:
+    """Reject vulnerable copies, including an old parallel transitive version."""
+    versions = re.findall(
+        r"^  ['\"]?minimatch@([^:\n'\"]+)['\"]?:$", lockfile, re.MULTILINE
+    )
+    if not versions:
+        raise ValueError("missing locked minimatch dependency")
+    for value in versions:
+        version = stable_version(value)
+        if (7, 0, 0) <= version < (11, 0, 1):
+            raise ValueError(f"minimatch {value} is vulnerable to GHSA-g3hv-75wg-m249")
+
+
+class ConsoleDependencySecurityTests(unittest.TestCase):
+    def test_repository_minimatch_has_no_vulnerable_parallel_versions(self) -> None:
+        verify_minimatch_security((ROOT / "pnpm-lock.yaml").read_text())
+
+    def test_missing_and_vulnerable_parallel_minimatch_are_rejected(self) -> None:
+        for lockfile in (
+            "packages:\n",
+            "packages:\n  minimatch@10.2.6:\n",
+            "packages:\n  minimatch@11.0.1:\n  minimatch@7.0.0:\n",
+            "packages:\n  minimatch@11.0.1:\n  minimatch@11.0.0:\n",
+            "packages:\n  'minimatch@10.2.6':\n",
+            "packages:\n  minimatch@11.0.1-rc.1:\n",
+        ):
+            with self.subTest(lockfile=lockfile), self.assertRaises(ValueError):
+                verify_minimatch_security(lockfile)
+        verify_minimatch_security("packages:\n  minimatch@11.0.1:\n")
+
+    def test_major_override_is_limited_to_the_reviewed_lint_consumers(self) -> None:
+        overrides = json.loads((ROOT / "package.json").read_text())["pnpm"]["overrides"]
+        minimatch = {
+            key: value for key, value in overrides.items() if "minimatch" in key
+        }
+        self.assertEqual(
+            minimatch,
+            {
+                "eslint>minimatch": "11.0.1",
+                "@eslint/config-array>minimatch": "11.0.1",
+                "@typescript-eslint/typescript-estree>minimatch": "11.0.1",
+            },
+        )
+
+
 class DependencySecurityGraphTests(unittest.TestCase):
     def test_repository_compression_graph_has_no_vulnerable_parallel_versions(
         self,
