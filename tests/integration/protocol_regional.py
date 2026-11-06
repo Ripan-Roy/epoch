@@ -23,7 +23,7 @@ sys.modules[MODULE_SPEC.name] = regional
 MODULE_SPEC.loader.exec_module(regional)
 
 RESULT_SCHEMA = "epoch.protocol-regional.evidence/v2"
-CLIENTS = {"redis": "8.8.2", "kafka": "4.3.1", "rabbitmq": "5.35.0"}
+CLIENTS = {"redis": "8.8.2", "kafka": "4.3.1", "rabbitmq": "5.37.0"}
 REDIS_IMAGE = (
     "redis@sha256:2b42a93631132be6df7a31f843b91ea8a907011e955b03395b7edbb13a20a99d"
 )

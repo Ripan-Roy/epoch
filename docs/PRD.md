@@ -65,8 +65,11 @@ artifacts; see [Control HA certification](CONTROL_HA_CERTIFICATION.md).
 The separate clean `dc8e44f` public Go/Java/Python SDK campaign also passed both
 controller fleets locally, including actual Catalog-leader lost responses,
 owner-watch reconnect, quorum/reopen recovery, and rejection of expired durable
-checkpoints. Its full independent verifier passed; protected SDK delivery is
-still required. Catalog capacity/sharding, legacy token migration, and a public
+checkpoints. Its full independent verifier passed. Protected PR #152 subsequently
+passed all 14 CI jobs and merged at `3f18779`; fresh exact-main delivery remains
+required after the dependency-audit fixes, including the transitive Zstandard
+migration described in [dependency security](DEPENDENCY_SECURITY.md).
+Catalog capacity/sharding, legacy token migration, and a public
 token-retention window remain open. See
 [ADR-0050](adr/0050-replicated-control-metadata-and-ha.md).
 
@@ -117,8 +120,9 @@ idempotent producers use `InitProducerId` and sequence-fenced atomic native
 batches with exact replay. AMQP durable exchange/binding declarations survive
 gateway replacement in a configured replicated Cache, named DLX declarations
 are validated against the provisioned Queue target, and delivered messages
-carry bounded `x-death` arrays. Exact Redis CLI 8.8.2, Kafka Java 4.3.1, and
-RabbitMQ Java 5.35.0 fixture conformance passes locally. Redis Lua/functions,
+carry bounded `x-death` arrays. The current fixture targets exact Redis CLI 8.8.2,
+Kafka Java 4.3.1, and RabbitMQ Java 5.37.0. Fresh fixture and real-regional
+conformance are required for the upgraded RabbitMQ client. Redis Lua/functions,
 Kafka transactions/control batches, simultaneous duplicate static owners,
 cooperative/new Kafka group protocols, AMQP transactions/1.0, and protected
 differential/fuzz/performance evidence remain open and are not implied by this
@@ -136,14 +140,23 @@ alpha; it does not claim a real-time deadline SLA, dynamic or cross-region
 ownership, coordinated backups/PITR, production performance evidence, or a
 complete external integration plane. See ADR-0027.
 
-**SDK candidate note (5 October 2026):** The separate SDK contract branch adds
+**SDK implementation note (24 October 2026):** PR #152 merged at `3f18779` with
+all 14 protected PR CI jobs and Pages verification passing. Its complete
+three/five-controller SDK bundle independently verifies all 516 receipts;
+manifest SHA-256 is
+`9dc49e92455c8e83df9f56e79d3cb3c0cfca1bc9e731e3dc8c2f7148cacdc50f`.
+Exact merged-main delivery remains separately gated: its initial dependency
+audits reported newly reviewed Zod, ctutils, and Tokio advisories. The follow-up
+patches those dependencies without an audit exclusion. This does not invalidate
+the PR's recorded runtime proof or authorize publication before current-main
+checks pass. The implementation adds
 strict whole-package Python typing and fail-closed standalone/regional response
 shape validation, plus Go/Java/Python clients for all seven generated management methods.
 All three preserve caller tokens and optional OCC presence, bound failover
 by one deadline and explicit endpoint allowlist, validate response identities
-and governance filters, and acknowledges only scanned management-watch cursors.
-Local generated TLS 1.3/mTLS tests and compiled examples are client-contract
-evidence, not protected delivery or Catalog fault certification. Generated
+and governance filters, and acknowledge only scanned management-watch cursors.
+Generated TLS 1.3/mTLS tests and compiled examples remain separate from the
+actual protected Catalog fault certification. Generated
 native response models, persistent/cooperative
 data streaming, the full version matrix, and deferred package publication remain
 DX-001 work. See [the management SDK candidate](MANAGEMENT_SDK.md).
@@ -301,11 +314,13 @@ PKG-005/DX-001 evidence. See ADR-0039, ADR-0040, and ADR-0041.
 **Protocol-compatibility implementation note (24 August 2026):** A separate
 bounded Rust gateway now exposes the documented RESP2/RESP3, Kafka, and AMQP
 0-9-1 subsets through one authenticated and generation/tablet/term-fenced
-semantic adapter. Redis CLI 8.8.2, Kafka Java 4.3.1, and RabbitMQ Java 5.35.0
-pass exact wire-client flows. Kafka record counts are preflighted, compression
-expansion is capped, and each Produce partition becomes one canonical atomic
-native Stream batch. The versioned migration scanner, public matrix, Pages UI,
-CI conformance job, and fifth OCI component are included. This is partial G6
+semantic adapter. The current exact wire-client targets are Redis CLI 8.8.2,
+Kafka Java 4.3.1, and RabbitMQ Java 5.37.0; fresh fixture and real-regional
+conformance are required for the upgraded RabbitMQ client. Kafka record counts
+are preflighted, compression expansion is capped, and each Produce partition
+becomes one canonical atomic native Stream batch. The versioned migration
+scanner, public matrix, Pages UI, CI conformance job, and fifth OCI component
+are included. This is partial G6
 evidence: richer commands/APIs, fuzz and differential suites, combined
 real-regional fault certification, MQTT, and performance parity remain open.
 See [ADR-0042](adr/0042-bounded-protocol-compatibility-gateways.md).

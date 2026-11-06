@@ -1,9 +1,9 @@
 # Epoch Delivery Checklist
 
-**Last reviewed:** 5 October 2026
+**Last reviewed:** 27 October 2026
 **Current published release:** `v0.2.0-beta.11`
 **Current release target:** `v0.2.0-beta.12`
-**Current core target:** control-HA release verification and remaining production gates
+**Current core target:** exact-main SDK/release verification, Catalog read-path efficiency, and native persistent Stream APIs
 
 This is the operational checklist for turning PRD scope into verified,
 releasable increments. [PRD.md](PRD.md) owns product scope,
@@ -96,8 +96,23 @@ unknown-outcome matrix, and the complete local three/five-controller Catalog
 campaign. The latter exited zero and independently verifies all 516 receipts;
 manifest SHA-256 is
 `b2d91b5b489d851544fb7a14e3a8eb77a9b1a7e7a51bd355c594dc9f40a4d228`.
-Rows remain candidate delivery until exact-source protected CI and main-only
-Pages pass. This does not close native persistent data RPCs or the whole PRD.
+PR #152 subsequently merged at `3f18779` after all 14 protected
+[PR CI jobs](https://github.com/Ripan-Roy/epoch/actions/runs/39912713868)
+and [Pages checks](https://github.com/Ripan-Roy/epoch/actions/runs/39912713760)
+passed. Its complete downloaded SDK bundle independently verifies all 516
+receipts, with manifest SHA-256
+`9dc49e92455c8e83df9f56e79d3cb3c0cfca1bc9e731e3dc8c2f7148cacdc50f`.
+The first merged-main audits then reported Zod, ctutils, and Tokio advisories;
+the follow-up patches them without weakening those gates. Rows remain candidate
+delivery until fresh exact-main CI and main-only Pages pass. This does not
+close native persistent data RPCs, the full SDK version matrix, or the PRD.
+
+PR #166's initial protected CI and independent 516-receipt verification passed,
+but a fresh October 26 advisory audit found additional transitive Zstandard
+issues. The combined follow-up fixes the complete graph, verifies its temporary
+source patch, and updates RabbitMQ conformance to Java 5.37.0. Its new exact-head
+runtime and main gates must pass; the earlier green run does not certify these
+changes. See [dependency security](DEPENDENCY_SECURITY.md).
 
 | ID | Checklist item | Boundary | State | Evidence / acceptance |
 |---|---|---|---:|---|
@@ -105,7 +120,7 @@ Pages pass. This does not close native persistent data RPCs or the whole PRD.
 | SDK-02 | Expose safe manually acknowledged watches | Public SDKs + application checkpoint | 🟡 | Fsynced scanned checkpoints precede ACK; actual owner loss reconnects without reset, and real expired nonzero checkpoints return `ABORTED` with no page/ACK/rewrite in both fleets. |
 | SDK-03 | Prove original outcomes through real faults | Go controllers + Rust Catalog | 🟡 | All three clients pass actual Catalog-leader lost responses, exact token/creation witnesses at every live endpoint, quorum loss/recovery, and full same-volume reopen; all native matrix checks remain. See [proof](MANAGEMENT_SDK.md#complete-local-catalog-evidence--5-october-2026). |
 | SDK-04 | Enforce generated and response boundaries | SDK + compiler tooling | 🟡 | Strict Python response/JSON validation, 86 tests and whole-package typing; checksum-pinned local Java generation, exact freshness, 69 Java tests, and all-language quality/build pass. |
-| SDK-05 | Require both complete fleets in protected CI | GitHub Actions + independent verifier | 🟡 | The candidate adds SDK probes to the existing parallel native workers, requires all runtimes, and rejects altered, foreign, failed, skipped or missing proofs; exact-source protected execution remains. |
+| SDK-05 | Require both complete fleets in protected CI | GitHub Actions + independent verifier | 🟡 | PR #152 passes both complete fleets and the protected aggregate; the downloaded 516-receipt bundle independently verifies. Every native/SDK fault and real stale checkpoint remains required. Fresh merged-main delivery is separate and must pass after the dependency-audit fix. |
 | SDK-06 | Publish exact examples and explicit limits | Documentation + Pages | 🟡 | Compiled/strictly typed Go/Java/Python sources are embedded in docs; full local docs build passes. Main-only publication and visual/browser QA remain unverified. Examples are compile-only, not the actual Catalog probes. |
 
 ## Current control delivery: replicated metadata and multi-instance ownership
@@ -170,10 +185,10 @@ matrix evidence and beta.12 publication remain open.
 | PC-02 | Bound adversarial protocol input and concurrency | Rust gateway | 🟡 | 8 MiB frames, 4 MiB bodies/cumulative Kafka expansion, 1,024 logical items, preflighted Kafka record counts, bounded Zstandard windows, bounded per-listener connection semaphores, strict trailing-byte rejection, AMQP state ordering, RESP partial-frame handling, and deterministic RESP/Kafka-record/AMQP mutation corpora pass local tests. Coverage-guided fuzzing plus minimized crash-corpus retention remains open. |
 | PC-03 | Support high-value Redis client traffic | RESP2/RESP3 | 🟡 | In addition to strings, counters, TTL, bounded structures, atomic multi-set, and pipelining, the candidate implements 128-command/key atomic `MULTI`/`EXEC` with key-version `WATCH`, 64-filter node-local Pub/Sub, and a durable shard-zero Streams subset with groups, acknowledgements, and a 4,096-entry pending ledger. Redis CLI 8.8.2 exact-client tests cover transactions, live Pub/Sub, and XADD/read/group/pending/ack. The `__epoch:` metadata prefix is inaccessible through Redis commands. Lua/functions, broader Streams/cluster/TLS behavior, binary collection members/keys, and protected differential conformance remain open. |
 | PC-04 | Support Kafka producer and consumer traffic | Kafka wire | 🟡 | ApiVersions now also advertises `InitProducerId` 0–5. Kafka Java 4.3.1 runs with idempotence enabled; one producer/epoch and contiguous multi-batch sequence span becomes state-command-v8 atomic native append, exact retry returns the original offset, and gap/stale/conflicting input is fenced. Existing four-codec, arbitrary-shard classic group, static identity, claim, and checkpoint evidence remains. Kafka transactions/control batches, simultaneous duplicate-owner fencing, multi-topic/cooperative/new-group membership, admin/SASL, and protected combined conformance remain open. |
-| PC-05 | Support RabbitMQ work delivery lifecycle | AMQP 0-9-1 | 🟡 | Existing routing, confirms, consume/settlement, TTL, and recovery behavior now includes revision-fenced durable exchanges/bindings/dead-letter declarations in a configured replicated Cache. A named DLX must resolve to exactly the provisioned native Queue target; the Queue outbox preserves the named route and emits bounded coalesced `x-death` plus first/last-death metadata. RabbitMQ Java 5.35.0 exact-client conformance passes across independent gateway state. Arbitrary DLX fanout, general policies/field values, transactions, AMQP 1.0/TLS, and protected combined conformance remain open. |
+| PC-05 | Support RabbitMQ work delivery lifecycle | AMQP 0-9-1 | 🟡 | Existing routing, confirms, consume/settlement, TTL, and recovery behavior now includes revision-fenced durable exchanges/bindings/dead-letter declarations in a configured replicated Cache. A named DLX must resolve to exactly the provisioned native Queue target; the Queue outbox preserves the named route and emits bounded coalesced `x-death` plus first/last-death metadata. RabbitMQ Java 5.37.0 is pinned; fresh exact-client fixture and real-regional conformance are required for this upgraded client. Arbitrary DLX fanout, general policies/field values, transactions, AMQP 1.0/TLS, and protected combined conformance remain open. |
 | PC-06 | Publish an exact compatibility matrix and migration-safe non-claims | Docs | 🟡 | [Protocol compatibility](PROTOCOL_COMPATIBILITY.md) names version targets, APIs/commands, lossy translations, security, retry behavior, and unsupported features; the GitHub Pages UI exposes the matrix plus Redis Python, Kafka Java, and RabbitMQ Java examples. Main-only Pages evidence remains open. |
 | PC-07 | Ship the gateway as a supply-chain component | OCI/release | 🟡 | A numeric non-root, pinned-base `epoch-compat` OCI image joins PR inspection, SPDX generation, native amd64/arm64 tag builds, immutable manifest assembly, provenance, signing, and release assets. Local image inspection and protected tag publication remain open. |
-| PC-08 | Prove real-client compatibility | CI | 🟡 | The pinned exact-client fixture and production-image regional-v2 campaign are green locally with Redis transactions, live Pub/Sub and Streams groups; Kafka Java idempotence; and RabbitMQ durable topology, named-DLX delivery, and `x-death`. Its 21 checks also cover binary Cache, codecs/metadata/groups/checkpoints, Queue lifecycle, gateway replacement, one real leader/term transition per tablet profile, all-voter reopen, and replica convergence. Protected CI must still pass before promotion. |
+| PC-08 | Prove real-client compatibility | CI | 🟡 | The pinned exact-client fixture and production-image regional-v2 campaign cover Redis transactions, live Pub/Sub and Streams groups; Kafka Java idempotence; and RabbitMQ durable topology, named-DLX delivery, and `x-death`. Its 21 checks also cover binary Cache, codecs/metadata/groups/checkpoints, Queue lifecycle, gateway replacement, one real leader/term transition per tablet profile, all-voter reopen, and replica convergence. Previous-version captures do not certify RabbitMQ Java 5.37.0; fresh fixture/real-regional evidence and protected CI must pass before promotion. |
 | PC-09 | Scan migrations before cutover | CLI | 🟡 | `epoch-compat scan` emits bounded `epoch.compatibility-scan/v1` text/JSON assessments with source lines, CI failure thresholds, supported/partial/unknown/unsupported outcomes. It now recognizes Redis transaction/Pub/Sub commands, marks the bounded Streams subset partial, and treats Kafka `InitProducerId` 0–5 as supported only for non-transactional producers. Dynamic traffic capture and protected evidence remain open. |
 | PC-10 | Meet comparative performance gates | Benchmark | ⬜ | Run matched-semantics Redis/Kafka/RabbitMQ baselines and publish throughput/p50/p99 saturation evidence; no performance parity is claimed yet. |
 

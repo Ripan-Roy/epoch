@@ -11,12 +11,13 @@ import (
 )
 
 type haWorkflowStep struct {
-	Name string            `json:"name"`
-	If   string            `json:"if"`
-	Uses string            `json:"uses"`
-	Run  string            `json:"run"`
-	Env  map[string]string `json:"env"`
-	With map[string]any    `json:"with"`
+	Name            string            `json:"name"`
+	If              string            `json:"if"`
+	Uses            string            `json:"uses"`
+	Run             string            `json:"run"`
+	Env             map[string]string `json:"env"`
+	With            map[string]any    `json:"with"`
+	ContinueOnError any               `json:"continue-on-error"`
 }
 
 type haWorkflowJob struct {
@@ -135,17 +136,11 @@ func TestControlHAProtectedGateRequiresBothCurrentAttemptFleetProofs(t *testing.
 func TestControlHACertifiesAllPublicSDKsWithoutReplacingNativeFaults(t *testing.T) {
 	jobs := readHAWorkflow(t)
 	fleet := jobs["control-ha-fleet"]
-	python, java := false, false
-	for _, step := range fleet.Steps {
-		if strings.HasPrefix(step.Uses, "actions/setup-python@") && step.With["python-version"] == "3.11" && step.If == "" {
-			python = true
-		}
-		if strings.HasPrefix(step.Uses, "actions/setup-java@") && step.With["java-version"] == "25" && step.If == "" {
-			java = true
-		}
-	}
-	if !python || !java {
+	if !hasRequiredHARuntime(fleet, "actions/setup-python@", "python-version", "3.11.18") || !hasRequiredHARuntime(fleet, "actions/setup-java@", "java-version", "25") {
 		t.Error("each live fleet must require Python and Java as well as Go, without optional runtime skips")
+	}
+	if !hasRequiredHARuntime(jobs["control-ha"], "actions/setup-python@", "python-version", "3.11.18") {
+		t.Error("aggregate verification must require the same exact Python patch as both fleets")
 	}
 	install := requireHAStep(t, fleet, "Install public SDK Catalog campaign dependencies")
 	if install.If != "" || !strings.Contains(install.Run, "sdk/python[management]") || !strings.Contains(install.Run, "test_management_sdk_catalog") {
@@ -165,5 +160,45 @@ func TestControlHACertifiesAllPublicSDKsWithoutReplacingNativeFaults(t *testing.
 		if err != nil || !strings.Contains(string(data), marker.required) {
 			t.Errorf("SDK gate must compose rather than replace the native full fault gate: %s", marker.path)
 		}
+	}
+}
+
+func hasRequiredHARuntime(job haWorkflowJob, actionPrefix, versionKey, version string) bool {
+	count, required := 0, false
+	for _, step := range job.Steps {
+		if strings.HasPrefix(step.Uses, actionPrefix) {
+			count++
+			required = step.With[versionKey] == version && step.If == "" && (step.ContinueOnError == nil || step.ContinueOnError == false)
+		}
+	}
+	return count == 1 && required
+}
+
+func TestMandatoryHARuntimeRejectsFloatingMismatchedAndOptionalSetup(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*haWorkflowJob)
+		valid  bool
+	}{
+		{"mandatory exact patch", func(*haWorkflowJob) {}, true},
+		{"explicit failure propagation", func(job *haWorkflowJob) { job.Steps[0].ContinueOnError = false }, true},
+		{"floating patch", func(job *haWorkflowJob) { job.Steps[0].With["python-version"] = "3.11" }, false},
+		{"different patch", func(job *haWorkflowJob) { job.Steps[0].With["python-version"] = "3.11.17" }, false},
+		{"conditional setup", func(job *haWorkflowJob) { job.Steps[0].If = "success()" }, false},
+		{"ignored failure", func(job *haWorkflowJob) { job.Steps[0].ContinueOnError = true }, false},
+		{"conditional ignored failure", func(job *haWorkflowJob) { job.Steps[0].ContinueOnError = "${{ true }}" }, false},
+		{"missing runtime", func(job *haWorkflowJob) { job.Steps = nil }, false},
+		{"duplicate runtime", func(job *haWorkflowJob) { job.Steps = append(job.Steps, job.Steps[0]) }, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := haWorkflowJob{Steps: []haWorkflowStep{{
+				Uses: "actions/setup-python@immutable-pin",
+				With: map[string]any{"python-version": "3.11.18"},
+			}}}
+			test.mutate(&job)
+			if got := hasRequiredHARuntime(job, "actions/setup-python@", "python-version", "3.11.18"); got != test.valid {
+				t.Errorf("mandatory runtime = %v, want %v", got, test.valid)
+			}
+		})
 	}
 }

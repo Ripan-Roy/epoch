@@ -11,6 +11,35 @@ fn scope() -> StreamTabletScope {
     StreamTabletScope::new(7, 3, "orders").unwrap()
 }
 
+#[test]
+fn pre_upgrade_zstd_command_replays_and_survives_snapshot_recovery() {
+    // Captured with zstd 0.13.3 before the security migration. Do not regenerate
+    // with the current encoder: this protects the persisted wire format.
+    const LEGACY_COMMAND: &[u8] = br#"{"format_version":2,"tablet_id":7,"tablet_epoch":3,"resource":"orders","idempotency_key":"legacy-zstd-0.13","applied_at_ms":11,"operation":{"kind":"append_batch","partition":0,"payload":{"compression":"zstd","record_count":1,"uncompressed_bytes":241,"compressed_bytes":168,"payload_base64":"KLUv/QBY/QQAokwkHXBJ2gbW1OBLW2nLxkggS1JiQEBVPMx/hGlW/R9CA2ut5KxSUeU34TbDGVlMignZlguGUXSfCxLPKegUPZCCbE5VBgGpuMXggVApNr+pxraSs0o/5YbNcDgrRHEErs3nW54MQPpJ6vMRsjarVd+CYbYQ+HyTEqpsfqrPB52cj/Q4Qt52ON/kEwdXxebxME4EAgMAUvNyYPrweaai"}}}"#;
+    let command = StreamTabletCommand::decode(LEGACY_COMMAND, &scope()).unwrap();
+    assert_eq!(command.decode_batch_records().unwrap(), [record(1, "one")]);
+    assert_eq!(command.encode(&scope()).unwrap(), LEGACY_COMMAND);
+    let proposal_id = command.proposal_id(&scope()).unwrap();
+    let mut tablet = StreamTablet::new(scope()).unwrap();
+    let receipt = tablet
+        .apply(committed(proposal_id, LEGACY_COMMAND))
+        .unwrap();
+    assert_eq!(receipt.offset, 0);
+    let digest = tablet.state_digest();
+    let snapshot = tablet
+        .encode_snapshot(&std::collections::BTreeSet::from([proposal_id]))
+        .unwrap();
+    let mut restored = StreamTablet::decode_snapshot(&scope(), &snapshot).unwrap();
+    assert_eq!(restored.fetch(0, 10).unwrap(), tablet.fetch(0, 10).unwrap());
+    assert_eq!(restored.state_digest(), digest);
+    let replay = restored
+        .apply(committed(proposal_id, LEGACY_COMMAND))
+        .unwrap();
+    assert_eq!(replay.disposition, StreamTabletAppendDisposition::Replayed);
+    assert_eq!(replay.batch, receipt.batch);
+    assert_eq!(restored.state_digest(), digest);
+}
+
 fn record(client_sequence: u32, id: &str) -> StreamBatchRecord {
     let mut envelope = EventEnvelope::new(
         "batch-tests",

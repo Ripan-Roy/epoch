@@ -174,6 +174,47 @@ class CIOptimizationTests(unittest.TestCase):
         job = job_block(self.workflow, "go-contracts")
         self.assertIn("make test-ci-optimization", job)
 
+    def test_fast_ci_checks_include_go_repository_workflow_contracts(self) -> None:
+        makefile = (WORKFLOW.parents[2] / "Makefile").read_text()
+        match = re.search(
+            r"^test-ci-optimization:.*(?:\n\t.*)*", makefile, re.MULTILINE
+        )
+        self.assertIsNotNone(match)
+        assert match is not None
+        recipe = match.group(0)
+        self.assertIn("\n\t@go test ./tests/repository", recipe)
+        self.assertNotIn("||", recipe)
+
+    def test_console_executes_tests_before_build_without_a_conditional_skip(
+        self,
+    ) -> None:
+        job = job_block(self.workflow, "web")
+        tests = [step for step in steps(job) if "run: pnpm run test\n" in step]
+        self.assertEqual(len(tests), 1)
+        self.assertNotRegex(tests[0], r"(?m)^        if:")
+        self.assertNotIn("continue-on-error:", tests[0])
+        self.assertLess(job.index(tests[0]), job.index("run: pnpm run build"))
+
+    def test_ha_fleets_and_aggregate_use_the_same_exact_python_patch(self) -> None:
+        # Host Python is part of the checksum-bound runtime identity. Floating
+        # 3.11 selected 3.11.17 and 3.11.18 on different workers in one real run.
+        for name in ("control-ha-fleet", "control-ha"):
+            with self.subTest(job=name):
+                job = job_block(self.workflow, name)
+                versions = re.findall(
+                    r"^          python-version: ['\"]?([^'\"\n]+)['\"]?$",
+                    job,
+                    re.MULTILINE,
+                )
+                self.assertEqual(versions, ["3.11.18"])
+        verifier = (
+            WORKFLOW.parents[2] / "tests/integration/control_ha_full.py"
+        ).read_text()
+        self.assertIn('if candidates[1]["identity"] != identity:', verifier)
+        self.assertIn(
+            'if owner.soak.source_identity() != identity["source"]:', verifier
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

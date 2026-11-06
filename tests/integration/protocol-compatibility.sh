@@ -258,4 +258,4 @@ javac --release 17 -Xlint:all -Werror \
 java -cp "$epoch_java_classes:$epoch_java_classpath" \
   ProtocolConformance 127.0.0.1 "$epoch_kafka_port" "$epoch_amqp_port"
 
-printf 'Redis CLI 8.8.2, Kafka Java 4.3.1, and RabbitMQ Java 5.35.0 conformance passed.\n'
+printf 'Redis CLI 8.8.2, Kafka Java 4.3.1, and RabbitMQ Java 5.37.0 conformance passed.\n'

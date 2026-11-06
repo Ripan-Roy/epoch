@@ -594,10 +594,31 @@ fn lower_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+
     use epoch_bus::{ConnectorDirection, ConnectorRegistry, ConnectorSpec};
-    use mysql_async::prelude::Queryable;
+    use mysql_async::{binlog::events::TransactionPayloadReader, prelude::Queryable};
 
     use super::*;
+
+    #[test]
+    fn pre_upgrade_zstd_mysql_transaction_payload_remains_readable() {
+        // Captured with zstd 0.13.3 before upgrading its transitive binlog use.
+        const LEGACY_FRAME: &[u8] = &[
+            40, 181, 47, 253, 0, 88, 57, 1, 0, 108, 101, 103, 97, 99, 121, 45, 109, 121, 115, 113,
+            108, 45, 98, 105, 110, 108, 111, 103, 45, 116, 114, 97, 110, 115, 97, 99, 116, 105,
+            111, 110, 0, 255, 0, 101, 112, 111, 99, 104,
+        ];
+        let mut reader = TransactionPayloadReader::new_zstd(LEGACY_FRAME).unwrap();
+        let mut decoded = Vec::new();
+        reader.read_to_end(&mut decoded).unwrap();
+        assert_eq!(decoded, b"legacy-mysql-binlog-transaction\0\xff\0epoch");
+        assert!(!reader.has_data_left().unwrap());
+
+        let mut truncated =
+            TransactionPayloadReader::new_zstd(&LEGACY_FRAME[..LEGACY_FRAME.len() - 1]).unwrap();
+        assert!(truncated.read_to_end(&mut Vec::new()).is_err());
+    }
 
     fn source(max_transaction_bytes: usize) -> MySqlSource {
         MySqlSource {
@@ -724,6 +745,202 @@ mod tests {
         let mut other = resolved.clone();
         other.source_identity = "other".into();
         assert!(parse_cursor(&cursor, &other).is_err());
+    }
+
+    fn assert_compressed_row_batch(batch: &SourceBatch, markers: &[&[u8]]) {
+        let events = batch
+            .records
+            .iter()
+            .map(|record| match record {
+                SourceRecord::Event(event) => event,
+                SourceRecord::Error { .. } => panic!("compressed CDC emitted an error record"),
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            events.iter().any(|event| {
+                event.payload["event_type"] == EventType::TRANSACTION_PAYLOAD_EVENT as u8
+            }),
+            "compressed CDC proof requires an actual TRANSACTION_PAYLOAD_EVENT"
+        );
+        assert_eq!(
+            events.last().unwrap().payload["event_type"],
+            EventType::XID_EVENT as u8,
+            "compressed transaction must finish at its decoded XID"
+        );
+        let rows = events
+            .iter()
+            .filter(|event| event.payload["event_type"] == EventType::WRITE_ROWS_EVENT as u8)
+            .flat_map(|event| {
+                BASE64
+                    .decode(event.payload["data"].as_str().unwrap())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for marker in markers {
+            assert!(
+                rows.windows(marker.len()).any(|bytes| bytes == *marker),
+                "expected row data must be present in decoded WRITE_ROWS events"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "requires an actual TRANSACTION_PAYLOAD_EVENT")]
+    fn uncompressed_rows_cannot_satisfy_the_live_compression_proof() {
+        let source = source(1_024);
+        let transaction = BinlogTransaction {
+            file: source.start_file.clone(),
+            position: 160,
+            events: vec![
+                observed(EventType::WRITE_ROWS_EVENT, 140, b"ordinary-row"),
+                observed(EventType::XID_EVENT, 160, b"xid"),
+            ],
+            overflowed: false,
+        };
+        let batch = transaction.into_batch(&source, "0".into(), "160".into());
+        assert_compressed_row_batch(&batch, &[b"ordinary-row"]);
+    }
+
+    async fn live_binlog_position(connection: &mut Conn) -> (String, u64) {
+        let status: mysql_async::Row = connection
+            .query_first("SHOW BINARY LOG STATUS")
+            .await
+            .unwrap()
+            .expect("MySQL should expose binary-log status");
+        (
+            status.get(0).expect("binary-log filename"),
+            status.get(1).expect("binary-log position"),
+        )
+    }
+
+    fn compressed_live_source(
+        start_file: String,
+        start_position: u64,
+    ) -> (ManagedTargetDeliveryConfig, MySqlSource) {
+        let config = crate::source_adapters::test_delivery_config(&json!([{
+            "kind": "connector_credentials",
+            "reference": "mysql-creds",
+            "values": {
+                "username": "epoch_replication",
+                "password": "epoch-replication-password"
+            }
+        }]));
+        let mut source = source(DEFAULT_MAX_TRANSACTION_BYTES);
+        source.host = "127.0.0.1".into();
+        source.port = 13306;
+        source.database = "epoch_connectors".into();
+        source.user = "epoch_replication".into();
+        source.server_id = 4_294_000_003;
+        source.start_file = start_file;
+        source.start_position = start_position;
+        (config, source)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires deploy/compose/docker-compose.connectors.yml"]
+    async fn live_compressed_row_binlog_resumes_after_complete_payload_checkpoint() {
+        let opts = OptsBuilder::default()
+            .ip_or_hostname("127.0.0.1")
+            .tcp_port(13306)
+            .user(Some("epoch_replication"))
+            .pass(Some("epoch-replication-password"))
+            .db_name(Some("epoch_connectors"))
+            .prefer_socket(false);
+        let mut writer = Conn::new(opts).await.unwrap();
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let table = format!("epoch_zstd_{}_{suffix}", std::process::id());
+        writer
+            .query_drop(format!(
+                "CREATE TABLE {table} (id INT PRIMARY KEY, payload VARBINARY(4096)) ENGINE=InnoDB"
+            ))
+            .await
+            .unwrap();
+        // The fixture enables the global default at server startup. Changing
+        // this restricted session variable would require extra test-user grants.
+        let enabled: u8 = writer
+            .query_first("SELECT @@SESSION.binlog_transaction_compression")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(enabled, 1);
+        let (start_file, start_position) = live_binlog_position(&mut writer).await;
+        writer.query_drop("START TRANSACTION").await.unwrap();
+        for (id, marker) in [
+            (1, "epoch-first-compressed"),
+            (2, "epoch-second-compressed"),
+        ] {
+            writer
+                .query_drop(format!(
+                    "INSERT INTO {table} VALUES ({id}, REPEAT('{marker}', 128))"
+                ))
+                .await
+                .unwrap();
+        }
+        writer.query_drop("COMMIT").await.unwrap();
+        let first_end = live_binlog_position(&mut writer).await;
+
+        let (config, source) = compressed_live_source(start_file, start_position);
+        let adapter = MySqlSourceAdapter::new(&config);
+        let first = adapter.fetch(&source, "0").await.unwrap().unwrap();
+        assert_compressed_row_batch(
+            &first,
+            &[b"epoch-first-compressed", b"epoch-second-compressed"],
+        );
+        let first_cursor = parse_cursor(&first.source_to, &source).unwrap();
+        assert_eq!((first_cursor.file, first_cursor.position), first_end);
+        let checkpoint = first.source_to.clone();
+        drop(adapter);
+
+        // A fresh adapter and connection must see EOF, not replay the embedded
+        // rows by checkpointing inside their compressed physical payload.
+        let restarted = MySqlSourceAdapter::new(&config);
+        assert!(
+            restarted
+                .fetch(&source, &checkpoint)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        writer
+            .query_drop(format!(
+                "INSERT INTO {table} VALUES (3, REPEAT('epoch-after-restart', 128))"
+            ))
+            .await
+            .unwrap();
+        let second_end = live_binlog_position(&mut writer).await;
+        let second = restarted
+            .fetch(&source, &checkpoint)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.source_from, checkpoint);
+        assert_compressed_row_batch(&second, &[b"epoch-after-restart"]);
+        let second_cursor = parse_cursor(&second.source_to, &source).unwrap();
+        assert_eq!((second_cursor.file, second_cursor.position), second_end);
+        assert_ne!(first.batch_id, second.batch_id);
+        let replay = restarted
+            .fetch(&source, &checkpoint)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay.batch_id, second.batch_id);
+        assert_eq!(replay.source_to, second.source_to);
+        assert!(
+            restarted
+                .fetch(&source, &second.source_to)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Only this test's unique table in the disposable connector database.
+        writer
+            .query_drop(format!("DROP TABLE {table}"))
+            .await
+            .unwrap();
+        writer.disconnect().await.unwrap();
     }
 
     #[tokio::test]

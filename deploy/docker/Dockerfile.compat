@@ -6,13 +6,17 @@ FROM rust:${RUST_VERSION}-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da4
 WORKDIR /workspace
 
 RUN apt-get update && \
-    apt-get install --yes --no-install-recommends cmake protobuf-compiler && \
+    apt-get install --yes --no-install-recommends cmake protobuf-compiler python3 && \
     rm -rf /var/lib/apt/lists/*
 
 ENV PROTOC=/usr/bin/protoc
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
+COPY third_party ./third_party
+COPY scripts/verify-vendored-dependencies.py ./scripts/verify-vendored-dependencies.py
+
+RUN python3 scripts/verify-vendored-dependencies.py
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/workspace/target \

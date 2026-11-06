@@ -2194,8 +2194,9 @@ export function ProtocolCompatibilityBody() {
       <Note title="Partial compatibility, stated precisely">
         The gateway does not claim full Redis, Kafka, or RabbitMQ parity. It advertises only implemented Kafka
         APIs, bounds every parser and connection pool, and maps successful writes to native replicated Epoch
-        mutations. CI pins Redis CLI 8.8.2, Kafka Java 4.3.1, and RabbitMQ Java 5.35.0 on their supported
-        paths.
+        mutations. CI pins Redis CLI 8.8.2, Kafka Java 4.3.1, and RabbitMQ Java 5.37.0 as conformance targets
+        on their supported paths. The upgraded RabbitMQ client requires fresh fixture and production-image
+        regional evidence before promotion; previous-client captures do not certify it.
       </Note>
 
       <Topic id="run" title="Run the gateway">
@@ -2239,7 +2240,7 @@ export function ProtocolCompatibilityBody() {
                   <code>5672</code>
                 </td>
                 <td>Queue → Queue</td>
-                <td>RabbitMQ Java 5.35.0</td>
+                <td>RabbitMQ Java 5.37.0</td>
               </tr>
             </tbody>
           </table>

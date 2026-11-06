@@ -32,6 +32,7 @@ use tokio::sync::{Mutex, broadcast};
 use crate::{
     catalog_tablet::{
         CatalogTabletQueryError, CatalogTabletReceipt, CatalogTabletService, CatalogTabletSnapshot,
+        MAX_MANAGED_RESOURCE_PAGE_SIZE as MAX_CONTROL_RESOURCE_PAGE_SIZE,
     },
     consensus::{ConsensusProbeApiError, ConsensusProbeError, ConsensusProbeHandle},
     tablet_http::{
@@ -62,7 +63,6 @@ pub const REGIONAL_CONTROL_CHANGES_PATH: &str = "/experimental/v1/regional/contr
 pub const REGIONAL_CONTROL_ALLOCATIONS_PATH: &str = "/experimental/v1/regional/control/allocations";
 const CATALOG_REQUEST_BODY_BYTES: usize = 512 * 1024;
 const CONTROL_RESOURCE_PAGE_BYTES: usize = 768 * 1024;
-const MAX_CONTROL_RESOURCE_PAGE_SIZE: usize = 128;
 pub const DEFAULT_CATALOG_COMMIT_WAIT: Duration = Duration::from_secs(5);
 
 pub type SharedRegionalTabletMaterializer = Arc<Mutex<RegionalTabletMaterializer>>;
@@ -912,19 +912,11 @@ async fn catalog_resource(
     Path(path): Path<CatalogResourcePath>,
 ) -> Result<Json<CatalogResourceResponse>, RegionalCatalogApiError> {
     let name = path.resource_name()?;
-    let snapshot = state
+    let resource = state
         .catalog
-        .snapshot()
-        .map_err(RegionalCatalogApiError::CatalogState)?;
-    snapshot
-        .resources
-        .iter()
-        .find(|resource| resource.name == name)
-        .map(CatalogResourceResponse::from)
-        .map(Json)
-        .ok_or_else(|| {
-            RegionalCatalogApiError::Catalog(CatalogError::NotFound(name.canonical_name()))
-        })
+        .resource(&name)
+        .map_err(RegionalCatalogApiError::from)?;
+    Ok(Json(CatalogResourceResponse::from(&resource)))
 }
 
 async fn managed_resources(
@@ -952,22 +944,17 @@ async fn managed_resources(
         after.validate().map_err(RegionalCatalogApiError::Catalog)?;
     }
     control_read_barrier(&state).await?;
-    let snapshot = state
+    let page = state
         .catalog
-        .snapshot()
-        .map_err(RegionalCatalogApiError::CatalogState)?;
-    let candidates = snapshot
-        .managed_resources
-        .iter()
-        .filter(|resource| after.as_ref().is_none_or(|after| resource.name > *after))
-        .take(query.limit)
-        .map(ManagedResourceResponse::from)
-        .collect::<Vec<_>>();
-    let mut resources = Vec::with_capacity(candidates.len());
+        .managed_resource_page(after.as_ref(), query.limit)
+        .map_err(RegionalCatalogApiError::from)?;
+    let candidates = page.resources.iter().map(ManagedResourceResponse::from);
+    let mut resources = Vec::with_capacity(page.resources.len());
+    let mut has_more = page.has_more;
     for candidate in candidates {
         resources.push(candidate);
         let probe = ControlResourceListResponse {
-            latest_change_cursor: snapshot.latest_change_cursor,
+            latest_change_cursor: page.latest_change_cursor,
             resources: resources.clone(),
             next_page_after: None,
         };
@@ -976,18 +963,13 @@ async fn managed_resources(
         })?;
         if encoded.len() > CONTROL_RESOURCE_PAGE_BYTES && resources.len() > 1 {
             resources.pop();
+            has_more = true;
             break;
         }
     }
     let last_name = resources.last().map(|resource| resource.name.clone());
-    let has_more = last_name.as_ref().is_some_and(|last| {
-        snapshot
-            .managed_resources
-            .iter()
-            .any(|resource| resource.name > *last)
-    });
     Ok(Json(ControlResourceListResponse {
-        latest_change_cursor: snapshot.latest_change_cursor,
+        latest_change_cursor: page.latest_change_cursor,
         resources,
         next_page_after: has_more.then_some(last_name).flatten(),
     }))
@@ -999,19 +981,11 @@ async fn managed_resource(
 ) -> Result<Json<ManagedResourceResponse>, RegionalCatalogApiError> {
     control_read_barrier(&state).await?;
     let name = path.resource_name()?;
-    let snapshot = state
+    let resource = state
         .catalog
-        .snapshot()
-        .map_err(RegionalCatalogApiError::CatalogState)?;
-    snapshot
-        .managed_resources
-        .iter()
-        .find(|resource| resource.name == name)
-        .map(ManagedResourceResponse::from)
-        .map(Json)
-        .ok_or_else(|| {
-            RegionalCatalogApiError::Catalog(CatalogError::NotFound(name.canonical_name()))
-        })
+        .managed_resource(&name)
+        .map_err(RegionalCatalogApiError::from)?;
+    Ok(Json(ManagedResourceResponse::from(&resource)))
 }
 
 async fn delete_desired_resource(
@@ -1323,13 +1297,12 @@ async fn control_allocations(
     State(state): State<RegionalCatalogState>,
 ) -> Result<Json<ControlAllocationsResponse>, RegionalCatalogApiError> {
     control_read_barrier(&state).await?;
-    let snapshot = state
+    let allocations = state
         .catalog
-        .snapshot()
+        .node_allocations()
         .map_err(RegionalCatalogApiError::CatalogState)?;
     Ok(Json(ControlAllocationsResponse {
-        allocations: snapshot
-            .node_allocations
+        allocations: allocations
             .into_iter()
             .map(|(node_id, catalog_groups)| ControlNodeAllocationResponse {
                 node_id,
@@ -1807,6 +1780,15 @@ pub enum RegionalCatalogApiError {
     },
 }
 
+impl From<CatalogTabletQueryError> for RegionalCatalogApiError {
+    fn from(error: CatalogTabletQueryError) -> Self {
+        match error {
+            CatalogTabletQueryError::Unavailable(error) => Self::CatalogState(error),
+            CatalogTabletQueryError::Catalog(error) => Self::Catalog(error),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct CatalogErrorBody {
     code: &'static str,
@@ -2066,6 +2048,356 @@ mod tests {
             )
             .await
             .unwrap()
+    }
+
+    async fn get_catalog_path(node: &RegionalTestNode, path: &str) -> Response {
+        node.app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    fn query_resource_name(name: &str) -> ResourceName {
+        let mut resource = stream_resource_name();
+        resource.name = name.into();
+        resource
+    }
+
+    fn managed_query_path(after: Option<&ResourceName>, limit: usize) -> String {
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        query.append_pair("limit", &limit.to_string());
+        if let Some(after) = after {
+            query.append_pair("after", &serde_json::to_string(after).unwrap());
+        }
+        format!("{REGIONAL_CONTROL_RESOURCES_PATH}?{}", query.finish())
+    }
+
+    async fn populate_query_catalog(node: &RegionalTestNode) {
+        for command in [
+            CatalogCommand::ApplyDesired(ApplyDesiredResources {
+                request_token: "query-managed".into(),
+                resources: ["alpha", "bravo", "charlie"]
+                    .into_iter()
+                    .map(|name| DesiredResourceWrite {
+                        name: query_resource_name(name),
+                        expected_generation: Some(0),
+                        desired: json!({"name": name}),
+                    })
+                    .collect(),
+            }),
+            CatalogCommand::Apply(ApplyResource {
+                request_token: "query-native".into(),
+                expected_generation: Some(0),
+                name: stream_resource_name(),
+                spec: ResourceSpec {
+                    workload_profile: WorkloadProfile::StreamLog,
+                    shard_count: 1,
+                    replica_count: 3,
+                    configuration: None,
+                    governance: None,
+                },
+                tablet_placements: vec![TabletPlacement {
+                    shard_index: 0,
+                    voter_node_ids: vec![1, 2, 3],
+                }],
+            }),
+        ] {
+            let (receipt, _) = commit_command(&node.state, command).await.unwrap();
+            ensure_mutation_accepted(&receipt).unwrap();
+        }
+    }
+
+    fn snapshot_page_response(
+        snapshot: &CatalogTabletSnapshot,
+        after: Option<&ResourceName>,
+        limit: usize,
+    ) -> Value {
+        let mut resources = Vec::new();
+        for candidate in snapshot
+            .managed_resources
+            .iter()
+            .filter(|resource| after.is_none_or(|after| resource.name > *after))
+            .take(limit)
+        {
+            resources.push(ManagedResourceResponse::from(candidate));
+            let probe = ControlResourceListResponse {
+                latest_change_cursor: snapshot.latest_change_cursor,
+                resources: resources.clone(),
+                next_page_after: None,
+            };
+            if serde_json::to_vec(&probe).unwrap().len() > CONTROL_RESOURCE_PAGE_BYTES
+                && resources.len() > 1
+            {
+                resources.pop();
+                break;
+            }
+        }
+        let last = resources.last().map(|resource| resource.name.clone());
+        let has_more = last.as_ref().is_some_and(|last| {
+            snapshot
+                .managed_resources
+                .iter()
+                .any(|resource| resource.name > *last)
+        });
+        serde_json::to_value(ControlResourceListResponse {
+            latest_change_cursor: snapshot.latest_change_cursor,
+            resources,
+            next_page_after: has_more.then_some(last).flatten(),
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn narrow_control_reads_preserve_wire_values_and_page_boundaries() {
+        let root = TempDir::new().unwrap();
+        let nodes = start_cluster(&root).await;
+        let leader = leader_index(&nodes).await;
+        populate_query_catalog(&nodes[leader]).await;
+        let snapshot = nodes[leader].state.catalog.snapshot().unwrap();
+        let initial = nodes[leader].state.catalog.full_snapshot_read_count();
+        for after in [
+            None,
+            Some(query_resource_name("alpha")),
+            Some(query_resource_name("alpine")),
+            Some(query_resource_name("charlie")),
+        ] {
+            for limit in [1, 2, MAX_CONTROL_RESOURCE_PAGE_SIZE] {
+                let page =
+                    get_catalog_path(&nodes[leader], &managed_query_path(after.as_ref(), limit))
+                        .await;
+                assert_eq!(page.status(), StatusCode::OK);
+                assert_eq!(
+                    response_json(page).await,
+                    snapshot_page_response(&snapshot, after.as_ref(), limit)
+                );
+            }
+        }
+        for expected in &snapshot.managed_resources {
+            let path = format!(
+                "{REGIONAL_CONTROL_RESOURCES_PATH}/acme/shop/dev/core/stream/{}",
+                expected.name.name
+            );
+            let response = get_catalog_path(&nodes[leader], &path).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response_json(response).await,
+                serde_json::to_value(ManagedResourceResponse::from(expected)).unwrap()
+            );
+        }
+        let native = get_catalog_path(&nodes[leader], catalog_resource_path()).await;
+        assert_eq!(native.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(native).await,
+            serde_json::to_value(CatalogResourceResponse::from(&snapshot.resources[0])).unwrap()
+        );
+        let allocations = get_catalog_path(&nodes[leader], REGIONAL_CONTROL_ALLOCATIONS_PATH).await;
+        assert_eq!(allocations.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(allocations).await,
+            json!({"allocations": [
+                {"node_id": "1", "catalog_groups": 1},
+                {"node_id": "2", "catalog_groups": 1},
+                {"node_id": "3", "catalog_groups": 1}
+            ]})
+        );
+        let (receipt, _) = commit_command(
+            &nodes[leader].state,
+            CatalogCommand::ApplyDesired(ApplyDesiredResources {
+                request_token: "query-update".into(),
+                resources: vec![DesiredResourceWrite {
+                    name: query_resource_name("alpha"),
+                    expected_generation: Some(1),
+                    desired: json!({"name": "updated"}),
+                }],
+            }),
+        )
+        .await
+        .unwrap();
+        ensure_mutation_accepted(&receipt).unwrap();
+        let response = get_catalog_path(
+            &nodes[leader],
+            &format!("{REGIONAL_CONTROL_RESOURCES_PATH}/acme/shop/dev/core/stream/alpha"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let updated = response_json(response).await;
+        assert_eq!(updated["generation"], "2");
+        assert_eq!(updated["desired"], json!({"name": "updated"}));
+        assert_eq!(
+            nodes[leader].state.catalog.full_snapshot_read_count(),
+            initial
+        );
+        for node in nodes {
+            node.materializer.lock().await.shutdown().await.unwrap();
+            node.peer_server.abort();
+            let _ = node.peer_server.await;
+        }
+    }
+
+    #[tokio::test]
+    async fn narrow_control_pages_preserve_byte_budget_and_continuation() {
+        let root = TempDir::new().unwrap();
+        let nodes = start_cluster(&root).await;
+        let leader = leader_index(&nodes).await;
+        for index in 0..8 {
+            let command = CatalogCommand::ApplyDesired(ApplyDesiredResources {
+                request_token: format!("query-large-page-{index}"),
+                resources: vec![DesiredResourceWrite {
+                    name: query_resource_name(&format!("large-{index}")),
+                    expected_generation: Some(0),
+                    desired: json!({"padding": "x".repeat(120 * 1024)}),
+                }],
+            });
+            let (receipt, _) = commit_command(&nodes[leader].state, command).await.unwrap();
+            ensure_mutation_accepted(&receipt).unwrap();
+        }
+        let snapshot = nodes[leader].state.catalog.snapshot().unwrap();
+        let initial = nodes[leader].state.catalog.full_snapshot_read_count();
+        let expected = snapshot_page_response(&snapshot, None, MAX_CONTROL_RESOURCE_PAGE_SIZE);
+        assert!(expected["resources"].as_array().unwrap().len() < snapshot.managed_resources.len());
+        assert!(!expected["next_page_after"].is_null());
+        let response = get_catalog_path(&nodes[leader], REGIONAL_CONTROL_RESOURCES_PATH).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await, expected);
+        let after: ResourceName =
+            serde_json::from_value(expected["next_page_after"].clone()).unwrap();
+        let remaining = get_catalog_path(
+            &nodes[leader],
+            &managed_query_path(Some(&after), MAX_CONTROL_RESOURCE_PAGE_SIZE),
+        )
+        .await;
+        assert_eq!(remaining.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(remaining).await,
+            snapshot_page_response(&snapshot, Some(&after), MAX_CONTROL_RESOURCE_PAGE_SIZE)
+        );
+        assert_eq!(
+            nodes[leader].state.catalog.full_snapshot_read_count(),
+            initial
+        );
+        for node in nodes {
+            node.materializer.lock().await.shutdown().await.unwrap();
+            node.peer_server.abort();
+            let _ = node.peer_server.await;
+        }
+    }
+
+    #[tokio::test]
+    async fn narrow_control_reads_retain_follower_and_quorum_rejections() {
+        let root = TempDir::new().unwrap();
+        let mut nodes = start_cluster(&root).await;
+        let leader = leader_index(&nodes).await;
+        populate_query_catalog(&nodes[leader]).await;
+        wait_for_catalog_resource_count(&nodes, 1).await;
+        let initial = nodes[leader].state.catalog.full_snapshot_read_count();
+        let follower = (leader + 1) % nodes.len();
+        let follower_initial = nodes[follower].state.catalog.full_snapshot_read_count();
+        let paths = [
+            REGIONAL_CONTROL_RESOURCES_PATH,
+            REGIONAL_CONTROL_ALLOCATIONS_PATH,
+            "/experimental/v1/regional/control/resources/acme/shop/dev/core/stream/alpha",
+        ];
+        for path in paths {
+            let response = get_catalog_path(&nodes[follower], path).await;
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert_eq!(response_json(response).await["code"], "not_leader");
+        }
+        for limit in [0, MAX_CONTROL_RESOURCE_PAGE_SIZE + 1] {
+            let response =
+                get_catalog_path(&nodes[follower], &managed_query_path(None, limit)).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                response_json(response).await["code"],
+                "invalid_catalog_request"
+            );
+        }
+        // The native Catalog diagnostic was a local read before this change;
+        // adding a leader requirement here would be a compatibility change.
+        assert_eq!(
+            get_catalog_path(&nodes[follower], catalog_resource_path())
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            nodes[follower].state.catalog.full_snapshot_read_count(),
+            follower_initial
+        );
+        for (index, node) in nodes.iter_mut().enumerate() {
+            if index != leader {
+                node.materializer.lock().await.shutdown().await.unwrap();
+                node.peer_server.abort();
+                let _ = (&mut node.peer_server).await;
+            }
+        }
+        assert!(
+            nodes[leader]
+                .state
+                .catalog
+                .managed_resource(&query_resource_name("alpha"))
+                .is_ok()
+        );
+        for path in paths {
+            let response = get_catalog_path(&nodes[leader], path).await;
+            assert!(matches!(
+                response.status(),
+                StatusCode::CONFLICT | StatusCode::SERVICE_UNAVAILABLE
+            ));
+            assert!(matches!(
+                response_json(response).await["code"].as_str(),
+                Some("not_leader" | "read_barrier_unavailable" | "proposal_conflict")
+            ));
+        }
+        assert_eq!(
+            nodes[leader].state.catalog.full_snapshot_read_count(),
+            initial
+        );
+        nodes[leader]
+            .materializer
+            .lock()
+            .await
+            .shutdown()
+            .await
+            .unwrap();
+        nodes[leader].peer_server.abort();
+        let _ = (&mut nodes[leader].peer_server).await;
+    }
+
+    #[tokio::test]
+    async fn narrow_management_reads_do_not_build_full_catalog_snapshots() {
+        let root = TempDir::new().unwrap();
+        let nodes = start_cluster(&root).await;
+        let leader = leader_index(&nodes).await;
+        let initial = nodes[leader].state.catalog.full_snapshot_read_count();
+        for (path, expected) in [
+            (REGIONAL_CONTROL_RESOURCES_PATH.to_owned(), StatusCode::OK),
+            (REGIONAL_CONTROL_ALLOCATIONS_PATH.to_owned(), StatusCode::OK),
+            (
+                format!("{REGIONAL_CONTROL_RESOURCES_PATH}/acme/shop/dev/core/stream/missing"),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "/experimental/v1/regional/catalog/resources/acme/shop/dev/core/stream/missing"
+                    .to_owned(),
+                StatusCode::NOT_FOUND,
+            ),
+        ] {
+            assert_eq!(
+                get_catalog_path(&nodes[leader], &path).await.status(),
+                expected
+            );
+        }
+        assert_eq!(
+            nodes[leader].state.catalog.full_snapshot_read_count(),
+            initial,
+            "bounded management reads must not copy or hash unrelated Catalog state"
+        );
+        for node in nodes {
+            node.materializer.lock().await.shutdown().await.unwrap();
+            node.peer_server.abort();
+            let _ = node.peer_server.await;
+        }
     }
 
     #[tokio::test]

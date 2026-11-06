@@ -2,3 +2,8 @@
 sdk/go/gen/** linguist-generated=true
 sdk/python/src/epoch_sdk/_generated/** linguist-generated=true
 sdk/java/src/generated/** linguist-generated=true
+
+# Preserve authenticated upstream source, including its existing doc whitespace.
+# The offline provenance verifier checks every byte; do not reformat this file.
+third_party/mysql_common-0.37.3/src/** linguist-vendored=true
+third_party/mysql_common-0.37.3/src/lib.rs -whitespace

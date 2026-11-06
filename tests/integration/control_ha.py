@@ -967,6 +967,8 @@ def run_campaign(
             "Cargo.lock",
             "rust-toolchain.toml",
             "crates",
+            "third_party",
+            "scripts/verify-vendored-dependencies.py",
             "deploy/docker/Dockerfile.node",
             "spec/proto",
         ],
