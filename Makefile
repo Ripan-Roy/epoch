@@ -131,6 +131,7 @@ test-release-workflow: ## Prove native multi-platform release and supply-chain i
 .PHONY: test-ci-optimization
 test-ci-optimization: ## Preserve CI coverage and cache isolation while allowing independent jobs to start immediately.
 	@python3 -m unittest discover -s tests/integration -p 'test_ci_*.py' -v
+	@go test ./tests/repository
 
 .PHONY: test-java-management-generation
 test-java-management-generation: ## Prove pinned Java generation and fail-closed freshness/inventory checks.

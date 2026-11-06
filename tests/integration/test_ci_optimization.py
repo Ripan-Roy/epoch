@@ -174,6 +174,17 @@ class CIOptimizationTests(unittest.TestCase):
         job = job_block(self.workflow, "go-contracts")
         self.assertIn("make test-ci-optimization", job)
 
+    def test_fast_ci_checks_include_go_repository_workflow_contracts(self) -> None:
+        makefile = (WORKFLOW.parents[2] / "Makefile").read_text()
+        match = re.search(
+            r"^test-ci-optimization:.*(?:\n\t.*)*", makefile, re.MULTILINE
+        )
+        self.assertIsNotNone(match)
+        assert match is not None
+        recipe = match.group(0)
+        self.assertIn("\n\t@go test ./tests/repository", recipe)
+        self.assertNotIn("||", recipe)
+
     def test_console_executes_tests_before_build_without_a_conditional_skip(
         self,
     ) -> None:
