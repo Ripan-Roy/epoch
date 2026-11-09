@@ -69,6 +69,7 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install 'sdk/python[management,management-dev]' ruff==0.15.19 mypy==2.1.0
 mkdir -p .cache
+make install-go-protobuf-tools
 python3 scripts/generate-java-management.py --install-plugin "$PWD/.cache/grpc-java-1.84.0"
 ```
 
@@ -85,6 +86,19 @@ compiler; `--check` never installs tools or changes generated sources. Set
 `EPOCH_GRPC_JAVA_PLUGIN` to an explicitly installed compiler's absolute path
 if using a different directory. This uses Buf's [local plugin support](https://buf.build/docs/configuration/v2/buf-gen-yaml/#type-of-plugin),
 not remote generation or a cached copy of expected generated sources.
+
+Go generation likewise uses local `protoc-gen-go` 1.36.11 and
+`protoc-gen-go-grpc` 1.5.1 with Buf 1.72.0. The installer builds them with
+Go 1.26.5, requires the pinned module and go.mod checksums with SumDB enabled,
+and uses fresh staging-private source, build and temporary caches with CGO
+disabled. Their Go compiler version, clean-build tag, compiled module metadata
+and version banners are verified before reuse; inherited-cache tools fail closed.
+Tools live under `.cache/go-protobuf-1.36.11-1.5.1-source-v1`, not the global Go bin
+directory. Set `EPOCH_PROTOBUF_GO_TOOLS` to another explicitly installed absolute
+tool directory if needed. Installed, verified tools work offline; generation
+does not call Buf's remote plugin service or require its request quota.
+`--check` generates into a temporary directory, compares every byte and the
+complete inventory, and never rewrites stale sources or deletes foreign files.
 All 61 Java generated files are byte-identical to the previous remote output.
 Its generated directory is compiled but excluded from
 application formatting/Checkstyle, not edited or suppressed by hand. Python
@@ -750,16 +764,16 @@ Do not change socket permissions broadly. Fix the Desktop/context state.
 
 ### Buf cannot generate
 
-Confirm `buf --version` and that at least one contract exists under
-`spec/proto`. Go currently uses pinned remote plugins and needs access to
-`buf.build`. Java generation runs locally and needs exact Protobuf 35.1 plus
-the checksum-pinned gRPC-Java 1.84.0 compiler installed above; Python uses its
-pinned `grpcio-tools` extra. Remote Buf generation has a [shared anonymous
-rate limit](https://buf.build/docs/bsr/rate-limits/) and may return
-`resource_exhausted`; this is not evidence of a code or test failure. Do not
-skip freshness checks or repeatedly retry them. Java's local generation
-removes that quota dependency for its checks. `make generate` safely skips
-an empty contract tree during the initial scaffold.
+Confirm Buf 1.72.0 and the contracts under `spec/proto`. All three language
+generators run locally. Install the source-verified Go plugins with
+`make install-go-protobuf-tools`; first installation requires the public Go
+proxy and SumDB, while subsequent verified generation uses no remote plugin
+service. Java needs exact Protobuf 35.1 and the checksum-pinned gRPC-Java 1.84.0
+compiler installed above; Python uses its pinned `grpcio-tools` extra.
+Use `make generate-check` for read-only freshness verification and `make generate`
+only when intentionally updating sources. Do not skip freshness checks, replace
+missing tools with cached expected output, or retry a remote quota failure in a
+loop. Empty, stale and unexpected generated inventories fail closed.
 
 ## Related documents
 

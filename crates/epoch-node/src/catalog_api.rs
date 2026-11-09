@@ -2235,24 +2235,62 @@ mod tests {
         }
     }
 
+    fn large_page_fixture_commands() -> Vec<CatalogCommand> {
+        // Keep eight 120 KiB records and the real Raft path, but use the public
+        // atomic batch capability to avoid eight large-image commit round trips.
+        // Four records still fit the unchanged 512 KiB command envelope.
+        (0..2)
+            .map(|batch| {
+                CatalogCommand::ApplyDesired(ApplyDesiredResources {
+                    request_token: format!("query-large-page-{batch}"),
+                    resources: (0..4)
+                        .map(|offset| DesiredResourceWrite {
+                            name: query_resource_name(&format!("large-{}", batch * 4 + offset)),
+                            expected_generation: Some(0),
+                            desired: json!({"padding": "x".repeat(120 * 1024)}),
+                        })
+                        .collect(),
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn large_page_fixture_uses_bounded_atomic_batches_without_reducing_page_pressure() {
+        let commands = large_page_fixture_commands();
+        assert_eq!(
+            commands.len(),
+            2,
+            "avoid eight expensive consensus round trips"
+        );
+        let mut names = std::collections::BTreeSet::new();
+        for command in commands {
+            let CatalogCommand::ApplyDesired(batch) = command else {
+                panic!("page fixture must use atomic desired writes");
+            };
+            assert_eq!(batch.resources.len(), 4);
+            for write in &batch.resources {
+                assert_eq!(write.expected_generation, Some(0));
+                assert_eq!(write.desired["padding"].as_str().unwrap().len(), 120 * 1024);
+                assert!(names.insert(write.name.clone()));
+            }
+            let encoded = CatalogCommand::ApplyDesired(batch).encode().unwrap();
+            assert!(encoded.len() <= 512 * 1024);
+        }
+        assert_eq!(names.len(), 8);
+    }
+
     #[tokio::test]
     async fn narrow_control_pages_preserve_byte_budget_and_continuation() {
         let root = TempDir::new().unwrap();
         let nodes = start_cluster(&root).await;
         let leader = leader_index(&nodes).await;
-        for index in 0..8 {
-            let command = CatalogCommand::ApplyDesired(ApplyDesiredResources {
-                request_token: format!("query-large-page-{index}"),
-                resources: vec![DesiredResourceWrite {
-                    name: query_resource_name(&format!("large-{index}")),
-                    expected_generation: Some(0),
-                    desired: json!({"padding": "x".repeat(120 * 1024)}),
-                }],
-            });
+        for command in large_page_fixture_commands() {
             let (receipt, _) = commit_command(&nodes[leader].state, command).await.unwrap();
             ensure_mutation_accepted(&receipt).unwrap();
         }
         let snapshot = nodes[leader].state.catalog.snapshot().unwrap();
+        assert_eq!(snapshot.managed_resources.len(), 8);
         let initial = nodes[leader].state.catalog.full_snapshot_read_count();
         let expected = snapshot_page_response(&snapshot, None, MAX_CONTROL_RESOURCE_PAGE_SIZE);
         assert!(expected["resources"].as_array().unwrap().len() < snapshot.managed_resources.len());

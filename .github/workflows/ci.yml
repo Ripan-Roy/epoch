@@ -120,6 +120,10 @@ jobs:
           cache-dependency-path: go.sum
       - name: Install pinned Buf CLI
         run: go install github.com/bufbuild/buf/cmd/buf@v1.72.0
+      - name: Install source-verified local Go Protobuf generators
+        run: make install-go-protobuf-tools
+      - name: Verify local Go generator and read-only freshness contracts
+        run: make test-go-generation
       - name: Lint workflows and shell scripts
         run: |
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color
@@ -150,7 +154,7 @@ jobs:
       - run: buf lint
       - name: Reject stale generated bindings
         run: |
-          buf generate
+          python3 scripts/generate-go-protobuf.py --check
           git diff --exit-code -- sdk/go/gen
           test -z "$(git status --porcelain --untracked-files=all -- sdk/go/gen)"
       - run: go vet ./...
@@ -179,6 +183,7 @@ jobs:
           scripts/generate-python-management.py
           scripts/generate-java-management.py
           scripts/verify-vendored-dependencies.py
+          scripts/install-go-protobuf-tools.py scripts/generate-go-protobuf.py
       - run: >-
           ruff check sdk/python tests/soak tests/integration/*.py
           console/src/quickstarts/quickstart.py
@@ -186,6 +191,7 @@ jobs:
           ruff check --config sdk/python/pyproject.toml
           scripts/generate-python-management.py scripts/generate-java-management.py
           scripts/verify-vendored-dependencies.py
+          scripts/install-go-protobuf-tools.py scripts/generate-go-protobuf.py
       - name: Compile and type-check Python SDK and displayed quickstart
         run: |
           python -m py_compile console/src/quickstarts/quickstart.py

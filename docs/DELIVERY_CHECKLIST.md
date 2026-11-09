@@ -5,6 +5,13 @@
 **Current release target:** `v0.2.0-beta.12`
 **Current core target:** exact-main SDK/release verification, Catalog read-path efficiency, and native persistent Stream APIs
 
+**Main verification update (9 November 2026):** PR #166 merged at `7aead5d`
+after all 14 PR CI jobs passed. Its exact-main CI `42285904411` failed on a
+controller metrics-port collision and a large-page setup commit timeout;
+Pages passed. [The certification repair](CONTROL_HA_CERTIFICATION.md#merged-main-verification-repair-9-november-2026)
+preserves all fault phases, inventories and limits. Fresh PR/main evidence and
+beta.12 publication remain open; a passing PR does not replace main proof.
+
 This is the operational checklist for turning PRD scope into verified,
 releasable increments. [PRD.md](PRD.md) owns product scope,
 [DELIVERY_PLAN.md](DELIVERY_PLAN.md) owns sequence, and

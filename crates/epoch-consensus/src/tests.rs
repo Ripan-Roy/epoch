@@ -412,6 +412,104 @@ fn deterministic_campaign_elects_the_requested_voter() {
 }
 
 #[test]
+fn quiescent_ready_and_unchanged_heartbeat_ticks_do_not_decode_checkpoints() {
+    let mut cluster = TestCluster::new(0xdec0_de01);
+    cluster.campaign(node(1));
+    cluster.propose(node(1), 52, b"retained-checkpoint-retry");
+    let adapter = cluster.nodes.get_mut(&node(1)).unwrap();
+    let application_payload = b"representative-profile-state".to_vec();
+    adapter
+        .checkpoint_with_application(
+            ApplicationSnapshot::new(
+                adapter.applied_index,
+                *b"CATALOG_STATE_V1",
+                1,
+                Sha256::digest(&application_payload).into(),
+                application_payload,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let snapshot = adapter.raw_node.store().snapshot.as_ref().unwrap();
+    assert_eq!(
+        u16::from_be_bytes(snapshot.data[4..6].try_into().unwrap()),
+        SNAPSHOT_V2_VERSION,
+        "this regression exercises the unchanged legacy EPSN v2 format"
+    );
+    assert!(!adapter.raw_node.has_ready());
+    let generation = adapter.stable_generation;
+    let lookup = adapter.lookup_proposal(proposal(52));
+    let digest = adapter.state_digest();
+    let applied_index = adapter.applied_index;
+    assert!(matches!(lookup, ProposalLookup::Committed(_)));
+
+    CHECKPOINT_DECODE_COUNT.with(|count| count.set(0));
+    let output = adapter.process_ready().unwrap();
+    assert!(output.messages.is_empty());
+    assert!(output.commits.is_empty());
+    assert!(output.installed_checkpoint.is_none());
+    assert_eq!(adapter.stable_generation, generation);
+    assert_eq!(adapter.lookup_proposal(proposal(52)), lookup);
+    let quiescent_decodes = CHECKPOINT_DECODE_COUNT.with(std::cell::Cell::get);
+
+    CHECKPOINT_DECODE_COUNT.with(|count| count.set(0));
+    let mut saw_heartbeat = false;
+    for _ in 0..3 {
+        let output = adapter.tick().unwrap();
+        saw_heartbeat |= output.messages.iter().any(|message| {
+            RaftWireMessage::decode(message.encoded.as_slice())
+                .unwrap()
+                .get_msg_type()
+                == MessageType::MsgHeartbeat
+        });
+        assert!(output.commits.is_empty());
+        assert!(output.installed_checkpoint.is_none());
+        assert_eq!(output.status.applied_index, applied_index);
+        assert_eq!(adapter.stable_generation, generation);
+        assert_eq!(adapter.lookup_proposal(proposal(52)), lookup);
+        assert_eq!(adapter.state_digest(), digest);
+    }
+    assert!(
+        saw_heartbeat,
+        "ticks must exercise an unchanged heartbeat Ready"
+    );
+    let heartbeat_decodes = CHECKPOINT_DECODE_COUNT.with(std::cell::Cell::get);
+    assert_eq!(
+        (quiescent_decodes, heartbeat_decodes),
+        (0, 0),
+        "unchanged state must reuse its validated checkpoint"
+    );
+
+    CHECKPOINT_DECODE_COUNT.with(|count| count.set(0));
+    PERSISTED_STATE_VALIDATION_COUNT.with(|count| count.set(0));
+    let output = adapter
+        .propose(Proposal::new(
+            group_id(),
+            group_epoch(),
+            adapter.status().term,
+            proposal(53),
+            b"new-pending-command",
+        ))
+        .unwrap();
+    assert!(output.commits.is_empty());
+    assert!(adapter.stable_generation > generation);
+    assert_eq!(
+        adapter.lookup_proposal(proposal(53)),
+        ProposalLookup::Pending {
+            payload: b"new-pending-command".to_vec()
+        }
+    );
+    assert!(
+        CHECKPOINT_DECODE_COUNT.with(std::cell::Cell::get) >= 1,
+        "a new stable generation must still validate its retained checkpoint"
+    );
+    assert!(
+        PERSISTED_STATE_VALIDATION_COUNT.with(std::cell::Cell::get) >= 1,
+        "a changed generation must run full validation, not only decode for proposal tracking"
+    );
+}
+
+#[test]
 fn five_voters_elect_commit_and_restart_without_changing_quorum_membership() {
     let voters = (1..=5).map(node).collect::<Vec<_>>();
     let mut cluster = TestCluster::with_voters(0x5005, &voters);
