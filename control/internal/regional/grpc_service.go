@@ -40,6 +40,10 @@ type controlChangeStore interface {
 	ControlChanges(context.Context, uint64, uint32) (ControlChangePage, error)
 }
 
+type contextualListStore interface {
+	ListContext(context.Context, resources.ListFilter) ([]resources.Resource, error)
+}
+
 // RegionalAdminServer exposes the versioned managed-control contract while
 // delegating catalog and placement authority to Rust.
 type RegionalAdminServer struct {
@@ -181,7 +185,7 @@ func (server *RegionalAdminServer) ListResources(
 	if err != nil {
 		return nil, err
 	}
-	listed, err := server.registry.List(resources.ListFilter{
+	filter := resources.ListFilter{
 		Organization:   request.GetOrganization(),
 		Project:        request.GetProject(),
 		Environment:    request.GetEnvironment(),
@@ -191,7 +195,16 @@ func (server *RegionalAdminServer) ListResources(
 		CostCenter:     request.GetCostCenter(),
 		Classification: optionalClassificationFromProto(request.GetClassification()),
 		Tags:           cloneStringMap(request.GetTags()),
-	})
+	}
+	var listed []resources.Resource
+	if registry, ok := server.registry.(contextualListStore); ok {
+		listed, err = registry.ListContext(ctx, filter)
+	} else {
+		listed, err = server.registry.List(filter)
+	}
+	if ctx.Err() != nil {
+		return nil, status.FromContextError(ctx.Err()).Err()
+	}
 	if err != nil {
 		return nil, registryStatus(err)
 	}

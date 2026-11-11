@@ -67,6 +67,39 @@ parallel socket allocation. Local tests are not a replacement for fresh
 three/five-controller PR and merged-main campaigns. Beta.12 publication remains
 gated on successful exact-main CI/Pages and the release workflow.
 
+## Concurrent inventory read recovery (10 November 2026)
+
+The first [PR #178](https://github.com/Ripan-Roy/epoch/pull/178) run at
+`c9fc34c` passed the eleven base CI jobs and the five-controller campaign, but
+[CI 42625833082](https://github.com/Ripan-Roy/epoch/actions/runs/42625833082)
+failed overall. Its three-controller worker failed an initial concurrent public
+Python SDK `ListResources` call with `UNAVAILABLE`, before the fault matrix.
+The five-controller job took 13m03s; this one-fleet observation is neither a
+passing whole matrix nor a comparable whole-CI speedup measurement.
+
+The retained Rust logs show successful HTTP inventory pages rather than an
+HTTP read failure. Concurrent SDK writes and observed-status changes can move
+the Catalog change cursor between those pages. This is the strongest historical
+cause inference, not a recovered exact RPC diagnostic. A deterministic real-HTTP
+regression separately reproduces the bug: cursor 10 followed by 11 aborts the
+old list even when a fresh scan would be coherent at 11.
+
+The registry now restarts only that forward-cursor-change case, with at most
+three whole-inventory scans. It discards every partial scan, preserves all
+filters, and publishes its resource count only after coherent completion. All
+pages and retries share one original caller context and the existing ten-second
+control-call cap. gRPC cancellation and deadlines propagate to the authority;
+no retry receives a fresh time budget. Malformed data, mismatched identities,
+invalid continuations and cursor regression fail closed rather than being
+retried away. The monotonic cursor floor also spans fresh scans.
+
+Local regression coverage includes transient and persistent churn, discarded
+partial counts, unchanged deadlines, cancellation, filtering, malformed pages
+and regression across a scan restart. Persistent churn can still return a
+bounded unavailable result; this is not an MVCC snapshot or an unbounded retry.
+The complete original three/five-controller fault campaign and exact-source
+independent verifier remain required after this production Go change.
+
 ## Ownership boundary
 
 Rust Catalog consensus remains the authority for managed metadata, leases,

@@ -380,6 +380,13 @@ claimed speedup: fresh exact-source CI must establish the optimized runtime.
 No history size, fixture inventory, failure phase, checkpoint rule, lease TTL,
 or recovery timeout is reduced to make CI faster.
 
+Concurrent management writes can advance the inventory cursor while Go pages
+through the Catalog. The registry discards that scan and allows at most three
+fresh coherent scans, all under the same caller context and ten-second cap.
+It never publishes partial counts or ignores malformed pages or cursor
+regression. This production read recovery is separate from the read-only
+campaign startup preflight; neither changes the strict mutation assertions.
+
 ## Runtime configuration and local ports
 
 The initial standalone development contract is:
