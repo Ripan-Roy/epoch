@@ -975,6 +975,16 @@ impl Drop for PeriodicTickHandle {
     }
 }
 
+fn consensus_tick_interval(tick_interval: Duration) -> tokio::time::Interval {
+    let start = tokio::time::Instant::now() + tick_interval;
+    let mut interval = tokio::time::interval_at(start, tick_interval);
+    // Stable-store/profile barriers can stall tick delivery. Do not replay
+    // missed deadlines as consecutive election ticks while peer work recovers.
+    // Keep the configured period and the original timer phase after a stall.
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval
+}
+
 pub fn spawn_periodic_ticks(
     handle: ConsensusProbeHandle,
     tick_interval: Duration,
@@ -982,8 +992,7 @@ pub fn spawn_periodic_ticks(
     validate_tick_interval(tick_interval)?;
     let (stop, mut stopped) = watch::channel(false);
     let task = tokio::spawn(async move {
-        let start = tokio::time::Instant::now() + tick_interval;
-        let mut ticks = tokio::time::interval_at(start, tick_interval);
+        let mut ticks = consensus_tick_interval(tick_interval);
         loop {
             tokio::select! {
                 _ = ticks.tick() => {
@@ -2349,6 +2358,46 @@ mod tests {
     use super::*;
     use crate::catalog_tablet::{CatalogTabletScope, CatalogTabletService};
     use crate::delivery_proposal::{ProposalRoute, propose_and_wait};
+
+    #[tokio::test(start_paused = true)]
+    async fn overdue_consensus_ticks_do_not_burst_and_keep_the_original_cadence() {
+        use futures_util::FutureExt;
+
+        let start = tokio::time::Instant::now();
+        let period = Duration::from_millis(100);
+        let mut ticks = consensus_tick_interval(period);
+        assert!(ticks.tick().now_or_never().is_none());
+
+        tokio::time::advance(period).await;
+        assert_eq!(ticks.tick().now_or_never(), Some(start + period));
+
+        // Model an actor snapshot/store barrier while its tick task cannot
+        // advance. One overdue tick is useful; replaying the backlog is not.
+        tokio::time::advance(Duration::from_millis(1_035)).await;
+        assert_eq!(
+            ticks.tick().now_or_never(),
+            Some(start + Duration::from_millis(200))
+        );
+        assert!(
+            ticks.tick().now_or_never().is_none(),
+            "missed deadlines must not become consecutive catch-up Raft ticks"
+        );
+
+        // Skip resumes on the original 100ms grid. Delay would instead wait
+        // until 1235ms, whereas Burst would still have immediately ready work.
+        tokio::time::advance(Duration::from_millis(64)).await;
+        assert!(ticks.tick().now_or_never().is_none());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(
+            ticks.tick().now_or_never(),
+            Some(start + Duration::from_millis(1_200))
+        );
+        assert!(ticks.tick().now_or_never().is_none());
+        assert_eq!(
+            ticks.missed_tick_behavior(),
+            tokio::time::MissedTickBehavior::Skip
+        );
+    }
 
     fn peer_url(port: u16) -> Url {
         Url::parse(&format!("http://127.0.0.1:{port}/")).expect("test peer URL should parse")

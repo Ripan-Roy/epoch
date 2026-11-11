@@ -253,7 +253,7 @@ class Controller:
         )
         regional.wait_until(
             f"controller {self.label} health",
-            lambda: self.request("GET", "/healthz").status == 200,
+            self.is_healthy,
         )
         health = self.request("GET", "/healthz")
         assert (
@@ -273,6 +273,18 @@ class Controller:
             "startup did not report a process owner"
         )
         self.owner_id = owners[-1]
+
+    def is_healthy(self) -> bool:
+        if self.process is None:
+            raise RuntimeError(f"controller {self.label} has no process during startup")
+        exit_code = self.process.poll()
+        if exit_code is not None:
+            self.log.flush()
+            raise RuntimeError(
+                f"controller {self.label} exited before readiness with code {exit_code}; "
+                f"see {self.log_path}"
+            )
+        return self.request("GET", "/healthz").status == 200
 
     def resume(self) -> None:
         if self.paused and self.process is not None and self.process.poll() is None:

@@ -63,6 +63,12 @@ const MAX_PENDING_READ_BARRIERS: usize = 1_024;
 const READ_BARRIER_CONTEXT_BYTES: usize = 8;
 static NEXT_ADAPTER_INSTANCE: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(test)]
+std::thread_local! {
+    static CHECKPOINT_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PERSISTED_STATE_VALIDATION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Maximum accepted size of a complete canonical Epoch peer-message frame.
 pub const MAX_PEER_MESSAGE_WIRE_BYTES: usize = 8 * 1024 * 1024;
 /// Maximum command payload accepted before it enters `RawNode`.
@@ -1912,6 +1918,7 @@ impl InMemoryRaftAdapter {
         let mut commits = Vec::new();
         let mut installed_checkpoint = None;
         let mut iterations = 0_u16;
+        let initial_generation = self.stable_generation;
         self.submit_pending_read_barriers()?;
 
         while self.raw_node.has_ready() {
@@ -1988,19 +1995,24 @@ impl InMemoryRaftAdapter {
             self.submit_pending_read_barriers()?;
         }
 
-        let validated = validate_persisted_state(PersistedStateView {
-            node_id: self.node_id,
-            group_id: self.group_id,
-            group_epoch: self.group_epoch,
-            voters: &self.voters,
-            storage: self.raw_node.store(),
-            applied_index: self.applied_index,
-            applied: &self.applied,
-            state_digest: self.state_digest,
-        })?;
-        self.proposals = validated.proposals;
-        self.state_digest_scheme = validated.state_digest_scheme;
-        self.applied_command_count = validated.applied_command_count;
+        // Constructors and checkpoint installation validate their input. Every
+        // storage/applied-state mutation crosses a new stable generation;
+        // an idle tick or unchanged heartbeat can reuse that validated state.
+        if self.stable_generation != initial_generation {
+            let validated = validate_persisted_state(PersistedStateView {
+                node_id: self.node_id,
+                group_id: self.group_id,
+                group_epoch: self.group_epoch,
+                voters: &self.voters,
+                storage: self.raw_node.store(),
+                applied_index: self.applied_index,
+                applied: &self.applied,
+                state_digest: self.state_digest,
+            })?;
+            self.proposals = validated.proposals;
+            self.state_digest_scheme = validated.state_digest_scheme;
+            self.applied_command_count = validated.applied_command_count;
+        }
         let read_barriers = self.take_completed_read_barriers()?;
 
         Ok(ConsensusOutput {
@@ -2049,14 +2061,16 @@ impl InMemoryRaftAdapter {
                 storage.set_hardstate(hard_state);
             }
         }
-        self.proposals = build_proposal_tracking(
-            self.group_id,
-            self.group_epoch,
-            self.raw_node.store(),
-            self.applied_index,
-            &self.applied,
-            &self.voters,
-        )?;
+        if !entries.is_empty() {
+            self.proposals = build_proposal_tracking(
+                self.group_id,
+                self.group_epoch,
+                self.raw_node.store(),
+                self.applied_index,
+                &self.applied,
+                &self.voters,
+            )?;
+        }
         Ok(barrier)
     }
 
@@ -2224,6 +2238,9 @@ impl InMemoryRaftAdapter {
     }
 
     fn project_checkpoint(&self, planned: &[PlannedEntry]) -> ConsensusResult<StableCheckpoint> {
+        if planned.is_empty() {
+            return Ok(self.current_checkpoint());
+        }
         let applied_index = planned
             .last()
             .map_or(self.applied_index, |entry| entry.log_index);
@@ -2311,6 +2328,9 @@ impl InMemoryRaftAdapter {
     }
 
     fn prevalidate_committed_batch(&self, entries: &[Entry]) -> ConsensusResult<Vec<PlannedEntry>> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut planned = Vec::with_capacity(entries.len());
         let mut projected_index = self.applied_index;
         let mut projected_membership = self.current_conf_state()?;
@@ -3341,6 +3361,8 @@ fn encode_checkpoint_proposals(
 }
 
 fn decode_checkpoint_image(encoded: &[u8]) -> ConsensusResult<CheckpointImage> {
+    #[cfg(test)]
+    CHECKPOINT_DECODE_COUNT.with(|count| count.set(count.get() + 1));
     if encoded.len() > MAX_SNAPSHOT_DATA_BYTES {
         return Err(ConsensusError::InvalidMessage(format!(
             "consensus checkpoint is {} bytes; maximum is {MAX_SNAPSHOT_DATA_BYTES}",
@@ -3949,6 +3971,8 @@ struct ValidatedPersistentState {
 fn validate_persisted_state(
     state: PersistedStateView<'_>,
 ) -> ConsensusResult<ValidatedPersistentState> {
+    #[cfg(test)]
+    PERSISTED_STATE_VALIDATION_COUNT.with(|count| count.set(count.get() + 1));
     let checkpoint_image = validate_persisted_storage(state)?;
     validate_applied_receipts(
         state.group_id,

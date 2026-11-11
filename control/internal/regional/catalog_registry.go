@@ -28,6 +28,7 @@ const (
 	controlOperationsPath       = "/experimental/v1/regional/control/operations"
 	controlChangesPath          = "/experimental/v1/regional/control/changes"
 	controlListPageLimit        = 128
+	controlListSnapshotAttempts = 3
 	controlLeaseTTL             = 10 * time.Second
 	controlCallTimeout          = 10 * time.Second
 	maxControlOwnerBytes        = 128
@@ -36,7 +37,10 @@ const (
 	legacyImportEnvironment     = "default"
 )
 
-var errManagedResourceNotFound = errors.New("managed resource was not found")
+var (
+	errManagedResourceNotFound = errors.New("managed resource was not found")
+	errCatalogInventoryChanged = errors.New("catalog inventory changed while it was being paged")
+)
 
 type controlResourceNameDocument struct {
 	Organization string `json:"organization"`
@@ -599,13 +603,49 @@ func (registry *CatalogRegistry) Get(key resources.ResourceKey) (resources.Resou
 }
 
 func (registry *CatalogRegistry) List(filter resources.ListFilter) ([]resources.Resource, error) {
+	return registry.ListContext(context.Background(), filter)
+}
+
+// ListContext returns one coherent inventory, restarting only a cursor-changed
+// scan. Every page and fresh scan shares the original caller deadline and one
+// control-call cap. Cursors must never regress across pages or fresh scans;
+// neither partial results nor partial counts are published.
+func (registry *CatalogRegistry) ListContext(ctx context.Context, filter resources.ListFilter) ([]resources.Resource, error) {
 	if err := registry.ensureOpen(); err != nil {
 		return nil, err
 	}
+	ctx, cancel := context.WithTimeout(ctx, controlCallTimeout)
+	defer cancel()
+	var scanError error
+	var minimumCursor uint64
+	for range controlListSnapshotAttempts {
+		if err := ctx.Err(); err != nil {
+			return nil, storeUnavailable("read desired inventory", err)
+		}
+		listed, err := registry.listInventorySnapshot(ctx, &minimumCursor)
+		if cause := ctx.Err(); cause != nil {
+			return nil, storeUnavailable("read desired inventory", cause)
+		}
+		if err == nil {
+			registry.count.Store(int64(len(listed)))
+			return resources.FilterResourceList(listed, filter)
+		}
+		if !errors.Is(err, errCatalogInventoryChanged) {
+			return nil, err
+		}
+		scanError = err
+	}
+	return nil, storeUnavailable("read coherent desired inventory", scanError)
+}
+
+func (registry *CatalogRegistry) listInventorySnapshot(ctx context.Context, minimumCursor *uint64) ([]resources.Resource, error) {
 	listed := make([]resources.Resource, 0)
 	var after *controlResourceNameDocument
 	var inventoryCursor *uint64
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, storeUnavailable("read desired inventory", err)
+		}
 		query := url.Values{}
 		query.Set("limit", strconv.Itoa(controlListPageLimit))
 		if after != nil {
@@ -615,27 +655,16 @@ func (registry *CatalogRegistry) List(filter resources.ListFilter) ([]resources.
 			}
 			query.Set("after", string(encoded))
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), controlCallTimeout)
 		response, err := registry.authority.readControlAny(
 			ctx,
 			controlResourcesPath+"?"+query.Encode(),
 		)
-		cancel()
 		if err != nil {
 			return nil, mapAuthorityStoreError(err, 0, 0)
 		}
 		var document controlResourceListDocument
 		if err := decodeAuthorityJSON(response, &document); err != nil {
 			return nil, storeUnavailable("decode desired inventory", err)
-		}
-		cursor := uint64(document.LatestChangeCursor)
-		if inventoryCursor == nil {
-			inventoryCursor = &cursor
-		} else if *inventoryCursor != cursor {
-			return nil, storeUnavailable(
-				"decode desired inventory",
-				fmt.Errorf("catalog inventory changed while it was being paged"),
-			)
 		}
 		if len(document.Resources) > controlListPageLimit ||
 			(document.NextPageAfter != nil && len(document.Resources) == 0) {
@@ -663,21 +692,33 @@ func (registry *CatalogRegistry) List(filter resources.ListFilter) ([]resources.
 			}
 			listed = append(listed, resource)
 		}
-		if document.NextPageAfter == nil {
-			break
-		}
-		last := document.Resources[len(document.Resources)-1].Name
-		if *document.NextPageAfter != last {
+		if document.NextPageAfter != nil && *document.NextPageAfter != document.Resources[len(document.Resources)-1].Name {
 			return nil, storeUnavailable(
 				"decode desired inventory",
 				fmt.Errorf("catalog inventory returned an inconsistent continuation cursor"),
 			)
 		}
+		// Validate the complete page before treating a cursor change as normal
+		// concurrent churn. Malformed or foreign data is never retried away.
+		cursor := uint64(document.LatestChangeCursor)
+		if cursor < *minimumCursor {
+			return nil, storeUnavailable(
+				"decode desired inventory",
+				fmt.Errorf("catalog inventory cursor regressed while it was being paged"),
+			)
+		}
+		*minimumCursor = cursor
+		if inventoryCursor == nil {
+			inventoryCursor = &cursor
+		} else if *inventoryCursor != cursor {
+			return nil, errCatalogInventoryChanged
+		}
+		if document.NextPageAfter == nil {
+			return listed, nil
+		}
 		next := *document.NextPageAfter
 		after = &next
 	}
-	registry.count.Store(int64(len(listed)))
-	return resources.FilterResourceList(listed, filter)
 }
 
 func resourceKeyLessForCatalog(left resources.ResourceKey, right controlResourceNameDocument) bool {

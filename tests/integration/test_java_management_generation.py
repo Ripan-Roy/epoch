@@ -162,16 +162,19 @@ class JavaGenerationTest(unittest.TestCase):
                 self.assertEqual(foreign.read_bytes(), b"not owned by this generator")
                 self.assertFalse((output / "Current.java").exists())
 
-    def test_make_checks_java_before_any_generator_can_rewrite_it(self):
+    def test_make_checks_all_languages_without_rewriting_them(self):
         text = (ROOT / "Makefile").read_text()
-        targets = text[
-            text.index("generate-check: ##") : text.index("release-check: ##")
-        ]
-        self.assertIn("scripts/generate-java-management.py --check", targets)
-        self.assertLess(
-            targets.index("scripts/generate-java-management.py --check"),
-            targets.index("$(MAKE) generate"),
+        target = text[text.index("generate-check: ##") :].split("\n\n", 1)[0]
+        commands = [line.strip() for line in target.splitlines()[1:]]
+        self.assertCountEqual(
+            commands,
+            [
+                "@python3 scripts/generate-go-protobuf.py --check",
+                "@python3 scripts/generate-python-management.py --check",
+                "@python3 scripts/generate-java-management.py --check",
+            ],
         )
+        self.assertNotIn("$(MAKE) generate", target)
 
 
 if __name__ == "__main__":

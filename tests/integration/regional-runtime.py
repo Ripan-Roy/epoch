@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -111,17 +112,42 @@ class HttpResponse:
     headers: dict[str, str]
 
 
+# A closed discovery socket is not an OS reservation. Remember all ports handed
+# out by this campaign process so the kernel cannot return a previous controller
+# or voter port before that child starts listening. The TCP port space bounds
+# this registry; it is shared across allocation calls and serialized threads.
+_allocated_ports: set[int] = set()
+_port_allocation_lock = threading.Lock()
+
+
 def allocate_ports(count: int) -> list[int]:
-    sockets: list[socket.socket] = []
-    try:
-        for _ in range(count):
-            listener = socket.socket()
-            listener.bind(("127.0.0.1", 0))
-            sockets.append(listener)
-        return [listener.getsockname()[1] for listener in sockets]
-    finally:
-        for listener in sockets:
-            listener.close()
+    if count < 0:
+        raise ValueError("port count must be nonnegative")
+    with _port_allocation_lock:
+        if count + len(_allocated_ports) > 65_535:
+            raise RuntimeError("not enough unique TCP ports remain for this campaign")
+        sockets: list[socket.socket] = []
+        selected: list[int] = []
+        try:
+            for _ in range(max(128, count * 8)):
+                if len(selected) == count:
+                    _allocated_ports.update(selected)
+                    return selected
+                listener = socket.socket()
+                sockets.append(listener)
+                listener.bind(("127.0.0.1", 0))
+                port = listener.getsockname()[1]
+                if port in _allocated_ports or port in selected:
+                    listener.close()
+                    sockets.pop()
+                    continue
+                selected.append(port)
+            raise RuntimeError(
+                "could not allocate unique TCP ports within bounded attempts"
+            )
+        finally:
+            for listener in sockets:
+                listener.close()
 
 
 def exact_int(value: object) -> int | None:

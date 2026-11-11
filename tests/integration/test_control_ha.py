@@ -43,6 +43,41 @@ def evidence_fixture() -> dict:
 
 
 class OwnerEvidenceContractTest(unittest.TestCase):
+    def test_controller_exit_is_reported_before_waiting_for_its_closed_health_port(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fleet = mock.Mock()
+            fleet.cluster.environment = {}
+            fleet.cluster.http_ports = {
+                node: 40000 + node for node in control_ha.regional.NODES
+            }
+            fleet.cluster.temporary_directory.name = directory
+            fleet.cluster.control_binary = Path(directory) / "unused-control"
+            controller = control_ha.Controller(fleet, "startup-failure", "controller")
+            process = mock.Mock()
+            process.poll.return_value = 17
+            try:
+                with (
+                    mock.patch.object(
+                        control_ha.subprocess, "Popen", return_value=process
+                    ),
+                    mock.patch.object(controller, "request") as request,
+                    mock.patch.object(
+                        control_ha.regional,
+                        "wait_until",
+                        side_effect=lambda _description, check: check(),
+                    ),
+                ):
+                    request.return_value = control_ha.regional.HttpResponse(200, {}, {})
+                    with self.assertRaisesRegex(
+                        RuntimeError, "startup-failure.*exited.*17"
+                    ):
+                        controller.start()
+                    request.assert_not_called()
+            finally:
+                controller.log.close()
+
     def initial_fleet(self, responses: list[list[object]]) -> object:
         fleet = control_ha.OwnerFleet.__new__(control_ha.OwnerFleet)
         fleet.cluster = mock.Mock()
