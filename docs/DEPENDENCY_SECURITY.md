@@ -5,6 +5,29 @@ from an older green run. `make audit` retains the sole documented Raft/fxhash
 exception (`RUSTSEC-2025-0057`); this change adds no exceptions and disables no
 compression codec or MySQL binlog feature.
 
+## Rustix xattr safety (11 November 2026)
+
+The exact-main run
+[42987056784](https://github.com/Ripan-Roy/epoch/actions/runs/42987056784)
+correctly rejected `rustix 1.1.4` under the unchanged `--deny warnings` gate.
+[RUSTSEC-2026-0486](https://raw.githubusercontent.com/RustSec/advisory-db/main/crates/rustix/RUSTSEC-2026-0486.md)
+describes unsound handling of zero-length extended-attribute buffers and lists
+`1.1.6` as the first patched 1.x version; the 0.38 series is unaffected.
+
+The database added that advisory in
+[commit 31cf5a8](https://github.com/RustSec/advisory-db/commit/31cf5a8673e10d3a4d7d829ad5095f47ed419049)
+at 08:37:09 UTC, after PR #178's passing CI finished at 08:25:13 UTC and before
+main's 08:45 UTC audit. The advisory's vulnerability date is October 27; the
+database publication time explains why identical source passed the earlier
+audit. A prior passing audit is not a substitute for current security data.
+
+The lockfile updates only `rustix 1.1.4` to `1.1.6`, its checksum and the
+existing `tempfile` dependency edge. Existing Windows dependency selections,
+all other package versions and the unaffected Rustix 0.38 copy are preserved;
+`cargo tree --locked --target all` validates the retained selections. The fresh
+audit scans 479 dependencies against 1,453 advisories without a new exception.
+Full local and exact-source CI remain required after this lockfile change.
+
 ## Console lint dependency and reproducible HA verification
 
 The November 6 revalidation found the subsequently published

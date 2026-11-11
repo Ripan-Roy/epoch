@@ -1,6 +1,6 @@
 # Epoch Delivery Checklist
 
-**Last reviewed:** 10 November 2026
+**Last reviewed:** 11 November 2026
 **Current published release:** `v0.2.0-beta.11`
 **Current release target:** `v0.2.0-beta.12`
 **Current core target:** exact-main SDK/release verification, Catalog read-path efficiency, and native persistent Stream APIs
@@ -20,6 +20,15 @@ and bounded, context-preserving whole-scan recovery are documented in
 Fresh complete PR/main evidence is still required. None of the seven currently
 open Dependabot PRs has a fully passing latest CI run; their update groups must
 be refreshed and verified after the baseline repair, not merged around failures.
+
+**Verified PR / main follow-up (11 November 2026):** PR #178 passed all fourteen
+CI jobs and independent verification of all 516 SDK receipts, then merged at
+`b7e7641`. Main's two HA fleets, aggregate and Pages passed; overall main CI
+`42987056784` failed on a newly published Rustix advisory and Docker smoke
+container auto-removal race. The
+[delivery repair](CONTROL_HA_CERTIFICATION.md#verified-pr-and-main-delivery-follow-up-11-november-2026)
+preserves all runtime proof and audit requirements. Beta.12 remains untagged
+until the repaired exact-main run and release workflow pass.
 
 This is the operational checklist for turning PRD scope into verified,
 releasable increments. [PRD.md](PRD.md) owns product scope,

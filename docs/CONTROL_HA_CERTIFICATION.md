@@ -100,6 +100,35 @@ bounded unavailable result; this is not an MVCC snapshot or an unbounded retry.
 The complete original three/five-controller fault campaign and exact-source
 independent verifier remain required after this production Go change.
 
+## Verified PR and main delivery follow-up (11 November 2026)
+
+The follow-up at `78ca158` passed all fourteen jobs in
+[PR CI 42984098377](https://github.com/Ripan-Roy/epoch/actions/runs/42984098377)
+and Pages verification. Independent local verification of the downloaded
+three-controller, five-controller and complete bundles passed all 516
+checksum-bound receipts. Full-manifest SHA-256 is
+`4f310bd28278a377d0b197e512d998f34ea1a0c96a05ffa566e265a48db5809f`.
+The tested merge `aafa382` has parents `7aead5d` and `78ca158`; its tree equals
+the tested feature head. Both fleets retain 135 desired resources and all
+four profile recovery digests.
+
+PR #178 merged at `b7e7641`. Both main HA fleets and their aggregate also passed,
+and [main Pages 42987056905](https://github.com/Ripan-Roy/epoch/actions/runs/42987056905)
+succeeded. However,
+[main CI 42987056784](https://github.com/Ripan-Roy/epoch/actions/runs/42987056784)
+failed overall on two separate delivery gates: a newly added Rustix security
+advisory and an asynchronous Docker auto-removal/name-reuse race in the mounted
+WAL smoke test. This is not a failed HA proof or permission to publish from a
+partially green main run.
+
+The security repair updates Rustix to 1.1.6 without adding an audit exclusion;
+see [dependency security](DEPENDENCY_SECURITY.md#rustix-xattr-safety-11-november-2026).
+The mounted-WAL fixture retains its exact data operations, same-volume reopen,
+512-byte segment rotation checks and health/stop budgets, but owns and removes
+its stopped containers explicitly instead of racing `--rm` cleanup. No receipt,
+fault phase or persistence assertion is dropped. Fresh complete exact-source
+CI and main-only release verification remain mandatory.
+
 ## Ownership boundary
 
 Rust Catalog consensus remains the authority for managed metadata, leases,
