@@ -20,11 +20,11 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-management = ["grpcio==1.84.0", "protobuf==7.35.1"]
+management = ["grpcio==1.85.1", "protobuf==7.36.2"]
 management-dev = [
-  "grpcio==1.84.0",
-  "protobuf==7.35.1",
-  "grpcio-tools==1.84.0",
+  "grpcio==1.85.1",
+  "protobuf==7.36.2",
+  "grpcio-tools==1.85.1",
   "grpc-stubs==1.53.0.6",
   "types-protobuf==7.35.1.20260906",
 ]
